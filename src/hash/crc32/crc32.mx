@@ -48,17 +48,17 @@ type CRC32 struct {
 	archState
 	ieeeTable        *Table
 	ieeeTable8       *slicing8Table
-	updateIEEE       func(crc uint32, p []byte) uint32
+	ieeeArch         bool
 	ieeeInited       bool
 	castagnoliTable  *Table
 	castagnoliTable8 *slicing8Table
-	updateCastagnoli func(crc uint32, p []byte) uint32
+	castagnoliArch   bool
 	castagnoliInited bool
 }
 
 // NewCRC32 creates a new CRC32 instance with IEEE tables eagerly initialized.
-func NewCRC32() *CRC32 {
-	c := &CRC32{}
+func NewCRC32() (c *CRC32) {
+	c = &CRC32{}
 	c.ieeeTable = simpleMakeTable(IEEE)
 	c.initIEEE()
 	return c
@@ -70,12 +70,9 @@ func (c *CRC32) initIEEE() {
 	}
 	if archAvailableIEEE() {
 		c.archInitIEEE()
-		c.updateIEEE = c.archUpdateIEEE
+		c.ieeeArch = true
 	} else {
 		c.ieeeTable8 = slicingMakeTable(IEEE)
-		c.updateIEEE = func(crc uint32, p []byte) uint32 {
-			return slicingUpdate(crc, c.ieeeTable8, p)
-		}
 	}
 	c.ieeeInited = true
 }
@@ -87,22 +84,19 @@ func (c *CRC32) initCastagnoli() {
 	c.castagnoliTable = simpleMakeTable(Castagnoli)
 	if archAvailableCastagnoli() {
 		c.archInitCastagnoli()
-		c.updateCastagnoli = c.archUpdateCastagnoli
+		c.castagnoliArch = true
 	} else {
 		c.castagnoliTable8 = slicingMakeTable(Castagnoli)
-		c.updateCastagnoli = func(crc uint32, p []byte) uint32 {
-			return slicingUpdate(crc, c.castagnoliTable8, p)
-		}
 	}
 	c.castagnoliInited = true
 }
 
 // IEEETable returns the table for the IEEE polynomial.
-func (c *CRC32) IEEETable() *Table { return c.ieeeTable }
+func (c *CRC32) IEEETable() (tab *Table) { return c.ieeeTable }
 
 // MakeTable returns a [Table] constructed from the specified polynomial.
 // The contents of this [Table] must not be modified.
-func (c *CRC32) MakeTable(poly uint32) *Table {
+func (c *CRC32) MakeTable(poly uint32) (tab *Table) {
 	switch poly {
 	case IEEE:
 		c.initIEEE()
@@ -127,7 +121,7 @@ type digest struct {
 // value out in big-endian byte order. The returned Hash32 also
 // implements [encoding.BinaryMarshaler] and [encoding.BinaryUnmarshaler] to
 // marshal and unmarshal the internal state of the hash.
-func (c *CRC32) New(tab *Table) hash.Hash32 {
+func (c *CRC32) New(tab *Table) (h hash.Hash32) {
 	if tab == c.ieeeTable {
 		c.initIEEE()
 	}
@@ -139,11 +133,11 @@ func (c *CRC32) New(tab *Table) hash.Hash32 {
 // big-endian byte order. The returned Hash32 also implements
 // [encoding.BinaryMarshaler] and [encoding.BinaryUnmarshaler] to marshal
 // and unmarshal the internal state of the hash.
-func (c *CRC32) NewIEEE() hash.Hash32 { return c.New(c.ieeeTable) }
+func (c *CRC32) NewIEEE() (h hash.Hash32) { return c.New(c.ieeeTable) }
 
-func (d *digest) Size() int32 { return Size }
+func (d *digest) Size() (size int32) { return Size }
 
-func (d *digest) BlockSize() int32 { return 1 }
+func (d *digest) BlockSize() (size int32) { return 1 }
 
 func (d *digest) Reset() { d.crc = 0 }
 
@@ -152,20 +146,20 @@ const (
 	marshaledSize = len(magic) + 4 + 4
 )
 
-func (d *digest) AppendBinary(b []byte) ([]byte, error) {
-	b = mxutil.Ensure(b, len(magic))
-	b = push(b, magic...)
-	b = byteorder.BEAppendUint32(b, d.c.tableSum(d.tab))
-	b = byteorder.BEAppendUint32(b, d.crc)
-	return b, nil
+func (d *digest) AppendBinary(b []byte) (out []byte, aerr error) {
+	out = mxutil.Ensure(b, len(magic))
+	out = push(out, magic...)
+	out = byteorder.BEAppendUint32(out, d.c.tableSum(d.tab))
+	out = byteorder.BEAppendUint32(out, d.crc)
+	return out, nil
 }
 
-func (d *digest) MarshalBinary() ([]byte, error) {
+func (d *digest) MarshalBinary() (out []byte, merr error) {
 	return d.AppendBinary([]byte{:0:marshaledSize})
 
 }
 
-func (d *digest) UnmarshalBinary(b []byte) error {
+func (d *digest) UnmarshalBinary(b []byte) (uerr error) {
 	if len(b) < len(magic) || b[:len(magic)] != magic {
 		return errors.New("hash/crc32: invalid hash state identifier")
 	}
@@ -179,27 +173,33 @@ func (d *digest) UnmarshalBinary(b []byte) error {
 	return nil
 }
 
-func (d *digest) Clone() (hash.Cloner, error) {
+func (d *digest) Clone() (cl hash.Cloner, cerr error) {
 	r := *d
 	return &r, nil
 }
 
-func (c *CRC32) update(crc uint32, tab *Table, p []byte, checkInitIEEE bool) uint32 {
+func (c *CRC32) update(crc uint32, tab *Table, p []byte, checkInitIEEE bool) (out uint32) {
 	switch {
 	case c.castagnoliInited && tab == c.castagnoliTable:
-		return c.updateCastagnoli(crc, p)
+		if c.castagnoliArch {
+			return c.archUpdateCastagnoli(crc, p)
+		}
+		return slicingUpdate(crc, c.castagnoliTable8, p)
 	case tab == c.ieeeTable:
 		if checkInitIEEE {
 			c.initIEEE()
 		}
-		return c.updateIEEE(crc, p)
+		if c.ieeeArch {
+			return c.archUpdateIEEE(crc, p)
+		}
+		return slicingUpdate(crc, c.ieeeTable8, p)
 	default:
 		return simpleUpdate(crc, tab, p)
 	}
 }
 
 // Update returns the result of adding the bytes in p to the crc.
-func (c *CRC32) Update(crc uint32, tab *Table, p []byte) uint32 {
+func (c *CRC32) Update(crc uint32, tab *Table, p []byte) (out uint32) {
 	return c.update(crc, tab, p, true)
 }
 
@@ -208,26 +208,29 @@ func (d *digest) Write(p []byte) (n int32, err error) {
 	return len(p), nil
 }
 
-func (d *digest) Sum32() uint32 { return d.crc }
+func (d *digest) Sum32() (s uint32) { return d.crc }
 
-func (d *digest) Sum(in []byte) []byte {
+func (d *digest) Sum(in []byte) (out []byte) {
 	s := d.Sum32()
 	return push(in, byte(s>>24), byte(s>>16), byte(s>>8), byte(s))
 }
 
 // Checksum returns the CRC-32 checksum of data
 // using the polynomial represented by the [Table].
-func (c *CRC32) Checksum(data []byte, tab *Table) uint32 { return c.Update(0, tab, data) }
+func (c *CRC32) Checksum(data []byte, tab *Table) (sum uint32) { return c.Update(0, tab, data) }
 
 // ChecksumIEEE returns the CRC-32 checksum of data
 // using the [IEEE] polynomial.
-func (c *CRC32) ChecksumIEEE(data []byte) uint32 {
+func (c *CRC32) ChecksumIEEE(data []byte) (sum uint32) {
 	c.initIEEE()
-	return c.updateIEEE(0, data)
+	if c.ieeeArch {
+		return c.archUpdateIEEE(0, data)
+	}
+	return slicingUpdate(0, c.ieeeTable8, data)
 }
 
 // tableSum returns the IEEE checksum of table t.
-func (c *CRC32) tableSum(t *Table) uint32 {
+func (c *CRC32) tableSum(t *Table) (sum uint32) {
 	var a [1024]byte
 	b := a[:0]
 	if t != nil {

@@ -73,9 +73,9 @@ type RGBA64Image interface {
 }
 
 // PalettedImage is an image whose colors may come from a limited palette.
-// If m is a PalettedImage and m.ColorModel() returns a [color.Palette] p,
+// If m is a PalettedImage and m.ColorModel() returns a [[]color.Color] p,
 // then m.At(x, y) should be equivalent to p[m.ColorIndexAt(x, y)]. If m's
-// color model is not a color.Palette, then ColorIndexAt's behavior is
+// color model is not a []color.Color, then ColorIndexAt's behavior is
 // undefined.
 type PalettedImage interface {
 	// ColorIndexAt returns the palette index of the pixel at (x, y).
@@ -90,7 +90,7 @@ type PalettedImage interface {
 //
 // This panics instead of returning an error because of backwards
 // compatibility. The NewXxx functions do not return an error.
-func pixelBufferLength(bytesPerPixel int32, r Rectangle, imageTypeName []byte) int32 {
+func pixelBufferLength(bytesPerPixel int32, r Rectangle, imageTypeName []byte) (out int32) {
 	totalLength := mul3NonNeg(bytesPerPixel, r.Dx(), r.Dy())
 	if totalLength < 0 {
 		panic(string(push(push([]byte("image: New"), imageTypeName...), " Rectangle has huge or negative dimensions"...)))
@@ -109,15 +109,16 @@ type RGBA struct {
 	Rect Rectangle
 }
 
-func (p *RGBA) ColorModel() color.Model { return color.RGBAModel() }
+func (p *RGBA) ColorModel() (out color.Model) { return color.RGBAModel() }
 
-func (p *RGBA) Bounds() Rectangle { return p.Rect }
+func (p *RGBA) Bounds() (out Rectangle) { return p.Rect }
 
-func (p *RGBA) At(x, y int32) color.Color {
-	return p.RGBAAt(x, y)
+func (p *RGBA) At(x, y int32) (out color.Color) {
+	c := p.RGBAAt(x, y)
+	return &c
 }
 
-func (p *RGBA) RGBA64At(x, y int32) color.RGBA64 {
+func (p *RGBA) RGBA64At(x, y int32) (out color.RGBA64) {
 	if !(Point{x, y}.In(p.Rect)) {
 		return color.RGBA64{}
 	}
@@ -135,7 +136,7 @@ func (p *RGBA) RGBA64At(x, y int32) color.RGBA64 {
 	}
 }
 
-func (p *RGBA) RGBAAt(x, y int32) color.RGBA {
+func (p *RGBA) RGBAAt(x, y int32) (out color.RGBA) {
 	if !(Point{x, y}.In(p.Rect)) {
 		return color.RGBA{}
 	}
@@ -146,7 +147,7 @@ func (p *RGBA) RGBAAt(x, y int32) color.RGBA {
 
 // PixOffset returns the index of the first element of Pix that corresponds to
 // the pixel at (x, y).
-func (p *RGBA) PixOffset(x, y int32) int32 {
+func (p *RGBA) PixOffset(x, y int32) (out int32) {
 	return (y-p.Rect.Min.Y)*p.Stride + (x-p.Rect.Min.X)*4
 }
 
@@ -155,7 +156,7 @@ func (p *RGBA) Set(x, y int32, c color.Color) {
 		return
 	}
 	i := p.PixOffset(x, y)
-	c1 := color.RGBAModel().Convert(c).(color.RGBA)
+	c1 := color.RGBAModel().Convert(c).(*color.RGBA)
 	s := p.Pix[i : i+4 : i+4] // Small cap improves performance, see https://golang.org/issue/27857
 	s[0] = c1.R
 	s[1] = c1.G
@@ -189,7 +190,7 @@ func (p *RGBA) SetRGBA(x, y int32, c color.RGBA) {
 
 // SubImage returns an image representing the portion of the image p visible
 // through r. The returned value shares pixels with the original image.
-func (p *RGBA) SubImage(r Rectangle) Image {
+func (p *RGBA) SubImage(r Rectangle) (out Image) {
 	r = r.Intersect(p.Rect)
 	// If r1 and r2 are Rectangles, r1.Intersect(r2) is not guaranteed to be inside
 	// either r1 or r2 if the intersection is empty. Without explicitly checking for
@@ -206,7 +207,7 @@ func (p *RGBA) SubImage(r Rectangle) Image {
 }
 
 // Opaque scans the entire image and reports whether it is fully opaque.
-func (p *RGBA) Opaque() bool {
+func (p *RGBA) Opaque() (out bool) {
 	if p.Rect.Empty() {
 		return true
 	}
@@ -224,7 +225,7 @@ func (p *RGBA) Opaque() bool {
 }
 
 // NewRGBA returns a new [RGBA] image with the given bounds.
-func NewRGBA(r Rectangle) *RGBA {
+func NewRGBA(r Rectangle) (out *RGBA) {
 	return &RGBA{
 		Pix:    []uint8{:pixelBufferLength(4, r, "RGBA")},
 		Stride: 4 * r.Dx(),
@@ -243,15 +244,16 @@ type RGBA64 struct {
 	Rect Rectangle
 }
 
-func (p *RGBA64) ColorModel() color.Model { return color.RGBA64Model() }
+func (p *RGBA64) ColorModel() (out color.Model) { return color.RGBA64Model() }
 
-func (p *RGBA64) Bounds() Rectangle { return p.Rect }
+func (p *RGBA64) Bounds() (out Rectangle) { return p.Rect }
 
-func (p *RGBA64) At(x, y int32) color.Color {
-	return p.RGBA64At(x, y)
+func (p *RGBA64) At(x, y int32) (out color.Color) {
+	c := p.RGBA64At(x, y)
+	return &c
 }
 
-func (p *RGBA64) RGBA64At(x, y int32) color.RGBA64 {
+func (p *RGBA64) RGBA64At(x, y int32) (out color.RGBA64) {
 	if !(Point{x, y}.In(p.Rect)) {
 		return color.RGBA64{}
 	}
@@ -267,7 +269,7 @@ func (p *RGBA64) RGBA64At(x, y int32) color.RGBA64 {
 
 // PixOffset returns the index of the first element of Pix that corresponds to
 // the pixel at (x, y).
-func (p *RGBA64) PixOffset(x, y int32) int32 {
+func (p *RGBA64) PixOffset(x, y int32) (out int32) {
 	return (y-p.Rect.Min.Y)*p.Stride + (x-p.Rect.Min.X)*8
 }
 
@@ -276,7 +278,7 @@ func (p *RGBA64) Set(x, y int32, c color.Color) {
 		return
 	}
 	i := p.PixOffset(x, y)
-	c1 := color.RGBA64Model().Convert(c).(color.RGBA64)
+	c1 := color.RGBA64Model().Convert(c).(*color.RGBA64)
 	s := p.Pix[i : i+8 : i+8] // Small cap improves performance, see https://golang.org/issue/27857
 	s[0] = uint8(c1.R >> 8)
 	s[1] = uint8(c1.R)
@@ -306,7 +308,7 @@ func (p *RGBA64) SetRGBA64(x, y int32, c color.RGBA64) {
 
 // SubImage returns an image representing the portion of the image p visible
 // through r. The returned value shares pixels with the original image.
-func (p *RGBA64) SubImage(r Rectangle) Image {
+func (p *RGBA64) SubImage(r Rectangle) (out Image) {
 	r = r.Intersect(p.Rect)
 	// If r1 and r2 are Rectangles, r1.Intersect(r2) is not guaranteed to be inside
 	// either r1 or r2 if the intersection is empty. Without explicitly checking for
@@ -323,7 +325,7 @@ func (p *RGBA64) SubImage(r Rectangle) Image {
 }
 
 // Opaque scans the entire image and reports whether it is fully opaque.
-func (p *RGBA64) Opaque() bool {
+func (p *RGBA64) Opaque() (out bool) {
 	if p.Rect.Empty() {
 		return true
 	}
@@ -341,7 +343,7 @@ func (p *RGBA64) Opaque() bool {
 }
 
 // NewRGBA64 returns a new [RGBA64] image with the given bounds.
-func NewRGBA64(r Rectangle) *RGBA64 {
+func NewRGBA64(r Rectangle) (out *RGBA64) {
 	return &RGBA64{
 		Pix:    []uint8{:pixelBufferLength(8, r, "RGBA64")},
 		Stride: 8 * r.Dx(),
@@ -360,20 +362,21 @@ type NRGBA struct {
 	Rect Rectangle
 }
 
-func (p *NRGBA) ColorModel() color.Model { return color.NRGBAModel() }
+func (p *NRGBA) ColorModel() (out color.Model) { return color.NRGBAModel() }
 
-func (p *NRGBA) Bounds() Rectangle { return p.Rect }
+func (p *NRGBA) Bounds() (out Rectangle) { return p.Rect }
 
-func (p *NRGBA) At(x, y int32) color.Color {
-	return p.NRGBAAt(x, y)
+func (p *NRGBA) At(x, y int32) (out color.Color) {
+	c := p.NRGBAAt(x, y)
+	return &c
 }
 
-func (p *NRGBA) RGBA64At(x, y int32) color.RGBA64 {
+func (p *NRGBA) RGBA64At(x, y int32) (out color.RGBA64) {
 	r, g, b, a := p.NRGBAAt(x, y).RGBA()
 	return color.RGBA64{uint16(r), uint16(g), uint16(b), uint16(a)}
 }
 
-func (p *NRGBA) NRGBAAt(x, y int32) color.NRGBA {
+func (p *NRGBA) NRGBAAt(x, y int32) (out color.NRGBA) {
 	if !(Point{x, y}.In(p.Rect)) {
 		return color.NRGBA{}
 	}
@@ -384,7 +387,7 @@ func (p *NRGBA) NRGBAAt(x, y int32) color.NRGBA {
 
 // PixOffset returns the index of the first element of Pix that corresponds to
 // the pixel at (x, y).
-func (p *NRGBA) PixOffset(x, y int32) int32 {
+func (p *NRGBA) PixOffset(x, y int32) (out int32) {
 	return (y-p.Rect.Min.Y)*p.Stride + (x-p.Rect.Min.X)*4
 }
 
@@ -393,7 +396,7 @@ func (p *NRGBA) Set(x, y int32, c color.Color) {
 		return
 	}
 	i := p.PixOffset(x, y)
-	c1 := color.NRGBAModel().Convert(c).(color.NRGBA)
+	c1 := color.NRGBAModel().Convert(c).(*color.NRGBA)
 	s := p.Pix[i : i+4 : i+4] // Small cap improves performance, see https://golang.org/issue/27857
 	s[0] = c1.R
 	s[1] = c1.G
@@ -433,7 +436,7 @@ func (p *NRGBA) SetNRGBA(x, y int32, c color.NRGBA) {
 
 // SubImage returns an image representing the portion of the image p visible
 // through r. The returned value shares pixels with the original image.
-func (p *NRGBA) SubImage(r Rectangle) Image {
+func (p *NRGBA) SubImage(r Rectangle) (out Image) {
 	r = r.Intersect(p.Rect)
 	// If r1 and r2 are Rectangles, r1.Intersect(r2) is not guaranteed to be inside
 	// either r1 or r2 if the intersection is empty. Without explicitly checking for
@@ -450,7 +453,7 @@ func (p *NRGBA) SubImage(r Rectangle) Image {
 }
 
 // Opaque scans the entire image and reports whether it is fully opaque.
-func (p *NRGBA) Opaque() bool {
+func (p *NRGBA) Opaque() (out bool) {
 	if p.Rect.Empty() {
 		return true
 	}
@@ -468,7 +471,7 @@ func (p *NRGBA) Opaque() bool {
 }
 
 // NewNRGBA returns a new [NRGBA] image with the given bounds.
-func NewNRGBA(r Rectangle) *NRGBA {
+func NewNRGBA(r Rectangle) (out *NRGBA) {
 	return &NRGBA{
 		Pix:    []uint8{:pixelBufferLength(4, r, "NRGBA")},
 		Stride: 4 * r.Dx(),
@@ -487,20 +490,21 @@ type NRGBA64 struct {
 	Rect Rectangle
 }
 
-func (p *NRGBA64) ColorModel() color.Model { return color.NRGBA64Model() }
+func (p *NRGBA64) ColorModel() (out color.Model) { return color.NRGBA64Model() }
 
-func (p *NRGBA64) Bounds() Rectangle { return p.Rect }
+func (p *NRGBA64) Bounds() (out Rectangle) { return p.Rect }
 
-func (p *NRGBA64) At(x, y int32) color.Color {
-	return p.NRGBA64At(x, y)
+func (p *NRGBA64) At(x, y int32) (out color.Color) {
+	c := p.NRGBA64At(x, y)
+	return &c
 }
 
-func (p *NRGBA64) RGBA64At(x, y int32) color.RGBA64 {
+func (p *NRGBA64) RGBA64At(x, y int32) (out color.RGBA64) {
 	r, g, b, a := p.NRGBA64At(x, y).RGBA()
 	return color.RGBA64{uint16(r), uint16(g), uint16(b), uint16(a)}
 }
 
-func (p *NRGBA64) NRGBA64At(x, y int32) color.NRGBA64 {
+func (p *NRGBA64) NRGBA64At(x, y int32) (out color.NRGBA64) {
 	if !(Point{x, y}.In(p.Rect)) {
 		return color.NRGBA64{}
 	}
@@ -516,7 +520,7 @@ func (p *NRGBA64) NRGBA64At(x, y int32) color.NRGBA64 {
 
 // PixOffset returns the index of the first element of Pix that corresponds to
 // the pixel at (x, y).
-func (p *NRGBA64) PixOffset(x, y int32) int32 {
+func (p *NRGBA64) PixOffset(x, y int32) (out int32) {
 	return (y-p.Rect.Min.Y)*p.Stride + (x-p.Rect.Min.X)*8
 }
 
@@ -525,7 +529,7 @@ func (p *NRGBA64) Set(x, y int32, c color.Color) {
 		return
 	}
 	i := p.PixOffset(x, y)
-	c1 := color.NRGBA64Model().Convert(c).(color.NRGBA64)
+	c1 := color.NRGBA64Model().Convert(c).(*color.NRGBA64)
 	s := p.Pix[i : i+8 : i+8] // Small cap improves performance, see https://golang.org/issue/27857
 	s[0] = uint8(c1.R >> 8)
 	s[1] = uint8(c1.R)
@@ -577,7 +581,7 @@ func (p *NRGBA64) SetNRGBA64(x, y int32, c color.NRGBA64) {
 
 // SubImage returns an image representing the portion of the image p visible
 // through r. The returned value shares pixels with the original image.
-func (p *NRGBA64) SubImage(r Rectangle) Image {
+func (p *NRGBA64) SubImage(r Rectangle) (out Image) {
 	r = r.Intersect(p.Rect)
 	// If r1 and r2 are Rectangles, r1.Intersect(r2) is not guaranteed to be inside
 	// either r1 or r2 if the intersection is empty. Without explicitly checking for
@@ -594,7 +598,7 @@ func (p *NRGBA64) SubImage(r Rectangle) Image {
 }
 
 // Opaque scans the entire image and reports whether it is fully opaque.
-func (p *NRGBA64) Opaque() bool {
+func (p *NRGBA64) Opaque() (out bool) {
 	if p.Rect.Empty() {
 		return true
 	}
@@ -612,7 +616,7 @@ func (p *NRGBA64) Opaque() bool {
 }
 
 // NewNRGBA64 returns a new [NRGBA64] image with the given bounds.
-func NewNRGBA64(r Rectangle) *NRGBA64 {
+func NewNRGBA64(r Rectangle) (out *NRGBA64) {
 	return &NRGBA64{
 		Pix:    []uint8{:pixelBufferLength(8, r, "NRGBA64")},
 		Stride: 8 * r.Dx(),
@@ -631,21 +635,22 @@ type Alpha struct {
 	Rect Rectangle
 }
 
-func (p *Alpha) ColorModel() color.Model { return color.AlphaModel() }
+func (p *Alpha) ColorModel() (out color.Model) { return color.AlphaModel() }
 
-func (p *Alpha) Bounds() Rectangle { return p.Rect }
+func (p *Alpha) Bounds() (out Rectangle) { return p.Rect }
 
-func (p *Alpha) At(x, y int32) color.Color {
-	return p.AlphaAt(x, y)
+func (p *Alpha) At(x, y int32) (out color.Color) {
+	c := p.AlphaAt(x, y)
+	return &c
 }
 
-func (p *Alpha) RGBA64At(x, y int32) color.RGBA64 {
+func (p *Alpha) RGBA64At(x, y int32) (out color.RGBA64) {
 	a := uint16(p.AlphaAt(x, y).A)
 	a |= a << 8
 	return color.RGBA64{a, a, a, a}
 }
 
-func (p *Alpha) AlphaAt(x, y int32) color.Alpha {
+func (p *Alpha) AlphaAt(x, y int32) (out color.Alpha) {
 	if !(Point{x, y}.In(p.Rect)) {
 		return color.Alpha{}
 	}
@@ -655,7 +660,7 @@ func (p *Alpha) AlphaAt(x, y int32) color.Alpha {
 
 // PixOffset returns the index of the first element of Pix that corresponds to
 // the pixel at (x, y).
-func (p *Alpha) PixOffset(x, y int32) int32 {
+func (p *Alpha) PixOffset(x, y int32) (out int32) {
 	return (y-p.Rect.Min.Y)*p.Stride + (x-p.Rect.Min.X)*1
 }
 
@@ -664,7 +669,7 @@ func (p *Alpha) Set(x, y int32, c color.Color) {
 		return
 	}
 	i := p.PixOffset(x, y)
-	p.Pix[i] = color.AlphaModel().Convert(c).(color.Alpha).A
+	p.Pix[i] = color.AlphaModel().Convert(c).(*color.Alpha).A
 }
 
 func (p *Alpha) SetRGBA64(x, y int32, c color.RGBA64) {
@@ -685,7 +690,7 @@ func (p *Alpha) SetAlpha(x, y int32, c color.Alpha) {
 
 // SubImage returns an image representing the portion of the image p visible
 // through r. The returned value shares pixels with the original image.
-func (p *Alpha) SubImage(r Rectangle) Image {
+func (p *Alpha) SubImage(r Rectangle) (out Image) {
 	r = r.Intersect(p.Rect)
 	// If r1 and r2 are Rectangles, r1.Intersect(r2) is not guaranteed to be inside
 	// either r1 or r2 if the intersection is empty. Without explicitly checking for
@@ -702,7 +707,7 @@ func (p *Alpha) SubImage(r Rectangle) Image {
 }
 
 // Opaque scans the entire image and reports whether it is fully opaque.
-func (p *Alpha) Opaque() bool {
+func (p *Alpha) Opaque() (out bool) {
 	if p.Rect.Empty() {
 		return true
 	}
@@ -720,7 +725,7 @@ func (p *Alpha) Opaque() bool {
 }
 
 // NewAlpha returns a new [Alpha] image with the given bounds.
-func NewAlpha(r Rectangle) *Alpha {
+func NewAlpha(r Rectangle) (out *Alpha) {
 	return &Alpha{
 		Pix:    []uint8{:pixelBufferLength(1, r, "Alpha")},
 		Stride: 1 * r.Dx(),
@@ -739,20 +744,21 @@ type Alpha16 struct {
 	Rect Rectangle
 }
 
-func (p *Alpha16) ColorModel() color.Model { return color.Alpha16Model() }
+func (p *Alpha16) ColorModel() (out color.Model) { return color.Alpha16Model() }
 
-func (p *Alpha16) Bounds() Rectangle { return p.Rect }
+func (p *Alpha16) Bounds() (out Rectangle) { return p.Rect }
 
-func (p *Alpha16) At(x, y int32) color.Color {
-	return p.Alpha16At(x, y)
+func (p *Alpha16) At(x, y int32) (out color.Color) {
+	c := p.Alpha16At(x, y)
+	return &c
 }
 
-func (p *Alpha16) RGBA64At(x, y int32) color.RGBA64 {
+func (p *Alpha16) RGBA64At(x, y int32) (out color.RGBA64) {
 	a := p.Alpha16At(x, y).A
 	return color.RGBA64{a, a, a, a}
 }
 
-func (p *Alpha16) Alpha16At(x, y int32) color.Alpha16 {
+func (p *Alpha16) Alpha16At(x, y int32) (out color.Alpha16) {
 	if !(Point{x, y}.In(p.Rect)) {
 		return color.Alpha16{}
 	}
@@ -762,7 +768,7 @@ func (p *Alpha16) Alpha16At(x, y int32) color.Alpha16 {
 
 // PixOffset returns the index of the first element of Pix that corresponds to
 // the pixel at (x, y).
-func (p *Alpha16) PixOffset(x, y int32) int32 {
+func (p *Alpha16) PixOffset(x, y int32) (out int32) {
 	return (y-p.Rect.Min.Y)*p.Stride + (x-p.Rect.Min.X)*2
 }
 
@@ -771,7 +777,7 @@ func (p *Alpha16) Set(x, y int32, c color.Color) {
 		return
 	}
 	i := p.PixOffset(x, y)
-	c1 := color.Alpha16Model().Convert(c).(color.Alpha16)
+	c1 := color.Alpha16Model().Convert(c).(*color.Alpha16)
 	p.Pix[i+0] = uint8(c1.A >> 8)
 	p.Pix[i+1] = uint8(c1.A)
 }
@@ -796,7 +802,7 @@ func (p *Alpha16) SetAlpha16(x, y int32, c color.Alpha16) {
 
 // SubImage returns an image representing the portion of the image p visible
 // through r. The returned value shares pixels with the original image.
-func (p *Alpha16) SubImage(r Rectangle) Image {
+func (p *Alpha16) SubImage(r Rectangle) (out Image) {
 	r = r.Intersect(p.Rect)
 	// If r1 and r2 are Rectangles, r1.Intersect(r2) is not guaranteed to be inside
 	// either r1 or r2 if the intersection is empty. Without explicitly checking for
@@ -813,7 +819,7 @@ func (p *Alpha16) SubImage(r Rectangle) Image {
 }
 
 // Opaque scans the entire image and reports whether it is fully opaque.
-func (p *Alpha16) Opaque() bool {
+func (p *Alpha16) Opaque() (out bool) {
 	if p.Rect.Empty() {
 		return true
 	}
@@ -831,7 +837,7 @@ func (p *Alpha16) Opaque() bool {
 }
 
 // NewAlpha16 returns a new [Alpha16] image with the given bounds.
-func NewAlpha16(r Rectangle) *Alpha16 {
+func NewAlpha16(r Rectangle) (out *Alpha16) {
 	return &Alpha16{
 		Pix:    []uint8{:pixelBufferLength(2, r, "Alpha16")},
 		Stride: 2 * r.Dx(),
@@ -850,21 +856,22 @@ type Gray struct {
 	Rect Rectangle
 }
 
-func (p *Gray) ColorModel() color.Model { return color.GrayModel() }
+func (p *Gray) ColorModel() (out color.Model) { return color.GrayModel() }
 
-func (p *Gray) Bounds() Rectangle { return p.Rect }
+func (p *Gray) Bounds() (out Rectangle) { return p.Rect }
 
-func (p *Gray) At(x, y int32) color.Color {
-	return p.GrayAt(x, y)
+func (p *Gray) At(x, y int32) (out color.Color) {
+	c := p.GrayAt(x, y)
+	return &c
 }
 
-func (p *Gray) RGBA64At(x, y int32) color.RGBA64 {
+func (p *Gray) RGBA64At(x, y int32) (out color.RGBA64) {
 	gray := uint16(p.GrayAt(x, y).Y)
 	gray |= gray << 8
 	return color.RGBA64{gray, gray, gray, 0xffff}
 }
 
-func (p *Gray) GrayAt(x, y int32) color.Gray {
+func (p *Gray) GrayAt(x, y int32) (out color.Gray) {
 	if !(Point{x, y}.In(p.Rect)) {
 		return color.Gray{}
 	}
@@ -874,7 +881,7 @@ func (p *Gray) GrayAt(x, y int32) color.Gray {
 
 // PixOffset returns the index of the first element of Pix that corresponds to
 // the pixel at (x, y).
-func (p *Gray) PixOffset(x, y int32) int32 {
+func (p *Gray) PixOffset(x, y int32) (out int32) {
 	return (y-p.Rect.Min.Y)*p.Stride + (x-p.Rect.Min.X)*1
 }
 
@@ -883,7 +890,7 @@ func (p *Gray) Set(x, y int32, c color.Color) {
 		return
 	}
 	i := p.PixOffset(x, y)
-	p.Pix[i] = color.GrayModel().Convert(c).(color.Gray).Y
+	p.Pix[i] = color.GrayModel().Convert(c).(*color.Gray).Y
 }
 
 func (p *Gray) SetRGBA64(x, y int32, c color.RGBA64) {
@@ -906,7 +913,7 @@ func (p *Gray) SetGray(x, y int32, c color.Gray) {
 
 // SubImage returns an image representing the portion of the image p visible
 // through r. The returned value shares pixels with the original image.
-func (p *Gray) SubImage(r Rectangle) Image {
+func (p *Gray) SubImage(r Rectangle) (out Image) {
 	r = r.Intersect(p.Rect)
 	// If r1 and r2 are Rectangles, r1.Intersect(r2) is not guaranteed to be inside
 	// either r1 or r2 if the intersection is empty. Without explicitly checking for
@@ -923,12 +930,12 @@ func (p *Gray) SubImage(r Rectangle) Image {
 }
 
 // Opaque scans the entire image and reports whether it is fully opaque.
-func (p *Gray) Opaque() bool {
+func (p *Gray) Opaque() (out bool) {
 	return true
 }
 
 // NewGray returns a new [Gray] image with the given bounds.
-func NewGray(r Rectangle) *Gray {
+func NewGray(r Rectangle) (out *Gray) {
 	return &Gray{
 		Pix:    []uint8{:pixelBufferLength(1, r, "Gray")},
 		Stride: 1 * r.Dx(),
@@ -947,20 +954,21 @@ type Gray16 struct {
 	Rect Rectangle
 }
 
-func (p *Gray16) ColorModel() color.Model { return color.Gray16Model() }
+func (p *Gray16) ColorModel() (out color.Model) { return color.Gray16Model() }
 
-func (p *Gray16) Bounds() Rectangle { return p.Rect }
+func (p *Gray16) Bounds() (out Rectangle) { return p.Rect }
 
-func (p *Gray16) At(x, y int32) color.Color {
-	return p.Gray16At(x, y)
+func (p *Gray16) At(x, y int32) (out color.Color) {
+	c := p.Gray16At(x, y)
+	return &c
 }
 
-func (p *Gray16) RGBA64At(x, y int32) color.RGBA64 {
+func (p *Gray16) RGBA64At(x, y int32) (out color.RGBA64) {
 	gray := p.Gray16At(x, y).Y
 	return color.RGBA64{gray, gray, gray, 0xffff}
 }
 
-func (p *Gray16) Gray16At(x, y int32) color.Gray16 {
+func (p *Gray16) Gray16At(x, y int32) (out color.Gray16) {
 	if !(Point{x, y}.In(p.Rect)) {
 		return color.Gray16{}
 	}
@@ -970,7 +978,7 @@ func (p *Gray16) Gray16At(x, y int32) color.Gray16 {
 
 // PixOffset returns the index of the first element of Pix that corresponds to
 // the pixel at (x, y).
-func (p *Gray16) PixOffset(x, y int32) int32 {
+func (p *Gray16) PixOffset(x, y int32) (out int32) {
 	return (y-p.Rect.Min.Y)*p.Stride + (x-p.Rect.Min.X)*2
 }
 
@@ -979,7 +987,7 @@ func (p *Gray16) Set(x, y int32, c color.Color) {
 		return
 	}
 	i := p.PixOffset(x, y)
-	c1 := color.Gray16Model().Convert(c).(color.Gray16)
+	c1 := color.Gray16Model().Convert(c).(*color.Gray16)
 	p.Pix[i+0] = uint8(c1.Y >> 8)
 	p.Pix[i+1] = uint8(c1.Y)
 }
@@ -1006,7 +1014,7 @@ func (p *Gray16) SetGray16(x, y int32, c color.Gray16) {
 
 // SubImage returns an image representing the portion of the image p visible
 // through r. The returned value shares pixels with the original image.
-func (p *Gray16) SubImage(r Rectangle) Image {
+func (p *Gray16) SubImage(r Rectangle) (out Image) {
 	r = r.Intersect(p.Rect)
 	// If r1 and r2 are Rectangles, r1.Intersect(r2) is not guaranteed to be inside
 	// either r1 or r2 if the intersection is empty. Without explicitly checking for
@@ -1023,12 +1031,12 @@ func (p *Gray16) SubImage(r Rectangle) Image {
 }
 
 // Opaque scans the entire image and reports whether it is fully opaque.
-func (p *Gray16) Opaque() bool {
+func (p *Gray16) Opaque() (out bool) {
 	return true
 }
 
 // NewGray16 returns a new [Gray16] image with the given bounds.
-func NewGray16(r Rectangle) *Gray16 {
+func NewGray16(r Rectangle) (out *Gray16) {
 	return &Gray16{
 		Pix:    []uint8{:pixelBufferLength(2, r, "Gray16")},
 		Stride: 2 * r.Dx(),
@@ -1047,20 +1055,21 @@ type CMYK struct {
 	Rect Rectangle
 }
 
-func (p *CMYK) ColorModel() color.Model { return color.CMYKModel() }
+func (p *CMYK) ColorModel() (out color.Model) { return color.CMYKModel() }
 
-func (p *CMYK) Bounds() Rectangle { return p.Rect }
+func (p *CMYK) Bounds() (out Rectangle) { return p.Rect }
 
-func (p *CMYK) At(x, y int32) color.Color {
-	return p.CMYKAt(x, y)
+func (p *CMYK) At(x, y int32) (out color.Color) {
+	c := p.CMYKAt(x, y)
+	return &c
 }
 
-func (p *CMYK) RGBA64At(x, y int32) color.RGBA64 {
+func (p *CMYK) RGBA64At(x, y int32) (out color.RGBA64) {
 	r, g, b, a := p.CMYKAt(x, y).RGBA()
 	return color.RGBA64{uint16(r), uint16(g), uint16(b), uint16(a)}
 }
 
-func (p *CMYK) CMYKAt(x, y int32) color.CMYK {
+func (p *CMYK) CMYKAt(x, y int32) (out color.CMYK) {
 	if !(Point{x, y}.In(p.Rect)) {
 		return color.CMYK{}
 	}
@@ -1071,7 +1080,7 @@ func (p *CMYK) CMYKAt(x, y int32) color.CMYK {
 
 // PixOffset returns the index of the first element of Pix that corresponds to
 // the pixel at (x, y).
-func (p *CMYK) PixOffset(x, y int32) int32 {
+func (p *CMYK) PixOffset(x, y int32) (out int32) {
 	return (y-p.Rect.Min.Y)*p.Stride + (x-p.Rect.Min.X)*4
 }
 
@@ -1080,7 +1089,7 @@ func (p *CMYK) Set(x, y int32, c color.Color) {
 		return
 	}
 	i := p.PixOffset(x, y)
-	c1 := color.CMYKModel().Convert(c).(color.CMYK)
+	c1 := color.CMYKModel().Convert(c).(*color.CMYK)
 	s := p.Pix[i : i+4 : i+4] // Small cap improves performance, see https://golang.org/issue/27857
 	s[0] = c1.C
 	s[1] = c1.M
@@ -1115,7 +1124,7 @@ func (p *CMYK) SetCMYK(x, y int32, c color.CMYK) {
 
 // SubImage returns an image representing the portion of the image p visible
 // through r. The returned value shares pixels with the original image.
-func (p *CMYK) SubImage(r Rectangle) Image {
+func (p *CMYK) SubImage(r Rectangle) (out Image) {
 	r = r.Intersect(p.Rect)
 	// If r1 and r2 are Rectangles, r1.Intersect(r2) is not guaranteed to be inside
 	// either r1 or r2 if the intersection is empty. Without explicitly checking for
@@ -1132,12 +1141,12 @@ func (p *CMYK) SubImage(r Rectangle) Image {
 }
 
 // Opaque scans the entire image and reports whether it is fully opaque.
-func (p *CMYK) Opaque() bool {
+func (p *CMYK) Opaque() (out bool) {
 	return true
 }
 
 // NewCMYK returns a new CMYK image with the given bounds.
-func NewCMYK(r Rectangle) *CMYK {
+func NewCMYK(r Rectangle) (out *CMYK) {
 	return &CMYK{
 		Pix:    []uint8{:pixelBufferLength(4, r, "CMYK")},
 		Stride: 4 * r.Dx(),
@@ -1155,14 +1164,14 @@ type Paletted struct {
 	// Rect is the image's bounds.
 	Rect Rectangle
 	// Palette is the image's palette.
-	Palette color.Palette
+	Palette []color.Color
 }
 
-func (p *Paletted) ColorModel() color.Model { return p.Palette }
+func (p *Paletted) ColorModel() (out color.Model) { return p.Palette }
 
-func (p *Paletted) Bounds() Rectangle { return p.Rect }
+func (p *Paletted) Bounds() (out Rectangle) { return p.Rect }
 
-func (p *Paletted) At(x, y int32) color.Color {
+func (p *Paletted) At(x, y int32) (out color.Color) {
 	if len(p.Palette) == 0 {
 		return nil
 	}
@@ -1173,7 +1182,7 @@ func (p *Paletted) At(x, y int32) color.Color {
 	return p.Palette[p.Pix[i]]
 }
 
-func (p *Paletted) RGBA64At(x, y int32) color.RGBA64 {
+func (p *Paletted) RGBA64At(x, y int32) (out color.RGBA64) {
 	if len(p.Palette) == 0 {
 		return color.RGBA64{}
 	}
@@ -1195,7 +1204,7 @@ func (p *Paletted) RGBA64At(x, y int32) color.RGBA64 {
 
 // PixOffset returns the index of the first element of Pix that corresponds to
 // the pixel at (x, y).
-func (p *Paletted) PixOffset(x, y int32) int32 {
+func (p *Paletted) PixOffset(x, y int32) (out int32) {
 	return (y-p.Rect.Min.Y)*p.Stride + (x-p.Rect.Min.X)*1
 }
 
@@ -1204,7 +1213,7 @@ func (p *Paletted) Set(x, y int32, c color.Color) {
 		return
 	}
 	i := p.PixOffset(x, y)
-	p.Pix[i] = uint8(p.Palette.Index(c))
+	p.Pix[i] = uint8(color.PaletteIndex(p.Palette, c))
 }
 
 func (p *Paletted) SetRGBA64(x, y int32, c color.RGBA64) {
@@ -1212,10 +1221,10 @@ func (p *Paletted) SetRGBA64(x, y int32, c color.RGBA64) {
 		return
 	}
 	i := p.PixOffset(x, y)
-	p.Pix[i] = uint8(p.Palette.Index(c))
+	p.Pix[i] = uint8(color.PaletteIndex(p.Palette, c))
 }
 
-func (p *Paletted) ColorIndexAt(x, y int32) uint8 {
+func (p *Paletted) ColorIndexAt(x, y int32) (out uint8) {
 	if !(Point{x, y}.In(p.Rect)) {
 		return 0
 	}
@@ -1233,7 +1242,7 @@ func (p *Paletted) SetColorIndex(x, y int32, index uint8) {
 
 // SubImage returns an image representing the portion of the image p visible
 // through r. The returned value shares pixels with the original image.
-func (p *Paletted) SubImage(r Rectangle) Image {
+func (p *Paletted) SubImage(r Rectangle) (out Image) {
 	r = r.Intersect(p.Rect)
 	// If r1 and r2 are Rectangles, r1.Intersect(r2) is not guaranteed to be inside
 	// either r1 or r2 if the intersection is empty. Without explicitly checking for
@@ -1253,7 +1262,7 @@ func (p *Paletted) SubImage(r Rectangle) Image {
 }
 
 // Opaque scans the entire image and reports whether it is fully opaque.
-func (p *Paletted) Opaque() bool {
+func (p *Paletted) Opaque() (out bool) {
 	var present [256]bool
 	i0, i1 := 0, p.Rect.Dx()
 	for y := p.Rect.Min.Y; y < p.Rect.Max.Y; y++ {
@@ -1277,7 +1286,7 @@ func (p *Paletted) Opaque() bool {
 
 // NewPaletted returns a new [Paletted] image with the given width, height and
 // palette.
-func NewPaletted(r Rectangle, p color.Palette) *Paletted {
+func NewPaletted(r Rectangle, p []color.Color) (out *Paletted) {
 	return &Paletted{
 		Pix:     []uint8{:pixelBufferLength(1, r, "Paletted")},
 		Stride:  1 * r.Dx(),

@@ -209,31 +209,31 @@ type file struct {
 }
 
 
-func (f *file) Name() string               { _, elem, _ := split(f.name); return elem }
-func (f *file) Size() int64                { return int64(len(f.data)) }
-func (f *file) ModTime() time.Time         { return time.Time{} }
-func (f *file) IsDir() bool                { _, _, isDir := split(f.name); return isDir }
-func (f *file) Sys() unsafe.Pointer { return nil }
-func (f *file) Type() fs.FileMode          { return f.Mode().Type() }
-func (f *file) Info() (fs.FileInfo, error) { return f, nil }
+func (f *file) Name() (out string)                 { _, elem, _ := split(f.name); return elem }
+func (f *file) Size() (out int64)                  { return int64(len(f.data)) }
+func (f *file) ModTime() (out time.Time)           { return time.Time{} }
+func (f *file) IsDir() (out bool)                  { _, _, isDir := split(f.name); return isDir }
+func (f *file) Sys() (out unsafe.Pointer)          { return nil }
+func (f *file) Type() (out fs.FileMode)            { mode := f.Mode(); return mode.Type() }
+func (f *file) Info() (out fs.FileInfo, err error) { return f, nil }
 
-func (f *file) Mode() fs.FileMode {
+func (f *file) Mode() (out fs.FileMode) {
 	if f.IsDir() {
 		return fs.ModeDir | 0555
 	}
 	return 0444
 }
 
-func (f *file) String() string {
+func (f *file) String() (out string) {
 	return fs.FormatFileInfo(f)
 }
 
 // dotFile is a file for the root directory,
 // which is omitted from the files list in a FS.
-func _dotFile() *file { return &file{name: "./"} }
+func _dotFile() (out *file) { return &file{name: "./"} }
 
 // lookup returns the named file, or nil if it is not present.
-func (f FS) lookup(name string) *file {
+func (f *FS) lookup(name string) (out *file) {
 	if !fs.ValidPath(name) {
 		// The compiler should never emit a file with an invalid name,
 		// so this check is not strictly necessary (if name is invalid,
@@ -251,39 +251,57 @@ func (f FS) lookup(name string) *file {
 	// and then check if name is at that position.
 	dir, elem, _ := split(name)
 	files := *f.files
-	i := sortSearch(len(files), func(idx int32) bool {
-		idir, ielem, _ := split(files[idx].name)
-		return idir > dir || idir == dir && ielem >= elem
-	})
-	if i < len(files) && stringslite.TrimSuffix(files[i].name, "/") == name {
+	i, j := int32(0), int32(len(files))
+	for i < j {
+		h := int32(uint32(i+j) >> 1)
+		idir, ielem, _ := split(files[h].name)
+		if idir > dir || idir == dir && ielem >= elem {
+			j = h
+		} else {
+			i = h + 1
+		}
+	}
+	if i < int32(len(files)) && stringslite.TrimSuffix(files[i].name, "/") == name {
 		return &files[i]
 	}
 	return nil
 }
 
 // readDir returns the list of files corresponding to the directory dir.
-func (f FS) readDir(dir string) []file {
+func (f *FS) readDir(dir string) (out []file) {
 	if f.files == nil {
 		return nil
 	}
 	// Binary search to find where dir starts and ends in the list
 	// and then return that slice of the list.
 	files := *f.files
-	i := sortSearch(len(files), func(idx int32) bool {
-		idir, _, _ := split(files[idx].name)
-		return idir >= dir
-	})
-	j := sortSearch(len(files), func(jdx int32) bool {
-		jdir, _, _ := split(files[jdx].name)
-		return jdir > dir
-	})
-	return files[i:j]
+	i, j := int32(0), int32(len(files))
+	for i < j {
+		h := int32(uint32(i+j) >> 1)
+		idir, _, _ := split(files[h].name)
+		if idir >= dir {
+			j = h
+		} else {
+			i = h + 1
+		}
+	}
+	k, l := int32(0), int32(len(files))
+	for k < l {
+		h := int32(uint32(k+l) >> 1)
+		jdir, _, _ := split(files[h].name)
+		if jdir > dir {
+			l = h
+		} else {
+			k = h + 1
+		}
+	}
+	return files[i:k]
 }
 
 // Open opens the named file for reading and returns it as an [fs.File].
 //
 // The returned file implements [io.Seeker] and [io.ReaderAt] when the file is not a directory.
-func (f FS) Open(name string) (fs.File, error) {
+func (f *FS) Open(name string) (out fs.File, err error) {
 	entry := f.lookup(name)
 	if entry == nil {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
@@ -295,10 +313,10 @@ func (f FS) Open(name string) (fs.File, error) {
 }
 
 // ReadDir reads and returns the entire named directory.
-func (f FS) ReadDir(name string) ([]fs.DirEntry, error) {
-	entry, err := f.Open(name)
-	if err != nil {
-		return nil, err
+func (f *FS) ReadDir(name string) (out []fs.DirEntry, err error) {
+	entry, openErr := f.Open(name)
+	if openErr != nil {
+		return nil, openErr
 	}
 	dir, ok := entry.(*openDir)
 	if !ok {
@@ -312,10 +330,10 @@ func (f FS) ReadDir(name string) ([]fs.DirEntry, error) {
 }
 
 // ReadFile reads and returns the content of the named file.
-func (f FS) ReadFile(name string) ([]byte, error) {
-	entry, err := f.Open(name)
-	if err != nil {
-		return nil, err
+func (f *FS) ReadFile(name string) (out []byte, err error) {
+	entry, openErr := f.Open(name)
+	if openErr != nil {
+		return nil, openErr
 	}
 	ofile, ok := entry.(*openFile)
 	if !ok {
@@ -331,10 +349,10 @@ type openFile struct {
 }
 
 
-func (f *openFile) Close() error               { return nil }
-func (f *openFile) Stat() (fs.FileInfo, error) { return f.f, nil }
+func (f *openFile) Close() (out error)                 { return nil }
+func (f *openFile) Stat() (out fs.FileInfo, err error) { return f.f, nil }
 
-func (f *openFile) Read(b []byte) (int32, error) {
+func (f *openFile) Read(b []byte) (out int32, err error) {
 	if f.offset >= int64(len(f.f.data)) {
 		return 0, io.EOF
 	}
@@ -346,7 +364,7 @@ func (f *openFile) Read(b []byte) (int32, error) {
 	return n, nil
 }
 
-func (f *openFile) Seek(offset int64, whence int32) (int64, error) {
+func (f *openFile) Seek(offset int64, whence int32) (out int64, err error) {
 	switch whence {
 	case 0:
 		// offset += 0
@@ -362,7 +380,7 @@ func (f *openFile) Seek(offset int64, whence int32) (int64, error) {
 	return offset, nil
 }
 
-func (f *openFile) ReadAt(b []byte, offset int64) (int32, error) {
+func (f *openFile) ReadAt(b []byte, offset int64) (out int32, err error) {
 	if offset < 0 || offset > int64(len(f.f.data)) {
 		return 0, &fs.PathError{Op: "read", Path: f.f.name, Err: fs.ErrInvalid}
 	}
@@ -377,17 +395,17 @@ func (f *openFile) ReadAt(b []byte, offset int64) (int32, error) {
 type openDir struct {
 	f      *file  // the directory file itself
 	files  []file // the directory contents
-	offset int32    // the read offset, an index into the files slice
+	offset int32  // the read offset, an index into the files slice
 }
 
-func (d *openDir) Close() error               { return nil }
-func (d *openDir) Stat() (fs.FileInfo, error) { return d.f, nil }
+func (d *openDir) Close() (out error)                 { return nil }
+func (d *openDir) Stat() (out fs.FileInfo, err error) { return d.f, nil }
 
-func (d *openDir) Read([]byte) (int32, error) {
+func (d *openDir) Read(p []byte) (out int32, err error) {
 	return 0, &fs.PathError{Op: "read", Path: d.f.name, Err: errors.New("is a directory")}
 }
 
-func (d *openDir) ReadDir(count int32) ([]fs.DirEntry, error) {
+func (d *openDir) ReadDir(count int32) (out []fs.DirEntry, err error) {
 	n := len(d.files) - d.offset
 	if n == 0 {
 		if count <= 0 {
@@ -404,22 +422,4 @@ func (d *openDir) ReadDir(count int32) ([]fs.DirEntry, error) {
 	}
 	d.offset += n
 	return list, nil
-}
-
-// sortSearch is like sort.Search, avoiding an import.
-func sortSearch(n int32, f func(int32) bool) int32 {
-	// Define f(-1) == false and f(n) == true.
-	// Invariant: f(i-1) == false, f(j) == true.
-	i, j := 0, n
-	for i < j {
-		h := int32(uint32(i+j) >> 1) // avoid overflow when computing h
-		// i ≤ h < j
-		if !f(h) {
-			i = h + 1 // preserves f(i-1) == false
-		} else {
-			j = h // preserves f(j) == true
-		}
-	}
-	// i == j, f(i-1) == false, and f(j) (= f(i)) == true  =>  answer is i.
-	return i
 }

@@ -108,7 +108,7 @@ var _defaultClientDone bool
 var _defaultClientVal *Client
 
 // DefaultClient returns the default [Client] used by [Get], [Head], and [Post].
-func DefaultClient() *Client {
+func DefaultClient() (rclient *Client) {
 	if !_defaultClientDone {
 		_defaultClientDone = true
 		_defaultClientVal = &Client{}
@@ -152,7 +152,7 @@ type RoundTripper interface {
 // refererForURL returns a referer without any authentication info or
 // an empty string if lastReq scheme is https and newReq scheme is http.
 // If the referer was explicitly set, then it will continue to be used.
-func refererForURL(lastReq, newReq *url.URL, explicitRef string) string {
+func refererForURL(lastReq, newReq *url.URL, explicitRef string) (rs string) {
 	// https://tools.ietf.org/html/rfc7231#section-5.5.2
 	//   "Clients SHOULD NOT include a Referer header field in a
 	//    (non-secure) HTTP request if the referring page was
@@ -197,14 +197,14 @@ func (c *Client) send(req *Request, deadline time.Time) (resp *Response, didTime
 	return resp, nil, nil
 }
 
-func (c *Client) deadline() time.Time {
+func (c *Client) deadline() (rtime time.Time) {
 	if c.Timeout > 0 {
 		return time.Now().Add(c.Timeout)
 	}
 	return time.Time{}
 }
 
-func (c *Client) transport() RoundTripper {
+func (c *Client) transport() (rroundTripper RoundTripper) {
 	if c.Transport != nil {
 		return c.Transport
 	}
@@ -212,7 +212,7 @@ func (c *Client) transport() RoundTripper {
 }
 
 // ErrSchemeMismatch is returned when a server returns an HTTP response to an HTTPS client.
-const ErrSchemeMismatch = errors.Const("http: server gave HTTP response to HTTPS client")
+var ErrSchemeMismatch error
 
 // send issues an HTTP request.
 // Caller should close resp.Body when done reading from it.
@@ -312,7 +312,7 @@ func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, d
 // timeBeforeContextDeadline reports whether the non-zero Time t is
 // before ctx's deadline, if any. If ctx does not have a deadline, it
 // always reports true (the deadline is considered infinite).
-func timeBeforeContextDeadline(t time.Time, ctx context.Context) bool {
+func timeBeforeContextDeadline(t time.Time, ctx context.Context) (rok bool) {
 	d, ok := ctx.Deadline()
 	if !ok {
 		return true
@@ -325,7 +325,7 @@ func timeBeforeContextDeadline(t time.Time, ctx context.Context) bool {
 // optional semantics (notably contexts). The Request is used
 // to check whether this particular request is using an alternate protocol,
 // in which case we need to check the RoundTripper for that protocol.
-func knownRoundTripperImpl(rt RoundTripper, req *Request) bool {
+func knownRoundTripperImpl(rt RoundTripper, req *Request) (rok bool) {
 	switch t := rt.(type) {
 	case *Transport:
 		if altRT := t.alternateRoundTripper(req); altRT != nil {
@@ -363,15 +363,17 @@ func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTi
 			return nop, alwaysFalse
 		}
 
-		var cancelCtx func()
+		var cancelCtx context.CancelFunc
 		req.ctx, cancelCtx = context.WithDeadline(oldCtx, deadline)
-		return cancelCtx, func() bool { return time.Now().After(deadline) }
+		return cancelCtx.Cancel, func() bool { return time.Now().After(deadline) }
 	}
 	initialReqCancel := req.Cancel // the user's original Request.Cancel, if any
 
-	var cancelCtx func()
+	var cancelCtx context.CancelFunc
+	cancelCtxSet := false
 	if timeBeforeContextDeadline(deadline, oldCtx) {
 		req.ctx, cancelCtx = context.WithDeadline(oldCtx, deadline)
+		cancelCtxSet = true
 	}
 
 	cancel := chan struct{}{}
@@ -396,8 +398,8 @@ func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTi
 		}
 		stopTimerDone = true
 		close(stopTimerCh)
-		if cancelCtx != nil {
-			cancelCtx()
+		if cancelCtxSet {
+			cancelCtx.Cancel()
 		}
 	}
 
@@ -425,7 +427,7 @@ func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTi
 // separated by a single colon (":") character, within a base64
 // encoded string in the credentials."
 // It is not meant to be urlencoded.
-func basicAuth(username, password string) string {
+func basicAuth(username, password string) (rs string) {
 	auth := username + ":" + password
 	return base64.StdEncoding().EncodeToString([]byte(auth))
 }
@@ -490,17 +492,17 @@ func (c *Client) Get(url string) (resp *Response, err error) {
 	return c.Do(req)
 }
 
-func alwaysFalse() bool { return false }
+func alwaysFalse() (rok bool) { return false }
 
 // ErrUseLastResponse can be returned by Client.CheckRedirect hooks to
 // control how redirects are processed. If returned, the next request
 // is not sent and the most recent response is returned with its body
 // unclosed.
-const ErrUseLastResponse = errors.Const("net/http: use last response")
+var ErrUseLastResponse error
 
 // checkRedirect calls either the user's configured CheckRedirect
 // function, or the default.
-func (c *Client) checkRedirect(req *Request, via []*Request) error {
+func (c *Client) checkRedirect(req *Request, via []*Request) (rerr error) {
 	fn := c.CheckRedirect
 	if fn == nil {
 		fn = defaultCheckRedirect
@@ -542,7 +544,7 @@ func redirectBehavior(reqMethod string, resp *Response, ireq *Request) (redirect
 
 // urlErrorOp returns the (*url.Error).Op value to use for the
 // provided (*Request).Method value.
-func urlErrorOp(method string) string {
+func urlErrorOp(method string) (rs string) {
 	if method == "" {
 		return "Get"
 	}
@@ -589,7 +591,7 @@ func urlErrorOp(method string) string {
 //
 // Any returned error will be of type [*url.Error]. The url.Error
 // value's Timeout method will report true if the request timed out.
-func (c *Client) Do(req *Request) (*Response, error) {
+func (c *Client) Do(req *Request) (rresponse *Response, rerr error) {
 	return c.do(req)
 }
 
@@ -755,7 +757,7 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 // makeHeadersCopier makes a function that copies headers from the
 // initial Request, ireq. For every redirect, this function must be called
 // so that it can copy headers into the upcoming Request.
-func (c *Client) makeHeadersCopier(ireq *Request) func(req *Request, stripSensitiveHeaders bool) {
+func (c *Client) makeHeadersCopier(ireq *Request) (rbool func(req *Request, stripSensitiveHeaders bool)) {
 	// The headers to copy are from the very initial request.
 	// We use a closured callback to keep a reference to these original headers.
 	var (
@@ -820,7 +822,7 @@ func (c *Client) makeHeadersCopier(ireq *Request) func(req *Request, stripSensit
 	}
 }
 
-func defaultCheckRedirect(req *Request, via []*Request) error {
+func defaultCheckRedirect(req *Request, via []*Request) (rerr error) {
 	if len(via) >= 10 {
 		return errors.New("stopped after 10 redirects")
 	}
@@ -986,13 +988,13 @@ func (b *cancelTimerBody) Read(p []byte) (n int32, err error) {
 	return n, err
 }
 
-func (b *cancelTimerBody) Close() error {
+func (b *cancelTimerBody) Close() (rerr error) {
 	err := b.rc.Close()
 	b.stop()
 	return err
 }
 
-func shouldCopyHeaderOnRedirect(initial, dest *url.URL) bool {
+func shouldCopyHeaderOnRedirect(initial, dest *url.URL) (rok bool) {
 	// Permit sending auth/cookie headers from "foo.com"
 	// to "sub.foo.com".
 
@@ -1015,7 +1017,7 @@ func shouldCopyHeaderOnRedirect(initial, dest *url.URL) bool {
 // match) of the parent domain.
 //
 // Both domains must already be in canonical form.
-func isDomainOrSubdomain(sub, parent string) bool {
+func isDomainOrSubdomain(sub, parent string) (rok bool) {
 	if sub == parent {
 		return true
 	}
@@ -1034,7 +1036,7 @@ func isDomainOrSubdomain(sub, parent string) bool {
 	return sub[len(sub)-len(parent)-1] == '.'
 }
 
-func stripPassword(u *url.URL) string {
+func stripPassword(u *url.URL) (rs string) {
 	_, passSet := u.User.Password()
 	if passSet {
 		return bytes.Replace(u.String(), u.User.String()+"@", u.User.Username()+":***@", 1)

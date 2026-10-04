@@ -42,7 +42,7 @@ const (
 	mptcpDisabledDial
 )
 
-func (m *mptcpStatusDial) get() bool {
+func (m *mptcpStatusDial) get() (rok bool) {
 	switch *m {
 	case mptcpEnabledDial:
 		return true
@@ -72,7 +72,7 @@ const (
 	mptcpDisabledListen
 )
 
-func (m *mptcpStatusListen) get() bool {
+func (m *mptcpStatusListen) get() (rok bool) {
 	switch *m {
 	case mptcpEnabledListen:
 		return true
@@ -205,9 +205,9 @@ type Dialer struct {
 	mptcpStatus mptcpStatusDial
 }
 
-func (d *Dialer) dualStack() bool { return d.FallbackDelay >= 0 }
+func (d *Dialer) dualStack() (rok bool) { return d.FallbackDelay >= 0 }
 
-func minNonzeroTime(a, b time.Time) time.Time {
+func minNonzeroTime(a, b time.Time) (rtime time.Time) {
 	if a.IsZero() {
 		return b
 	}
@@ -233,7 +233,7 @@ func (d *Dialer) deadline(ctx context.Context, now time.Time) (earliest time.Tim
 	return minNonzeroTime(earliest, d.Deadline)
 }
 
-func (d *Dialer) resolver() *Resolver {
+func (d *Dialer) resolver() (rresolver *Resolver) {
 	if d.Resolver != nil {
 		return d.Resolver
 	}
@@ -242,7 +242,7 @@ func (d *Dialer) resolver() *Resolver {
 
 // partialDeadline returns the deadline to use for a single address,
 // when multiple addresses are pending.
-func partialDeadline(now, deadline time.Time, addrsRemaining int32) (time.Time, error) {
+func partialDeadline(now, deadline time.Time, addrsRemaining int32) (rtime time.Time, rerr error) {
 	if deadline.IsZero() {
 		return deadline, nil
 	}
@@ -264,7 +264,7 @@ func partialDeadline(now, deadline time.Time, addrsRemaining int32) (time.Time, 
 	return now.Add(timeout1), nil
 }
 
-func (d *Dialer) fallbackDelay() time.Duration {
+func (d *Dialer) fallbackDelay() (rduration time.Duration) {
 	if d.FallbackDelay > 0 {
 		return d.FallbackDelay
 	} else {
@@ -307,7 +307,7 @@ func parseNetwork(ctx context.Context, network string, needsProto bool) (afnet s
 // resolveAddrList resolves addr using hint and returns a list of
 // addresses. The result contains at least one address when error is
 // nil.
-func (r *Resolver) resolveAddrList(ctx context.Context, op, network, addr string, hint Addr) (addrList, error) {
+func (r *Resolver) resolveAddrList(ctx context.Context, op, network, addr string, hint Addr) (raddrList addrList, rerr error) {
 	afnet, _, err3 := parseNetwork(ctx, network, true)
 	if err3 != nil {
 		return nil, err3
@@ -383,7 +383,7 @@ func (r *Resolver) resolveAddrList(ctx context.Context, op, network, addr string
 //
 // This method doesn't check if MPTCP is supported by the operating
 // system or not.
-func (d *Dialer) MultipathTCP() bool {
+func (d *Dialer) MultipathTCP() (rok bool) {
 	return d.mptcpStatus.get()
 }
 
@@ -445,7 +445,7 @@ func (d *Dialer) SetMultipathTCP(use bool) {
 // assumed.
 //
 // For Unix networks, the address must be a file system path.
-func Dial(network, address string) (Conn, error) {
+func Dial(network, address string) (rconn Conn, rerr error) {
 	var d Dialer
 	return d.Dial(network, address)
 }
@@ -460,7 +460,7 @@ func Dial(network, address string) (Conn, error) {
 //
 // See func Dial for a description of the network and address
 // parameters.
-func DialTimeout(network, address string, timeout time.Duration) (Conn, error) {
+func DialTimeout(network, address string, timeout time.Duration) (rconn Conn, rerr error) {
 	d := Dialer{Timeout: timeout}
 	return d.Dial(network, address)
 }
@@ -478,7 +478,7 @@ type sysDialer struct {
 //
 // Dial uses [context.Background] internally; to specify the context, use
 // [Dialer.DialContext].
-func (d *Dialer) Dial(network, address string) (Conn, error) {
+func (d *Dialer) Dial(network, address string) (rconn Conn, rerr error) {
 	return d.DialContext(context.Background(), network, address)
 }
 
@@ -500,7 +500,7 @@ func (d *Dialer) Dial(network, address string) (Conn, error) {
 //
 // See func [Dial] for a description of the network and address
 // parameters.
-func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn, error) {
+func (d *Dialer) DialContext(ctx context.Context, network, address string) (rconn Conn, rerr error) {
 	if ctx == nil {
 		panic("nil context")
 	}
@@ -508,17 +508,17 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn
 	if !deadline.IsZero() {
 		if d1, ok := ctx.Deadline(); !ok || deadline.Before(d1) {
 			subCtx, cancel := context.WithDeadline(ctx, deadline)
-			defer cancel()
+			defer cancel.Cancel()
 			ctx = subCtx
 		}
 	}
 	if oldCancel := d.Cancel; oldCancel != nil {
 		subCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
+		defer cancel.Cancel()
 		// Moxie: no goroutines. Check oldCancel synchronously.
 		select {
 		case <-oldCancel:
-			cancel()
+			cancel.Cancel()
 		default:
 		}
 		ctx = subCtx
@@ -549,7 +549,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn
 
 // dialParallel tries primaries first, then fallbacks.
 // Moxie: no goroutines, so sequential instead of racing.
-func (sd *sysDialer) dialParallel(ctx context.Context, primaries, fallbacks addrList) (Conn, error) {
+func (sd *sysDialer) dialParallel(ctx context.Context, primaries, fallbacks addrList) (rconn Conn, rerr error) {
 	c, err := sd.dialSerial(ctx, primaries)
 	if err == nil {
 		return c, nil
@@ -562,7 +562,7 @@ func (sd *sysDialer) dialParallel(ctx context.Context, primaries, fallbacks addr
 
 // dialSerial connects to a list of addresses in sequence, returning
 // either the first successful connection, or the first error.
-func (sd *sysDialer) dialSerial(ctx context.Context, ras addrList) (Conn, error) {
+func (sd *sysDialer) dialSerial(ctx context.Context, ras addrList) (rconn Conn, rerr error) {
 	var firstErr error // The error from the first address is most relevant.
 
 	for i, ra := range ras {
@@ -585,7 +585,7 @@ func (sd *sysDialer) dialSerial(ctx context.Context, ras addrList) (Conn, error)
 			if partialDeadline1.Before(deadline) {
 				var cancel context.CancelFunc
 				dialCtx, cancel = context.WithDeadline(ctx, partialDeadline1)
-				defer cancel()
+				defer cancel.Cancel()
 			}
 		}
 
@@ -688,7 +688,7 @@ type ListenConfig struct {
 //
 // This method doesn't check if MPTCP is supported by the operating
 // system or not.
-func (lc *ListenConfig) MultipathTCP() bool {
+func (lc *ListenConfig) MultipathTCP() (rok bool) {
 	return lc.mptcpStatus.get()
 }
 
@@ -709,7 +709,7 @@ func (lc *ListenConfig) SetMultipathTCP(use bool) {
 //
 // The ctx argument is used while resolving the address on which to listen;
 // it does not affect the returned Listener.
-func (lc *ListenConfig) Listen(ctx context.Context, network, address string) (Listener, error) {
+func (lc *ListenConfig) Listen(ctx context.Context, network, address string) (rlistener Listener, rerr error) {
 	addrs, err := DefaultResolver().resolveAddrList(ctx, "listen", network, address, nil)
 	if err != nil {
 		return nil, &OpError{Op: "listen", Net: network, Source: nil, Addr: nil, Err: err}
@@ -746,7 +746,7 @@ func (lc *ListenConfig) Listen(ctx context.Context, network, address string) (Li
 //
 // The ctx argument is used while resolving the address on which to listen;
 // it does not affect the returned PacketConn.
-func (lc *ListenConfig) ListenPacket(ctx context.Context, network, address string) (PacketConn, error) {
+func (lc *ListenConfig) ListenPacket(ctx context.Context, network, address string) (rpacketConn PacketConn, rerr error) {
 	addrs, err := DefaultResolver().resolveAddrList(ctx, "listen", network, address, nil)
 	if err != nil {
 		return nil, &OpError{Op: "listen", Net: network, Source: nil, Addr: nil, Err: err}
@@ -801,7 +801,7 @@ type sysListener struct {
 //
 // Listen uses context.Background internally; to specify the context, use
 // [ListenConfig.Listen].
-func Listen(network, address string) (Listener, error) {
+func Listen(network, address string) (rlistener Listener, rerr error) {
 	var lc ListenConfig
 	return lc.Listen(context.Background(), network, address)
 }
@@ -831,7 +831,7 @@ func Listen(network, address string) (Listener, error) {
 //
 // ListenPacket uses context.Background internally; to specify the context, use
 // [ListenConfig.ListenPacket].
-func ListenPacket(network, address string) (PacketConn, error) {
+func ListenPacket(network, address string) (rpacketConn PacketConn, rerr error) {
 	var lc ListenConfig
 	return lc.ListenPacket(context.Background(), network, address)
 }

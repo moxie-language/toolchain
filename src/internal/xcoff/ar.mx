@@ -76,7 +76,7 @@ type MemberHeader struct {
 
 // OpenArchive opens the named archive using os.Open and prepares it for use
 // as an AIX big archive.
-func OpenArchive(name []byte) (*Archive, error) {
+func OpenArchive(name []byte) (out *Archive, rerr error) {
 	f, err := os.Open(name)
 	if err != nil {
 		return nil, err
@@ -93,7 +93,7 @@ func OpenArchive(name []byte) (*Archive, error) {
 // Close closes the Archive.
 // If the Archive was created using NewArchive directly instead of OpenArchive,
 // Close has no effect.
-func (a *Archive) Close() error {
+func (a *Archive) Close() (rerr error) {
 	var err error
 	if a.closer != nil {
 		err = a.closer.Close()
@@ -103,8 +103,8 @@ func (a *Archive) Close() error {
 }
 
 // NewArchive creates a new Archive for accessing an AIX big archive in an underlying reader.
-func NewArchive(r io.ReaderAt) (*Archive, error) {
-	parseDecimalBytes := func(b []byte) (int64, error) {
+func NewArchive(r io.ReaderAt) (out *Archive, rerr error) {
+	parseDecimalBytes := func(b []byte) (num int64, perr error) {
 		return strconv.ParseInt(bytes.TrimSpace([]byte(b)), 10, 64)
 	}
 	sr := io.NewSectionReader(r, 0, 1<<63-1)
@@ -133,9 +133,9 @@ func NewArchive(r io.ReaderAt) (*Archive, error) {
 		return nil, err
 	}
 
-	off, err := parseDecimalBytes(fhdr.Flfstmoff[:])
-	if err != nil {
-		return nil, fmt.Errorf("error parsing offset of first member in archive header(%q); %v", fhdr, err)
+	off, derr := parseDecimalBytes(fhdr.Flfstmoff[:])
+	if derr != nil {
+		return nil, fmt.Errorf("error parsing offset of first member in archive header(%q); %v", fhdr, derr)
 	}
 
 	if off == 0 {
@@ -143,9 +143,9 @@ func NewArchive(r io.ReaderAt) (*Archive, error) {
 		return arch, nil
 	}
 
-	lastoff, err := parseDecimalBytes(fhdr.Fllstmoff[:])
-	if err != nil {
-		return nil, fmt.Errorf("error parsing offset of first member in archive header(%q); %v", fhdr, err)
+	lastoff, derr := parseDecimalBytes(fhdr.Fllstmoff[:])
+	if derr != nil {
+		return nil, fmt.Errorf("error parsing offset of first member in archive header(%q); %v", fhdr, derr)
 	}
 
 	// Read members
@@ -167,19 +167,19 @@ func NewArchive(r io.ReaderAt) (*Archive, error) {
 		arch.Members = mxutil.Ensure(arch.Members, 1)
 		arch.Members = push(arch.Members, member)
 
-		size, err := parseDecimalBytes(mhdr.Arsize[:])
-		if err != nil {
-			return nil, fmt.Errorf("error parsing size in member header(%q); %v", mhdr, err)
+		size, merr := parseDecimalBytes(mhdr.Arsize[:])
+		if merr != nil {
+			return nil, fmt.Errorf("error parsing size in member header(%q); %v", mhdr, merr)
 		}
 		member.Size = uint64(size)
 
 		// Read name
-		namlen, err := parseDecimalBytes(mhdr.Arnamlen[:])
-		if err != nil {
-			return nil, fmt.Errorf("error parsing name length in member header(%q); %v", mhdr, err)
+		namlen, merr := parseDecimalBytes(mhdr.Arnamlen[:])
+		if merr != nil {
+			return nil, fmt.Errorf("error parsing name length in member header(%q); %v", mhdr, merr)
 		}
 		name := []byte{:namlen}
-		if err := binary.Read(sr, binary.BigEndian(), unsafe.TypeOf(*name), unsafe.Pointer(name)); err != nil {
+		if _, err := io.ReadFull(sr, name); err != nil {
 			return nil, err
 		}
 		member.Name = []byte(name)
@@ -207,9 +207,9 @@ func NewArchive(r io.ReaderAt) (*Archive, error) {
 		if off == lastoff {
 			break
 		}
-		off, err = parseDecimalBytes(mhdr.Arnxtmem[:])
-		if err != nil {
-			return nil, fmt.Errorf("error parsing offset of first member in archive header(%q); %v", fhdr, err)
+		off, merr = parseDecimalBytes(mhdr.Arnxtmem[:])
+		if merr != nil {
+			return nil, fmt.Errorf("error parsing offset of first member in archive header(%q); %v", fhdr, merr)
 		}
 
 	}
@@ -220,7 +220,7 @@ func NewArchive(r io.ReaderAt) (*Archive, error) {
 // GetFile returns the XCOFF file defined by member name.
 // FIXME: This doesn't work if an archive has two members with the same
 // name which can occur if an archive has both 32-bits and 64-bits files.
-func (arch *Archive) GetFile(name []byte) (*File, error) {
+func (arch *Archive) GetFile(name []byte) (out *File, rerr error) {
 	for _, mem := range arch.Members {
 		if mem.Name == name {
 			return NewFile(mem.sr)

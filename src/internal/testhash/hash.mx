@@ -21,172 +21,184 @@ func TestHash(t *testing.T, mh MakeHash) {
 	TestHashWithoutClone(t, mh)
 
 	// Test whether the results after cloning are consistent.
-	t.Run("Clone", func(t *testing.T) {
-		h, ok := mh().(hash.Cloner)
-		if !ok {
-			t.Fatalf("%T does not implement hash.Cloner", mh)
-		}
-		h3, err := h.Clone()
-		if err != nil {
-			t.Fatalf("Clone failed: %v", err)
-		}
-		prefix := []byte("tmp")
-		writeToHash(t, h, prefix)
-		h2, err := h.Clone()
-		if err != nil {
-			t.Fatalf("Clone failed: %v", err)
-		}
-		prefixSum := h.Sum(nil)
-		if !bytes.Equal(prefixSum, h2.Sum(nil)) {
-			t.Fatalf("%T Clone results are inconsistent", h)
-		}
-		suffix := []byte("tmp2")
-		writeToHash(t, h, suffix)
-		writeToHash(t, h3, push(prefix, suffix...))
-		compositeSum := h3.Sum(nil)
-		if !bytes.Equal(h.Sum(nil), compositeSum) {
-			t.Fatalf("%T Clone results are inconsistent", h)
-		}
-		if !bytes.Equal(h2.Sum(nil), prefixSum) {
-			t.Fatalf("%T Clone results are inconsistent", h)
-		}
-		writeToHash(t, h2, suffix)
-		if !bytes.Equal(h.Sum(nil), compositeSum) {
-			t.Fatalf("%T Clone results are inconsistent", h)
-		}
-		if !bytes.Equal(h2.Sum(nil), compositeSum) {
-			t.Fatalf("%T Clone results are inconsistent", h)
-		}
-	})
+	testClone(t, mh)
+}
+
+func testClone(t *testing.T, mh MakeHash) {
+	h, ok := mh().(hash.Cloner)
+	if !ok {
+		t.Fatalf("%T does not implement hash.Cloner", mh)
+	}
+	h3, cerr := h.Clone()
+	if cerr != nil {
+		t.Fatalf("Clone failed: %v", cerr)
+	}
+	prefix := []byte("tmp")
+	writeToHash(t, h, prefix)
+	h2, rerr := h.Clone()
+	if rerr != nil {
+		t.Fatalf("Clone failed: %v", rerr)
+	}
+	prefixSum := h.Sum(nil)
+	if !bytes.Equal(prefixSum, h2.Sum(nil)) {
+		t.Fatalf("%T Clone results are inconsistent", h)
+	}
+	suffix := []byte("tmp2")
+	writeToHash(t, h, suffix)
+	writeToHash(t, h3, push(prefix, suffix...))
+	compositeSum := h3.Sum(nil)
+	if !bytes.Equal(h.Sum(nil), compositeSum) {
+		t.Fatalf("%T Clone results are inconsistent", h)
+	}
+	if !bytes.Equal(h2.Sum(nil), prefixSum) {
+		t.Fatalf("%T Clone results are inconsistent", h)
+	}
+	writeToHash(t, h2, suffix)
+	if !bytes.Equal(h.Sum(nil), compositeSum) {
+		t.Fatalf("%T Clone results are inconsistent", h)
+	}
+	if !bytes.Equal(h2.Sum(nil), compositeSum) {
+		t.Fatalf("%T Clone results are inconsistent", h)
+	}
 }
 
 func TestHashWithoutClone(t *testing.T, mh MakeHash) {
 	// Test that Sum returns an appended digest matching output of Size
-	t.Run("SumAppend", func(t *testing.T) {
-		h := mh()
-		rng := newRandReader(t)
-
-		emptyBuff := []byte("")
-		shortBuff := []byte("a")
-		longBuff := []byte{:h.BlockSize()+1}
-		rng.Read(longBuff)
-
-		// Set of example strings to append digest to
-		prefixes := [][]byte{nil, emptyBuff, shortBuff, longBuff}
-
-		// Go to each string and check digest gets appended to and is correct size.
-		for _, prefix := range prefixes {
-			h.Reset()
-
-			sum := getSum(t, h, prefix) // Append new digest to prefix
-
-			// Check that Sum didn't alter the prefix
-			if !bytes.Equal(sum[:len(prefix)], prefix) {
-				t.Errorf("Sum alters passed buffer instead of appending; got %x, want %x", sum[:len(prefix)], prefix)
-			}
-
-			// Check that the appended sum wasn't affected by the prefix
-			if expectedSum := getSum(t, h, nil); !bytes.Equal(sum[len(prefix):], expectedSum) {
-				t.Errorf("Sum behavior affected by data in the input buffer; got %x, want %x", sum[len(prefix):], expectedSum)
-			}
-
-			// Check size of append
-			if got, want := len(sum)-len(prefix), h.Size(); got != want {
-				t.Errorf("Sum appends number of bytes != Size; got %v , want %v", got, want)
-			}
-		}
-	})
+	testSumAppend(t, mh)
 
 	// Test that Hash.Write never returns error.
-	t.Run("WriteWithoutError", func(t *testing.T) {
-		h := mh()
-		rng := newRandReader(t)
+	testWriteWithoutError(t, mh)
 
-		emptySlice := []byte("")
-		shortSlice := []byte("a")
-		longSlice := []byte{:h.BlockSize()+1}
-		rng.Read(longSlice)
-
-		// Set of example strings to append digest to
-		slices := [][]byte{emptySlice, shortSlice, longSlice}
-
-		for _, slice := range slices {
-			writeToHash(t, h, slice) // Writes and checks Write doesn't error
-		}
-	})
-
-	t.Run("ResetState", func(t *testing.T) {
-		h := mh()
-		rng := newRandReader(t)
-
-		emptySum := getSum(t, h, nil)
-
-		// Write to hash and then Reset it and see if Sum is same as emptySum
-		writeEx := []byte{:h.BlockSize()}
-		rng.Read(writeEx)
-		writeToHash(t, h, writeEx)
-		h.Reset()
-		resetSum := getSum(t, h, nil)
-
-		if !bytes.Equal(emptySum, resetSum) {
-			t.Errorf("Reset hash yields different Sum than new hash; got %x, want %x", emptySum, resetSum)
-		}
-	})
+	testResetState(t, mh)
 
 	// Check that Write isn't reading from beyond input slice's bounds
-	t.Run("OutOfBoundsRead", func(t *testing.T) {
-		h := mh()
-		blockSize := h.BlockSize()
-		rng := newRandReader(t)
-
-		msg := []byte{:blockSize}
-		rng.Read(msg)
-		writeToHash(t, h, msg)
-		expectedDigest := getSum(t, h, nil) // Record control digest
-
-		h.Reset()
-
-		// Make a buffer with msg in the middle and data on either end
-		buff := []byte{:blockSize*3}
-		endOfPrefix, startOfSuffix := blockSize, blockSize*2
-
-		copy(buff[endOfPrefix:startOfSuffix], msg)
-		rng.Read(buff[:endOfPrefix])
-		rng.Read(buff[startOfSuffix:])
-
-		writeToHash(t, h, buff[endOfPrefix:startOfSuffix])
-		testDigest := getSum(t, h, nil)
-
-		if !bytes.Equal(testDigest, expectedDigest) {
-			t.Errorf("Write affected by data outside of input slice bounds; got %x, want %x", testDigest, expectedDigest)
-		}
-	})
+	testOutOfBoundsRead(t, mh)
 
 	// Test that multiple calls to Write is stateful
-	t.Run("StatefulWrite", func(t *testing.T) {
-		h := mh()
-		rng := newRandReader(t)
+	testStatefulWrite(t, mh)
+}
 
-		prefix, suffix := []byte{:h.BlockSize()}, []byte{:h.BlockSize()}
-		rng.Read(prefix)
-		rng.Read(suffix)
+func testSumAppend(t *testing.T, mh MakeHash) {
+	h := mh()
+	rng := newRandReader(t)
 
-		// Write prefix then suffix sequentially and record resulting hash
-		writeToHash(t, h, prefix)
-		writeToHash(t, h, suffix)
-		serialSum := getSum(t, h, nil)
+	emptyBuff := []byte("")
+	shortBuff := []byte("a")
+	longBuff := []byte{:h.BlockSize()+1}
+	rng.Read(longBuff)
 
+	// Set of example strings to append digest to
+	prefixes := [][]byte{nil, emptyBuff, shortBuff, longBuff}
+
+	// Go to each string and check digest gets appended to and is correct size.
+	for _, prefix := range prefixes {
 		h.Reset()
 
-		// Write prefix and suffix at the same time and record resulting hash
-		writeToHash(t, h, push(prefix, suffix...))
-		compositeSum := getSum(t, h, nil)
+		sum := getSum(t, h, prefix) // Append new digest to prefix
 
-		// Check that sequential writing results in the same as writing all at once
-		if !bytes.Equal(compositeSum, serialSum) {
-			t.Errorf("two successive Write calls resulted in a different Sum than a single one; got %x, want %x", compositeSum, serialSum)
+		// Check that Sum didn't alter the prefix
+		if !bytes.Equal(sum[:len(prefix)], prefix) {
+			t.Errorf("Sum alters passed buffer instead of appending; got %x, want %x", sum[:len(prefix)], prefix)
 		}
-	})
+
+		// Check that the appended sum wasn't affected by the prefix
+		if expectedSum := getSum(t, h, nil); !bytes.Equal(sum[len(prefix):], expectedSum) {
+			t.Errorf("Sum behavior affected by data in the input buffer; got %x, want %x", sum[len(prefix):], expectedSum)
+		}
+
+		// Check size of append
+		if got, want := len(sum)-len(prefix), h.Size(); got != want {
+			t.Errorf("Sum appends number of bytes != Size; got %v , want %v", got, want)
+		}
+	}
+}
+
+func testWriteWithoutError(t *testing.T, mh MakeHash) {
+	h := mh()
+	rng := newRandReader(t)
+
+	emptySlice := []byte("")
+	shortSlice := []byte("a")
+	longSlice := []byte{:h.BlockSize()+1}
+	rng.Read(longSlice)
+
+	// Set of example strings to append digest to
+	slices := [][]byte{emptySlice, shortSlice, longSlice}
+
+	for _, slice := range slices {
+		writeToHash(t, h, slice) // Writes and checks Write doesn't error
+	}
+}
+
+func testResetState(t *testing.T, mh MakeHash) {
+	h := mh()
+	rng := newRandReader(t)
+
+	emptySum := getSum(t, h, nil)
+
+	// Write to hash and then Reset it and see if Sum is same as emptySum
+	writeEx := []byte{:h.BlockSize()}
+	rng.Read(writeEx)
+	writeToHash(t, h, writeEx)
+	h.Reset()
+	resetSum := getSum(t, h, nil)
+
+	if !bytes.Equal(emptySum, resetSum) {
+		t.Errorf("Reset hash yields different Sum than new hash; got %x, want %x", emptySum, resetSum)
+	}
+}
+
+func testOutOfBoundsRead(t *testing.T, mh MakeHash) {
+	h := mh()
+	blockSize := h.BlockSize()
+	rng := newRandReader(t)
+
+	msg := []byte{:blockSize}
+	rng.Read(msg)
+	writeToHash(t, h, msg)
+	expectedDigest := getSum(t, h, nil) // Record control digest
+
+	h.Reset()
+
+	// Make a buffer with msg in the middle and data on either end
+	buff := []byte{:blockSize*3}
+	endOfPrefix, startOfSuffix := blockSize, blockSize*2
+
+	copy(buff[endOfPrefix:startOfSuffix], msg)
+	rng.Read(buff[:endOfPrefix])
+	rng.Read(buff[startOfSuffix:])
+
+	writeToHash(t, h, buff[endOfPrefix:startOfSuffix])
+	testDigest := getSum(t, h, nil)
+
+	if !bytes.Equal(testDigest, expectedDigest) {
+		t.Errorf("Write affected by data outside of input slice bounds; got %x, want %x", testDigest, expectedDigest)
+	}
+}
+
+func testStatefulWrite(t *testing.T, mh MakeHash) {
+	h := mh()
+	rng := newRandReader(t)
+
+	prefix, suffix := []byte{:h.BlockSize()}, []byte{:h.BlockSize()}
+	rng.Read(prefix)
+	rng.Read(suffix)
+
+	// Write prefix then suffix sequentially and record resulting hash
+	writeToHash(t, h, prefix)
+	writeToHash(t, h, suffix)
+	serialSum := getSum(t, h, nil)
+
+	h.Reset()
+
+	// Write prefix and suffix at the same time and record resulting hash
+	writeToHash(t, h, push(prefix, suffix...))
+	compositeSum := getSum(t, h, nil)
+
+	// Check that sequential writing results in the same as writing all at once
+	if !bytes.Equal(compositeSum, serialSum) {
+		t.Errorf("two successive Write calls resulted in a different Sum than a single one; got %x, want %x", compositeSum, serialSum)
+	}
 }
 
 // Helper function for writing. Verifies that Write does not error.
@@ -207,7 +219,7 @@ func writeToHash(t *testing.T, h hash.Hash, p []byte) {
 }
 
 // Helper function for getting Sum. Checks that Sum doesn't change hash state.
-func getSum(t *testing.T, h hash.Hash, buff []byte) []byte {
+func getSum(t *testing.T, h hash.Hash, buff []byte) (out []byte) {
 	t.Helper()
 
 	testBuff := []byte{:len(buff)}
@@ -224,7 +236,7 @@ func getSum(t *testing.T, h hash.Hash, buff []byte) []byte {
 	return sum
 }
 
-func newRandReader(t *testing.T) io.Reader {
+func newRandReader(t *testing.T) (r io.Reader) {
 	seed := time.Now().UnixNano()
 	t.Logf("Deterministic RNG seed: 0x%x", seed)
 	return rand.New(rand.NewSource(seed))

@@ -18,7 +18,24 @@ type implementation struct {
 	Toggle    *bool
 }
 
-var allImplementations []implementation
+// registry owns the list of registered implementations. Registration writes
+// through its method so the package-level state is only ever mutated inside a
+// self-mutating type.
+type registry struct {
+	all []implementation
+}
+
+var registered registry
+
+func (r *registry) add(pkg, name []byte, avail *bool) {
+	r.all = mxutil.Ensure(r.all, 1)
+	r.all = push(r.all, implementation{
+		Package:   pkg,
+		Name:      name,
+		Available: *avail,
+		Toggle:    avail,
+	})
+}
 
 // Register records an alternative implementation of a cryptographic primitive.
 // The implementation might be available or not based on CPU support. If
@@ -33,21 +50,14 @@ func Register(pkg, name []byte, avail *bool) {
 	if bytes.Contains(pkg, []byte("/")) {
 		panic("impl: package name must not contain slashes")
 	}
-	allImplementations = mxutil.Ensure(allImplementations, 1)
-	allImplementations = push(allImplementations, implementation{
-		Package:   pkg,
-		Name:      name,
-		Available: *avail,
-		Toggle:    avail,
-	})
+	registered.add(pkg, name, avail)
 }
 
 // Packages returns the list of all packages for which alternative
 // implementations are registered.
-func Packages() [][]byte {
-	var pkgs [][]byte
+func Packages() (pkgs [][]byte) {
 	seen := map[string]bool{}
-	for _, i := range allImplementations {
+	for _, i := range registered.all {
 		if !seen[[]byte(i.Package)] {
 			pkgs = mxutil.Ensure(pkgs, 1)
 			pkgs = push(pkgs, i.Package)
@@ -60,9 +70,8 @@ func Packages() [][]byte {
 // List returns the names of all alternative implementations registered for the
 // given package, whether available or not. The implicit base implementation is
 // not included.
-func List(pkg []byte) [][]byte {
-	var names [][]byte
-	for _, i := range allImplementations {
+func List(pkg []byte) (names [][]byte) {
+	for _, i := range registered.all {
 		if i.Package == pkg {
 			names = mxutil.Ensure(names, 1)
 			names = push(names, i.Name)
@@ -71,8 +80,8 @@ func List(pkg []byte) [][]byte {
 	return names
 }
 
-func available(pkg, name []byte) bool {
-	for _, i := range allImplementations {
+func available(pkg, name []byte) (ok bool) {
+	for _, i := range registered.all {
 		if i.Package == pkg && i.Name == name {
 			return i.Available
 		}
@@ -83,9 +92,9 @@ func available(pkg, name []byte) bool {
 // Select disables all implementations for the given package except the one
 // with the given name. If name is empty, the base implementation is selected.
 // It returns whether the selected implementation is available.
-func Select(pkg, name []byte) bool {
+func Select(pkg, name []byte) (ok bool) {
 	if name == "" {
-		for _, i := range allImplementations {
+		for _, i := range registered.all {
 			if i.Package == pkg {
 				*i.Toggle = false
 			}
@@ -95,7 +104,7 @@ func Select(pkg, name []byte) bool {
 	if !available(pkg, name) {
 		return false
 	}
-	for _, i := range allImplementations {
+	for _, i := range registered.all {
 		if i.Package == pkg {
 			*i.Toggle = i.Name == name
 		}
@@ -104,7 +113,7 @@ func Select(pkg, name []byte) bool {
 }
 
 func Reset(pkg []byte) {
-	for _, i := range allImplementations {
+	for _, i := range registered.all {
 		if i.Package == pkg {
 			*i.Toggle = i.Available
 			return

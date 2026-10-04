@@ -108,18 +108,18 @@ const (
 	formatMax
 )
 
-func (f Format) has(f2 Format) bool   { return f&f2 != 0 }
-func (f *Format) mayBe(f2 Format)     { *f |= f2 }
-func (f *Format) mayOnlyBe(f2 Format) { *f &= f2 }
-func (f *Format) mustNotBe(f2 Format) { *f &^= f2 }
+func (f *Format) has(f2 Format) (ok bool)   { return *f&f2 != 0 }
+func (f *Format) mayBe(f2 Format)           { *f |= f2 }
+func (f *Format) mayOnlyBe(f2 Format)       { *f &= f2 }
+func (f *Format) mustNotBe(f2 Format)       { *f &^= f2 }
 
-func _formatNames() map[Format][]byte {
+func _formatNames() (names map[Format][]byte) {
 	return map[Format][]byte{
 		formatV7: "V7", FormatUSTAR: "USTAR", FormatPAX: "PAX", FormatGNU: "GNU", formatSTAR: "STAR",
 	}
 }
 
-func (f Format) String() string {
+func (f *Format) String() (s string) {
 	fnames := _formatNames()
 	var ss [][]byte
 	for f2 := Format(1); f2 < formatMax; f2 <<= 1 {
@@ -140,9 +140,13 @@ func (f Format) String() string {
 
 // Magics used to identify various formats.
 const (
-	magicGNU, versionGNU     = "ustar ", " \x00"
-	magicUSTAR, versionUSTAR = "ustar\x00", "00"
-	trailerSTAR              = "tar\x00"
+	// Declared one name per spec: a multi-name string const spec was lowered
+	// as a zero value, so the values never reached the copy calls below.
+	magicGNU     = "ustar "
+	versionGNU   = " \x00"
+	magicUSTAR   = "ustar\x00"
+	versionUSTAR = "00"
+	trailerSTAR  = "tar\x00"
 )
 
 // Size constants from various tar specifications.
@@ -162,7 +166,7 @@ func blockPadding(offset int64) (n int64) {
 	return -offset & (blockSize - 1)
 }
 
-func _zeroBlock() []byte {
+func _zeroBlock() (out []byte) {
 	var b block
 	return b[:]
 }
@@ -170,16 +174,16 @@ func _zeroBlock() []byte {
 type block [blockSize]byte
 
 // Convert block to any number of formats.
-func (b *block) toV7() *headerV7       { return (*headerV7)(b) }
-func (b *block) toGNU() *headerGNU     { return (*headerGNU)(b) }
-func (b *block) toSTAR() *headerSTAR   { return (*headerSTAR)(b) }
-func (b *block) toUSTAR() *headerUSTAR { return (*headerUSTAR)(b) }
-func (b *block) toSparse() sparseArray { return sparseArray(b[:]) }
+func (b *block) toV7() (v7 *headerV7)          { return (*headerV7)(b) }
+func (b *block) toGNU() (gnu *headerGNU)       { return (*headerGNU)(b) }
+func (b *block) toSTAR() (star *headerSTAR)    { return (*headerSTAR)(b) }
+func (b *block) toUSTAR() (ustar *headerUSTAR) { return (*headerUSTAR)(b) }
+func (b *block) toSparse() (s []byte)          { return b[:] }
 
 // getFormat checks that the block is a valid tar header based on the checksum.
 // It then attempts to guess the specific format based on magic values.
 // If the checksum fails, then FormatUnknown is returned.
-func (b *block) getFormat() Format {
+func (b *block) getFormat() (format Format) {
 	// Verify checksum.
 	var p parser
 	value := p.parseOctal(b.toV7().chksum())
@@ -256,62 +260,61 @@ func (b *block) reset() {
 
 type headerV7 [blockSize]byte
 
-func (h *headerV7) name() []byte     { return h[000:][:100] }
-func (h *headerV7) mode() []byte     { return h[100:][:8] }
-func (h *headerV7) uid() []byte      { return h[108:][:8] }
-func (h *headerV7) gid() []byte      { return h[116:][:8] }
-func (h *headerV7) size() []byte     { return h[124:][:12] }
-func (h *headerV7) modTime() []byte  { return h[136:][:12] }
-func (h *headerV7) chksum() []byte   { return h[148:][:8] }
-func (h *headerV7) typeFlag() []byte { return h[156:][:1] }
-func (h *headerV7) linkName() []byte { return h[157:][:100] }
+func (h *headerV7) name() (b []byte)     { return h[000:][:100] }
+func (h *headerV7) mode() (b []byte)     { return h[100:][:8] }
+func (h *headerV7) uid() (b []byte)      { return h[108:][:8] }
+func (h *headerV7) gid() (b []byte)      { return h[116:][:8] }
+func (h *headerV7) size() (b []byte)     { return h[124:][:12] }
+func (h *headerV7) modTime() (b []byte)  { return h[136:][:12] }
+func (h *headerV7) chksum() (b []byte)   { return h[148:][:8] }
+func (h *headerV7) typeFlag() (b []byte) { return h[156:][:1] }
+func (h *headerV7) linkName() (b []byte) { return h[157:][:100] }
 
 type headerGNU [blockSize]byte
 
-func (h *headerGNU) v7() *headerV7       { return (*headerV7)(h) }
-func (h *headerGNU) magic() []byte       { return h[257:][:6] }
-func (h *headerGNU) version() []byte     { return h[263:][:2] }
-func (h *headerGNU) userName() []byte    { return h[265:][:32] }
-func (h *headerGNU) groupName() []byte   { return h[297:][:32] }
-func (h *headerGNU) devMajor() []byte    { return h[329:][:8] }
-func (h *headerGNU) devMinor() []byte    { return h[337:][:8] }
-func (h *headerGNU) accessTime() []byte  { return h[345:][:12] }
-func (h *headerGNU) changeTime() []byte  { return h[357:][:12] }
-func (h *headerGNU) sparse() sparseArray { return sparseArray(h[386:][:24*4+1]) }
-func (h *headerGNU) realSize() []byte    { return h[483:][:12] }
+func (h *headerGNU) v7() (v7 *headerV7)          { return (*headerV7)(h) }
+func (h *headerGNU) magic() (b []byte)           { return h[257:][:6] }
+func (h *headerGNU) version() (b []byte)         { return h[263:][:2] }
+func (h *headerGNU) userName() (b []byte)        { return h[265:][:32] }
+func (h *headerGNU) groupName() (b []byte)       { return h[297:][:32] }
+func (h *headerGNU) devMajor() (b []byte)        { return h[329:][:8] }
+func (h *headerGNU) devMinor() (b []byte)        { return h[337:][:8] }
+func (h *headerGNU) accessTime() (b []byte)      { return h[345:][:12] }
+func (h *headerGNU) changeTime() (b []byte)      { return h[357:][:12] }
+func (h *headerGNU) sparse() (s []byte)          { return h[386:][:24*4+1] }
+func (h *headerGNU) realSize() (b []byte)        { return h[483:][:12] }
 
 type headerSTAR [blockSize]byte
 
-func (h *headerSTAR) v7() *headerV7      { return (*headerV7)(h) }
-func (h *headerSTAR) magic() []byte      { return h[257:][:6] }
-func (h *headerSTAR) version() []byte    { return h[263:][:2] }
-func (h *headerSTAR) userName() []byte   { return h[265:][:32] }
-func (h *headerSTAR) groupName() []byte  { return h[297:][:32] }
-func (h *headerSTAR) devMajor() []byte   { return h[329:][:8] }
-func (h *headerSTAR) devMinor() []byte   { return h[337:][:8] }
-func (h *headerSTAR) prefix() []byte     { return h[345:][:131] }
-func (h *headerSTAR) accessTime() []byte { return h[476:][:12] }
-func (h *headerSTAR) changeTime() []byte { return h[488:][:12] }
-func (h *headerSTAR) trailer() []byte    { return h[508:][:4] }
+func (h *headerSTAR) v7() (v7 *headerV7)         { return (*headerV7)(h) }
+func (h *headerSTAR) magic() (b []byte)          { return h[257:][:6] }
+func (h *headerSTAR) version() (b []byte)        { return h[263:][:2] }
+func (h *headerSTAR) userName() (b []byte)       { return h[265:][:32] }
+func (h *headerSTAR) groupName() (b []byte)      { return h[297:][:32] }
+func (h *headerSTAR) devMajor() (b []byte)       { return h[329:][:8] }
+func (h *headerSTAR) devMinor() (b []byte)       { return h[337:][:8] }
+func (h *headerSTAR) prefix() (b []byte)         { return h[345:][:131] }
+func (h *headerSTAR) accessTime() (b []byte)     { return h[476:][:12] }
+func (h *headerSTAR) changeTime() (b []byte)     { return h[488:][:12] }
+func (h *headerSTAR) trailer() (b []byte)        { return h[508:][:4] }
 
 type headerUSTAR [blockSize]byte
 
-func (h *headerUSTAR) v7() *headerV7     { return (*headerV7)(h) }
-func (h *headerUSTAR) magic() []byte     { return h[257:][:6] }
-func (h *headerUSTAR) version() []byte   { return h[263:][:2] }
-func (h *headerUSTAR) userName() []byte  { return h[265:][:32] }
-func (h *headerUSTAR) groupName() []byte { return h[297:][:32] }
-func (h *headerUSTAR) devMajor() []byte  { return h[329:][:8] }
-func (h *headerUSTAR) devMinor() []byte  { return h[337:][:8] }
-func (h *headerUSTAR) prefix() []byte    { return h[345:][:155] }
+func (h *headerUSTAR) v7() (v7 *headerV7)        { return (*headerV7)(h) }
+func (h *headerUSTAR) magic() (b []byte)         { return h[257:][:6] }
+func (h *headerUSTAR) version() (b []byte)       { return h[263:][:2] }
+func (h *headerUSTAR) userName() (b []byte)      { return h[265:][:32] }
+func (h *headerUSTAR) groupName() (b []byte)     { return h[297:][:32] }
+func (h *headerUSTAR) devMajor() (b []byte)      { return h[329:][:8] }
+func (h *headerUSTAR) devMinor() (b []byte)      { return h[337:][:8] }
+func (h *headerUSTAR) prefix() (b []byte)        { return h[345:][:155] }
 
-type sparseArray []byte
+// The raw sparse-map region of a GNU header and its 24-byte entries are plain
+// []byte. Moxie rejects a named slice type, so the former type's methods became
+// these free functions.
+func sparseArrayEntry(s []byte, i int32) (e []byte) { return s[i*24:] }
+func sparseArrayIsExtended(s []byte) (b []byte)     { return s[24*sparseArrayMaxEntries(s):][:1] }
+func sparseArrayMaxEntries(s []byte) (n int32)      { return len(s) / 24 }
 
-func (s sparseArray) entry(i int32) sparseElem { return sparseElem(s[i*24:]) }
-func (s sparseArray) isExtended() []byte     { return s[24*s.maxEntries():][:1] }
-func (s sparseArray) maxEntries() int32        { return len(s) / 24 }
-
-type sparseElem []byte
-
-func (s sparseElem) offset() []byte { return s[00:][:12] }
-func (s sparseElem) length() []byte { return s[12:][:12] }
+func sparseElemOffset(s []byte) (b []byte) { return s[00:][:12] }
+func sparseElemLength(s []byte) (b []byte) { return s[12:][:12] }

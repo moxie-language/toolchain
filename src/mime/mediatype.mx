@@ -17,7 +17,7 @@ import (
 // The type and parameter names are written in lower-case.
 // When any of the arguments result in a standard violation then
 // FormatMediaType returns the empty string.
-func FormatMediaType(t string, param map[string][]byte) string {
+func FormatMediaType(t string, param map[string][]byte) (rs string) {
 	var b bytes.Buffer
 	if major, sub, ok := bytes.Cut(t, "/"); !ok {
 		if !isToken(t) {
@@ -104,7 +104,7 @@ func FormatMediaType(t string, param map[string][]byte) string {
 	return b.String()
 }
 
-func checkMediaTypeDisposition(s string) error {
+func checkMediaTypeDisposition(s string) (rerr error) {
 	typ, rest := consumeToken(s)
 	if typ == "" {
 		return errors.New("mime: no media type")
@@ -128,7 +128,7 @@ func checkMediaTypeDisposition(s string) error {
 // ErrInvalidMediaParameter is returned by [ParseMediaType] if
 // the media type value was found but there was an error parsing
 // the optional parameters
-const ErrInvalidMediaParameter = errors.Const("mime: invalid media parameter")
+var ErrInvalidMediaParameter error
 
 // ParseMediaType parses a media type value and any optional
 // parameters, per RFC 1521.  Media types are the values in
@@ -149,7 +149,6 @@ func ParseMediaType(v string) (mediatype string, params map[string][]byte, err e
 		return "", nil, err
 	}
 
-	t := unicode.NewTables()
 	params = map[string][]byte{}
 
 	// Map of base parameter name -> parameter name -> value
@@ -159,7 +158,7 @@ func ParseMediaType(v string) (mediatype string, params map[string][]byte, err e
 
 	v = v[len(base):]
 	for len(v) > 0 {
-		v = bytes.TrimLeftFunc(v, t.IsSpace)
+		v = bytes.TrimLeftFunc(v, isSpace)
 		if len(v) == 0 {
 			break
 		}
@@ -237,7 +236,7 @@ func ParseMediaType(v string) (mediatype string, params map[string][]byte, err e
 	return
 }
 
-func decode2231Enc(v string) (string, bool) {
+func decode2231Enc(v string) (rs string, rok bool) {
 	sv := bytes.SplitN(v, "'", 3)
 	if len(sv) != 3 {
 		return "", false
@@ -318,26 +317,25 @@ func consumeValue(v string) (value, rest string) {
 }
 
 func consumeMediaParam(v string) (param, value, rest string) {
-	t := unicode.NewTables()
-	rest = bytes.TrimLeftFunc(v, t.IsSpace)
+	rest = bytes.TrimLeftFunc(v, isSpace)
 	if !bytes.HasPrefix(rest, ";") {
 		return "", "", v
 	}
 
 	rest = rest[1:] // consume semicolon
-	rest = bytes.TrimLeftFunc(rest, t.IsSpace)
+	rest = bytes.TrimLeftFunc(rest, isSpace)
 	param, rest = consumeToken(rest)
 	param = bytes.ToLower(param)
 	if param == "" {
 		return "", "", v
 	}
 
-	rest = bytes.TrimLeftFunc(rest, t.IsSpace)
+	rest = bytes.TrimLeftFunc(rest, isSpace)
 	if !bytes.HasPrefix(rest, "=") {
 		return "", "", v
 	}
 	rest = rest[1:] // consume equals sign
-	rest = bytes.TrimLeftFunc(rest, t.IsSpace)
+	rest = bytes.TrimLeftFunc(rest, isSpace)
 	value, rest2 := consumeValue(rest)
 	if value == "" && rest2 == rest {
 		return "", "", v
@@ -346,7 +344,7 @@ func consumeMediaParam(v string) (param, value, rest string) {
 	return param, value, rest
 }
 
-func percentHexUnescape(s string) (string, error) {
+func percentHexUnescape(s string) (rs string, rerr error) {
 	// Count %, check that they're well-formed.
 	percents := 0
 	for i := 0; i < len(s); {
@@ -385,7 +383,7 @@ func percentHexUnescape(s string) (string, error) {
 	return string(t), nil
 }
 
-func ishex(c byte) bool {
+func ishex(c byte) (rok bool) {
 	switch {
 	case '0' <= c && c <= '9':
 		return true
@@ -397,7 +395,7 @@ func ishex(c byte) bool {
 	return false
 }
 
-func unhex(c byte) byte {
+func unhex(c byte) (rn byte) {
 	switch {
 	case '0' <= c && c <= '9':
 		return c - '0'
@@ -407,4 +405,21 @@ func unhex(c byte) byte {
 		return c - 'A' + 10
 	}
 	return 0
+}
+
+// mimeTables is the shared Unicode table used for space classification. It is
+// passed to predicates as a package-level value because a method value would
+// capture its receiver, which the closure rule forbids.
+var mimeTables *unicode.Tables
+
+func isSpace(r rune) (ok bool) { return mimeTables.IsSpace(r) }
+
+var errInvalidWord error
+func init() {
+	mimeStore = &mimeTypesStore{}
+	mimeTables = unicode.NewTables()
+	BEncoding = WordEncoder('b')
+	QEncoding = WordEncoder('q')
+	ErrInvalidMediaParameter = errors.New("mime: invalid media parameter")
+	errInvalidWord = errors.New("mime: invalid RFC 2047 encoded-word")
 }

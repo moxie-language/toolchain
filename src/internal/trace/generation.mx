@@ -47,7 +47,7 @@ type spilledBatch struct {
 //
 // If gen is non-nil, it is valid and must be processed before handling the returned
 // error.
-func readGeneration(r *bufio.Reader, spill *spilledBatch, ver version.Version) (*generation, *spilledBatch, error) {
+func readGeneration(r *bufio.Reader, spill *spilledBatch, ver version.Version) (out *generation, next *spilledBatch, rerr error) {
 	g := &generation{
 		evTable: &evTable{
 			pcs: map[uint64]frame{},
@@ -106,8 +106,8 @@ func readGeneration(r *bufio.Reader, spill *spilledBatch, ver version.Version) (
 		if g.minTs == 0 || b.time < g.minTs {
 			g.minTs = b.time
 		}
-		if err := processBatch(g, b, ver); err != nil {
-			return nil, nil, err
+		if perr := processBatch(g, b, ver); perr != nil {
+			return nil, nil, perr
 		}
 	}
 
@@ -127,7 +127,7 @@ func readGeneration(r *bufio.Reader, spill *spilledBatch, ver version.Version) (
 
 	// Compactify stacks and strings for better lookup performance later.
 	g.stacks.compactify()
-	g.bytes.compactify()
+	g.strings.compactify()
 
 	// Validate stacks.
 	if err := validateStackStrings(&g.stacks, &g.strings, g.pcs); err != nil {
@@ -147,7 +147,7 @@ func readGeneration(r *bufio.Reader, spill *spilledBatch, ver version.Version) (
 }
 
 // processBatch adds the batch to the generation.
-func processBatch(g *generation, b batch, ver version.Version) error {
+func processBatch(g *generation, b batch, ver version.Version) (rerr error) {
 	switch {
 	case b.isStringsBatch():
 		if err := addStrings(&g.strings, b); err != nil {
@@ -190,41 +190,53 @@ func validateStackStrings(
 	stacks *dataTable[stackID, stack],
 	strings *dataTable[stringID, string],
 	frames map[uint64]frame,
-) error {
-	var err error
-	stacks.forEach(func(id stackID, stk stack) bool {
-		for _, pc := range stk.pcs {
-			frame, ok := frames[pc]
-			if !ok {
-				err = fmt.Errorf("found unknown pc %x for stack %d", pc, id)
-				return false
-			}
-			_, ok = bytes.get(frame.funcID)
-			if !ok {
-				err = fmt.Errorf("found invalid func string ID %d for stack %d", frame.funcID, id)
-				return false
-			}
-			_, ok = bytes.get(frame.fileID)
-			if !ok {
-				err = fmt.Errorf("found invalid file string ID %d for stack %d", frame.fileID, id)
-				return false
+) (rerr error) {
+	for id, stk := range stacks.dense {
+		if stacks.present[id/8]&(uint8(1)<<(id%8)) == 0 {
+			continue
+		}
+		if err := validateStack(stk, stackID(id), strings, frames); err != nil {
+			return err
+		}
+	}
+	if stacks.sparse != nil {
+		for id, stk := range stacks.sparse {
+			if err := validateStack(stk, id, strings, frames); err != nil {
+				return err
 			}
 		}
-		return true
-	})
-	return err
+	}
+	return nil
+}
+
+func validateStack(stk stack, id stackID, strings *dataTable[stringID, string], frames map[uint64]frame) (rerr error) {
+	for _, pc := range stk.pcs {
+		fr, ok := frames[pc]
+		if !ok {
+			return fmt.Errorf("found unknown pc %x for stack %d", pc, id)
+		}
+		_, ok = strings.get(fr.funcID)
+		if !ok {
+			return fmt.Errorf("found invalid func string ID %d for stack %d", fr.funcID, id)
+		}
+		_, ok = strings.get(fr.fileID)
+		if !ok {
+			return fmt.Errorf("found invalid file string ID %d for stack %d", fr.fileID, id)
+		}
+	}
+	return nil
 }
 
 // addStrings takes a batch whose first byte is an EvStrings event
 // (indicating that the batch contains only strings) and adds each
 // string contained therein to the provided strings map.
-func addStrings(stringTable *dataTable[stringID, string], b batch) error {
+func addStrings(stringTable *dataTable[stringID, string], b batch) (rerr error) {
 	if !b.isStringsBatch() {
 		return fmt.Errorf("internal error: addStrings called on non-string batch")
 	}
 	r := bytes.NewReader(b.data)
-	hdr, err := r.ReadByte() // Consume the EvStrings byte.
-	if err != nil || tracev2.EventType(hdr) != tracev2.EvStrings {
+	hdr, herr := r.ReadByte() // Consume the EvStrings byte.
+	if herr != nil || tracev2.EventType(hdr) != tracev2.EvStrings {
 		return fmt.Errorf("missing strings batch header")
 	}
 
@@ -246,18 +258,18 @@ func addStrings(stringTable *dataTable[stringID, string], b batch) error {
 		}
 
 		// Read the string's length.
-		len, err := binary.ReadUvarint(r)
+		strLen, err := binary.ReadUvarint(r)
 		if err != nil {
 			return err
 		}
-		if len > tracev2.MaxEventTrailerDataSize {
-			return fmt.Errorf("invalid string size %d, maximum is %d", len, tracev2.MaxEventTrailerDataSize)
+		if strLen > tracev2.MaxEventTrailerDataSize {
+			return fmt.Errorf("invalid string size %d, maximum is %d", strLen, tracev2.MaxEventTrailerDataSize)
 		}
 
 		// Copy out the string.
-		n, err := io.CopyN(&sb, r, int64(len))
-		if n != int64(len) {
-			return fmt.Errorf("failed to read full string: read %d but wanted %d", n, len)
+		n, err := io.CopyN(&sb, r, int64(strLen))
+		if n != int64(strLen) {
+			return fmt.Errorf("failed to read full string: read %d but wanted %d", n, strLen)
 		}
 		if err != nil {
 			return fmt.Errorf("copying string data: %w", err)
@@ -266,8 +278,8 @@ func addStrings(stringTable *dataTable[stringID, string], b batch) error {
 		// Add the string to the map.
 		s := sb.String()
 		sb.Reset()
-		if err := stringTable.insert(stringID(id), s); err != nil {
-			return err
+		if ierr := stringTable.insert(stringID(id), s); ierr != nil {
+			return ierr
 		}
 	}
 	return nil
@@ -276,36 +288,36 @@ func addStrings(stringTable *dataTable[stringID, string], b batch) error {
 // addStacks takes a batch whose first byte is an EvStacks event
 // (indicating that the batch contains only stacks) and adds each
 // string contained therein to the provided stacks map.
-func addStacks(stackTable *dataTable[stackID, stack], pcs map[uint64]frame, b batch) error {
+func addStacks(stackTable *dataTable[stackID, stack], pcs map[uint64]frame, b batch) (rerr error) {
 	if !b.isStacksBatch() {
 		return fmt.Errorf("internal error: addStacks called on non-stacks batch")
 	}
 	r := bytes.NewReader(b.data)
-	hdr, err := r.ReadByte() // Consume the EvStacks byte.
-	if err != nil || tracev2.EventType(hdr) != tracev2.EvStacks {
+	hdr, herr := r.ReadByte() // Consume the EvStacks byte.
+	if herr != nil || tracev2.EventType(hdr) != tracev2.EvStacks {
 		return fmt.Errorf("missing stacks batch header")
 	}
 
 	for r.Len() != 0 {
 		// Read the header.
-		ev, err := r.ReadByte()
-		if err != nil {
-			return err
+		ev, qerr := r.ReadByte()
+		if qerr != nil {
+			return qerr
 		}
 		if tracev2.EventType(ev) != tracev2.EvStack {
 			return fmt.Errorf("expected stack event, got %d", ev)
 		}
 
 		// Read the stack's ID.
-		id, err := binary.ReadUvarint(r)
-		if err != nil {
-			return err
+		id, qerr := binary.ReadUvarint(r)
+		if qerr != nil {
+			return qerr
 		}
 
 		// Read how many frames are in each stack.
-		nFrames, err := binary.ReadUvarint(r)
-		if err != nil {
-			return err
+		nFrames, qerr := binary.ReadUvarint(r)
+		if qerr != nil {
+			return qerr
 		}
 		if nFrames > tracev2.MaxFramesPerStack {
 			return fmt.Errorf("invalid stack size %d, maximum is %d", nFrames, tracev2.MaxFramesPerStack)
@@ -355,13 +367,13 @@ func addStacks(stackTable *dataTable[stackID, stack], pcs map[uint64]frame, b ba
 // addCPUSamples takes a batch whose first byte is an EvCPUSamples event
 // (indicating that the batch contains only CPU samples) and adds each
 // sample contained therein to the provided samples list.
-func addCPUSamples(samples []cpuSample, b batch) ([]cpuSample, error) {
+func addCPUSamples(samples []cpuSample, b batch) (out []cpuSample, rerr error) {
 	if !b.isCPUSamplesBatch() {
 		return nil, fmt.Errorf("internal error: addCPUSamples called on non-CPU-sample batch")
 	}
 	r := bytes.NewReader(b.data)
-	hdr, err := r.ReadByte() // Consume the EvCPUSamples byte.
-	if err != nil || tracev2.EventType(hdr) != tracev2.EvCPUSamples {
+	hdr, herr := r.ReadByte() // Consume the EvCPUSamples byte.
+	if herr != nil || tracev2.EventType(hdr) != tracev2.EvCPUSamples {
 		return nil, fmt.Errorf("missing CPU samples batch header")
 	}
 
@@ -435,14 +447,14 @@ type sync struct {
 	snapWall         time.Time
 }
 
-func setSyncBatch(s *sync, b batch, ver version.Version) error {
+func setSyncBatch(s *sync, b batch, ver version.Version) (rerr error) {
 	if !b.isSyncBatch(ver) {
 		return fmt.Errorf("internal error: setSyncBatch called on non-sync batch")
 	}
 	r := bytes.NewReader(b.data)
 	if ver >= version.Go125 {
-		hdr, err := r.ReadByte() // Consume the EvSync byte.
-		if err != nil || tracev2.EventType(hdr) != tracev2.EvSync {
+		hdr, herr := r.ReadByte() // Consume the EvSync byte.
+		if herr != nil || tracev2.EventType(hdr) != tracev2.EvSync {
 			return fmt.Errorf("missing sync batch header")
 		}
 	}
@@ -450,9 +462,9 @@ func setSyncBatch(s *sync, b batch, ver version.Version) error {
 	lastTs := b.time
 	for r.Len() != 0 {
 		// Read the header
-		ev, err := r.ReadByte()
-		if err != nil {
-			return err
+		ev, qerr := r.ReadByte()
+		if qerr != nil {
+			return qerr
 		}
 		et := tracev2.EventType(ev)
 		switch {
@@ -505,7 +517,7 @@ func setSyncBatch(s *sync, b batch, ver version.Version) error {
 
 // addExperimentalBatch takes an experimental batch and adds it to the list of experimental
 // batches for the experiment its a part of.
-func addExperimentalBatch(expBatches map[tracev2.Experiment][]ExperimentalBatch, b batch) error {
+func addExperimentalBatch(expBatches map[tracev2.Experiment][]ExperimentalBatch, b batch) (rerr error) {
 	if b.exp == tracev2.NoExperiment {
 		return fmt.Errorf("internal error: addExperimentalBatch called on non-experimental batch")
 	}

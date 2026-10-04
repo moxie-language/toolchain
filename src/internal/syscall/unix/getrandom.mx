@@ -15,7 +15,17 @@ func vgetrandom(p []byte, flags uint32) (ret int32, supported bool) {
 	return -1, false
 }
 
-var getrandomUnsupported bool
+// getrandomState memoises whether the running kernel lacks getrandom;
+// the ENOSYS result is latched after the first failing call.
+type getrandomState struct {
+	unsupported bool
+}
+
+var grState getrandomState
+
+func (s *getrandomState) markUnsupported() {
+	s.unsupported = true
+}
 
 // GetRandomFlag is a flag supported by the getrandom system call.
 type GetRandomFlag uintptr
@@ -29,7 +39,7 @@ func GetRandom(p []byte, flags GetRandomFlag) (n int32, err error) {
 		}
 		return ret, nil
 	}
-	if getrandomUnsupported {
+	if grState.unsupported {
 		return 0, syscall.ENOSYS
 	}
 	r1, _, errno := syscall.Syscall(getrandomTrap,
@@ -38,7 +48,7 @@ func GetRandom(p []byte, flags GetRandomFlag) (n int32, err error) {
 		uintptr(flags))
 	if errno != 0 {
 		if errno == syscall.ENOSYS {
-			getrandomUnsupported = true
+			grState.markUnsupported()
 		}
 		return 0, errno
 	}

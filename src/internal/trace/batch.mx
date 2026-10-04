@@ -26,19 +26,19 @@ type batch struct {
 	exp  tracev2.Experiment
 }
 
-func (b *batch) isStringsBatch() bool {
+func (b *batch) isStringsBatch() (okay bool) {
 	return b.exp == tracev2.NoExperiment && len(b.data) > 0 && tracev2.EventType(b.data[0]) == tracev2.EvStrings
 }
 
-func (b *batch) isStacksBatch() bool {
+func (b *batch) isStacksBatch() (okay bool) {
 	return b.exp == tracev2.NoExperiment && len(b.data) > 0 && tracev2.EventType(b.data[0]) == tracev2.EvStacks
 }
 
-func (b *batch) isCPUSamplesBatch() bool {
+func (b *batch) isCPUSamplesBatch() (okay bool) {
 	return b.exp == tracev2.NoExperiment && len(b.data) > 0 && tracev2.EventType(b.data[0]) == tracev2.EvCPUSamples
 }
 
-func (b *batch) isSyncBatch(ver version.Version) bool {
+func (b *batch) isSyncBatch(ver version.Version) (okay bool) {
 	return (b.exp == tracev2.NoExperiment && len(b.data) > 0) &&
 		((tracev2.EventType(b.data[0]) == tracev2.EvFrequency && ver < version.Go125) ||
 			(tracev2.EventType(b.data[0]) == tracev2.EvSync && ver >= version.Go125))
@@ -48,7 +48,7 @@ func (b *batch) isSyncBatch(ver version.Version) bool {
 func readBatch(r interface {
 	io.Reader
 	io.ByteReader
-}) (batch, uint64, error) {
+}) (out batch, g uint64, rerr error) {
 	// Read batch header byte.
 	b, err := r.ReadByte()
 	if err != nil {
@@ -61,9 +61,9 @@ func readBatch(r interface {
 	// Read the experiment of we have one.
 	exp := tracev2.NoExperiment
 	if tracev2.EventType(b) == tracev2.EvExperimentalBatch {
-		e, err := r.ReadByte()
-		if err != nil {
-			return batch{}, 0, err
+		e, xerr := r.ReadByte()
+		if xerr != nil {
+			return batch{}, 0, xerr
 		}
 		exp = tracev2.Experiment(e)
 	}

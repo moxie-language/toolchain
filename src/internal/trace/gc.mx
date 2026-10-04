@@ -6,9 +6,8 @@ package trace
 
 import (
 	"git.smesh.lol/moxie/pkg/mxutil"
-	"container/heap"
 	"math"
-	"sort"
+	"slices"
 	"bytes"
 	"time"
 )
@@ -53,7 +52,7 @@ const (
 //
 // If the UtilPerProc flag is not given, this always returns a single
 // utilization function. Otherwise, it returns one function per P.
-func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
+func MutatorUtilizationV2(events []Event, flags UtilFlags) (utils [][]MutatorUtil) {
 	// Set up a bunch of analysis state.
 	type perP struct {
 		// gc > 0 indicates that GC is active on this P.
@@ -78,17 +77,6 @@ func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
 	procs := []procsCount{}
 	nSync := 0
 
-	// Helpers.
-	handleSTW := func(r Range) bool {
-		return flags&UtilSTW != 0 && isGCSTW(r)
-	}
-	handleMarkAssist := func(r Range) bool {
-		return flags&UtilAssist != 0 && isGCMarkAssist(r)
-	}
-	handleSweep := func(r Range) bool {
-		return flags&UtilSweep != 0 && isGCSweep(r)
-	}
-
 	// Iterate through the trace, tracking mutator utilization.
 	var lastEv *Event
 	for i := range events {
@@ -101,7 +89,7 @@ func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
 			nSync = ev.Sync().N
 		case EventMetric:
 			m := ev.Metric()
-			if m.Name != "/sched/gomaxprocs:threads" {
+			if !bytes.Equal(m.Name, "/sched/gomaxprocs:threads") {
 				break
 			}
 			gomaxprocs := int32(m.Value.Uint64())
@@ -151,8 +139,9 @@ func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
 			// N.B. A trace can't start during a STW, so we don't handle it here.
 			r := ev.Range()
 			switch {
-			case handleMarkAssist(r):
-				if states[ev.Goroutine()].Executing() {
+			case flags&UtilAssist != 0 && isGCMarkAssist(r):
+				gst := states[ev.Goroutine()]
+				if gst.Executing() {
 					// This G has been in a mark assist *and running on its P* since the start
 					// of the trace. Handle same as sweep below.
 					if flags&UtilPerProc == 0 {
@@ -172,7 +161,7 @@ func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
 						}
 					}
 				}
-			case handleSweep(r):
+			case flags&UtilSweep != 0 && isGCSweep(r):
 				// This P has been in sweep in the start of the trace.
 				//
 				// We don't need to do anything if UtilPerProc is set. If we get an event like
@@ -201,11 +190,11 @@ func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
 			}
 			// After accounting for the portion we missed, this just acts like the
 			// beginning of a new range.
-			if handleSTW(r) {
+			if flags&UtilSTW != 0 && isGCSTW(r) {
 				stw++
-			} else if handleSweep(r) {
+			} else if flags&UtilSweep != 0 && isGCSweep(r) {
 				ps[ev.Proc()].gc++
-			} else if handleMarkAssist(r) {
+			} else if flags&UtilAssist != 0 && isGCMarkAssist(r) {
 				ps[ev.Proc()].gc++
 				if g := r.Scope.Goroutine(); g != NoGoroutine {
 					inGC[g] = true
@@ -213,11 +202,11 @@ func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
 			}
 		case EventRangeBegin:
 			r := ev.Range()
-			if handleSTW(r) {
+			if flags&UtilSTW != 0 && isGCSTW(r) {
 				stw++
-			} else if handleSweep(r) {
+			} else if flags&UtilSweep != 0 && isGCSweep(r) {
 				ps[ev.Proc()].gc++
-			} else if handleMarkAssist(r) {
+			} else if flags&UtilAssist != 0 && isGCMarkAssist(r) {
 				ps[ev.Proc()].gc++
 				if g := r.Scope.Goroutine(); g != NoGoroutine {
 					inGC[g] = true
@@ -225,11 +214,11 @@ func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
 			}
 		case EventRangeEnd:
 			r := ev.Range()
-			if handleSTW(r) {
+			if flags&UtilSTW != 0 && isGCSTW(r) {
 				stw--
-			} else if handleSweep(r) {
+			} else if flags&UtilSweep != 0 && isGCSweep(r) {
 				ps[ev.Proc()].gc--
-			} else if handleMarkAssist(r) {
+			} else if flags&UtilAssist != 0 && isGCMarkAssist(r) {
 				ps[ev.Proc()].gc--
 				if g := r.Scope.Goroutine(); g != NoGoroutine {
 					delete(inGC, g)
@@ -278,8 +267,8 @@ func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
 			if stw > 0 {
 				gcPs = len(ps)
 			} else {
-				for i := range ps {
-					if ps[i].gc > 0 {
+				for j := range ps {
+					if ps[j].gc > 0 {
 						gcPs++
 					}
 				}
@@ -291,8 +280,8 @@ func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
 			out[0] = addUtil(out[0], mu)
 		} else {
 			// Check for per-P utilization changes.
-			for i := range ps {
-				p := &ps[i]
+			for j := range ps {
+				p := &ps[j]
 				util := 1.0
 				if stw > 0 || p.gc > 0 {
 					util = 0.0
@@ -311,14 +300,14 @@ func MutatorUtilizationV2(events []Event, flags UtilFlags) [][]MutatorUtil {
 	// is important to mark the end of the trace. The exact value
 	// shouldn't matter since no window should extend beyond this,
 	// but using 0 is symmetric with the start of the trace.
-	mu := MutatorUtil{int64(lastEv.Time()), 0}
+	fmu := MutatorUtil{int64(lastEv.Time()), 0}
 	for i := range ps {
-		out[ps[i].series] = addUtil(out[ps[i].series], mu)
+		out[ps[i].series] = addUtil(out[ps[i].series], fmu)
 	}
 	return out
 }
 
-func addUtil(util []MutatorUtil, mu MutatorUtil) []MutatorUtil {
+func addUtil(util []MutatorUtil, mu MutatorUtil) (out []MutatorUtil) {
 	if len(util) > 0 {
 		if mu.Util == util[len(util)-1].Util {
 			// No change.
@@ -340,13 +329,13 @@ func addUtil(util []MutatorUtil, mu MutatorUtil) []MutatorUtil {
 // which is also a float64.
 type totalUtil float64
 
-func totalUtilOf(meanUtil float64, dur int64) totalUtil {
+func totalUtilOf(meanUtil float64, dur int64) (out totalUtil) {
 	return totalUtil(meanUtil * float64(dur))
 }
 
 // mean returns the mean utilization over dur.
-func (u totalUtil) mean(dur time.Duration) float64 {
-	return float64(u) / float64(dur)
+func (u *totalUtil) mean(dur time.Duration) (out float64) {
+	return float64(*u) / float64(dur)
 }
 
 // An MMUCurve is the minimum mutator utilization curve across
@@ -381,7 +370,7 @@ type mmuBand struct {
 
 // NewMMUCurve returns an MMU curve for the given mutator utilization
 // function.
-func NewMMUCurve(utils [][]MutatorUtil) *MMUCurve {
+func NewMMUCurve(utils [][]MutatorUtil) (out *MMUCurve) {
 	series := []mmuSeries{:len(utils)}
 	for i, util := range utils {
 		series[i] = newMMUSeries(util)
@@ -392,7 +381,7 @@ func NewMMUCurve(utils [][]MutatorUtil) *MMUCurve {
 // bandsPerSeries is the number of bands to divide each series into.
 const bandsPerSeries = 1000
 
-func newMMUSeries(util []MutatorUtil) mmuSeries {
+func newMMUSeries(util []MutatorUtil) (out mmuSeries) {
 	// Compute cumulative sum.
 	sums := []totalUtil{:len(util)}
 	var prev MutatorUtil
@@ -429,8 +418,8 @@ func newMMUSeries(util []MutatorUtil) mmuSeries {
 		cumUtil := leftSum.advance(startTime)
 		predIdx := leftSum.pos
 		minUtil := 1.0
-		for i := predIdx; i < len(util) && util[i].Time < endTime; i++ {
-			minUtil = math.Min(minUtil, util[i].Util)
+		for k := predIdx; k < len(util) && util[k].Time < endTime; k++ {
+			minUtil = math.Min(minUtil, util[k].Util)
 		}
 		bands[i] = mmuBand{minUtil, cumUtil, leftSum}
 	}
@@ -454,28 +443,37 @@ type bandUtil struct {
 	utilBound float64
 }
 
-type bandUtilHeap []bandUtil
-
-func (h bandUtilHeap) Len() int32 {
-	return len(h)
+func bandUtilHeapInit(h []bandUtil) {
+	for i := int32(len(h))/2 - 1; i >= 0; i-- {
+		bandUtilHeapDown(h, i, int32(len(h)))
+	}
 }
 
-func (h bandUtilHeap) Less(i, j int32) bool {
-	return h[i].utilBound < h[j].utilBound
+func bandUtilHeapPop(h []bandUtil) (out []bandUtil) {
+	n := int32(len(h)) - 1
+	h[0], h[n] = h[n], h[0]
+	bandUtilHeapDown(h, 0, n)
+	return h[:n]
 }
 
-func (h bandUtilHeap) Swap(i, j int32) {
-	h[i], h[j] = h[j], h[i]
-}
-
-func (h *bandUtilHeap) Push(x bandUtil) {
-	*h = push(*h, x)
-}
-
-func (h *bandUtilHeap) Pop() bandUtil {
-	x := (*h)[len(*h)-1]
-	*h = (*h)[:len(*h)-1]
-	return x
+func bandUtilHeapDown(h []bandUtil, i0, n int32) (moved bool) {
+	i := i0
+	for {
+		j1 := 2*i + 1
+		if j1 >= n || j1 < 0 {
+			break
+		}
+		j := j1
+		if j2 := j1 + 1; j2 < n && h[j2].utilBound < h[j1].utilBound {
+			j = j2
+		}
+		if h[j].utilBound >= h[i].utilBound {
+			break
+		}
+		h[i], h[j] = h[j], h[i]
+		i = j
+	}
+	return i > i0
 }
 
 // UtilWindow is a specific window at Time.
@@ -485,31 +483,76 @@ type UtilWindow struct {
 	MutatorUtil float64
 }
 
-type utilHeap []UtilWindow
-
-func (h utilHeap) Len() int32 {
-	return len(h)
-}
-
-func (h utilHeap) Less(i, j int32) bool {
-	if h[i].MutatorUtil != h[j].MutatorUtil {
-		return h[i].MutatorUtil > h[j].MutatorUtil
+func utilWindowLess(a, b UtilWindow) (ok bool) {
+	if a.MutatorUtil != b.MutatorUtil {
+		return a.MutatorUtil > b.MutatorUtil
 	}
-	return h[i].Time > h[j].Time
+	return a.Time > b.Time
 }
 
-func (h utilHeap) Swap(i, j int32) {
-	h[i], h[j] = h[j], h[i]
+func utilWindowRevCmp(a, b UtilWindow) (out int32) {
+	if utilWindowLess(b, a) {
+		return -1
+	}
+	if utilWindowLess(a, b) {
+		return 1
+	}
+	return 0
 }
 
-func (h *utilHeap) Push(x UtilWindow) {
-	*h = push(*h, x)
+func utilHeapDown(h []UtilWindow, i0, n int32) (moved bool) {
+	i := i0
+	for {
+		j1 := 2*i + 1
+		if j1 >= n || j1 < 0 {
+			break
+		}
+		j := j1
+		if j2 := j1 + 1; j2 < n && utilWindowLess(h[j2], h[j1]) {
+			j = j2
+		}
+		if !utilWindowLess(h[j], h[i]) {
+			break
+		}
+		h[i], h[j] = h[j], h[i]
+		i = j
+	}
+	return i > i0
 }
 
-func (h *utilHeap) Pop() UtilWindow {
-	x := (*h)[len(*h)-1]
-	*h = (*h)[:len(*h)-1]
-	return x
+func utilHeapUp(h []UtilWindow, j int32) {
+	for j > 0 {
+		i := (j - 1) / 2
+		if !utilWindowLess(h[j], h[i]) {
+			break
+		}
+		h[i], h[j] = h[j], h[i]
+		j = i
+	}
+}
+
+func utilHeapPush(h []UtilWindow, x UtilWindow) (out []UtilWindow) {
+	out = push(h, x)
+	utilHeapUp(out, int32(len(out)-1))
+	return out
+}
+
+func utilHeapPop(h []UtilWindow) (out []UtilWindow) {
+	n := int32(len(h)) - 1
+	h[0], h[n] = h[n], h[0]
+	utilHeapDown(h, 0, n)
+	return h[:n]
+}
+
+func utilHeapRemove(h []UtilWindow, i int32) (out []UtilWindow) {
+	n := int32(len(h)) - 1
+	if n != i {
+		h[i], h[n] = h[n], h[i]
+		if !utilHeapDown(h, i, n) {
+			utilHeapUp(h, i)
+		}
+	}
+	return h[:n]
 }
 
 // An accumulator takes a windowed mutator utilization function and
@@ -524,7 +567,7 @@ type accumulator struct {
 
 	// Worst N window tracking
 	nWorst int32
-	wHeap  utilHeap
+	wHeap  []UtilWindow
 
 	// Mutator utilization distribution tracking
 	mud *mud
@@ -551,7 +594,7 @@ func (acc *accumulator) resetTime() {
 // of time.
 //
 // It returns true if further calls to addMU would be pointless.
-func (acc *accumulator) addMU(ts int64, mu float64, window time.Duration) bool {
+func (acc *accumulator) addMU(ts int64, mu float64, window time.Duration) (done bool) {
 	if mu < acc.mmu {
 		acc.mmu = mu
 	}
@@ -577,15 +620,15 @@ func (acc *accumulator) addMU(ts int64, mu float64, window time.Duration) bool {
 					goto keep
 				} else {
 					// Replace it with this window.
-					heap.Remove(&acc.wHeap, i)
+					acc.wHeap = utilHeapRemove(acc.wHeap, i)
 					break
 				}
 			}
 		}
 
-		heap.Push(&acc.wHeap, UtilWindow{ts, mu})
+		acc.wHeap = utilHeapPush(acc.wHeap, UtilWindow{ts, mu})
 		if len(acc.wHeap) > acc.nWorst {
-			heap.Pop(&acc.wHeap)
+			acc.wHeap = utilHeapPop(acc.wHeap)
 		}
 	keep:
 	}
@@ -639,8 +682,8 @@ func (c *MMUCurve) MMU(window time.Duration) (mmu float64) {
 func (c *MMUCurve) Examples(window time.Duration, n int32) (worst []UtilWindow) {
 	acc := accumulator{mmu: 1.0, bound: 1.0, nWorst: n}
 	c.mmu(window, &acc)
-	sort.Sort(sort.Reverse(acc.wHeap))
-	return ([]UtilWindow)(acc.wHeap)
+	slices.SortFunc(acc.wHeap, utilWindowRevCmp)
+	return acc.wHeap
 }
 
 // MUD returns mutator utilization distribution quantiles for the
@@ -653,7 +696,7 @@ func (c *MMUCurve) Examples(window time.Duration, n int32) (worst []UtilWindow) 
 // The minimum mutator utilization is the minimum (0th percentile) of
 // this distribution. (However, if only the minimum is desired, it's
 // more efficient to use the MMU method.)
-func (c *MMUCurve) MUD(window time.Duration, quantiles []float64) []float64 {
+func (c *MMUCurve) MUD(window time.Duration, quantiles []float64) (qs []float64) {
 	if len(quantiles) == 0 {
 		return []float64{}
 	}
@@ -728,7 +771,7 @@ func (c *MMUCurve) mmu(window time.Duration, acc *accumulator) {
 		return
 	}
 
-	var bandU bandUtilHeap
+	var bandU []bandUtil
 	windows := []time.Duration{:len(c.series)}
 	for i, s := range c.series {
 		windows[i] = window
@@ -736,7 +779,7 @@ func (c *MMUCurve) mmu(window time.Duration, acc *accumulator) {
 			windows[i] = bandMax
 		}
 
-		bandU1 := bandUtilHeap(s.mkBandUtil(i, windows[i]))
+		bandU1 := s.mkBandUtil(i, windows[i])
 		if bandU == nil {
 			bandU = bandU1
 		} else {
@@ -746,7 +789,7 @@ func (c *MMUCurve) mmu(window time.Duration, acc *accumulator) {
 	}
 
 	// Process bands from lowest utilization bound to highest.
-	heap.Init(&bandU)
+	bandUtilHeapInit(bandU)
 
 	// Refine each band into a precise window and MMU until
 	// refining the next lowest band can no longer affect the MMU
@@ -754,11 +797,11 @@ func (c *MMUCurve) mmu(window time.Duration, acc *accumulator) {
 	for len(bandU) > 0 && bandU[0].utilBound < acc.bound {
 		i := bandU[0].series
 		c.series[i].bandMMU(bandU[0].i, windows[i], acc)
-		heap.Pop(&bandU)
+		bandU = bandUtilHeapPop(bandU)
 	}
 }
 
-func (c *mmuSeries) mkBandUtil(series int32, window time.Duration) []bandUtil {
+func (c *mmuSeries) mkBandUtil(series int32, window time.Duration) (out []bandUtil) {
 	// For each band, compute the worst-possible total mutator
 	// utilization for all windows that start in that band.
 
@@ -842,18 +885,20 @@ func (c *mmuSeries) bandMMU(bandIdx int32, window time.Duration, acc *accumulato
 	// window and to the right edge of the window.
 	left := c.bands[bandIdx].integrator
 	right := left
-	time, endTime := c.bandTime(bandIdx)
+	time0, endTime := c.bandTime(bandIdx)
 	if utilEnd := util[len(util)-1].Time - int64(window); utilEnd < endTime {
 		endTime = utilEnd
 	}
 	acc.resetTime()
+	tcur := time0
 	for {
 		// Advance edges to time and time+window.
-		mu := (right.advance(time+int64(window)) - left.advance(time)).mean(window)
-		if acc.addMU(time, mu, window) {
+		diff := right.advance(tcur+int64(window)) - left.advance(tcur)
+		mu := diff.mean(window)
+		if acc.addMU(tcur, mu, window) {
 			break
 		}
-		if time == endTime {
+		if tcur == endTime {
 			break
 		}
 
@@ -861,24 +906,24 @@ func (c *mmuSeries) bandMMU(bandIdx int32, window time.Duration, acc *accumulato
 		// utilization function is 1/window, so we can always
 		// advance the time by at least (mu - mmu) * window
 		// without dropping below mmu.
-		minTime := time + int64((mu-acc.bound)*float64(window))
+		minTime := tcur + int64((mu-acc.bound)*float64(window))
 
 		// Advance the window to the next time where either
 		// the left or right edge of the window encounters a
 		// change in the utilization curve.
-		if t1, t2 := left.next(time), right.next(time+int64(window))-int64(window); t1 < t2 {
-			time = t1
+		if t1, t2 := left.next(tcur), right.next(tcur+int64(window))-int64(window); t1 < t2 {
+			tcur = t1
 		} else {
-			time = t2
+			tcur = t2
 		}
-		if time < minTime {
-			time = minTime
+		if tcur < minTime {
+			tcur = minTime
 		}
-		if time >= endTime {
+		if tcur >= endTime {
 			// For MMUs we could stop here, but for MUDs
 			// it's important that we span the entire
 			// band.
-			time = endTime
+			tcur = endTime
 		}
 	}
 }
@@ -895,7 +940,7 @@ type integrator struct {
 // advance returns the integral of the utilization function from 0 to
 // time. advance must be called on monotonically increasing values of
 // times.
-func (in *integrator) advance(ts int64) totalUtil {
+func (in *integrator) advance(ts int64) (out totalUtil) {
 	util, pos := in.u.util, in.pos
 	// Advance pos until pos+1 is ts's strict successor (making
 	// pos ts's non-strict predecessor).
@@ -912,8 +957,9 @@ func (in *integrator) advance(ts int64) totalUtil {
 	} else {
 		// Far. Binary search for ts's strict successor.
 		l, r := pos, len(util)
+		var h int32
 		for l < r {
-			h := int32(uint32(l+r) >> 1)
+			h = int32(uint32(l+r) >> 1)
 			if util[h].Time <= ts {
 				l = h + 1
 			} else {
@@ -932,7 +978,7 @@ func (in *integrator) advance(ts int64) totalUtil {
 
 // next returns the smallest time t' > time of a change in the
 // utilization function.
-func (in *integrator) next(ts int64) int64 {
+func (in *integrator) next(ts int64) (out int64) {
 	for _, u := range in.u.util[in.pos:] {
 		if u.Time > ts {
 			return u.Time
@@ -941,14 +987,14 @@ func (in *integrator) next(ts int64) int64 {
 	return 1<<63 - 1
 }
 
-func isGCSTW(r Range) bool {
+func isGCSTW(r Range) (okay bool) {
 	return bytes.HasPrefix(r.Name, "stop-the-world") && bytes.Contains(r.Name, "GC")
 }
 
-func isGCMarkAssist(r Range) bool {
-	return r.Name == "GC mark assist"
+func isGCMarkAssist(r Range) (okay bool) {
+	return bytes.Equal(r.Name, "GC mark assist")
 }
 
-func isGCSweep(r Range) bool {
-	return r.Name == "GC incremental sweep"
+func isGCSweep(r Range) (okay bool) {
+	return bytes.Equal(r.Name, "GC incremental sweep")
 }

@@ -53,9 +53,9 @@ func (r *PipeReader) Read(p []byte) (n int, err error) {
 
 type Bool bool
 
-func (v Bool) EncodeTo(w io.Writer) error {
+func (v *Bool) EncodeTo(w io.Writer) error {
 	var b [1]byte
-	if v {
+	if *v {
 		b[0] = 1
 	}
 	_, err := w.Write(b[:])
@@ -71,8 +71,8 @@ func (v *Bool) DecodeFrom(r io.Reader) error {
 
 type Int8 int8
 
-func (v Int8) EncodeTo(w io.Writer) error {
-	_, err := w.Write([]byte{byte(v)})
+func (v *Int8) EncodeTo(w io.Writer) error {
+	_, err := w.Write([]byte{byte(*v)})
 	return err
 }
 
@@ -85,8 +85,8 @@ func (v *Int8) DecodeFrom(r io.Reader) error {
 
 type Uint8 uint8
 
-func (v Uint8) EncodeTo(w io.Writer) error {
-	_, err := w.Write([]byte{byte(v)})
+func (v *Uint8) EncodeTo(w io.Writer) error {
+	_, err := w.Write([]byte{byte(*v)})
 	return err
 }
 
@@ -101,10 +101,10 @@ func (v *Uint8) DecodeFrom(r io.Reader) error {
 
 type Int16 int16
 
-func (v Int16) EncodeTo(w io.Writer) error {
+func (v *Int16) EncodeTo(w io.Writer) error {
 	var b [2]byte
-	b[0] = byte(v)
-	b[1] = byte(v >> 8)
+	b[0] = byte(*v)
+	b[1] = byte(*v >> 8)
 	_, err := w.Write(b[:])
 	return err
 }
@@ -118,10 +118,10 @@ func (v *Int16) DecodeFrom(r io.Reader) error {
 
 type Uint16 uint16
 
-func (v Uint16) EncodeTo(w io.Writer) error {
+func (v *Uint16) EncodeTo(w io.Writer) error {
 	var b [2]byte
-	b[0] = byte(v)
-	b[1] = byte(v >> 8)
+	b[0] = byte(*v)
+	b[1] = byte(*v >> 8)
 	_, err := w.Write(b[:])
 	return err
 }
@@ -135,10 +135,10 @@ func (v *Uint16) DecodeFrom(r io.Reader) error {
 
 type BigInt16 int16
 
-func (v BigInt16) EncodeTo(w io.Writer) error {
+func (v *BigInt16) EncodeTo(w io.Writer) error {
 	var b [2]byte
-	b[0] = byte(v >> 8)
-	b[1] = byte(v)
+	b[0] = byte(*v >> 8)
+	b[1] = byte(*v)
 	_, err := w.Write(b[:])
 	return err
 }
@@ -152,10 +152,10 @@ func (v *BigInt16) DecodeFrom(r io.Reader) error {
 
 type BigUint16 uint16
 
-func (v BigUint16) EncodeTo(w io.Writer) error {
+func (v *BigUint16) EncodeTo(w io.Writer) error {
 	var b [2]byte
-	b[0] = byte(v >> 8)
-	b[1] = byte(v)
+	b[0] = byte(*v >> 8)
+	b[1] = byte(*v)
 	_, err := w.Write(b[:])
 	return err
 }
@@ -171,12 +171,12 @@ func (v *BigUint16) DecodeFrom(r io.Reader) error {
 
 type Int32 int32
 
-func (v Int32) EncodeTo(w io.Writer) error {
+func (v *Int32) EncodeTo(w io.Writer) error {
 	var b [4]byte
-	b[0] = byte(v)
-	b[1] = byte(v >> 8)
-	b[2] = byte(v >> 16)
-	b[3] = byte(v >> 24)
+	b[0] = byte(*v)
+	b[1] = byte(*v >> 8)
+	b[2] = byte(*v >> 16)
+	b[3] = byte(*v >> 24)
 	_, err := w.Write(b[:])
 	return err
 }
@@ -190,12 +190,12 @@ func (v *Int32) DecodeFrom(r io.Reader) error {
 
 type Uint32 uint32
 
-func (v Uint32) EncodeTo(w io.Writer) error {
+func (v *Uint32) EncodeTo(w io.Writer) error {
 	var b [4]byte
-	b[0] = byte(v)
-	b[1] = byte(v >> 8)
-	b[2] = byte(v >> 16)
-	b[3] = byte(v >> 24)
+	b[0] = byte(*v)
+	b[1] = byte(*v >> 8)
+	b[2] = byte(*v >> 16)
+	b[3] = byte(*v >> 24)
 	_, err := w.Write(b[:])
 	return err
 }
@@ -209,12 +209,12 @@ func (v *Uint32) DecodeFrom(r io.Reader) error {
 
 type BigInt32 int32
 
-func (v BigInt32) EncodeTo(w io.Writer) error {
+func (v *BigInt32) EncodeTo(w io.Writer) error {
 	var b [4]byte
-	b[0] = byte(v >> 24)
-	b[1] = byte(v >> 16)
-	b[2] = byte(v >> 8)
-	b[3] = byte(v)
+	b[0] = byte(*v >> 24)
+	b[1] = byte(*v >> 16)
+	b[2] = byte(*v >> 8)
+	b[3] = byte(*v)
 	_, err := w.Write(b[:])
 	return err
 }
@@ -228,12 +228,12 @@ func (v *BigInt32) DecodeFrom(r io.Reader) error {
 
 type BigUint32 uint32
 
-func (v BigUint32) EncodeTo(w io.Writer) error {
+func (v *BigUint32) EncodeTo(w io.Writer) error {
 	var b [4]byte
-	b[0] = byte(v >> 24)
-	b[1] = byte(v >> 16)
-	b[2] = byte(v >> 8)
-	b[3] = byte(v)
+	b[0] = byte(*v >> 24)
+	b[1] = byte(*v >> 16)
+	b[2] = byte(*v >> 8)
+	b[3] = byte(*v)
 	_, err := w.Write(b[:])
 	return err
 }
@@ -249,16 +249,16 @@ func (v *BigUint32) DecodeFrom(r io.Reader) error {
 
 type Int64 int64
 
-func (v Int64) EncodeTo(w io.Writer) error {
+func (v *Int64) EncodeTo(w io.Writer) error {
 	var b [8]byte
-	b[0] = byte(v)
-	b[1] = byte(v >> 8)
-	b[2] = byte(v >> 16)
-	b[3] = byte(v >> 24)
-	b[4] = byte(v >> 32)
-	b[5] = byte(v >> 40)
-	b[6] = byte(v >> 48)
-	b[7] = byte(v >> 56)
+	b[0] = byte(*v)
+	b[1] = byte(*v >> 8)
+	b[2] = byte(*v >> 16)
+	b[3] = byte(*v >> 24)
+	b[4] = byte(*v >> 32)
+	b[5] = byte(*v >> 40)
+	b[6] = byte(*v >> 48)
+	b[7] = byte(*v >> 56)
 	_, err := w.Write(b[:])
 	return err
 }
@@ -273,16 +273,16 @@ func (v *Int64) DecodeFrom(r io.Reader) error {
 
 type Uint64 uint64
 
-func (v Uint64) EncodeTo(w io.Writer) error {
+func (v *Uint64) EncodeTo(w io.Writer) error {
 	var b [8]byte
-	b[0] = byte(v)
-	b[1] = byte(v >> 8)
-	b[2] = byte(v >> 16)
-	b[3] = byte(v >> 24)
-	b[4] = byte(v >> 32)
-	b[5] = byte(v >> 40)
-	b[6] = byte(v >> 48)
-	b[7] = byte(v >> 56)
+	b[0] = byte(*v)
+	b[1] = byte(*v >> 8)
+	b[2] = byte(*v >> 16)
+	b[3] = byte(*v >> 24)
+	b[4] = byte(*v >> 32)
+	b[5] = byte(*v >> 40)
+	b[6] = byte(*v >> 48)
+	b[7] = byte(*v >> 56)
 	_, err := w.Write(b[:])
 	return err
 }
@@ -297,16 +297,16 @@ func (v *Uint64) DecodeFrom(r io.Reader) error {
 
 type BigInt64 int64
 
-func (v BigInt64) EncodeTo(w io.Writer) error {
+func (v *BigInt64) EncodeTo(w io.Writer) error {
 	var b [8]byte
-	b[0] = byte(v >> 56)
-	b[1] = byte(v >> 48)
-	b[2] = byte(v >> 40)
-	b[3] = byte(v >> 32)
-	b[4] = byte(v >> 24)
-	b[5] = byte(v >> 16)
-	b[6] = byte(v >> 8)
-	b[7] = byte(v)
+	b[0] = byte(*v >> 56)
+	b[1] = byte(*v >> 48)
+	b[2] = byte(*v >> 40)
+	b[3] = byte(*v >> 32)
+	b[4] = byte(*v >> 24)
+	b[5] = byte(*v >> 16)
+	b[6] = byte(*v >> 8)
+	b[7] = byte(*v)
 	_, err := w.Write(b[:])
 	return err
 }
@@ -321,16 +321,16 @@ func (v *BigInt64) DecodeFrom(r io.Reader) error {
 
 type BigUint64 uint64
 
-func (v BigUint64) EncodeTo(w io.Writer) error {
+func (v *BigUint64) EncodeTo(w io.Writer) error {
 	var b [8]byte
-	b[0] = byte(v >> 56)
-	b[1] = byte(v >> 48)
-	b[2] = byte(v >> 40)
-	b[3] = byte(v >> 32)
-	b[4] = byte(v >> 24)
-	b[5] = byte(v >> 16)
-	b[6] = byte(v >> 8)
-	b[7] = byte(v)
+	b[0] = byte(*v >> 56)
+	b[1] = byte(*v >> 48)
+	b[2] = byte(*v >> 40)
+	b[3] = byte(*v >> 32)
+	b[4] = byte(*v >> 24)
+	b[5] = byte(*v >> 16)
+	b[6] = byte(*v >> 8)
+	b[7] = byte(*v)
 	_, err := w.Write(b[:])
 	return err
 }
@@ -347,8 +347,8 @@ func (v *BigUint64) DecodeFrom(r io.Reader) error {
 
 type Float32 float32
 
-func (v Float32) EncodeTo(w io.Writer) error {
-	return Uint32(*(*uint32)(unsafe.Pointer(&v))).EncodeTo(w)
+func (v *Float32) EncodeTo(w io.Writer) error {
+	return (*Uint32)(unsafe.Pointer(v)).EncodeTo(w)
 }
 
 func (v *Float32) DecodeFrom(r io.Reader) error {
@@ -357,8 +357,8 @@ func (v *Float32) DecodeFrom(r io.Reader) error {
 
 type Float64 float64
 
-func (v Float64) EncodeTo(w io.Writer) error {
-	return Uint64(*(*uint64)(unsafe.Pointer(&v))).EncodeTo(w)
+func (v *Float64) EncodeTo(w io.Writer) error {
+	return (*Uint64)(unsafe.Pointer(v)).EncodeTo(w)
 }
 
 func (v *Float64) DecodeFrom(r io.Reader) error {
@@ -367,8 +367,8 @@ func (v *Float64) DecodeFrom(r io.Reader) error {
 
 type BigFloat32 float32
 
-func (v BigFloat32) EncodeTo(w io.Writer) error {
-	return BigUint32(*(*uint32)(unsafe.Pointer(&v))).EncodeTo(w)
+func (v *BigFloat32) EncodeTo(w io.Writer) error {
+	return (*BigUint32)(unsafe.Pointer(v)).EncodeTo(w)
 }
 
 func (v *BigFloat32) DecodeFrom(r io.Reader) error {
@@ -377,8 +377,8 @@ func (v *BigFloat32) DecodeFrom(r io.Reader) error {
 
 type BigFloat64 float64
 
-func (v BigFloat64) EncodeTo(w io.Writer) error {
-	return BigUint64(*(*uint64)(unsafe.Pointer(&v))).EncodeTo(w)
+func (v *BigFloat64) EncodeTo(w io.Writer) error {
+	return (*BigUint64)(unsafe.Pointer(v)).EncodeTo(w)
 }
 
 func (v *BigFloat64) DecodeFrom(r io.Reader) error {
@@ -387,23 +387,23 @@ func (v *BigFloat64) DecodeFrom(r io.Reader) error {
 
 // ── bytes (string = []byte in moxie) ───────────────────────────
 
-// Bytes is a length-prefixed byte slice. Length is encoded as Uint32 (LE).
-type Bytes []byte
-
-func (v Bytes) EncodeTo(w io.Writer) error {
-	if err := Uint32(len(v)).EncodeTo(w); err != nil {
+// EncodeBytes writes v as a Uint32 (LE) length prefix followed by the bytes.
+func EncodeBytes(w io.Writer, v []byte) error {
+	n := Uint32(len(v))
+	if err := n.EncodeTo(w); err != nil {
 		return err
 	}
 	_, err := w.Write(v)
 	return err
 }
 
-func (v *Bytes) DecodeFrom(r io.Reader) error {
+// DecodeBytes reads a Uint32 (LE) length prefix and then that many bytes.
+func DecodeBytes(r io.Reader) (v []byte, err error) {
 	var n Uint32
-	if err := n.DecodeFrom(r); err != nil {
-		return err
+	if err = n.DecodeFrom(r); err != nil {
+		return
 	}
-	*v = make([]byte, n)
-	_, err := io.ReadFull(r, *v)
-	return err
+	v = make([]byte, n)
+	_, err = io.ReadFull(r, v)
+	return
 }

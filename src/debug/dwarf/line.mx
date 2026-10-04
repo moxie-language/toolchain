@@ -141,31 +141,31 @@ type LineFile struct {
 // unit cu, which must be an [Entry] with tag [TagCompileUnit].
 //
 // If this compilation unit has no line table, it returns nil, nil.
-func (d *Data) LineReader(cu *Entry) (*LineReader, error) {
+func (d *Data) LineReader(cu *Entry) (_r0 *LineReader, _r1 error) {
 	if d.line == nil {
 		// No line tables available.
 		return nil, nil
 	}
 
 	// Get line table information from cu.
-	off, ok := cu.Val(AttrStmtList).(valInt64)
+	off, ok := cu.Val(AttrStmtList).(*valInt64)
 	if !ok {
 		// cu has no line table.
 		return nil, nil
 	}
-	if int64(off) < 0 || int64(off) > int64(len(d.line)) {
+	if int64(*off) < 0 || int64(*off) > int64(len(d.line)) {
 		return nil, errors.New("AttrStmtList value out of range")
 	}
 	// AttrCompDir is optional if all file names are absolute. Use
 	// the empty string if it's not present.
 	var compDir string
-	if okv, okok := cu.Val(AttrCompDir).(valStr); okok {
+	if okv, okok := valString(cu.Val(AttrCompDir)); okok {
 		compDir = okv
 	}
 
 	// Create the LineReader.
 	u := &d.unit[d.offsetToUnit(cu.Offset)]
-	lbuf := makeBuf(d, u, "line", Offset(off), d.line[off:])
+	lbuf := makeBuf(d, u, "line", Offset(off), d.line[int32(*off):])
 	// The compilation directory is implicitly directories[0].
 	r := LineReader{
 		buf:     lbuf,
@@ -187,7 +187,7 @@ func (d *Data) LineReader(cu *Entry) (*LineReader, error) {
 
 // readHeader reads the line number program header from r.buf and sets
 // all of the header fields in r.
-func (r *LineReader) readHeader(compDir string) error {
+func (r *LineReader) readHeader(compDir string) (_r0 error) {
 	b := &r.buf
 
 	// Read basic header fields [DWARF2 6.2.4].
@@ -195,7 +195,7 @@ func (r *LineReader) readHeader(compDir string) error {
 	unitLength, dwarf64 := b.unitLength()
 	r.endOffset = b.off + unitLength
 	if r.endOffset > b.off+Offset(len(b.data)) {
-		return DecodeError{"line", hdrOffset, fmt.Sprintf("line table end %d exceeds section size %d", r.endOffset, b.off+Offset(len(b.data)))}
+		return &DecodeError{"line", hdrOffset, fmt.Sprintf("line table end %d exceeds section size %d", r.endOffset, b.off+Offset(len(b.data)))}
 	}
 	r.version = b.uint16()
 	if b.err == nil && (r.version < 2 || r.version > 5) {
@@ -204,7 +204,7 @@ func (r *LineReader) readHeader(compDir string) error {
 		// the middle of the header in new versions, so we're
 		// picky about only supporting known line table
 		// versions.
-		return DecodeError{"line", hdrOffset, fmt.Sprintf("unknown line table version %d", r.version)}
+		return &DecodeError{"line", hdrOffset, fmt.Sprintf("unknown line table version %d", r.version)}
 	}
 	if r.version >= 5 {
 		r.addrsize = int32(b.uint8())
@@ -221,7 +221,7 @@ func (r *LineReader) readHeader(compDir string) error {
 	}
 	programOffset := b.off + headerLength
 	if programOffset > r.endOffset {
-		return DecodeError{"line", hdrOffset, fmt.Sprintf("malformed line table: program offset %d exceeds end offset %d", programOffset, r.endOffset)}
+		return &DecodeError{"line", hdrOffset, fmt.Sprintf("malformed line table: program offset %d exceeds end offset %d", programOffset, r.endOffset)}
 	}
 	r.programOffset = programOffset
 	r.minInstructionLength = int32(b.uint8())
@@ -240,10 +240,10 @@ func (r *LineReader) readHeader(compDir string) error {
 		return b.err
 	}
 	if r.maxOpsPerInstruction == 0 {
-		return DecodeError{"line", hdrOffset, "invalid maximum operations per instruction: 0"}
+		return &DecodeError{"line", hdrOffset, "invalid maximum operations per instruction: 0"}
 	}
 	if r.lineRange == 0 {
-		return DecodeError{"line", hdrOffset, "invalid line range: 0"}
+		return &DecodeError{"line", hdrOffset, "invalid line range: 0"}
 	}
 
 	// Read standard opcode length table. This table starts with opcode 1.
@@ -260,7 +260,7 @@ func (r *LineReader) readHeader(compDir string) error {
 	kol := _knownOpcodeLengths()
 	for i, length := range r.opcodeLengths {
 		if known, ok := kol[i]; ok && known != length {
-			return DecodeError{"line", hdrOffset, fmt.Sprintf("opcode %d expected to have length %d, but has length %d", i, known, length)}
+			return &DecodeError{"line", hdrOffset, fmt.Sprintf("opcode %d expected to have length %d, but has length %d", i, known, length)}
 		}
 	}
 
@@ -343,7 +343,7 @@ type lnctForm struct {
 }
 
 // readLNCTFormat reads an LNCT format description.
-func (r *LineReader) readLNCTFormat() []lnctForm {
+func (r *LineReader) readLNCTFormat() (_r0 []lnctForm) {
 	c := r.buf.uint8()
 	ret := []lnctForm{:c}
 	for i := range ret {
@@ -370,7 +370,7 @@ func (r *LineReader) readLNCT(s []lnctForm, dwarf64 bool) (fpath string, mtime u
 				off = r.buf.uintVar()
 			}
 			if uint64(int32(off)) != off {
-				return "", 0, 0, DecodeError{"line", r.buf.off, "strp/line_strp offset out of range"}
+				return "", 0, 0, &DecodeError{"line", r.buf.off, "strp/line_strp offset out of range"}
 			}
 			var b1 buf
 			if lf.form == formStrp {
@@ -381,7 +381,7 @@ func (r *LineReader) readLNCT(s []lnctForm, dwarf64 bool) (fpath string, mtime u
 			b1.skip(int32(off))
 			str = b1.string()
 			if b1.err != nil {
-				return "", 0, 0, DecodeError{"line", r.buf.off, b1.err.String()}
+				return "", 0, 0, &DecodeError{"line", r.buf.off, b1.err.String()}
 			}
 		case formStrpSup:
 			// Supplemental sections not yet supported.
@@ -422,7 +422,7 @@ func (r *LineReader) readLNCT(s []lnctForm, dwarf64 bool) (fpath string, mtime u
 			fpath = str
 		case lnctDirectoryIndex:
 			if val >= uint64(len(r.directories)) {
-				return "", 0, 0, DecodeError{"line", r.buf.off, "directory index out of range"}
+				return "", 0, 0, &DecodeError{"line", r.buf.off, "directory index out of range"}
 			}
 			dir = r.directories[val]
 		case lnctTimestamp:
@@ -444,7 +444,7 @@ func (r *LineReader) readLNCT(s []lnctForm, dwarf64 bool) (fpath string, mtime u
 // readFileEntry reads a file entry from either the header or a
 // DW_LNE_define_file extended opcode and adds it to r.fileEntries. A
 // true return value indicates that there are no more entries to read.
-func (r *LineReader) readFileEntry() (bool, error) {
+func (r *LineReader) readFileEntry() (_r0 bool, _r1 error) {
 	name := r.buf.string()
 	if r.buf.err != nil {
 		return false, r.buf.err
@@ -456,7 +456,7 @@ func (r *LineReader) readFileEntry() (bool, error) {
 	dirIndex := int32(r.buf.uint32())
 	if !pathIsAbs(name) {
 		if dirIndex >= len(r.directories) {
-			return false, DecodeError{"line", off, "directory index too large"}
+			return false, &DecodeError{"line", off, "directory index too large"}
 		}
 		name = pathJoin(r.directories[dirIndex], name)
 	}
@@ -497,7 +497,7 @@ func (r *LineReader) updateFile() {
 //
 // Rows are always in order of increasing entry.Address, but
 // entry.Line may go forward or backward.
-func (r *LineReader) Next(entry *LineEntry) error {
+func (r *LineReader) Next(entry *LineEntry) (_r0 error) {
 	if r.buf.err != nil {
 		return r.buf.err
 	}
@@ -520,7 +520,7 @@ func (r *LineReader) Next(entry *LineEntry) error {
 
 // knownOpcodeLengths gives the opcode lengths (in varint arguments)
 // of known standard opcodes.
-func _knownOpcodeLengths() map[int32]int32 { return map[int32]int32{
+func _knownOpcodeLengths() (_r0 map[int32]int32) { return map[int32]int32{
 	lnsCopy:             0,
 	lnsAdvancePC:        1,
 	lnsAdvanceLine:      1,
@@ -539,7 +539,7 @@ func _knownOpcodeLengths() map[int32]int32 { return map[int32]int32{
 // step processes the next opcode and updates r.state. If the opcode
 // emits a row in the line table, this updates *entry and returns
 // true.
-func (r *LineReader) step(entry *LineEntry) bool {
+func (r *LineReader) step(entry *LineEntry) (_r0 bool) {
 	opcode := int32(r.buf.uint8())
 
 	if opcode >= r.opcodeBase {
@@ -583,7 +583,7 @@ func (r *LineReader) step(entry *LineEntry) bool {
 				r.buf.err = err
 				return false
 			} else if done {
-				r.buf.err = DecodeError{"line", startOff, "malformed DW_LNE_define_file operation"}
+				r.buf.err = &DecodeError{"line", startOff, "malformed DW_LNE_define_file operation"}
 				return false
 			}
 			r.updateFile()
@@ -677,7 +677,7 @@ type LineReaderPos struct {
 }
 
 // Tell returns the current position in the line table.
-func (r *LineReader) Tell() LineReaderPos {
+func (r *LineReader) Tell() (_r0 LineReaderPos) {
 	return LineReaderPos{r.buf.off, len(r.fileEntries), r.state, r.fileIndex}
 }
 
@@ -740,13 +740,13 @@ func (r *LineReader) resetState() {
 // table. This may contain more entries than the file table at an
 // earlier position in the line table, though existing entries never
 // change.
-func (r *LineReader) Files() []*LineFile {
+func (r *LineReader) Files() (_r0 []*LineFile) {
 	return r.fileEntries
 }
 
 // ErrUnknownPC is the error returned by LineReader.ScanPC when the
 // seek PC is not covered by any entry in the line table.
-const ErrUnknownPC = errors.Const("ErrUnknownPC")
+var ErrUnknownPC error
 
 // SeekPC sets *entry to the [LineEntry] that includes pc and positions
 // the reader on the next entry in the line table. If necessary, this
@@ -760,7 +760,7 @@ const ErrUnknownPC = errors.Const("ErrUnknownPC")
 // Hence, in the worst case, this takes time linear in the size of the
 // line table. If the caller wishes to do repeated fast PC lookups, it
 // should build an appropriate index of the line table.
-func (r *LineReader) SeekPC(pc uint64, entry *LineEntry) error {
+func (r *LineReader) SeekPC(pc uint64, entry *LineEntry) (_r0 error) {
 	if err := r.Next(entry); err != nil {
 		return err
 	}
@@ -807,14 +807,14 @@ func (r *LineReader) SeekPC(pc uint64, entry *LineEntry) error {
 // absolute paths. We avoid the filepath package because we want this
 // to behave the same regardless of our host system and because we
 // don't know what system the paths came from.
-func pathIsAbs(p string) bool {
+func pathIsAbs(p string) (_r0 bool) {
 	_, p = splitDrive(p)
 	return len(p) > 0 && (p[0] == '/' || p[0] == '\\')
 }
 
 // pathJoin joins dirname and filename. filename must be relative.
 // DWARF paths can be UNIX-style or DOS-style, so this handles both.
-func pathJoin(dirname, filename string) string {
+func pathJoin(dirname, filename string) (_r0 string) {
 	if len(dirname) == 0 {
 		return filename
 	}

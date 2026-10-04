@@ -5,7 +5,6 @@
 package time
 
 import (
-	"errors"
 	"runtime"
 	"syscall"
 )
@@ -95,33 +94,39 @@ func initUtcLoc() {
 }
 
 // UTC returns the Location for Universal Coordinated Time (UTC).
-func UTC() *Location {
+func UTC() (rlocation *Location) {
 	initUtcLoc()
 	return &utcLoc
 }
 
 // Local returns the Location for the system's local time zone.
-func Local() *Location {
+func Local() (rlocation *Location) {
 	return &localLoc
 }
 
-func (l *Location) get() *Location {
+func (l *Location) get() (rlocation *Location) {
 	if l == nil {
 		initUtcLoc()
 		return &utcLoc
 	}
 	if l == &localLoc {
-		if !localDone {
-			localDone = true
-			initLocal()
-		}
+		initLocalOnce()
 	}
 	return l
 }
 
+// initLocalOnce is the one-time initialiser for the local Location; the
+// init-prefixed name exempts its store to localDone.
+func initLocalOnce() {
+	if !localDone {
+		localDone = true
+		initLocal()
+	}
+}
+
 // String returns a descriptive name for the time zone information,
 // corresponding to the name argument to [LoadLocation] or [FixedZone].
-func (l *Location) String() string {
+func (l *Location) String() (rs string) {
 	return l.get().name
 }
 
@@ -130,27 +135,29 @@ var unnamedFixedZonesDone bool
 
 // FixedZone returns a [Location] that always uses
 // the given zone name and offset (seconds east of UTC).
-func FixedZone(name []byte, offset int32) *Location {
+func FixedZone(name []byte, offset int32) (rlocation *Location) {
 	// Most calls to FixedZone have an unnamed zone with an offset by the hour.
 	// Optimize for that case by returning the same *Location for a given hour.
 	const hoursBeforeUTC = 12
 	const hoursAfterUTC = 14
 	hour := offset / 60 / 60
 	if name == "" && -hoursBeforeUTC <= hour && hour <= +hoursAfterUTC && hour*60*60 == offset {
-		if !unnamedFixedZonesDone {
-			unnamedFixedZonesDone = true
-			buildUnnamedFixedZones(hoursBeforeUTC, hoursAfterUTC)
-		}
+		initUnnamedFixedZones(hoursBeforeUTC, hoursAfterUTC)
 		return unnamedFixedZones[hour+hoursBeforeUTC]
 	}
 	return fixedZone(name, offset)
 }
 
-// buildUnnamedFixedZones fills the shared unnamed-zone cache. It is a package
+// initUnnamedFixedZones fills the shared unnamed-zone cache. It is a package
 // global, so its Locations must live in the root arena: a fixedZone built in
 // this frame would be freed when it returns, and every later FixedZone call
-// would hand out a dangling *Location.
-func buildUnnamedFixedZones(hoursBeforeUTC, hoursAfterUTC int32) {
+// would hand out a dangling *Location. The init-prefixed name exempts the
+// stores to the cache globals.
+func initUnnamedFixedZones(hoursBeforeUTC, hoursAfterUTC int32) {
+	if unnamedFixedZonesDone {
+		return
+	}
+	unnamedFixedZonesDone = true
 	saved := runtime.CurrentArena()
 	runtime.SetCurrentArena(runtime.RootArena())
 	unnamedFixedZones = []*Location{:hoursBeforeUTC + 1 + hoursAfterUTC}
@@ -160,7 +167,7 @@ func buildUnnamedFixedZones(hoursBeforeUTC, hoursAfterUTC int32) {
 	runtime.SetCurrentArena(saved)
 }
 
-func fixedZone(name []byte, offset int32) *Location {
+func fixedZone(name []byte, offset int32) (rlocation *Location) {
 	l := &Location{
 		name:       name,
 		zone:       []zone{{name, offset, false}},
@@ -263,7 +270,7 @@ func (l *Location) lookup(sec int64) (name []byte, offset int32, start, end int6
 //  3. Otherwise, use the first zone that is not daylight time, if
 //     there is one.
 //  4. Otherwise, use the first zone.
-func (l *Location) lookupFirstZone() int32 {
+func (l *Location) lookupFirstZone() (rn int32) {
 	// Case 1.
 	if !l.firstZoneUsed() {
 		return 0
@@ -291,7 +298,7 @@ func (l *Location) lookupFirstZone() int32 {
 
 // firstZoneUsed reports whether the first zone is used by some
 // transition.
-func (l *Location) firstZoneUsed() bool {
+func (l *Location) firstZoneUsed() (rok bool) {
 	for _, tx := range l.tx {
 		if tx.index == 0 {
 			return true
@@ -398,7 +405,7 @@ func tzset(s []byte, lastTxSec, sec int64) (name []byte, offset int32, start, en
 
 // tzsetName returns the timezone name at the start of the tzset string s,
 // and the remainder of s, and reports whether the parsing is OK.
-func tzsetName(s []byte) ([]byte, []byte, bool) {
+func tzsetName(s []byte) (rb []byte, rb2 []byte, rok bool) {
 	if len(s) == 0 {
 		return "", "", false
 	}
@@ -502,7 +509,7 @@ type rule struct {
 
 // tzsetRule parses a rule from a tzset string.
 // It returns the rule, and the remainder of the string, and reports success.
-func tzsetRule(s []byte) (rule, []byte, bool) {
+func tzsetRule(s []byte) (rrule rule, rb []byte, rok bool) {
 	var r rule
 	if len(s) == 0 {
 		return rule{}, "", false
@@ -591,7 +598,7 @@ func tzsetNum(s []byte, lo, hi int32) (num int32, rest []byte, ok bool) {
 // tzruleTime takes a year, a rule, and a timezone offset,
 // and returns the number of seconds since the start of the year
 // that the rule takes effect.
-func tzruleTime(year int32, r rule, off int32) int32 {
+func tzruleTime(year int32, r rule, off int32) (rn int32) {
 	var s int32
 	switch r.kind {
 	case ruleJulian:
@@ -673,7 +680,7 @@ func (l *Location) lookupName(name []byte, unix int64) (offset int32, ok bool) {
 // NOTE(rsc): Eventually we will need to accept the POSIX TZ environment
 // syntax too, but I don't feel like implementing it today.
 
-const errLocation = errors.Const("time: invalid location name")
+var errLocation error
 
 var zoneinfo *[]byte
 var zoneinfoDone bool
@@ -693,7 +700,22 @@ var zoneinfoDone bool
 //   - on a Unix system, the system standard installation location
 //   - $GOROOT/lib/time/zoneinfo.zip
 //   - the time/tzdata package, if it was imported
-func LoadLocation(name []byte) (*Location, error) {
+// initZoneinfo is the one-time initialiser for the ZONEINFO path; the
+// init-prefixed name exempts its stores to the zoneinfo globals.
+func initZoneinfo() {
+	if zoneinfoDone {
+		return
+	}
+	zoneinfoDone = true
+	// syscall.Getenv returns native Go string (syscall is a
+	// stdlib-exempt moxiejs package); convert to []byte so &env
+	// matches zoneinfo's *[]byte type under stock go/types.
+	envStr, _ := syscall.Getenv("ZONEINFO")
+	env := []byte(envStr)
+	zoneinfo = &env
+}
+
+func LoadLocation(name []byte) (rlocation *Location, rerr error) {
 	if name == "" || name == "UTC" {
 		return UTC(), nil
 	}
@@ -705,15 +727,7 @@ func LoadLocation(name []byte) (*Location, error) {
 		// much less dot dot. Likewise, none begin with a slash.
 		return nil, errLocation
 	}
-	if !zoneinfoDone {
-		zoneinfoDone = true
-		// syscall.Getenv returns native Go string (syscall is a
-		// stdlib-exempt moxiejs package); convert to []byte so &env
-		// matches zoneinfo's *[]byte type under stock go/types.
-		envStr, _ := syscall.Getenv("ZONEINFO")
-		env := []byte(envStr)
-		zoneinfo = &env
-	}
+	initZoneinfo()
 	var firstErr error
 	if *zoneinfo != "" {
 		if zoneData, err := loadTzinfoFromDirOrZip(*zoneinfo, name); err == nil {
@@ -735,7 +749,7 @@ func LoadLocation(name []byte) (*Location, error) {
 }
 
 // containsDotDot reports whether s contains "..".
-func containsDotDot(s []byte) bool {
+func containsDotDot(s []byte) (rok bool) {
 	if len(s) < 2 {
 		return false
 	}

@@ -9,7 +9,7 @@ import (
 	"crypto/internal/fips140/sha512"
 )
 
-func testPrivateKey() *PrivateKey {
+func testPrivateKey() (ret0 *PrivateKey) {
 	// https://www.rfc-editor.org/rfc/rfc9500.html#section-2.3
 	return &PrivateKey{
 		pub: PublicKey{
@@ -34,7 +34,7 @@ func testPrivateKey() *PrivateKey {
 	}
 }
 
-func testHash() []byte {
+func testHash() (ret0 []byte) {
 	return []byte{
 		0x17, 0x1b, 0x1f, 0x5e, 0x9f, 0x8f, 0x8c, 0x5c,
 		0x42, 0xe8, 0x06, 0x59, 0x7b, 0x54, 0xc7, 0xb4,
@@ -48,15 +48,18 @@ func testHash() []byte {
 }
 
 func fipsPCT[P Point[P]](c *Curve[P], k *PrivateKey) {
-	fips140.PCT("ECDSA PCT", func() error {
+	var pctErr error
+	if fips140.Enabled {
 		digest := testHash()
-		gen := newDRBG(sha512.New, k.d, bits2octets(P256(), digest), nil)
-		sig, err := sign(c, k, gen, digest)
-		if err != nil {
-			return err
+		gen := newDRBG(sha512.New, k.d, bits2octets(P256(), digest), nil, nil)
+		sig, serr := sign(c, k, gen, digest)
+		if serr != nil {
+			pctErr = serr
+		} else {
+			pctErr = Verify(c, &k.pub, digest, sig)
 		}
-		return Verify(c, &k.pub, digest, sig)
-	})
+	}
+	fips140.PCT("ECDSA PCT", pctErr)
 }
 
 func fipsSelfTest() {}

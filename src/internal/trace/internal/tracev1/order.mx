@@ -32,23 +32,23 @@ const (
 
 // stateTransition returns goroutine state (sequence and status) when the event
 // becomes ready for merging (init) and the goroutine state after the event (next).
-func stateTransition(ev *Event) (g uint64, init, next gState) {
+func stateTransition(ev *Event) (g uint64, istate gState, next gState) {
 	// Note that we have an explicit return in each case, as that produces slightly better code (tested on Go 1.19).
 
 	switch ev.Type {
 	case EvGoCreate:
 		g = ev.Args[0]
-		init = gState{0, gDead}
+		istate = gState{0, gDead}
 		next = gState{1, gRunnable}
 		return
 	case EvGoWaiting, EvGoInSyscall:
 		g = ev.G
-		init = gState{1, gRunnable}
+		istate = gState{1, gRunnable}
 		next = gState{2, gWaiting}
 		return
 	case EvGoStart, EvGoStartLabel:
 		g = ev.G
-		init = gState{ev.Args[1], gRunnable}
+		istate = gState{ev.Args[1], gRunnable}
 		next = gState{ev.Args[1] + 1, gRunning}
 		return
 	case EvGoStartLocal:
@@ -59,34 +59,34 @@ func stateTransition(ev *Event) (g uint64, init, next gState) {
 		// seqinc is a stub for cases when event increments g sequence,
 		// but since we don't know current seq we also don't know next seq.
 		g = ev.G
-		init = gState{noseq, gRunnable}
+		istate = gState{noseq, gRunnable}
 		next = gState{seqinc, gRunning}
 		return
 	case EvGoBlock, EvGoBlockSend, EvGoBlockRecv, EvGoBlockSelect,
 		EvGoBlockSync, EvGoBlockCond, EvGoBlockNet, EvGoSleep,
 		EvGoSysBlock, EvGoBlockGC:
 		g = ev.G
-		init = gState{noseq, gRunning}
+		istate = gState{noseq, gRunning}
 		next = gState{noseq, gWaiting}
 		return
 	case EvGoSched, EvGoPreempt:
 		g = ev.G
-		init = gState{noseq, gRunning}
+		istate = gState{noseq, gRunning}
 		next = gState{noseq, gRunnable}
 		return
 	case EvGoUnblock, EvGoSysExit:
 		g = ev.Args[0]
-		init = gState{ev.Args[1], gWaiting}
+		istate = gState{ev.Args[1], gWaiting}
 		next = gState{ev.Args[1] + 1, gRunnable}
 		return
 	case EvGoUnblockLocal, EvGoSysExitLocal:
 		g = ev.Args[0]
-		init = gState{noseq, gWaiting}
+		istate = gState{noseq, gWaiting}
 		next = gState{seqinc, gRunnable}
 		return
 	case EvGCStart:
 		g = garbage
-		init = gState{ev.Args[0], gDead}
+		istate = gState{ev.Args[0], gDead}
 		next = gState{ev.Args[0] + 1, gDead}
 		return
 	default:
@@ -96,16 +96,16 @@ func stateTransition(ev *Event) (g uint64, init, next gState) {
 	}
 }
 
-func transitionReady(g uint64, curr, init gState) bool {
-	return g == unordered || (init.seq == noseq || init.seq == curr.seq) && init.status == curr.status
+func transitionReady(g uint64, curr, istate gState) (ready bool) {
+	return g == unordered || (istate.seq == noseq || istate.seq == curr.seq) && istate.status == curr.status
 }
 
-func transition(gs map[uint64]gState, g uint64, init, next gState) error {
+func transition(gs map[uint64]gState, g uint64, istate, next gState) (rerr error) {
 	if g == unordered {
 		return nil
 	}
 	curr := gs[g]
-	if !transitionReady(g, curr, init) {
+	if !transitionReady(g, curr, istate) {
 		// See comment near the call to transition, where we're building the frontier, for details on how this could
 		// possibly happen.
 		return errors.New("encountered impossible goroutine state transition")
@@ -120,38 +120,37 @@ func transition(gs map[uint64]gState, g uint64, init, next gState) error {
 	return nil
 }
 
-type orderEventList []orderEvent
-
-func (l *orderEventList) Less(i, j int32) bool {
-	return (*l)[i].ev.Ts < (*l)[j].ev.Ts
+func orderEventLess(l []orderEvent, i, j int32) (less bool) {
+	return l[i].ev.Ts < l[j].ev.Ts
 }
 
-func (h *orderEventList) Push(x orderEvent) {
-	*h = push(*h, x)
-	heapUp(h, len(*h)-1)
+func orderEventPush(h []orderEvent, x orderEvent) (out []orderEvent) {
+	out = push(h, x)
+	heapUp(out, len(out)-1)
+	return out
 }
 
-func (h *orderEventList) Pop() orderEvent {
-	n := len(*h) - 1
-	(*h)[0], (*h)[n] = (*h)[n], (*h)[0]
+func orderEventPop(h []orderEvent) (out []orderEvent, x orderEvent) {
+	n := len(h) - 1
+	h[0], h[n] = h[n], h[0]
 	heapDown(h, 0, n)
-	x := (*h)[len(*h)-1]
-	*h = (*h)[:len(*h)-1]
-	return x
+	x = h[len(h)-1]
+	out = h[:len(h)-1]
+	return out, x
 }
 
-func heapUp(h *orderEventList, j int32) {
+func heapUp(h []orderEvent, j int32) {
 	for {
 		i := (j - 1) / 2 // parent
-		if i == j || !h.Less(j, i) {
+		if i == j || !orderEventLess(h, j, i) {
 			break
 		}
-		(*h)[i], (*h)[j] = (*h)[j], (*h)[i]
+		h[i], h[j] = h[j], h[i]
 		j = i
 	}
 }
 
-func heapDown(h *orderEventList, i0, n int32) bool {
+func heapDown(h []orderEvent, i0, n int32) (moved bool) {
 	i := i0
 	for {
 		j1 := 2*i + 1
@@ -159,13 +158,13 @@ func heapDown(h *orderEventList, i0, n int32) bool {
 			break
 		}
 		j := j1 // left child
-		if j2 := j1 + 1; j2 < n && h.Less(j2, j1) {
+		if j2 := j1 + 1; j2 < n && orderEventLess(h, j2, j1) {
 			j = j2 // = 2*i + 2  // right child
 		}
-		if !h.Less(j, i) {
+		if !orderEventLess(h, j, i) {
 			break
 		}
-		(*h)[i], (*h)[j] = (*h)[j], (*h)[i]
+		h[i], h[j] = h[j], h[i]
 		i = j
 	}
 	return i > i0

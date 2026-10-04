@@ -58,7 +58,7 @@ import (
 	"math/big"
 )
 
-func _bigOne() *big.Int { return big.NewInt(1) }
+func _bigOne() (out *big.Int) { return big.NewInt(1) }
 
 // A PublicKey represents the public part of an RSA key.
 //
@@ -74,12 +74,12 @@ type PublicKey struct {
 
 // Size returns the modulus size in bytes. Raw signatures and ciphertexts
 // for or by this public key will have the same size.
-func (pub *PublicKey) Size() int32 {
+func (pub *PublicKey) Size() (n int32) {
 	return (pub.N.BitLen() + 7) / 8
 }
 
 // Equal reports whether pub and x have the same value.
-func (pub *PublicKey) Equal(x crypto.PublicKey) bool {
+func (pub *PublicKey) Equal(x crypto.PublicKey) (okay bool) {
 	xx, ok := x.(*PublicKey)
 	if !ok {
 		return false
@@ -115,13 +115,13 @@ type PrivateKey struct {
 }
 
 // Public returns the public key corresponding to priv.
-func (priv *PrivateKey) Public() crypto.PublicKey {
+func (priv *PrivateKey) Public() (out crypto.PublicKey) {
 	return &priv.PublicKey
 }
 
 // Equal reports whether priv and x have equivalent values. It ignores
 // Precomputed values.
-func (priv *PrivateKey) Equal(x crypto.PrivateKey) bool {
+func (priv *PrivateKey) Equal(x crypto.PrivateKey) (okay bool) {
 	xx, ok := x.(*PrivateKey)
 	if !ok {
 		return false
@@ -142,7 +142,7 @@ func (priv *PrivateKey) Equal(x crypto.PrivateKey) bool {
 
 // bigIntEqual reports whether a and b are equal leaking only their bit length
 // through timing side-channels.
-func bigIntEqual(a, b *big.Int) bool {
+func bigIntEqual(a, b *big.Int) (ok bool) {
 	return subtle.ConstantTimeCompare(a.Bytes(), b.Bytes()) == 1
 }
 
@@ -154,7 +154,7 @@ func bigIntEqual(a, b *big.Int) bool {
 // This method implements [crypto.Signer], which is an interface to support keys
 // where the private part is kept in, for example, a hardware module. Common
 // uses should use the Sign* functions in this package directly.
-func (priv *PrivateKey) Sign(random io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+func (priv *PrivateKey) Sign(random io.Reader, digest []byte, opts crypto.SignerOpts) (b []byte, derr error) {
 	if pssOpts, ok := opts.(*PSSOptions); ok {
 		return SignPSS(random, priv, pssOpts.Hash, digest, pssOpts)
 	}
@@ -173,9 +173,9 @@ func (priv *PrivateKey) Decrypt(random io.Reader, ciphertext []byte, opts crypto
 	switch opts := opts.(type) {
 	case *OAEPOptions:
 		if opts.MGFHash == 0 {
-			return decryptOAEP(opts.Hash.New(), opts.Hash.New(), priv, ciphertext, opts.Label)
+			return decryptOAEP(crypto.HashNew(opts.Hash), crypto.HashNew(opts.Hash), priv, ciphertext, opts.Label)
 		} else {
-			return decryptOAEP(opts.Hash.New(), opts.MGFHash.New(), priv, ciphertext, opts.Label)
+			return decryptOAEP(crypto.HashNew(opts.Hash), crypto.HashNew(opts.MGFHash), priv, ciphertext, opts.Label)
 		}
 
 	case *PKCS1v15DecryptOptions:
@@ -226,7 +226,7 @@ type CRTValue struct {
 // It returns nil if the key is valid, or else an error describing a problem.
 //
 // It runs faster on valid keys if run after [PrivateKey.Precompute].
-func (priv *PrivateKey) Validate() error {
+func (priv *PrivateKey) Validate() (derr error) {
 	// We can operate on keys based on d alone, but it isn't possible to encode
 	// with [crypto/x509.MarshalPKCS1PrivateKey], which unfortunately doesn't
 	// return an error.
@@ -242,14 +242,14 @@ func (priv *PrivateKey) Validate() error {
 	return err
 }
 
-func checkKeySize(size int32) error {
+func checkKeySize(size int32) (derr error) {
 	if size >= 1024 {
 		return nil
 	}
 	return fmt.Errorf("crypto/rsa: %d-bit keys are insecure (see https://go.dev/pkg/crypto/rsa#hdr-Minimum_key_size)", size)
 }
 
-func checkPublicKeySize(k *PublicKey) error {
+func checkPublicKeySize(k *PublicKey) (derr error) {
 	if k.N == nil {
 		return errors.New("crypto/rsa: missing public modulus")
 	}
@@ -266,7 +266,7 @@ func checkPublicKeySize(k *PublicKey) error {
 // and may change between calls and/or between versions.
 //
 // [Minimum key size]: https://pkg.go.dev/crypto/rsa#hdr-Minimum_key_size
-func GenerateKey(random io.Reader, bits int32) (*PrivateKey, error) {
+func GenerateKey(random io.Reader, bits int32) (out *PrivateKey, derr error) {
 	if err3 := checkKeySize(bits); err3 != nil {
 		return nil, err3
 	}
@@ -375,7 +375,7 @@ func GenerateKey(random io.Reader, bits int32) (*PrivateKey, error) {
 // reasons. Use [GenerateKey] instead.
 //
 // [On the Security of Multi-prime RSA]: http://www.cacr.math.uwaterloo.ca/techreports/2006/cacr2006-16.pdf
-func GenerateMultiPrimeKey(random io.Reader, nprimes int32, bits int32) (*PrivateKey, error) {
+func GenerateMultiPrimeKey(random io.Reader, nprimes int32, bits int32) (out *PrivateKey, derr error) {
 	if nprimes == 2 {
 		return GenerateKey(random, bits)
 	}
@@ -481,15 +481,15 @@ NextSetOfPrimes:
 // ErrMessageTooLong is returned when attempting to encrypt or sign a message
 // which is too large for the size of the key. When using [SignPSS], this can also
 // be returned if the size of the salt is too large.
-const ErrMessageTooLong = errors.Const("crypto/rsa: message too long for RSA key size")
+var ErrMessageTooLong error
 
 // ErrDecryption represents a failure to decrypt a message.
 // It is deliberately vague to avoid adaptive attacks.
-const ErrDecryption = errors.Const("crypto/rsa: decryption error")
+var ErrDecryption error
 
 // ErrVerification represents a failure to verify a signature.
 // It is deliberately vague to avoid adaptive attacks.
-const ErrVerification = errors.Const("crypto/rsa: verification error")
+var ErrVerification error
 
 // Precompute performs some calculations that speed up private key operations
 // in the future. It is safe to run on non-validated private keys.
@@ -507,7 +507,7 @@ func (priv *PrivateKey) Precompute() {
 	priv.Precomputed = precomputed
 }
 
-func (priv *PrivateKey) precompute() (PrecomputedValues, error) {
+func (priv *PrivateKey) precompute() (out PrecomputedValues, derr error) {
 	var precomputed PrecomputedValues
 
 	if priv.N == nil {
@@ -555,7 +555,7 @@ func (priv *PrivateKey) precompute() (PrecomputedValues, error) {
 	return precomputed, nil
 }
 
-func (priv *PrivateKey) precomputeLegacy() (PrecomputedValues, error) {
+func (priv *PrivateKey) precomputeLegacy() (out PrecomputedValues, derr error) {
 	var precomputed PrecomputedValues
 
 	k, err := rsa.NewPrivateKeyWithoutCRT(priv.N.Bytes(), priv.E, priv.D.Bytes())
@@ -610,7 +610,7 @@ func (priv *PrivateKey) precomputeLegacy() (PrecomputedValues, error) {
 	return precomputed, nil
 }
 
-func fipsPublicKey(pub *PublicKey) (*rsa.PublicKey, error) {
+func fipsPublicKey(pub *PublicKey) (out *rsa.PublicKey, derr error) {
 	N, err := bigmod.NewModulus(pub.N.Bytes())
 	if err != nil {
 		return nil, err
@@ -618,7 +618,7 @@ func fipsPublicKey(pub *PublicKey) (*rsa.PublicKey, error) {
 	return &rsa.PublicKey{N: N, E: pub.E}, nil
 }
 
-func fipsPrivateKey(priv *PrivateKey) (*rsa.PrivateKey, error) {
+func fipsPrivateKey(priv *PrivateKey) (out *rsa.PrivateKey, derr error) {
 	if priv.Precomputed.fips != nil {
 		return priv.Precomputed.fips, nil
 	}
@@ -627,4 +627,13 @@ func fipsPrivateKey(priv *PrivateKey) (*rsa.PrivateKey, error) {
 		return nil, err
 	}
 	return precomputed.fips, nil
+}
+
+func init() {
+	// Alias the FIPS 140 implementation's sentinels: the public and internal
+	// errors cross fipsError's switch, and errors.New would make them distinct
+	// pointers so no comparison could ever match.
+	ErrMessageTooLong = rsa.ErrMessageTooLong
+	ErrDecryption = rsa.ErrDecryption
+	ErrVerification = rsa.ErrVerification
 }

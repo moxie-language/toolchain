@@ -22,30 +22,38 @@ func (g *Graph) Transpose() {
 	}
 }
 
-// Topo returns a topological sort of g. This function is deterministic.
-func (g *Graph) Topo() [][]byte {
-	topo := [][]byte{:0:len(g.Nodes)}
-	marks := map[string]bool{}
+// topoVisit carries the depth-first scratch for Topo. It is a self-mutating
+// type so the walk can recurse without a closure capturing g, marks and topo.
+type topoVisit struct {
+	g     *Graph
+	marks map[string]bool
+	topo  [][]byte
+}
 
-	var visit func(n []byte)
-	visit = func(n []byte) {
-		if marks[n] {
-			return
-		}
-		for _, to := range g.Edges(n) {
-			visit(to)
-		}
-		marks[n] = true
-		topo = mxutil.Ensure(topo, 1)
-		topo = push(topo, n)
+func (v *topoVisit) visit(n []byte) {
+	if v.marks[n] {
+		return
 	}
+	for _, to := range v.g.Edges(n) {
+		v.visit(to)
+	}
+	v.marks[n] = true
+	v.topo = mxutil.Ensure(v.topo, 1)
+	v.topo = push(v.topo, n)
+}
+
+// Topo returns a topological sort of g. This function is deterministic.
+func (g *Graph) Topo() (out [][]byte) {
+	v := &topoVisit{g: g, marks: map[string]bool{}, topo: [][]byte{:0: len(g.Nodes)}}
+
 	for _, root := range g.Nodes {
-		visit(root)
+		v.visit(root)
 	}
-	for i, j := 0, len(topo)-1; i < j; i, j = i+1, j-1 {
-		topo[i], topo[j] = topo[j], topo[i]
+	out = v.topo
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
 	}
-	return topo
+	return out
 }
 
 // TransitiveReduction removes edges from g that are transitively

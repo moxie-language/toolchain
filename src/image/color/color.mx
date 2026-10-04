@@ -27,7 +27,7 @@ type RGBA struct {
 	R, G, B, A uint8
 }
 
-func (c RGBA) RGBA() (r, g, b, a uint32) {
+func (c *RGBA) RGBA() (r, g, b, a uint32) {
 	r = uint32(c.R)
 	r |= r << 8
 	g = uint32(c.G)
@@ -48,7 +48,7 @@ type RGBA64 struct {
 	R, G, B, A uint16
 }
 
-func (c RGBA64) RGBA() (r, g, b, a uint32) {
+func (c *RGBA64) RGBA() (r, g, b, a uint32) {
 	return uint32(c.R), uint32(c.G), uint32(c.B), uint32(c.A)
 }
 
@@ -57,7 +57,7 @@ type NRGBA struct {
 	R, G, B, A uint8
 }
 
-func (c NRGBA) RGBA() (r, g, b, a uint32) {
+func (c *NRGBA) RGBA() (r, g, b, a uint32) {
 	r = uint32(c.R)
 	r |= r << 8
 	r *= uint32(c.A)
@@ -81,7 +81,7 @@ type NRGBA64 struct {
 	R, G, B, A uint16
 }
 
-func (c NRGBA64) RGBA() (r, g, b, a uint32) {
+func (c *NRGBA64) RGBA() (r, g, b, a uint32) {
 	r = uint32(c.R)
 	r *= uint32(c.A)
 	r /= 0xffff
@@ -100,7 +100,7 @@ type Alpha struct {
 	A uint8
 }
 
-func (c Alpha) RGBA() (r, g, b, a uint32) {
+func (c *Alpha) RGBA() (r, g, b, a uint32) {
 	a = uint32(c.A)
 	a |= a << 8
 	return a, a, a, a
@@ -111,7 +111,7 @@ type Alpha16 struct {
 	A uint16
 }
 
-func (c Alpha16) RGBA() (r, g, b, a uint32) {
+func (c *Alpha16) RGBA() (r, g, b, a uint32) {
 	a = uint32(c.A)
 	return a, a, a, a
 }
@@ -121,7 +121,7 @@ type Gray struct {
 	Y uint8
 }
 
-func (c Gray) RGBA() (r, g, b, a uint32) {
+func (c *Gray) RGBA() (r, g, b, a uint32) {
 	y := uint32(c.Y)
 	y |= y << 8
 	return y, y, y, 0xffff
@@ -132,7 +132,7 @@ type Gray16 struct {
 	Y uint16
 }
 
-func (c Gray16) RGBA() (r, g, b, a uint32) {
+func (c *Gray16) RGBA() (r, g, b, a uint32) {
 	y := uint32(c.Y)
 	return y, y, y, 0xffff
 }
@@ -144,7 +144,7 @@ type Model interface {
 }
 
 // ModelFunc returns a [Model] that invokes f to implement the conversion.
-func ModelFunc(f func(Color) Color) Model {
+func ModelFunc(f func(Color) Color) (out Model) {
 	// Note: using *modelFunc as the implementation
 	// means that callers can still use comparisons
 	// like m == RGBAModel. This is not possible if
@@ -157,90 +157,90 @@ type modelFunc struct {
 	f func(Color) Color
 }
 
-func (m *modelFunc) Convert(c Color) Color {
+func (m *modelFunc) Convert(c Color) (out Color) {
 	return m.f(c)
 }
 
 // Models for the standard color types.
-func RGBAModel() Model    { return ModelFunc(rgbaModel) }
-func RGBA64Model() Model  { return ModelFunc(rgba64Model) }
-func NRGBAModel() Model   { return ModelFunc(nrgbaModel) }
-func NRGBA64Model() Model { return ModelFunc(nrgba64Model) }
-func AlphaModel() Model   { return ModelFunc(alphaModel) }
-func Alpha16Model() Model { return ModelFunc(alpha16Model) }
-func GrayModel() Model    { return ModelFunc(grayModel) }
-func Gray16Model() Model  { return ModelFunc(gray16Model) }
+func RGBAModel() (out Model)    { return ModelFunc(rgbaModel) }
+func RGBA64Model() (out Model)  { return ModelFunc(rgba64Model) }
+func NRGBAModel() (out Model)   { return ModelFunc(nrgbaModel) }
+func NRGBA64Model() (out Model) { return ModelFunc(nrgba64Model) }
+func AlphaModel() (out Model)   { return ModelFunc(alphaModel) }
+func Alpha16Model() (out Model) { return ModelFunc(alpha16Model) }
+func GrayModel() (out Model)    { return ModelFunc(grayModel) }
+func Gray16Model() (out Model)  { return ModelFunc(gray16Model) }
 
-func rgbaModel(c Color) Color {
-	if _, ok := c.(RGBA); ok {
+func rgbaModel(c Color) (out Color) {
+	if _, ok := c.(*RGBA); ok {
 		return c
 	}
 	r, g, b, a := c.RGBA()
-	return RGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), uint8(a >> 8)}
+	return &RGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), uint8(a >> 8)}
 }
 
-func rgba64Model(c Color) Color {
-	if _, ok := c.(RGBA64); ok {
+func rgba64Model(c Color) (out Color) {
+	if _, ok := c.(*RGBA64); ok {
 		return c
 	}
 	r, g, b, a := c.RGBA()
-	return RGBA64{uint16(r), uint16(g), uint16(b), uint16(a)}
+	return &RGBA64{uint16(r), uint16(g), uint16(b), uint16(a)}
 }
 
-func nrgbaModel(c Color) Color {
-	if _, ok := c.(NRGBA); ok {
+func nrgbaModel(c Color) (out Color) {
+	if _, ok := c.(*NRGBA); ok {
 		return c
 	}
 	r, g, b, a := c.RGBA()
 	if a == 0xffff {
-		return NRGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), 0xff}
+		return &NRGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), 0xff}
 	}
 	if a == 0 {
-		return NRGBA{0, 0, 0, 0}
+		return &NRGBA{0, 0, 0, 0}
 	}
 	// Since Color.RGBA returns an alpha-premultiplied color, we should have r <= a && g <= a && b <= a.
 	r = (r * 0xffff) / a
 	g = (g * 0xffff) / a
 	b = (b * 0xffff) / a
-	return NRGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), uint8(a >> 8)}
+	return &NRGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), uint8(a >> 8)}
 }
 
-func nrgba64Model(c Color) Color {
-	if _, ok := c.(NRGBA64); ok {
+func nrgba64Model(c Color) (out Color) {
+	if _, ok := c.(*NRGBA64); ok {
 		return c
 	}
 	r, g, b, a := c.RGBA()
 	if a == 0xffff {
-		return NRGBA64{uint16(r), uint16(g), uint16(b), 0xffff}
+		return &NRGBA64{uint16(r), uint16(g), uint16(b), 0xffff}
 	}
 	if a == 0 {
-		return NRGBA64{0, 0, 0, 0}
+		return &NRGBA64{0, 0, 0, 0}
 	}
 	// Since Color.RGBA returns an alpha-premultiplied color, we should have r <= a && g <= a && b <= a.
 	r = (r * 0xffff) / a
 	g = (g * 0xffff) / a
 	b = (b * 0xffff) / a
-	return NRGBA64{uint16(r), uint16(g), uint16(b), uint16(a)}
+	return &NRGBA64{uint16(r), uint16(g), uint16(b), uint16(a)}
 }
 
-func alphaModel(c Color) Color {
-	if _, ok := c.(Alpha); ok {
+func alphaModel(c Color) (out Color) {
+	if _, ok := c.(*Alpha); ok {
 		return c
 	}
 	_, _, _, a := c.RGBA()
-	return Alpha{uint8(a >> 8)}
+	return &Alpha{uint8(a >> 8)}
 }
 
-func alpha16Model(c Color) Color {
-	if _, ok := c.(Alpha16); ok {
+func alpha16Model(c Color) (out Color) {
+	if _, ok := c.(*Alpha16); ok {
 		return c
 	}
 	_, _, _, a := c.RGBA()
-	return Alpha16{uint16(a)}
+	return &Alpha16{uint16(a)}
 }
 
-func grayModel(c Color) Color {
-	if _, ok := c.(Gray); ok {
+func grayModel(c Color) (out Color) {
+	if _, ok := c.(*Gray); ok {
 		return c
 	}
 	r, g, b, _ := c.RGBA()
@@ -255,11 +255,11 @@ func grayModel(c Color) Color {
 	// because the return value is 8 bit color, not 16 bit color.
 	y := (19595*r + 38470*g + 7471*b + 1<<15) >> 24
 
-	return Gray{uint8(y)}
+	return &Gray{uint8(y)}
 }
 
-func gray16Model(c Color) Color {
-	if _, ok := c.(Gray16); ok {
+func gray16Model(c Color) (out Color) {
+	if _, ok := c.(*Gray16); ok {
 		return c
 	}
 	r, g, b, _ := c.RGBA()
@@ -271,23 +271,21 @@ func gray16Model(c Color) Color {
 	// Note that 19595 + 38470 + 7471 equals 65536.
 	y := (19595*r + 38470*g + 7471*b + 1<<15) >> 16
 
-	return Gray16{uint16(y)}
+	return &Gray16{uint16(y)}
 }
 
-// Palette is a palette of colors.
-type Palette []Color
 
-// Convert returns the palette color closest to c in Euclidean R,G,B space.
-func (p Palette) Convert(c Color) Color {
+// PaletteConvert returns the palette color closest to c in Euclidean R,G,B space.
+func PaletteConvert(p []Color, c Color) (out Color) {
 	if len(p) == 0 {
 		return nil
 	}
-	return p[p.Index(c)]
+	return p[PaletteIndex(p, c)]
 }
 
-// Index returns the index of the palette color closest to c in Euclidean
+// PaletteIndex returns the index of the palette color closest to c in Euclidean
 // R,G,B,A space.
-func (p Palette) Index(c Color) int32 {
+func PaletteIndex(p []Color, c Color) (ret int32) {
 	// A batch version of this computation is in image/draw/draw.go.
 
 	cr, cg, cb, ca := c.RGBA()
@@ -309,7 +307,7 @@ func (p Palette) Index(c Color) int32 {
 // adding four of those won't overflow a uint32.
 //
 // x and y are both assumed to be in the range [0, 0xffff].
-func sqDiff(x, y uint32) uint32 {
+func sqDiff(x, y uint32) (out uint32) {
 	// The canonical code of this function looks as follows:
 	//
 	//	var d uint32
@@ -336,7 +334,7 @@ func sqDiff(x, y uint32) uint32 {
 	return (d * d) >> 2
 }
 
-func Black() Gray16       { return Gray16{0} }
-func White() Gray16       { return Gray16{0xffff} }
-func Transparent() Alpha16 { return Alpha16{0} }
-func Opaque() Alpha16     { return Alpha16{0xffff} }
+func Black() (out *Gray16)        { return &Gray16{0} }
+func White() (out *Gray16)        { return &Gray16{0xffff} }
+func Transparent() (out *Alpha16) { return &Alpha16{0} }
+func Opaque() (out *Alpha16)      { return &Alpha16{0xffff} }

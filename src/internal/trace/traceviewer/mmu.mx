@@ -40,26 +40,27 @@ import (
 
 type MutatorUtilFunc func(trace.UtilFlags) ([][]trace.MutatorUtil, error)
 
-func MMUHandlerFunc(ranges []Range, f MutatorUtilFunc) http.HandlerFunc {
-	mmu := &mmu{
+func MMUHandlerFunc(ranges []Range, f MutatorUtilFunc) (out http.Handler) {
+	return &mmu{
 		cache:  map[trace.UtilFlags]*mmuCacheEntry{},
 		f:      f,
 		ranges: ranges,
 	}
-	return func(w http.ResponseWriter, r *http.Request) {
-		switch r.FormValue("mode") {
-		case "plot":
-			mmu.HandlePlot(w, r)
-			return
-		case "details":
-			mmu.HandleDetails(w, r)
-			return
-		}
-		http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(templMMU))
-	}
 }
 
-func _utilFlagNames() map[string]trace.UtilFlags {
+func (m *mmu) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.FormValue("mode") {
+	case "plot":
+		m.HandlePlot(w, r)
+		return
+	case "details":
+		m.HandleDetails(w, r)
+		return
+	}
+	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(templMMU))
+}
+
+func _utilFlagNames() (out map[string]trace.UtilFlags) {
 	return map[string]trace.UtilFlags{
 		"perProc":    trace.UtilPerProc,
 		"stw":        trace.UtilSTW,
@@ -69,7 +70,7 @@ func _utilFlagNames() map[string]trace.UtilFlags {
 	}
 }
 
-func requestUtilFlags(r *http.Request) trace.UtilFlags {
+func requestUtilFlags(r *http.Request) (out trace.UtilFlags) {
 	ufn := _utilFlagNames()
 	var flags trace.UtilFlags
 	for _, flagStr := range bytes.Split(r.FormValue("flags"), "|") {
@@ -91,7 +92,7 @@ type mmu struct {
 	ranges []Range
 }
 
-func (m *mmu) get(flags trace.UtilFlags) ([][]trace.MutatorUtil, *trace.MMUCurve, error) {
+func (m *mmu) get(flags trace.UtilFlags) (util [][]trace.MutatorUtil, curve *trace.MMUCurve, err error) {
 	entry := m.cache[flags]
 	if entry == nil {
 		entry = &mmuCacheEntry{}
@@ -100,12 +101,12 @@ func (m *mmu) get(flags trace.UtilFlags) ([][]trace.MutatorUtil, *trace.MMUCurve
 
 	if !entry.done {
 		entry.done = true
-		util, err := m.f(flags)
-		if err != nil {
-			entry.err = err
+		u, ferr := m.f(flags)
+		if ferr != nil {
+			entry.err = ferr
 		} else {
-			entry.util = util
-			entry.mmuCurve = trace.NewMMUCurve(util)
+			entry.util = u
+			entry.mmuCurve = trace.NewMMUCurve(u)
 		}
 	}
 	return entry.util, entry.mmuCurve, entry.err
@@ -130,7 +131,7 @@ func (m *mmu) HandlePlot(w http.ResponseWriter, r *http.Request) {
 	// Find a nice starting point for the plot.
 	xMin := time.Second
 	for xMin > 1 {
-		if mmu := mmuCurve.MMU(xMin); mmu < 0.0001 {
+		if u := mmuCurve.MMU(xMin); u < 0.0001 {
 			break
 		}
 		xMin /= 1000
@@ -378,9 +379,9 @@ func (m *mmu) HandleDetails(w http.ResponseWriter, r *http.Request) {
 	}
 
 	windowStr := r.FormValue("window")
-	window, err := strconv.ParseUint(windowStr, 10, 64)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to parse window parameter %q: %v", windowStr, err), http.StatusBadRequest)
+	window, perr := strconv.ParseUint(windowStr, 10, 64)
+	if perr != nil {
+		http.Error(w, fmt.Sprintf("failed to parse window parameter %q: %v", windowStr, perr), http.StatusBadRequest)
 		return
 	}
 	worst := mmuCurve.Examples(time.Duration(window), 10)
@@ -404,7 +405,7 @@ type linkedUtilWindow struct {
 	URL []byte
 }
 
-func (m *mmu) newLinkedUtilWindow(ui trace.UtilWindow, window time.Duration) linkedUtilWindow {
+func (m *mmu) newLinkedUtilWindow(ui trace.UtilWindow, window time.Duration) (out linkedUtilWindow) {
 	// Find the range containing this window.
 	var r Range
 	for _, r = range m.ranges {

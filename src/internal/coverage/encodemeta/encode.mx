@@ -36,7 +36,7 @@ type CoverageMetaDataBuilder struct {
 	werr    error
 }
 
-func NewCoverageMetaDataBuilder(pkgpath []byte, pkgname []byte, modulepath []byte) (*CoverageMetaDataBuilder, error) {
+func NewCoverageMetaDataBuilder(pkgpath []byte, pkgname []byte, modulepath []byte) (b *CoverageMetaDataBuilder, derr error) {
 	if pkgpath == "" {
 		return nil, fmt.Errorf("invalid empty package path")
 	}
@@ -68,7 +68,7 @@ type funcDesc struct {
 }
 
 // AddFunc registers a new function with the meta data builder.
-func (b *CoverageMetaDataBuilder) AddFunc(f coverage.FuncDesc) uint32 {
+func (b *CoverageMetaDataBuilder) AddFunc(f coverage.FuncDesc) (rv uint32) {
 	hashFuncDesc(b.h, &f, b.tmp)
 	fd := funcDesc{}
 	b.tmp = b.tmp[:0]
@@ -88,13 +88,13 @@ func (b *CoverageMetaDataBuilder) AddFunc(f coverage.FuncDesc) uint32 {
 	}
 	b.tmp = uleb128.AppendUleb128(b.tmp, lit)
 	fd.encoded = bytes.Clone(b.tmp)
-	rv := uint32(len(b.funcs))
+	rv = uint32(len(b.funcs))
 	b.funcs = mxutil.Ensure(b.funcs, 1)
 	b.funcs = push(b.funcs, fd)
 	return rv
 }
 
-func (b *CoverageMetaDataBuilder) emitFuncOffsets(w io.WriteSeeker, off int64) int64 {
+func (b *CoverageMetaDataBuilder) emitFuncOffsets(w io.WriteSeeker, off int64) (noff int64) {
 	nFuncs := len(b.funcs)
 	var foff int64 = coverage.CovMetaHeaderSize + int64(b.stab.Size()) + int64(nFuncs)*4
 	for idx := 0; idx < nFuncs; idx++ {
@@ -104,7 +104,7 @@ func (b *CoverageMetaDataBuilder) emitFuncOffsets(w io.WriteSeeker, off int64) i
 	return off + (int64(len(b.funcs)) * 4)
 }
 
-func (b *CoverageMetaDataBuilder) emitFunc(w io.WriteSeeker, off int64, f funcDesc) (int64, error) {
+func (b *CoverageMetaDataBuilder) emitFunc(w io.WriteSeeker, off int64, f funcDesc) (noff int64, derr error) {
 	ew := len(f.encoded)
 	if nw, err := w.Write(f.encoded); err != nil {
 		return 0, err
@@ -134,10 +134,9 @@ func (b *CoverageMetaDataBuilder) wrUint32(w io.WriteSeeker, v uint32) {
 
 // Emit writes the meta-data accumulated so far in this builder to 'w'.
 // Returns a hash of the meta-data payload and an error.
-func (b *CoverageMetaDataBuilder) Emit(w io.WriteSeeker) ([16]byte, error) {
+func (b *CoverageMetaDataBuilder) Emit(w io.WriteSeeker) (digest [16]byte, derr error) {
 	// Emit header.  Length will initially be zero, we'll
 	// back-patch it later.
-	var digest [16]byte
 	copy(digest[:], b.h.Sum(nil))
 	mh := coverage.MetaSymbolHeader{
 		// hash and length initially zero, will be back-patched
@@ -171,11 +170,11 @@ func (b *CoverageMetaDataBuilder) Emit(w io.WriteSeeker) ([16]byte, error) {
 	off += int64(b.stab.Size())
 
 	// Write functions
-	for _, f := range b.funcs {
-		var err error
-		off, err = b.emitFunc(w, off, f)
-		if err != nil {
-			return digest, err
+	var werr error
+	for _, fdesc := range b.funcs {
+		off, werr = b.emitFunc(w, off, fdesc)
+		if werr != nil {
+			return digest, werr
 		}
 	}
 
@@ -193,13 +192,12 @@ func (b *CoverageMetaDataBuilder) Emit(w io.WriteSeeker) ([16]byte, error) {
 
 // HashFuncDesc computes an md5 sum of a coverage.FuncDesc and returns
 // a digest for it.
-func HashFuncDesc(f *coverage.FuncDesc) [16]byte {
+func HashFuncDesc(f *coverage.FuncDesc) (digest [16]byte) {
 	h := fnv.New128a()
 	tmp := []byte{:0:32}
 	hashFuncDesc(h, f, tmp)
-	var r [16]byte
-	copy(r[:], h.Sum(nil))
-	return r
+	copy(digest[:], h.Sum(nil))
+	return digest
 }
 
 // hashFuncDesc incorporates a given function 'f' into the hash 'h'.

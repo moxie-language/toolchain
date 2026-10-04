@@ -17,13 +17,13 @@ import (
 const ratGobVersion byte = 1
 
 // GobEncode implements the [encoding/gob.GobEncoder] interface.
-func (x *Rat) GobEncode() ([]byte, error) {
+func (x *Rat) GobEncode() (rb []byte, rerr error) {
 	if x == nil {
 		return nil, nil
 	}
 	buf := []byte{:1+4+(len(x.a.abs)+len(x.b.abs))*_S} // extra bytes for version and sign bit (1), and numerator length (4)
-	i := x.b.abs.bytes(buf)
-	j := x.a.abs.bytes(buf[:i])
+	i := natBytes(x.b.abs, buf)
+	j := natBytes(x.a.abs, buf[:i])
 	n := i - j
 	if int32(uint32(n)) != n {
 		// this should never happen
@@ -40,7 +40,7 @@ func (x *Rat) GobEncode() ([]byte, error) {
 }
 
 // GobDecode implements the [encoding/gob.GobDecoder] interface.
-func (z *Rat) GobDecode(buf []byte) error {
+func (z *Rat) GobDecode(buf []byte) (rerr error) {
 	if len(buf) == 0 {
 		// Other side sent a nil or default value.
 		*z = Rat{}
@@ -63,13 +63,13 @@ func (z *Rat) GobDecode(buf []byte) error {
 		return errors.New("Rat.GobDecode: buffer too small")
 	}
 	z.a.neg = b&1 != 0
-	z.a.abs = z.a.abs.setBytes(buf[j:i])
-	z.b.abs = z.b.abs.setBytes(buf[i:])
+	z.a.abs = natSetBytes(z.a.abs, buf[j:i])
+	z.b.abs = natSetBytes(z.b.abs, buf[i:])
 	return nil
 }
 
 // AppendText implements the [encoding.TextAppender] interface.
-func (x *Rat) AppendText(b []byte) ([]byte, error) {
+func (x *Rat) AppendText(b []byte) (rb []byte, rerr error) {
 	if x.IsInt() {
 		return x.a.AppendText(b)
 	}
@@ -82,7 +82,7 @@ func (x *Rat) MarshalText() (text []byte, err error) {
 }
 
 // UnmarshalText implements the [encoding.TextUnmarshaler] interface.
-func (z *Rat) UnmarshalText(text []byte) error {
+func (z *Rat) UnmarshalText(text []byte) (rerr error) {
 	// TODO(gri): get rid of the []byte/string conversion
 	if _, ok := z.SetString([]byte(text)); !ok {
 		return fmt.Errorf("math/big: cannot unmarshal %q into a *big.Rat", text)

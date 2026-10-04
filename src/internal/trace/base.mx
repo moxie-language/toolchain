@@ -31,7 +31,7 @@ type baseEvent struct {
 
 // extra returns a slice representing extra available space in args
 // that the parser can use to pass data up into Event.
-func (e *baseEvent) extra(v version.Version) []uint64 {
+func (e *baseEvent) extra(v version.Version) (out []uint64) {
 	switch v {
 	case version.Go122:
 		return e.args[len(tracev2.Specs()[e.typ].Args)-1:]
@@ -60,27 +60,27 @@ type evTable struct {
 
 // addExtraString adds an extra string to the evTable and returns
 // a unique ID for the string in the table.
-func (t *evTable) addExtraString(s []byte) extraStringID {
-	if s == "" {
+func (t *evTable) addExtraString(s []byte) (eid extraStringID) {
+	if len(s) == 0 {
 		return 0
 	}
 	if t.extraStringIDs == nil {
 		t.extraStringIDs = map[string]extraStringID{}
 	}
-	if id, ok := t.extraStringIDs[s]; ok {
-		return id
+	if xid, ok := t.extraStringIDs[s]; ok {
+		return xid
 	}
 	t.nextExtra++
-	id := t.nextExtra
+	nid := t.nextExtra
 	t.extraStrings = mxutil.Ensure(t.extraStrings, 1)
 	t.extraStrings = push(t.extraStrings, s)
-	t.extraStringIDs[s] = id
-	return id
+	t.extraStringIDs[s] = nid
+	return nid
 }
 
 // getExtraString returns the extra string for the provided ID.
 // The ID must have been produced by addExtraString for this evTable.
-func (t *evTable) getExtraString(id extraStringID) []byte {
+func (t *evTable) getExtraString(id extraStringID) (out []byte) {
 	if id == 0 {
 		return ""
 	}
@@ -99,7 +99,7 @@ type dataTable[EI ~uint64, E comparable] struct {
 // Returns an error if a mapping for id already exists, regardless
 // of whether or not s is the same in content. This should be used
 // for validation during parsing.
-func (d *dataTable[EI, E]) insert(id EI, data E) error {
+func (d *dataTable[EI, E]) insert(id EI, data E) (err error) {
 	if d.sparse == nil {
 		d.sparse = map[EI]E{}
 	}
@@ -152,7 +152,7 @@ func (d *dataTable[EI, E]) compactify() {
 
 // get returns the E for id or false if it doesn't
 // exist. This should be used for validation during parsing.
-func (d *dataTable[EI, E]) get(id EI) (E, bool) {
+func (d *dataTable[EI, E]) get(id EI) (val E, okay bool) {
 	var zero E
 	if id == 0 {
 		return zero, true
@@ -170,7 +170,7 @@ func (d *dataTable[EI, E]) get(id EI) (E, bool) {
 }
 
 // forEach iterates over all ID/value pairs in the data table.
-func (d *dataTable[EI, E]) forEach(yield func(EI, E) bool) bool {
+func (d *dataTable[EI, E]) forEach(yield func(EI, E) bool) (out bool) {
 	for id, value := range d.dense {
 		if d.present[id/8]&(uint8(1)<<(id%8)) == 0 {
 			continue
@@ -193,7 +193,7 @@ func (d *dataTable[EI, E]) forEach(yield func(EI, E) bool) bool {
 // mustGet returns the E for id or panics if it fails.
 //
 // This should only be used if id has already been validated.
-func (d *dataTable[EI, E]) mustGet(id EI) E {
+func (d *dataTable[EI, E]) mustGet(id EI) (val E) {
 	data, ok := d.get(id)
 	if !ok {
 		panic(fmt.Sprintf("expected id %d in %T table", id, data))
@@ -205,8 +205,8 @@ func (d *dataTable[EI, E]) mustGet(id EI) E {
 type frequency float64
 
 // mul multiplies an unprocessed to produce a time in nanoseconds.
-func (f frequency) mul(t timestamp) Time {
-	return Time(float64(t) * float64(f))
+func (f *frequency) mul(t timestamp) (out Time) {
+	return Time(float64(t) * float64(*f))
 }
 
 // stringID is an index into the string table for a generation.
@@ -230,7 +230,7 @@ type cpuSample struct {
 //
 // We don't just store it as an Event in generation to minimize
 // the amount of pointer data floating around.
-func (s cpuSample) asEvent(table *evTable) Event {
+func (s *cpuSample) asEvent(table *evTable) (out Event) {
 	// TODO(mknyszek): This is go122-specific, but shouldn't be.
 	// Generalize this in the future.
 	e := Event{
@@ -250,10 +250,10 @@ type stack struct {
 	pcs []uint64
 }
 
-func (s stack) String() string {
+func (s *stack) String() (out string) {
 	var sb bytes.Buffer
-	for _, frame := range s.pcs {
-		fmt.Fprintf(&sb, "\t%#v\n", frame)
+	for _, fr := range s.pcs {
+		fmt.Fprintf(&sb, "\t%#v\n", fr)
 	}
 	return sb.String()
 }

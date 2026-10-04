@@ -42,7 +42,7 @@ type message interface {
 	encode(*buffer)
 }
 
-func marshal(m message) []byte {
+func marshal(m message) (out []byte) {
 	var b buffer
 	m.encode(&b)
 	return b.data
@@ -171,15 +171,15 @@ func unmarshal(data []byte, m message) (err error) {
 	return decodeMessage(&b, m)
 }
 
-func le64(p []byte) uint64 {
+func le64(p []byte) (v uint64) {
 	return uint64(p[0]) | uint64(p[1])<<8 | uint64(p[2])<<16 | uint64(p[3])<<24 | uint64(p[4])<<32 | uint64(p[5])<<40 | uint64(p[6])<<48 | uint64(p[7])<<56
 }
 
-func le32(p []byte) uint32 {
+func le32(p []byte) (v uint32) {
 	return uint32(p[0]) | uint32(p[1])<<8 | uint32(p[2])<<16 | uint32(p[3])<<24
 }
 
-func decodeVarint(data []byte) (uint64, []byte, error) {
+func decodeVarint(data []byte) (v uint64, rest []byte, rerr error) {
 	var i int32
 	var u uint64
 	for i = 0; ; i++ {
@@ -193,7 +193,7 @@ func decodeVarint(data []byte) (uint64, []byte, error) {
 	}
 }
 
-func decodeField(b *buffer, data []byte) ([]byte, error) {
+func decodeField(b *buffer, data []byte) (out []byte, rerr error) {
 	x, data, err := decodeVarint(data)
 	if err != nil {
 		return nil, err
@@ -238,14 +238,14 @@ func decodeField(b *buffer, data []byte) ([]byte, error) {
 	return data, nil
 }
 
-func checkType(b *buffer, typ int32) error {
+func checkType(b *buffer, typ int32) (rerr error) {
 	if b.typ != typ {
 		return errors.New("type mismatch")
 	}
 	return nil
 }
 
-func decodeMessage(b *buffer, m message) error {
+func decodeMessage(b *buffer, m message) (rerr error) {
 	if err := checkType(b, 2); err != nil {
 		return err
 	}
@@ -261,14 +261,14 @@ func decodeMessage(b *buffer, m message) error {
 		if b.field >= len(dec) || dec[b.field] == nil {
 			continue
 		}
-		if err := dec[b.field](b, m); err != nil {
-			return err
+		if cerr := dec[b.field](b, m); cerr != nil {
+			return cerr
 		}
 	}
 	return nil
 }
 
-func decodeInt64(b *buffer, x *int64) error {
+func decodeInt64(b *buffer, x *int64) (rerr error) {
 	if err := checkType(b, 0); err != nil {
 		return err
 	}
@@ -276,7 +276,7 @@ func decodeInt64(b *buffer, x *int64) error {
 	return nil
 }
 
-func decodeInt64s(b *buffer, x *[]int64) error {
+func decodeInt64s(b *buffer, x *[]int64) (rerr error) {
 	if b.typ == 2 {
 		// Packed encoding
 		data := b.data
@@ -299,7 +299,7 @@ func decodeInt64s(b *buffer, x *[]int64) error {
 	return nil
 }
 
-func decodeUint64(b *buffer, x *uint64) error {
+func decodeUint64(b *buffer, x *uint64) (rerr error) {
 	if err := checkType(b, 0); err != nil {
 		return err
 	}
@@ -307,7 +307,7 @@ func decodeUint64(b *buffer, x *uint64) error {
 	return nil
 }
 
-func decodeUint64s(b *buffer, x *[]uint64) error {
+func decodeUint64s(b *buffer, x *[]uint64) (rerr error) {
 	if b.typ == 2 {
 		data := b.data
 		// Packed encoding
@@ -322,15 +322,15 @@ func decodeUint64s(b *buffer, x *[]uint64) error {
 		}
 		return nil
 	}
-	var u uint64
-	if err := decodeUint64(b, &u); err != nil {
+	var v uint64
+	if err := decodeUint64(b, &v); err != nil {
 		return err
 	}
-	*x = push(*x, u)
+	*x = push(*x, v)
 	return nil
 }
 
-func decodeString(b *buffer, x *[]byte) error {
+func decodeString(b *buffer, x *[]byte) (rerr error) {
 	if err := checkType(b, 2); err != nil {
 		return err
 	}
@@ -338,7 +338,7 @@ func decodeString(b *buffer, x *[]byte) error {
 	return nil
 }
 
-func decodeStrings(b *buffer, x *[][]byte) error {
+func decodeStrings(b *buffer, x *[][]byte) (rerr error) {
 	var s []byte
 	if err := decodeString(b, &s); err != nil {
 		return err
@@ -347,7 +347,7 @@ func decodeStrings(b *buffer, x *[][]byte) error {
 	return nil
 }
 
-func decodeBool(b *buffer, x *bool) error {
+func decodeBool(b *buffer, x *bool) (rerr error) {
 	if err := checkType(b, 0); err != nil {
 		return err
 	}

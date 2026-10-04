@@ -13,20 +13,8 @@ import (
 //:linkname fatal crypto/internal/fips140.fatal
 func fatal([]byte)
 
-// CAST runs the named Cryptographic Algorithm Self-Test (if operated in FIPS
-// mode) and aborts the program (stopping the module input/output and entering
-// the "error state") if the self-test fails.
-//
-// CASTs are mandatory self-checks that must be performed by FIPS 140-3 modules
-// before the algorithm is used. See Implementation Guidance 10.3.A.
-//
-// The name must not contain commas, colons, hashes, or equal signs.
-//
-// If a package p calls CAST from its init function, an import of p should also
-// be added to crypto/internal/fips140test. If a package p calls CAST on the first
-// use of the algorithm, an invocation of that algorithm should be added to
-// fipstest.TestConditionals.
-func CAST(name []byte, f func() error) {
+// checkSelfTestName rejects a self-test name with reserved characters.
+func checkSelfTestName(name []byte) {
 	if bytes.ContainsAny(name, ",#=:") {
 		var msg []byte
 		msg = mxutil.Ensure(msg, len("fips: invalid self-test name: "))
@@ -35,73 +23,68 @@ func CAST(name []byte, f func() error) {
 		msg = push(msg, name...)
 		panic(string(msg))
 	}
+}
+
+// failSelfTest aborts the program after a failed self-test.
+func failSelfTest(name []byte, err error) {
+	var msg2 []byte
+	msg2 = mxutil.Ensure(msg2, len("FIPS 140-3 self-test failed: "))
+	msg2 = push(msg2, "FIPS 140-3 self-test failed: "...)
+	msg2 = mxutil.Ensure(msg2, len(name))
+	msg2 = push(msg2, name...)
+	msg2 = mxutil.Ensure(msg2, len(": "))
+	msg2 = push(msg2, ": "...)
+	msg2 = mxutil.Ensure(msg2, 1)
+	msg2 = push(msg2, err.String()...)
+	fatal(msg2)
+	panic("unreachable")
+}
+
+// CAST reports the result of the named Cryptographic Algorithm Self-Test. The
+// caller runs the test, guarded by Enabled, and passes its error here: a Moxie
+// closure captures nothing, so the test cannot be a callback closing over its
+// inputs.
+//
+// CASTs are mandatory self-checks that must be performed by FIPS 140-3 modules
+// before the algorithm is used. See Implementation Guidance 10.3.A.
+//
+// The name must not contain commas, colons, hashes, or equal signs.
+func CAST(name []byte, err error) {
+	checkSelfTestName(name)
 	if !Enabled {
 		return
 	}
-
-	err := f()
+	rerr := err
 	if false {
-		err = errors.New("simulated CAST failure")
+		rerr = errors.New("simulated CAST failure")
 	}
-	if err != nil {
-		var msg2 []byte
-		msg2 = mxutil.Ensure(msg2, len("FIPS 140-3 self-test failed: "))
-		msg2 = push(msg2, "FIPS 140-3 self-test failed: "...)
-		msg2 = mxutil.Ensure(msg2, len(name))
-		msg2 = push(msg2, name...)
-		msg2 = mxutil.Ensure(msg2, len(": "))
-		msg2 = push(msg2, ": "...)
-		msg2 = mxutil.Ensure(msg2, 1)
-		msg2 = push(msg2, err.String()...)
-		fatal(msg2)
-		panic("unreachable")
+	if rerr != nil {
+		failSelfTest(name, rerr)
 	}
 	if debug {
 		println("FIPS 140-3 self-test passed:", string(name))
 	}
 }
 
-// PCT runs the named Pairwise Consistency Test (if operated in FIPS mode) and
-// aborts the program (stopping the module input/output and entering the "error
-// state") if the test fails.
+// PCT reports the result of the named Pairwise Consistency Test. Like CAST, the
+// caller runs the test and passes its error here.
 //
 // PCTs are mandatory for every generated (but not imported) key pair, including
 // ephemeral keys (which effectively doubles the cost of key establishment). See
 // Implementation Guidance 10.3.A Additional Comment 1.
 //
 // The name must not contain commas, colons, hashes, or equal signs.
-//
-// If a package p calls PCT during key generation, an invocation of that
-// function should be added to fipstest.TestConditionals.
-func PCT(name []byte, f func() error) {
-	if bytes.ContainsAny(name, ",#=:") {
-		var msg []byte
-		msg = mxutil.Ensure(msg, len("fips: invalid self-test name: "))
-		msg = push(msg, "fips: invalid self-test name: "...)
-		msg = mxutil.Ensure(msg, len(name))
-		msg = push(msg, name...)
-		panic(string(msg))
-	}
+func PCT(name []byte, err error) {
+	checkSelfTestName(name)
 	if !Enabled {
 		return
 	}
-
-	err := f()
+	rerr := err
 	if false {
-		err = errors.New("simulated PCT failure")
+		rerr = errors.New("simulated PCT failure")
 	}
-	if err != nil {
-		var msg2 []byte
-		msg2 = mxutil.Ensure(msg2, len("FIPS 140-3 self-test failed: "))
-		msg2 = push(msg2, "FIPS 140-3 self-test failed: "...)
-		msg2 = mxutil.Ensure(msg2, len(name))
-		msg2 = push(msg2, name...)
-		msg2 = mxutil.Ensure(msg2, len(": "))
-		msg2 = push(msg2, ": "...)
-		msg2 = mxutil.Ensure(msg2, 1)
-		msg2 = push(msg2, err.String()...)
-		fatal(msg2)
-		panic("unreachable")
+	if rerr != nil {
+		failSelfTest(name, rerr)
 	}
 	if debug {
 		println("FIPS 140-3 PCT passed:", string(name))

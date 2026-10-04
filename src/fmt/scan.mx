@@ -21,8 +21,8 @@ type Scanner interface {
 	Scan(state ScanState, verb rune) error
 }
 
-const errComplex = errors.Const("syntax error scanning complex number")
-const errBool = errors.Const("syntax error scanning boolean")
+var errComplex error
+var errBool error
 
 const (
 	floatVerbs = "beEfFgGv"
@@ -32,20 +32,13 @@ const (
 
 const eof = -1
 
-type scanError struct {
-	err error
-}
-
-func (e scanError) Error() string  { return e.err.Error() }
-func (e scanError) String() string { return e.Error() }
-
 func errorHandler(errp *error) {
 	if e := recover(); e != "" {
 		*errp = errors.New(e)
 	}
 }
 
-func isSpace(r rune) bool {
+func isSpace(r rune) (okay bool) {
 	space := [10][2]uint16{
 		{0x0009, 0x000d},
 		{0x0020, 0x0020},
@@ -73,11 +66,11 @@ func isSpace(r rune) bool {
 	return false
 }
 
-func notSpace(r rune) bool {
+func notSpace(r rune) (okay bool) {
 	return !isSpace(r)
 }
 
-func indexRune(s []byte, r rune) int32 {
+func indexRune(s []byte, r rune) (ret int32) {
 	for i := 0; i < len(s); {
 		c, w := utf8.DecodeRune(s[i:])
 		if c == r {
@@ -88,7 +81,7 @@ func indexRune(s []byte, r rune) int32 {
 	return -1
 }
 
-func hexDigit(d rune) (int32, bool) {
+func hexDigit(d rune) (ret int32, okay bool) {
 	digit := int32(d)
 	switch digit {
 	case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
@@ -160,7 +153,7 @@ func (r *readRune) ReadRune() (rr rune, size int32, err error) {
 	return
 }
 
-func (r *readRune) UnreadRune() error {
+func (r *readRune) UnreadRune() (rerr error) {
 	if r.peekRune >= 0 {
 		return errors.New("fmt: scanning called UnreadRune with no rune available")
 	}
@@ -168,13 +161,7 @@ func (r *readRune) UnreadRune() error {
 	return nil
 }
 
-type stringReader []byte
-
-func (r *stringReader) Read(b []byte) (n int32, err error) {
-	n = copy(b, *r)
-	*r = (*r)[n:]
-	if n == 0 {
-		err = io.EOF
-	}
-	return
+func init() {
+	errComplex = errors.New("syntax error scanning complex number")
+	errBool = errors.New("syntax error scanning boolean")
 }

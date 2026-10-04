@@ -11,7 +11,7 @@ import (
 	"sort"
 )
 
-func (p *Profile) decoder() []decoder {
+func (p *Profile) decoder() (ds []decoder) {
 	return []decoder{
 		nil, // 0
 		// repeated ValueType sample_type = 1
@@ -96,6 +96,11 @@ func (p *Profile) preEncode() {
 	strings := map[string]int32{}
 	addString(strings, "")
 
+	var keys [][]byte
+	var vs [][]byte
+	var numKeys [][]byte
+	var nvs []int64
+
 	for _, st := range p.SampleType {
 		st.typeX = addString(strings, st.Type)
 		st.unitX = addString(strings, st.Unit)
@@ -103,14 +108,14 @@ func (p *Profile) preEncode() {
 
 	for _, s := range p.Sample {
 		s.labelX = nil
-		var keys [][]byte
+		keys = nil
 		for k := range s.Label {
 			keys = mxutil.Ensure(keys, 1)
 			keys = push(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			vs := s.Label[k]
+			vs = s.Label[k]
 			for _, v := range vs {
 				s.labelX = mxutil.Ensure(s.labelX, 1)
 				s.labelX = push(s.labelX,
@@ -121,15 +126,15 @@ func (p *Profile) preEncode() {
 				)
 			}
 		}
-		var numKeys [][]byte
+		numKeys = nil
 		for k := range s.NumLabel {
 			numKeys = mxutil.Ensure(numKeys, 1)
 			numKeys = push(numKeys, k)
 		}
 		sort.Strings(numKeys)
 		for _, k := range numKeys {
-			vs := s.NumLabel[k]
-			for _, v := range vs {
+			nvs = s.NumLabel[k]
+			for _, v := range nvs {
 				s.labelX = mxutil.Ensure(s.labelX, 1)
 				s.labelX = push(s.labelX,
 					Label{
@@ -216,8 +221,12 @@ func (p *Profile) encode(b *buffer) {
 // postDecode takes the unexported fields populated by decode (with
 // suffix X) and populates the corresponding exported fields.
 // The unexported fields are cleared up to facilitate testing.
-func (p *Profile) postDecode() error {
+func (p *Profile) postDecode() (rerr error) {
 	var err error
+	var key, value []byte
+	var labels map[string][][]byte
+	var numLabels map[string][]int64
+	var c []byte
 
 	mappings := map[uint64]*Mapping{}
 	for _, m := range p.Mapping {
@@ -256,10 +265,9 @@ func (p *Profile) postDecode() error {
 	}
 
 	for _, s := range p.Sample {
-		labels := map[string][][]byte{}
-		numLabels := map[string][]int64{}
+		labels = map[string][][]byte{}
+		numLabels = map[string][]int64{}
 		for _, l := range s.labelX {
-			var key, value []byte
 			key, err = getString(p.stringTable, &l.keyX, err)
 			if l.strX != 0 {
 				value, err = getString(p.stringTable, &l.strX, err)
@@ -294,7 +302,6 @@ func (p *Profile) postDecode() error {
 		pt.Unit, err = getString(p.stringTable, &pt.unitX, err)
 	}
 	for _, i := range p.commentX {
-		var c []byte
 		c, err = getString(p.stringTable, &i, err)
 		p.Comments = mxutil.Ensure(p.Comments, 1)
 		p.Comments = push(p.Comments, c)
@@ -306,7 +313,7 @@ func (p *Profile) postDecode() error {
 	return err
 }
 
-func (p *ValueType) decoder() []decoder {
+func (p *ValueType) decoder() (ds []decoder) {
 	return []decoder{
 		nil, // 0
 		func(b *buffer, m message) error { return decodeInt64(b, &m.(*ValueType).typeX) },
@@ -319,7 +326,7 @@ func (p *ValueType) encode(b *buffer) {
 	encodeInt64Opt(b, 2, p.unitX)
 }
 
-func (p *Sample) decoder() []decoder {
+func (p *Sample) decoder() (ds []decoder) {
 	return []decoder{
 		nil, // 0
 		func(b *buffer, m message) error { return decodeUint64s(b, &m.(*Sample).locationIDX) },
@@ -340,11 +347,11 @@ func (p *Sample) encode(b *buffer) {
 		encodeInt64(b, 2, x)
 	}
 	for _, x := range p.labelX {
-		encodeMessage(b, 3, x)
+		encodeMessage(b, 3, &x)
 	}
 }
 
-func (p Label) decoder() []decoder {
+func (p *Label) decoder() (ds []decoder) {
 	return []decoder{
 		nil, // 0
 		func(b *buffer, m message) error { return decodeInt64(b, &m.(*Label).keyX) },
@@ -353,13 +360,13 @@ func (p Label) decoder() []decoder {
 	}
 }
 
-func (p Label) encode(b *buffer) {
+func (p *Label) encode(b *buffer) {
 	encodeInt64Opt(b, 1, p.keyX)
 	encodeInt64Opt(b, 2, p.strX)
 	encodeInt64Opt(b, 3, p.numX)
 }
 
-func (p *Mapping) decoder() []decoder {
+func (p *Mapping) decoder() (ds []decoder) {
 	return []decoder{
 		nil, // 0
 		func(b *buffer, m message) error { return decodeUint64(b, &m.(*Mapping).ID) },
@@ -388,7 +395,7 @@ func (p *Mapping) encode(b *buffer) {
 	encodeBoolOpt(b, 10, p.HasInlineFrames)
 }
 
-func (p *Location) decoder() []decoder {
+func (p *Location) decoder() (ds []decoder) {
 	return []decoder{
 		nil, // 0
 		func(b *buffer, m message) error { return decodeUint64(b, &m.(*Location).ID) },
@@ -413,7 +420,7 @@ func (p *Location) encode(b *buffer) {
 	}
 }
 
-func (p *Line) decoder() []decoder {
+func (p *Line) decoder() (ds []decoder) {
 	return []decoder{
 		nil, // 0
 		func(b *buffer, m message) error { return decodeUint64(b, &m.(*Line).functionIDX) },
@@ -426,7 +433,7 @@ func (p *Line) encode(b *buffer) {
 	encodeInt64Opt(b, 2, p.Line)
 }
 
-func (p *Function) decoder() []decoder {
+func (p *Function) decoder() (ds []decoder) {
 	return []decoder{
 		nil, // 0
 		func(b *buffer, m message) error { return decodeUint64(b, &m.(*Function).ID) },
@@ -445,7 +452,7 @@ func (p *Function) encode(b *buffer) {
 	encodeInt64Opt(b, 5, p.StartLine)
 }
 
-func addString(strings map[string]int32, s []byte) int64 {
+func addString(strings map[string]int32, s []byte) (idx int64) {
 	i, ok := strings[s]
 	if !ok {
 		i = len(strings)
@@ -454,7 +461,7 @@ func addString(strings map[string]int32, s []byte) int64 {
 	return int64(i)
 }
 
-func getString(strings [][]byte, strng *int64, err error) ([]byte, error) {
+func getString(strings [][]byte, strng *int64, err error) (out []byte, rerr error) {
 	if err != nil {
 		return "", err
 	}

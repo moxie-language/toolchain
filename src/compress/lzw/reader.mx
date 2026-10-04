@@ -87,12 +87,11 @@ type Reader struct {
 }
 
 // readLSB returns the next code for "Least Significant Bits first" data.
-func (r *Reader) readLSB() (uint16, error) {
+func (r *Reader) readLSB() (out uint16, err error) {
 	// Declared once, outside the loop: a declaration in a loop in a
 	// self-mutating method is rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
 	var x byte
-	var err error
 	for r.nBits < r.width {
 		x, err = r.r.ReadByte()
 		if err != nil {
@@ -108,12 +107,11 @@ func (r *Reader) readLSB() (uint16, error) {
 }
 
 // readMSB returns the next code for "Most Significant Bits first" data.
-func (r *Reader) readMSB() (uint16, error) {
+func (r *Reader) readMSB() (out uint16, err error) {
 	// Declared once, outside the loop: a declaration in a loop in a
 	// self-mutating method is rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
 	var x byte
-	var err error
 	for r.nBits < r.width {
 		x, err = r.r.ReadByte()
 		if err != nil {
@@ -129,11 +127,10 @@ func (r *Reader) readMSB() (uint16, error) {
 }
 
 // Read implements io.Reader, reading uncompressed bytes from its underlying reader.
-func (r *Reader) Read(b []byte) (int32, error) {
+func (r *Reader) Read(b []byte) (n int32, rerr error) {
 	// Declared once, outside the loop: a declaration in a loop in a
 	// self-mutating method is rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
-	var n int32
 	for {
 		if len(r.toRead) > 0 {
 			n = copy(b, r.toRead)
@@ -244,11 +241,11 @@ loop:
 	r.o = 0
 }
 
-const errClosed = errors.Const("lzw: reader/writer is closed")
+var errClosed error
 
 // Close closes the [Reader] and returns an error for any future read operation.
 // It does not close the underlying [io.Reader].
-func (r *Reader) Close() error {
+func (r *Reader) Close() (err error) {
 	r.err = errClosed // in case any Reads come along
 	return nil
 }
@@ -272,11 +269,11 @@ func (r *Reader) Reset(src io.Reader, order Order, litWidth int32) {
 //
 // It is guaranteed that the underlying type of the returned [io.ReadCloser]
 // is a *[Reader].
-func NewReader(r io.Reader, order Order, litWidth int32) io.ReadCloser {
+func NewReader(r io.Reader, order Order, litWidth int32) (rc io.ReadCloser) {
 	return newReader(r, order, litWidth)
 }
 
-func newReader(src io.Reader, order Order, litWidth int32) *Reader {
+func newReader(src io.Reader, order Order, litWidth int32) (out *Reader) {
 	r := &Reader{}
 	r.init(src, order, litWidth)
 	return r
@@ -308,4 +305,9 @@ func (r *Reader) init(src io.Reader, order Order, litWidth int32) {
 	r.eof, r.hi = r.clear+1, r.clear+1
 	r.overflow = uint16(1) << r.width
 	r.last = decoderInvalidCode
+}
+
+func init() {
+	errClosed = errors.New("lzw: reader/writer is closed")
+	errOutOfCodes = errors.New("lzw: out of codes")
 }

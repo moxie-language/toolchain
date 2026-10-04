@@ -106,7 +106,7 @@ type compressor struct {
 	hashMatch [maxMatchLength - 1]uint32
 }
 
-func (d *compressor) fillDeflate(b []byte) int32 {
+func (d *compressor) fillDeflate(b []byte) (n int32) {
 	if d.index >= 2*windowSize-(minMatchLength+maxMatchLength) {
 		// shift the window by windowSize
 		copy(d.window, d.window[windowSize:2*windowSize])
@@ -146,7 +146,7 @@ func (d *compressor) fillDeflate(b []byte) int32 {
 	return n
 }
 
-func (d *compressor) writeBlock(tokens []token, index int32) error {
+func (d *compressor) writeBlock(tokens []token, index int32) (err error) {
 	if index > 0 {
 		var window []byte
 		if d.blockStart <= index {
@@ -275,7 +275,7 @@ func (d *compressor) findMatch(pos int32, prevHead int32, prevLength int32, look
 	return
 }
 
-func (d *compressor) writeStoredBlock(buf []byte) error {
+func (d *compressor) writeStoredBlock(buf []byte) (err error) {
 	if d.w.writeStoredHeader(len(buf), false); d.w.err != nil {
 		return d.w.err
 	}
@@ -288,7 +288,7 @@ const hashmul = 0x1e35a7bd
 // hash4 returns a hash representation of the first 4 bytes
 // of the supplied slice.
 // The caller must ensure that len(b) >= 4.
-func hash4(b []byte) uint32 {
+func hash4(b []byte) (h uint32) {
 	return ((uint32(b[3]) | uint32(b[2])<<8 | uint32(b[1])<<16 | uint32(b[0])<<24) * hashmul) >> (32 - hashBits)
 }
 
@@ -310,7 +310,7 @@ func bulkHash4(b []byte, dst []uint32) {
 // matchLen returns the number of matching bytes in a and b
 // up to length 'limit'. Both slices must be at least 'limit'
 // bytes in size.
-func matchLen(a, b []byte, limit int32) int32 {
+func matchLen(a, b []byte, limit int32) (n int32) {
 	a = a[:limit]
 	b = b[:len(a)]
 	for i, av := range a {
@@ -523,7 +523,7 @@ Loop:
 	}
 }
 
-func (d *compressor) fillStore(b []byte) int32 {
+func (d *compressor) fillStore(b []byte) (n int32) {
 	n := copy(d.window[d.windowEnd:], b)
 	d.windowEnd += n
 	return n
@@ -563,7 +563,7 @@ func (d *compressor) write(b []byte) (n int32, err error) {
 	return n, nil
 }
 
-func (d *compressor) syncFlush() error {
+func (d *compressor) syncFlush() (err error) {
 	if d.err != nil {
 		return d.err
 	}
@@ -655,7 +655,7 @@ func (d *compressor) reset(w io.Writer) {
 	}
 }
 
-func (d *compressor) close() error {
+func (d *compressor) close() (err error) {
 	if d.err == errWriterClosed {
 		return nil
 	}
@@ -690,7 +690,7 @@ func (d *compressor) close() error {
 //
 // If level is in the range [-2, 9] then the error returned will be nil.
 // Otherwise the error returned will be non-nil.
-func NewWriter(w io.Writer, level int32) (*Writer, error) {
+func NewWriter(w io.Writer, level int32) (out *Writer, werr error) {
 	var dw Writer
 	if err := dw.d.init(w, level); err != nil {
 		return nil, err
@@ -704,7 +704,7 @@ func NewWriter(w io.Writer, level int32) (*Writer, error) {
 // any compressed output. The compressed data written to w
 // can only be decompressed by a reader initialized with the
 // same dictionary (see [NewReaderDict]).
-func NewWriterDict(w io.Writer, level int32, dict []byte) (*Writer, error) {
+func NewWriterDict(w io.Writer, level int32, dict []byte) (out *Writer, werr error) {
 	dw := &dictWriter{w}
 	zw, err := NewWriter(dw, level)
 	if err != nil {
@@ -724,7 +724,7 @@ func (w *dictWriter) Write(b []byte) (n int32, err error) {
 	return w.w.Write(b)
 }
 
-const errWriterClosed = errors.Const("flate: closed writer")
+var errWriterClosed error
 
 // A Writer takes data written to it and writes the compressed
 // form of that data to an underlying writer (see [NewWriter]).
@@ -748,14 +748,14 @@ func (w *Writer) Write(data []byte) (n int32, err error) {
 // If the underlying writer returns an error, Flush returns that error.
 //
 // In the terminology of the zlib library, Flush is equivalent to Z_SYNC_FLUSH.
-func (w *Writer) Flush() error {
+func (w *Writer) Flush() (err error) {
 	// For more about flushing:
 	// https://www.bolet.org/~pornin/deflate-flush.html
 	return w.d.syncFlush()
 }
 
 // Close flushes and closes the writer.
-func (w *Writer) Close() error {
+func (w *Writer) Close() (err error) {
 	return w.d.close()
 }
 
@@ -772,4 +772,8 @@ func (w *Writer) Reset(dst io.Writer) {
 		// w was created with NewWriter
 		w.d.reset(dst)
 	}
+}
+
+func init() {
+	errWriterClosed = errors.New("flate: closed writer")
 }

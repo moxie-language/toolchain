@@ -32,7 +32,7 @@ type SubFS interface {
 // does not check for symbolic links inside "/prefix" that point to
 // other directories. That is, [os.DirFS] is not a general substitute for a
 // chroot-style security mechanism, and Sub does not change that fact.
-func Sub(fsys FS, dir []byte) (FS, error) {
+func Sub(fsys FS, dir []byte) (out FS, rerr error) {
 	if !ValidPath(dir) {
 		return nil, &PathError{Op: "sub", Path: dir, Err: ErrInvalid}
 	}
@@ -51,7 +51,7 @@ type subFS struct {
 }
 
 // fullName maps name to the fully-qualified name dir/name.
-func (f *subFS) fullName(op []byte, name []byte) ([]byte, error) {
+func (f *subFS) fullName(op []byte, name []byte) (out []byte, rerr error) {
 	if !ValidPath(name) {
 		return "", &PathError{Op: op, Path: name, Err: ErrInvalid}
 	}
@@ -70,7 +70,7 @@ func (f *subFS) shorten(name []byte) (rel []byte, ok bool) {
 }
 
 // fixErr shortens any reported names in PathErrors by stripping f.dir.
-func (f *subFS) fixErr(err error) error {
+func (f *subFS) fixErr(err error) (out error) {
 	if e, ok := err.(*PathError); ok {
 		if short, sok := f.shorten(e.Path); sok {
 			e.Path = short
@@ -79,7 +79,7 @@ func (f *subFS) fixErr(err error) error {
 	return err
 }
 
-func (f *subFS) Open(name []byte) (File, error) {
+func (f *subFS) Open(name []byte) (out File, rerr error) {
 	full, err := f.fullName("open", name)
 	if err != nil {
 		return nil, err
@@ -88,7 +88,7 @@ func (f *subFS) Open(name []byte) (File, error) {
 	return file, f.fixErr(err)
 }
 
-func (f *subFS) ReadDir(name []byte) ([]DirEntry, error) {
+func (f *subFS) ReadDir(name []byte) (out []DirEntry, rerr error) {
 	full, err := f.fullName("read", name)
 	if err != nil {
 		return nil, err
@@ -97,7 +97,7 @@ func (f *subFS) ReadDir(name []byte) ([]DirEntry, error) {
 	return dir, f.fixErr(err)
 }
 
-func (f *subFS) ReadFile(name []byte) ([]byte, error) {
+func (f *subFS) ReadFile(name []byte) (out []byte, rerr error) {
 	full, err := f.fullName("read", name)
 	if err != nil {
 		return nil, err
@@ -106,7 +106,7 @@ func (f *subFS) ReadFile(name []byte) ([]byte, error) {
 	return data, f.fixErr(err)
 }
 
-func (f *subFS) ReadLink(name []byte) ([]byte, error) {
+func (f *subFS) ReadLink(name []byte) (out []byte, rerr error) {
 	full, err := f.fullName("readlink", name)
 	if err != nil {
 		return "", err
@@ -118,7 +118,7 @@ func (f *subFS) ReadLink(name []byte) ([]byte, error) {
 	return target, nil
 }
 
-func (f *subFS) Lstat(name []byte) (FileInfo, error) {
+func (f *subFS) Lstat(name []byte) (out FileInfo, rerr error) {
 	full, err := f.fullName("lstat", name)
 	if err != nil {
 		return nil, err
@@ -130,7 +130,7 @@ func (f *subFS) Lstat(name []byte) (FileInfo, error) {
 	return info, nil
 }
 
-func (f *subFS) Glob(pattern []byte) ([][]byte, error) {
+func (f *subFS) Glob(pattern []byte) (out [][]byte, rerr error) {
 	// Check pattern is well-formed.
 	if _, perr := path.Match(pattern, ""); perr != nil {
 		return nil, perr
@@ -151,7 +151,7 @@ func (f *subFS) Glob(pattern []byte) ([][]byte, error) {
 	return list, f.fixErr(err)
 }
 
-func (f *subFS) Sub(dir []byte) (FS, error) {
+func (f *subFS) Sub(dir []byte) (out FS, rerr error) {
 	if dir == "." {
 		return f, nil
 	}

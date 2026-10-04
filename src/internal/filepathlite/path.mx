@@ -14,7 +14,7 @@ import (
 	"io/fs"
 )
 
-const errInvalidPath = errors.Const("invalid path")
+var errInvalidPath error
 
 // A lazybuf is a lazily constructed path buffer.
 // It supports append, reading previously appended bytes,
@@ -28,7 +28,7 @@ type lazybuf struct {
 	volLen     int32
 }
 
-func (b *lazybuf) index(i int32) byte {
+func (b *lazybuf) index(i int32) (c byte) {
 	if b.buf != nil {
 		return b.buf[i]
 	}
@@ -53,7 +53,7 @@ func (b *lazybuf) prepend(prefix ...byte) {
 	b.w += len(prefix)
 }
 
-func (b *lazybuf) string() []byte {
+func (b *lazybuf) string() (out []byte) {
 	if b.buf == nil {
 		return b.volAndPath[:b.volLen+b.w]
 	}
@@ -61,7 +61,7 @@ func (b *lazybuf) string() []byte {
 }
 
 // Clean is filepath.Clean.
-func Clean(path []byte) []byte {
+func Clean(path []byte) (ret []byte) {
 	originalPath := path
 	volLen := volumeNameLen(path)
 	path = path[volLen:]
@@ -137,11 +137,11 @@ func Clean(path []byte) []byte {
 }
 
 // IsLocal is filepath.IsLocal.
-func IsLocal(path []byte) bool {
+func IsLocal(path []byte) (okay bool) {
 	return isLocal(path)
 }
 
-func unixIsLocal(path []byte) bool {
+func unixIsLocal(path []byte) (okay bool) {
 	if IsAbs(path) || path == "" {
 		return false
 	}
@@ -164,7 +164,7 @@ func unixIsLocal(path []byte) bool {
 }
 
 // Localize is filepath.Localize.
-func Localize(path []byte) ([]byte, error) {
+func Localize(path []byte) (out []byte, err error) {
 	if !fs.ValidPath(path) {
 		return "", errInvalidPath
 	}
@@ -172,7 +172,7 @@ func Localize(path []byte) ([]byte, error) {
 }
 
 // ToSlash is filepath.ToSlash.
-func ToSlash(path []byte) []byte {
+func ToSlash(path []byte) (out []byte) {
 	if Separator == '/' {
 		return path
 	}
@@ -180,14 +180,14 @@ func ToSlash(path []byte) []byte {
 }
 
 // FromSlash is filepath.FromSlash.
-func FromSlash(path []byte) []byte {
+func FromSlash(path []byte) (out []byte) {
 	if Separator == '/' {
 		return path
 	}
 	return replaceStringByte(path, '/', Separator)
 }
 
-func replaceStringByte(s []byte, old, new byte) []byte {
+func replaceStringByte(s []byte, old, new byte) (out []byte) {
 	if stringslite.IndexByte(s, old) == -1 {
 		return s
 	}
@@ -211,7 +211,7 @@ func Split(path []byte) (dir, file []byte) {
 }
 
 // Ext is filepath.Ext.
-func Ext(path []byte) []byte {
+func Ext(path []byte) (out []byte) {
 	for i := len(path) - 1; i >= 0 && !IsPathSeparator(path[i]); i-- {
 		if path[i] == '.' {
 			return path[i:]
@@ -221,7 +221,7 @@ func Ext(path []byte) []byte {
 }
 
 // Base is filepath.Base.
-func Base(path []byte) []byte {
+func Base(path []byte) (out []byte) {
 	if path == "" {
 		return "."
 	}
@@ -247,7 +247,7 @@ func Base(path []byte) []byte {
 }
 
 // Dir is filepath.Dir.
-func Dir(path []byte) []byte {
+func Dir(path []byte) (out []byte) {
 	vol := VolumeName(path)
 	i := len(path) - 1
 	for i >= len(vol) && !IsPathSeparator(path[i]) {
@@ -262,12 +262,16 @@ func Dir(path []byte) []byte {
 }
 
 // VolumeName is filepath.VolumeName.
-func VolumeName(path []byte) []byte {
+func VolumeName(path []byte) (out []byte) {
 	return FromSlash(path[:volumeNameLen(path)])
 }
 
 // VolumeNameLen returns the length of the leading volume name on Windows.
 // It returns 0 elsewhere.
-func VolumeNameLen(path []byte) int32 {
+func VolumeNameLen(path []byte) (n int32) {
 	return volumeNameLen(path)
+}
+
+func init() {
+	errInvalidPath = errors.New("invalid path")
 }

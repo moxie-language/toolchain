@@ -24,7 +24,7 @@ import (
 //
 // Often, ascii85-encoded data is wrapped in <~ and ~> symbols.
 // Encode does not add these.
-func Encode(dst, src []byte) int32 {
+func Encode(dst, src []byte) (nout int32) {
 	if len(src) == 0 {
 		return 0
 	}
@@ -86,14 +86,14 @@ func Encode(dst, src []byte) int32 {
 }
 
 // MaxEncodedLen returns the maximum length of an encoding of n source bytes.
-func MaxEncodedLen(n int32) int32 { return (n + 3) / 4 * 5 }
+func MaxEncodedLen(n int32) (out int32) { return (n + 3) / 4 * 5 }
 
 // NewEncoder returns a new ascii85 stream encoder. Data written to
 // the returned writer will be encoded and then written to w.
 // Ascii85 encodings operate in 32-bit blocks; when finished
 // writing, the caller must Close the returned encoder to flush any
 // trailing partial block.
-func NewEncoder(w io.Writer) io.WriteCloser { return &encoder{w: w} }
+func NewEncoder(w io.Writer) (enc io.WriteCloser) { return &encoder{w: w} }
 
 type encoder struct {
 	err  error
@@ -158,7 +158,7 @@ func (e *encoder) Write(p []byte) (n int32, err error) {
 
 // Close flushes any pending output from the encoder.
 // It is an error to call Write after calling Close.
-func (e *encoder) Close() error {
+func (e *encoder) Close() (err error) {
 	// If there's anything left in the buffer, flush it out
 	if e.err == nil && e.nbuf > 0 {
 		nout := Encode(e.out[0:], e.buf[0:e.nbuf])
@@ -174,11 +174,18 @@ func (e *encoder) Close() error {
 
 type CorruptInputError int64
 
-func (e CorruptInputError) Error() string {
-	return "illegal ascii85 data at input byte " + strconv.FormatInt(int64(e), 10)
+func (e *CorruptInputError) Error() (msg string) {
+	return "illegal ascii85 data at input byte " + strconv.FormatInt(int64(*e), 10)
 }
 
-func (e CorruptInputError) String() string { return e.Error() }
+func (e *CorruptInputError) String() (s string) { return e.Error() }
+
+// corruptInputError returns a CorruptInputError as an error.
+func corruptInputError(n int32) (cerr error) {
+	ce := CorruptInputError(n)
+	cerr = &ce
+	return
+}
 
 // Decode decodes src into dst, returning both the number
 // of bytes written to dst and the number consumed from src.
@@ -210,7 +217,7 @@ func Decode(dst, src []byte, flush bool) (ndst, nsrc int32, err error) {
 			v = v*85 + uint32(b-'!')
 			nb++
 		default:
-			return 0, 0, CorruptInputError(i)
+			return 0, 0, corruptInputError(i)
 		}
 		if nb == 5 {
 			nsrc = i + 1
@@ -231,7 +238,7 @@ func Decode(dst, src []byte, flush bool) (ndst, nsrc int32, err error) {
 			// the extra byte provides enough bits to cover
 			// the inefficiency of the encoding for the block.
 			if nb == 1 {
-				return 0, 0, CorruptInputError(len(src))
+				return 0, 0, corruptInputError(len(src))
 			}
 			for i := nb; i < 5; i++ {
 				// The short encoding truncated the output value.
@@ -250,7 +257,7 @@ func Decode(dst, src []byte, flush bool) (ndst, nsrc int32, err error) {
 }
 
 // NewDecoder constructs a new ascii85 stream decoder.
-func NewDecoder(r io.Reader) io.Reader { return &decoder{r: r} }
+func NewDecoder(r io.Reader) (dec io.Reader) { return &decoder{r: r} }
 
 type decoder struct {
 	err     error

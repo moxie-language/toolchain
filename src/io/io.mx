@@ -23,19 +23,19 @@ const (
 	SeekEnd     = 2 // seek relative to the end
 )
 
-const ErrShortWrite = errors.Const("short write")
+var ErrShortWrite error
 
-const errInvalidWrite = errors.Const("invalid write result")
+var errInvalidWrite error
 
-const ErrShortBuffer = errors.Const("short buffer")
+var ErrShortBuffer error
 
 // EOF is the error returned by Read when no more input is available.
 // Functions should return EOF only to signal a graceful end of input.
-const EOF = errors.Const("EOF")
+var EOF error
 
-const ErrUnexpectedEOF = errors.Const("unexpected EOF")
+var ErrUnexpectedEOF error
 
-const ErrNoProgress = errors.Const("multiple Read calls return no data or error")
+var ErrNoProgress error
 
 // Reader is the interface that wraps the basic Read method.
 //
@@ -445,7 +445,7 @@ func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 // LimitReader returns a Reader that reads from r
 // but stops with EOF after n bytes.
 // The underlying implementation is a *LimitedReader.
-func LimitReader(r Reader, n int64) Reader { return &LimitedReader{r, n} }
+func LimitReader(r Reader, n int64) (out Reader) { return &LimitedReader{r, n} }
 
 // A LimitedReader reads from R but limits the amount of
 // data returned to just N bytes. Each call to Read
@@ -470,7 +470,7 @@ func (l *LimitedReader) Read(p []byte) (n int32, err error) {
 
 // NewSectionReader returns a [SectionReader] that reads from r
 // starting at offset off and stops with EOF after n bytes.
-func NewSectionReader(r ReaderAt, off int64, n int64) *SectionReader {
+func NewSectionReader(r ReaderAt, off int64, n int64) (out *SectionReader) {
 	var remaining int64
 	const maxint64 = 1<<63 - 1
 	if off <= maxint64-n {
@@ -505,10 +505,10 @@ func (s *SectionReader) Read(p []byte) (n int32, err error) {
 	return
 }
 
-const errWhence = errors.Const("Seek: invalid whence")
-const errOffset = errors.Const("Seek: invalid offset")
+var errWhence error
+var errOffset error
 
-func (s *SectionReader) Seek(offset int64, whence int32) (int64, error) {
+func (s *SectionReader) Seek(offset int64, whence int32) (noff int64, serr error) {
 	switch whence {
 	default:
 		return 0, errWhence
@@ -543,7 +543,7 @@ func (s *SectionReader) ReadAt(p []byte, off int64) (n int32, err error) {
 }
 
 // Size returns the size of the section in bytes.
-func (s *SectionReader) Size() int64 { return s.limit - s.base }
+func (s *SectionReader) Size() (size int64) { return s.limit - s.base }
 
 // Outer returns the underlying [ReaderAt] and offsets for the section.
 //
@@ -562,7 +562,7 @@ type OffsetWriter struct {
 
 // NewOffsetWriter returns an [OffsetWriter] that writes to w
 // starting at offset off.
-func NewOffsetWriter(w WriterAt, off int64) *OffsetWriter {
+func NewOffsetWriter(w WriterAt, off int64) (out *OffsetWriter) {
 	return &OffsetWriter{w, off, off}
 }
 
@@ -581,7 +581,7 @@ func (o *OffsetWriter) WriteAt(p []byte, off int64) (n int32, err error) {
 	return o.w.WriteAt(p, off)
 }
 
-func (o *OffsetWriter) Seek(offset int64, whence int32) (int64, error) {
+func (o *OffsetWriter) Seek(offset int64, whence int32) (noff int64, oerr error) {
 	switch whence {
 	default:
 		return 0, errWhence
@@ -602,7 +602,7 @@ func (o *OffsetWriter) Seek(offset int64, whence int32) (int64, error) {
 // corresponding writes to w. There is no internal buffering -
 // the write must complete before the read completes.
 // Any error encountered while writing is reported as a read error.
-func TeeReader(r Reader, w Writer) Reader {
+func TeeReader(r Reader, w Writer) (out Reader) {
 	return &teeReader{r, w}
 }
 
@@ -623,21 +623,21 @@ func (t *teeReader) Read(p []byte) (n int32, err error) {
 
 // Discard returns a [Writer] on which all Write calls succeed
 // without doing anything.
-func Discard() Writer { return discard{} }
+func Discard() (out Writer) { return &discard{} }
 
 type discard struct{}
 
 // discard implements ReaderFrom as an optimization so Copy to
 // io.Discard() can avoid doing unnecessary work.
-func (discard) Write(p []byte) (int32, error) {
+func (d *discard) Write(p []byte) (n int32, err error) {
 	return len(p), nil
 }
 
-func (discard) WriteString(s []byte) (int32, error) {
+func (d *discard) WriteString(s []byte) (n int32, err error) {
 	return len(s), nil
 }
 
-func (discard) ReadFrom(r Reader) (n int64, err error) {
+func (d *discard) ReadFrom(r Reader) (n int64, err error) {
 	buf := []byte{:8192}
 	readSize := 0
 	for {
@@ -656,26 +656,26 @@ func (discard) ReadFrom(r Reader) (n int64, err error) {
 // the provided [Reader] r.
 // If r implements [WriterTo], the returned [ReadCloser] will implement [WriterTo]
 // by forwarding calls to r.
-func NopCloser(r Reader) ReadCloser {
+func NopCloser(r Reader) (rc ReadCloser) {
 	if _, ok := r.(WriterTo); ok {
-		return nopCloserWriterTo{r}
+		return &nopCloserWriterTo{r}
 	}
-	return nopCloser{r}
+	return &nopCloser{r}
 }
 
 type nopCloser struct {
 	Reader
 }
 
-func (nopCloser) Close() error { return nil }
+func (c *nopCloser) Close() (err error) { return nil }
 
 type nopCloserWriterTo struct {
 	Reader
 }
 
-func (nopCloserWriterTo) Close() error { return nil }
+func (c *nopCloserWriterTo) Close() (err error) { return nil }
 
-func (c nopCloserWriterTo) WriteTo(w Writer) (n int64, err error) {
+func (c *nopCloserWriterTo) WriteTo(w Writer) (n int64, err error) {
 	return c.Reader.(WriterTo).WriteTo(w)
 }
 
@@ -683,7 +683,7 @@ func (c nopCloserWriterTo) WriteTo(w Writer) (n int64, err error) {
 // A successful call returns err == nil, not err == EOF. Because ReadAll is
 // defined to read from src until EOF, it does not treat an EOF from Read
 // as an error to be reported.
-func ReadAll(r Reader) ([]byte, error) {
+func ReadAll(r Reader) (data []byte, rerr error) {
 	b := []byte{:0:512}
 	for {
 		n, err := r.Read(b[len(b):cap(b)])
@@ -703,4 +703,16 @@ func ReadAll(r Reader) ([]byte, error) {
 			b = nb
 		}
 	}
+}
+
+func init() {
+	ErrShortWrite = errors.New("short write")
+	errInvalidWrite = errors.New("invalid write result")
+	ErrShortBuffer = errors.New("short buffer")
+	EOF = errors.New("EOF")
+	ErrUnexpectedEOF = errors.New("unexpected EOF")
+	ErrNoProgress = errors.New("multiple Read calls return no data or error")
+	errWhence = errors.New("Seek: invalid whence")
+	errOffset = errors.New("Seek: invalid offset")
+	ErrClosedPipe = errors.New("io: read/write on closed pipe")
 }

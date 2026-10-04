@@ -28,7 +28,7 @@ type DecapsulationKey1024 struct {
 // Bytes returns the decapsulation key as a 64-byte seed in the "d || z" form.
 //
 // The decapsulation key must be kept secret.
-func (dk *DecapsulationKey1024) Bytes() []byte {
+func (dk *DecapsulationKey1024) Bytes() (ret0 []byte) {
 	var b [SeedSize]byte
 	copy(b[:], dk.d[:])
 	copy(b[32:], dk.z[:])
@@ -40,7 +40,7 @@ func (dk *DecapsulationKey1024) Bytes() []byte {
 //
 // This should only be used for ACVP testing. For all other purposes prefer
 // the Bytes method that returns the (much smaller) seed.
-func TestingOnlyExpandedBytes1024(dk *DecapsulationKey1024) []byte {
+func TestingOnlyExpandedBytes1024(dk *DecapsulationKey1024) (ret0 []byte) {
 	b := []byte{:0:decapsulationKeySize1024}
 
 	// ByteEncode₁₂(s)
@@ -66,7 +66,7 @@ func TestingOnlyExpandedBytes1024(dk *DecapsulationKey1024) []byte {
 
 // EncapsulationKey returns the public encapsulation key necessary to produce
 // ciphertexts.
-func (dk *DecapsulationKey1024) EncapsulationKey() *EncapsulationKey1024 {
+func (dk *DecapsulationKey1024) EncapsulationKey() (ret0 *EncapsulationKey1024) {
 	return &EncapsulationKey1024{
 		rho:                 dk.rho,
 		h:                 dk.h,
@@ -83,13 +83,13 @@ type EncapsulationKey1024 struct {
 }
 
 // Bytes returns the encapsulation key as a byte slice.
-func (ek *EncapsulationKey1024) Bytes() []byte {
+func (ek *EncapsulationKey1024) Bytes() (ret0 []byte) {
 	// The actual logic is in a separate function to outline this allocation.
 	b := []byte{:0:EncapsulationKeySize1024}
 	return ek.bytes(b)
 }
 
-func (ek *EncapsulationKey1024) bytes(b []byte) []byte {
+func (ek *EncapsulationKey1024) bytes(b []byte) (ret0 []byte) {
 	for i := range ek.t {
 		b = polyByteEncode(b, ek.t[i])
 	}
@@ -111,26 +111,30 @@ type decryptionKey1024 struct {
 
 // GenerateKey1024 generates a new decapsulation key, drawing random bytes from
 // a DRBG. The decapsulation key must be kept secret.
-func GenerateKey1024() (*DecapsulationKey1024, error) {
+func GenerateKey1024() (ret0 *DecapsulationKey1024, ret1 error) {
 	// The actual logic is in a separate function to outline this allocation.
 	dk := &DecapsulationKey1024{}
 	return generateKey1024(dk)
 }
 
-func generateKey1024(dk *DecapsulationKey1024) (*DecapsulationKey1024, error) {
+func generateKey1024(dk *DecapsulationKey1024) (ret0 *DecapsulationKey1024, ret1 error) {
 	var d [32]byte
 	drbg.Read(d[:])
 	var z [32]byte
 	drbg.Read(z[:])
 	kemKeyGen1024(dk, d[:], z[:])
-	fips140.PCT("ML-KEM PCT", func() error { return kemPCT1024(dk) })
+	var pctErr error
+	if fips140.Enabled {
+		pctErr = kemPCT1024(dk)
+	}
+	fips140.PCT("ML-KEM PCT", pctErr)
 	fips140.RecordApproved()
 	return dk, nil
 }
 
 // GenerateKeyInternal1024 is a derandomized version of GenerateKey1024,
 // exclusively for use in tests.
-func GenerateKeyInternal1024(d, z *[32]byte) *DecapsulationKey1024 {
+func GenerateKeyInternal1024(d, z *[32]byte) (ret0 *DecapsulationKey1024) {
 	dk := &DecapsulationKey1024{}
 	kemKeyGen1024(dk, d[:], z[:])
 	return dk
@@ -138,13 +142,13 @@ func GenerateKeyInternal1024(d, z *[32]byte) *DecapsulationKey1024 {
 
 // NewDecapsulationKey1024 parses a decapsulation key from a 64-byte
 // seed in the "d || z" form. The seed must be uniformly random.
-func NewDecapsulationKey1024(seed []byte) (*DecapsulationKey1024, error) {
+func NewDecapsulationKey1024(seed []byte) (ret0 *DecapsulationKey1024, ret1 error) {
 	// The actual logic is in a separate function to outline this allocation.
 	dk := &DecapsulationKey1024{}
 	return newKeyFromSeed1024(dk, seed)
 }
 
-func newKeyFromSeed1024(dk *DecapsulationKey1024, seed []byte) (*DecapsulationKey1024, error) {
+func newKeyFromSeed1024(dk *DecapsulationKey1024, seed []byte) (ret0 *DecapsulationKey1024, ret1 error) {
 	if len(seed) != SeedSize {
 		return nil, errors.New("mlkem: invalid seed length")
 	}
@@ -160,7 +164,7 @@ func newKeyFromSeed1024(dk *DecapsulationKey1024, seed []byte) (*DecapsulationKe
 //
 // This function should only be used for ACVP testing. Prefer NewDecapsulationKey1024 for all
 // other purposes.
-func TestingOnlyNewDecapsulationKey1024(b []byte) (*DecapsulationKey1024, error) {
+func TestingOnlyNewDecapsulationKey1024(b []byte) (ret0 *DecapsulationKey1024, ret1 error) {
 	if len(b) != decapsulationKeySize1024 {
 		return nil, errors.New("mlkem: invalid NIST decapsulation key length")
 	}
@@ -257,7 +261,7 @@ func kemKeyGen1024(dk *DecapsulationKey1024, d, z []byte) {
 // the two shared secret K values are equal. The PCT shall be performed either
 // when keys are generated/imported, prior to the first exportation, or prior to
 // the first operational use (if not exported before the first use)."
-func kemPCT1024(dk *DecapsulationKey1024) error {
+func kemPCT1024(dk *DecapsulationKey1024) (ret0 error) {
 	ek := dk.EncapsulationKey()
 	K, c := ek.Encapsulate()
 	K1, err := dk.Decapsulate(c)
@@ -311,7 +315,7 @@ func kemEncaps1024(cc *[CiphertextSize1024]byte, ek *EncapsulationKey1024, m *[m
 
 // NewEncapsulationKey1024 parses an encapsulation key from its encoded form.
 // If the encapsulation key is not valid, NewEncapsulationKey1024 returns an error.
-func NewEncapsulationKey1024(encapsulationKey []byte) (*EncapsulationKey1024, error) {
+func NewEncapsulationKey1024(encapsulationKey []byte) (ret0 *EncapsulationKey1024, ret1 error) {
 	// The actual logic is in a separate function to outline this allocation.
 	ek := &EncapsulationKey1024{}
 	return parseEK1024(ek, encapsulationKey)
@@ -321,7 +325,7 @@ func NewEncapsulationKey1024(encapsulationKey []byte) (*EncapsulationKey1024, er
 //
 // It implements the initial stages of K-PKE.Encrypt according to FIPS 203,
 // Algorithm 14.
-func parseEK1024(ek *EncapsulationKey1024, ekPKE []byte) (*EncapsulationKey1024, error) {
+func parseEK1024(ek *EncapsulationKey1024, ekPKE []byte) (ret0 *EncapsulationKey1024, ret1 error) {
 	if len(ekPKE) != EncapsulationKeySize1024 {
 		return nil, errors.New("mlkem: invalid encapsulation key length")
 	}
@@ -353,7 +357,7 @@ func parseEK1024(ek *EncapsulationKey1024, ekPKE []byte) (*EncapsulationKey1024,
 //
 // It implements K-PKE.Encrypt according to FIPS 203, Algorithm 14, although the
 // computation of t and AT is done in parseEK1024.
-func pkeEncrypt1024(cc *[CiphertextSize1024]byte, ex *encryptionKey1024, m []byte, rnd []byte) []byte {
+func pkeEncrypt1024(cc *[CiphertextSize1024]byte, ex *encryptionKey1024, m []byte, rnd []byte) (ret0 []byte) {
 	var N byte
 	r, e1 := []nttElement{:k1024}, []ringElement{:k1024}
 	for i := range r {
@@ -400,7 +404,7 @@ func (dk *DecapsulationKey1024) Decapsulate(ciphertext []byte) (sharedKey []byte
 	if len(ciphertext) != CiphertextSize1024 {
 		return nil, errors.New("mlkem: invalid ciphertext length")
 	}
-	c := (*[CiphertextSize1024]byte)(ciphertext)
+	c := ciphertext
 	// Note that the hash check (step 3 of the decapsulation input check from
 	// FIPS 203, Section 7.3) is foregone as a DecapsulationKey is always
 	// validly generated by ML-KEM.KeyGen_internal.
@@ -410,7 +414,7 @@ func (dk *DecapsulationKey1024) Decapsulate(ciphertext []byte) (sharedKey []byte
 // kemDecaps1024 produces a shared key from a ciphertext.
 //
 // It implements ML-KEM.Decaps_internal according to FIPS 203, Algorithm 18.
-func kemDecaps1024(dk *DecapsulationKey1024, c *[CiphertextSize1024]byte) (K []byte) {
+func kemDecaps1024(dk *DecapsulationKey1024, c []byte) (K []byte) {
 	fips140.RecordApproved()
 	m := pkeDecrypt1024(&dk.decryptionKey1024, c)
 	g := sha3.New512()
@@ -420,13 +424,13 @@ func kemDecaps1024(dk *DecapsulationKey1024, c *[CiphertextSize1024]byte) (K []b
 	Kprime, r := G[:SharedKeySize], G[SharedKeySize:]
 	J := sha3.NewShake256()
 	J.Write(dk.z[:])
-	J.Write(c[:])
+	J.Write(c)
 	Kout := []byte{:SharedKeySize}
 	J.Read(Kout)
 	var cc [CiphertextSize1024]byte
 	c1 := pkeEncrypt1024(&cc, &dk.encryptionKey1024, m, r)
 
-	subtle.ConstantTimeCopy(subtle.ConstantTimeCompare(c[:], c1), Kout, Kprime)
+	subtle.ConstantTimeCopy(subtle.ConstantTimeCompare(c, c1), Kout, Kprime)
 	return Kout
 }
 
@@ -434,14 +438,14 @@ func kemDecaps1024(dk *DecapsulationKey1024, c *[CiphertextSize1024]byte) (K []b
 //
 // It implements K-PKE.Decrypt according to FIPS 203, Algorithm 15,
 // although s is retained from kemKeyGen1024.
-func pkeDecrypt1024(dx *decryptionKey1024, c *[CiphertextSize1024]byte) []byte {
+func pkeDecrypt1024(dx *decryptionKey1024, c []byte) (ret0 []byte) {
 	u := []ringElement{:k1024}
 	for i := range u {
-		enc11 := (*[encodingSize11]byte)(c[encodingSize11*i : encodingSize11*(i+1)])
+		enc11 := c[encodingSize11*i : encodingSize11*(i+1)]
 		u[i] = ringDecodeAndDecompress11(enc11)
 	}
 
-	b := (*[encodingSize5]byte)(c[encodingSize11*k1024:])
+	b := c[encodingSize11*k1024:]
 	v := ringDecodeAndDecompress5(b)
 
 	var mask nttElement // s⊺ ◦ NTT(u)

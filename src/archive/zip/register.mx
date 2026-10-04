@@ -12,13 +12,13 @@ import (
 
 // A Compressor returns a new compressing writer, writing to w.
 // The WriteCloser's Close method must be used to flush pending data to w.
-type Compressor func(w io.Writer) (io.WriteCloser, error)
+type Compressor func(w io.Writer) (wc io.WriteCloser, cerr error)
 
 // A Decompressor returns a new decompressing reader, reading from r.
 // The [io.ReadCloser]'s Close method must be used to release associated resources.
-type Decompressor func(r io.Reader) io.ReadCloser
+type Decompressor func(r io.Reader) (rc io.ReadCloser)
 
-func newFlateWriter(w io.Writer) io.WriteCloser {
+func newFlateWriter(w io.Writer) (wc io.WriteCloser) {
 	fw, _ := flate.NewWriter(w, 5)
 	return &pooledFlateWriter{fw: fw}
 }
@@ -34,7 +34,7 @@ func (w *pooledFlateWriter) Write(p []byte) (n int32, err error) {
 	return w.fw.Write(p)
 }
 
-func (w *pooledFlateWriter) Close() error {
+func (w *pooledFlateWriter) Close() (cerr error) {
 	var err error
 	if w.fw != nil {
 		err = w.fw.Close()
@@ -43,7 +43,7 @@ func (w *pooledFlateWriter) Close() error {
 	return err
 }
 
-func newFlateReader(r io.Reader) io.ReadCloser {
+func newFlateReader(r io.Reader) (rc io.ReadCloser) {
 	return &pooledFlateReader{fr: flate.NewReader(r)}
 }
 
@@ -58,7 +58,7 @@ func (r *pooledFlateReader) Read(p []byte) (n int32, err error) {
 	return r.fr.Read(p)
 }
 
-func (r *pooledFlateReader) Close() error {
+func (r *pooledFlateReader) Close() (cerr error) {
 	var err error
 	if r.fr != nil {
 		err = r.fr.Close()
@@ -67,17 +67,17 @@ func (r *pooledFlateReader) Close() error {
 	return err
 }
 
-func compressor(method uint16) Compressor {
+func compressor(method uint16) (comp Compressor) {
 	switch method {
 	case Store:
-		return func(w io.Writer) (io.WriteCloser, error) { return &nopCloser{w}, nil }
+		return func(w io.Writer) (wc io.WriteCloser, cerr error) { return &nopCloser{w}, nil }
 	case Deflate:
-		return func(w io.Writer) (io.WriteCloser, error) { return newFlateWriter(w), nil }
+		return func(w io.Writer) (wc io.WriteCloser, cerr error) { return newFlateWriter(w), nil }
 	}
 	return nil
 }
 
-func decompressor(method uint16) Decompressor {
+func decompressor(method uint16) (dcomp Decompressor) {
 	switch method {
 	case Store:
 		return Decompressor(io.NopCloser)

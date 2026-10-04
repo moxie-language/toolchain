@@ -39,7 +39,7 @@ const (
 // VersionName returns the name for the provided TLS version number
 // (e.g. "TLS 1.3"), or a fallback representation of the value if the
 // version is not implemented by this package.
-func VersionName(version uint16) []byte {
+func VersionName(version uint16) (rb []byte) {
 	switch version {
 	case VersionSSL30:
 		return "SSLv3"
@@ -150,7 +150,7 @@ const (
 	SecP384r1MLKEM1024 CurveID = 4589
 )
 
-func isTLS13OnlyKeyExchange(curve CurveID) bool {
+func isTLS13OnlyKeyExchange(curve CurveID) (rok bool) {
 	switch curve {
 	case X25519MLKEM768, SecP256r1MLKEM768, SecP384r1MLKEM1024:
 		return true
@@ -159,7 +159,7 @@ func isTLS13OnlyKeyExchange(curve CurveID) bool {
 	}
 }
 
-func isPQKeyExchange(curve CurveID) bool {
+func isPQKeyExchange(curve CurveID) (rok bool) {
 	switch curve {
 	case X25519MLKEM768, SecP256r1MLKEM768, SecP384r1MLKEM1024:
 		return true
@@ -220,7 +220,7 @@ const directSigning crypto.Hash = 0
 
 // _helloRetryRequestRandom is set as the Random value of a ServerHello
 // to signal that the message is actually a HelloRetryRequest.
-func _helloRetryRequestRandom() []byte { // See RFC 8446, Section 4.1.3.
+func _helloRetryRequestRandom() (rb []byte) { // See RFC 8446, Section 4.1.3.
 	return []byte{
 		0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
 		0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
@@ -319,7 +319,7 @@ type ConnectionState struct {
 	HelloRetryRequest bool
 
 	// ekm is a closure exposed via ExportKeyingMaterial.
-	ekm func(label []byte, context []byte, length int32) ([]byte, error)
+	ekm ekmFunc
 
 	// testingOnlyPeerSignatureAlgorithm is the signature algorithm used by the
 	// peer to sign the handshake. It is not set for resumed connections.
@@ -336,8 +336,8 @@ type ConnectionState struct {
 // in Go 1.22 due to security issues (see the Security Considerations sections
 // of RFC 5705 and RFC 7627), but can be re-enabled with the GODEBUG setting
 // tlsunsafeekm=1.
-func (cs *ConnectionState) ExportKeyingMaterial(label []byte, ctxInfo []byte, length int32) ([]byte, error) {
-	return cs.ekm(label, ctxInfo, length)
+func (cs *ConnectionState) ExportKeyingMaterial(label []byte, ctxInfo []byte, length int32) (rb []byte, rerr error) {
+	return cs.ekm.ekm(label, ctxInfo, length)
 }
 
 // ClientAuthType declares the policy the server will follow for
@@ -370,7 +370,7 @@ const (
 
 // requiresClientCert reports whether the ClientAuthType requires a client
 // certificate to be provided.
-func requiresClientCert(c ClientAuthType) bool {
+func requiresClientCert(c ClientAuthType) (rok bool) {
 	switch c {
 	case RequireAnyClientCert, RequireAndVerifyClientCert:
 		return true
@@ -495,7 +495,7 @@ type ClientHelloInfo struct {
 // Context returns the context of the handshake that is in progress.
 // This context is a child of the context passed to HandshakeContext,
 // if any, and is canceled when the handshake concludes.
-func (c *ClientHelloInfo) Context() context.Context {
+func (c *ClientHelloInfo) Context() (rcontext context.Context) {
 	return c.ctx
 }
 
@@ -523,7 +523,7 @@ type CertificateRequestInfo struct {
 // Context returns the context of the handshake that is in progress.
 // This context is a child of the context passed to HandshakeContext,
 // if any, and is canceled when the handshake concludes.
-func (c *CertificateRequestInfo) Context() context.Context {
+func (c *CertificateRequestInfo) Context() (rcontext context.Context) {
 	return c.ctx
 }
 
@@ -988,7 +988,7 @@ const maxSessionTicketLifetime = 7 * 24 * time.Hour
 // including connections that were originally established on the parent Config.
 // If that is not intended, use [Config.VerifyConnection] instead, or set
 // [Config.SessionTicketsDisabled].
-func (c *Config) Clone() *Config {
+func (c *Config) Clone() (rconfig *Config) {
 	if c == nil {
 		return nil
 	}
@@ -1032,7 +1032,7 @@ func (c *Config) Clone() *Config {
 
 // _deprecatedSessionTicketKey is set as the prefix of SessionTicketKey if it was
 // randomized for backwards compatibility but is not in use.
-func _deprecatedSessionTicketKey() []byte { return []byte("DEPRECATED") }
+func _deprecatedSessionTicketKey() (rb []byte) { return []byte("DEPRECATED") }
 
 // initLegacySessionTicketKeyRLocked ensures the legacy SessionTicketKey field is
 // randomized if empty, and that sessionTicketKeys is populated from it otherwise.
@@ -1069,7 +1069,7 @@ func (c *Config) initLegacySessionTicketKeyRLocked() {
 // encrypting tickets (ie. the first ticketKey in c.sessionTicketKeys)
 // is not fresh, then a new session ticket key will be
 // created and prepended to c.sessionTicketKeys.
-func (c *Config) ticketKeys(configForClient *Config) []ticketKey {
+func (c *Config) ticketKeys(configForClient *Config) (rticketKey []ticketKey) {
 	// If the ConfigForClient callback returned a Config with explicitly set
 	// keys, use those, otherwise just use the original Config.
 	if configForClient != nil {
@@ -1141,7 +1141,7 @@ func (c *Config) SetSessionTicketKeys(keys [][32]byte) {
 	c.sessionTicketKeys = newKeys
 }
 
-func (c *Config) rand() io.Reader {
+func (c *Config) rand() (rreader io.Reader) {
 	r := c.Rand
 	if r == nil {
 		return rand.Reader()
@@ -1149,7 +1149,7 @@ func (c *Config) rand() io.Reader {
 	return r
 }
 
-func (c *Config) time() time.Time {
+func (c *Config) time() (rtime time.Time) {
 	t := c.Time
 	if t == nil {
 		t = time.Now
@@ -1157,15 +1157,20 @@ func (c *Config) time() time.Time {
 	return t()
 }
 
-func (c *Config) cipherSuites(aesGCMPreferred bool) []uint16 {
+func (c *Config) cipherSuites(aesGCMPreferred bool) (ruint16 []uint16) {
 	var cipherSuites []uint16
 	if c.CipherSuites == nil {
 		cipherSuites = defaultCipherSuites(aesGCMPreferred)
 	} else {
 		cipherSuites = supportedCipherSuites(aesGCMPreferred)
-		cipherSuites = slices.DeleteFunc(cipherSuites, func(id uint16) bool {
-			return !slices.Contains(c.CipherSuites, id)
-		})
+		var allowed []uint16
+		for _, id := range cipherSuites {
+			if slices.Contains(c.CipherSuites, id) {
+				allowed = mxutil.Ensure(allowed, 1)
+				allowed = push(allowed, id)
+			}
+		}
+		cipherSuites = allowed
 	}
 	if fips140tls.Required() {
 		cipherSuites = slices.DeleteFunc(cipherSuites, func(id uint16) bool {
@@ -1177,11 +1182,11 @@ func (c *Config) cipherSuites(aesGCMPreferred bool) []uint16 {
 
 // supportedCipherSuites returns the supported TLS 1.0-1.2 cipher suites in an
 // undefined order. For preference ordering, use [Config.cipherSuites].
-func (c *Config) supportedCipherSuites() []uint16 {
+func (c *Config) supportedCipherSuites() (ruint16 []uint16) {
 	return c.cipherSuites(false)
 }
 
-func _supportedVersionsList() []uint16 {
+func _supportedVersionsList() (ruint16 []uint16) {
 	return []uint16{
 		VersionTLS13,
 		VersionTLS12,
@@ -1197,7 +1202,7 @@ const roleServer = false
 
 // supportedVersions returns the list of supported TLS versions, sorted from
 // highest to lowest (and hence also in preference order).
-func (c *Config) supportedVersions(isClient bool) []uint16 {
+func (c *Config) supportedVersions(isClient bool) (ruint16 []uint16) {
 	svl := _supportedVersionsList()
 	versions := []uint16{:0:len(svl)}
 	for _, v := range svl {
@@ -1222,7 +1227,7 @@ func (c *Config) supportedVersions(isClient bool) []uint16 {
 	return versions
 }
 
-func (c *Config) maxSupportedVersion(isClient bool) uint16 {
+func (c *Config) maxSupportedVersion(isClient bool) (rn uint16) {
 	supportedVersions := c.supportedVersions(isClient)
 	if len(supportedVersions) == 0 {
 		return 0
@@ -1233,7 +1238,7 @@ func (c *Config) maxSupportedVersion(isClient bool) uint16 {
 // supportedVersionsFromMax returns a list of supported versions derived from a
 // legacy maximum version value. Note that only versions supported by this
 // library are returned. Any newer peer will use supportedVersions anyway.
-func supportedVersionsFromMax(maxVersion uint16) []uint16 {
+func supportedVersionsFromMax(maxVersion uint16) (ruint16 []uint16) {
 	svl := _supportedVersionsList()
 	versions := []uint16{:0:len(svl)}
 	for _, v := range svl {
@@ -1246,7 +1251,7 @@ func supportedVersionsFromMax(maxVersion uint16) []uint16 {
 	return versions
 }
 
-func (c *Config) curvePreferences(version uint16) []CurveID {
+func (c *Config) curvePreferences(version uint16) (rcurveID []CurveID) {
 	curvePreferences := defaultCurvePreferences()
 	if fips140tls.Required() {
 		curvePreferences = slices.DeleteFunc(curvePreferences, func(x CurveID) bool {
@@ -1254,9 +1259,14 @@ func (c *Config) curvePreferences(version uint16) []CurveID {
 		})
 	}
 	if c != nil && len(c.CurvePreferences) != 0 {
-		curvePreferences = slices.DeleteFunc(curvePreferences, func(x CurveID) bool {
-			return !slices.Contains(c.CurvePreferences, x)
-		})
+		var chosen []CurveID
+		for _, x := range curvePreferences {
+			if slices.Contains(c.CurvePreferences, x) {
+				chosen = mxutil.Ensure(chosen, 1)
+				chosen = push(chosen, x)
+			}
+		}
+		curvePreferences = chosen
 	}
 	if version < VersionTLS13 {
 		curvePreferences = slices.DeleteFunc(curvePreferences, isTLS13OnlyKeyExchange)
@@ -1264,13 +1274,13 @@ func (c *Config) curvePreferences(version uint16) []CurveID {
 	return curvePreferences
 }
 
-func (c *Config) supportsCurve(version uint16, curve CurveID) bool {
+func (c *Config) supportsCurve(version uint16, curve CurveID) (rok bool) {
 	return slices.Contains(c.curvePreferences(version), curve)
 }
 
 // mutualVersion returns the protocol version to use given the advertised
 // versions of the peer. The highest supported version is preferred.
-func (c *Config) mutualVersion(isClient bool, peerVersions []uint16) (uint16, bool) {
+func (c *Config) mutualVersion(isClient bool, peerVersions []uint16) (rn uint16, rok bool) {
 	supportedVersions := c.supportedVersions(isClient)
 	for _, v := range supportedVersions {
 		if slices.Contains(peerVersions, v) {
@@ -1289,11 +1299,11 @@ func (c *Config) mutualVersion(isClient bool, peerVersions []uint16) (uint16, bo
 // See go.dev/issue/67401.
 //
 //:linkname errNoCertificates
-const errNoCertificates = errors.Const("tls: no certificates configured")
+var errNoCertificates error
 
 // getCertificate returns the best certificate for the given ClientHelloInfo,
 // defaulting to the first element of c.Certificates.
-func (c *Config) getCertificate(clientHello *ClientHelloInfo) (*Certificate, error) {
+func (c *Config) getCertificate(clientHello *ClientHelloInfo) (rcertificate *Certificate, rerr error) {
 	if c.GetCertificate != nil &&
 		(len(c.Certificates) == 0 || len(clientHello.ServerName) > 0) {
 		cert, err := c.GetCertificate(clientHello)
@@ -1347,7 +1357,76 @@ func (c *Config) getCertificate(clientHello *ClientHelloInfo) (*Certificate, err
 //
 // This function will call x509.ParseCertificate unless c.Leaf is set, which can
 // incur a significant performance cost.
-func (chi *ClientHelloInfo) SupportsCertificate(c *Certificate) error {
+// rsaFallbackFilter accepts the static RSA cipher suites usable at vers.
+type rsaFallbackFilter struct {
+	vers uint16
+}
+
+func (f *rsaFallbackFilter) cipherSuiteOk(c *cipherSuite) (rok bool) {
+	if c.flags&suiteECDHE != 0 {
+		return false
+	}
+	if f.vers < VersionTLS12 && c.flags&suiteTLS12 != 0 {
+		return false
+	}
+	return true
+}
+
+// certCipherFilter accepts ECDHE cipher suites matching the certificate key
+// type at vers.
+type certCipherFilter struct {
+	vers             uint16
+	ecdsaCipherSuite bool
+}
+
+func (f *certCipherFilter) cipherSuiteOk(c *cipherSuite) (rok bool) {
+	if c.flags&suiteECDHE == 0 {
+		return false
+	}
+	if c.flags&suiteECSign != 0 {
+		if !f.ecdsaCipherSuite {
+			return false
+		}
+	} else {
+		if f.ecdsaCipherSuite {
+			return false
+		}
+	}
+	if f.vers < VersionTLS12 && c.flags&suiteTLS12 != 0 {
+		return false
+	}
+	return true
+}
+
+// supportsRSAFallback returns nil if the certificate and connection support
+// the static RSA key exchange, and unsupported otherwise. The logic for
+// supporting static RSA is completely disjoint from the logic for supporting
+// signed key exchanges, so we just check it as a fallback.
+func supportsRSAFallback(unsupported error, vers uint16, c *Certificate, chi *ClientHelloInfo, config *Config) (rerr error) {
+	// TLS 1.3 dropped support for the static RSA key exchange.
+	if vers == VersionTLS13 {
+		return unsupported
+	}
+	// The static RSA key exchange works by decrypting a challenge with the
+	// RSA private key, not by signing, so check the PrivateKey implements
+	// crypto.Decrypter, like *rsa.PrivateKey does.
+	if priv, ok2 := c.PrivateKey.(crypto.Decrypter); ok2 {
+		if _, ok1 := priv.Public().(*rsa.PublicKey); !ok1 {
+			return unsupported
+		}
+	} else {
+		return unsupported
+	}
+	// Finally, there needs to be a mutual cipher suite that uses the static
+	// RSA key exchange instead of ECDHE.
+	rsaCipherSuite := selectCipherSuite(chi.CipherSuites, config.supportedCipherSuites(), &rsaFallbackFilter{vers: vers})
+	if rsaCipherSuite == nil {
+		return unsupported
+	}
+	return nil
+}
+
+func (chi *ClientHelloInfo) SupportsCertificate(c *Certificate) (rerr error) {
 	// Note we don't currently support certificate_authorities nor
 	// signature_algorithms_cert, and don't check the algorithms of the
 	// signatures on the chain (which anyway are a SHOULD, see RFC 8446,
@@ -1374,47 +1453,11 @@ func (chi *ClientHelloInfo) SupportsCertificate(c *Certificate) error {
 		}
 	}
 
-	// supportsRSAFallback returns nil if the certificate and connection support
-	// the static RSA key exchange, and unsupported otherwise. The logic for
-	// supporting static RSA is completely disjoint from the logic for
-	// supporting signed key exchanges, so we just check it as a fallback.
-	supportsRSAFallback := func(unsupported error) error {
-		// TLS 1.3 dropped support for the static RSA key exchange.
-		if vers == VersionTLS13 {
-			return unsupported
-		}
-		// The static RSA key exchange works by decrypting a challenge with the
-		// RSA private key, not by signing, so check the PrivateKey implements
-		// crypto.Decrypter, like *rsa.PrivateKey does.
-		if priv, ok2 := c.PrivateKey.(crypto.Decrypter); ok2 {
-			if _, ok1 := priv.Public().(*rsa.PublicKey); !ok1 {
-				return unsupported
-			}
-		} else {
-			return unsupported
-		}
-		// Finally, there needs to be a mutual cipher suite that uses the static
-		// RSA key exchange instead of ECDHE.
-		rsaCipherSuite := selectCipherSuite(chi.CipherSuites, config.supportedCipherSuites(), func(c *cipherSuite) bool {
-			if c.flags&suiteECDHE != 0 {
-				return false
-			}
-			if vers < VersionTLS12 && c.flags&suiteTLS12 != 0 {
-				return false
-			}
-			return true
-		})
-		if rsaCipherSuite == nil {
-			return unsupported
-		}
-		return nil
-	}
-
 	// If the client sent the signature_algorithms extension, ensure it supports
 	// schemes we can use with this certificate and TLS version.
 	if len(chi.SignatureSchemes) > 0 {
 		if _, err1 := selectSignatureScheme(vers, c, chi.SignatureSchemes); err1 != nil {
-			return supportsRSAFallback(err1)
+			return supportsRSAFallback(err1, vers, c, chi, config)
 		}
 	}
 
@@ -1431,7 +1474,7 @@ func (chi *ClientHelloInfo) SupportsCertificate(c *Certificate) error {
 		return err4
 	}
 	if !ecdheSupported {
-		return supportsRSAFallback(errors.New("client doesn't support ECDHE, can only use legacy RSA key exchange"))
+		return supportsRSAFallback(errors.New("client doesn't support ECDHE, can only use legacy RSA key exchange"), vers, c, chi, config)
 	}
 
 	var ecdsaCipherSuite bool
@@ -1447,7 +1490,7 @@ func (chi *ClientHelloInfo) SupportsCertificate(c *Certificate) error {
 			case elliptic.P521():
 				curve = CurveP521
 			default:
-				return supportsRSAFallback(unsupportedCertificateError(c))
+				return supportsRSAFallback(unsupportedCertificateError(c), vers, c, chi, config)
 			}
 			var curveOk bool
 			for _, c1 := range chi.SupportedCurves {
@@ -1467,35 +1510,18 @@ func (chi *ClientHelloInfo) SupportsCertificate(c *Certificate) error {
 			ecdsaCipherSuite = true
 		case *rsa.PublicKey:
 		default:
-			return supportsRSAFallback(unsupportedCertificateError(c))
+			return supportsRSAFallback(unsupportedCertificateError(c), vers, c, chi, config)
 		}
 	} else {
-		return supportsRSAFallback(unsupportedCertificateError(c))
+		return supportsRSAFallback(unsupportedCertificateError(c), vers, c, chi, config)
 	}
 
 	// Make sure that there is a mutually supported cipher suite that works with
 	// this certificate. Cipher suite selection will then apply the logic in
 	// reverse to pick it. See also serverHandshakeState.cipherSuiteOk.
-	cipherSuite1 := selectCipherSuite(chi.CipherSuites, config.supportedCipherSuites(), func(c *cipherSuite) bool {
-		if c.flags&suiteECDHE == 0 {
-			return false
-		}
-		if c.flags&suiteECSign != 0 {
-			if !ecdsaCipherSuite {
-				return false
-			}
-		} else {
-			if ecdsaCipherSuite {
-				return false
-			}
-		}
-		if vers < VersionTLS12 && c.flags&suiteTLS12 != 0 {
-			return false
-		}
-		return true
-	})
+	cipherSuite1 := selectCipherSuite(chi.CipherSuites, config.supportedCipherSuites(), &certCipherFilter{vers: vers, ecdsaCipherSuite: ecdsaCipherSuite})
 	if cipherSuite1 == nil {
-		return supportsRSAFallback(errors.New("client doesn't support any cipher suites compatible with the certificate"))
+		return supportsRSAFallback(errors.New("client doesn't support any cipher suites compatible with the certificate"), vers, c, chi, config)
 	}
 
 	return nil
@@ -1504,7 +1530,7 @@ func (chi *ClientHelloInfo) SupportsCertificate(c *Certificate) error {
 // SupportsCertificate returns nil if the provided certificate is supported by
 // the server that sent the CertificateRequest. Otherwise, it returns an error
 // describing the reason for the incompatibility.
-func (cri *CertificateRequestInfo) SupportsCertificate(c *Certificate) error {
+func (cri *CertificateRequestInfo) SupportsCertificate(c *Certificate) (rerr error) {
 	if _, err2 := selectSignatureScheme(cri.Version, c, cri.SignatureSchemes); err2 != nil {
 		return err2
 	}
@@ -1582,7 +1608,7 @@ const (
 	keyLogLabelServerTraffic   = "SERVER_TRAFFIC_SECRET_0"
 )
 
-func (c *Config) writeKeyLog(label []byte, clientRandom, secret []byte) error {
+func (c *Config) writeKeyLog(label []byte, clientRandom, secret []byte) (rerr error) {
 	if c.KeyLogWriter == nil {
 		return nil
 	}
@@ -1624,7 +1650,7 @@ type Certificate struct {
 
 // leaf returns the parsed leaf certificate, either from c.Leaf or by parsing
 // the corresponding c.Certificate[0].
-func (c *Certificate) leaf() (*x509.Certificate, error) {
+func (c *Certificate) leaf() (rcertificate *x509.Certificate, rerr error) {
 	if c.Leaf != nil {
 		return c.Leaf, nil
 	}
@@ -1709,7 +1735,7 @@ func (c *lruSessionCache) moveToFront(e *lruSessionCacheEntry) {
 // NewLRUClientSessionCache returns a [ClientSessionCache] with the given
 // capacity that uses an LRU strategy. If capacity is < 1, a default capacity
 // is used instead.
-func NewLRUClientSessionCache(capacity int32) ClientSessionCache {
+func NewLRUClientSessionCache(capacity int32) (rclientSessionCache ClientSessionCache) {
 	const defaultSessionCacheCapacity = 64
 
 	if capacity < 1 {
@@ -1753,7 +1779,7 @@ func (c *lruSessionCache) Put(sessionKey []byte, cs *ClientSessionState) {
 
 // Get returns the [ClientSessionState] value associated with a given key. It
 // returns (nil, false) if no value is found.
-func (c *lruSessionCache) Get(sessionKey []byte) (*ClientSessionState, bool) {
+func (c *lruSessionCache) Get(sessionKey []byte) (rclientSessionState *ClientSessionState, rok bool) {
 	if entry, ok := c.m[sessionKey]; ok {
 		c.moveToFront(entry)
 		return entry.state, true
@@ -1761,25 +1787,31 @@ func (c *lruSessionCache) Get(sessionKey []byte) (*ClientSessionState, bool) {
 	return nil, false
 }
 
-func defaultConfig() *Config {
+func defaultConfig() (rconfig *Config) {
 	return &Config{}
 }
 
-func unexpectedMessageError(wanted, got handshakeMessage) error {
+func unexpectedMessageError(wanted, got handshakeMessage) (rerr error) {
 	return fmt.Errorf("tls: received unexpected handshake message of type %T when waiting for %T", got, wanted)
 }
 
 // supportedSignatureAlgorithms returns the supported signature algorithms for
 // the given minimum TLS version, to advertise in ClientHello and
 // CertificateRequest messages.
-func supportedSignatureAlgorithms(minVers uint16) []SignatureScheme {
+func supportedSignatureAlgorithms(minVers uint16) (rsignatureScheme []SignatureScheme) {
 	sigAlgs := defaultSupportedSignatureAlgorithms()
-	return slices.DeleteFunc(sigAlgs, func(s SignatureScheme) bool {
-		return isDisabledSignatureAlgorithm(minVers, s, false)
-	})
+	filtered := []SignatureScheme{:0:len(sigAlgs)}
+	n := int32(0)
+	for _, s := range sigAlgs {
+		if !isDisabledSignatureAlgorithm(minVers, s, false) {
+			filtered[n] = s
+			n++
+		}
+	}
+	return filtered[:n]
 }
 
-func isDisabledSignatureAlgorithm(version uint16, s SignatureScheme, isCert bool) bool {
+func isDisabledSignatureAlgorithm(version uint16, s SignatureScheme, isCert bool) (rok bool) {
 	if fips140tls.Required() && !slices.Contains(_allowedSignatureAlgorithmsFIPS(), s) {
 		return true
 	}
@@ -1813,14 +1845,14 @@ func isDisabledSignatureAlgorithm(version uint16, s SignatureScheme, isCert bool
 
 // supportedSignatureAlgorithmsCert returns the supported algorithms for
 // signatures in certificates.
-func supportedSignatureAlgorithmsCert() []SignatureScheme {
+func supportedSignatureAlgorithmsCert() (rsignatureScheme []SignatureScheme) {
 	sigAlgs := defaultSupportedSignatureAlgorithms()
 	return slices.DeleteFunc(sigAlgs, func(s SignatureScheme) bool {
 		return isDisabledSignatureAlgorithm(0, s, true)
 	})
 }
 
-func isSupportedSignatureAlgorithm(sigAlg SignatureScheme, sigs []SignatureScheme) bool {
+func isSupportedSignatureAlgorithm(sigAlg SignatureScheme, sigs []SignatureScheme) (rok bool) {
 	return slices.Contains(sigs, sigAlg)
 }
 
@@ -1831,13 +1863,13 @@ type CertificateVerificationError struct {
 	Err                    error
 }
 
-func (e *CertificateVerificationError) Error() string {
+func (e *CertificateVerificationError) Error() (rs string) {
 	return fmt.Sprintf("tls: failed to verify certificate: %s", e.Err)
 }
 
-func (e *CertificateVerificationError) String() string { return e.Error() }
+func (e *CertificateVerificationError) String() (rs string) { return e.Error() }
 
-func (e *CertificateVerificationError) Unwrap() error {
+func (e *CertificateVerificationError) Unwrap() (rerr error) {
 	return e.Err
 }
 
@@ -1847,7 +1879,7 @@ func (e *CertificateVerificationError) Unwrap() error {
 // If fips140tls is not required, the chains are returned as-is with no processing.
 // Otherwise, the returned chains are filtered to only those allowed by FIPS 140-3.
 // If this results in no chains it returns an error.
-func fipsAllowedChains(chains [][]*x509.Certificate) ([][]*x509.Certificate, error) {
+func fipsAllowedChains(chains [][]*x509.Certificate) (rcertificate [][]*x509.Certificate, rerr error) {
 	if !fips140tls.Required() {
 		return chains, nil
 	}
@@ -1867,7 +1899,7 @@ func fipsAllowedChains(chains [][]*x509.Certificate) ([][]*x509.Certificate, err
 	return permittedChains, nil
 }
 
-func fipsAllowChain(chain []*x509.Certificate) bool {
+func fipsAllowChain(chain []*x509.Certificate) (rok bool) {
 	if len(chain) == 0 {
 		return false
 	}
@@ -1885,14 +1917,19 @@ func fipsAllowChain(chain []*x509.Certificate) bool {
 // is valid, as indicated by none of the certificates being expired and the root
 // being in opts.Roots (or in the system root pool if opts.Roots is nil). If
 // verifiedChains is empty, it returns false.
-func anyValidVerifiedChain(verifiedChains [][]*x509.Certificate, opts x509.VerifyOptions) bool {
+func anyValidVerifiedChain(verifiedChains [][]*x509.Certificate, opts x509.VerifyOptions) (rok bool) {
 	for _, chain := range verifiedChains {
 		if len(chain) == 0 {
 			continue
 		}
-		if slices.ContainsFunc(chain, func(cert *x509.Certificate) bool {
-			return opts.CurrentTime.Before(cert.NotBefore) || opts.CurrentTime.After(cert.NotAfter)
-		}) {
+		expired := false
+		for _, cert := range chain {
+			if opts.CurrentTime.Before(cert.NotBefore) || opts.CurrentTime.After(cert.NotAfter) {
+				expired = true
+				break
+			}
+		}
+		if expired {
 			continue
 		}
 		// Since we already validated the chain, we only care that it is rooted

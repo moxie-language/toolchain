@@ -27,7 +27,7 @@ const (
 // In general, the GHASH operation performed by this implementation of GCM is not constant-time.
 // An exception is when the underlying [Block] was created by aes.NewCipher
 // on systems with hardware support for AES. See the [crypto/aes] package documentation for details.
-func NewGCM(cipher Block) (AEAD, error) {
+func NewGCM(cipher Block) (mode AEAD, err error) {
 	if fips140only.Enabled {
 		return nil, errors.New("crypto/cipher: use of GCM with arbitrary IVs is not allowed in FIPS 140-only mode, use NewGCMWithRandomNonce")
 	}
@@ -41,7 +41,7 @@ func NewGCM(cipher Block) (AEAD, error) {
 // Only use this function if you require compatibility with an existing
 // cryptosystem that uses non-standard nonce lengths. All other users should use
 // [NewGCM], which is faster and more resistant to misuse.
-func NewGCMWithNonceSize(cipher Block, size int32) (AEAD, error) {
+func NewGCMWithNonceSize(cipher Block, size int32) (mode AEAD, err error) {
 	if fips140only.Enabled {
 		return nil, errors.New("crypto/cipher: use of GCM with arbitrary IVs is not allowed in FIPS 140-only mode, use NewGCMWithRandomNonce")
 	}
@@ -56,14 +56,14 @@ func NewGCMWithNonceSize(cipher Block, size int32) (AEAD, error) {
 // Only use this function if you require compatibility with an existing
 // cryptosystem that uses non-standard tag lengths. All other users should use
 // [NewGCM], which is more resistant to misuse.
-func NewGCMWithTagSize(cipher Block, tagSize int32) (AEAD, error) {
+func NewGCMWithTagSize(cipher Block, tagSize int32) (mode AEAD, err error) {
 	if fips140only.Enabled {
 		return nil, errors.New("crypto/cipher: use of GCM with arbitrary IVs is not allowed in FIPS 140-only mode, use NewGCMWithRandomNonce")
 	}
 	return newGCM(cipher, gcmStandardNonceSize, tagSize)
 }
 
-func newGCM(cipher Block, nonceSize, tagSize int32) (AEAD, error) {
+func newGCM(cipher Block, nonceSize, tagSize int32) (mode AEAD, rerr error) {
 	c, ok := cipher.(*aes.Block)
 	if !ok {
 		if fips140only.Enabled {
@@ -90,7 +90,7 @@ func newGCM(cipher Block, nonceSize, tagSize int32) (AEAD, error) {
 //
 // A given key MUST NOT be used to encrypt more than 2^32 messages, to limit the
 // risk of a random nonce collision to negligible levels.
-func NewGCMWithRandomNonce(cipher Block) (AEAD, error) {
+func NewGCMWithRandomNonce(cipher Block) (mode AEAD, rerr error) {
 	c, ok := cipher.(*aes.Block)
 	if !ok {
 		return nil, errors.New("cipher: NewGCMWithRandomNonce requires aes.Block")
@@ -99,22 +99,22 @@ func NewGCMWithRandomNonce(cipher Block) (AEAD, error) {
 	if err != nil {
 		return nil, err
 	}
-	return gcmWithRandomNonce{g}, nil
+	return &gcmWithRandomNonce{g}, nil
 }
 
 type gcmWithRandomNonce struct {
 	*gcm.GCM
 }
 
-func (g gcmWithRandomNonce) NonceSize() int32 {
+func (g *gcmWithRandomNonce) NonceSize() (n int32) {
 	return 0
 }
 
-func (g gcmWithRandomNonce) Overhead() int32 {
+func (g *gcmWithRandomNonce) Overhead() (n int32) {
 	return gcmStandardNonceSize + gcmTagSize
 }
 
-func (g gcmWithRandomNonce) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
+func (g *gcmWithRandomNonce) Seal(dst, nonce, plaintext, additionalData []byte) (sealed []byte) {
 	if len(nonce) != 0 {
 		panic("crypto/cipher: non-empty nonce passed to GCMWithRandomNonce")
 	}
@@ -161,7 +161,7 @@ func (g gcmWithRandomNonce) Seal(dst, nonce, plaintext, additionalData []byte) [
 	return ret
 }
 
-func (g gcmWithRandomNonce) Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error) {
+func (g *gcmWithRandomNonce) Open(dst, nonce, ciphertext, additionalData []byte) (plain []byte, rerr error) {
 	if len(nonce) != 0 {
 		panic("crypto/cipher: non-empty nonce passed to GCMWithRandomNonce")
 	}
@@ -204,7 +204,7 @@ type gcmAble interface {
 	NewGCM(nonceSize, tagSize int32) (AEAD, error)
 }
 
-func newGCMFallback(cipher Block, nonceSize, tagSize int32) (AEAD, error) {
+func newGCMFallback(cipher Block, nonceSize, tagSize int32) (mode AEAD, err error) {
 	if tagSize < gcmMinimumTagSize || tagSize > gcmBlockSize {
 		return nil, errors.New("cipher: incorrect tag size given to GCM")
 	}
@@ -229,15 +229,15 @@ type gcmFallback struct {
 	tagSize   int32
 }
 
-func (g *gcmFallback) NonceSize() int32 {
+func (g *gcmFallback) NonceSize() (n int32) {
 	return g.nonceSize
 }
 
-func (g *gcmFallback) Overhead() int32 {
+func (g *gcmFallback) Overhead() (n int32) {
 	return g.tagSize
 }
 
-func (g *gcmFallback) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
+func (g *gcmFallback) Seal(dst, nonce, plaintext, additionalData []byte) (sealed []byte) {
 	if len(nonce) != g.nonceSize {
 		panic("crypto/cipher: incorrect nonce length given to GCM")
 	}
@@ -270,9 +270,9 @@ func (g *gcmFallback) Seal(dst, nonce, plaintext, additionalData []byte) []byte 
 	return ret
 }
 
-const errOpen = errors.Const("cipher: message authentication failed")
+var errOpen error
 
-func (g *gcmFallback) Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error) {
+func (g *gcmFallback) Open(dst, nonce, ciphertext, additionalData []byte) (plain []byte, rerr error) {
 	if len(nonce) != g.nonceSize {
 		panic("crypto/cipher: incorrect nonce length given to GCM")
 	}
@@ -374,4 +374,8 @@ func sliceForAppend(in []byte, n int32) (head, tail []byte) {
 	}
 	tail = head[len(in):]
 	return
+}
+
+func init() {
+	errOpen = errors.New("cipher: message authentication failed")
 }

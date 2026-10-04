@@ -32,16 +32,16 @@ import (
 // standard library.
 type Int struct {
 	neg bool // sign
-	abs nat  // absolute value of the integer
+	abs []Word  // absolute value of the integer
 }
 
-func _intOne() *Int { return &Int{false, _natOne()} }
+func _intOne() (rint *Int) { return &Int{false, _natOne()} }
 
 // Sign returns:
 //   - -1 if x < 0;
 //   - 0 if x == 0;
 //   - +1 if x > 0.
-func (x *Int) Sign() int32 {
+func (x *Int) Sign() (rn int32) {
 	// This function is used in cryptographic operations. It must not leak
 	// anything but the Int's sign and bit size through side-channels. Any
 	// changes must be reviewed by a security expert.
@@ -55,26 +55,26 @@ func (x *Int) Sign() int32 {
 }
 
 // SetInt64 sets z to x and returns z.
-func (z *Int) SetInt64(x int64) *Int {
+func (z *Int) SetInt64(x int64) (rint *Int) {
 	neg := false
 	if x < 0 {
 		neg = true
 		x = -x
 	}
-	z.abs = z.abs.setUint64(uint64(x))
+	z.abs = natSetUint64(z.abs, uint64(x))
 	z.neg = neg
 	return z
 }
 
 // SetUint64 sets z to x and returns z.
-func (z *Int) SetUint64(x uint64) *Int {
-	z.abs = z.abs.setUint64(x)
+func (z *Int) SetUint64(x uint64) (rint *Int) {
+	z.abs = natSetUint64(z.abs, x)
 	z.neg = false
 	return z
 }
 
 // NewInt allocates and returns a new [Int] set to x.
-func NewInt(x int64) *Int {
+func NewInt(x int64) (rint *Int) {
 	// This code is arranged to be inlineable and produce
 	// zero allocations when inlined. See issue 29951.
 	u := uint64(x)
@@ -92,9 +92,9 @@ func NewInt(x int64) *Int {
 }
 
 // Set sets z to x and returns z.
-func (z *Int) Set(x *Int) *Int {
+func (z *Int) Set(x *Int) (rint *Int) {
 	if z != x {
-		z.abs = z.abs.set(x.abs)
+		z.abs = natSet(z.abs, x.abs)
 		z.neg = x.neg
 	}
 	return z
@@ -105,7 +105,7 @@ func (z *Int) Set(x *Int) *Int {
 // the same underlying array.
 // Bits is intended to support implementation of missing low-level [Int]
 // functionality outside this package; it should be avoided otherwise.
-func (x *Int) Bits() []Word {
+func (x *Int) Bits() (rword []Word) {
 	// This function is used in cryptographic operations. It must not leak
 	// anything but the Int's sign and bit size through side-channels. Any
 	// changes must be reviewed by a security expert.
@@ -117,41 +117,41 @@ func (x *Int) Bits() []Word {
 // z. The result and abs share the same underlying array.
 // SetBits is intended to support implementation of missing low-level [Int]
 // functionality outside this package; it should be avoided otherwise.
-func (z *Int) SetBits(abs []Word) *Int {
-	z.abs = nat(abs).norm()
+func (z *Int) SetBits(abs []Word) (rint *Int) {
+	z.abs = natNorm([]Word(abs))
 	z.neg = false
 	return z
 }
 
 // Abs sets z to |x| (the absolute value of x) and returns z.
-func (z *Int) Abs(x *Int) *Int {
+func (z *Int) Abs(x *Int) (rint *Int) {
 	z.Set(x)
 	z.neg = false
 	return z
 }
 
 // Neg sets z to -x and returns z.
-func (z *Int) Neg(x *Int) *Int {
+func (z *Int) Neg(x *Int) (rint *Int) {
 	z.Set(x)
 	z.neg = len(z.abs) > 0 && !z.neg // 0 has no sign
 	return z
 }
 
 // Add sets z to the sum x+y and returns z.
-func (z *Int) Add(x, y *Int) *Int {
+func (z *Int) Add(x, y *Int) (rint *Int) {
 	neg := x.neg
 	if x.neg == y.neg {
 		// x + y == x + y
 		// (-x) + (-y) == -(x + y)
-		z.abs = z.abs.add(x.abs, y.abs)
+		z.abs = natAdd(z.abs, x.abs, y.abs)
 	} else {
 		// x + (-y) == x - y == -(y - x)
 		// (-x) + y == y - x == -(x - y)
-		if x.abs.cmp(y.abs) >= 0 {
-			z.abs = z.abs.sub(x.abs, y.abs)
+		if natCmp(x.abs, y.abs) >= 0 {
+			z.abs = natSub(z.abs, x.abs, y.abs)
 		} else {
 			neg = !neg
-			z.abs = z.abs.sub(y.abs, x.abs)
+			z.abs = natSub(z.abs, y.abs, x.abs)
 		}
 	}
 	z.neg = len(z.abs) > 0 && neg // 0 has no sign
@@ -159,20 +159,20 @@ func (z *Int) Add(x, y *Int) *Int {
 }
 
 // Sub sets z to the difference x-y and returns z.
-func (z *Int) Sub(x, y *Int) *Int {
+func (z *Int) Sub(x, y *Int) (rint *Int) {
 	neg := x.neg
 	if x.neg != y.neg {
 		// x - (-y) == x + y
 		// (-x) - y == -(x + y)
-		z.abs = z.abs.add(x.abs, y.abs)
+		z.abs = natAdd(z.abs, x.abs, y.abs)
 	} else {
 		// x - y == x - y == -(y - x)
 		// (-x) - (-y) == y - x == -(x - y)
-		if x.abs.cmp(y.abs) >= 0 {
-			z.abs = z.abs.sub(x.abs, y.abs)
+		if natCmp(x.abs, y.abs) >= 0 {
+			z.abs = natSub(z.abs, x.abs, y.abs)
 		} else {
 			neg = !neg
-			z.abs = z.abs.sub(y.abs, x.abs)
+			z.abs = natSub(z.abs, y.abs, x.abs)
 		}
 	}
 	z.neg = len(z.abs) > 0 && neg // 0 has no sign
@@ -180,7 +180,7 @@ func (z *Int) Sub(x, y *Int) *Int {
 }
 
 // Mul sets z to the product x*y and returns z.
-func (z *Int) Mul(x, y *Int) *Int {
+func (z *Int) Mul(x, y *Int) (rint *Int) {
 	z.mul(nil, x, y)
 	return z
 }
@@ -194,18 +194,18 @@ func (z *Int) mul(stk *stack, x, y *Int) {
 	// (-x) * y == -(x * y)
 	// (-x) * (-y) == x * y
 	if x == y {
-		z.abs = z.abs.sqr(stk, x.abs)
+		z.abs = natSqr(z.abs, stk, x.abs)
 		z.neg = false
 		return
 	}
-	z.abs = z.abs.mul(stk, x.abs, y.abs)
+	z.abs = natMul(z.abs, stk, x.abs, y.abs)
 	z.neg = len(z.abs) > 0 && x.neg != y.neg // 0 has no sign
 }
 
 // MulRange sets z to the product of all integers
 // in the range [a, b] inclusively and returns z.
 // If a > b (empty range), the result is 1.
-func (z *Int) MulRange(a, b int64) *Int {
+func (z *Int) MulRange(a, b int64) (rint *Int) {
 	switch {
 	case a > b:
 		return z.SetInt64(1) // empty range
@@ -220,13 +220,13 @@ func (z *Int) MulRange(a, b int64) *Int {
 		a, b = -b, -a
 	}
 
-	z.abs = z.abs.mulRange(nil, uint64(a), uint64(b))
+	z.abs = natMulRange(z.abs, nil, uint64(a), uint64(b))
 	z.neg = neg
 	return z
 }
 
 // Binomial sets z to the binomial coefficient C(n, k) and returns z.
-func (z *Int) Binomial(n, k int64) *Int {
+func (z *Int) Binomial(n, k int64) (rint *Int) {
 	if k > n {
 		return z.SetInt64(0)
 	}
@@ -270,8 +270,8 @@ func (z *Int) Binomial(n, k int64) *Int {
 // Quo sets z to the quotient x/y for y != 0 and returns z.
 // If y == 0, a division-by-zero run-time panic occurs.
 // Quo implements truncated division (like Go); see [Int.QuoRem] for more details.
-func (z *Int) Quo(x, y *Int) *Int {
-	z.abs, _ = z.abs.div(nil, nil, x.abs, y.abs)
+func (z *Int) Quo(x, y *Int) (rint *Int) {
+	z.abs, _ = natDiv(z.abs, nil, nil, x.abs, y.abs)
 	z.neg = len(z.abs) > 0 && x.neg != y.neg // 0 has no sign
 	return z
 }
@@ -279,8 +279,8 @@ func (z *Int) Quo(x, y *Int) *Int {
 // Rem sets z to the remainder x%y for y != 0 and returns z.
 // If y == 0, a division-by-zero run-time panic occurs.
 // Rem implements truncated modulus (like Go); see [Int.QuoRem] for more details.
-func (z *Int) Rem(x, y *Int) *Int {
-	_, z.abs = nat(nil).div(nil, z.abs, x.abs, y.abs)
+func (z *Int) Rem(x, y *Int) (rint *Int) {
+	_, z.abs = natDiv([]Word(nil), nil, z.abs, x.abs, y.abs)
 	z.neg = len(z.abs) > 0 && x.neg // 0 has no sign
 	return z
 }
@@ -296,8 +296,8 @@ func (z *Int) Rem(x, y *Int) *Int {
 //
 // (See Daan Leijen, "Division and Modulus for Computer Scientists".)
 // See [Int.DivMod] for Euclidean division and modulus (unlike Go).
-func (z *Int) QuoRem(x, y, r *Int) (*Int, *Int) {
-	z.abs, r.abs = z.abs.div(nil, r.abs, x.abs, y.abs)
+func (z *Int) QuoRem(x, y, r *Int) (rint *Int, rint2 *Int) {
+	z.abs, r.abs = natDiv(z.abs, nil, r.abs, x.abs, y.abs)
 	z.neg, r.neg = len(z.abs) > 0 && x.neg != y.neg, len(r.abs) > 0 && x.neg // 0 has no sign
 	return z, r
 }
@@ -305,7 +305,7 @@ func (z *Int) QuoRem(x, y, r *Int) (*Int, *Int) {
 // Div sets z to the quotient x/y for y != 0 and returns z.
 // If y == 0, a division-by-zero run-time panic occurs.
 // Div implements Euclidean division (unlike Go); see [Int.DivMod] for more details.
-func (z *Int) Div(x, y *Int) *Int {
+func (z *Int) Div(x, y *Int) (rint *Int) {
 	y_neg := y.neg // z may be an alias for y
 	var r Int
 	z.QuoRem(x, y, &r)
@@ -322,7 +322,7 @@ func (z *Int) Div(x, y *Int) *Int {
 // Mod sets z to the modulus x%y for y != 0 and returns z.
 // If y == 0, a division-by-zero run-time panic occurs.
 // Mod implements Euclidean modulus (unlike Go); see [Int.DivMod] for more details.
-func (z *Int) Mod(x, y *Int) *Int {
+func (z *Int) Mod(x, y *Int) (rint *Int) {
 	y0 := y // save y
 	if z == y || alias(z.abs, y.abs) {
 		y0 = (&Int{}).Set(y)
@@ -353,7 +353,7 @@ func (z *Int) Mod(x, y *Int) *Int {
 // Systems (TOPLAS), 14(2):127-144, New York, NY, USA, 4/1992.
 // ACM press.)
 // See [Int.QuoRem] for T-division and modulus (like Go).
-func (z *Int) DivMod(x, y, m *Int) (*Int, *Int) {
+func (z *Int) DivMod(x, y, m *Int) (rint *Int, rint2 *Int) {
 	y0 := y // save y
 	if z == y || alias(z.abs, y.abs) {
 		y0 = (&Int{}).Set(y)
@@ -384,7 +384,7 @@ func (x *Int) Cmp(y *Int) (r int32) {
 	case x == y:
 		// nothing to do
 	case x.neg == y.neg:
-		r = x.abs.cmp(y.abs)
+		r = natCmp(x.abs, y.abs)
 		if x.neg {
 			r = -r
 		}
@@ -400,12 +400,12 @@ func (x *Int) Cmp(y *Int) (r int32) {
 //   - -1 if |x| < |y|;
 //   - 0 if |x| == |y|;
 //   - +1 if |x| > |y|.
-func (x *Int) CmpAbs(y *Int) int32 {
-	return x.abs.cmp(y.abs)
+func (x *Int) CmpAbs(y *Int) (rn int32) {
+	return natCmp(x.abs, y.abs)
 }
 
 // low32 returns the least significant 32 bits of x.
-func low32(x nat) uint32 {
+func low32(x []Word) (rn uint32) {
 	if len(x) == 0 {
 		return 0
 	}
@@ -413,7 +413,7 @@ func low32(x nat) uint32 {
 }
 
 // low64 returns the least significant 64 bits of x.
-func low64(x nat) uint64 {
+func low64(x []Word) (rn uint64) {
 	if len(x) == 0 {
 		return 0
 	}
@@ -426,7 +426,7 @@ func low64(x nat) uint64 {
 
 // Int64 returns the int64 representation of x.
 // If x cannot be represented in an int64, the result is undefined.
-func (x *Int) Int64() int64 {
+func (x *Int) Int64() (rn int64) {
 	v := int64(low64(x.abs))
 	if x.neg {
 		v = -v
@@ -436,12 +436,12 @@ func (x *Int) Int64() int64 {
 
 // Uint64 returns the uint64 representation of x.
 // If x cannot be represented in a uint64, the result is undefined.
-func (x *Int) Uint64() uint64 {
+func (x *Int) Uint64() (rn uint64) {
 	return low64(x.abs)
 }
 
 // IsInt64 reports whether x can be represented as an int64.
-func (x *Int) IsInt64() bool {
+func (x *Int) IsInt64() (rok bool) {
 	if len(x.abs) <= 64/_W {
 		w := int64(low64(x.abs))
 		return w >= 0 || x.neg && w == -w
@@ -450,20 +450,20 @@ func (x *Int) IsInt64() bool {
 }
 
 // IsUint64 reports whether x can be represented as a uint64.
-func (x *Int) IsUint64() bool {
+func (x *Int) IsUint64() (rok bool) {
 	return !x.neg && len(x.abs) <= 64/_W
 }
 
 // Float64 returns the float64 value nearest x,
 // and an indication of any rounding that occurred.
-func (x *Int) Float64() (float64, Accuracy) {
-	n := x.abs.bitLen() // NB: still uses slow crypto impl!
+func (x *Int) Float64() (rfloat64 float64, raccuracy Accuracy) {
+	n := natBitLen(x.abs) // NB: still uses slow crypto impl!
 	if n == 0 {
 		return 0.0, Exact
 	}
 
 	// Fast path: no more than 53 significant bits.
-	if n <= 53 || n < 64 && n-int32(x.abs.trailingZeroBits()) <= 53 {
+	if n <= 53 || n < 64 && n-int32(natTrailingZeroBits(x.abs)) <= 53 {
 		f := float64(low64(x.abs))
 		if x.neg {
 			f = -f
@@ -496,13 +496,13 @@ func (x *Int) Float64() (float64, Accuracy) {
 // Incorrect placement of underscores is reported as an error if there
 // are no other errors. If base != 0, underscores are not recognized
 // and act like any other character that is not a valid digit.
-func (z *Int) SetString(s []byte, base int32) (*Int, bool) {
+func (z *Int) SetString(s []byte, base int32) (rint *Int, rok bool) {
 	return z.setFromScanner(bytes.NewReader(s), base)
 }
 
 // setFromScanner implements SetString given an io.ByteScanner.
 // For documentation see comments of SetString.
-func (z *Int) setFromScanner(r io.ByteScanner, base int32) (*Int, bool) {
+func (z *Int) setFromScanner(r io.ByteScanner, base int32) (rint *Int, rok bool) {
 	if _, _, err := z.scan(r, base); err != nil {
 		return nil, false
 	}
@@ -515,8 +515,8 @@ func (z *Int) setFromScanner(r io.ByteScanner, base int32) (*Int, bool) {
 
 // SetBytes interprets buf as the bytes of a big-endian unsigned
 // integer, sets z to that value, and returns z.
-func (z *Int) SetBytes(buf []byte) *Int {
-	z.abs = z.abs.setBytes(buf)
+func (z *Int) SetBytes(buf []byte) (rint *Int) {
+	z.abs = natSetBytes(z.abs, buf)
 	z.neg = false
 	return z
 }
@@ -524,38 +524,38 @@ func (z *Int) SetBytes(buf []byte) *Int {
 // Bytes returns the absolute value of x as a big-endian byte slice.
 //
 // To use a fixed length slice, or a preallocated one, use [Int.FillBytes].
-func (x *Int) Bytes() []byte {
+func (x *Int) Bytes() (rb []byte) {
 	// This function is used in cryptographic operations. It must not leak
 	// anything but the Int's sign and bit size through side-channels. Any
 	// changes must be reviewed by a security expert.
 	buf := []byte{:len(x.abs)*_S}
-	return buf[x.abs.bytes(buf):]
+	return buf[natBytes(x.abs, buf):]
 }
 
 // FillBytes sets buf to the absolute value of x, storing it as a zero-extended
 // big-endian byte slice, and returns buf.
 //
 // If the absolute value of x doesn't fit in buf, FillBytes will panic.
-func (x *Int) FillBytes(buf []byte) []byte {
+func (x *Int) FillBytes(buf []byte) (rb []byte) {
 	// Clear whole buffer.
 	clear(buf)
-	x.abs.bytes(buf)
+	natBytes(x.abs, buf)
 	return buf
 }
 
 // BitLen returns the length of the absolute value of x in bits.
 // The bit length of 0 is 0.
-func (x *Int) BitLen() int32 {
+func (x *Int) BitLen() (rn int32) {
 	// This function is used in cryptographic operations. It must not leak
 	// anything but the Int's sign and bit size through side-channels. Any
 	// changes must be reviewed by a security expert.
-	return x.abs.bitLen()
+	return natBitLen(x.abs)
 }
 
 // TrailingZeroBits returns the number of consecutive least significant zero
 // bits of |x|.
-func (x *Int) TrailingZeroBits() uint32 {
-	return x.abs.trailingZeroBits()
+func (x *Int) TrailingZeroBits() (rn uint32) {
+	return natTrailingZeroBits(x.abs)
 }
 
 // Exp sets z = x**y mod |m| (i.e. the sign of m is ignored), and returns z.
@@ -564,15 +564,15 @@ func (x *Int) TrailingZeroBits() uint32 {
 //
 // Modular exponentiation of inputs of a particular size is not a
 // cryptographically constant-time operation.
-func (z *Int) Exp(x, y, m *Int) *Int {
+func (z *Int) Exp(x, y, m *Int) (rint *Int) {
 	return z.exp(x, y, m, false)
 }
 
-func (z *Int) expSlow(x, y, m *Int) *Int {
+func (z *Int) expSlow(x, y, m *Int) (rint *Int) {
 	return z.exp(x, y, m, true)
 }
 
-func (z *Int) exp(x, y, m *Int, slow bool) *Int {
+func (z *Int) exp(x, y, m *Int, slow bool) (rint *Int) {
 	// See Knuth, volume 2, section 4.6.3.
 	xWords := x.abs
 	if y.neg {
@@ -588,7 +588,7 @@ func (z *Int) exp(x, y, m *Int, slow bool) *Int {
 	}
 	yWords := y.abs
 
-	var mWords nat
+	var mWords []Word
 	if m != nil {
 		if z == m || alias(z.abs, m.abs) {
 			m = (&Int{}).Set(m)
@@ -596,11 +596,11 @@ func (z *Int) exp(x, y, m *Int, slow bool) *Int {
 		mWords = m.abs // m.abs may be nil for m == 0
 	}
 
-	z.abs = z.abs.expNN(nil, xWords, yWords, mWords, slow)
+	z.abs = natExpNN(z.abs, nil, xWords, yWords, mWords, slow)
 	z.neg = len(z.abs) > 0 && x.neg && len(yWords) > 0 && yWords[0]&1 == 1 // 0 has no sign
 	if z.neg && len(mWords) > 0 {
 		// make modulus result positive
-		z.abs = z.abs.sub(mWords, z.abs) // z == x**y mod |m| && 0 <= z < |m|
+		z.abs = natSub(z.abs, mWords, z.abs) // z == x**y mod |m| && 0 <= z < |m|
 		z.neg = false
 	}
 
@@ -618,7 +618,7 @@ func (z *Int) exp(x, y, m *Int, slow bool) *Int {
 // If a == 0 and b != 0, GCD sets z = |b|, x = 0, y = sign(b) * 1.
 //
 // If a != 0 and b == 0, GCD sets z = |a|, x = sign(a) * 1, y = 0.
-func (z *Int) GCD(x, y, a, b *Int) *Int {
+func (z *Int) GCD(x, y, a, b *Int) (rint *Int) {
 	if len(a.abs) == 0 || len(b.abs) == 0 {
 		lenA, lenB, negA, negB := len(a.abs), len(b.abs), a.neg, b.neg
 		if lenA == 0 {
@@ -726,7 +726,7 @@ func lehmerUpdate(A, B, q, r *Int, u0, u1, v0, v1 Word, even bool) {
 // mulW sets z = x * (-?)w
 // where the minus sign is present when neg is true.
 func mulW(z, x *Int, neg bool, w Word) {
-	z.abs = z.abs.mulAddWW(x.abs, w, 0)
+	z.abs = natMulAddWW(z.abs, x.abs, w, 0)
 	z.neg = x.neg != neg
 }
 
@@ -756,7 +756,7 @@ func euclidUpdate(A, B, Ua, Ub, q, r *Int, extended bool) (nA, nB, nr, nUa, nUb 
 // Design and Implementation of Symbolic Computation Systems, pp 45-58.
 // The cosequences are updated according to Algorithm 10.45 from
 // Cohen et al. "Handbook of Elliptic and Hyperelliptic Curve Cryptography" pp 192.
-func (z *Int) lehmerGCD(x, y, a, b *Int) *Int {
+func (z *Int) lehmerGCD(x, y, a, b *Int) (rint *Int) {
 	var A, B, Ua, Ub *Int
 
 	A = (&Int{}).Abs(a)
@@ -775,7 +775,7 @@ func (z *Int) lehmerGCD(x, y, a, b *Int) *Int {
 	r := &Int{}
 
 	// ensure A >= B
-	if A.abs.cmp(B.abs) < 0 {
+	if natCmp(A.abs, B.abs) < 0 {
 		A, B = B, A
 		Ub, Ua = Ua, Ub
 	}
@@ -871,7 +871,7 @@ func (z *Int) lehmerGCD(x, y, a, b *Int) *Int {
 //
 // As this uses the [math/rand] package, it must not be used for
 // security-sensitive work. Use [crypto/rand.Int] instead.
-func (z *Int) Rand(rnd *rand.Rand, n *Int) *Int {
+func (z *Int) Rand(rnd *rand.Rand, n *Int) (rint *Int) {
 	// z.neg is not modified before the if check, because z and n might alias.
 	if n.neg || len(n.abs) == 0 {
 		z.neg = false
@@ -879,7 +879,7 @@ func (z *Int) Rand(rnd *rand.Rand, n *Int) *Int {
 		return z
 	}
 	z.neg = false
-	z.abs = z.abs.random(rnd, n.abs, n.abs.bitLen())
+	z.abs = natRandom(z.abs, rnd, n.abs, natBitLen(n.abs))
 	return z
 }
 
@@ -887,7 +887,7 @@ func (z *Int) Rand(rnd *rand.Rand, n *Int) *Int {
 // and returns z. If g and n are not relatively prime, g has no multiplicative
 // inverse in the ring ℤ/nℤ.  In this case, z is unchanged and the return value
 // is nil. If n == 0, a division-by-zero run-time panic occurs.
-func (z *Int) ModInverse(g, n *Int) *Int {
+func (z *Int) ModInverse(g, n *Int) (rint *Int) {
 	// GCD expects parameters a and b to be > 0.
 	if n.neg {
 		var n2 Int
@@ -915,14 +915,14 @@ func (z *Int) ModInverse(g, n *Int) *Int {
 	return z
 }
 
-func (z nat) modInverse(g, n nat) nat {
+func natModInverse(z []Word, g, n []Word) (rnat []Word) {
 	// TODO(rsc): ModInverse should be implemented in terms of this function.
 	return (&Int{abs: z}).ModInverse(&Int{abs: g}, &Int{abs: n}).abs
 }
 
 // Jacobi returns the Jacobi symbol (x/y), either +1, -1, or 0.
 // The y argument must be an odd integer.
-func Jacobi(x, y *Int) int32 {
+func Jacobi(x, y *Int) (rn int32) {
 	if len(y.abs) == 0 || y.abs[0]&1 == 0 {
 		panic(fmt.Sprintf("big: invalid 2nd argument to Int.Jacobi: need odd integer but got %s", y.String()))
 	}
@@ -957,7 +957,7 @@ func Jacobi(x, y *Int) int32 {
 		// a > 0
 
 		// handle factors of 2 in 'a'
-		s := a.abs.trailingZeroBits()
+		s := natTrailingZeroBits(a.abs)
 		if s&1 != 0 {
 			bmod8 := b.abs[0] & 7
 			if bmod8 == 3 || bmod8 == 5 {
@@ -983,7 +983,7 @@ func Jacobi(x, y *Int) int32 {
 //
 // to calculate the square root of any quadratic residue mod p quickly for 3
 // mod 4 primes.
-func (z *Int) modSqrt3Mod4Prime(x, p *Int) *Int {
+func (z *Int) modSqrt3Mod4Prime(x, p *Int) (rint *Int) {
 	e := (&Int{}).Add(p, _intOne()) // e = p + 1
 	e.Rsh(e, 2)                  // e = (p + 1) / 4
 	z.Exp(x, e, p)               // z = x^e mod p
@@ -998,7 +998,7 @@ func (z *Int) modSqrt3Mod4Prime(x, p *Int) *Int {
 //
 // to calculate the square root of any quadratic residue mod p quickly for 5
 // mod 8 primes.
-func (z *Int) modSqrt5Mod8Prime(x, p *Int) *Int {
+func (z *Int) modSqrt5Mod8Prime(x, p *Int) (rint *Int) {
 	// p == 5 mod 8 implies p = e*8 + 5
 	// e is the quotient and 5 the remainder on division by 8
 	e := (&Int{}).Rsh(p, 3)  // e = (p - 5) / 8
@@ -1018,11 +1018,11 @@ func (z *Int) modSqrt5Mod8Prime(x, p *Int) *Int {
 
 // modSqrtTonelliShanks uses the Tonelli-Shanks algorithm to find the square
 // root of a quadratic residue modulo any prime.
-func (z *Int) modSqrtTonelliShanks(x, p *Int) *Int {
+func (z *Int) modSqrtTonelliShanks(x, p *Int) (rint *Int) {
 	// Break p-1 into s*2^e such that s is odd.
 	var s Int
 	s.Sub(p, _intOne())
-	e := s.abs.trailingZeroBits()
+	e := natTrailingZeroBits(s.abs)
 	s.Rsh(&s, e)
 
 	// find some non-square n
@@ -1069,7 +1069,7 @@ func (z *Int) modSqrtTonelliShanks(x, p *Int) *Int {
 // returns z. The modulus p must be an odd prime. If x is not a square mod p,
 // ModSqrt leaves z unchanged and returns nil. This function panics if p is
 // not an odd integer, its behavior is undefined if p is odd but not prime.
-func (z *Int) ModSqrt(x, p *Int) *Int {
+func (z *Int) ModSqrt(x, p *Int) (rint *Int) {
 	switch Jacobi(x, p) {
 	case -1:
 		return nil // x is not a square mod p
@@ -1096,31 +1096,31 @@ func (z *Int) ModSqrt(x, p *Int) *Int {
 }
 
 // Lsh sets z = x << n and returns z.
-func (z *Int) Lsh(x *Int, n uint32) *Int {
-	z.abs = z.abs.lsh(x.abs, n)
+func (z *Int) Lsh(x *Int, n uint32) (rint *Int) {
+	z.abs = natLsh(z.abs, x.abs, n)
 	z.neg = x.neg
 	return z
 }
 
 // Rsh sets z = x >> n and returns z.
-func (z *Int) Rsh(x *Int, n uint32) *Int {
+func (z *Int) Rsh(x *Int, n uint32) (rint *Int) {
 	if x.neg {
 		// (-x) >> s == ^(x-1) >> s == ^((x-1) >> s) == -(((x-1) >> s) + 1)
-		t := z.abs.sub(x.abs, _natOne()) // no underflow because |x| > 0
-		t = t.rsh(t, n)
-		z.abs = t.add(t, _natOne())
+		t := natSub(z.abs, x.abs, _natOne()) // no underflow because |x| > 0
+		t = natRsh(t, t, n)
+		z.abs = natAdd(t, t, _natOne())
 		z.neg = true // z cannot be zero if x is negative
 		return z
 	}
 
-	z.abs = z.abs.rsh(x.abs, n)
+	z.abs = natRsh(z.abs, x.abs, n)
 	z.neg = false
 	return z
 }
 
 // Bit returns the value of the i'th bit of x. That is, it
 // returns (x>>i)&1. The bit index i must be >= 0.
-func (x *Int) Bit(i int32) uint32 {
+func (x *Int) Bit(i int32) (rn uint32) {
 	if i == 0 {
 		// optimization for common case: odd/even test of x
 		if len(x.abs) > 0 {
@@ -1132,11 +1132,11 @@ func (x *Int) Bit(i int32) uint32 {
 		panic("negative bit index")
 	}
 	if x.neg {
-		t := nat(nil).sub(x.abs, _natOne())
-		return t.bit(uint32(i)) ^ 1
+		t := natSub([]Word(nil), x.abs, _natOne())
+		return natBit(t, uint32(i)) ^ 1
 	}
 
-	return x.abs.bit(uint32(i))
+	return natBit(x.abs, uint32(i))
 }
 
 // SetBit sets z to x, with x's i'th bit set to b (0 or 1).
@@ -1144,36 +1144,36 @@ func (x *Int) Bit(i int32) uint32 {
 //   - if b is 1, SetBit sets z = x | (1 << i);
 //   - if b is 0, SetBit sets z = x &^ (1 << i);
 //   - if b is not 0 or 1, SetBit will panic.
-func (z *Int) SetBit(x *Int, i int32, b uint32) *Int {
+func (z *Int) SetBit(x *Int, i int32, b uint32) (rint *Int) {
 	if i < 0 {
 		panic("negative bit index")
 	}
 	if x.neg {
-		t := z.abs.sub(x.abs, _natOne())
-		t = t.setBit(t, uint32(i), b^1)
-		z.abs = t.add(t, _natOne())
+		t := natSub(z.abs, x.abs, _natOne())
+		t = natSetBit(t, t, uint32(i), b^1)
+		z.abs = natAdd(t, t, _natOne())
 		z.neg = len(z.abs) > 0
 		return z
 	}
-	z.abs = z.abs.setBit(x.abs, uint32(i), b)
+	z.abs = natSetBit(z.abs, x.abs, uint32(i), b)
 	z.neg = false
 	return z
 }
 
 // And sets z = x & y and returns z.
-func (z *Int) And(x, y *Int) *Int {
+func (z *Int) And(x, y *Int) (rint *Int) {
 	if x.neg == y.neg {
 		if x.neg {
 			// (-x) & (-y) == ^(x-1) & ^(y-1) == ^((x-1) | (y-1)) == -(((x-1) | (y-1)) + 1)
-			x1 := nat(nil).sub(x.abs, _natOne())
-			ym1 := nat(nil).sub(y.abs, _natOne())
-			z.abs = z.abs.add(z.abs.or(x1, ym1), _natOne())
+			x1 := natSub([]Word(nil), x.abs, _natOne())
+			ym1 := natSub([]Word(nil), y.abs, _natOne())
+			z.abs = natAdd(z.abs, natOr(z.abs, x1, ym1), _natOne())
 			z.neg = true // z cannot be zero if x and y are negative
 			return z
 		}
 
 		// x & y == x & y
-		z.abs = z.abs.and(x.abs, y.abs)
+		z.abs = natAnd(z.abs, x.abs, y.abs)
 		z.neg = false
 		return z
 	}
@@ -1184,59 +1184,59 @@ func (z *Int) And(x, y *Int) *Int {
 	}
 
 	// x & (-y) == x & ^(y-1) == x &^ (y-1)
-	y1 := nat(nil).sub(y.abs, _natOne())
-	z.abs = z.abs.andNot(x.abs, y1)
+	y1 := natSub([]Word(nil), y.abs, _natOne())
+	z.abs = natAndNot(z.abs, x.abs, y1)
 	z.neg = false
 	return z
 }
 
 // AndNot sets z = x &^ y and returns z.
-func (z *Int) AndNot(x, y *Int) *Int {
+func (z *Int) AndNot(x, y *Int) (rint *Int) {
 	if x.neg == y.neg {
 		if x.neg {
 			// (-x) &^ (-y) == ^(x-1) &^ ^(y-1) == ^(x-1) & (y-1) == (y-1) &^ (x-1)
-			x1 := nat(nil).sub(x.abs, _natOne())
-			ym1 := nat(nil).sub(y.abs, _natOne())
-			z.abs = z.abs.andNot(ym1, x1)
+			x1 := natSub([]Word(nil), x.abs, _natOne())
+			ym1 := natSub([]Word(nil), y.abs, _natOne())
+			z.abs = natAndNot(z.abs, ym1, x1)
 			z.neg = false
 			return z
 		}
 
 		// x &^ y == x &^ y
-		z.abs = z.abs.andNot(x.abs, y.abs)
+		z.abs = natAndNot(z.abs, x.abs, y.abs)
 		z.neg = false
 		return z
 	}
 
 	if x.neg {
 		// (-x) &^ y == ^(x-1) &^ y == ^(x-1) & ^y == ^((x-1) | y) == -(((x-1) | y) + 1)
-		x1 := nat(nil).sub(x.abs, _natOne())
-		z.abs = z.abs.add(z.abs.or(x1, y.abs), _natOne())
+		x1 := natSub([]Word(nil), x.abs, _natOne())
+		z.abs = natAdd(z.abs, natOr(z.abs, x1, y.abs), _natOne())
 		z.neg = true // z cannot be zero if x is negative and y is positive
 		return z
 	}
 
 	// x &^ (-y) == x &^ ^(y-1) == x & (y-1)
-	y1 := nat(nil).sub(y.abs, _natOne())
-	z.abs = z.abs.and(x.abs, y1)
+	y1 := natSub([]Word(nil), y.abs, _natOne())
+	z.abs = natAnd(z.abs, x.abs, y1)
 	z.neg = false
 	return z
 }
 
 // Or sets z = x | y and returns z.
-func (z *Int) Or(x, y *Int) *Int {
+func (z *Int) Or(x, y *Int) (rint *Int) {
 	if x.neg == y.neg {
 		if x.neg {
 			// (-x) | (-y) == ^(x-1) | ^(y-1) == ^((x-1) & (y-1)) == -(((x-1) & (y-1)) + 1)
-			x1 := nat(nil).sub(x.abs, _natOne())
-			ym1 := nat(nil).sub(y.abs, _natOne())
-			z.abs = z.abs.add(z.abs.and(x1, ym1), _natOne())
+			x1 := natSub([]Word(nil), x.abs, _natOne())
+			ym1 := natSub([]Word(nil), y.abs, _natOne())
+			z.abs = natAdd(z.abs, natAnd(z.abs, x1, ym1), _natOne())
 			z.neg = true // z cannot be zero if x and y are negative
 			return z
 		}
 
 		// x | y == x | y
-		z.abs = z.abs.or(x.abs, y.abs)
+		z.abs = natOr(z.abs, x.abs, y.abs)
 		z.neg = false
 		return z
 	}
@@ -1247,26 +1247,26 @@ func (z *Int) Or(x, y *Int) *Int {
 	}
 
 	// x | (-y) == x | ^(y-1) == ^((y-1) &^ x) == -(^((y-1) &^ x) + 1)
-	y1 := nat(nil).sub(y.abs, _natOne())
-	z.abs = z.abs.add(z.abs.andNot(y1, x.abs), _natOne())
+	y1 := natSub([]Word(nil), y.abs, _natOne())
+	z.abs = natAdd(z.abs, natAndNot(z.abs, y1, x.abs), _natOne())
 	z.neg = true // z cannot be zero if one of x or y is negative
 	return z
 }
 
 // Xor sets z = x ^ y and returns z.
-func (z *Int) Xor(x, y *Int) *Int {
+func (z *Int) Xor(x, y *Int) (rint *Int) {
 	if x.neg == y.neg {
 		if x.neg {
 			// (-x) ^ (-y) == ^(x-1) ^ ^(y-1) == (x-1) ^ (y-1)
-			x1 := nat(nil).sub(x.abs, _natOne())
-			ym1 := nat(nil).sub(y.abs, _natOne())
-			z.abs = z.abs.xor(x1, ym1)
+			x1 := natSub([]Word(nil), x.abs, _natOne())
+			ym1 := natSub([]Word(nil), y.abs, _natOne())
+			z.abs = natXor(z.abs, x1, ym1)
 			z.neg = false
 			return z
 		}
 
 		// x ^ y == x ^ y
-		z.abs = z.abs.xor(x.abs, y.abs)
+		z.abs = natXor(z.abs, x.abs, y.abs)
 		z.neg = false
 		return z
 	}
@@ -1277,34 +1277,34 @@ func (z *Int) Xor(x, y *Int) *Int {
 	}
 
 	// x ^ (-y) == x ^ ^(y-1) == ^(x ^ (y-1)) == -((x ^ (y-1)) + 1)
-	y1 := nat(nil).sub(y.abs, _natOne())
-	z.abs = z.abs.add(z.abs.xor(x.abs, y1), _natOne())
+	y1 := natSub([]Word(nil), y.abs, _natOne())
+	z.abs = natAdd(z.abs, natXor(z.abs, x.abs, y1), _natOne())
 	z.neg = true // z cannot be zero if only one of x or y is negative
 	return z
 }
 
 // Not sets z = ^x and returns z.
-func (z *Int) Not(x *Int) *Int {
+func (z *Int) Not(x *Int) (rint *Int) {
 	if x.neg {
 		// ^(-x) == ^(^(x-1)) == x-1
-		z.abs = z.abs.sub(x.abs, _natOne())
+		z.abs = natSub(z.abs, x.abs, _natOne())
 		z.neg = false
 		return z
 	}
 
 	// ^x == -x-1 == -(x+1)
-	z.abs = z.abs.add(x.abs, _natOne())
+	z.abs = natAdd(z.abs, x.abs, _natOne())
 	z.neg = true // z cannot be zero if x is positive
 	return z
 }
 
 // Sqrt sets z to ⌊√x⌋, the largest integer such that z² ≤ x, and returns z.
 // It panics if x is negative.
-func (z *Int) Sqrt(x *Int) *Int {
+func (z *Int) Sqrt(x *Int) (rint *Int) {
 	if x.neg {
 		panic("square root of negative number")
 	}
 	z.neg = false
-	z.abs = z.abs.sqrt(nil, x.abs)
+	z.abs = natSqrt(z.abs, nil, x.abs)
 	return z
 }

@@ -40,20 +40,20 @@ type echConfig struct {
 	Extensions    []echExtension
 }
 
-const errMalformedECHConfigList = errors.Const("tls: malformed ECHConfigList")
+var errMalformedECHConfigList error
 
 type echConfigErr struct {
 	field []byte
 }
 
-func (e *echConfigErr) Error() string {
+func (e *echConfigErr) Error() (rs string) {
 	if e.field == "" {
 		return "tls: malformed ECHConfig"
 	}
 	return fmt.Sprintf("tls: malformed ECHConfig, invalid %s field", e.field)
 }
 
-func (e *echConfigErr) String() string { return e.Error() }
+func (e *echConfigErr) String() (rs string) { return e.Error() }
 
 func parseECHConfig(enc []byte) (skip bool, ec echConfig, err error) {
 	s := cryptobyte.String(enc)
@@ -126,7 +126,7 @@ func parseECHConfig(enc []byte) (skip bool, ec echConfig, err error) {
 // parseECHConfigList parses a draft-ietf-tls-esni-18 ECHConfigList, returning a
 // slice of parsed ECHConfigs, in the same order they were parsed, or an error
 // if the list is malformed.
-func parseECHConfigList(data []byte) ([]echConfig, error) {
+func parseECHConfigList(data []byte) (rechConfig []echConfig, rerr error) {
 	s := cryptobyte.String(data)
 	var length uint16
 	if !s.ReadUint16(&length) {
@@ -154,7 +154,7 @@ func parseECHConfigList(data []byte) ([]echConfig, error) {
 	return configs, nil
 }
 
-func pickECHConfig(list []echConfig) (*echConfig, hpke.PublicKey, hpke.KDF, hpke.AEAD) {
+func pickECHConfig(list []echConfig) (rechConfig *echConfig, rpublicKey hpke.PublicKey, rkDF hpke.KDF, raEAD hpke.AEAD) {
 	for _, ec := range list {
 		if !validDNSName([]byte(ec.PublicName)) {
 			continue
@@ -199,7 +199,7 @@ func pickECHConfig(list []echConfig) (*echConfig, hpke.PublicKey, hpke.KDF, hpke
 	return nil, nil, nil, nil
 }
 
-func encodeInnerClientHello(inner *clientHelloMsg, maxNameLength int32) ([]byte, error) {
+func encodeInnerClientHello(inner *clientHelloMsg, maxNameLength int32) (rb []byte, rerr error) {
 	h, err := inner.marshalMsg(true)
 	if err != nil {
 		return nil, err
@@ -217,7 +217,7 @@ func encodeInnerClientHello(inner *clientHelloMsg, maxNameLength int32) ([]byte,
 	return push(h, []byte{:paddingLen}...), nil
 }
 
-func skipUint8LengthPrefixed(s *cryptobyte.String) bool {
+func skipUint8LengthPrefixed(s *cryptobyte.String) (rok bool) {
 	var skip uint8
 	if !s.ReadUint8(&skip) {
 		return false
@@ -225,7 +225,7 @@ func skipUint8LengthPrefixed(s *cryptobyte.String) bool {
 	return s.Skip(int32(skip))
 }
 
-func skipUint16LengthPrefixed(s *cryptobyte.String) bool {
+func skipUint16LengthPrefixed(s *cryptobyte.String) (rok bool) {
 	var skip uint16
 	if !s.ReadUint16(&skip) {
 		return false
@@ -238,7 +238,7 @@ type rawExtension struct {
 	data    []byte
 }
 
-func extractRawExtensions(hello *clientHelloMsg) ([]rawExtension, error) {
+func extractRawExtensions(hello *clientHelloMsg) (rrawExtension []rawExtension, rerr error) {
 	s := cryptobyte.String(hello.original)
 	if !s.Skip(4+2+32) || // header, version, random
 		!skipUint8LengthPrefixed(&s) || // session ID
@@ -265,7 +265,71 @@ func extractRawExtensions(hello *clientHelloMsg) ([]rawExtension, error) {
 	return rawExtensions, nil
 }
 
-func decodeInnerClientHello(outer *clientHelloMsg, encoded []byte) (*clientHelloMsg, error) {
+// marshalInnerClientHello reconstructs the inner ClientHello body. It is a
+// free function so the builder frames can be written inline: a closure would
+// have to capture the caller's frame, which Moxie forbids.
+func marshalInnerClientHello(recon *cryptobyte.Builder, versionAndRandom, cipherSuites, compressionMethods []byte, outer *clientHelloMsg, extensions cryptobyte.String, rawOuterExts []rawExtension) (rerr error) {
+	recon.AddBytes(versionAndRandom)
+	recon.BeginUint8LengthPrefixed()
+	recon.AddBytes(outer.sessionId)
+	recon.EndLengthPrefixed()
+	recon.BeginUint16LengthPrefixed()
+	recon.AddBytes(cipherSuites)
+	recon.EndLengthPrefixed()
+	recon.BeginUint8LengthPrefixed()
+	recon.AddBytes(compressionMethods)
+	recon.EndLengthPrefixed()
+	recon.BeginUint16LengthPrefixed()
+	for !extensions.Empty() {
+		var extension uint16
+		var extData cryptobyte.String
+		if !extensions.ReadUint16(&extension) ||
+			!extensions.ReadUint16LengthPrefixed(&extData) {
+			recon.SetError(errors.New("tls: invalid inner client hello"))
+			return errors.New("tls: invalid inner client hello")
+		}
+		if extension == extensionECHOuterExtensions {
+			if !extData.ReadUint8LengthPrefixed(&extData) {
+				recon.SetError(errors.New("tls: invalid inner client hello"))
+				return errors.New("tls: invalid inner client hello")
+			}
+			var i int32
+			for !extData.Empty() {
+				var extType uint16
+				if !extData.ReadUint16(&extType) {
+					recon.SetError(errors.New("tls: invalid inner client hello"))
+					return errors.New("tls: invalid inner client hello")
+				}
+				if extType == extensionEncryptedClientHello {
+					recon.SetError(errors.New("tls: invalid outer extensions"))
+					return errors.New("tls: invalid outer extensions")
+				}
+				for ; i <= len(rawOuterExts); i++ {
+					if i == len(rawOuterExts) {
+						recon.SetError(errors.New("tls: invalid outer extensions"))
+						return errors.New("tls: invalid outer extensions")
+					}
+					if rawOuterExts[i].extType == extType {
+						break
+					}
+				}
+				recon.AddUint16(rawOuterExts[i].extType)
+				recon.BeginUint16LengthPrefixed()
+				recon.AddBytes(rawOuterExts[i].data)
+				recon.EndLengthPrefixed()
+			}
+		} else {
+			recon.AddUint16(extension)
+			recon.BeginUint16LengthPrefixed()
+			recon.AddBytes(extData)
+			recon.EndLengthPrefixed()
+		}
+	}
+	recon.EndLengthPrefixed()
+	return nil
+}
+
+func decodeInnerClientHello(outer *clientHelloMsg, encoded []byte) (rclientHelloMsg *clientHelloMsg, rerr error) {
 	// Reconstructing the inner client hello from its encoded form is somewhat
 	// complicated. It is missing its header (message type and length), session
 	// ID, and the extensions may be compressed. Since we need to put the
@@ -302,65 +366,12 @@ func decodeInnerClientHello(outer *clientHelloMsg, encoded []byte) (*clientHello
 
 	recon := cryptobyte.NewBuilder(nil)
 	recon.AddUint8(typeClientHello)
-	recon.AddUint24LengthPrefixed(func(recon *cryptobyte.Builder) {
-		recon.AddBytes(versionAndRandom)
-		recon.AddUint8LengthPrefixed(func(recon *cryptobyte.Builder) {
-			recon.AddBytes(outer.sessionId)
-		})
-		recon.AddUint16LengthPrefixed(func(recon *cryptobyte.Builder) {
-			recon.AddBytes(cipherSuites)
-		})
-		recon.AddUint8LengthPrefixed(func(recon *cryptobyte.Builder) {
-			recon.AddBytes(compressionMethods)
-		})
-		recon.AddUint16LengthPrefixed(func(recon *cryptobyte.Builder) {
-			for !extensions.Empty() {
-				var extension uint16
-				var extData cryptobyte.String
-				if !extensions.ReadUint16(&extension) ||
-					!extensions.ReadUint16LengthPrefixed(&extData) {
-					recon.SetError(errors.New("tls: invalid inner client hello"))
-					return
-				}
-				if extension == extensionECHOuterExtensions {
-					if !extData.ReadUint8LengthPrefixed(&extData) {
-						recon.SetError(errors.New("tls: invalid inner client hello"))
-						return
-					}
-					var i int32
-					for !extData.Empty() {
-						var extType uint16
-						if !extData.ReadUint16(&extType) {
-							recon.SetError(errors.New("tls: invalid inner client hello"))
-							return
-						}
-						if extType == extensionEncryptedClientHello {
-							recon.SetError(errors.New("tls: invalid outer extensions"))
-							return
-						}
-						for ; i <= len(rawOuterExts); i++ {
-							if i == len(rawOuterExts) {
-								recon.SetError(errors.New("tls: invalid outer extensions"))
-								return
-							}
-							if rawOuterExts[i].extType == extType {
-								break
-							}
-						}
-						recon.AddUint16(rawOuterExts[i].extType)
-						recon.AddUint16LengthPrefixed(func(recon *cryptobyte.Builder) {
-							recon.AddBytes(rawOuterExts[i].data)
-						})
-					}
-				} else {
-					recon.AddUint16(extension)
-					recon.AddUint16LengthPrefixed(func(recon *cryptobyte.Builder) {
-						recon.AddBytes(extData)
-					})
-				}
-			}
-		})
-	})
+	recon.BeginUint24LengthPrefixed()
+	err2 := marshalInnerClientHello(recon, versionAndRandom, cipherSuites, compressionMethods, outer, extensions, rawOuterExts)
+	if err2 != nil {
+		return nil, err2
+	}
+	recon.EndLengthPrefixed()
 
 	reconBytes, err := recon.Bytes()
 	if err != nil {
@@ -402,23 +413,27 @@ func decodeInnerClientHello(outer *clientHelloMsg, encoded []byte) (*clientHello
 	return inner, nil
 }
 
-func decryptECHPayload(ctxInfo *hpke.Recipient, hello, payload []byte) ([]byte, error) {
+func decryptECHPayload(ctxInfo *hpke.Recipient, hello, payload []byte) (rb []byte, rerr error) {
 	outerAAD := bytes.Replace(hello[4:], payload, []byte{:len(payload)}, 1)
 	return ctxInfo.Open(outerAAD, payload)
 }
 
-func generateOuterECHExt(id uint8, kdfID, aeadID uint16, encodedKey []byte, payload []byte) ([]byte, error) {
+func generateOuterECHExt(id uint8, kdfID, aeadID uint16, encodedKey []byte, payload []byte) (rb []byte, rerr error) {
 	var b cryptobyte.Builder
 	b.AddUint8(0) // outer
 	b.AddUint16(kdfID)
 	b.AddUint16(aeadID)
 	b.AddUint8(id)
-	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(encodedKey) })
-	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(payload) })
+	b.BeginUint16LengthPrefixed()
+	b.AddBytes(encodedKey)
+b.EndLengthPrefixed()
+	b.BeginUint16LengthPrefixed()
+	b.AddBytes(payload)
+b.EndLengthPrefixed()
 	return b.Bytes()
 }
 
-func computeAndUpdateOuterECHExtension(outer, inner *clientHelloMsg, ech *echClientContext, useKey bool) error {
+func computeAndUpdateOuterECHExtension(outer, inner *clientHelloMsg, ech *echClientContext, useKey bool) (rerr error) {
 	var encapKey []byte
 	if useKey {
 		encapKey = ech.encapsulatedKey
@@ -455,7 +470,7 @@ func computeAndUpdateOuterECHExtension(outer, inner *clientHelloMsg, ech *echCli
 // This is used to check if the public_name in a ECHConfig is valid when we are
 // picking a config. This can be somewhat lax because even if we pick a
 // valid-looking name, the DNS layer will later reject it anyway.
-func validDNSName(name []byte) bool {
+func validDNSName(name []byte) (rok bool) {
 	if len(name) > 253 {
 		return false
 	}
@@ -490,14 +505,14 @@ type ECHRejectionError struct {
 	RetryConfigList []byte
 }
 
-func (e *ECHRejectionError) Error() string {
+func (e *ECHRejectionError) Error() (rs string) {
 	return "tls: server rejected ECH"
 }
 
-func (e *ECHRejectionError) String() string { return e.Error() }
+func (e *ECHRejectionError) String() (rs string) { return e.Error() }
 
-const errMalformedECHExt = errors.Const("tls: malformed encrypted_client_hello extension")
-const errInvalidECHExt = errors.Const("tls: client sent invalid encrypted_client_hello extension")
+var errMalformedECHExt error
+var errInvalidECHExt error
 
 type echExtType uint8
 
@@ -553,7 +568,7 @@ func parseECHExt(ext []byte) (echType echExtType, cs echCipher, configID uint8, 
 	return echType, cs, configID, bytes.Clone(encap), bytes.Clone(payload), nil
 }
 
-func (c *Conn) processECHClientHello(outer *clientHelloMsg, echKeys []EncryptedClientHelloKey) (*clientHelloMsg, *echServerContext, error) {
+func (c *Conn) processECHClientHello(outer *clientHelloMsg, echKeys []EncryptedClientHelloKey) (rclientHelloMsg *clientHelloMsg, rechServerContext *echServerContext, rerr error) {
 	echType, echCiphersuite, configID, encap, payload, err9 := parseECHExt(outer.encryptedClientHello)
 	if err9 != nil {
 		if errors.Is(err9, errInvalidECHExt) {
@@ -657,20 +672,32 @@ func (c *Conn) processECHClientHello(outer *clientHelloMsg, echKeys []EncryptedC
 	return outer, nil, nil
 }
 
-func buildRetryConfigList(keys []EncryptedClientHelloKey) ([]byte, error) {
+func buildRetryConfigList(keys []EncryptedClientHelloKey) (rb []byte, rerr error) {
 	var atLeastOneRetryConfig bool
 	var retryBuilder cryptobyte.Builder
-	retryBuilder.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+	retryBuilder.BeginUint16LengthPrefixed()
 		for _, c := range keys {
 			if !c.SendAsRetry {
 				continue
 			}
 			atLeastOneRetryConfig = true
-			b.AddBytes(c.Config)
+			retryBuilder.AddBytes(c.Config)
 		}
-	})
+	retryBuilder.EndLengthPrefixed()
 	if !atLeastOneRetryConfig {
 		return nil, nil
 	}
 	return retryBuilder.Bytes()
+}
+
+var errShutdown error
+func init() {
+	errShutdown = errors.New("tls: protocol is shutdown")
+	errEarlyCloseWrite = errors.New("tls: CloseWrite called before handshake complete")
+	errMalformedECHConfigList = errors.New("tls: malformed ECHConfigList")
+	errMalformedECHExt = errors.New("tls: malformed encrypted_client_hello extension")
+	errInvalidECHExt = errors.New("tls: client sent invalid encrypted_client_hello extension")
+	errClientKeyExchange = errors.New("tls: invalid ClientKeyExchange message")
+	errServerKeyExchange = errors.New("tls: invalid ServerKeyExchange message")
+	errNoCertificates = errors.New("tls: no certificates configured")
 }

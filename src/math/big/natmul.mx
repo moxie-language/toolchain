@@ -13,17 +13,17 @@ const karatsubaThreshold = 40 // see calibrate_test.go
 
 // mul sets z = x*y, using stk for temporary storage.
 // The caller may pass stk == nil to request that mul obtain and release one itself.
-func (z nat) mul(stk *stack, x, y nat) nat {
+func natMul(z []Word, stk *stack, x, y []Word) (rnat []Word) {
 	m := len(x)
 	n := len(y)
 
 	switch {
 	case m < n:
-		return z.mul(stk, y, x)
+		return natMul(z, stk, y, x)
 	case m == 0 || n == 0:
 		return z[:0]
 	case n == 1:
-		return z.mulAddWW(x, y[0], 0)
+		return natMulAddWW(z, x, y[0], 0)
 	}
 	// m >= n > 1
 
@@ -31,12 +31,12 @@ func (z nat) mul(stk *stack, x, y nat) nat {
 	if alias(z, x) || alias(z, y) {
 		z = nil // z is an alias for x or y - cannot reuse
 	}
-	z = z.alloc(m + n)
+	z = natAlloc(z, m + n)
 
 	// use basic multiplication if the numbers are small
 	if n < karatsubaThreshold {
 		basicMul(z, x, y)
-		return z.norm()
+		return natNorm(z)
 	}
 
 	if stk == nil {
@@ -54,12 +54,12 @@ func (z nat) mul(stk *stack, x, y nat) nat {
 		defer stk.restore(stk.save())
 		t := stk.nat(2 * n)
 		for i := n; i < m; i += n {
-			t = t.mul(stk, x[i:min(i+n, len(x))], y)
+			t = natMul(t, stk, x[i:min(i+n, len(x))], y)
 			addTo(z[i:], t)
 		}
 	}
 
-	return z.norm()
+	return natNorm(z)
 }
 
 // Operands that are shorter than basicSqrThreshold are squared using
@@ -70,26 +70,26 @@ const karatsubaSqrThreshold = 80 // see calibrate_test.go
 
 // sqr sets z = x*x, using stk for temporary storage.
 // The caller may pass stk == nil to request that sqr obtain and release one itself.
-func (z nat) sqr(stk *stack, x nat) nat {
+func natSqr(z []Word, stk *stack, x []Word) (rnat []Word) {
 	n := len(x)
 	switch {
 	case n == 0:
 		return z[:0]
 	case n == 1:
 		d := x[0]
-		z = z.alloc(2)
+		z = natAlloc(z, 2)
 		z[1], z[0] = mulWW(d, d)
-		return z.norm()
+		return natNorm(z)
 	}
 
 	if alias(z, x) {
 		z = nil // z is an alias for x - cannot reuse
 	}
-	z = z.alloc(2 * n)
+	z = natAlloc(z, 2 * n)
 
 	if n < basicSqrThreshold && n < karatsubaSqrThreshold {
 		basicMul(z, x, x)
-		return z.norm()
+		return natNorm(z)
 	}
 
 	if stk == nil {
@@ -99,18 +99,18 @@ func (z nat) sqr(stk *stack, x nat) nat {
 
 	if n < karatsubaSqrThreshold {
 		basicSqr(stk, z, x)
-		return z.norm()
+		return natNorm(z)
 	}
 
 	karatsubaSqr(stk, z, x)
-	return z.norm()
+	return natNorm(z)
 }
 
 // basicSqr sets z = x*x and is asymptotically faster than basicMul
 // by about a factor of 2, but slower for small arguments due to overhead.
 // Requirements: len(x) > 0, len(z) == 2*len(x)
 // The (non-normalized) result is placed in z.
-func basicSqr(stk *stack, z, x nat) {
+func basicSqr(stk *stack, z, x []Word) {
 	n := len(x)
 	if n < basicSqrThreshold {
 		basicMul(z, x, x)
@@ -133,22 +133,22 @@ func basicSqr(stk *stack, z, x nat) {
 }
 
 // mulAddWW returns z = x*y + r.
-func (z nat) mulAddWW(x nat, y, r Word) nat {
+func natMulAddWW(z []Word, x []Word, y, r Word) (rnat []Word) {
 	m := len(x)
 	if m == 0 || y == 0 {
-		return z.setWord(r) // result is r
+		return natSetWord(z, r) // result is r
 	}
 	// m > 0
 
-	z = z.alloc(m + 1)
+	z = natAlloc(z, m + 1)
 	z[m] = mulAddVWW(z[0:m], x, y, r)
 
-	return z.norm()
+	return natNorm(z)
 }
 
 // basicMul multiplies x and y and leaves the result in z.
 // The (non-normalized) result is placed in z[0 : len(x) + len(y)].
-func basicMul(z, x, y nat) {
+func basicMul(z, x, y []Word) {
 	clear(z[0 : len(x)+len(y)]) // initialize z
 	for i, d := range y {
 		if d != 0 {
@@ -161,7 +161,7 @@ func basicMul(z, x, y nat) {
 // writing the (non-normalized) result to z.
 // x and y must have the same length n,
 // and z must have length twice that.
-func karatsuba(stk *stack, z, x, y nat) {
+func karatsuba(stk *stack, z, x, y []Word) {
 	n := len(y)
 	if len(x) != n || len(z) != 2*n {
 		panic("bad karatsuba length")
@@ -194,8 +194,8 @@ func karatsuba(stk *stack, z, x, y nat) {
 	//	z1 = (x0-x1)*(y1-y0) + z0 + z2
 
 	n2 := (n + 1) / 2
-	x0, x1 := &Int{abs: x[:n2].norm()}, &Int{abs: x[n2:].norm()}
-	y0, y1 := &Int{abs: y[:n2].norm()}, &Int{abs: y[n2:].norm()}
+	x0, x1 := &Int{abs: natNorm(x[:n2])}, &Int{abs: natNorm(x[n2:])}
+	y0, y1 := &Int{abs: natNorm(y[:n2])}, &Int{abs: natNorm(y[n2:])}
 	z0 := &Int{abs: z[0 : 2*n2]}
 	z2 := &Int{abs: z[2*n2:]}
 
@@ -219,9 +219,9 @@ func karatsuba(stk *stack, z, x, y nat) {
 	// Debug mode: double-check answer and print trace on failure.
 	const debug = false
 	if debug {
-		zz := nat{:len(z)}
+		zz := []Word{:len(z)}
 		basicMul(zz, x, y)
-		if z.cmp(zz) != 0 {
+		if natCmp(z, zz) != 0 {
 			// All the temps were aliased to z and gone. Recompute.
 			z0 = &Int{}
 			z0.mul(stk, x0, y0)
@@ -254,7 +254,7 @@ func karatsuba(stk *stack, z, x, y nat) {
 // z must have length 2*len(x).
 // It is analogous to [karatsuba] but can run faster
 // knowing both multiplicands are the same value.
-func karatsubaSqr(stk *stack, z, x nat) {
+func karatsubaSqr(stk *stack, z, x []Word) {
 	n := len(x)
 	if len(z) != 2*n {
 		panic("bad karatsubaSqr length")
@@ -283,7 +283,7 @@ func karatsubaSqr(stk *stack, z, x nat) {
 	//	z1 = z0 + z2 - (x0-x1)²
 
 	n2 := (n + 1) / 2
-	x0, x1 := &Int{abs: x[:n2].norm()}, &Int{abs: x[n2:].norm()}
+	x0, x1 := &Int{abs: natNorm(x[:n2])}, &Int{abs: natNorm(x[n2:])}
 	z0 := &Int{abs: z[0 : 2*n2]}
 	z2 := &Int{abs: z[2*n2:]}
 
@@ -293,12 +293,12 @@ func karatsubaSqr(stk *stack, z, x nat) {
 	tx := &Int{abs: z[0:n2]}
 
 	tx.Sub(x0, x1)
-	z1.abs = z1.abs.sqr(stk, tx.abs)
+	z1.abs = natSqr(z1.abs, stk, tx.abs)
 	z1.neg = true
 
 	clear(z)
-	z0.abs = z0.abs.sqr(stk, x0.abs)
-	z2.abs = z2.abs.sqr(stk, x1.abs)
+	z0.abs = natSqr(z0.abs, stk, x0.abs)
+	z2.abs = natSqr(z2.abs, stk, x1.abs)
 	z1.Add(z1, z0)
 	z1.Add(z1, z2)
 	addTo(z[n2:], z1.abs)
@@ -306,9 +306,9 @@ func karatsubaSqr(stk *stack, z, x nat) {
 	// Debug mode: double-check answer and print trace on failure.
 	const debug = false
 	if debug {
-		zz := nat{:len(z)}
+		zz := []Word{:len(z)}
 		basicSqr(stk, zz, x)
-		if z.cmp(zz) != 0 {
+		if natCmp(z, zz) != 0 {
 			// All the temps were aliased to z and gone. Recompute.
 			tx = (&Int{}).Sub(x0, x1)
 			z0 = (&Int{}).Mul(x0, x0)
@@ -332,7 +332,7 @@ func karatsubaSqr(stk *stack, z, x nat) {
 }
 
 // ifmt returns the debug formatting of the Int x: 0xHEX.
-func ifmt(x *Int) []byte {
+func ifmt(x *Int) (rb []byte) {
 	neg, s, t := "", x.Text(16), ""
 	if s == "" { // happens for denormalized zero
 		s = "0x0"

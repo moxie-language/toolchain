@@ -67,13 +67,13 @@ type UserTaskSummary struct {
 
 // Complete returns true if we have complete information about the task
 // from the trace: both a start and an end.
-func (s *UserTaskSummary) Complete() bool {
+func (s *UserTaskSummary) Complete() (okay bool) {
 	return s.Start != nil && s.End != nil
 }
 
 // Descendents returns a slice consisting of itself (always the first task returned),
 // and the transitive closure of all of its children.
-func (s *UserTaskSummary) Descendents() []*UserTaskSummary {
+func (s *UserTaskSummary) Descendents() (out []*UserTaskSummary) {
 	descendents := []*UserTaskSummary{s}
 	for _, child := range s.Children {
 		descendents = mxutil.Ensure(descendents, 1)
@@ -121,7 +121,7 @@ type GoroutineExecStats struct {
 	RangeTime map[string]time.Duration
 }
 
-func (s GoroutineExecStats) NonOverlappingStats() map[string]time.Duration {
+func (s *GoroutineExecStats) NonOverlappingStats() (out map[string]time.Duration) {
 	stats := map[string]time.Duration{
 		"Execution time":         s.ExecTime,
 		"Sched wait time":        s.SchedWaitTime,
@@ -138,7 +138,7 @@ func (s GoroutineExecStats) NonOverlappingStats() map[string]time.Duration {
 }
 
 // UnknownTime returns whatever isn't accounted for in TotalTime.
-func (s GoroutineExecStats) UnknownTime() time.Duration {
+func (s *GoroutineExecStats) UnknownTime() (out time.Duration) {
 	sum := s.ExecTime + s.SchedWaitTime + s.SyscallTime +
 		s.SyscallBlockTime
 	for _, dt := range s.BlockTimeByReason {
@@ -153,7 +153,7 @@ func (s GoroutineExecStats) UnknownTime() time.Duration {
 }
 
 // sub returns the stats v-s.
-func (s GoroutineExecStats) sub(v GoroutineExecStats) (r GoroutineExecStats) {
+func (s *GoroutineExecStats) sub(v GoroutineExecStats) (r GoroutineExecStats) {
 	r = s.clone()
 	r.ExecTime -= v.ExecTime
 	r.SchedWaitTime -= v.SchedWaitTime
@@ -169,8 +169,8 @@ func (s GoroutineExecStats) sub(v GoroutineExecStats) (r GoroutineExecStats) {
 	return r
 }
 
-func (s GoroutineExecStats) clone() (r GoroutineExecStats) {
-	r = s
+func (s *GoroutineExecStats) clone() (r GoroutineExecStats) {
+	r = *s
 	r.BlockTimeByReason = map[string]time.Duration{}
 	for reason, dt := range s.BlockTimeByReason {
 		r.BlockTimeByReason[reason] = dt
@@ -281,7 +281,7 @@ type Summarizer struct {
 }
 
 // NewSummarizer creates a new struct to build goroutine stats from a trace.
-func NewSummarizer() *Summarizer {
+func NewSummarizer() (out *Summarizer) {
 	return &Summarizer{
 		gs:          map[GoID]*GoroutineSummary{},
 		tasks:       map[TaskID]*UserTaskSummary{},
@@ -302,6 +302,7 @@ func (s *Summarizer) Event(ev *Event) {
 		s.syncTs = ev.Time()
 	}
 	s.lastTs = ev.Time()
+	nowTs := ev.Time()
 
 	switch ev.Kind() {
 	// Record sync time for the RangeActive events.
@@ -350,34 +351,34 @@ func (s *Summarizer) Event(ev *Event) {
 				// Undetermined case, so this is will simply not fire.
 				if creatorG := s.gs[ev.Goroutine()]; creatorG != nil && len(creatorG.activeRegions) > 0 {
 					regions := creatorG.activeRegions
-					s := regions[len(regions)-1]
-					g.activeRegions = []*UserRegionSummary{{TaskID: s.TaskID, Start: ev}}
+					lastRegion := regions[len(regions)-1]
+					g.activeRegions = []*UserRegionSummary{{TaskID: lastRegion.TaskID, Start: ev}}
 				}
 				s.gs[g.ID] = g
 			case GoRunning:
 				// Record execution time as we transition out of running
-				g.ExecTime += ev.Time().Sub(g.lastStartTime)
+				g.ExecTime += nowTs.Sub(g.lastStartTime)
 				g.lastStartTime = 0
 			case GoWaiting:
 				// Record block time as we transition out of waiting.
 				if g.lastBlockTime != 0 {
-					g.BlockTimeByReason[g.lastBlockReason] += ev.Time().Sub(g.lastBlockTime)
+					g.BlockTimeByReason[g.lastBlockReason] += nowTs.Sub(g.lastBlockTime)
 					g.lastBlockTime = 0
 				}
 			case GoRunnable:
 				// Record sched latency time as we transition out of runnable.
 				if g.lastRunnableTime != 0 {
-					g.SchedWaitTime += ev.Time().Sub(g.lastRunnableTime)
+					g.SchedWaitTime += nowTs.Sub(g.lastRunnableTime)
 					g.lastRunnableTime = 0
 				}
 			case GoSyscall:
 				// Record syscall execution time and syscall block time as we transition out of syscall.
 				if g.lastSyscallTime != 0 {
 					if g.lastSyscallBlockTime != 0 {
-						g.SyscallBlockTime += ev.Time().Sub(g.lastSyscallBlockTime)
+						g.SyscallBlockTime += nowTs.Sub(g.lastSyscallBlockTime)
 						g.SyscallTime += g.lastSyscallBlockTime.Sub(g.lastSyscallTime)
 					} else {
-						g.SyscallTime += ev.Time().Sub(g.lastSyscallTime)
+						g.SyscallTime += nowTs.Sub(g.lastSyscallTime)
 					}
 					g.lastSyscallTime = 0
 					g.lastSyscallBlockTime = 0
@@ -392,15 +393,15 @@ func (s *Summarizer) Event(ev *Event) {
 			// and identify the goroutine by the root frame of that stack.
 			// This root frame will be identical for all transitions on this
 			// goroutine, because it represents its immutable start point.
-			if g.Name == "" {
-				for frame := range st.Stack.Frames() {
+			if len(g.Name) == 0 {
+				for _, fr := range st.Stack.Frames() {
 					// NB: this PC won't actually be consistent for
 					// goroutines which existed at the start of the
 					// trace. The UI doesn't use it directly; this
 					// mainly serves as an indication that we
 					// actually saw a call stack for the goroutine
-					g.PC = frame.PC
-					g.Name = frame.Func
+					g.PC = fr.PC
+					g.Name = fr.Func
 				}
 			}
 
@@ -415,7 +416,7 @@ func (s *Summarizer) Event(ev *Event) {
 			case GoRunnable:
 				g.lastRunnableTime = ev.Time()
 			case GoWaiting:
-				if st.Reason != "forever" {
+				if !bytes.Equal(st.Reason, "forever") {
 					g.lastBlockTime = ev.Time()
 					g.lastBlockReason = st.Reason
 					break
@@ -500,7 +501,7 @@ func (s *Summarizer) Event(ev *Event) {
 		if ts == 0 {
 			break
 		}
-		g.RangeTime[r.Name] += ev.Time().Sub(ts)
+		g.RangeTime[r.Name] += nowTs.Sub(ts)
 		delete(g.lastRangeTime, r.Name)
 
 	// Handle user-defined regions.
@@ -540,7 +541,8 @@ func (s *Summarizer) Event(ev *Event) {
 			task.Regions = mxutil.Ensure(task.Regions, 1)
 			task.Regions = push(task.Regions, sd)
 		}
-		sd.GoroutineExecStats = g.snapshotStat(ev.Time()).sub(sd.GoroutineExecStats)
+		st := g.snapshotStat(ev.Time())
+		sd.GoroutineExecStats = st.sub(sd.GoroutineExecStats)
 		sd.End = ev
 		g.Regions = mxutil.Ensure(g.Regions, 1)
 		g.Regions = push(g.Regions, sd)
@@ -577,7 +579,7 @@ func (s *Summarizer) Event(ev *Event) {
 	}
 }
 
-func (s *Summarizer) getOrAddTask(id TaskID) *UserTaskSummary {
+func (s *Summarizer) getOrAddTask(id TaskID) (out *UserTaskSummary) {
 	task := s.tasks[id]
 	if task == nil {
 		task = &UserTaskSummary{ID: id, Goroutines: map[GoID]*GoroutineSummary{}}
@@ -588,7 +590,7 @@ func (s *Summarizer) getOrAddTask(id TaskID) *UserTaskSummary {
 
 // Finalize indicates to the summarizer that we're done processing the trace.
 // It cleans up any remaining state and returns the full summary.
-func (s *Summarizer) Finalize() *Summary {
+func (s *Summarizer) Finalize() (out *Summary) {
 	for _, g := range s.gs {
 		g.finalize(s.lastTs, nil)
 
@@ -618,7 +620,7 @@ func (s *Summarizer) Finalize() *Summary {
 // RelatedGoroutinesV2 finds a set of goroutines related to goroutine goid for v2 traces.
 // The association is based on whether they have synchronized with each other in the Go
 // scheduler (one has unblocked another).
-func RelatedGoroutinesV2(events []Event, goid GoID) map[GoID]struct{} {
+func RelatedGoroutinesV2(events []Event, goid GoID) (out map[GoID]struct{}) {
 	// Process all the events, looking for transitions of goroutines
 	// out of GoWaiting. If there was an active goroutine when this
 	// happened, then we know that active goroutine unblocked another.
@@ -660,9 +662,9 @@ func RelatedGoroutinesV2(events []Event, goid GoID) map[GoID]struct{} {
 		for g := range gmap {
 			gmap1[g] = struct{}{}
 		}
-		for _, edge := range unblockEdges {
-			if _, ok := gmap[edge.operand]; ok {
-				gmap1[edge.operator] = struct{}{}
+		for _, ed := range unblockEdges {
+			if _, ok := gmap[ed.operand]; ok {
+				gmap1[ed.operator] = struct{}{}
 			}
 		}
 		gmap = gmap1
@@ -670,9 +672,9 @@ func RelatedGoroutinesV2(events []Event, goid GoID) map[GoID]struct{} {
 	return gmap
 }
 
-func IsSystemGoroutine(entryFn []byte) bool {
+func IsSystemGoroutine(entryFn []byte) (okay bool) {
 	// This mimics runtime.isSystemGoroutine as closely as
 	// possible.
 	// Also, locked g in extra M (with empty entryFn) is system goroutine.
-	return entryFn == "" || entryFn != "runtime.main" && bytes.HasPrefix(entryFn, "runtime.")
+	return len(entryFn) == 0 || !bytes.Equal(entryFn, "runtime.main") && bytes.HasPrefix(entryFn, "runtime.")
 }

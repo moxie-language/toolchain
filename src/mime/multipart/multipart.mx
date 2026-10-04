@@ -38,7 +38,7 @@ import (
 	"path/filepath"
 )
 
-func _emptyParams() map[string][]byte { return map[string][]byte{} }
+func _emptyParams() (rm map[string][]byte) { return map[string][]byte{} }
 
 // This constant needs to be at least 76 for this package to work correctly.
 // This is because \r\n--separator_of_len_70- would fill the buffer and it
@@ -70,7 +70,7 @@ type Part struct {
 
 // FormName returns the name parameter if p has a Content-Disposition
 // of type "form-data".  Otherwise it returns the empty string.
-func (p *Part) FormName() []byte {
+func (p *Part) FormName() (rb []byte) {
 	// See https://tools.ietf.org/html/rfc2183 section 2 for EBNF
 	// of Content-Disposition value format.
 	if p.dispositionParams == nil {
@@ -85,7 +85,7 @@ func (p *Part) FormName() []byte {
 // FileName returns the filename parameter of the [Part]'s Content-Disposition
 // header. If not empty, the filename is passed through filepath.Base (which is
 // platform dependent) before being returned.
-func (p *Part) FileName() []byte {
+func (p *Part) FileName() (rb []byte) {
 	if p.dispositionParams == nil {
 		p.parseContentDisposition()
 	}
@@ -113,7 +113,7 @@ func (p *Part) parseContentDisposition() {
 // The boundary is usually obtained from the "boundary" parameter of
 // the message's "Content-Type" header. Use [mime.ParseMediaType] to
 // parse such headers.
-func NewReader(r io.Reader, boundary []byte) *Reader {
+func NewReader(r io.Reader, boundary []byte) (rreader *Reader) {
 	b := []byte("\r\n--" | boundary | "--")
 	return &Reader{
 		bufReader:        bufio.NewReaderSize(&stickyErrorReader{r: r}, peekBufferSize),
@@ -142,7 +142,7 @@ func (r *stickyErrorReader) Read(p []byte) (n int32, _ error) {
 	return n, r.err
 }
 
-func newPart(mr *Reader, rawPart bool, maxMIMEHeaderSize, maxMIMEHeaders int64) (*Part, error) {
+func newPart(mr *Reader, rawPart bool, maxMIMEHeaderSize, maxMIMEHeaders int64) (rpart *Part, rerr error) {
 	bp := &Part{
 		Header: map[string][][]byte{},
 		mr:     mr,
@@ -150,7 +150,7 @@ func newPart(mr *Reader, rawPart bool, maxMIMEHeaderSize, maxMIMEHeaders int64) 
 	if err := bp.populateHeaders(maxMIMEHeaderSize, maxMIMEHeaders); err != nil {
 		return nil, err
 	}
-	bp.r = partReader{bp}
+	bp.r = &partReader{bp}
 
 	// rawPart is used to switch between Part.NextPart and Part.NextRawPart.
 	if !rawPart {
@@ -163,7 +163,7 @@ func newPart(mr *Reader, rawPart bool, maxMIMEHeaderSize, maxMIMEHeaders int64) 
 	return bp, nil
 }
 
-func (p *Part) populateHeaders(maxMIMEHeaderSize, maxMIMEHeaders int64) error {
+func (p *Part) populateHeaders(maxMIMEHeaderSize, maxMIMEHeaders int64) (rerr error) {
 	r := textproto.NewReader(p.mr.bufReader)
 	header, err := readMIMEHeader(r, maxMIMEHeaderSize, maxMIMEHeaders)
 	if err == nil {
@@ -188,14 +188,15 @@ type partReader struct {
 	p *Part
 }
 
-func (pr partReader) Read(d []byte) (int32, error) {
+func (pr *partReader) Read(d []byte) (rn int32, rerr error) {
 	p := pr.p
 	br := p.mr.bufReader
 
 	// Read into buffer until we identify some data to return,
 	// or we find a reason to stop (boundary or read error).
+	var peek []byte
 	for p.n == 0 && p.err == nil {
-		peek, _ := br.Peek(br.Buffered())
+		peek, _ = br.Peek(br.Buffered())
 		p.n, p.err = scanUntilBoundary(peek, p.mr.dashBoundary, p.mr.nlDashBoundary, p.total, p.readErr)
 		if p.n == 0 && p.err == nil {
 			// Force buffered I/O to read more into buffer.
@@ -233,7 +234,7 @@ func (pr partReader) Read(d []byte) (int32, error) {
 // scanUntilBoundary returns the number of data bytes from buf that can be
 // returned as part of the Part body and also the error to return (if any)
 // once those data bytes are done.
-func scanUntilBoundary(buf, dashBoundary, nlDashBoundary []byte, total int64, readErr error) (int32, error) {
+func scanUntilBoundary(buf, dashBoundary, nlDashBoundary []byte, total int64, readErr error) (rn int32, rerr error) {
 	if total == 0 {
 		// At beginning of body, allow dashBoundary.
 		if bytes.HasPrefix(buf, dashBoundary) {
@@ -252,14 +253,14 @@ func scanUntilBoundary(buf, dashBoundary, nlDashBoundary []byte, total int64, re
 	}
 
 	// Search for "\n--boundary".
-	if i := bytes.Index(buf, nlDashBoundary); i >= 0 {
-		switch matchAfterPrefix(buf[i:], nlDashBoundary, readErr) {
+	if idx := bytes.Index(buf, nlDashBoundary); idx >= 0 {
+		switch matchAfterPrefix(buf[idx:], nlDashBoundary, readErr) {
 		case -1:
-			return i + len(nlDashBoundary), nil
+			return idx + len(nlDashBoundary), nil
 		case 0:
-			return i, nil
+			return idx, nil
 		case +1:
-			return i, io.EOF
+			return idx, io.EOF
 		}
 	}
 	if bytes.HasPrefix(nlDashBoundary, buf) {
@@ -289,7 +290,7 @@ func scanUntilBoundary(buf, dashBoundary, nlDashBoundary []byte, total int64, re
 // For example, "--foobar" does not match "--foo".
 // It returns 0 more input needs to be read to make the decision,
 // meaning that len(buf) == len(prefix) and readErr == nil.
-func matchAfterPrefix(buf, prefix []byte, readErr error) int32 {
+func matchAfterPrefix(buf, prefix []byte, readErr error) (rn int32) {
 	if len(buf) == len(prefix) {
 		if readErr != nil {
 			return +1
@@ -319,7 +320,7 @@ func matchAfterPrefix(buf, prefix []byte, readErr error) int32 {
 	return -1
 }
 
-func (p *Part) Close() error {
+func (p *Part) Close() (rerr error) {
 	io.Copy(io.Discard(), p)
 	return nil
 }
@@ -342,9 +343,9 @@ type Reader struct {
 
 // maxMIMEHeaderSize is the maximum size of a MIME header we will parse,
 // including header keys, values, and map overhead.
-const maxMIMEHeaderSize = 10 << 20
+const defaultMaxMIMEHeaderSize = 10 << 20
 
-func maxMIMEHeaders() int64 {
+func defaultMaxMIMEHeaders() (rn int64) {
 	return 10000
 }
 
@@ -354,8 +355,8 @@ func maxMIMEHeaders() int64 {
 // As a special case, if the "Content-Transfer-Encoding" header
 // has a value of "quoted-printable", that header is instead
 // hidden and the body is transparently decoded during Read calls.
-func (r *Reader) NextPart() (*Part, error) {
-	return r.nextPart(false, maxMIMEHeaderSize, maxMIMEHeaders())
+func (r *Reader) NextPart() (rpart *Part, rerr error) {
+	return r.nextPart(false, defaultMaxMIMEHeaderSize, defaultMaxMIMEHeaders())
 }
 
 // NextRawPart returns the next part in the multipart or an error.
@@ -363,11 +364,11 @@ func (r *Reader) NextPart() (*Part, error) {
 //
 // Unlike [Reader.NextPart], it does not have special handling for
 // "Content-Transfer-Encoding: quoted-printable".
-func (r *Reader) NextRawPart() (*Part, error) {
-	return r.nextPart(true, maxMIMEHeaderSize, maxMIMEHeaders())
+func (r *Reader) NextRawPart() (rpart *Part, rerr error) {
+	return r.nextPart(true, defaultMaxMIMEHeaderSize, defaultMaxMIMEHeaders())
 }
 
-func (r *Reader) nextPart(rawPart bool, maxMIMEHeaderSize, maxMIMEHeaders int64) (*Part, error) {
+func (r *Reader) nextPart(rawPart bool, maxMIMEHeaderSize, maxMIMEHeaders int64) (rpart *Part, rerr error) {
 	if r.currentPart != nil {
 		r.currentPart.Close()
 	}
@@ -430,7 +431,7 @@ func (r *Reader) nextPart(rawPart bool, maxMIMEHeaderSize, maxMIMEHeaders int64)
 // isFinalBoundary reports whether line is the final boundary line
 // indicating that all parts are over.
 // It matches `^--boundary--[ \t]*(\r\n)?$`
-func (r *Reader) isFinalBoundary(line []byte) bool {
+func (r *Reader) isFinalBoundary(line []byte) (rok bool) {
 	if !bytes.HasPrefix(line, r.dashBoundaryDash) {
 		return false
 	}
@@ -466,7 +467,7 @@ func (r *Reader) isBoundaryDelimiterLine(line []byte) (ret bool) {
 // RFC 822 defines:
 //
 //	LWSP-char = SPACE / HTAB
-func skipLWSPChar(b []byte) []byte {
+func skipLWSPChar(b []byte) (rb []byte) {
 	for len(b) > 0 && (b[0] == ' ' || b[0] == '\t') {
 		b = b[1:]
 	}

@@ -12,13 +12,13 @@ import (
 )
 
 // Round the length of a netlink message up to align it properly.
-func nlmAlignOf(msglen int32) int32 {
+func nlmAlignOf(msglen int32) (rn int32) {
 	return (msglen + NLMSG_ALIGNTO - 1) & ^(NLMSG_ALIGNTO - 1)
 }
 
 // Round the length of a netlink route attribute up to align it
 // properly.
-func rtaAlignOf(attrlen int32) int32 {
+func rtaAlignOf(attrlen int32) (rn int32) {
 	return (attrlen + RTA_ALIGNTO - 1) & ^(RTA_ALIGNTO - 1)
 }
 
@@ -29,7 +29,7 @@ type NetlinkRouteRequest struct {
 	Data   RtGenmsg
 }
 
-func (rr *NetlinkRouteRequest) toWireFormat() []byte {
+func (rr *NetlinkRouteRequest) toWireFormat() (rb2 []byte) {
 	b := []byte{:rr.Header.Len}
 	*(*uint32)(unsafe.Pointer(&b[0:4][0])) = rr.Header.Len
 	*(*uint16)(unsafe.Pointer(&b[4:6][0])) = rr.Header.Type
@@ -40,7 +40,7 @@ func (rr *NetlinkRouteRequest) toWireFormat() []byte {
 	return b
 }
 
-func newNetlinkRouteRequest(proto, seq, family int32) []byte {
+func newNetlinkRouteRequest(proto, seq, family int32) (rb2 []byte) {
 	rr := &NetlinkRouteRequest{}
 	rr.Header.Len = uint32(NLMSG_HDRLEN + SizeofRtGenmsg)
 	rr.Header.Type = uint16(proto)
@@ -52,7 +52,7 @@ func newNetlinkRouteRequest(proto, seq, family int32) []byte {
 
 // NetlinkRIB returns routing information base, as known as RIB, which
 // consists of network facility information, states and parameters.
-func NetlinkRIB(proto, family int32) ([]byte, error) {
+func NetlinkRIB(proto, family int32) (rb2 []byte, rerr2 error) {
 	s, err := Socket(AF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, NETLINK_ROUTE)
 	if err != nil {
 		return nil, err
@@ -118,7 +118,7 @@ type NetlinkMessage struct {
 
 // ParseNetlinkMessage parses b as an array of netlink messages and
 // returns the slice containing the NetlinkMessage structures.
-func ParseNetlinkMessage(b []byte) ([]NetlinkMessage, error) {
+func ParseNetlinkMessage(b []byte) (rnetlinkMessage []NetlinkMessage, rerr error) {
 	var msgs []NetlinkMessage
 	for len(b) >= NLMSG_HDRLEN {
 		h, dbuf, dlen, err := netlinkMessageHeaderAndData(b)
@@ -133,7 +133,7 @@ func ParseNetlinkMessage(b []byte) ([]NetlinkMessage, error) {
 	return msgs, nil
 }
 
-func netlinkMessageHeaderAndData(b []byte) (*NlMsghdr, []byte, int32, error) {
+func netlinkMessageHeaderAndData(b []byte) (rnlMsghdr *NlMsghdr, rb []byte, rn int32, rerr error) {
 	h := (*NlMsghdr)(unsafe.Pointer(&b[0]))
 	l := nlmAlignOf(int32(h.Len))
 	if int32(h.Len) < NLMSG_HDRLEN || l > len(b) {
@@ -151,7 +151,7 @@ type NetlinkRouteAttr struct {
 // ParseNetlinkRouteAttr parses m's payload as an array of netlink
 // route attributes and returns the slice containing the
 // NetlinkRouteAttr structures.
-func ParseNetlinkRouteAttr(m *NetlinkMessage) ([]NetlinkRouteAttr, error) {
+func ParseNetlinkRouteAttr(m *NetlinkMessage) (rnetlinkRouteAttr []NetlinkRouteAttr, rerr error) {
 	var b []byte
 	switch m.Header.Type {
 	case RTM_NEWLINK, RTM_DELLINK:
@@ -177,7 +177,7 @@ func ParseNetlinkRouteAttr(m *NetlinkMessage) ([]NetlinkRouteAttr, error) {
 	return attrs, nil
 }
 
-func netlinkRouteAttrAndValue(b []byte) (*RtAttr, []byte, int32, error) {
+func netlinkRouteAttrAndValue(b []byte) (rrtAttr *RtAttr, rb []byte, rn int32, rerr error) {
 	a := (*RtAttr)(unsafe.Pointer(&b[0]))
 	if int32(a.Len) < SizeofRtAttr || int32(a.Len) > len(b) {
 		return nil, nil, 0, EINVAL

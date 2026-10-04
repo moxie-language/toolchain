@@ -36,16 +36,8 @@ const (
 	maxDNSPacketSize = 1232
 )
 
-const (
-	errLameReferral              = errors.Const("lame referral")
-	errCannotUnmarshalDNSMessage = errors.Const("cannot unmarshal DNS message")
-	errCannotMarshalDNSMessage   = errors.Const("cannot marshal DNS message")
-	errServerMisbehaving         = errors.Const("server misbehaving")
-	errInvalidDNSResponse        = errors.Const("invalid DNS response")
-	errNoAnswerFromDNSServer     = errors.Const("no answer from DNS server")
-)
 
-func errServerTemporarilyMisbehaving() error { return &temporaryError{"server misbehaving"} }
+func errServerTemporarilyMisbehaving() (rerr error) { return &temporaryError{"server misbehaving"} }
 
 func newRequest(q dnsmessage.Question, ad bool) (id uint16, udpReq, tcpReq []byte, err error) {
 	id = uint16(randInt())
@@ -80,7 +72,7 @@ func newRequest(q dnsmessage.Question, ad bool) (id uint16, udpReq, tcpReq []byt
 	return id, udpReq, tcpReq, nil
 }
 
-func checkResponse(reqID uint16, reqQues dnsmessage.Question, respHdr dnsmessage.Header, respQues dnsmessage.Question) bool {
+func checkResponse(reqID uint16, reqQues dnsmessage.Question, respHdr dnsmessage.Header, respQues dnsmessage.Question) (rok bool) {
 	if !respHdr.Response {
 		return false
 	}
@@ -93,7 +85,7 @@ func checkResponse(reqID uint16, reqQues dnsmessage.Question, respHdr dnsmessage
 	return true
 }
 
-func dnsPacketRoundTrip(c Conn, id uint16, query dnsmessage.Question, b []byte) (dnsmessage.Parser, dnsmessage.Header, error) {
+func dnsPacketRoundTrip(c Conn, id uint16, query dnsmessage.Question, b []byte) (rparser dnsmessage.Parser, rheader dnsmessage.Header, rerr error) {
 	if _, err := c.Write(b); err != nil {
 		return dnsmessage.Parser{}, dnsmessage.Header{}, err
 	}
@@ -120,7 +112,7 @@ func dnsPacketRoundTrip(c Conn, id uint16, query dnsmessage.Question, b []byte) 
 	}
 }
 
-func dnsStreamRoundTrip(c Conn, id uint16, query dnsmessage.Question, b []byte) (dnsmessage.Parser, dnsmessage.Header, error) {
+func dnsStreamRoundTrip(c Conn, id uint16, query dnsmessage.Question, b []byte) (rparser dnsmessage.Parser, rheader dnsmessage.Header, rerr error) {
 	if _, err5 := c.Write(b); err5 != nil {
 		return dnsmessage.Parser{}, dnsmessage.Header{}, err5
 	}
@@ -153,7 +145,7 @@ func dnsStreamRoundTrip(c Conn, id uint16, query dnsmessage.Question, b []byte) 
 }
 
 // exchange sends a query on the connection and hopes for a response.
-func (r *Resolver) exchange(ctx context.Context, server string, q dnsmessage.Question, timeout time.Duration, useTCP, ad bool) (dnsmessage.Parser, dnsmessage.Header, error) {
+func (r *Resolver) exchange(ctx context.Context, server string, q dnsmessage.Question, timeout time.Duration, useTCP, ad bool) (rparser dnsmessage.Parser, rheader dnsmessage.Header, rerr error) {
 	q.Class = dnsmessage.ClassINET
 	id, udpReq, tcpReq, err3 := newRequest(q, ad)
 	if err3 != nil {
@@ -167,7 +159,7 @@ func (r *Resolver) exchange(ctx context.Context, server string, q dnsmessage.Que
 	}
 	for _, network := range networks {
 		ctx1, cancel := context.WithDeadline(ctx, time.Now().Add(timeout))
-		defer cancel()
+		defer cancel.Cancel()
 
 		c, err2 := r.dial(ctx1, network, server)
 		if err2 != nil {
@@ -206,7 +198,7 @@ func (r *Resolver) exchange(ctx context.Context, server string, q dnsmessage.Que
 }
 
 // checkHeader performs basic sanity checks on the header.
-func checkHeader(p *dnsmessage.Parser, h dnsmessage.Header) error {
+func checkHeader(p *dnsmessage.Parser, h dnsmessage.Header) (rerr error) {
 	rcode, hasAdd := extractExtendedRCode(*p, h)
 
 	if rcode == dnsmessage.RCodeNameError {
@@ -239,7 +231,7 @@ func checkHeader(p *dnsmessage.Parser, h dnsmessage.Header) error {
 	return nil
 }
 
-func skipToAnswer(p *dnsmessage.Parser, qtype dnsmessage.Type) error {
+func skipToAnswer(p *dnsmessage.Parser, qtype dnsmessage.Type) (rerr error) {
 	for {
 		h, err2 := p.AnswerHeader()
 		if err2 == dnsmessage.ErrSectionDone {
@@ -260,7 +252,7 @@ func skipToAnswer(p *dnsmessage.Parser, qtype dnsmessage.Type) error {
 // extractExtendedRCode extracts the extended RCode from the OPT resource (EDNS(0))
 // If an OPT record is not found, the RCode from the hdr is returned.
 // Another return value indicates whether an additional resource was found.
-func extractExtendedRCode(p dnsmessage.Parser, hdr dnsmessage.Header) (dnsmessage.RCode, bool) {
+func extractExtendedRCode(p dnsmessage.Parser, hdr dnsmessage.Header) (rrCode dnsmessage.RCode, rok bool) {
 	p.SkipAllAnswers()
 	p.SkipAllAuthorities()
 	hasAdd := false
@@ -281,7 +273,7 @@ func extractExtendedRCode(p dnsmessage.Parser, hdr dnsmessage.Header) (dnsmessag
 
 // Do a lookup for a single name, which must be rooted
 // (otherwise answer will not find the answers).
-func (r *Resolver) tryOneName(ctx context.Context, cfg *dnsConfig, name string, qtype dnsmessage.Type) (dnsmessage.Parser, string, error) {
+func (r *Resolver) tryOneName(ctx context.Context, cfg *dnsConfig, name string, qtype dnsmessage.Type) (rparser dnsmessage.Parser, rs string, rerr error) {
 	var lastErr error
 	serverOffset := cfg.serverOffset()
 	sLen := uint32(len(cfg.servers))
@@ -352,7 +344,7 @@ type resolverConfig struct {
 
 var resolvConf resolverConfig
 
-func getSystemDNSConfig() *dnsConfig {
+func getSystemDNSConfig() (rdnsConfig *dnsConfig) {
 	resolvConf.tryUpdate("/etc/resolv.conf")
 	return resolvConf.dnsConfig
 }
@@ -403,7 +395,7 @@ func (conf *resolverConfig) tryUpdate(name string) {
 	conf.dnsConfig = dnsConf
 }
 
-func (conf *resolverConfig) tryAcquireSema() bool {
+func (conf *resolverConfig) tryAcquireSema() (rok bool) {
 	select {
 	case conf.ch <- struct{}{}:
 		return true
@@ -416,7 +408,7 @@ func (conf *resolverConfig) releaseSema() {
 	<-conf.ch
 }
 
-func (r *Resolver) lookup(ctx context.Context, name string, qtype dnsmessage.Type, conf *dnsConfig) (dnsmessage.Parser, string, error) {
+func (r *Resolver) lookup(ctx context.Context, name string, qtype dnsmessage.Type, conf *dnsConfig) (rparser dnsmessage.Parser, rs string, rerr error) {
 	if !isDomainName(name) {
 		// We used to use "invalid domain name" as the error,
 		// but that is a detail of the specific lookup mechanism.
@@ -462,7 +454,7 @@ func (r *Resolver) lookup(ctx context.Context, name string, qtype dnsmessage.Typ
 // use DNS. Currently this includes only .onion, per RFC 7686. See
 // golang.org/issue/13705. Does not cover .local names (RFC 6762),
 // see golang.org/issue/16739.
-func avoidDNS(name string) bool {
+func avoidDNS(name string) (rok bool) {
 	if name == "" {
 		return true
 	}
@@ -471,7 +463,7 @@ func avoidDNS(name string) bool {
 }
 
 // nameList returns a list of names for sequential DNS queries.
-func (conf *dnsConfig) nameList(name string) [][]byte {
+func (conf *dnsConfig) nameList(name string) (rbyte [][]byte) {
 	// Check name length (see isDomainName).
 	l := len(name)
 	rooted := l > 0 && name[l-1] == '.'
@@ -528,7 +520,7 @@ const (
 	hostLookupDNS                      // only DNS
 )
 
-func _lookupOrderName() map[hostLookupOrder]string {
+func _lookupOrderName() (rm map[hostLookupOrder]string) {
 	return map[hostLookupOrder]string{
 		hostLookupCgo:      "cgo",
 		hostLookupFilesDNS: "files,dns",
@@ -538,12 +530,12 @@ func _lookupOrderName() map[hostLookupOrder]string {
 	}
 }
 
-func (o hostLookupOrder) String() string {
+func (o *hostLookupOrder) String() (rs string) {
 	m := _lookupOrderName()
-	if s, ok := m[o]; ok {
+	if s, ok := m[*o]; ok {
 		return s
 	}
-	return "hostLookupOrder=" + itoa.Itoa(int32(o)) + "??"
+	return "hostLookupOrder=" + itoa.Itoa(int32(*o)) + "??"
 }
 
 func (r *Resolver) goLookupHostOrder(ctx context.Context, name string, order hostLookupOrder, conf *dnsConfig) (addrs [][]byte, err error) {
@@ -789,13 +781,13 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
 }
 
 // goLookupCNAME is the native Go (non-cgo) implementation of LookupCNAME.
-func (r *Resolver) goLookupCNAME(ctx context.Context, host string, order hostLookupOrder, conf *dnsConfig) (string, error) {
+func (r *Resolver) goLookupCNAME(ctx context.Context, host string, order hostLookupOrder, conf *dnsConfig) (rs string, rerr error) {
 	_, cname, err := r.goLookupIPCNAMEOrder(ctx, "CNAME", host, order, conf)
 	return cname.String(), err
 }
 
 // goLookupPTR is the native Go implementation of LookupAddr.
-func (r *Resolver) goLookupPTR(ctx context.Context, addr string, order hostLookupOrder, conf *dnsConfig) ([][]byte, error) {
+func (r *Resolver) goLookupPTR(ctx context.Context, addr string, order hostLookupOrder, conf *dnsConfig) (rbyte [][]byte, rerr error) {
 	if order == hostLookupFiles || order == hostLookupFilesDNS {
 		names := lookupStaticAddr(addr)
 		if len(names) > 0 {
@@ -861,4 +853,35 @@ func (r *Resolver) goLookupPTR(ctx context.Context, addr string, order hostLooku
 	}
 
 	return ptrs, nil
+}
+
+var ErrWriteToConnected error
+var errCannotMarshalDNSMessage error
+var errCannotUnmarshalDNSMessage error
+var errInvalidDNSResponse error
+var errInvalidInterface error
+var errInvalidInterfaceIndex error
+var errInvalidInterfaceName error
+var errLameReferral error
+var errMissingAddress error
+var errNoAnswerFromDNSServer error
+var errNoSuchInterface error
+var errNoSuchMulticastInterface error
+var errNoSuitableAddress error
+var errServerMisbehaving error
+func init() {
+	errInvalidInterface = errors.New("invalid network interface")
+	errInvalidInterfaceIndex = errors.New("invalid network interface index")
+	errInvalidInterfaceName = errors.New("invalid network interface name")
+	errNoSuchInterface = errors.New("no such network interface")
+	errNoSuchMulticastInterface = errors.New("no such multicast network interface")
+	errLameReferral = errors.New("lame referral")
+	errCannotUnmarshalDNSMessage = errors.New("cannot unmarshal DNS message")
+	errCannotMarshalDNSMessage = errors.New("cannot marshal DNS message")
+	errServerMisbehaving = errors.New("server misbehaving")
+	errInvalidDNSResponse = errors.New("invalid DNS response")
+	errNoAnswerFromDNSServer = errors.New("no answer from DNS server")
+	errNoSuitableAddress = errors.New("no suitable address found")
+	errMissingAddress = errors.New("missing address")
+	ErrWriteToConnected = errors.New("use of WriteTo with pre-connected connection")
 }

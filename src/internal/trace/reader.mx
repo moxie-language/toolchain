@@ -39,17 +39,17 @@ type Reader struct {
 }
 
 // NewReader creates a new trace reader.
-func NewReader(r io.Reader) (*Reader, error) {
+func NewReader(r io.Reader) (out *Reader, rerr error) {
 	br := bufio.NewReader(r)
-	v, err := version.ReadHeader(br)
-	if err != nil {
-		return nil, err
+	v, herr := version.ReadHeader(br)
+	if herr != nil {
+		return nil, herr
 	}
 	switch v {
 	case version.Go111, version.Go119, version.Go121:
-		tr, err := tracev1.Parse(br, v)
-		if err != nil {
-			return nil, err
+		tr, terr := tracev1.Parse(br, v)
+		if terr != nil {
+			return nil, terr
 		}
 		return &Reader{
 			v1Events: convertV1Trace(tr),
@@ -84,22 +84,22 @@ func (r *Reader) ReadEvent() (e Event, err error) {
 	if r.v1Events != nil {
 		if r.syncs == 0 {
 			// Always emit a sync event first, if we have any events at all.
-			ev, ok := r.v1Events.events.Peek()
-			if ok {
+			pev, pok := r.v1Events.events.Peek()
+			if pok {
 				r.syncs++
-				return syncEvent(r.v1Events.evt, Time(ev.Ts-1), r.syncs), nil
+				return syncEvent(r.v1Events.evt, Time(pev.Ts-1), r.syncs), nil
 			}
 		}
-		ev, err := r.v1Events.next()
-		if err == io.EOF {
+		nev, verr := r.v1Events.next()
+		if verr == io.EOF {
 			// Always emit a sync event at the end.
 			r.done = true
 			r.syncs++
 			return syncEvent(nil, r.v1Events.lastTs+1, r.syncs), nil
-		} else if err != nil {
-			return Event{}, err
+		} else if verr != nil {
+			return Event{}, verr
 		}
-		return ev, nil
+		return nev, nil
 	}
 
 	// Trace v2 parsing algorithm.
@@ -119,22 +119,11 @@ func (r *Reader) ReadEvent() (e Event, err error) {
 
 	// Set us up to track the last timestamp and fix up
 	// the timestamp of any event that comes through.
-	defer func() {
-		if err != nil {
-			return
-		}
-		if err = e.validateTableIDs(); err != nil {
-			return
-		}
-		if e.base.time <= r.lastTs {
-			e.base.time = r.lastTs + 1
-		}
-		r.lastTs = e.base.time
-	}()
+	defer finishReadEvent(&e, &err, r)
 
 	// Consume any events in the ordering first.
-	if ev, ok := r.order.Next(); ok {
-		return ev, nil
+	if qev, qok := r.order.Next(); qok {
+		return qev, nil
 	}
 
 	// Check if we need to refresh the generation.
@@ -170,49 +159,20 @@ func (r *Reader) ReadEvent() (e Event, err error) {
 
 		// Reset frontier.
 		for _, m := range r.gen.batchMs {
-			batches := r.gen.batches[m]
-			bc := &batchCursor{m: m}
-			ok, err := bc.nextEvent(batches, r.gen.freq)
-			if err != nil {
-				return Event{}, err
+			if ferr := r.addToFrontier(m); ferr != nil {
+				return Event{}, ferr
 			}
-			if !ok {
-				// Turns out there aren't actually any events in these batches.
-				continue
-			}
-			r.frontier = heapInsert(r.frontier, bc)
 		}
 		r.syncs++
 		// Always emit a sync event at the beginning of the generation.
 		return syncEvent(r.gen.evTable, r.gen.freq.mul(r.gen.minTs), r.syncs), nil
 	}
-	tryAdvance := func(i int32) (bool, error) {
-		bc := r.frontier[i]
-
-		if ok, err := r.order.Advance(&bc.ev, r.gen.evTable, bc.m, r.gen.gen); !ok || err != nil {
-			return ok, err
-		}
-
-		// Refresh the cursor's event.
-		ok, err := bc.nextEvent(r.gen.batches[bc.m], r.gen.freq)
-		if err != nil {
-			return false, err
-		}
-		if ok {
-			// If we successfully refreshed, update the heap.
-			heapUpdate(r.frontier, i)
-		} else {
-			// There's nothing else to read. Delete this cursor from the frontier.
-			r.frontier = heapRemove(r.frontier, i)
-		}
-		return true, nil
-	}
 	// Inject a CPU sample if it comes next.
 	if len(r.cpuSamples) != 0 {
 		if len(r.frontier) == 0 || r.cpuSamples[0].time < r.frontier[0].ev.time {
-			e := r.cpuSamples[0].asEvent(r.gen.evTable)
+			cev := r.cpuSamples[0].asEvent(r.gen.evTable)
 			r.cpuSamples = r.cpuSamples[1:]
-			return e, nil
+			return cev, nil
 		}
 	}
 	// Try to advance the head of the frontier, which should have the minimum timestamp.
@@ -220,20 +180,24 @@ func (r *Reader) ReadEvent() (e Event, err error) {
 	if len(r.frontier) == 0 {
 		return Event{}, fmt.Errorf("broken trace: frontier is empty:\n[gen=%d]\n\n%s\n%s\n", r.gen.gen, dumpFrontier(r.frontier), dumpOrdering(&r.order))
 	}
-	if ok, err := tryAdvance(0); err != nil {
-		return Event{}, err
-	} else if !ok {
+	aok, aerr := r.tryAdvance(0)
+	if aerr != nil {
+		return Event{}, aerr
+	} else if !aok {
 		// Try to advance the rest of the frontier, in timestamp order.
 		//
 		// To do this, sort the min-heap. A sorted min-heap is still a
 		// min-heap, but now we can iterate over the rest and try to
 		// advance in order. This path should be rare.
-		slices.SortFunc(r.frontier, (*batchCursor).compare)
+		slices.SortFunc(r.frontier, batchCursorCompare)
 		success := false
+		var aok2 bool
+		var aerr2 error
 		for i := 1; i < len(r.frontier); i++ {
-			if ok, err = tryAdvance(i); err != nil {
-				return Event{}, err
-			} else if ok {
+			aok2, aerr2 = r.tryAdvance(i)
+			if aerr2 != nil {
+				return Event{}, aerr2
+			} else if aok2 {
 				success = true
 				break
 			}
@@ -244,14 +208,77 @@ func (r *Reader) ReadEvent() (e Event, err error) {
 	}
 
 	// Pick off the next event on the queue. At this point, one must exist.
-	ev, ok := r.order.Next()
-	if !ok {
+	fev, fok := r.order.Next()
+	if !fok {
 		panic("invariant violation: advance successful, but queue is empty")
 	}
-	return ev, nil
+	return fev, nil
 }
 
-func dumpFrontier(frontier []*batchCursor) []byte {
+// finishReadEvent validates the event selected by ReadEvent and fixes up its
+// timestamp. It runs as ReadEvent's deferred epilogue; the named results are
+// written through explicit pointers.
+func finishReadEvent(ep *Event, errp *error, r *Reader) {
+	if *errp != nil {
+		return
+	}
+	if verr := ep.validateTableIDs(); verr != nil {
+		*errp = verr
+		return
+	}
+	if ep.base.time <= r.lastTs {
+		ep.base.time = r.lastTs + 1
+	}
+	r.lastTs = ep.base.time
+}
+
+// addToFrontier reads the first event of thread m's batches and inserts a
+// cursor for it into the frontier. Threads with no events are skipped.
+func (r *Reader) addToFrontier(m ThreadID) (rerr error) {
+	batches := r.gen.batches[m]
+	bc := &batchCursor{m: m}
+	okay, rerr2 := bc.nextEvent(batches, r.gen.freq)
+	if rerr2 != nil {
+		return rerr2
+	}
+	if !okay {
+		// Turns out there aren't actually any events in these batches.
+		return nil
+	}
+	r.frontier = heapInsert(r.frontier, bc)
+	return nil
+}
+
+// tryAdvance advances the frontier cursor at index i by one event.
+func (r *Reader) tryAdvance(i int32) (ok bool, rerr error) {
+	bc := r.frontier[i]
+
+	adv, aerr := r.order.Advance(&bc.ev, r.gen.evTable, bc.m, r.gen.gen)
+	if !adv || aerr != nil {
+		return adv, aerr
+	}
+
+	// Refresh the cursor's event.
+	okay, rerr2 := bc.nextEvent(r.gen.batches[bc.m], r.gen.freq)
+	if rerr2 != nil {
+		return false, rerr2
+	}
+	if okay {
+		// If we successfully refreshed, update the heap.
+		heapUpdate(r.frontier, i)
+	} else {
+		// There's nothing else to read. Delete this cursor from the frontier.
+		r.frontier = heapRemove(r.frontier, i)
+	}
+	return true, nil
+}
+
+// batchCursorCompare orders cursors by the timestamp of their current event.
+func batchCursorCompare(a, b *batchCursor) (out int32) {
+	return a.compare(b)
+}
+
+func dumpFrontier(frontier []*batchCursor) (out []byte) {
 	var sb bytes.Buffer
 	for _, bc := range frontier {
 		spec := tracev2.Specs()[bc.ev.typ]

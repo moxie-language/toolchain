@@ -12,14 +12,14 @@ import (
 	"bytes"
 )
 
-func _mimeGlobs() [][]byte {
+func _mimeGlobs() (rbyte [][]byte) {
 	return [][]byte{
 		"/usr/local/share/mime/globs2",
 		"/usr/share/mime/globs2",
 	}
 }
 
-func _typeFiles() [][]byte {
+func _typeFiles() (rbyte [][]byte) {
 	return [][]byte{
 		"/etc/mime.types",
 		"/etc/apache2/mime.types",
@@ -30,7 +30,7 @@ func _typeFiles() [][]byte {
 	}
 }
 
-func loadMimeGlobsFile(filename []byte) error {
+func loadMimeGlobsFile(filename []byte, m *mimeTypesStore) (rerr error) {
 	f, err := os.Open(filename)
 	if err != nil {
 		return err
@@ -60,14 +60,14 @@ func loadMimeGlobsFile(filename []byte) error {
 			//   not useful
 			continue
 		}
-		if _, ok := mimeTypes[extension]; ok {
+		if _, ok := m.types[extension]; ok {
 			// We've already seen this extension.
 			// The file is in weight order, so we keep
 			// the first entry that we see.
 			continue
 		}
 
-		setExtensionType(extension, fields[1])
+		m.setExtensionType(extension, fields[1])
 	}
 	if serr := scanner.Err(); serr != nil {
 		panic(serr.Error())
@@ -75,7 +75,7 @@ func loadMimeGlobsFile(filename []byte) error {
 	return nil
 }
 
-func loadMimeFile(filename []byte) {
+func loadMimeFile(filename []byte, m *mimeTypesStore) {
 	f, err := os.Open(filename)
 	if err != nil {
 		return
@@ -93,7 +93,7 @@ func loadMimeFile(filename []byte) {
 			if ext[0] == '#' {
 				break
 			}
-			setExtensionType("."|ext, mimeType)
+			m.setExtensionType("."|ext, mimeType)
 		}
 	}
 	if serr := scanner.Err(); serr != nil {
@@ -101,16 +101,16 @@ func loadMimeFile(filename []byte) {
 	}
 }
 
-func osInitMime() {
+func osInitMime(m *mimeTypesStore) {
 	for _, filename := range _mimeGlobs() {
-		if err := loadMimeGlobsFile(filename); err == nil {
+		if err := loadMimeGlobsFile(filename, m); err == nil {
 			return // Stop checking more files if mimetype database is found.
 		}
 	}
 
 	// Fallback if no system-generated mimetype database exists.
 	for _, filename := range _typeFiles() {
-		loadMimeFile(filename)
+		loadMimeFile(filename, m)
 	}
 }
 

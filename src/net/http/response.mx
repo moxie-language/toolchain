@@ -10,7 +10,6 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
 	"net/textproto"
@@ -20,7 +19,7 @@ import (
 	"golang.org/x/net/http/httpguts"
 )
 
-func _respExcludeHeader() map[string]bool {
+func _respExcludeHeader() (rm map[string]bool) {
 	return map[string]bool{
 		"Content-Length":    true,
 		"Transfer-Encoding": true,
@@ -123,19 +122,19 @@ type Response struct {
 }
 
 // Cookies parses and returns the cookies set in the Set-Cookie headers.
-func (r *Response) Cookies() []*Cookie {
+func (r *Response) Cookies() (rcookie []*Cookie) {
 	return readSetCookies(r.Header)
 }
 
 // ErrNoLocation is returned by the [Response.Location] method
 // when no Location header is present.
-const ErrNoLocation = errors.Const("http: no Location header in response")
+var ErrNoLocation error
 
 // Location returns the URL of the response's "Location" header,
 // if present. Relative redirects are resolved relative to
 // [Response.Request]. [ErrNoLocation] is returned if no
 // Location header is present.
-func (r *Response) Location() (*url.URL, error) {
+func (r *Response) Location() (ruRL *url.URL, rerr error) {
 	lv := r.Header.Get("Location")
 	if lv == "" {
 		return nil, ErrNoLocation
@@ -152,7 +151,7 @@ func (r *Response) Location() (*url.URL, error) {
 // Clients must call resp.Body.Close when finished reading resp.Body.
 // After that call, clients can inspect resp.Trailer to find key/value
 // pairs included in the response trailer.
-func ReadResponse(r *bufio.Reader, req *Request) (*Response, error) {
+func ReadResponse(r *bufio.Reader, req *Request) (rresponse *Response, rerr error) {
 	tp := textproto.NewReader(r)
 	resp := &Response{
 		Request: req,
@@ -222,7 +221,7 @@ func fixPragmaCacheControl(header Header) {
 
 // ProtoAtLeast reports whether the HTTP protocol used
 // in the response is at least major.minor.
-func (r *Response) ProtoAtLeast(major, minor int32) bool {
+func (r *Response) ProtoAtLeast(major, minor int32) (rok bool) {
 	return r.ProtoMajor > major ||
 		r.ProtoMajor == major && r.ProtoMinor >= minor
 }
@@ -243,7 +242,7 @@ func (r *Response) ProtoAtLeast(major, minor int32) bool {
 //	Header, values for non-canonical keys will have unpredictable behavior
 //
 // The Response Body is closed after it is sent.
-func (r *Response) Write(w io.Writer) error {
+func (r *Response) Write(w io.Writer) (rerr error) {
 	// Status line
 	text := r.Status
 	if text == "" {
@@ -347,26 +346,26 @@ func (r *Response) closeBody() {
 // connection is done being managed from its perspective. Once we
 // return a writable response body to a user, the net/http package is
 // done managing that connection.
-func (r *Response) bodyIsWritable() bool {
+func (r *Response) bodyIsWritable() (rok bool) {
 	_, ok := r.Body.(io.Writer)
 	return ok
 }
 
 // isProtocolSwitch reports whether the response code and header
 // indicate a successful protocol upgrade response.
-func (r *Response) isProtocolSwitch() bool {
+func (r *Response) isProtocolSwitch() (rok bool) {
 	return isProtocolSwitchResponse(r.StatusCode, r.Header)
 }
 
 // isProtocolSwitchResponse reports whether the response code and
 // response header indicate a successful protocol upgrade response.
-func isProtocolSwitchResponse(code int32, h Header) bool {
+func isProtocolSwitchResponse(code int32, h Header) (rok bool) {
 	return code == StatusSwitchingProtocols && isProtocolSwitchHeader(h)
 }
 
 // isProtocolSwitchHeader reports whether the request or response header
 // is for a protocol switch.
-func isProtocolSwitchHeader(h Header) bool {
+func isProtocolSwitchHeader(h Header) (rok bool) {
 	return h.Get("Upgrade") != "" &&
 		httpguts.HeaderValuesContainsToken(h["Connection"], "Upgrade")
 }

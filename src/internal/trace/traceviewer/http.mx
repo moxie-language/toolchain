@@ -12,13 +12,18 @@ import (
 	"bytes"
 )
 
-func MainHandler(views []View) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if err := getTemplMain().Execute(w, views); err != nil {
-			http.Error(w, err.String(), http.StatusInternalServerError)
-			return
-		}
-	})
+func MainHandler(views []View) (out http.Handler) {
+	return &mainHandler{views: views}
+}
+
+type mainHandler struct {
+	views []View
+}
+
+func (h *mainHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if err := initTemplMain().Execute(w, h.views); err != nil {
+		http.Error(w, err.String(), http.StatusInternalServerError)
+	}
 }
 
 const CommonStyle = `
@@ -62,12 +67,12 @@ textarea.code {
 var _templMainDone bool
 var _templMainVal *template.Template
 
-func getTemplMain() *template.Template {
+func initTemplMain() (out *template.Template) {
 	if !_templMainDone {
 		_templMainDone = true
 		_templMainVal = template.Must(template.New("").Parse(`
 <html>
-<style>` + CommonStyle + `</style>
+<style>` | CommonStyle | `</style>
 <body>
 <h1>cmd/trace: the Go trace event viewer</h1>
 <p>
@@ -254,22 +259,21 @@ func getTemplMain() *template.Template {
 }
 
 type View struct {
-	Type   ViewType
+	Type   []byte
 	Ranges []Range
 }
 
-type ViewType []byte
-
 const (
-	ViewProc   ViewType = "proc"
-	ViewThread ViewType = "thread"
+	ViewProc   = "proc"
+	ViewThread = "thread"
 )
 
-func (v View) URL(rangeIdx int32) []byte {
+func (v *View) URL(rangeIdx int32) (out []byte) {
 	if rangeIdx < 0 {
 		return fmt.Sprintf("/trace?view=%s", v.Type)
 	}
-	return v.Ranges[rangeIdx].URL(v.Type)
+	r := v.Ranges[rangeIdx]
+	return r.URL(v.Type)
 }
 
 type Range struct {
@@ -280,11 +284,11 @@ type Range struct {
 	EndTime   int64
 }
 
-func (r Range) URL(viewType ViewType) []byte {
+func (r *Range) URL(viewType []byte) (out []byte) {
 	return fmt.Sprintf("/trace?view=%s&start=%d&end=%d", viewType, r.Start, r.End)
 }
 
-func TraceHandler() http.Handler {
+func TraceHandler() (out http.Handler) {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, err.String(), http.StatusInternalServerError)
@@ -426,6 +430,6 @@ function onTraceViewerImportFail() {
 //:embed static/trace_viewer_full.html static/webcomponents.min.js
 var staticContent embed.FS
 
-func StaticHandler() http.Handler {
-	return http.FileServer(http.FS(staticContent))
+func StaticHandler() (out http.Handler) {
+	return http.FileServer(http.FS(&staticContent))
 }

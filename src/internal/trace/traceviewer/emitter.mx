@@ -15,203 +15,228 @@ import (
 	"time"
 )
 
-type TraceConsumer struct {
-	ConsumeTimeUnit    func(unit []byte)
-	ConsumeViewerEvent func(v *format.Event, required bool)
-	ConsumeViewerFrame func(key []byte, f format.Frame)
-	Flush              func()
+type TraceConsumer interface {
+	ConsumeTimeUnit(unit []byte)
+	ConsumeViewerEvent(v *format.Event, required bool)
+	ConsumeViewerFrame(key []byte, f format.Frame)
+	Flush()
 }
 
 // ViewerDataTraceConsumer returns a TraceConsumer that writes to w. The
 // startIdx and endIdx are used for splitting large traces. They refer to
 // indexes in the traceEvents output array, not the events in the trace input.
-func ViewerDataTraceConsumer(w io.Writer, startIdx, endIdx int64) TraceConsumer {
-	allFrames := map[string]format.Frame{}
-	requiredFrames := map[string]format.Frame{}
-	enc := json.NewEncoder(w)
-	written := 0
-	index := int64(-1)
-
+func ViewerDataTraceConsumer(w io.Writer, startIdx, endIdx int64) (out TraceConsumer) {
+	c := &viewerDataConsumer{
+		w:              w,
+		enc:            json.NewEncoder(w),
+		index:          -1,
+		startIdx:       startIdx,
+		endIdx:         endIdx,
+		allFrames:      map[string]format.Frame{},
+		requiredFrames: map[string]format.Frame{},
+	}
 	io.WriteString(w, "{")
-	return TraceConsumer{
-		ConsumeTimeUnit: func(unit []byte) {
-			io.WriteString(w, `"displayTimeUnit":`)
-			enc.Encode(unit)
-			io.WriteString(w, ",")
-		},
-		ConsumeViewerEvent: func(v *format.Event, required bool) {
-			index++
-			if !required && (index < startIdx || index > endIdx) {
-				// not in the range. Skip!
-				return
-			}
-			WalkStackFrames(allFrames, v.Stack, func(id int32) {
-				s := strconv.Itoa(id)
-				requiredFrames[s] = allFrames[s]
-			})
-			WalkStackFrames(allFrames, v.EndStack, func(id int32) {
-				s := strconv.Itoa(id)
-				requiredFrames[s] = allFrames[s]
-			})
-			if written == 0 {
-				io.WriteString(w, `"traceEvents": [`)
-			}
-			if written > 0 {
-				io.WriteString(w, ",")
-			}
-			enc.Encode(v)
-			// TODO(mknyszek): get rid of the extra \n inserted by enc.Encode.
-			// Same should be applied to splittingTraceConsumer.
-			written++
-		},
-		ConsumeViewerFrame: func(k []byte, v format.Frame) {
-			allFrames[k] = v
-		},
-		Flush: func() {
-			io.WriteString(w, `], "stackFrames":`)
-			enc.Encode(requiredFrames)
-			io.WriteString(w, `}`)
-		},
+	return c
+}
+
+type viewerDataConsumer struct {
+	w              io.Writer
+	enc            *json.Encoder
+	written        int32
+	index          int64
+	startIdx       int64
+	endIdx         int64
+	allFrames      map[string]format.Frame
+	requiredFrames map[string]format.Frame
+}
+
+func (c *viewerDataConsumer) ConsumeTimeUnit(unit []byte) {
+	io.WriteString(c.w, `"displayTimeUnit":`)
+	c.enc.Encode(unit)
+	io.WriteString(c.w, ",")
+}
+
+func (c *viewerDataConsumer) ConsumeViewerEvent(v *format.Event, required bool) {
+	c.index++
+	if !required && (c.index < c.startIdx || c.index > c.endIdx) {
+		// not in the range. Skip!
+		return
+	}
+	c.addFrames(stackFrameIDs(c.allFrames, v.Stack))
+	c.addFrames(stackFrameIDs(c.allFrames, v.EndStack))
+	if c.written == 0 {
+		io.WriteString(c.w, `"traceEvents": [`)
+	}
+	if c.written > 0 {
+		io.WriteString(c.w, ",")
+	}
+	c.enc.Encode(v)
+	// TODO(mknyszek): get rid of the extra \n inserted by enc.Encode.
+	// Same should be applied to splittingTraceConsumer.
+	c.written++
+}
+
+func (c *viewerDataConsumer) addFrames(ids []int32) {
+	s := ""
+	i := int32(0)
+	for i = 0; i < int32(len(ids)); i++ {
+		s = strconv.Itoa(ids[i])
+		c.requiredFrames[s] = c.allFrames[s]
 	}
 }
 
-func SplittingTraceConsumer(maxSize int32) (*splitter, TraceConsumer) {
-	type eventSz struct {
-		Time   float64
-		Sz     int32
-		Frames []int32
-	}
+func (c *viewerDataConsumer) ConsumeViewerFrame(k []byte, v format.Frame) {
+	c.allFrames[k] = v
+}
 
+func (c *viewerDataConsumer) Flush() {
+	io.WriteString(c.w, `], "stackFrames":`)
+	c.enc.Encode(c.requiredFrames)
+	io.WriteString(c.w, `}`)
+}
+
+func SplittingTraceConsumer(maxSize int32) (sp *splitter, out TraceConsumer) {
+	sp = &splitter{}
+	c := &splittingConsumer{
+		data:      format.Data{Frames: map[string]format.Frame{}},
+		allFrames: map[string]format.Frame{},
+		s:         sp,
+		maxSize:   maxSize,
+	}
+	return sp, c
+}
+
+type eventSz struct {
+	Time   float64
+	Sz     int32
+	Frames []int32
+}
+
+type splittingConsumer struct {
+	data      format.Data
+	allFrames map[string]format.Frame
+	sizes     []eventSz
+	cw        countingWriter
+	s         *splitter
+	maxSize   int32
+}
+
+func (c *splittingConsumer) ConsumeTimeUnit(unit []byte) {
+	c.data.TimeUnit = unit
+}
+
+func (c *splittingConsumer) ConsumeViewerEvent(v *format.Event, required bool) {
+	if required {
+		// Store required events inside data so flush
+		// can include them in the required part of the
+		// trace.
+		c.data.Events = mxutil.Ensure(c.data.Events, 1)
+		c.data.Events = push(c.data.Events, v)
+		c.addFrames(stackFrameIDs(c.allFrames, v.Stack))
+		c.addFrames(stackFrameIDs(c.allFrames, v.EndStack))
+		return
+	}
+	enc := json.NewEncoder(&c.cw)
+	enc.Encode(v)
+	evSize := eventSz{Time: v.Time, Sz: c.cw.size + 1} // +1 for ",".
+	// Add referenced stack frames. Their size is computed
+	// in flush, where we can dedup across events.
+	evSize.Frames = appendFrameIDs(evSize.Frames, stackFrameIDs(c.allFrames, v.Stack))
+	evSize.Frames = appendFrameIDs(evSize.Frames, stackFrameIDs(c.allFrames, v.EndStack)) // This may add duplicates. We'll dedup later.
+	c.sizes = mxutil.Ensure(c.sizes, 1)
+	c.sizes = push(c.sizes, evSize)
+	c.cw.size = 0
+}
+
+func (c *splittingConsumer) addFrames(ids []int32) {
+	s := ""
+	i := int32(0)
+	for i = 0; i < int32(len(ids)); i++ {
+		s = strconv.Itoa(ids[i])
+		c.data.Frames[s] = c.allFrames[s]
+	}
+}
+
+func (c *splittingConsumer) ConsumeViewerFrame(k []byte, v format.Frame) {
+	c.allFrames[k] = v
+}
+
+func (c *splittingConsumer) Flush() {
+	// Calculate size of the mandatory part of the trace.
+	// This includes thread names and stack frames for
+	// required events.
+	c.cw.size = 0
+	enc := json.NewEncoder(&c.cw)
+	enc.Encode(c.data)
+	requiredSize := c.cw.size
+	c.s.Ranges = splitRanges(c.sizes, c.allFrames, requiredSize, c.maxSize)
+}
+
+// splitRanges calculates the size of each individual event and its stack
+// frames, grouping them into ranges. Only stack frames relevant to the events
+// in a range are included, to reduce overhead.
+func splitRanges(sizes []eventSz, allFrames map[string]format.Frame, requiredSize, maxSize int32) (out []Range) {
 	var (
-		// data.Frames contains only the frames for required events.
-		data = format.Data{Frames: map[string]format.Frame{}}
+		start = 0
 
-		allFrames = map[string]format.Frame{}
+		eventsSize = 0
 
-		sizes []eventSz
-		cw    countingWriter
+		frames     = map[string]format.Frame{}
+		framesSize = 0
 	)
+	for i, ev := range sizes {
+		eventsSize += ev.Sz
 
-	s := &splitter{}
-
-	return s, TraceConsumer{
-		ConsumeTimeUnit: func(unit []byte) {
-			data.TimeUnit = unit
-		},
-		ConsumeViewerEvent: func(v *format.Event, required bool) {
-			if required {
-				// Store required events inside data so flush
-				// can include them in the required part of the
-				// trace.
-				data.Events = mxutil.Ensure(data.Events, 1)
-				data.Events = push(data.Events, v)
-				WalkStackFrames(allFrames, v.Stack, func(id int32) {
-					s := strconv.Itoa(id)
-					data.Frames[s] = allFrames[s]
-				})
-				WalkStackFrames(allFrames, v.EndStack, func(id int32) {
-					s := strconv.Itoa(id)
-					data.Frames[s] = allFrames[s]
-				})
-				return
+		// Add required stack frames. Note that they
+		// may already be in the map.
+		for _, id := range ev.Frames {
+			s := strconv.Itoa(id)
+			_, ok := frames[s]
+			if ok {
+				continue
 			}
-			enc := json.NewEncoder(&cw)
-			enc.Encode(v)
-			size := eventSz{Time: v.Time, Sz: cw.size + 1} // +1 for ",".
-			// Add referenced stack frames. Their size is computed
-			// in flush, where we can dedup across events.
-			WalkStackFrames(allFrames, v.Stack, func(id int32) {
-				size.Frames = mxutil.Ensure(size.Frames, 1)
-				size.Frames = push(size.Frames, id)
-			})
-			WalkStackFrames(allFrames, v.EndStack, func(id int32) {
-				size.Frames = mxutil.Ensure(size.Frames, 1)
-				size.Frames = push(size.Frames, id) // This may add duplicates. We'll dedup later.
-			})
-			sizes = mxutil.Ensure(sizes, 1)
-			sizes = push(sizes, size)
-			cw.size = 0
-		},
-		ConsumeViewerFrame: func(k []byte, v format.Frame) {
-			allFrames[k] = v
-		},
-		Flush: func() {
-			// Calculate size of the mandatory part of the trace.
-			// This includes thread names and stack frames for
-			// required events.
-			cw.size = 0
-			enc := json.NewEncoder(&cw)
-			enc.Encode(data)
-			requiredSize := cw.size
+			f := allFrames[s]
+			frames[s] = f
+			framesSize += stackFrameEncodedSize(uint32(id), f)
+		}
 
-			// Then calculate size of each individual event and
-			// their stack frames, grouping them into ranges. We
-			// only include stack frames relevant to the events in
-			// the range to reduce overhead.
+		total := requiredSize + framesSize + eventsSize
+		if total < maxSize {
+			continue
+		}
 
-			var (
-				start = 0
-
-				eventsSize = 0
-
-				frames     = map[string]format.Frame{}
-				framesSize = 0
-			)
-			for i, ev := range sizes {
-				eventsSize += ev.Sz
-
-				// Add required stack frames. Note that they
-				// may already be in the map.
-				for _, id := range ev.Frames {
-					s := strconv.Itoa(id)
-					_, ok := frames[s]
-					if ok {
-						continue
-					}
-					f := allFrames[s]
-					frames[s] = f
-					framesSize += stackFrameEncodedSize(uint32(id), f)
-				}
-
-				total := requiredSize + framesSize + eventsSize
-				if total < maxSize {
-					continue
-				}
-
-				// Reached maxSize size, commit this range and
-				// start a new range.
-				startTime := time.Duration(sizes[start].Time * 1000)
-				endTime := time.Duration(ev.Time * 1000)
-				s.Ranges = mxutil.Ensure(s.Ranges, 1)
-				s.Ranges = push(s.Ranges, Range{
-					Name:      fmt.Sprintf("%v-%v", startTime, endTime),
-					Start:     start,
-					End:       i + 1,
-					StartTime: int64(startTime),
-					EndTime:   int64(endTime),
-				})
-				start = i + 1
-				frames = map[string]format.Frame{}
-				framesSize = 0
-				eventsSize = 0
-			}
-			if len(s.Ranges) <= 1 {
-				s.Ranges = nil
-				return
-			}
-
-			if end := len(sizes) - 1; start < end {
-				s.Ranges = mxutil.Ensure(s.Ranges, 1)
-				s.Ranges = push(s.Ranges, Range{
-					Name:      fmt.Sprintf("%v-%v", time.Duration(sizes[start].Time*1000), time.Duration(sizes[end].Time*1000)),
-					Start:     start,
-					End:       end,
-					StartTime: int64(sizes[start].Time * 1000),
-					EndTime:   int64(sizes[end].Time * 1000),
-				})
-			}
-		},
+		// Reached maxSize size, commit this range and
+		// start a new range.
+		startTime := time.Duration(sizes[start].Time * 1000)
+		endTime := time.Duration(ev.Time * 1000)
+		out = mxutil.Ensure(out, 1)
+		out = push(out, Range{
+			Name:      fmt.Sprintf("%v-%v", startTime, endTime),
+			Start:     start,
+			End:       i + 1,
+			StartTime: int64(startTime),
+			EndTime:   int64(endTime),
+		})
+		start = i + 1
+		frames = map[string]format.Frame{}
+		framesSize = 0
+		eventsSize = 0
 	}
+	if len(out) <= 1 {
+		return nil
+	}
+
+	if end := len(sizes) - 1; start < end {
+		out = mxutil.Ensure(out, 1)
+		out = push(out, Range{
+			Name:      fmt.Sprintf("%v-%v", time.Duration(sizes[start].Time*1000), time.Duration(sizes[end].Time*1000)),
+			Start:     start,
+			End:       end,
+			StartTime: int64(sizes[start].Time * 1000),
+			EndTime:   int64(sizes[end].Time * 1000),
+		})
+	}
+	return out
 }
 
 type splitter struct {
@@ -222,12 +247,12 @@ type countingWriter struct {
 	size int32
 }
 
-func (cw *countingWriter) Write(data []byte) (int32, error) {
+func (cw *countingWriter) Write(data []byte) (n int32, err error) {
 	cw.size += len(data)
 	return len(data), nil
 }
 
-func stackFrameEncodedSize(id uint32, f format.Frame) int32 {
+func stackFrameEncodedSize(id uint32, f format.Frame) (out int32) {
 	// We want to know the marginal size of traceviewer.Data.Frames for
 	// each event. Running full JSON encoding of the map for each event is
 	// far too slow.
@@ -272,16 +297,28 @@ func stackFrameEncodedSize(id uint32, f format.Frame) int32 {
 	return size
 }
 
-// WalkStackFrames calls fn for id and all of its parent frames from allFrames.
-func WalkStackFrames(allFrames map[string]format.Frame, id int32, fn func(id int32)) {
+// stackFrameIDs returns id and all of its parent frame ids from allFrames.
+func stackFrameIDs(allFrames map[string]format.Frame, id int32) (ids []int32) {
 	for id != 0 {
 		f, ok := allFrames[strconv.Itoa(id)]
 		if !ok {
 			break
 		}
-		fn(id)
+		ids = mxutil.Ensure(ids, 1)
+		ids = push(ids, id)
 		id = f.Parent
 	}
+	return ids
+}
+
+// appendFrameIDs appends ids to frames.
+func appendFrameIDs(frames, ids []int32) (out []int32) {
+	out = frames
+	for _, id := range ids {
+		out = mxutil.Ensure(out, 1)
+		out = push(out, id)
+	}
+	return out
 }
 
 type Mode int32
@@ -294,10 +331,8 @@ const (
 
 // NewEmitter returns a new Emitter that writes to c. The rangeStart and
 // rangeEnd args are used for splitting large traces.
-func NewEmitter(c TraceConsumer, rangeStart, rangeEnd time.Duration) *Emitter {
-	c.ConsumeTimeUnit("ns")
-
-	return &Emitter{
+func NewEmitter(c TraceConsumer, rangeStart, rangeEnd time.Duration) (out *Emitter) {
+	e := &Emitter{
 		c:          c,
 		rangeStart: rangeStart,
 		rangeEnd:   rangeEnd,
@@ -305,6 +340,8 @@ func NewEmitter(c TraceConsumer, rangeStart, rangeEnd time.Duration) *Emitter {
 		resources:  map[uint64][]byte{},
 		tasks:      map[uint64]task{},
 	}
+	e.c.ConsumeTimeUnit("ns")
+	return e
 }
 
 type Emitter struct {
@@ -604,7 +641,7 @@ func (e *Emitter) emitHeapCounters(ts time.Duration) {
 }
 
 // Err returns an error if the emitter is in an invalid state.
-func (e *Emitter) Err() error {
+func (e *Emitter) Err() (err error) {
 	if e.gstates[GRunnable] < 0 || e.gstates[GRunning] < 0 || e.threadStats[ThreadStateInSyscall] < 0 || e.threadStats[ThreadStateInSyscallRuntime] < 0 {
 		return fmt.Errorf(
 			"runnable=%d running=%d insyscall=%d insyscallRuntime=%d",
@@ -617,7 +654,7 @@ func (e *Emitter) Err() error {
 	return nil
 }
 
-func (e *Emitter) tsWithinRange(ts time.Duration) bool {
+func (e *Emitter) tsWithinRange(ts time.Duration) (ok bool) {
 	return e.rangeStart <= ts && ts <= e.rangeEnd
 }
 
@@ -633,8 +670,8 @@ func (e *Emitter) Flush() {
 	if len(e.tasks) != 0 {
 		e.processMeta(format.TasksSection, "TASKS", 1)
 	}
-	for id, task := range e.tasks {
-		e.threadMeta(format.TasksSection, id, task.name, task.sortIndex)
+	for id, tk := range e.tasks {
+		e.threadMeta(format.TasksSection, id, tk.name, tk.sortIndex)
 	}
 
 	e.processMeta(format.ProcsSection, e.resourceType, 2)
@@ -690,12 +727,12 @@ func (e *Emitter) processMeta(sectionID uint64, name []byte, priority int32) {
 
 // Stack emits the given frames and returns a unique id for the stack. No
 // pointers to the given data are being retained beyond the call to Stack.
-func (e *Emitter) Stack(stk []trace.StackFrame) int32 {
+func (e *Emitter) Stack(stk []trace.StackFrame) (id int32) {
 	return e.buildBranch(e.frameTree, stk)
 }
 
 // buildBranch builds one branch in the prefix tree rooted at ctx.frameTree.
-func (e *Emitter) buildBranch(parent frameNode, stk []trace.StackFrame) int32 {
+func (e *Emitter) buildBranch(parent frameNode, stk []trace.StackFrame) (id int32) {
 	if len(stk) == 0 {
 		return parent.id
 	}
@@ -719,7 +756,7 @@ type heapStats struct {
 	nextGC    uint64
 }
 
-func viewerTime(t time.Duration) float64 {
+func viewerTime(t time.Duration) (out float64) {
 	return float64(t) / float64(time.Microsecond)
 }
 
@@ -788,7 +825,7 @@ const (
 	colorAnotherGrey    = "cq_build_attempt_failed"      // 187, 187, 187
 )
 
-func _colorForTask() [][]byte {
+func _colorForTask() (out [][]byte) {
 	return [][]byte{
 		colorLightMauve,
 		colorOrange,
@@ -816,7 +853,7 @@ func _colorForTask() [][]byte {
 	}
 }
 
-func pickTaskColor(id uint64) []byte {
+func pickTaskColor(id uint64) (out []byte) {
 	cft := _colorForTask()
 	idx := id % uint64(len(cft))
 	return cft[idx]

@@ -13,7 +13,7 @@ import (
 	"syscall"
 )
 
-func sockaddrToTCP(sa syscall.Sockaddr) Addr {
+func sockaddrToTCP(sa syscall.Sockaddr) (raddr2 Addr) {
 	switch sa := sa.(type) {
 	case *syscall.SockaddrInet4:
 		return &TCPAddr{IP: sa.Addr[0:], Port: sa.Port}
@@ -23,7 +23,7 @@ func sockaddrToTCP(sa syscall.Sockaddr) Addr {
 	return nil
 }
 
-func (a *TCPAddr) family() int32 {
+func (a *TCPAddr) family() (rn int32) {
 	if a == nil || len(a.IP) <= IPv4len {
 		return syscall.AF_INET
 	}
@@ -33,18 +33,18 @@ func (a *TCPAddr) family() int32 {
 	return syscall.AF_INET6
 }
 
-func (a *TCPAddr) sockaddr(family int32) (syscall.Sockaddr, error) {
+func (a *TCPAddr) sockaddr(family int32) (rsockaddr syscall.Sockaddr, rerr error) {
 	if a == nil {
 		return nil, nil
 	}
 	return ipToSockaddr(family, a.IP, a.Port, a.Zone)
 }
 
-func (a *TCPAddr) toLocal(net []byte) sockaddr {
+func (a *TCPAddr) toLocal(net []byte) (rsockaddr sockaddr) {
 	return &TCPAddr{loopbackIP(net), a.Port, a.Zone}
 }
 
-func (c *TCPConn) readFrom(r io.Reader) (int64, error) {
+func (c *TCPConn) readFrom(r io.Reader) (rn int64, rerr error) {
 	if n, err, handled := spliceFrom(c.fd, r); handled {
 		return n, err
 	}
@@ -54,22 +54,22 @@ func (c *TCPConn) readFrom(r io.Reader) (int64, error) {
 	return genericReadFrom(c, r)
 }
 
-func (c *TCPConn) writeTo(w io.Writer) (int64, error) {
+func (c *TCPConn) writeTo(w io.Writer) (rn int64, rerr error) {
 	if n, err, handled := spliceTo(w, c.fd); handled {
 		return n, err
 	}
 	return genericWriteTo(c, w)
 }
 
-func (sd *sysDialer) dialTCP(ctx context.Context, laddr, raddr *TCPAddr) (*TCPConn, error) {
+func (sd *sysDialer) dialTCP(ctx context.Context, laddr, raddr *TCPAddr) (rtCPConn *TCPConn, rerr error) {
 	return sd.doDialTCP(ctx, laddr, raddr)
 }
 
-func (sd *sysDialer) doDialTCP(ctx context.Context, laddr, raddr *TCPAddr) (*TCPConn, error) {
+func (sd *sysDialer) doDialTCP(ctx context.Context, laddr, raddr *TCPAddr) (rtCPConn *TCPConn, rerr error) {
 	return sd.doDialTCPProto(ctx, laddr, raddr, 0)
 }
 
-func (sd *sysDialer) doDialTCPProto(ctx context.Context, laddr, raddr *TCPAddr, proto int32) (*TCPConn, error) {
+func (sd *sysDialer) doDialTCPProto(ctx context.Context, laddr, raddr *TCPAddr, proto int32) (rtCPConn *TCPConn, rerr error) {
 	ctrlCtxFn := sd.Dialer.ControlContext
 	if ctrlCtxFn == nil && sd.Dialer.Control != nil {
 		ctrlCtxFn = func(ctx context.Context, network, address []byte, c syscall.RawConn) error {
@@ -115,7 +115,7 @@ func (sd *sysDialer) doDialTCPProto(ctx context.Context, laddr, raddr *TCPAddr, 
 	return newTCPConn(fd, sd.Dialer.KeepAlive, sd.Dialer.KeepAliveConfig), nil
 }
 
-func selfConnect(fd *netFD, err error) bool {
+func selfConnect(fd *netFD, err error) (rok bool) {
 	// If the connect failed, we clearly didn't connect to ourselves.
 	if err != nil {
 		return false
@@ -137,7 +137,7 @@ func selfConnect(fd *netFD, err error) bool {
 	return l.Port == r.Port && l.IP.Equal(r.IP)
 }
 
-func spuriousENOTAVAIL(err error) bool {
+func spuriousENOTAVAIL(err error) (rok bool) {
 	if op, ok := err.(*OpError); ok {
 		err = op.Err
 	}
@@ -147,9 +147,9 @@ func spuriousENOTAVAIL(err error) bool {
 	return err == syscall.EADDRNOTAVAIL
 }
 
-func (ln *TCPListener) ok() bool { return ln != nil && ln.fd != nil }
+func (ln *TCPListener) ok() (rok bool) { return ln != nil && ln.fd != nil }
 
-func (ln *TCPListener) accept() (*TCPConn, error) {
+func (ln *TCPListener) accept() (rtCPConn *TCPConn, rerr error) {
 	fd, err := ln.fd.accept()
 	if err != nil {
 		return nil, err
@@ -157,11 +157,11 @@ func (ln *TCPListener) accept() (*TCPConn, error) {
 	return newTCPConn(fd, ln.lc.KeepAlive, ln.lc.KeepAliveConfig), nil
 }
 
-func (ln *TCPListener) close() error {
+func (ln *TCPListener) close() (rerr error) {
 	return ln.fd.Close()
 }
 
-func (ln *TCPListener) file() (*os.File, error) {
+func (ln *TCPListener) file() (rfile *os.File, rerr error) {
 	f, err := ln.fd.dup()
 	if err != nil {
 		return nil, err
@@ -169,11 +169,11 @@ func (ln *TCPListener) file() (*os.File, error) {
 	return f, nil
 }
 
-func (sl *sysListener) listenTCP(ctx context.Context, laddr *TCPAddr) (*TCPListener, error) {
+func (sl *sysListener) listenTCP(ctx context.Context, laddr *TCPAddr) (rtCPListener *TCPListener, rerr error) {
 	return sl.listenTCPProto(ctx, laddr, 0)
 }
 
-func (sl *sysListener) listenTCPProto(ctx context.Context, laddr *TCPAddr, proto int32) (*TCPListener, error) {
+func (sl *sysListener) listenTCPProto(ctx context.Context, laddr *TCPAddr, proto int32) (rtCPListener *TCPListener, rerr error) {
 	var ctrlCtxFn func(ctx context.Context, network, address []byte, c syscall.RawConn) error
 	if sl.ListenConfig.Control != nil {
 		ctrlCtxFn = func(ctx context.Context, network, address []byte, c syscall.RawConn) error {

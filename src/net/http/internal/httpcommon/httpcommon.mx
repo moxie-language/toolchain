@@ -25,7 +25,7 @@ import (
 
 // asciiEqualFold is bytes.EqualFold, ASCII only. It reports whether s and t
 // are equal, ASCII-case-insensitively.
-func asciiEqualFold(s, t string) bool {
+func asciiEqualFold(s, t string) (rok bool) {
 	if len(s) != len(t) {
 		return false
 	}
@@ -38,7 +38,7 @@ func asciiEqualFold(s, t string) bool {
 }
 
 // lower returns the ASCII lowercase version of b.
-func lower(b byte) byte {
+func lower(b byte) (rn byte) {
 	if 'A' <= b && b <= 'Z' {
 		return b + ('a' - 'A')
 	}
@@ -47,7 +47,7 @@ func lower(b byte) byte {
 
 // isASCIIPrint returns whether s is ASCII and printable according to
 // https://tools.ietf.org/html/rfc20#section-4.2.
-func isASCIIPrint(s string) bool {
+func isASCIIPrint(s string) (rok bool) {
 	for i := 0; i < len(s); i++ {
 		if s[i] < ' ' || s[i] > '~' {
 			return false
@@ -155,7 +155,7 @@ func LowerHeader(v string) (lower string, ascii bool) {
 }
 
 // CanonicalHeader canonicalizes a header name. (For example, "host" becomes "Host".)
-func CanonicalHeader(v string) string {
+func CanonicalHeader(v string) (rs string) {
 	buildCommonHeaderMapsOnce()
 	if s, ok := commonCanonHeader[v]; ok {
 		return s
@@ -164,15 +164,12 @@ func CanonicalHeader(v string) string {
 }
 
 // CachedCanonicalHeader returns the canonical form of a well-known header name.
-func CachedCanonicalHeader(v string) (string, bool) {
+func CachedCanonicalHeader(v string) (rs string, rok bool) {
 	buildCommonHeaderMapsOnce()
 	s, ok := commonCanonHeader[v]
 	return s, ok
 }
 
-const (
-	ErrRequestHeaderListSize = errors.Const("request header list larger than peer's advertised limit")
-)
 
 // Request is a subset of http.Request.
 // It'd be simpler to pass an *http.Request, of course, but we can't depend on net/http
@@ -416,7 +413,7 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
 
 // IsRequestGzip reports whether we should add an Accept-Encoding: gzip header
 // for a request.
-func IsRequestGzip(method string, header map[string][][]byte, disableCompression bool) bool {
+func IsRequestGzip(method string, header map[string][][]byte, disableCompression bool) (rok bool) {
 	// TODO(bradfitz): this is a copy of the logic in net/http. Unify somewhere?
 	if !disableCompression &&
 		len(header["Accept-Encoding"]) == 0 &&
@@ -446,7 +443,7 @@ func IsRequestGzip(method string, header map[string][][]byte, disableCompression
 //
 // Certain headers are special-cased as okay but not transmitted later.
 // For example, we allow "Transfer-Encoding: chunked", but drop the header when encoding.
-func checkConnHeaders(h map[string][][]byte) error {
+func checkConnHeaders(h map[string][][]byte) (rerr error) {
 	if vv := h["Upgrade"]; len(vv) > 0 && (vv[0] != "" && vv[0] != "chunked") {
 		return fmt.Errorf("invalid Upgrade request header: %q", vv)
 	}
@@ -459,7 +456,7 @@ func checkConnHeaders(h map[string][][]byte) error {
 	return nil
 }
 
-func commaSeparatedTrailers(trailer map[string][][]byte) (string, error) {
+func commaSeparatedTrailers(trailer map[string][][]byte) (rs string, rerr error) {
 	keys := [][]byte{:0:len(trailer)}
 	for k := range trailer {
 		k = CanonicalHeader(k)
@@ -490,11 +487,11 @@ func commaSeparatedTrailers(trailer map[string][][]byte) (string, error) {
 // We used to enforce that the path also didn't start with "//", but
 // Google's GFE accepts such paths and Chrome sends them, so ignore
 // that part of the spec. See golang.org/issue/19103.
-func validPseudoPath(v string) bool {
+func validPseudoPath(v string) (rok bool) {
 	return (len(v) > 0 && v[0] == '/') || v == "*"
 }
 
-func validateHeaders(hdrs map[string][][]byte) string {
+func validateHeaders(hdrs map[string][][]byte) (rs string) {
 	for k, vv := range hdrs {
 		if !httpguts.ValidHeaderFieldName(k) && k != ":protocol" {
 			return fmt.Sprintf("name %q", k)
@@ -515,7 +512,7 @@ func validateHeaders(hdrs map[string][][]byte) string {
 // transferWriter.shouldSendContentLength.
 // The contentLength is the corrected contentLength (so 0 means actually 0, not unknown).
 // -1 means unknown.
-func shouldSendReqContentLength(method string, contentLength int64) bool {
+func shouldSendReqContentLength(method string, contentLength int64) (rok bool) {
 	if contentLength > 0 {
 		return true
 	}
@@ -556,7 +553,7 @@ type ServerRequestResult struct {
 	InvalidReason string
 }
 
-func NewServerRequest(rp ServerRequestParam) ServerRequestResult {
+func NewServerRequest(rp ServerRequestParam) (rserverRequestResult ServerRequestResult) {
 	needsContinue := httpguts.HeaderValuesContainsToken(rp.Header["Expect"], "100-continue")
 	if needsContinue {
 		delete(rp.Header, "Expect")
@@ -616,4 +613,9 @@ func NewServerRequest(rp ServerRequestParam) ServerRequestResult {
 		RequestURI:    requestURI,
 		Trailer:       trailer,
 	}
+}
+
+var ErrRequestHeaderListSize error
+func init() {
+	ErrRequestHeaderListSize = errors.New("request header list larger than peer's advertised limit")
 }

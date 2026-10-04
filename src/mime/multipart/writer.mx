@@ -22,7 +22,7 @@ type Writer struct {
 
 // NewWriter returns a new multipart [Writer] with a random boundary,
 // writing to w.
-func NewWriter(w io.Writer) *Writer {
+func NewWriter(w io.Writer) (rwriter *Writer) {
 	return &Writer{
 		w:        w,
 		boundary: randomBoundary(),
@@ -30,7 +30,7 @@ func NewWriter(w io.Writer) *Writer {
 }
 
 // Boundary returns the [Writer]'s boundary.
-func (w *Writer) Boundary() []byte {
+func (w *Writer) Boundary() (rb []byte) {
 	return w.boundary
 }
 
@@ -40,7 +40,7 @@ func (w *Writer) Boundary() []byte {
 // SetBoundary must be called before any parts are created, may only
 // contain certain ASCII characters, and must be non-empty and
 // at most 70 bytes long.
-func (w *Writer) SetBoundary(boundary []byte) error {
+func (w *Writer) SetBoundary(boundary []byte) (rerr error) {
 	if w.lastpart != nil {
 		return errors.New("mime: SetBoundary called after write")
 	}
@@ -69,7 +69,7 @@ func (w *Writer) SetBoundary(boundary []byte) error {
 
 // FormDataContentType returns the Content-Type for an HTTP
 // multipart/form-data with this [Writer]'s Boundary.
-func (w *Writer) FormDataContentType() []byte {
+func (w *Writer) FormDataContentType() (rb []byte) {
 	b := w.boundary
 	// We must quote the boundary if it contains any of the
 	// tspecials characters defined by RFC 2045, or space.
@@ -79,7 +79,7 @@ func (w *Writer) FormDataContentType() []byte {
 	return "multipart/form-data; boundary=" | b
 }
 
-func randomBoundary() []byte {
+func randomBoundary() (rb []byte) {
 	buf := []byte{:30}
 	_, err := io.ReadFull(rand.Reader(), buf)
 	if err != nil {
@@ -98,10 +98,10 @@ func randomBoundary() []byte {
 // header. The body of the part should be written to the returned
 // [Writer]. After calling CreatePart, any previous part may no longer
 // be written to.
-func (w *Writer) CreatePart(header textproto.MIMEHeader) (io.Writer, error) {
+func (w *Writer) CreatePart(header textproto.MIMEHeader) (rwriter io.Writer, rerr error) {
 	if w.lastpart != nil {
-		if err := w.lastpart.close(); err != nil {
-			return nil, err
+		if cerr := w.lastpart.close(); cerr != nil {
+			return nil, cerr
 		}
 	}
 	var b bytes.Buffer
@@ -145,13 +145,13 @@ func (w *Writer) CreatePart(header textproto.MIMEHeader) (io.Writer, error) {
 	return p, nil
 }
 
-func escapeQuotes(s []byte) []byte {
+func escapeQuotes(s []byte) (rb []byte) {
 	return bytes.NewReplacer("\\", "\\\\", `"`, "\\\"").Replace(s)
 }
 
 // CreateFormFile is a convenience wrapper around [Writer.CreatePart]. It creates
 // a new form-data header with the provided field name and file name.
-func (w *Writer) CreateFormFile(fieldname, filename []byte) (io.Writer, error) {
+func (w *Writer) CreateFormFile(fieldname, filename []byte) (rwriter io.Writer, rerr error) {
 	h := textproto.MIMEHeader{}
 	h.Set("Content-Disposition", FileContentDisposition(fieldname, filename))
 	h.Set("Content-Type", "application/octet-stream")
@@ -160,7 +160,7 @@ func (w *Writer) CreateFormFile(fieldname, filename []byte) (io.Writer, error) {
 
 // CreateFormField calls [Writer.CreatePart] with a header using the
 // given field name.
-func (w *Writer) CreateFormField(fieldname []byte) (io.Writer, error) {
+func (w *Writer) CreateFormField(fieldname []byte) (rwriter io.Writer, rerr error) {
 	h := textproto.MIMEHeader{}
 	h.Set("Content-Disposition",
 		`form-data; name="` | escapeQuotes(fieldname) | `"`)
@@ -169,12 +169,12 @@ func (w *Writer) CreateFormField(fieldname []byte) (io.Writer, error) {
 
 // FileContentDisposition returns the value of a Content-Disposition header
 // with the provided field name and file name.
-func FileContentDisposition(fieldname, filename []byte) []byte {
+func FileContentDisposition(fieldname, filename []byte) (rb []byte) {
 	return `form-data; name="` | escapeQuotes(fieldname) | `"; filename="` | escapeQuotes(filename) | `"`
 }
 
 // WriteField calls [Writer.CreateFormField] and then writes the given value.
-func (w *Writer) WriteField(fieldname, value []byte) error {
+func (w *Writer) WriteField(fieldname, value []byte) (rerr error) {
 	p, err := w.CreateFormField(fieldname)
 	if err != nil {
 		return err
@@ -185,10 +185,10 @@ func (w *Writer) WriteField(fieldname, value []byte) error {
 
 // Close finishes the multipart message and writes the trailing
 // boundary end line to the output.
-func (w *Writer) Close() error {
+func (w *Writer) Close() (rerr error) {
 	if w.lastpart != nil {
-		if err := w.lastpart.close(); err != nil {
-			return err
+		if cerr := w.lastpart.close(); cerr != nil {
+			return cerr
 		}
 		w.lastpart = nil
 	}
@@ -202,7 +202,7 @@ type part struct {
 	we     error // last error that occurred writing
 }
 
-func (p *part) close() error {
+func (p *part) close() (rerr error) {
 	p.closed = true
 	return p.we
 }

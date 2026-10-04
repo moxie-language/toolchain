@@ -39,7 +39,7 @@ type serverHandshakeState struct {
 }
 
 // serverHandshake performs a TLS handshake as a server.
-func (c *Conn) serverHandshake(ctx context.Context) error {
+func (c *Conn) serverHandshake(ctx context.Context) (rerr error) {
 	clientHello, ech, err := c.readClientHello(ctx)
 	if err != nil {
 		return err
@@ -63,7 +63,7 @@ func (c *Conn) serverHandshake(ctx context.Context) error {
 	return hs2.handshake()
 }
 
-func (hs *serverHandshakeState) handshake() error {
+func (hs *serverHandshakeState) handshake() (rerr error) {
 	c := hs.c
 
 	if err15 := hs.processClientHello(); err15 != nil {
@@ -131,7 +131,7 @@ func (hs *serverHandshakeState) handshake() error {
 }
 
 // readClientHello reads a ClientHello message and selects the protocol version.
-func (c *Conn) readClientHello(ctx context.Context) (*clientHelloMsg, *echServerContext, error) {
+func (c *Conn) readClientHello(ctx context.Context) (rclientHelloMsg *clientHelloMsg, rechServerContext *echServerContext, rerr error) {
 	// clientHelloMsg is included in the transcript, but we haven't initialized
 	// it yet. The respective handshake functions will record it themselves.
 	msg, err := c.readHandshake(nil)
@@ -211,7 +211,7 @@ func (c *Conn) readClientHello(ctx context.Context) (*clientHelloMsg, *echServer
 	return clientHello, ech, nil
 }
 
-func (hs *serverHandshakeState) processClientHello() error {
+func (hs *serverHandshakeState) processClientHello() (rerr error) {
 	c := hs.c
 
 	hs.hello = &serverHelloMsg{}
@@ -326,7 +326,7 @@ func (hs *serverHandshakeState) processClientHello() error {
 // negotiateALPN picks a shared ALPN protocol that both sides support in server
 // preference order. If ALPN is not configured or the peer doesn't support it,
 // it returns "" and no error.
-func negotiateALPN(serverProtos, clientProtos [][]byte, quic bool) ([]byte, error) {
+func negotiateALPN(serverProtos, clientProtos [][]byte, quic bool) (rb []byte, rerr error) {
 	if len(serverProtos) == 0 || len(clientProtos) == 0 {
 		if quic && len(serverProtos) != 0 {
 			// RFC 9001, Section 8.1
@@ -357,7 +357,7 @@ func negotiateALPN(serverProtos, clientProtos [][]byte, quic bool) ([]byte, erro
 
 // supportsECDHE returns whether ECDHE key exchanges can be used with this
 // pre-TLS 1.3 client.
-func supportsECDHE(c *Config, version uint16, supportedCurves []CurveID, supportedPoints []uint8) (bool, error) {
+func supportsECDHE(c *Config, version uint16, supportedCurves []CurveID, supportedPoints []uint8) (rok bool, rerr error) {
 	supportsCurve := false
 	for _, curve := range supportedCurves {
 		if c.supportsCurve(version, curve) {
@@ -388,12 +388,12 @@ func supportsECDHE(c *Config, version uint16, supportedCurves []CurveID, support
 	return supportsCurve && supportsPointFormat, nil
 }
 
-func (hs *serverHandshakeState) pickCipherSuite() error {
+func (hs *serverHandshakeState) pickCipherSuite() (rerr error) {
 	c := hs.c
 
 	preferenceList := c.config.cipherSuites(isAESGCMPreferred(hs.clientHello.cipherSuites))
 
-	hs.suite = selectCipherSuite(preferenceList, hs.clientHello.cipherSuites, hs.cipherSuiteOk)
+	hs.suite = selectCipherSuite(preferenceList, hs.clientHello.cipherSuites, hs)
 	if hs.suite == nil {
 		c.sendAlert(alertHandshakeFailure)
 		return fmt.Errorf("tls: no cipher suite supported by both client and server; client offered: %x",
@@ -415,7 +415,7 @@ func (hs *serverHandshakeState) pickCipherSuite() error {
 	return nil
 }
 
-func (hs *serverHandshakeState) cipherSuiteOk(c *cipherSuite) bool {
+func (hs *serverHandshakeState) cipherSuiteOk(c *cipherSuite) (rok bool) {
 	if c.flags&suiteECDHE != 0 {
 		if !hs.ecdheOk {
 			return false
@@ -437,7 +437,7 @@ func (hs *serverHandshakeState) cipherSuiteOk(c *cipherSuite) bool {
 }
 
 // checkForResumption reports whether we should perform resumption on this connection.
-func (hs *serverHandshakeState) checkForResumption() error {
+func (hs *serverHandshakeState) checkForResumption() (rerr error) {
 	c := hs.c
 
 	if c.config.SessionTicketsDisabled {
@@ -493,7 +493,7 @@ func (hs *serverHandshakeState) checkForResumption() error {
 
 	// Check that we also support the ciphersuite from the session.
 	suite := selectCipherSuite([]uint16{sessionState.cipherSuite},
-		c.config.supportedCipherSuites(), hs.cipherSuiteOk)
+		c.config.supportedCipherSuites(), hs)
 	if suite == nil {
 		return nil
 	}
@@ -545,7 +545,7 @@ func (hs *serverHandshakeState) checkForResumption() error {
 	return nil
 }
 
-func (hs *serverHandshakeState) doResumeHandshake() error {
+func (hs *serverHandshakeState) doResumeHandshake() (rerr error) {
 	c := hs.c
 
 	hs.hello.cipherSuite = hs.suite.id
@@ -578,7 +578,7 @@ func (hs *serverHandshakeState) doResumeHandshake() error {
 	return nil
 }
 
-func (hs *serverHandshakeState) doFullHandshake() error {
+func (hs *serverHandshakeState) doFullHandshake() (rerr error) {
 	c := hs.c
 
 	if hs.clientHello.ocspStapling && len(hs.cert.OCSPStaple) > 0 {
@@ -800,7 +800,7 @@ func (hs *serverHandshakeState) doFullHandshake() error {
 	return nil
 }
 
-func (hs *serverHandshakeState) establishKeys() error {
+func (hs *serverHandshakeState) establishKeys() (rerr error) {
 	c := hs.c
 
 	clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV :=
@@ -815,8 +815,8 @@ func (hs *serverHandshakeState) establishKeys() error {
 		serverCipher = hs.suite.cipher(serverKey, serverIV, false /* not for reading */)
 		serverHash = hs.suite.mac(serverMAC)
 	} else {
-		clientCipher = aeadCipher{a: hs.suite.aead(clientKey, clientIV)}
-		serverCipher = aeadCipher{a: hs.suite.aead(serverKey, serverIV)}
+		clientCipher = &aeadCipher{a: hs.suite.aead(clientKey, clientIV)}
+		serverCipher = &aeadCipher{a: hs.suite.aead(serverKey, serverIV)}
 	}
 
 	c.in.prepareCipherSpec(c.vers, clientCipher, clientHash)
@@ -825,7 +825,7 @@ func (hs *serverHandshakeState) establishKeys() error {
 	return nil
 }
 
-func (hs *serverHandshakeState) readFinished(out []byte) error {
+func (hs *serverHandshakeState) readFinished(out []byte) (rerr error) {
 	c := hs.c
 
 	if err3 := c.readChangeCipherSpec(); err3 != nil {
@@ -860,7 +860,7 @@ func (hs *serverHandshakeState) readFinished(out []byte) error {
 	return nil
 }
 
-func (hs *serverHandshakeState) sendSessionTicket() error {
+func (hs *serverHandshakeState) sendSessionTicket() (rerr error) {
 	if !hs.hello.ticketSupported {
 		return nil
 	}
@@ -899,7 +899,7 @@ func (hs *serverHandshakeState) sendSessionTicket() error {
 	return nil
 }
 
-func (hs *serverHandshakeState) sendFinished(out []byte) error {
+func (hs *serverHandshakeState) sendFinished(out []byte) (rerr error) {
 	c := hs.c
 
 	if err := c.writeChangeCipherRecord(); err != nil {
@@ -919,7 +919,7 @@ func (hs *serverHandshakeState) sendFinished(out []byte) error {
 
 // processCertsFromClient takes a chain of client certificates either from a
 // certificateMsg message or a certificateMsgTLS13 message and verifies them.
-func (c *Conn) processCertsFromClient(certificate Certificate) error {
+func (c *Conn) processCertsFromClient(certificate Certificate) (rerr error) {
 	certificates := certificate.Certificate
 	certs := []*x509.Certificate{:len(certificates)}
 	var err3 error
@@ -962,9 +962,9 @@ func (c *Conn) processCertsFromClient(certificate Certificate) error {
 
 		chains, err2 := certs[0].Verify(opts)
 		if err2 != nil {
-			if _, ok2 := err2.(x509.UnknownAuthorityError); ok2 {
+			if _, ok2 := err2.(*x509.UnknownAuthorityError); ok2 {
 				c.sendAlert(alertUnknownCA)
-			} else if ciErr, ok1 := err2.(x509.CertificateInvalidError); ok1 && ciErr.Reason == x509.Expired {
+			} else if ciErr, ok1 := err2.(*x509.CertificateInvalidError); ok1 && ciErr.Reason == x509.Expired {
 				c.sendAlert(alertCertificateExpired)
 			} else {
 				c.sendAlert(alertBadCertificate)
@@ -1002,7 +1002,7 @@ func (c *Conn) processCertsFromClient(certificate Certificate) error {
 	return nil
 }
 
-func clientHelloInfo(ctx context.Context, c *Conn, clientHello *clientHelloMsg) *ClientHelloInfo {
+func clientHelloInfo(ctx context.Context, c *Conn, clientHello *clientHelloMsg) (rclientHelloInfo *ClientHelloInfo) {
 	supportedVersions := clientHello.supportedVersions
 	if len(clientHello.supportedVersions) == 0 {
 		supportedVersions = supportedVersionsFromMax(clientHello.vers)

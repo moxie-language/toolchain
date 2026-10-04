@@ -11,49 +11,57 @@ import (
 	"fmt"
 )
 
-var (
-	mimeTypes      map[string][]byte   // ".Z" => "application/x-compress"
-	mimeTypesLower map[string][]byte   // ".z" => "application/x-compress"
+// mimeTypesStore owns the MIME type tables. It is a self-mutating value so the
+// runtime extension registration writes go through its methods rather than
+// storing into package globals outside init.
+type mimeTypesStore struct {
+	// types maps ".Z" => "application/x-compress".
+	types map[string][]byte
+	// typesLower maps ".z" => "application/x-compress".
+	typesLower map[string][]byte
+	// extensions maps "image/jpeg" => [".jpg", ".jpeg"].
+	extensions map[string][][]byte
+	inited     bool
+}
 
-	// extensions maps from MIME type to list of lowercase file
-	// extensions: "image/jpeg" => [".jpg", ".jpeg"]
-	extensions map[string][][]byte // slice values are append-only.
-)
+var mimeStore *mimeTypesStore
 
-// setMimeTypes is used by initMime's non-test path, and by tests.
-func setMimeTypes(lowerExt, mixExt map[string][]byte) {
-	if mimeTypes == nil {
-		mimeTypes = map[string][]byte{}
-		mimeTypesLower = map[string][]byte{}
-		extensions = map[string][][]byte{}
+// setTypes is used by init's non-test path, and by tests.
+func (m *mimeTypesStore) setTypes(lowerExt, mixExt map[string][]byte) {
+	if m.types == nil {
+		m.types = map[string][]byte{}
+		m.typesLower = map[string][]byte{}
+		m.extensions = map[string][][]byte{}
 	}
-	for k := range mimeTypes {
-		delete(mimeTypes, k)
+	for k := range m.types {
+		delete(m.types, k)
 	}
-	for k := range mimeTypesLower {
-		delete(mimeTypesLower, k)
+	for k := range m.typesLower {
+		delete(m.typesLower, k)
 	}
-	for k := range extensions {
-		delete(extensions, k)
+	for k := range m.extensions {
+		delete(m.extensions, k)
 	}
 
 	for k, v := range lowerExt {
-		mimeTypesLower[k] = v
+		m.typesLower[k] = v
 	}
 	for k, v := range mixExt {
-		mimeTypes[k] = v
+		m.types[k] = v
 	}
 
+	var justType []byte
+	var perr error
 	for k, v := range lowerExt {
-		justType, _, err := ParseMediaType(v)
-		if err != nil {
-			panic(err.Error())
+		justType, _, perr = ParseMediaType(v)
+		if perr != nil {
+			panic(perr.Error())
 		}
-		extensions[justType] = push(extensions[justType], k)
+		m.extensions[justType] = push(m.extensions[justType], k)
 	}
 }
 
-func _builtinTypesLower() map[string][]byte {
+func _builtinTypesLower() (rm map[string][]byte) {
 	return map[string][]byte{
 		".avif": "image/avif",
 		".css":  "text/css; charset=utf-8",
@@ -74,12 +82,10 @@ func _builtinTypesLower() map[string][]byte {
 	}
 }
 
-var mimeInited bool
-
-func initMime() {
+func (m *mimeTypesStore) init() {
 	b := _builtinTypesLower()
-	setMimeTypes(b, b)
-	osInitMime()
+	m.setTypes(b, b)
+	osInitMime(m)
 }
 
 // TypeByExtension returns the MIME type associated with the file extension ext.
@@ -101,14 +107,15 @@ func initMime() {
 // On Windows, MIME types are extracted from the registry.
 //
 // Text types have the charset parameter set to "utf-8" by default.
-func TypeByExtension(ext []byte) []byte {
-	if !mimeInited {
-		mimeInited = true
-		initMime()
+func TypeByExtension(ext []byte) (rb []byte) {
+	m := mimeStore
+	if !m.inited {
+		m.inited = true
+		m.init()
 	}
 
 	// Case-sensitive lookup.
-	if v, ok := mimeTypes[string(ext)]; ok {
+	if v, ok := m.types[string(ext)]; ok {
 		return v
 	}
 
@@ -122,7 +129,7 @@ func TypeByExtension(ext []byte) []byte {
 		c := ext[i]
 		if c >= utf8RuneSelf {
 			// Slow path.
-			return mimeTypesLower[string(bytes.ToLower(ext))]
+			return m.typesLower[string(bytes.ToLower(ext))]
 		}
 		if 'A' <= c && c <= 'Z' {
 			lower = mxutil.Ensure(lower, 1)
@@ -132,24 +139,25 @@ func TypeByExtension(ext []byte) []byte {
 			lower = push(lower, c)
 		}
 	}
-	return mimeTypesLower[string(lower)]
+	return m.typesLower[string(lower)]
 }
 
 // ExtensionsByType returns the extensions known to be associated with the MIME
 // type typ. The returned extensions will each begin with a leading dot, as in
 // ".html". When typ has no associated extensions, ExtensionsByType returns an
 // nil slice.
-func ExtensionsByType(typ []byte) ([][]byte, error) {
+func ExtensionsByType(typ []byte) (rbyte [][]byte, rerr error) {
 	justType, _, err := ParseMediaType(typ)
 	if err != nil {
 		return nil, err
 	}
 
-	if !mimeInited {
-		mimeInited = true
-		initMime()
+	m := mimeStore
+	if !m.inited {
+		m.inited = true
+		m.init()
 	}
-	s, ok := extensions[justType]
+	s, ok := m.extensions[justType]
 	if !ok {
 		return nil, nil
 	}
@@ -165,18 +173,19 @@ func ExtensionsByType(typ []byte) ([][]byte, error) {
 // AddExtensionType sets the MIME type associated with
 // the extension ext to typ. The extension should begin with
 // a leading dot, as in ".html".
-func AddExtensionType(ext, typ []byte) error {
+func AddExtensionType(ext, typ []byte) (rerr error) {
 	if !bytes.HasPrefix(ext, ".") {
 		return fmt.Errorf("mime: extension %q missing leading dot", ext)
 	}
-	if !mimeInited {
-		mimeInited = true
-		initMime()
+	m := mimeStore
+	if !m.inited {
+		m.inited = true
+		m.init()
 	}
-	return setExtensionType(ext, typ)
+	return m.setExtensionType(ext, typ)
 }
 
-func setExtensionType(extension, mimeType []byte) error {
+func (m *mimeTypesStore) setExtensionType(extension, mimeType []byte) (rerr error) {
 	justType, param, err := ParseMediaType(mimeType)
 	if err != nil {
 		return err
@@ -187,15 +196,15 @@ func setExtensionType(extension, mimeType []byte) error {
 	}
 	extLower := bytes.ToLower(extension)
 
-	mimeTypes[string(extension)] = mimeType
-	mimeTypesLower[string(extLower)] = mimeType
+	m.types[string(extension)] = mimeType
+	m.typesLower[string(extLower)] = mimeType
 
-	exts := extensions[justType]
+	exts := m.extensions[justType]
 	for _, v := range exts {
 		if v == extLower {
 			return nil
 		}
 	}
-	extensions[justType] = push(exts, extLower)
+	m.extensions[justType] = push(exts, extLower)
 	return nil
 }

@@ -18,7 +18,7 @@ import (
 // its own.
 
 // ExpandLabel implements HKDF-Expand-Label from RFC 8446, Section 7.1.
-func ExpandLabel[H hash.Hash](hfn func() H, secret []byte, label []byte, context []byte, length int32) []byte {
+func ExpandLabel[H hash.Hash](hfn func() H, secret []byte, label []byte, context []byte, length int32) (ret0 []byte) {
 	if len("tls13 ")+len(label) > 255 || len(context) > 255 {
 		// It should be impossible for this to panic: labels are fixed strings,
 		// and context is either a fixed-length computed hash, or parsed from a
@@ -45,14 +45,14 @@ func ExpandLabel[H hash.Hash](hfn func() H, secret []byte, label []byte, context
 	return hkdf.Expand(hfn, secret, hkdfLabel, length)
 }
 
-func extract[H hash.Hash](hfn func() H, newSecret, currentSecret []byte) []byte {
+func extract[H hash.Hash](hfn func() H, newSecret, currentSecret []byte) (ret0 []byte) {
 	if newSecret == nil {
 		newSecret = []byte{:hfn().Size()}
 	}
 	return hkdf.Extract(hfn, newSecret, currentSecret)
 }
 
-func deriveSecret[H hash.Hash](hfn func() H, secret []byte, label []byte, transcript hash.Hash) []byte {
+func deriveSecret[H hash.Hash](hfn func() H, secret []byte, label []byte, transcript hash.Hash) (ret0 []byte) {
 	if transcript == nil {
 		transcript = hfn()
 	}
@@ -76,20 +76,23 @@ type EarlySecret struct {
 	hash   func() hash.Hash
 }
 
-func NewEarlySecret[H hash.Hash](h func() H, psk []byte) *EarlySecret {
+// NewEarlySecret takes the constructor as func() hash.Hash directly. A generic
+// func() H cannot be assigned to func() hash.Hash, and wrapping it in a
+// closure would capture h, which Moxie forbids.
+func NewEarlySecret(h func() hash.Hash, psk []byte) (ret0 *EarlySecret) {
 	return &EarlySecret{
 		secret: extract(h, psk, nil),
-		hash:   func() hash.Hash { return h() },
+		hash:   h,
 	}
 }
 
-func (s *EarlySecret) ResumptionBinderKey() []byte {
+func (s *EarlySecret) ResumptionBinderKey() (ret0 []byte) {
 	return deriveSecret(s.hash, s.secret, resumptionBinderLabel, nil)
 }
 
 // ClientEarlyTrafficSecret derives the client_early_traffic_secret from the
 // early secret and the transcript up to the ClientHello.
-func (s *EarlySecret) ClientEarlyTrafficSecret(transcript hash.Hash) []byte {
+func (s *EarlySecret) ClientEarlyTrafficSecret(transcript hash.Hash) (ret0 []byte) {
 	return deriveSecret(s.hash, s.secret, clientEarlyTrafficLabel, transcript)
 }
 
@@ -98,7 +101,7 @@ type HandshakeSecret struct {
 	hash   func() hash.Hash
 }
 
-func (s *EarlySecret) HandshakeSecret(sharedSecret []byte) *HandshakeSecret {
+func (s *EarlySecret) HandshakeSecret(sharedSecret []byte) (ret0 *HandshakeSecret) {
 	derived := deriveSecret(s.hash, s.secret, []byte("derived"), nil)
 	return &HandshakeSecret{
 		secret: extract(s.hash, sharedSecret, derived),
@@ -108,13 +111,13 @@ func (s *EarlySecret) HandshakeSecret(sharedSecret []byte) *HandshakeSecret {
 
 // ClientHandshakeTrafficSecret derives the client_handshake_traffic_secret from
 // the handshake secret and the transcript up to the ServerHello.
-func (s *HandshakeSecret) ClientHandshakeTrafficSecret(transcript hash.Hash) []byte {
+func (s *HandshakeSecret) ClientHandshakeTrafficSecret(transcript hash.Hash) (ret0 []byte) {
 	return deriveSecret(s.hash, s.secret, clientHandshakeTrafficLabel, transcript)
 }
 
 // ServerHandshakeTrafficSecret derives the server_handshake_traffic_secret from
 // the handshake secret and the transcript up to the ServerHello.
-func (s *HandshakeSecret) ServerHandshakeTrafficSecret(transcript hash.Hash) []byte {
+func (s *HandshakeSecret) ServerHandshakeTrafficSecret(transcript hash.Hash) (ret0 []byte) {
 	return deriveSecret(s.hash, s.secret, serverHandshakeTrafficLabel, transcript)
 }
 
@@ -123,7 +126,7 @@ type MasterSecret struct {
 	hash   func() hash.Hash
 }
 
-func (s *HandshakeSecret) MasterSecret() *MasterSecret {
+func (s *HandshakeSecret) MasterSecret() (ret0 *MasterSecret) {
 	derived := deriveSecret(s.hash, s.secret, []byte("derived"), nil)
 	return &MasterSecret{
 		secret: extract(s.hash, nil, derived),
@@ -133,19 +136,19 @@ func (s *HandshakeSecret) MasterSecret() *MasterSecret {
 
 // ClientApplicationTrafficSecret derives the client_application_traffic_secret_0
 // from the master secret and the transcript up to the server Finished.
-func (s *MasterSecret) ClientApplicationTrafficSecret(transcript hash.Hash) []byte {
+func (s *MasterSecret) ClientApplicationTrafficSecret(transcript hash.Hash) (ret0 []byte) {
 	return deriveSecret(s.hash, s.secret, clientApplicationTrafficLabel, transcript)
 }
 
 // ServerApplicationTrafficSecret derives the server_application_traffic_secret_0
 // from the master secret and the transcript up to the server Finished.
-func (s *MasterSecret) ServerApplicationTrafficSecret(transcript hash.Hash) []byte {
+func (s *MasterSecret) ServerApplicationTrafficSecret(transcript hash.Hash) (ret0 []byte) {
 	return deriveSecret(s.hash, s.secret, serverApplicationTrafficLabel, transcript)
 }
 
 // ResumptionMasterSecret derives the resumption_master_secret from the master secret
 // and the transcript up to the client Finished.
-func (s *MasterSecret) ResumptionMasterSecret(transcript hash.Hash) []byte {
+func (s *MasterSecret) ResumptionMasterSecret(transcript hash.Hash) (ret0 []byte) {
 	return deriveSecret(s.hash, s.secret, resumptionLabel, transcript)
 }
 
@@ -156,7 +159,7 @@ type ExporterMasterSecret struct {
 
 // ExporterMasterSecret derives the exporter_master_secret from the master secret
 // and the transcript up to the server Finished.
-func (s *MasterSecret) ExporterMasterSecret(transcript hash.Hash) *ExporterMasterSecret {
+func (s *MasterSecret) ExporterMasterSecret(transcript hash.Hash) (ret0 *ExporterMasterSecret) {
 	return &ExporterMasterSecret{
 		secret: deriveSecret(s.hash, s.secret, exporterLabel, transcript),
 		hash:   s.hash,
@@ -165,20 +168,20 @@ func (s *MasterSecret) ExporterMasterSecret(transcript hash.Hash) *ExporterMaste
 
 // EarlyExporterMasterSecret derives the exporter_master_secret from the early secret
 // and the transcript up to the ClientHello.
-func (s *EarlySecret) EarlyExporterMasterSecret(transcript hash.Hash) *ExporterMasterSecret {
+func (s *EarlySecret) EarlyExporterMasterSecret(transcript hash.Hash) (ret0 *ExporterMasterSecret) {
 	return &ExporterMasterSecret{
 		secret: deriveSecret(s.hash, s.secret, earlyExporterLabel, transcript),
 		hash:   s.hash,
 	}
 }
 
-func (s *ExporterMasterSecret) Exporter(label []byte, context []byte, length int32) []byte {
+func (s *ExporterMasterSecret) Exporter(label []byte, context []byte, length int32) (ret0 []byte) {
 	secret := deriveSecret(s.hash, s.secret, label, nil)
 	h := s.hash()
 	h.Write(context)
 	return ExpandLabel(s.hash, secret, []byte("exporter"), h.Sum(nil), length)
 }
 
-func TestingOnlyExporterSecret(s *ExporterMasterSecret) []byte {
+func TestingOnlyExporterSecret(s *ExporterMasterSecret) (ret0 []byte) {
 	return s.secret
 }

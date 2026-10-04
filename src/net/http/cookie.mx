@@ -58,24 +58,17 @@ const (
 	SameSiteNoneMode
 )
 
-const (
-	errBlankCookie            = errors.Const("http: blank cookie")
-	errEqualNotFoundInCookie  = errors.Const("http: '=' not found in cookie")
-	errInvalidCookieName      = errors.Const("http: invalid cookie name")
-	errInvalidCookieValue     = errors.Const("http: invalid cookie value")
-	errCookieNumLimitExceeded = errors.Const("http: number of cookies exceeded limit")
-)
 
 const defaultCookieMaxNum = 3000
 
-func cookieNumWithinMax(cookieNum int32) bool {
+func cookieNumWithinMax(cookieNum int32) (rok bool) {
 	return cookieNum <= defaultCookieMaxNum
 }
 
 // ParseCookie parses a Cookie header value and returns all the cookies
 // which were set in it. Since the same cookie name can appear multiple times
 // the returned Values can contain more than one value for a given key.
-func ParseCookie(line string) ([]*Cookie, error) {
+func ParseCookie(line string) (rcookie []*Cookie, rerr error) {
 	if !cookieNumWithinMax(bytes.Count(line, ";") + 1) {
 		return nil, errCookieNumLimitExceeded
 	}
@@ -105,7 +98,7 @@ func ParseCookie(line string) ([]*Cookie, error) {
 
 // ParseSetCookie parses a Set-Cookie header value and returns a cookie.
 // It returns an error on syntax error.
-func ParseSetCookie(line string) (*Cookie, error) {
+func ParseSetCookie(line string) (rcookie *Cookie, rerr error) {
 	parts := bytes.Split(textproto.TrimString(line), ";")
 	if len(parts) == 1 && parts[0] == "" {
 		return nil, errBlankCookie
@@ -215,7 +208,7 @@ func ParseSetCookie(line string) (*Cookie, error) {
 // If the amount of cookies exceeds CookieNumLimit, and httpcookielimitnum
 // GODEBUG option is not explicitly turned off, this function will silently
 // fail and return an empty slice.
-func readSetCookies(h Header) []*Cookie {
+func readSetCookies(h Header) (rcookie []*Cookie) {
 	cookieCount := len(h["Set-Cookie"])
 	if cookieCount == 0 {
 		return []*Cookie{}
@@ -249,7 +242,7 @@ func SetCookie(w ResponseWriter, cookie *Cookie) {
 // header (if only Name and Value are set) or a Set-Cookie response
 // header (if other fields are set).
 // If c is nil or c.Name is invalid, the empty string is returned.
-func (c *Cookie) String() string {
+func (c *Cookie) String() (rs string) {
 	if c == nil || !isToken(c.Name) {
 		return ""
 	}
@@ -316,7 +309,7 @@ func (c *Cookie) String() string {
 }
 
 // Valid reports whether the cookie is valid.
-func (c *Cookie) Valid() error {
+func (c *Cookie) Valid() (rerr error) {
 	if c == nil {
 		return errors.New("http: nil Cookie")
 	}
@@ -359,7 +352,7 @@ func (c *Cookie) Valid() error {
 // If the amount of cookies exceeds CookieNumLimit, and httpcookielimitnum
 // GODEBUG option is not explicitly turned off, this function will silently
 // fail and return an empty slice.
-func readCookies(h Header, filter string) []*Cookie {
+func readCookies(h Header, filter string) (rcookie []*Cookie) {
 	lines := h["Cookie"]
 	if len(lines) == 0 {
 		return []*Cookie{}
@@ -407,7 +400,7 @@ func readCookies(h Header, filter string) []*Cookie {
 }
 
 // validCookieDomain reports whether v is a valid cookie domain-value.
-func validCookieDomain(v string) bool {
+func validCookieDomain(v string) (rok bool) {
 	if isCookieDomainName(v) {
 		return true
 	}
@@ -418,7 +411,7 @@ func validCookieDomain(v string) bool {
 }
 
 // validCookieExpires reports whether v is a valid cookie expires-value.
-func validCookieExpires(t time.Time) bool {
+func validCookieExpires(t time.Time) (rok bool) {
 	// IETF RFC 6265 Section 5.1.1.5, the year must not be less than 1601
 	return t.Year() >= 1601
 }
@@ -426,7 +419,7 @@ func validCookieExpires(t time.Time) bool {
 // isCookieDomainName reports whether s is a valid domain name or a valid
 // domain name with a leading dot '.'.  It is almost a direct copy of
 // package net's isDomainName.
-func isCookieDomainName(s string) bool {
+func isCookieDomainName(s string) (rok bool) {
 	if len(s) == 0 {
 		return false
 	}
@@ -478,7 +471,7 @@ func isCookieDomainName(s string) bool {
 	return ok
 }
 
-func sanitizeCookieName(n string) string {
+func sanitizeCookieName(n string) (rs string) {
 	return bytes.NewReplacer("\n", "-", "\r", "-").Replace(n)
 }
 
@@ -496,7 +489,7 @@ func sanitizeCookieName(n string) string {
 // We loosen this as spaces and commas are common in cookie values
 // thus we produce a quoted cookie-value if v contains commas or spaces.
 // See https://golang.org/issue/7243 for the discussion.
-func sanitizeCookieValue(v string, quoted bool) string {
+func sanitizeCookieValue(v string, quoted bool) (rs string) {
 	v = sanitizeOrWarn("Cookie.Value", validCookieValueByte, v)
 	if len(v) == 0 {
 		return v
@@ -507,21 +500,21 @@ func sanitizeCookieValue(v string, quoted bool) string {
 	return v
 }
 
-func validCookieValueByte(b byte) bool {
+func validCookieValueByte(b byte) (rok bool) {
 	return 0x20 <= b && b < 0x7f && b != '"' && b != ';' && b != '\\'
 }
 
 // path-av           = "Path=" path-value
 // path-value        = <any CHAR except CTLs or ";">
-func sanitizeCookiePath(v string) string {
+func sanitizeCookiePath(v string) (rs string) {
 	return sanitizeOrWarn("Cookie.Path", validCookiePathByte, v)
 }
 
-func validCookiePathByte(b byte) bool {
+func validCookiePathByte(b byte) (rok bool) {
 	return 0x20 <= b && b < 0x7f && b != ';'
 }
 
-func sanitizeOrWarn(fieldName string, valid func(byte) bool, v string) string {
+func sanitizeOrWarn(fieldName string, valid func(byte) bool, v string) (rs string) {
 	ok := true
 	for i := 0; i < len(v); i++ {
 		if valid(v[i]) {

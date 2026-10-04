@@ -14,7 +14,7 @@ import (
 // cached pointer dangles once that frame returns. Returning it lets the arena
 // relocation copy it into the caller's arena, which is where the caller uses
 // it.
-func three() *Float {
+func three() (rfloat *Float) {
 	return NewFloat(3.0)
 }
 
@@ -27,7 +27,7 @@ func three() *Float {
 //
 // The function panics if z < 0. The value of z is undefined in that
 // case.
-func (z *Float) Sqrt(x *Float) *Float {
+func (z *Float) Sqrt(x *Float) (rfloat *Float) {
 	if debugFloat {
 		x.validate()
 	}
@@ -38,7 +38,7 @@ func (z *Float) Sqrt(x *Float) *Float {
 
 	if x.Sign() == -1 {
 		// following IEEE754-2008 (section 7.2)
-		panic(ErrNaN{"square root of negative operand"}.Error())
+		panic((&ErrNaN{"square root of negative operand"}).Error())
 	}
 
 	// handle ±0 and +∞
@@ -78,6 +78,18 @@ func (z *Float) Sqrt(x *Float) *Float {
 	return z.SetMantExp(z, b/2)
 }
 
+// sqrtInverseStep performs one Newton step of sqrtInverse: t = ½t(3 - xt²).
+func sqrtInverseStep(x, u, v, threeF, t *Float) (r *Float) {
+	u.prec = t.prec
+	v.prec = t.prec
+	u.Mul(t, t)       // u = t²
+	u.Mul(x, u)       //   = xt²
+	v.Sub(threeF, u)  // v = 3 - xt²
+	u.Mul(t, v)       // u = t(3 - xt²)
+	u.exp--           //   = ½t(3 - xt²)
+	return t.Set(u)
+}
+
 // Compute √x (to z.prec precision) by solving
 //
 //	1/t² - x = 0
@@ -93,23 +105,13 @@ func (z *Float) sqrtInverse(x *Float) {
 	u := newFloat(z.prec)
 	v := newFloat(z.prec)
 	threeF := three()
-	ng := func(t *Float) *Float {
-		u.prec = t.prec
-		v.prec = t.prec
-		u.Mul(t, t)       // u = t²
-		u.Mul(x, u)       //   = xt²
-		v.Sub(threeF, u)  // v = 3 - xt²
-		u.Mul(t, v)       // u = t(3 - xt²)
-		u.exp--           //   = ½t(3 - xt²)
-		return t.Set(u)
-	}
 
 	xf, _ := x.Float64()
 	sqi := newFloat(z.prec)
 	sqi.SetFloat64(1 / math.Sqrt(xf))
 	for prec := z.prec + 32; sqi.prec < prec; {
 		sqi.prec *= 2
-		sqi = ng(sqi)
+		sqi = sqrtInverseStep(x, u, v, threeF, sqi)
 	}
 	// sqi = 1/√x
 
@@ -119,9 +121,9 @@ func (z *Float) sqrtInverse(x *Float) {
 
 // newFloat returns a new *Float with space for twice the given
 // precision.
-func newFloat(prec2 uint32) *Float {
+func newFloat(prec2 uint32) (rfloat *Float) {
 	z := &Float{}
 	// nat.make ensures the slice length is > 0
-	z.mant = z.mant.alloc(int32(prec2/_W) * 2)
+	z.mant = natAlloc(z.mant, int32(prec2/_W) * 2)
 	return z
 }

@@ -75,7 +75,7 @@ type GoStringer interface {
 // flags, the width, and the precision. Missing flags, width, and precision are
 // omitted. This function allows a [Formatter] to reconstruct the original
 // directive triggering the call to Format.
-func FormatString(state State, verb rune) []byte {
+func FormatString(state State, verb rune) (ret []byte) {
 	var tmp [16]byte // Use a local buffer.
 	b := push(tmp[:0], '%')
 	for _, c := range " +-#0" { // All known flags
@@ -97,12 +97,11 @@ func FormatString(state State, verb rune) []byte {
 }
 
 // Use simple []byte instead of bytes.Buffer to avoid large dependency.
-type buffer []byte
 
 // growBuf returns buf with room for n more bytes, allocating a fresh
 // backing array when needed. Growth is always explicit - old backing
 // arrays are left to the arena.
-func growBuf(buf buffer, n int32) (r0 buffer) {
+func growBuf(buf []byte, n int32) (out []byte) {
 	if len(buf)+n <= cap(buf) {
 		return buf
 	}
@@ -110,32 +109,32 @@ func growBuf(buf buffer, n int32) (r0 buffer) {
 	if need < 64 {
 		need = 64
 	}
-	nb := buffer{:0:need}
+	nb := []byte{:0:need}
 	copy(nb[:len(buf)], buf)
 	return nb[:len(buf)]
 }
 
-func (b *buffer) write(p []byte) {
-	*b = growBuf(*b, len(p))
-	push(*b, p...)
+func bufWrite(buf []byte, p []byte) (out []byte) {
+	out = growBuf(buf, len(p))
+	return push(out, p...)
 }
 
-func (b *buffer) writeString(s []byte) {
-	*b = growBuf(*b, len(s))
-	push(*b, s...)
+func bufWriteString(buf []byte, s []byte) (out []byte) {
+	out = growBuf(buf, len(s))
+	return push(out, s...)
 }
 
-func (b *buffer) writeByte(c byte) {
-	*b = growBuf(*b, 1)
-	push(*b, c)
+func bufWriteByte(buf []byte, c byte) (out []byte) {
+	out = growBuf(buf, 1)
+	return push(out, c)
 }
 
-func (b *buffer) writeRune(r rune) {
-	*b = utf8.AppendRune(*b, r)
+func bufWriteRune(buf []byte, r rune) (out []byte) {
+	return utf8.AppendRune(buf, r)
 }
 
 type pp struct {
-	buf buffer
+	buf []byte
 
 	// arg holds the current item.
 	arg Stringer
@@ -157,7 +156,7 @@ type pp struct {
 	wrappedErrs []int32
 }
 
-func newPrinter() *pp {
+func newPrinter() (ret *pp) {
 	p := &pp{}
 	p.fmt.init(&p.buf)
 	return p
@@ -170,7 +169,7 @@ func (p *pp) Width() (wid int32, ok bool) { return p.fmt.wid, p.fmt.widPresent }
 
 func (p *pp) Precision() (prec int32, ok bool) { return p.fmt.prec, p.fmt.precPresent }
 
-func (p *pp) Flag(b int32) bool {
+func (p *pp) Flag(b int32) (okay bool) {
 	switch b {
 	case '-':
 		return p.fmt.minus
@@ -189,14 +188,14 @@ func (p *pp) Flag(b int32) bool {
 // Write implements [io.Writer] so we can call [Fprintf] on a pp (through [State]), for
 // recursive use in custom verbs.
 func (p *pp) Write(b []byte) (ret int32, err error) {
-	p.buf.write(b)
+	p.buf = bufWrite(p.buf, b)
 	return len(b), nil
 }
 
 // WriteString implements [io.StringWriter] so that we can call [io.WriteString]
 // on a pp (through state), for efficiency.
 func (p *pp) WriteString(s []byte) (ret int32, err error) {
-	p.buf.writeString(s)
+	p.buf = bufWriteString(p.buf, s)
 	return len(s), nil
 }
 
@@ -219,7 +218,7 @@ func Printf(format []byte, a ...Stringer) (n int32, err error) {
 }
 
 // Sprintf formats according to a format specifier and returns the resulting string.
-func Sprintf(format []byte, a ...Stringer) []byte {
+func Sprintf(format []byte, a ...Stringer) (ret []byte) {
 	p := newPrinter()
 	p.doPrintf(format, a)
 	s := copyBuf(p.buf)
@@ -229,7 +228,7 @@ func Sprintf(format []byte, a ...Stringer) []byte {
 
 // Appendf formats according to a format specifier, appends the result to the byte
 // slice, and returns the updated slice.
-func Appendf(b []byte, format []byte, a ...Stringer) []byte {
+func Appendf(b []byte, format []byte, a ...Stringer) (ret []byte) {
 	p := newPrinter()
 	p.doPrintf(format, a)
 	b = mxutil.Ensure(b, len(p.buf))
@@ -260,7 +259,7 @@ func Print(a ...Stringer) (n int32, err error) {
 
 // Sprint formats using the default formats for its operands and returns the resulting string.
 // Spaces are added between operands when neither is a string.
-func Sprint(a ...Stringer) []byte {
+func Sprint(a ...Stringer) (ret []byte) {
 	p := newPrinter()
 	p.doPrint(a)
 	s := copyBuf(p.buf)
@@ -270,7 +269,7 @@ func Sprint(a ...Stringer) []byte {
 
 // Append formats using the default formats for its operands, appends the result to
 // the byte slice, and returns the updated slice.
-func Append(b []byte, a ...Stringer) []byte {
+func Append(b []byte, a ...Stringer) (ret []byte) {
 	p := newPrinter()
 	p.doPrint(a)
 	b = mxutil.Ensure(b, len(p.buf))
@@ -303,7 +302,7 @@ func Println(a ...Stringer) (n int32, err error) {
 
 // Sprintln formats using the default formats for its operands and returns the resulting string.
 // Spaces are always added between operands and a newline is appended.
-func Sprintln(a ...Stringer) []byte {
+func Sprintln(a ...Stringer) (ret []byte) {
 	p := newPrinter()
 	p.doPrintln(a)
 	s := copyBuf(p.buf)
@@ -314,7 +313,7 @@ func Sprintln(a ...Stringer) []byte {
 // copyBuf returns an owned copy of b. With string=[]byte, returning a
 // slice that shares backing storage with a pooled buffer causes silent
 // corruption when the pool recycles the buffer.
-func copyBuf(b []byte) []byte {
+func copyBuf(b []byte) (ret []byte) {
 	if len(b) == 0 {
 		return nil
 	}
@@ -326,7 +325,7 @@ func copyBuf(b []byte) []byte {
 // Appendln formats using the default formats for its operands, appends the result
 // to the byte slice, and returns the updated slice. Spaces are always added
 // between operands and a newline is appended.
-func Appendln(b []byte, a ...Stringer) []byte {
+func Appendln(b []byte, a ...Stringer) (ret []byte) {
 	p := newPrinter()
 	p.doPrintln(a)
 	b = mxutil.Ensure(b, len(p.buf))
@@ -337,7 +336,7 @@ func Appendln(b []byte, a ...Stringer) []byte {
 
 // tooLarge reports whether the magnitude of the integer is
 // too large to be used as a formatting width or precision.
-func tooLarge(x int32) bool {
+func tooLarge(x int32) (okay bool) {
 	const limit int32 = 1e6
 	return x > limit || x < -limit
 }
@@ -358,23 +357,23 @@ func parsenum(s []byte, start, end int32) (num int32, isnum bool, newi int32) {
 }
 
 func (p *pp) unknownType(v Stringer) {
-	p.buf.writeByte('?')
+	p.buf = bufWriteByte(p.buf, '?')
 }
 
 func (p *pp) badVerb(verb rune) {
 	p.erroring = true
-	p.buf.writeString(percentBangString)
-	p.buf.writeRune(verb)
-	p.buf.writeByte('(')
+	p.buf = bufWriteString(p.buf, percentBangString)
+	p.buf = bufWriteRune(p.buf, verb)
+	p.buf = bufWriteByte(p.buf, '(')
 	switch {
 	case p.arg != nil:
-		p.buf.writeString("?")
-		p.buf.writeByte('=')
+		p.buf = bufWriteString(p.buf, "?")
+		p.buf = bufWriteByte(p.buf, '=')
 		p.printArg(p.arg, 'v')
 	default:
-		p.buf.writeString(nilAngleString)
+		p.buf = bufWriteString(p.buf, nilAngleString)
 	}
-	p.buf.writeByte(')')
+	p.buf = bufWriteByte(p.buf, ')')
 	p.erroring = false
 }
 
@@ -482,7 +481,7 @@ func (p *pp) catchPanic(arg Stringer, verb rune, method []byte) {
 		// Stringer that fails to guard against nil or a nil pointer for a
 		// value receiver, and in either case, "<nil>" is a nice result.
 		if p.arg == nil {
-			p.buf.writeString(nilAngleString)
+			p.buf = bufWriteString(p.buf, nilAngleString)
 			return
 		}
 		// Otherwise print a concise panic message. Most of the time the panic
@@ -496,15 +495,15 @@ func (p *pp) catchPanic(arg Stringer, verb rune, method []byte) {
 		// For this output we want default behavior.
 		p.fmt.clearflags()
 
-		p.buf.writeString(percentBangString)
-		p.buf.writeRune(verb)
-		p.buf.writeString(panicString)
-		p.buf.writeString(method)
-		p.buf.writeString(" method: ")
+		p.buf = bufWriteString(p.buf, percentBangString)
+		p.buf = bufWriteRune(p.buf, verb)
+		p.buf = bufWriteString(p.buf, panicString)
+		p.buf = bufWriteString(p.buf, method)
+		p.buf = bufWriteString(p.buf, " method: ")
 		p.panicking = true
 		p.printArg(err, 'v')
 		p.panicking = false
-		p.buf.writeByte(')')
+		p.buf = bufWriteByte(p.buf, ')')
 
 		p.fmt.fmtFlags = oldFlags
 	}
@@ -685,15 +684,15 @@ func (p *pp) argNumber(argNum int32, format []byte, i int32, numArgs int32) (new
 }
 
 func (p *pp) badArgNum(verb rune) {
-	p.buf.writeString(percentBangString)
-	p.buf.writeRune(verb)
-	p.buf.writeString(badIndexString)
+	p.buf = bufWriteString(p.buf, percentBangString)
+	p.buf = bufWriteRune(p.buf, verb)
+	p.buf = bufWriteString(p.buf, badIndexString)
 }
 
 func (p *pp) missingArg(verb rune) {
-	p.buf.writeString(percentBangString)
-	p.buf.writeRune(verb)
-	p.buf.writeString(missingString)
+	p.buf = bufWriteString(p.buf, percentBangString)
+	p.buf = bufWriteRune(p.buf, verb)
+	p.buf = bufWriteString(p.buf, missingString)
 }
 
 func (p *pp) doPrintf(format []byte, a []Stringer) {
@@ -713,7 +712,7 @@ formatLoop:
 			i++
 		}
 		if i > lasti {
-			p.buf.writeString(format[lasti:i])
+			p.buf = bufWriteString(p.buf, format[lasti:i])
 		}
 		if i >= end {
 			// done processing format string
@@ -778,7 +777,7 @@ formatLoop:
 			p.fmt.wid, p.fmt.widPresent, argNum = intFromArg(a, argNum)
 
 			if !p.fmt.widPresent {
-				p.buf.writeString(badWidthString)
+				p.buf = bufWriteString(p.buf, badWidthString)
 			}
 
 			// We have a negative width, so take its value and ensure
@@ -812,7 +811,7 @@ formatLoop:
 					p.fmt.precPresent = false
 				}
 				if !p.fmt.precPresent {
-					p.buf.writeString(badPrecString)
+					p.buf = bufWriteString(p.buf, badPrecString)
 				}
 				afterIndex = false
 			} else {
@@ -829,7 +828,7 @@ formatLoop:
 		}
 
 		if i >= end {
-			p.buf.writeString(noVerbString)
+			p.buf = bufWriteString(p.buf, noVerbString)
 			break
 		}
 
@@ -841,7 +840,7 @@ formatLoop:
 
 		switch {
 		case verb == '%': // Percent does not absorb operands and ignores f.wid and f.prec.
-			p.buf.writeByte('%')
+			p.buf = bufWriteByte(p.buf, '%')
 		case !p.goodArgNum:
 			p.badArgNum(verb)
 		case argNum >= len(a): // No argument left over to print for the current verb.
@@ -875,30 +874,31 @@ formatLoop:
 	// been used and arguably OK if they're not.
 	if !p.reordered && argNum < len(a) {
 		p.fmt.clearflags()
-		p.buf.writeString(extraString)
+		p.buf = bufWriteString(p.buf, extraString)
 		for i, arg := range a[argNum:] {
 			if i > 0 {
-				p.buf.writeString(commaSpaceString)
+				p.buf = bufWriteString(p.buf, commaSpaceString)
 			}
 			if arg == nil {
-				p.buf.writeString(nilAngleString)
+				p.buf = bufWriteString(p.buf, nilAngleString)
 			} else {
-				p.buf.writeString("?")
-				p.buf.writeByte('=')
+				p.buf = bufWriteString(p.buf, "?")
+				p.buf = bufWriteByte(p.buf, '=')
 				p.printArg(arg, 'v')
 			}
 		}
-		p.buf.writeByte(')')
+		p.buf = bufWriteByte(p.buf, ')')
 	}
 }
 
 func (p *pp) doPrint(a []Stringer) {
 	prevString := false
+	var isString bool
 	for argNum, arg := range a {
-		_, isString := arg.([]byte)
+		_, isString = arg.([]byte)
 		// Add a space between two non-string arguments.
 		if argNum > 0 && !isString && !prevString {
-			p.buf.writeByte(' ')
+			p.buf = bufWriteByte(p.buf, ' ')
 		}
 		p.printArg(arg, 'v')
 		prevString = isString
@@ -910,9 +910,9 @@ func (p *pp) doPrint(a []Stringer) {
 func (p *pp) doPrintln(a []Stringer) {
 	for argNum, arg := range a {
 		if argNum > 0 {
-			p.buf.writeByte(' ')
+			p.buf = bufWriteByte(p.buf, ' ')
 		}
 		p.printArg(arg, 'v')
 	}
-	p.buf.writeByte('\n')
+	p.buf = bufWriteByte(p.buf, '\n')
 }

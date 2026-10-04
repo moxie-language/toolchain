@@ -8,22 +8,17 @@ import (
 	"math/bits"
 )
 
-// block is the data for a single compressed block.
-// The data starts immediately after the 3 byte block header,
-// and is Block_Size bytes long.
-type block []byte
-
 // bitReader reads a bit stream going forward.
 type bitReader struct {
 	r    *Reader // for error reporting
-	data block   // the bits to read
+	data []byte  // the bits to read
 	off  uint32  // current offset into data
 	bits uint32  // bits ready to be returned
 	cnt  uint32  // number of valid bits in the bits field
 }
 
 // makeBitReader makes a bit reader starting at off.
-func (r *Reader) makeBitReader(data block, off int32) bitReader {
+func (r *Reader) makeBitReader(data []byte, off int32) (br bitReader) {
 	return bitReader{
 		r:    r,
 		data: data,
@@ -33,7 +28,7 @@ func (r *Reader) makeBitReader(data block, off int32) bitReader {
 
 // moreBits is called to read more bits.
 // This ensures that at least 16 bits are available.
-func (br *bitReader) moreBits() error {
+func (br *bitReader) moreBits() (rerr error) {
 	// Declared once, outside the loop: a declaration in a loop in a
 	// self-mutating method is rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
@@ -51,7 +46,7 @@ func (br *bitReader) moreBits() error {
 }
 
 // val is called to fetch a value of b bits.
-func (br *bitReader) val(b uint8) uint32 {
+func (br *bitReader) val(b uint8) (v uint32) {
 	r := br.bits & ((1 << b) - 1)
 	br.bits >>= b
 	br.cnt -= uint32(b)
@@ -67,14 +62,14 @@ func (br *bitReader) backup() {
 }
 
 // makeError returns an error at the current offset wrapping a string.
-func (br *bitReader) makeError(msg []byte) error {
+func (br *bitReader) makeError(msg []byte) (rerr error) {
 	return br.r.makeError(int32(br.off), msg)
 }
 
 // reverseBitReader reads a bit stream in reverse.
 type reverseBitReader struct {
 	r     *Reader // for error reporting
-	data  block   // the bits to read
+	data  []byte  // the bits to read
 	off   uint32  // current offset into data
 	start uint32  // start in data; we read backward to start
 	bits  uint32  // bits ready to be returned
@@ -84,7 +79,7 @@ type reverseBitReader struct {
 // makeReverseBitReader makes a reverseBitReader reading backward
 // from off to start. The bitstream starts with a 1 bit in the last
 // byte, at off.
-func (r *Reader) makeReverseBitReader(data block, off, start int32) (reverseBitReader, error) {
+func (r *Reader) makeReverseBitReader(data []byte, off, start int32) (br reverseBitReader, rerr error) {
 	streamStart := data[off]
 	if streamStart == 0 {
 		return reverseBitReader{}, r.makeError(off, "zero byte at reverse bit stream start")
@@ -101,7 +96,7 @@ func (r *Reader) makeReverseBitReader(data block, off, start int32) (reverseBitR
 }
 
 // val is called to fetch a value of b bits.
-func (rbr *reverseBitReader) val(b uint8) (uint32, error) {
+func (rbr *reverseBitReader) val(b uint8) (out uint32, rerr error) {
 	if !rbr.fetch(b) {
 		return 0, rbr.r.makeEOFError(int32(rbr.off))
 	}
@@ -114,7 +109,7 @@ func (rbr *reverseBitReader) val(b uint8) (uint32, error) {
 // fetch is called to ensure that at least b bits are available.
 // It reports false if this can't be done,
 // in which case only rbr.cnt bits are available.
-func (rbr *reverseBitReader) fetch(b uint8) bool {
+func (rbr *reverseBitReader) fetch(b uint8) (okay bool) {
 	// Declared once, outside the loop: a declaration in a loop in a
 	// self-mutating method is rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
@@ -133,6 +128,6 @@ func (rbr *reverseBitReader) fetch(b uint8) bool {
 }
 
 // makeError returns an error at the current offset wrapping a string.
-func (rbr *reverseBitReader) makeError(msg []byte) error {
+func (rbr *reverseBitReader) makeError(msg []byte) (rerr error) {
 	return rbr.r.makeError(int32(rbr.off), msg)
 }

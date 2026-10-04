@@ -32,7 +32,7 @@ import (
 
 // isPrintable reports whether the given b is in the ASN.1 PrintableString set.
 // This is a simplified version of encoding/asn1.isPrintable.
-func isPrintable(b byte) bool {
+func isPrintable(b byte) (rok bool) {
 	return 'a' <= b && b <= 'z' ||
 		'A' <= b && b <= 'Z' ||
 		'0' <= b && b <= '9' ||
@@ -57,7 +57,7 @@ func isPrintable(b byte) bool {
 // UTF8String, BMPString, IA5String, and NumericString. This is mostly copied
 // from the respective encoding/asn1.parse... methods, rather than just
 // increasing the API surface of that package.
-func parseASN1String(tag cryptobyte_asn1.Tag, value []byte) (string, error) {
+func parseASN1String(tag cryptobyte_asn1.Tag, value []byte) (rs string, rerr error) {
 	switch tag {
 	case cryptobyte_asn1.T61String:
 		// T.61 is a defunct ITU 8-bit character encoding which preceded Unicode.
@@ -141,14 +141,14 @@ func parseASN1String(tag cryptobyte_asn1.Tag, value []byte) (string, error) {
 
 // parseName parses a DER encoded Name as defined in RFC 5280. We may
 // want to export this function in the future for use in crypto/tls.
-func parseName(raw cryptobyte.String) (*pkix.RDNSequence, error) {
+func parseName(raw cryptobyte.String) (rrDNSequence *[][]pkix.AttributeTypeAndValue, rerr error) {
 	if !raw.ReadASN1(&raw, cryptobyte_asn1.SEQUENCE) {
 		return nil, errors.New("x509: invalid RDNSequence")
 	}
 
-	var rdnSeq pkix.RDNSequence
+	var rdnSeq [][]pkix.AttributeTypeAndValue
 	for !raw.Empty() {
-		var rdnSet pkix.RelativeDistinguishedNameSET
+		var rdnSet []pkix.AttributeTypeAndValue
 		var set cryptobyte.String
 		if !raw.ReadASN1(&set, cryptobyte_asn1.SET) {
 			return nil, errors.New("x509: invalid RDNSequence")
@@ -183,7 +183,7 @@ func parseName(raw cryptobyte.String) (*pkix.RDNSequence, error) {
 	return &rdnSeq, nil
 }
 
-func parseAI(der cryptobyte.String) (pkix.AlgorithmIdentifier, error) {
+func parseAI(der cryptobyte.String) (ralgorithmIdentifier pkix.AlgorithmIdentifier, rerr error) {
 	ai := pkix.AlgorithmIdentifier{}
 	if !der.ReadASN1ObjectIdentifier(&ai.Algorithm) {
 		return ai, errors.New("x509: malformed OID")
@@ -201,7 +201,7 @@ func parseAI(der cryptobyte.String) (pkix.AlgorithmIdentifier, error) {
 	return ai, nil
 }
 
-func parseTime(der *cryptobyte.String) (time.Time, error) {
+func parseTime(der *cryptobyte.String) (rtime time.Time, rerr error) {
 	var t time.Time
 	switch {
 	case der.PeekASN1Tag(cryptobyte_asn1.UTCTime):
@@ -218,7 +218,7 @@ func parseTime(der *cryptobyte.String) (time.Time, error) {
 	return t, nil
 }
 
-func parseValidity(der cryptobyte.String) (time.Time, time.Time, error) {
+func parseValidity(der cryptobyte.String) (rtime time.Time, rtime2 time.Time, rerr error) {
 	notBefore, err := parseTime(&der)
 	if err != nil {
 		return time.Time{}, time.Time{}, err
@@ -231,7 +231,7 @@ func parseValidity(der cryptobyte.String) (time.Time, time.Time, error) {
 	return notBefore, notAfter, nil
 }
 
-func parseExtension(der cryptobyte.String) (pkix.Extension, error) {
+func parseExtension(der cryptobyte.String) (rextension pkix.Extension, rerr error) {
 	var ext pkix.Extension
 	if !der.ReadASN1ObjectIdentifier(&ext.Id) {
 		return ext, errors.New("x509: malformed extension OID field")
@@ -249,7 +249,7 @@ func parseExtension(der cryptobyte.String) (pkix.Extension, error) {
 	return ext, nil
 }
 
-func parsePublicKey(keyData *publicKeyInfo) (crypto.PublicKey, error) {
+func parsePublicKey(keyData *publicKeyInfo) (rpublicKey crypto.PublicKey, rerr error) {
 	oid := keyData.Algorithm.Algorithm
 	params := keyData.Algorithm.Parameters
 	der := cryptobyte.String(keyData.PublicKey.RightAlign())
@@ -351,7 +351,7 @@ func parsePublicKey(keyData *publicKeyInfo) (crypto.PublicKey, error) {
 	}
 }
 
-func parseKeyUsageExtension(der cryptobyte.String) (KeyUsage, error) {
+func parseKeyUsageExtension(der cryptobyte.String) (rkeyUsage KeyUsage, rerr error) {
 	var usageBits asn1.BitString
 	if !der.ReadASN1BitString(&usageBits) {
 		return 0, errors.New("x509: invalid key usage")
@@ -366,7 +366,7 @@ func parseKeyUsageExtension(der cryptobyte.String) (KeyUsage, error) {
 	return KeyUsage(usage), nil
 }
 
-func parseBasicConstraintsExtension(der cryptobyte.String) (bool, int32, error) {
+func parseBasicConstraintsExtension(der cryptobyte.String) (rok bool, rn int32, rerr error) {
 	var isCA bool
 	if !der.ReadASN1(&der, cryptobyte_asn1.SEQUENCE) {
 		return false, 0, errors.New("x509: invalid basic constraints")
@@ -389,52 +389,66 @@ func parseBasicConstraintsExtension(der cryptobyte.String) (bool, int32, error) 
 	return isCA, maxPathLen, nil
 }
 
-func forEachSAN(der cryptobyte.String, callback func(tag int32, data []byte) error) error {
+// sanEntry is one parsed subject alternative name.
+type sanEntry struct {
+	tag  int32
+	data []byte
+}
+
+// forEachSAN returns every subject alternative name in der. It returns a slice
+// rather than taking a callback because a callback would have to capture the
+// caller's frame, which Moxie does not allow.
+func forEachSAN(der cryptobyte.String) (rentries []sanEntry, rerr error) {
 	if !der.ReadASN1(&der, cryptobyte_asn1.SEQUENCE) {
-		return errors.New("x509: invalid subject alternative names")
+		return nil, errors.New("x509: invalid subject alternative names")
 	}
 	for !der.Empty() {
 		var san cryptobyte.String
 		var tag cryptobyte_asn1.Tag
 		if !der.ReadAnyASN1(&san, &tag) {
-			return errors.New("x509: invalid subject alternative name")
+			return nil, errors.New("x509: invalid subject alternative name")
 		}
-		if err := callback(int32(tag^0x80), san); err != nil {
-			return err
-		}
+		rentries = mxutil.Ensure(rentries, 1)
+		rentries = push(rentries, sanEntry{tag: int32(tag ^ 0x80), data: san})
 	}
 
-	return nil
+	return rentries, nil
 }
 
 func parseSANExtension(der cryptobyte.String) (dnsNames, emailAddresses [][]byte, ipAddresses []net.IP, uris []*url.URL, err error) {
-	err = forEachSAN(der, func(tag int32, data []byte) error {
+	entries, err6 := forEachSAN(der)
+	if err6 != nil {
+		return nil, nil, nil, nil, err6
+	}
+	for _, entry := range entries {
+		tag := entry.tag
+		data := entry.data
 		switch tag {
 		case nameTypeEmail:
 			email := string(data)
 			if err4 := isIA5String(email); err4 != nil {
-				return errors.New("x509: SAN rfc822Name is malformed")
+				return nil, nil, nil, nil, errors.New("x509: SAN rfc822Name is malformed")
 			}
 			emailAddresses = mxutil.Ensure(emailAddresses, 1)
 			emailAddresses = push(emailAddresses, email)
 		case nameTypeDNS:
 			name := string(data)
 			if err3 := isIA5String(name); err3 != nil {
-				return errors.New("x509: SAN dNSName is malformed")
+				return nil, nil, nil, nil, errors.New("x509: SAN dNSName is malformed")
 			}
 			dnsNames = mxutil.Ensure(dnsNames, 1)
 			dnsNames = push(dnsNames, string(name))
 		case nameTypeURI:
 			uriStr := string(data)
 			if err2 := isIA5String(uriStr); err2 != nil {
-				return errors.New("x509: SAN uniformResourceIdentifier is malformed")
+				return nil, nil, nil, nil, errors.New("x509: SAN uniformResourceIdentifier is malformed")
 			}
 			uri, err1 := url.Parse(uriStr)
 			if err1 != nil {
-				return fmt.Errorf("x509: cannot parse URI %q: %s", uriStr, err1)
+				return nil, nil, nil, nil, fmt.Errorf("x509: cannot parse URI %q: %s", uriStr, err1)
 			}
 			if len(uri.Host) > 0 && !domainNameValid(uri.Host, false) {
-				return fmt.Errorf("x509: cannot parse URI %q: invalid domain", uriStr)
+				return nil, nil, nil, nil, fmt.Errorf("x509: cannot parse URI %q: invalid domain", uriStr)
 			}
 			uris = mxutil.Ensure(uris, 1)
 			uris = push(uris, uri)
@@ -444,17 +458,15 @@ func parseSANExtension(der cryptobyte.String) (dnsNames, emailAddresses [][]byte
 				ipAddresses = mxutil.Ensure(ipAddresses, 1)
 				ipAddresses = push(ipAddresses, data)
 			default:
-				return errors.New("x509: cannot parse IP address of length " | strconv.Itoa(len(data)))
+				return nil, nil, nil, nil, errors.New("x509: cannot parse IP address of length " | strconv.Itoa(len(data)))
 			}
 		}
+	}
 
-		return nil
-	})
-
-	return
+	return dnsNames, emailAddresses, ipAddresses, uris, nil
 }
 
-func parseAuthorityKeyIdentifier(e pkix.Extension) ([]byte, error) {
+func parseAuthorityKeyIdentifier(e pkix.Extension) (rb []byte, rerr error) {
 	// RFC 5280, Section 4.2.1.1
 	if e.Critical {
 		// Conforming CAs MUST mark this extension as non-critical
@@ -474,7 +486,7 @@ func parseAuthorityKeyIdentifier(e pkix.Extension) ([]byte, error) {
 	return nil, nil
 }
 
-func parseExtKeyUsageExtension(der cryptobyte.String) ([]ExtKeyUsage, []asn1.ObjectIdentifier, error) {
+func parseExtKeyUsageExtension(der cryptobyte.String) (rextKeyUsage []ExtKeyUsage, robjectIdentifier []asn1.ObjectIdentifier, rerr error) {
 	var extKeyUsages []ExtKeyUsage
 	var unknownUsages []asn1.ObjectIdentifier
 	if !der.ReadASN1(&der, cryptobyte_asn1.SEQUENCE) {
@@ -496,7 +508,7 @@ func parseExtKeyUsageExtension(der cryptobyte.String) ([]ExtKeyUsage, []asn1.Obj
 	return extKeyUsages, unknownUsages, nil
 }
 
-func parseCertificatePoliciesExtension(der cryptobyte.String) ([]OID, error) {
+func parseCertificatePoliciesExtension(der cryptobyte.String) (roID []OID, rerr error) {
 	var oids []OID
 	seenOIDs := map[string]bool{}
 	if !der.ReadASN1(&der, cryptobyte_asn1.SEQUENCE) {
@@ -523,7 +535,7 @@ func parseCertificatePoliciesExtension(der cryptobyte.String) ([]OID, error) {
 }
 
 // isValidIPMask reports whether mask consists of zero or more 1 bits, followed by zero bits.
-func isValidIPMask(mask []byte) bool {
+func isValidIPMask(mask []byte) (rok bool) {
 	seenZero := false
 
 	for _, b := range mask {
@@ -690,13 +702,13 @@ func parseNameConstraintsExtension(out *Certificate, e pkix.Extension) (unhandle
 	return unhandled, nil
 }
 
-func processExtensions(out *Certificate) error {
+func processExtensions(out *Certificate) (rerr error) {
 	var err error
 	for _, e := range out.Extensions {
 		unhandled := false
 
-		if len(e.Id) == 4 && e.Id[0] == 2 && e.Id[1] == 5 && e.Id[2] == 29 {
-			switch e.Id[3] {
+		if len(e.Id.OID) == 4 && e.Id.OID[0] == 2 && e.Id.OID[1] == 5 && e.Id.OID[2] == 29 {
+			switch e.Id.OID[3] {
 			case 15:
 				out.KeyUsage, err = parseKeyUsageExtension(e.Value)
 				if err != nil {
@@ -908,7 +920,7 @@ func processExtensions(out *Certificate) error {
 	return nil
 }
 
-func parseCertificate(der []byte) (*Certificate, error) {
+func parseCertificate(der []byte) (rcertificate *Certificate, rerr error) {
 	cert := &Certificate{}
 
 	input := cryptobyte.String(der)
@@ -1096,7 +1108,7 @@ func parseCertificate(der []byte) (*Certificate, error) {
 // Before Go 1.23, ParseCertificate accepted certificates with negative serial
 // numbers. This behavior can be restored by including "x509negativeserial=1" in
 // the GODEBUG environment variable.
-func ParseCertificate(der []byte) (*Certificate, error) {
+func ParseCertificate(der []byte) (rcertificate *Certificate, rerr error) {
 	cert, err := parseCertificate(der)
 	if err != nil {
 		return nil, err
@@ -1109,7 +1121,7 @@ func ParseCertificate(der []byte) (*Certificate, error) {
 
 // ParseCertificates parses one or more certificates from the given ASN.1 DER
 // data. The certificates must be concatenated with no intermediate padding.
-func ParseCertificates(der []byte) ([]*Certificate, error) {
+func ParseCertificates(der []byte) (rcertificate []*Certificate, rerr error) {
 	var certs []*Certificate
 	for len(der) > 0 {
 		cert, err := parseCertificate(der)
@@ -1129,7 +1141,7 @@ const x509v2Version = 1
 
 // ParseRevocationList parses a X509 v2 [Certificate] Revocation List from the given
 // ASN.1 DER data.
-func ParseRevocationList(der []byte) (*RevocationList, error) {
+func ParseRevocationList(der []byte) (rrevocationList *RevocationList, rerr error) {
 	rl := &RevocationList{}
 
 	input := cryptobyte.String(der)
@@ -1317,7 +1329,7 @@ func ParseRevocationList(der []byte) (*RevocationList, error) {
 
 // domainNameValid is an alloc-less version of the checks that
 // domainToReverseLabels does.
-func domainNameValid(s string, constraint bool) bool {
+func domainNameValid(s string, constraint bool) (rok bool) {
 	// TODO(#75835): This function omits a number of checks which we
 	// really should be doing to enforce that domain names are valid names per
 	// RFC 1034. We previously enabled these checks, but this broke a

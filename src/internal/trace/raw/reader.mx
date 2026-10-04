@@ -24,22 +24,22 @@ type Reader struct {
 }
 
 // NewReader creates a new reader for the trace wire format.
-func NewReader(r io.Reader) (*Reader, error) {
+func NewReader(r io.Reader) (rr *Reader, rerr error) {
 	br := bufio.NewReader(r)
 	v, err := version.ReadHeader(br)
 	if err != nil {
 		return nil, err
 	}
-	return &Reader{r: br, v: v, specs: v.Specs()}, nil
+	return &Reader{r: br, v: v, specs: (&v).Specs()}, nil
 }
 
 // Version returns the version of the trace that we're reading.
-func (r *Reader) Version() version.Version {
+func (r *Reader) Version() (v version.Version) {
 	return r.v
 }
 
 // ReadEvent reads and returns the next trace event in the byte stream.
-func (r *Reader) ReadEvent() (Event, error) {
+func (r *Reader) ReadEvent() (ev Event, rerr error) {
 	evb, err := r.r.ReadByte()
 	if err == io.EOF {
 		return Event{}, io.EOF
@@ -50,8 +50,8 @@ func (r *Reader) ReadEvent() (Event, error) {
 	if int32(evb) >= len(r.specs) || evb == 0 {
 		return Event{}, fmt.Errorf("invalid event type: %d", evb)
 	}
-	ev := tracev2.EventType(evb)
-	spec := r.specs[ev]
+	typ := tracev2.EventType(evb)
+	spec := r.specs[typ]
 	args, err := r.readArgs(len(spec.Args))
 	if err != nil {
 		return Event{}, err
@@ -60,9 +60,9 @@ func (r *Reader) ReadEvent() (Event, error) {
 		n := int32(args[1])
 		for i := 0; i < n; i++ {
 			// Each stack frame has four args: pc, func ID, file ID, line number.
-			frame, err := r.readArgs(4)
-			if err != nil {
-				return Event{}, err
+			frame, ferr := r.readArgs(4)
+			if ferr != nil {
+				return Event{}, ferr
 			}
 			args = mxutil.Ensure(args, len(frame))
 			args = push(args, frame...)
@@ -77,14 +77,13 @@ func (r *Reader) ReadEvent() (Event, error) {
 	}
 	return Event{
 		Version: r.v,
-		Ev:      ev,
+		Ev:      typ,
 		Args:    args,
 		Data:    data,
 	}, nil
 }
 
-func (r *Reader) readArgs(n int32) ([]uint64, error) {
-	var args []uint64
+func (r *Reader) readArgs(n int32) (args []uint64, rerr error) {
 	for i := 0; i < n; i++ {
 		val, err := binary.ReadUvarint(r.r)
 		if err != nil {
@@ -96,16 +95,15 @@ func (r *Reader) readArgs(n int32) ([]uint64, error) {
 	return args, nil
 }
 
-func (r *Reader) readData() ([]byte, error) {
-	len, err := binary.ReadUvarint(r.r)
+func (r *Reader) readData() (data []byte, rerr error) {
+	n, err := binary.ReadUvarint(r.r)
 	if err != nil {
 		return nil, err
 	}
-	var data []byte
-	for i := 0; i < int32(len); i++ {
-		b, err := r.r.ReadByte()
-		if err != nil {
-			return nil, err
+	for i := 0; i < int32(n); i++ {
+		b, berr := r.r.ReadByte()
+		if berr != nil {
+			return nil, berr
 		}
 		data = mxutil.Ensure(data, 1)
 		data = push(data, b)

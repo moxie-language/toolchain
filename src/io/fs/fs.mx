@@ -11,6 +11,7 @@
 package fs
 
 import (
+	"errors"
 	"internal/oserror"
 	"time"
 	"unicode/utf8"
@@ -52,7 +53,7 @@ type FS interface {
 // Paths containing other characters such as backslash and colon
 // are accepted as valid, but those characters must never be
 // interpreted by an [FS] implementation as path element separators.
-func ValidPath(name []byte) bool {
+func ValidPath(name []byte) (valid bool) {
 	if !utf8.ValidString(name) {
 		return false
 	}
@@ -141,12 +142,12 @@ type ReadDirFile interface {
 // Generic file system errors.
 // Errors returned by file systems can be tested against these errors
 // using [errors.Is].
-const (
-	ErrInvalid    = oserror.ErrInvalid
-	ErrPermission = oserror.ErrPermission
-	ErrExist      = oserror.ErrExist
-	ErrNotExist   = oserror.ErrNotExist
-	ErrClosed     = oserror.ErrClosed
+var (
+	ErrInvalid    error
+	ErrPermission error
+	ErrExist      error
+	ErrNotExist   error
+	ErrClosed     error
 )
 
 // A FileInfo describes a file and is returned by [Stat].
@@ -194,12 +195,12 @@ const (
 	ModePerm FileMode = 0777 // Unix permission bits
 )
 
-func (m FileMode) String() string {
+func (m *FileMode) String() (s string) {
 	const str = "dalTLDpSugct?"
 	var buf [32]byte // Mode is uint32.
 	w := 0
 	for i, c := range str {
-		if m&(1<<uint32(32-1-i)) != 0 {
+		if *m&(1<<uint32(32-1-i)) != 0 {
 			buf[w] = byte(c)
 			w++
 		}
@@ -210,7 +211,7 @@ func (m FileMode) String() string {
 	}
 	const rwx = "rwxrwxrwx"
 	for i, c := range rwx {
-		if m&(1<<uint32(9-1-i)) != 0 {
+		if *m&(1<<uint32(9-1-i)) != 0 {
 			buf[w] = byte(c)
 		} else {
 			buf[w] = '-'
@@ -222,24 +223,24 @@ func (m FileMode) String() string {
 
 // IsDir reports whether m describes a directory.
 // That is, it tests for the [ModeDir] bit being set in m.
-func (m FileMode) IsDir() bool {
-	return m&ModeDir != 0
+func (m *FileMode) IsDir() (isDir bool) {
+	return *m&ModeDir != 0
 }
 
 // IsRegular reports whether m describes a regular file.
 // That is, it tests that no mode type bits are set.
-func (m FileMode) IsRegular() bool {
-	return m&ModeType == 0
+func (m *FileMode) IsRegular() (regular bool) {
+	return *m&ModeType == 0
 }
 
 // Perm returns the Unix permission bits in m (m & [ModePerm]).
-func (m FileMode) Perm() FileMode {
-	return m & ModePerm
+func (m *FileMode) Perm() (perm FileMode) {
+	return *m & ModePerm
 }
 
 // Type returns type bits in m (m & [ModeType]).
-func (m FileMode) Type() FileMode {
-	return m & ModeType
+func (m *FileMode) Type() (modeType FileMode) {
+	return *m & ModeType
 }
 
 // PathError records an error and the operation and file path that caused it.
@@ -249,13 +250,23 @@ type PathError struct {
 	Err  error
 }
 
-func (e *PathError) Error() string  { return e.Op | " " | e.Path | ": " | e.Err.Error() }
-func (e *PathError) String() string { return e.Error() }
+func (e *PathError) Error() (msg string)  { return e.Op | " " | e.Path | ": " | e.Err.Error() }
+func (e *PathError) String() (msg string) { return e.Error() }
 
-func (e *PathError) Unwrap() error { return e.Err }
+func (e *PathError) Unwrap() (err error) { return e.Err }
 
 // Timeout reports whether this error represents a timeout.
-func (e *PathError) Timeout() bool {
+func (e *PathError) Timeout() (timedOut bool) {
 	t, ok := e.Err.(interface{ Timeout() bool })
 	return ok && t.Timeout()
+}
+
+func init() {
+	ErrInvalid = oserror.ErrInvalid
+	ErrPermission = oserror.ErrPermission
+	ErrExist = oserror.ErrExist
+	ErrNotExist = oserror.ErrNotExist
+	ErrClosed = oserror.ErrClosed
+	SkipDir = errors.New("skip this directory")
+	SkipAll = errors.New("skip everything and stop the walk")
 }

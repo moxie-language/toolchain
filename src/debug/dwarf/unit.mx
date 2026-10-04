@@ -5,7 +5,6 @@
 package dwarf
 
 import (
-	"sort"
 	"strconv"
 )
 
@@ -16,7 +15,7 @@ type unit struct {
 	base   Offset // byte offset of header within the aggregate info
 	off    Offset // byte offset of data within the aggregate info
 	data   []byte
-	atable abbrevTable
+	atable map[uint32]abbrev
 	*unit5 // info specific to DWARF 5 units
 	asize  int32
 	vers   int32
@@ -33,50 +32,50 @@ type unit5 struct {
 
 // Implement the dataFormat interface.
 
-func (u *unit) version() int32 {
+func (u *unit) version() (_r0 int32) {
 	return u.vers
 }
 
-func (u *unit) dwarf64() (bool, bool) {
+func (u *unit) dwarf64() (_r0 bool, _r1 bool) {
 	return u.is64, true
 }
 
-func (u *unit) addrsize() int32 {
+func (u *unit) addrsize() (_r0 int32) {
 	return u.asize
 }
 
-func (u *unit) addrBase() uint64 {
+func (u *unit) addrBase() (_r0 uint64) {
 	if u.unit5 != nil {
 		return u.unit5.addrBase
 	}
 	return 0
 }
 
-func (u *unit) strOffsetsBase() uint64 {
+func (u *unit) strOffsetsBase() (_r0 uint64) {
 	if u.unit5 != nil {
 		return u.unit5.strOffsetsBase
 	}
 	return 0
 }
 
-func (u *unit) rngListsBase() uint64 {
+func (u *unit) rngListsBase() (_r0 uint64) {
 	if u.unit5 != nil {
 		return u.unit5.rngListsBase
 	}
 	return 0
 }
 
-func (u *unit) locListsBase() uint64 {
+func (u *unit) locListsBase() (_r0 uint64) {
 	if u.unit5 != nil {
 		return u.unit5.locListsBase
 	}
 	return 0
 }
 
-func (d *Data) parseUnits() ([]unit, error) {
+func (d *Data) parseUnits() (_r0 []unit, _r1 error) {
 	// Count units.
 	nunit := 0
-	b := makeBuf(d, unknownFormat{}, "info", 0, d.info)
+	b := makeBuf(d, &unknownFormat{}, "info", 0, d.info)
 	for len(b.data) > 0 {
 		length, _ := b.unitLength()
 		if length != Offset(uint32(length)) {
@@ -93,7 +92,7 @@ func (d *Data) parseUnits() ([]unit, error) {
 	}
 
 	// Again, this time writing them down.
-	b = makeBuf(d, unknownFormat{}, "info", 0, d.info)
+	b = makeBuf(d, &unknownFormat{}, "info", 0, d.info)
 	units := []unit{:nunit}
 	for i := range units {
 		u := &units[i]
@@ -157,11 +156,18 @@ func (d *Data) parseUnits() ([]unit, error) {
 
 // offsetToUnit returns the index of the unit containing offset off.
 // It returns -1 if no unit contains this offset.
-func (d *Data) offsetToUnit(off Offset) int32 {
-	// Find the unit after off
-	next := sort.Search(len(d.unit), func(i int32) bool {
-		return d.unit[i].off > off
-	})
+func (d *Data) offsetToUnit(off Offset) (_r0 int32) {
+	// Find the unit after off (smallest i with d.unit[i].off > off).
+	lo, hi := int32(0), len(d.unit)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if d.unit[mid].off > off {
+			hi = mid
+		} else {
+			lo = mid + 1
+		}
+	}
+	next := lo
 	if next == 0 {
 		return -1
 	}
@@ -172,7 +178,7 @@ func (d *Data) offsetToUnit(off Offset) int32 {
 	return -1
 }
 
-func (d *Data) collectDwarf5BaseOffsets(u *unit) error {
+func (d *Data) collectDwarf5BaseOffsets(u *unit) (_r0 error) {
 	if u.unit5 == nil {
 		panic("expected unit5 to be set up already")
 	}
@@ -184,16 +190,16 @@ func (d *Data) collectDwarf5BaseOffsets(u *unit) error {
 		// detected at some later point.
 		return b.err
 	}
-	if iAddrBase, ok := cu.Val(AttrAddrBase).(int64); ok {
+	if iAddrBase, ok := valInt(cu.Val(AttrAddrBase)); ok {
 		u.unit5.addrBase = uint64(iAddrBase)
 	}
-	if iStrOffsetsBase, ok := cu.Val(AttrStrOffsetsBase).(int64); ok {
+	if iStrOffsetsBase, ok := valInt(cu.Val(AttrStrOffsetsBase)); ok {
 		u.unit5.strOffsetsBase = uint64(iStrOffsetsBase)
 	}
-	if iRngListsBase, ok := cu.Val(AttrRnglistsBase).(int64); ok {
+	if iRngListsBase, ok := valInt(cu.Val(AttrRnglistsBase)); ok {
 		u.unit5.rngListsBase = uint64(iRngListsBase)
 	}
-	if iLocListsBase, ok := cu.Val(AttrLoclistsBase).(int64); ok {
+	if iLocListsBase, ok := valInt(cu.Val(AttrLoclistsBase)); ok {
 		u.unit5.locListsBase = uint64(iLocListsBase)
 	}
 	return nil

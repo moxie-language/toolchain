@@ -18,7 +18,28 @@ import (
 	"hash"
 )
 
-type prfFunc func(secret []byte, label []byte, seed []byte, keyLen int32) []byte
+// prfFunc is the TLS 1.0-1.2 pseudo-random function. It is an interface rather
+// than a func value because a closure carrying the hash constructor would
+// capture the caller's frame, which Moxie does not allow.
+type prfFunc interface {
+	prf(secret []byte, label []byte, seed []byte, keyLen int32) (rb []byte)
+}
+
+// tls10PRF is the stateless TLS 1.0/1.1 PRF.
+type tls10PRF struct{}
+
+func (p *tls10PRF) prf(secret, label, seed []byte, keyLen int32) (rb []byte) {
+	return prf10(secret, label, seed, keyLen)
+}
+
+// tls12PRF carries the hash constructor for the TLS 1.2 PRF.
+type tls12PRF struct {
+	hashFunc func() hash.Hash
+}
+
+func (p *tls12PRF) prf(secret, label, seed []byte, keyLen int32) (rb []byte) {
+	return tls12.PRF(p.hashFunc, secret, label, seed, keyLen)
+}
 
 // Split a premaster secret in two as specified in RFC 4346, Section 5.
 func splitPreMasterSecret(secret []byte) (s1, s2 []byte) {
@@ -49,7 +70,7 @@ func pHash(result, secret, seed []byte, hfn func() hash.Hash) {
 }
 
 // prf10 implements the TLS 1.0 pseudo-random function, as defined in RFC 2246, Section 5.
-func prf10(secret []byte, label []byte, seed []byte, keyLen int32) []byte {
+func prf10(secret []byte, label []byte, seed []byte, keyLen int32) (rb []byte) {
 	result := []byte{:keyLen}
 	hashSHA1 := sha1.New
 	hashMD5 := md5.New
@@ -71,10 +92,8 @@ func prf10(secret []byte, label []byte, seed []byte, keyLen int32) []byte {
 }
 
 // prf12 implements the TLS 1.2 pseudo-random function, as defined in RFC 5246, Section 5.
-func prf12(hashFunc func() hash.Hash) prfFunc {
-	return func(secret []byte, label []byte, seed []byte, keyLen int32) []byte {
-		return tls12.PRF(hashFunc, secret, label, seed, keyLen)
-	}
+func prf12(hashFunc func() hash.Hash) (rprfFunc prfFunc) {
+	return &tls12PRF{hashFunc: hashFunc}
 }
 
 const (
@@ -88,10 +107,10 @@ const keyExpansionLabel = "key expansion"
 const clientFinishedLabel = "client finished"
 const serverFinishedLabel = "server finished"
 
-func prfAndHashForVersion(version uint16, suite *cipherSuite) (prfFunc, crypto.Hash) {
+func prfAndHashForVersion(version uint16, suite *cipherSuite) (rprfFunc prfFunc, rhash crypto.Hash) {
 	switch version {
 	case VersionTLS10, VersionTLS11:
-		return prf10, crypto.Hash(0)
+		return &tls10PRF{}, crypto.Hash(0)
 	case VersionTLS12:
 		if suite.flags&suiteSHA384 != 0 {
 			return prf12(sha512.New384), crypto.SHA384
@@ -102,33 +121,36 @@ func prfAndHashForVersion(version uint16, suite *cipherSuite) (prfFunc, crypto.H
 	}
 }
 
-func prfForVersion(version uint16, suite *cipherSuite) prfFunc {
+func prfForVersion(version uint16, suite *cipherSuite) (rprfFunc prfFunc) {
 	prf, _ := prfAndHashForVersion(version, suite)
 	return prf
 }
 
 // masterFromPreMasterSecret generates the master secret from the pre-master
 // secret. See RFC 5246, Section 8.1.
-func masterFromPreMasterSecret(version uint16, suite *cipherSuite, preMasterSecret, clientRandom, serverRandom []byte) []byte {
+func masterFromPreMasterSecret(version uint16, suite *cipherSuite, preMasterSecret, clientRandom, serverRandom []byte) (rb []byte) {
 	seed := []byte{:0:len(clientRandom)+len(serverRandom)}
 	seed = mxutil.Ensure(seed, len(clientRandom))
 	seed = push(seed, clientRandom...)
 	seed = mxutil.Ensure(seed, len(serverRandom))
 	seed = push(seed, serverRandom...)
 
-	return prfForVersion(version, suite)(preMasterSecret, masterSecretLabel, seed, masterSecretLength)
+	return prfForVersion(version, suite).prf(preMasterSecret, masterSecretLabel, seed, masterSecretLength)
 }
 
 // extMasterFromPreMasterSecret generates the extended master secret from the
 // pre-master secret. See RFC 7627.
-func extMasterFromPreMasterSecret(version uint16, suite *cipherSuite, preMasterSecret, transcript []byte) []byte {
-	prf, h := prfAndHashForVersion(version, suite)
+func extMasterFromPreMasterSecret(version uint16, suite *cipherSuite, preMasterSecret, transcript []byte) (rb []byte) {
 	if version == VersionTLS12 {
 		// Use the FIPS 140-3 module only for TLS 1.2 with EMS, which is the
 		// only TLS 1.0-1.2 approved mode per IG D.Q.
-		return tls12.MasterSecret(h.New, preMasterSecret, transcript)
+		var hashFunc func() hash.Hash = sha256.New
+		if suite.flags&suiteSHA384 != 0 {
+			hashFunc = sha512.New384
+		}
+		return tls12.MasterSecret(hashFunc, preMasterSecret, transcript)
 	}
-	return prf(preMasterSecret, extendedMasterSecretLabel, transcript, masterSecretLength)
+	return prfForVersion(version, suite).prf(preMasterSecret, extendedMasterSecretLabel, transcript, masterSecretLength)
 }
 
 // keysFromMasterSecret generates the connection keys from the master
@@ -142,7 +164,7 @@ func keysFromMasterSecret(version uint16, suite *cipherSuite, masterSecret, clie
 	seed = push(seed, clientRandom...)
 
 	n := 2*macLen + 2*keyLen + 2*ivLen
-	keyMaterial := prfForVersion(version, suite)(masterSecret, keyExpansionLabel, seed, n)
+	keyMaterial := prfForVersion(version, suite).prf(masterSecret, keyExpansionLabel, seed, n)
 	clientMAC = keyMaterial[:macLen]
 	keyMaterial = keyMaterial[macLen:]
 	serverMAC = keyMaterial[:macLen]
@@ -157,7 +179,7 @@ func keysFromMasterSecret(version uint16, suite *cipherSuite, masterSecret, clie
 	return
 }
 
-func newFinishedHash(version uint16, cs *cs) finishedHash {
+func newFinishedHash(version uint16, cs *cs) (rfinishedHash finishedHash) {
 	var buffer []byte
 	if version >= VersionTLS12 {
 		buffer = []byte{}
@@ -165,7 +187,7 @@ func newFinishedHash(version uint16, cs *cs) finishedHash {
 
 	prf, h := prfAndHashForVersion(version, cs)
 	if h != 0 {
-		return finishedHash{h.New(), h.New(), nil, nil, buffer, version, prf}
+		return finishedHash{crypto.HashNew(h), crypto.HashNew(h), nil, nil, buffer, version, prf}
 	}
 
 	return finishedHash{sha1.New(), sha1.New(), md5.New(), md5.New(), buffer, version, prf}
@@ -205,7 +227,7 @@ func (h *finishedHash) Write(msg []byte) (n int32, err error) {
 	return len(msg), nil
 }
 
-func (h finishedHash) Sum() []byte {
+func (h *finishedHash) Sum() (rb []byte) {
 	if h.version >= VersionTLS12 {
 		return h.client.Sum(nil)
 	}
@@ -217,19 +239,19 @@ func (h finishedHash) Sum() []byte {
 
 // clientSum returns the contents of the verify_data member of a client's
 // Finished message.
-func (h finishedHash) clientSum(masterSecret []byte) []byte {
-	return h.prf(masterSecret, clientFinishedLabel, h.Sum(), finishedVerifyLength)
+func (h *finishedHash) clientSum(masterSecret []byte) (rb []byte) {
+	return h.prf.prf(masterSecret, clientFinishedLabel, h.Sum(), finishedVerifyLength)
 }
 
 // serverSum returns the contents of the verify_data member of a server's
 // Finished message.
-func (h finishedHash) serverSum(masterSecret []byte) []byte {
-	return h.prf(masterSecret, serverFinishedLabel, h.Sum(), finishedVerifyLength)
+func (h *finishedHash) serverSum(masterSecret []byte) (rb []byte) {
+	return h.prf.prf(masterSecret, serverFinishedLabel, h.Sum(), finishedVerifyLength)
 }
 
 // hashForClientCertificate returns the handshake messages so far, pre-hashed,
 // suitable for signing by a TLS 1.0 and 1.1 client certificate.
-func (h finishedHash) hashForClientCertificate(sigType uint8) []byte {
+func (h *finishedHash) hashForClientCertificate(sigType uint8) (rb []byte) {
 	if sigType == signatureECDSA {
 		return h.server.Sum(nil)
 	}
@@ -243,50 +265,77 @@ func (h *finishedHash) discardHandshakeBuffer() {
 	h.buffer = nil
 }
 
-// noEKMBecauseRenegotiation is used as a value of
-// ConnectionState.ekm when renegotiation is enabled and thus
-// we wish to fail all key-material export requests.
-func noEKMBecauseRenegotiation(label []byte, ctxInfo []byte, length int32) ([]byte, error) {
+// ekmFunc exports keying material, or fails for a policy reason. It is an
+// interface rather than a func value because the closure would capture the
+// enclosing frame, which Moxie does not allow.
+type ekmFunc interface {
+	ekm(label []byte, ctxInfo []byte, length int32) (rb []byte, rerr error)
+}
+
+// noEKMRenegotiation fails every key-material export when renegotiation is
+// enabled.
+type noEKMRenegotiation struct{}
+
+func (n *noEKMRenegotiation) ekm(label []byte, ctxInfo []byte, length int32) (rb []byte, rerr error) {
 	return nil, errors.New("crypto/tls: ExportKeyingMaterial is unavailable when renegotiation is enabled")
 }
 
-// noEKMBecauseNoEMS is used as a value of ConnectionState.ekm when Extended
-// Master Secret is not negotiated and thus we wish to fail all key-material
-// export requests.
-func noEKMBecauseNoEMS(label []byte, ctxInfo []byte, length int32) ([]byte, error) {
+// noEKMNoEMS fails every key-material export when neither TLS 1.3 nor Extended
+// Master Secret is negotiated.
+type noEKMNoEMS struct{}
+
+func (n *noEKMNoEMS) ekm(label []byte, ctxInfo []byte, length int32) (rb []byte, rerr error) {
 	return nil, errors.New("crypto/tls: ExportKeyingMaterial is unavailable when neither TLS 1.3 nor Extended Master Secret are negotiated; override with GODEBUG=tlsunsafeekm=1")
 }
 
+// ekmFromMasterSecretState generates exported keying material as defined in
+// RFC 5705.
+type ekmFromMasterSecretState struct {
+	version      uint16
+	suite        *cipherSuite
+	masterSecret []byte
+	clientRandom []byte
+	serverRandom []byte
+}
+
 // ekmFromMasterSecret generates exported keying material as defined in RFC 5705.
-func ekmFromMasterSecret(version uint16, suite *cipherSuite, masterSecret, clientRandom, serverRandom []byte) func([]byte, []byte, int32) ([]byte, error) {
-	return func(label []byte, ctxInfo []byte, length int32) ([]byte, error) {
-		switch label {
-		case "client finished", "server finished", "master secret", "key expansion":
-			// These values are reserved and may not be used.
-			return nil, fmt.Errorf("crypto/tls: reserved ExportKeyingMaterial label: %s", label)
-		}
-
-		seedLen := len(serverRandom) + len(clientRandom)
-		if ctxInfo != nil {
-			seedLen += 2 + len(ctxInfo)
-		}
-		seed := []byte{:0:seedLen}
-
-		seed = mxutil.Ensure(seed, len(clientRandom))
-		seed = push(seed, clientRandom...)
-		seed = mxutil.Ensure(seed, len(serverRandom))
-		seed = push(seed, serverRandom...)
-
-		if ctxInfo != nil {
-			if len(ctxInfo) >= 1<<16 {
-				return nil, fmt.Errorf("crypto/tls: ExportKeyingMaterial ctxInfo too long")
-			}
-			seed = mxutil.Ensure(seed, 1)
-			seed = push(seed, byte(len(ctxInfo)>>8), byte(len(ctxInfo)))
-			seed = mxutil.Ensure(seed, len(ctxInfo))
-			seed = push(seed, ctxInfo...)
-		}
-
-		return prfForVersion(version, suite)(masterSecret, label, seed, length), nil
+func ekmFromMasterSecret(version uint16, suite *cipherSuite, masterSecret, clientRandom, serverRandom []byte) (rekm ekmFunc) {
+	return &ekmFromMasterSecretState{
+		version:      version,
+		suite:        suite,
+		masterSecret: masterSecret,
+		clientRandom: clientRandom,
+		serverRandom: serverRandom,
 	}
+}
+
+func (e *ekmFromMasterSecretState) ekm(label []byte, ctxInfo []byte, length int32) (rb []byte, rerr error) {
+	switch label {
+	case "client finished", "server finished", "master secret", "key expansion":
+		// These values are reserved and may not be used.
+		return nil, fmt.Errorf("crypto/tls: reserved ExportKeyingMaterial label: %s", label)
+	}
+
+	seedLen := len(e.serverRandom) + len(e.clientRandom)
+	if ctxInfo != nil {
+		seedLen += 2 + len(ctxInfo)
+	}
+	seed := []byte{:0:seedLen}
+
+	seed = mxutil.Ensure(seed, len(e.clientRandom))
+	seed = push(seed, e.clientRandom...)
+	seed = mxutil.Ensure(seed, len(e.serverRandom))
+	seed = push(seed, e.serverRandom...)
+
+	if ctxInfo != nil {
+		if len(ctxInfo) >= 1<<16 {
+			return nil, fmt.Errorf("crypto/tls: ExportKeyingMaterial ctxInfo too long")
+		}
+		seed = mxutil.Ensure(seed, 1)
+		seed = push(seed, byte(len(ctxInfo)>>8), byte(len(ctxInfo)))
+		seed = mxutil.Ensure(seed, len(ctxInfo))
+		seed = push(seed, ctxInfo...)
+	}
+
+	return prfForVersion(e.version, e.suite).prf(e.masterSecret, label, seed, length), nil
 }

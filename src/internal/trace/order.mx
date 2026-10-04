@@ -14,6 +14,22 @@ import (
 	"internal/trace/version"
 )
 
+// Const-holder globals so pointer-receiver String methods can be used in
+// formatted diagnostics. They are assigned once in initOrderConsts.
+var (
+	stateGoRunning GoState
+	stateGoSyscall GoState
+	procRunning    tracev2.ProcStatus
+	procSyscall    tracev2.ProcStatus
+)
+
+func initOrderConsts() {
+	stateGoRunning = GoRunning
+	stateGoSyscall = GoSyscall
+	procRunning = tracev2.ProcRunning
+	procSyscall = tracev2.ProcSyscall
+}
+
 // ordering emulates Go scheduler state for both validation and
 // for putting events in the right order.
 //
@@ -45,7 +61,7 @@ type ordering struct {
 // If this returns true, Next is guaranteed to return a complete event. However,
 // multiple events may be added to the ordering, so the caller should (but is not
 // required to) continue to call Next until it is exhausted.
-func (o *ordering) Advance(ev *baseEvent, evt *evTable, m ThreadID, gen uint64) (bool, error) {
+func (o *ordering) Advance(ev *baseEvent, evt *evTable, m ThreadID, gen uint64) (adv bool, rerr error) {
 	if o.initialGen == 0 {
 		// Set the initial gen if necessary.
 		o.initialGen = gen
@@ -81,22 +97,22 @@ func (o *ordering) Advance(ev *baseEvent, evt *evTable, m ThreadID, gen uint64) 
 	if f == nil {
 		return false, fmt.Errorf("bad event type found while ordering: %v", ev.typ)
 	}
-	newCtx, ok, err := f(o, ev, evt, m, gen, curCtx)
-	if err == nil && ok && ms != nil {
+	newCtx, dok, derr := f(o, ev, evt, m, gen, curCtx)
+	if derr == nil && dok && ms != nil {
 		// Update the mState for this event.
 		ms.p = newCtx.P
 		ms.g = newCtx.G
 	}
-	return ok, err
+	return dok, derr
 }
 
-func (o *ordering) evName(typ tracev2.EventType) []byte {
+func (o *ordering) evName(typ tracev2.EventType) (out []byte) {
 	return o.traceVer.EventName(typ)
 }
 
 type orderingHandleFunc func(o *ordering, ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error)
 
-func _orderingDispatch() [256]orderingHandleFunc {
+func _orderingDispatch() (out [256]orderingHandleFunc) {
 	return [256]orderingHandleFunc{
 		// Procs.
 		tracev2.EvProcsChange: (*ordering).advanceAnnotation,
@@ -171,12 +187,12 @@ func _orderingDispatch() [256]orderingHandleFunc {
 	}
 }
 
-func (o *ordering) advanceProcStatus(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceProcStatus(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	pid := ProcID(ev.args[0])
 	status := tracev2.ProcStatus(ev.args[1])
 	procSt := _tracev2ProcStatus2ProcState()
 	if int32(status) >= len(procSt) {
-		return curCtx, false, fmt.Errorf("invalid status for proc %d: %d", pid, status)
+		return curCtx, false, fmt.Errorf("invalid status for proc %d: %d", pid, &status)
 	}
 	oldState := procSt[status]
 	if s, ok := o.pStates[pid]; ok {
@@ -193,7 +209,7 @@ func (o *ordering) advanceProcStatus(ev *baseEvent, evt *evTable, m ThreadID, ge
 			oldState = ProcIdle
 			ev.args[1] = uint64(tracev2.ProcSyscallAbandoned)
 		} else if s.status != status {
-			return curCtx, false, fmt.Errorf("inconsistent status for proc %d: old %v vs. new %v", pid, s.status, status)
+			return curCtx, false, fmt.Errorf("inconsistent status for proc %d: old %v vs. new %v", pid, &s.status, &status)
 		}
 		s.seq = makeSeq(gen, 0) // Reset seq.
 	} else {
@@ -236,7 +252,7 @@ func (o *ordering) advanceProcStatus(ev *baseEvent, evt *evTable, m ThreadID, ge
 	return newCtx, true, nil
 }
 
-func (o *ordering) advanceProcStart(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceProcStart(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	pid := ProcID(ev.args[0])
 	seq := makeSeq(gen, ev.args[1])
 
@@ -267,7 +283,7 @@ func (o *ordering) advanceProcStart(ev *baseEvent, evt *evTable, m ThreadID, gen
 	return newCtx, true, nil
 }
 
-func (o *ordering) advanceProcStop(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceProcStop(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	// We must be able to advance this P.
 	//
 	// There are 2 ways a P can stop: ProcStop and ProcSteal. ProcStop is used when the P
@@ -282,7 +298,7 @@ func (o *ordering) advanceProcStop(ev *baseEvent, evt *evTable, m ThreadID, gen 
 		return curCtx, false, fmt.Errorf("event %s for proc (%v) that doesn't exist", o.evName(ev.typ), curCtx.P)
 	}
 	if state.status != tracev2.ProcRunning && state.status != tracev2.ProcSyscall {
-		return curCtx, false, fmt.Errorf("%s event for proc that's not %s or %s", o.evName(ev.typ), tracev2.ProcRunning, tracev2.ProcSyscall)
+		return curCtx, false, fmt.Errorf("%s event for proc that's not %s or %s", o.evName(ev.typ), &procRunning, &procSyscall)
 	}
 	reqs := schedReqs{M: mustHave, P: mustHave, G: mayHave}
 	if err := validateCtx(curCtx, reqs); err != nil {
@@ -295,7 +311,7 @@ func (o *ordering) advanceProcStop(ev *baseEvent, evt *evTable, m ThreadID, gen 
 	return newCtx, true, nil
 }
 
-func (o *ordering) advanceProcSteal(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceProcSteal(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	pid := ProcID(ev.args[0])
 	seq := makeSeq(gen, ev.args[1])
 	state, ok := o.pStates[pid]
@@ -345,14 +361,14 @@ func (o *ordering) advanceProcSteal(ev *baseEvent, evt *evTable, m ThreadID, gen
 	}
 
 	// We're stealing from some other M.
-	mState, ok := o.mStates[mid]
+	ms, ok := o.mStates[mid]
 	if !ok {
 		return curCtx, false, fmt.Errorf("stole proc from non-existent thread %d", mid)
 	}
 
 	// Make sure we're actually stealing the right P.
-	if mState.p != pid {
-		return curCtx, false, fmt.Errorf("tried to steal proc %d from thread %d, but got proc %d instead", pid, mid, mState.p)
+	if ms.p != pid {
+		return curCtx, false, fmt.Errorf("tried to steal proc %d from thread %d, but got proc %d instead", pid, mid, ms.p)
 	}
 
 	// Tell the M it has no P so it can proceed.
@@ -361,24 +377,24 @@ func (o *ordering) advanceProcSteal(ev *baseEvent, evt *evTable, m ThreadID, gen
 	// the other M must be trying to get out of the syscall.
 	// GoSyscallEndBlocked cannot advance until the corresponding
 	// M loses its P.
-	mState.p = NoProc
+	ms.p = NoProc
 	o.queue.push(Event{table: evt, ctx: curCtx, base: *ev})
 	return newCtx, true, nil
 }
 
-func (o *ordering) advanceGoStatus(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGoStatus(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	gid := GoID(ev.args[0])
 	mid := ThreadID(ev.args[1])
 	status := tracev2.GoStatus(ev.args[2])
 
 	goSt := _tracev2GoStatus2GoState()
 	if int32(status) >= len(goSt) {
-		return curCtx, false, fmt.Errorf("invalid status for goroutine %d: %d", gid, status)
+		return curCtx, false, fmt.Errorf("invalid status for goroutine %d: %d", gid, &status)
 	}
 	oldState := goSt[status]
 	if s, ok := o.gStates[gid]; ok {
 		if s.status != status {
-			return curCtx, false, fmt.Errorf("inconsistent status for goroutine %d: old %v vs. new %v", gid, s.status, status)
+			return curCtx, false, fmt.Errorf("inconsistent status for goroutine %d: old %v vs. new %v", gid, &s.status, &status)
 		}
 		s.seq = makeSeq(gen, 0) // Reset seq.
 	} else if gen == o.initialGen {
@@ -386,7 +402,7 @@ func (o *ordering) advanceGoStatus(ev *baseEvent, evt *evTable, m ThreadID, gen 
 		o.gStates[gid] = &gState{id: gid, status: status, seq: makeSeq(gen, 0)}
 		oldState = GoUndetermined
 	} else {
-		return curCtx, false, fmt.Errorf("found goroutine status for new goroutine after the first generation: id=%v status=%v", gid, status)
+		return curCtx, false, fmt.Errorf("found goroutine status for new goroutine after the first generation: id=%v status=%v", gid, &status)
 	}
 	ev.args[2] = uint64(oldState)<<32 | uint64(status) // Smuggle in the old state for StateTransition.
 
@@ -444,7 +460,7 @@ func (o *ordering) advanceGoStatus(ev *baseEvent, evt *evTable, m ThreadID, gen 
 	return newCtx, true, nil
 }
 
-func (o *ordering) advanceGoCreate(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGoCreate(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	// Goroutines must be created on a running P, but may or may not be created
 	// by a running goroutine.
 	reqs := schedReqs{M: mustHave, P: mustHave, G: mayHave}
@@ -453,7 +469,7 @@ func (o *ordering) advanceGoCreate(ev *baseEvent, evt *evTable, m ThreadID, gen 
 	}
 	// If we have a goroutine, it must be running.
 	if state, ok := o.gStates[curCtx.G]; ok && state.status != tracev2.GoRunning {
-		return curCtx, false, fmt.Errorf("%s event for goroutine that's not %s", o.evName(ev.typ), GoRunning)
+		return curCtx, false, fmt.Errorf("%s event for goroutine that's not %s", o.evName(ev.typ), &stateGoRunning)
 	}
 	// This goroutine created another. Add a state for it.
 	newgid := GoID(ev.args[0])
@@ -469,19 +485,19 @@ func (o *ordering) advanceGoCreate(ev *baseEvent, evt *evTable, m ThreadID, gen 
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceGoStopExec(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGoStopExec(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	// These are goroutine events that all require an active running
 	// goroutine on some thread. They must *always* be advance-able,
 	// since running goroutines are bound to their M.
 	if err := validateCtx(curCtx, _userGoReqs()); err != nil {
 		return curCtx, false, err
 	}
-	state, ok := o.gStates[curCtx.G]
-	if !ok {
+	state, gok := o.gStates[curCtx.G]
+	if !gok {
 		return curCtx, false, fmt.Errorf("event %s for goroutine (%v) that doesn't exist", o.evName(ev.typ), curCtx.G)
 	}
 	if state.status != tracev2.GoRunning {
-		return curCtx, false, fmt.Errorf("%s event for goroutine that's not %s", o.evName(ev.typ), GoRunning)
+		return curCtx, false, fmt.Errorf("%s event for goroutine that's not %s", o.evName(ev.typ), &stateGoRunning)
 	}
 	// Handle each case slightly differently; we just group them together
 	// because they have shared preconditions.
@@ -504,7 +520,7 @@ func (o *ordering) advanceGoStopExec(ev *baseEvent, evt *evTable, m ThreadID, ge
 	return newCtx, true, nil
 }
 
-func (o *ordering) advanceGoStart(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGoStart(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	gid := GoID(ev.args[0])
 	seq := makeSeq(gen, ev.args[1])
 	state, ok := o.gStates[gid]
@@ -527,7 +543,7 @@ func (o *ordering) advanceGoStart(ev *baseEvent, evt *evTable, m ThreadID, gen u
 	return newCtx, true, nil
 }
 
-func (o *ordering) advanceGoUnblock(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGoUnblock(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	// N.B. These both reference the goroutine to unblock, not the current goroutine.
 	gid := GoID(ev.args[0])
 	seq := makeSeq(gen, ev.args[1])
@@ -546,7 +562,7 @@ func (o *ordering) advanceGoUnblock(ev *baseEvent, evt *evTable, m ThreadID, gen
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceGoSwitch(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGoSwitch(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	// GoSwitch and GoSwitchDestroy represent a trio of events:
 	// - Unblock of the goroutine to switch to.
 	// - Block or destroy of the current goroutine.
@@ -564,7 +580,7 @@ func (o *ordering) advanceGoSwitch(ev *baseEvent, evt *evTable, m ThreadID, gen 
 		return curCtx, false, fmt.Errorf("event %s for goroutine (%v) that doesn't exist", o.evName(ev.typ), curCtx.G)
 	}
 	if curGState.status != tracev2.GoRunning {
-		return curCtx, false, fmt.Errorf("%s event for goroutine that's not %s", o.evName(ev.typ), GoRunning)
+		return curCtx, false, fmt.Errorf("%s event for goroutine that's not %s", o.evName(ev.typ), &stateGoRunning)
 	}
 	nextg := GoID(ev.args[0])
 	seq := makeSeq(gen, ev.args[1]) // seq is for nextg, not curCtx.G.
@@ -608,26 +624,26 @@ func (o *ordering) advanceGoSwitch(ev *baseEvent, evt *evTable, m ThreadID, gen 
 	return newCtx, true, nil
 }
 
-func (o *ordering) advanceGoSyscallBegin(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGoSyscallBegin(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	// Entering a syscall requires an active running goroutine with a
 	// proc on some thread. It is always advancable.
 	if err := validateCtx(curCtx, _userGoReqs()); err != nil {
 		return curCtx, false, err
 	}
-	state, ok := o.gStates[curCtx.G]
-	if !ok {
+	state, gok := o.gStates[curCtx.G]
+	if !gok {
 		return curCtx, false, fmt.Errorf("event %s for goroutine (%v) that doesn't exist", o.evName(ev.typ), curCtx.G)
 	}
 	if state.status != tracev2.GoRunning {
-		return curCtx, false, fmt.Errorf("%s event for goroutine that's not %s", o.evName(ev.typ), GoRunning)
+		return curCtx, false, fmt.Errorf("%s event for goroutine that's not %s", o.evName(ev.typ), &stateGoRunning)
 	}
 	// Goroutine entered a syscall. It's still running on this P and M.
 	state.status = tracev2.GoSyscall
-	pState, ok := o.pStates[curCtx.P]
+	ps, ok := o.pStates[curCtx.P]
 	if !ok {
 		return curCtx, false, fmt.Errorf("uninitialized proc %d found during %s", curCtx.P, o.evName(ev.typ))
 	}
-	pState.status = tracev2.ProcSyscall
+	ps.status = tracev2.ProcSyscall
 	// Validate the P sequence number on the event and advance it.
 	//
 	// We have a P sequence number for what is supposed to be a goroutine event
@@ -640,44 +656,44 @@ func (o *ordering) advanceGoSyscallBegin(ev *baseEvent, evt *evTable, m ThreadID
 	// we can enforce that we have the right sequence number at this point; we don't need
 	// to back off and see if any other events will advance. This is a running P.
 	pSeq := makeSeq(gen, ev.args[0])
-	if !pSeq.succeeds(pState.seq) {
-		return curCtx, false, fmt.Errorf("failed to advance %s: can't make sequence: %s -> %s", o.evName(ev.typ), pState.seq, pSeq)
+	if !pSeq.succeeds(ps.seq) {
+		return curCtx, false, fmt.Errorf("failed to advance %s: can't make sequence: %s -> %s", o.evName(ev.typ), &ps.seq, &pSeq)
 	}
-	pState.seq = pSeq
+	ps.seq = pSeq
 	o.queue.push(Event{table: evt, ctx: curCtx, base: *ev})
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceGoSyscallEnd(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGoSyscallEnd(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	// This event is always advance-able because it happens on the same
 	// thread that EvGoSyscallStart happened, and the goroutine can't leave
 	// that thread until its done.
 	if err := validateCtx(curCtx, _userGoReqs()); err != nil {
 		return curCtx, false, err
 	}
-	state, ok := o.gStates[curCtx.G]
-	if !ok {
+	state, gok := o.gStates[curCtx.G]
+	if !gok {
 		return curCtx, false, fmt.Errorf("event %s for goroutine (%v) that doesn't exist", o.evName(ev.typ), curCtx.G)
 	}
 	if state.status != tracev2.GoSyscall {
-		return curCtx, false, fmt.Errorf("%s event for goroutine that's not %s", o.evName(ev.typ), GoRunning)
+		return curCtx, false, fmt.Errorf("%s event for goroutine that's not %s", o.evName(ev.typ), &stateGoRunning)
 	}
 	state.status = tracev2.GoRunning
 
 	// Transfer the P back to running from syscall.
-	pState, ok := o.pStates[curCtx.P]
+	ps, ok := o.pStates[curCtx.P]
 	if !ok {
 		return curCtx, false, fmt.Errorf("uninitialized proc %d found during %s", curCtx.P, o.evName(ev.typ))
 	}
-	if pState.status != tracev2.ProcSyscall {
-		return curCtx, false, fmt.Errorf("expected proc %d in state %v, but got %v instead", curCtx.P, tracev2.ProcSyscall, pState.status)
+	if ps.status != tracev2.ProcSyscall {
+		return curCtx, false, fmt.Errorf("expected proc %d in state %v, but got %v instead", curCtx.P, &procSyscall, &ps.status)
 	}
-	pState.status = tracev2.ProcRunning
+	ps.status = tracev2.ProcRunning
 	o.queue.push(Event{table: evt, ctx: curCtx, base: *ev})
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceGoSyscallEndBlocked(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGoSyscallEndBlocked(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	// This event becomes advanceable when its P is not in a syscall state
 	// (lack of a P altogether is also acceptable for advancing).
 	// The transfer out of ProcSyscall can happen either voluntarily via
@@ -689,11 +705,11 @@ func (o *ordering) advanceGoSyscallEndBlocked(ev *baseEvent, evt *evTable, m Thr
 	// *know* from the event that we're going to lose it at some point during
 	// the syscall. We shouldn't advance until that happens.
 	if curCtx.P != NoProc {
-		pState, ok := o.pStates[curCtx.P]
+		ps, ok := o.pStates[curCtx.P]
 		if !ok {
 			return curCtx, false, fmt.Errorf("uninitialized proc %d found during %s", curCtx.P, o.evName(ev.typ))
 		}
-		if pState.status == tracev2.ProcSyscall {
+		if ps.status == tracev2.ProcSyscall {
 			return curCtx, false, nil
 		}
 	}
@@ -702,12 +718,12 @@ func (o *ordering) advanceGoSyscallEndBlocked(ev *baseEvent, evt *evTable, m Thr
 	if err := validateCtx(curCtx, schedReqs{M: mustHave, P: mayHave, G: mustHave}); err != nil {
 		return curCtx, false, err
 	}
-	state, ok := o.gStates[curCtx.G]
-	if !ok {
+	state, gok := o.gStates[curCtx.G]
+	if !gok {
 		return curCtx, false, fmt.Errorf("event %s for goroutine (%v) that doesn't exist", o.evName(ev.typ), curCtx.G)
 	}
 	if state.status != tracev2.GoSyscall {
-		return curCtx, false, fmt.Errorf("%s event for goroutine that's not %s", o.evName(ev.typ), GoRunning)
+		return curCtx, false, fmt.Errorf("%s event for goroutine that's not %s", o.evName(ev.typ), &stateGoRunning)
 	}
 	newCtx := curCtx
 	newCtx.G = NoGoroutine
@@ -716,7 +732,7 @@ func (o *ordering) advanceGoSyscallEndBlocked(ev *baseEvent, evt *evTable, m Thr
 	return newCtx, true, nil
 }
 
-func (o *ordering) advanceGoCreateSyscall(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGoCreateSyscall(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	// This event indicates that a goroutine is effectively
 	// being created out of a cgo callback. Such a goroutine
 	// is 'created' in the syscall state.
@@ -736,7 +752,7 @@ func (o *ordering) advanceGoCreateSyscall(ev *baseEvent, evt *evTable, m ThreadI
 	return newCtx, true, nil
 }
 
-func (o *ordering) advanceGoDestroySyscall(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGoDestroySyscall(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	// This event indicates that a goroutine created for a
 	// cgo callback is disappearing, either because the callback
 	// ending or the C thread that called it is being destroyed.
@@ -757,12 +773,12 @@ func (o *ordering) advanceGoDestroySyscall(ev *baseEvent, evt *evTable, m Thread
 		return curCtx, false, err
 	}
 	// Check to make sure the goroutine exists in the right state.
-	state, ok := o.gStates[curCtx.G]
-	if !ok {
+	state, gok := o.gStates[curCtx.G]
+	if !gok {
 		return curCtx, false, fmt.Errorf("event %s for goroutine (%v) that doesn't exist", o.evName(ev.typ), curCtx.G)
 	}
 	if state.status != tracev2.GoSyscall {
-		return curCtx, false, fmt.Errorf("%s event for goroutine that's not %v", o.evName(ev.typ), GoSyscall)
+		return curCtx, false, fmt.Errorf("%s event for goroutine that's not %v", o.evName(ev.typ), &stateGoSyscall)
 	}
 	// This goroutine is exiting itself.
 	delete(o.gStates, curCtx.G)
@@ -771,15 +787,15 @@ func (o *ordering) advanceGoDestroySyscall(ev *baseEvent, evt *evTable, m Thread
 
 	// If we have a proc, then we're dissociating from it now. See the comment at the top of the case.
 	if curCtx.P != NoProc {
-		pState, ok := o.pStates[curCtx.P]
-		if !ok {
+		ps, pok := o.pStates[curCtx.P]
+		if !pok {
 			return curCtx, false, fmt.Errorf("found invalid proc %d during %s", curCtx.P, o.evName(ev.typ))
 		}
-		if pState.status != tracev2.ProcSyscall {
-			return curCtx, false, fmt.Errorf("proc %d in unexpected state %s during %s", curCtx.P, pState.status, o.evName(ev.typ))
+		if ps.status != tracev2.ProcSyscall {
+			return curCtx, false, fmt.Errorf("proc %d in unexpected state %s during %s", curCtx.P, &ps.status, o.evName(ev.typ))
 		}
 		// See the go122-create-syscall-reuse-thread-id test case for more details.
-		pState.status = tracev2.ProcSyscallAbandoned
+		ps.status = tracev2.ProcSyscallAbandoned
 		newCtx.P = NoProc
 
 		// Queue an extra self-ProcSteal event.
@@ -791,7 +807,7 @@ func (o *ordering) advanceGoDestroySyscall(ev *baseEvent, evt *evTable, m Thread
 	return newCtx, true, nil
 }
 
-func (o *ordering) advanceUserTaskBegin(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceUserTaskBegin(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	// Handle tasks. Tasks are interesting because:
 	// - There's no Begin event required to reference a task.
 	// - End for a particular task ID can appear multiple times.
@@ -817,8 +833,11 @@ func (o *ordering) advanceUserTaskBegin(ev *baseEvent, evt *evTable, m ThreadID,
 	// Validate the name and record it. We'll need to pass it through to
 	// EvUserTaskEnd.
 	nameID := stringID(ev.args[2])
-	name, ok := evt.bytes.get(nameID)
-	if !ok {
+	strs := evt.strings
+	var name []byte
+	var sok bool
+	name, sok = strs.get(nameID)
+	if !sok {
 		return curCtx, false, fmt.Errorf("invalid string ID %v for %v event", nameID, ev.typ)
 	}
 	o.activeTasks[id] = taskState{name: name, parentID: parentID}
@@ -829,7 +848,7 @@ func (o *ordering) advanceUserTaskBegin(ev *baseEvent, evt *evTable, m ThreadID,
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceUserTaskEnd(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceUserTaskEnd(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	id := TaskID(ev.args[0])
 	if ts, ok := o.activeTasks[id]; ok {
 		// Smuggle the task info. This may happen in a different generation,
@@ -850,42 +869,48 @@ func (o *ordering) advanceUserTaskEnd(ev *baseEvent, evt *evTable, m ThreadID, g
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceUserRegionBegin(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceUserRegionBegin(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	if err := validateCtx(curCtx, _userGoReqs()); err != nil {
 		return curCtx, false, err
 	}
 	tid := TaskID(ev.args[0])
 	nameID := stringID(ev.args[1])
-	name, ok := evt.bytes.get(nameID)
+	strs := evt.strings
+	var name []byte
+	var ok bool
+	name, ok = strs.get(nameID)
 	if !ok {
 		return curCtx, false, fmt.Errorf("invalid string ID %v for %v event", nameID, ev.typ)
 	}
-	gState, ok := o.gStates[curCtx.G]
+	gs, ok := o.gStates[curCtx.G]
 	if !ok {
 		return curCtx, false, fmt.Errorf("encountered EvUserRegionBegin without known state for current goroutine %d", curCtx.G)
 	}
-	if err := gState.beginRegion(userRegion{tid, name}); err != nil {
+	if err := gs.beginRegion(userRegion{tid, name}); err != nil {
 		return curCtx, false, err
 	}
 	o.queue.push(Event{table: evt, ctx: curCtx, base: *ev})
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceUserRegionEnd(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceUserRegionEnd(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	if err := validateCtx(curCtx, _userGoReqs()); err != nil {
 		return curCtx, false, err
 	}
 	tid := TaskID(ev.args[0])
 	nameID := stringID(ev.args[1])
-	name, ok := evt.bytes.get(nameID)
+	strs := evt.strings
+	var name []byte
+	var ok bool
+	name, ok = strs.get(nameID)
 	if !ok {
 		return curCtx, false, fmt.Errorf("invalid string ID %v for %v event", nameID, ev.typ)
 	}
-	gState, ok := o.gStates[curCtx.G]
+	gs, ok := o.gStates[curCtx.G]
 	if !ok {
 		return curCtx, false, fmt.Errorf("encountered EvUserRegionEnd without known state for current goroutine %d", curCtx.G)
 	}
-	if err := gState.endRegion(userRegion{tid, name}); err != nil {
+	if err := gs.endRegion(userRegion{tid, name}); err != nil {
 		return curCtx, false, err
 	}
 	o.queue.push(Event{table: evt, ctx: curCtx, base: *ev})
@@ -899,7 +924,7 @@ func (o *ordering) advanceUserRegionEnd(ev *baseEvent, evt *evTable, m ThreadID,
 // partial order edge between start and end here, otherwise we're
 // relying entirely on timestamps to make sure we don't advance a
 // GCEnd for a _different_ GC cycle if timestamps are wildly broken.
-func (o *ordering) advanceGCActive(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGCActive(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	seq := ev.args[0]
 	if gen == o.initialGen {
 		if o.gcState != gcUndetermined {
@@ -925,7 +950,7 @@ func (o *ordering) advanceGCActive(ev *baseEvent, evt *evTable, m ThreadID, gen 
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceGCBegin(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGCBegin(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	seq := ev.args[0]
 	if o.gcState == gcUndetermined {
 		o.gcSeq = seq
@@ -949,7 +974,7 @@ func (o *ordering) advanceGCBegin(ev *baseEvent, evt *evTable, m ThreadID, gen u
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceGCEnd(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGCEnd(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	seq := ev.args[0]
 	if seq != o.gcSeq+1 {
 		// This is not the right GC cycle.
@@ -970,7 +995,7 @@ func (o *ordering) advanceGCEnd(ev *baseEvent, evt *evTable, m ThreadID, gen uin
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceAnnotation(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceAnnotation(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	// Handle simple instantaneous events that require a G.
 	if err := validateCtx(curCtx, _userGoReqs()); err != nil {
 		return curCtx, false, err
@@ -979,7 +1004,7 @@ func (o *ordering) advanceAnnotation(ev *baseEvent, evt *evTable, m ThreadID, ge
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceHeapMetric(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceHeapMetric(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	// Handle allocation metrics, which don't require a G.
 	if err := validateCtx(curCtx, schedReqs{M: mustHave, P: mustHave, G: mayHave}); err != nil {
 		return curCtx, false, err
@@ -988,7 +1013,7 @@ func (o *ordering) advanceHeapMetric(ev *baseEvent, evt *evTable, m ThreadID, ge
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceGCSweepBegin(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGCSweepBegin(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	// Handle sweep, which is bound to a P and doesn't require a G.
 	if err := validateCtx(curCtx, schedReqs{M: mustHave, P: mustHave, G: mayHave}); err != nil {
 		return curCtx, false, err
@@ -1000,36 +1025,36 @@ func (o *ordering) advanceGCSweepBegin(ev *baseEvent, evt *evTable, m ThreadID, 
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceGCSweepActive(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGCSweepActive(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	pid := ProcID(ev.args[0])
 	// N.B. In practice Ps can't block while they're sweeping, so this can only
 	// ever reference curCtx.P. However, be lenient about this like we are with
 	// GCMarkAssistActive; there's no reason the runtime couldn't change to block
 	// in the middle of a sweep.
-	pState, ok := o.pStates[pid]
+	ps, ok := o.pStates[pid]
 	if !ok {
 		return curCtx, false, fmt.Errorf("encountered GCSweepActive for unknown proc %d", pid)
 	}
-	if err := pState.activeRange(makeRangeType(ev.typ, 0), gen == o.initialGen); err != nil {
+	if err := ps.activeRange(makeRangeType(ev.typ, 0), gen == o.initialGen); err != nil {
 		return curCtx, false, err
 	}
 	o.queue.push(Event{table: evt, ctx: curCtx, base: *ev})
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceGCSweepEnd(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGCSweepEnd(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	if err := validateCtx(curCtx, schedReqs{M: mustHave, P: mustHave, G: mayHave}); err != nil {
 		return curCtx, false, err
 	}
-	_, err := o.pStates[curCtx.P].endRange(ev.typ)
-	if err != nil {
-		return curCtx, false, err
+	_, derr := o.pStates[curCtx.P].endRange(ev.typ)
+	if derr != nil {
+		return curCtx, false, derr
 	}
 	o.queue.push(Event{table: evt, ctx: curCtx, base: *ev})
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceGoRangeBegin(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGoRangeBegin(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	// Handle special goroutine-bound event ranges.
 	if err := validateCtx(curCtx, _userGoReqs()); err != nil {
 		return curCtx, false, err
@@ -1038,44 +1063,44 @@ func (o *ordering) advanceGoRangeBegin(ev *baseEvent, evt *evTable, m ThreadID, 
 	if ev.typ == tracev2.EvSTWBegin {
 		desc = stringID(ev.args[0])
 	}
-	gState, ok := o.gStates[curCtx.G]
+	gs, ok := o.gStates[curCtx.G]
 	if !ok {
 		return curCtx, false, fmt.Errorf("encountered event of type %d without known state for current goroutine %d", ev.typ, curCtx.G)
 	}
-	if err := gState.beginRange(makeRangeType(ev.typ, desc)); err != nil {
+	if err := gs.beginRange(makeRangeType(ev.typ, desc)); err != nil {
 		return curCtx, false, err
 	}
 	o.queue.push(Event{table: evt, ctx: curCtx, base: *ev})
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceGoRangeActive(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGoRangeActive(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	gid := GoID(ev.args[0])
 	// N.B. Like GoStatus, this can happen at any time, because it can
 	// reference a non-running goroutine. Don't check anything about the
 	// current scheduler context.
-	gState, ok := o.gStates[gid]
+	gs, ok := o.gStates[gid]
 	if !ok {
 		return curCtx, false, fmt.Errorf("uninitialized goroutine %d found during %s", gid, o.evName(ev.typ))
 	}
-	if err := gState.activeRange(makeRangeType(ev.typ, 0), gen == o.initialGen); err != nil {
+	if err := gs.activeRange(makeRangeType(ev.typ, 0), gen == o.initialGen); err != nil {
 		return curCtx, false, err
 	}
 	o.queue.push(Event{table: evt, ctx: curCtx, base: *ev})
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceGoRangeEnd(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceGoRangeEnd(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	if err := validateCtx(curCtx, _userGoReqs()); err != nil {
 		return curCtx, false, err
 	}
-	gState, ok := o.gStates[curCtx.G]
+	gs, ok := o.gStates[curCtx.G]
 	if !ok {
 		return curCtx, false, fmt.Errorf("encountered event of type %d without known state for current goroutine %d", ev.typ, curCtx.G)
 	}
-	desc, err := gState.endRange(ev.typ)
-	if err != nil {
-		return curCtx, false, err
+	desc, derr := gs.endRange(ev.typ)
+	if derr != nil {
+		return curCtx, false, derr
 	}
 	if ev.typ == tracev2.EvSTWEnd {
 		// Smuggle the kind into the event.
@@ -1086,7 +1111,7 @@ func (o *ordering) advanceGoRangeEnd(ev *baseEvent, evt *evTable, m ThreadID, ge
 	return curCtx, true, nil
 }
 
-func (o *ordering) advanceAllocFree(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (schedCtx, bool, error) {
+func (o *ordering) advanceAllocFree(ev *baseEvent, evt *evTable, m ThreadID, gen uint64, curCtx schedCtx) (out schedCtx, adv bool, rerr error) {
 	// Handle simple instantaneous events that may or may not have a P.
 	if err := validateCtx(curCtx, schedReqs{M: mustHave, P: mayHave, G: mayHave}); err != nil {
 		return curCtx, false, err
@@ -1096,7 +1121,7 @@ func (o *ordering) advanceAllocFree(ev *baseEvent, evt *evTable, m ThreadID, gen
 }
 
 // Next returns the next event in the ordering.
-func (o *ordering) Next() (Event, bool) {
+func (o *ordering) Next() (out Event, okay bool) {
 	return o.queue.pop()
 }
 
@@ -1109,7 +1134,7 @@ type schedCtx struct {
 
 // validateCtx ensures that ctx conforms to some reqs, returning an error if
 // it doesn't.
-func validateCtx(ctx schedCtx, reqs schedReqs) error {
+func validateCtx(ctx schedCtx, reqs schedReqs) (rerr error) {
 	// Check thread requirements.
 	if reqs.M == mustHave && ctx.M == NoThread {
 		return fmt.Errorf("expected a thread but didn't have one")
@@ -1145,8 +1170,8 @@ const (
 )
 
 // String returns a human-readable string for the GC state.
-func (s gcState) String() string {
-	switch s {
+func (s *gcState) String() (out string) {
+	switch *s {
 	case gcUndetermined:
 		return "Undetermined"
 	case gcNotRunning:
@@ -1157,7 +1182,7 @@ func (s gcState) String() string {
 	return "Bad"
 }
 
-// userRegion represents a unique user region when attached to some gState.
+// userRegion represents a unique user region when attached to some gs.
 type userRegion struct {
 	// name must be a resolved string because the string ID for the same
 	// string may change across generations, but we care about checking
@@ -1177,7 +1202,7 @@ type rangeType struct {
 }
 
 // makeRangeType constructs a new rangeType.
-func makeRangeType(typ tracev2.EventType, desc stringID) rangeType {
+func makeRangeType(typ tracev2.EventType, desc stringID) (out rangeType) {
 	if styp := tracev2.Specs()[typ].StartEv; styp != tracev2.EvNone {
 		typ = styp
 	}
@@ -1198,19 +1223,19 @@ type gState struct {
 }
 
 // beginRegion starts a user region on the goroutine.
-func (s *gState) beginRegion(r userRegion) error {
+func (s *gState) beginRegion(r userRegion) (rerr error) {
 	s.regions = mxutil.Ensure(s.regions, 1)
 	s.regions = push(s.regions, r)
 	return nil
 }
 
 // endRegion ends a user region on the goroutine.
-func (s *gState) endRegion(r userRegion) error {
+func (s *gState) endRegion(r userRegion) (rerr error) {
 	if len(s.regions) == 0 {
 		// We do not know about regions that began before tracing started.
 		return nil
 	}
-	if next := s.regions[len(s.regions)-1]; next != r {
+	if next := s.regions[len(s.regions)-1]; next.taskID != r.taskID || !bytes.Equal(next.name, r.name) {
 		return fmt.Errorf("misuse of region in goroutine %v: region end %v when the inner-most active region start event is %v", s.id, r, next)
 	}
 	s.regions = s.regions[:len(s.regions)-1]
@@ -1242,7 +1267,7 @@ type rangeState struct {
 // beginRange begins a special range in time on the goroutine.
 //
 // Returns an error if the range is already in progress.
-func (s *rangeState) beginRange(typ rangeType) error {
+func (s *rangeState) beginRange(typ rangeType) (rerr error) {
 	if s.hasRange(typ) {
 		return fmt.Errorf("discovered event already in-flight for when starting event %v", tracev2.Specs()[typ.typ].Name)
 	}
@@ -1253,7 +1278,7 @@ func (s *rangeState) beginRange(typ rangeType) error {
 
 // activeRange marks special range in time on the goroutine as active in the
 // initial generation, or confirms that it is indeed active in later generations.
-func (s *rangeState) activeRange(typ rangeType, isInitialGen bool) error {
+func (s *rangeState) activeRange(typ rangeType, isInitialGen bool) (rerr error) {
 	if isInitialGen {
 		if s.hasRange(typ) {
 			return fmt.Errorf("found named active range already in first gen: %v", typ)
@@ -1267,14 +1292,14 @@ func (s *rangeState) activeRange(typ rangeType, isInitialGen bool) error {
 }
 
 // hasRange returns true if a special time range on the goroutine as in progress.
-func (s *rangeState) hasRange(typ rangeType) bool {
+func (s *rangeState) hasRange(typ rangeType) (okay bool) {
 	return slices.Contains(s.inFlight, typ)
 }
 
 // endRange ends a special range in time on the goroutine.
 //
 // This must line up with the start event type  of the range the goroutine is currently in.
-func (s *rangeState) endRange(typ tracev2.EventType) (stringID, error) {
+func (s *rangeState) endRange(typ tracev2.EventType) (desc stringID, rerr error) {
 	st := tracev2.Specs()[typ].StartEv
 	idx := -1
 	for i, r := range s.inFlight {
@@ -1300,35 +1325,35 @@ type seqCounter struct {
 }
 
 // makeSeq creates a new seqCounter.
-func makeSeq(gen, seq uint64) seqCounter {
+func makeSeq(gen, seq uint64) (out seqCounter) {
 	return seqCounter{gen: gen, seq: seq}
 }
 
 // succeeds returns true if a is the immediate successor of b.
-func (a seqCounter) succeeds(b seqCounter) bool {
+func (a *seqCounter) succeeds(b seqCounter) (okay bool) {
 	return a.gen == b.gen && a.seq == b.seq+1
 }
 
 // String returns a debug string representation of the seqCounter.
-func (c seqCounter) String() string {
+func (c *seqCounter) String() (out string) {
 	return fmt.Sprintf("%d (gen=%d)", c.seq, c.gen)
 }
 
-func dumpOrdering(order *ordering) []byte {
+func dumpOrdering(order *ordering) (out []byte) {
 	var sb bytes.Buffer
 	for id, state := range order.gStates {
-		fmt.Fprintf(&sb, "G %d [status=%s seq=%s]\n", id, state.status, state.seq)
+		fmt.Fprintf(&sb, "G %d [status=%s seq=%s]\n", id, &state.status, &state.seq)
 	}
 	fmt.Fprintln(&sb)
 	for id, state := range order.pStates {
-		fmt.Fprintf(&sb, "P %d [status=%s seq=%s]\n", id, state.status, state.seq)
+		fmt.Fprintf(&sb, "P %d [status=%s seq=%s]\n", id, &state.status, &state.seq)
 	}
 	fmt.Fprintln(&sb)
 	for id, state := range order.mStates {
 		fmt.Fprintf(&sb, "M %d [g=%d p=%d]\n", id, state.g, state.p)
 	}
 	fmt.Fprintln(&sb)
-	fmt.Fprintf(&sb, "GC %d %s\n", order.gcSeq, order.gcState)
+	fmt.Fprintf(&sb, "GC %d %s\n", order.gcSeq, &order.gcState)
 	return sb.String()
 }
 
@@ -1378,15 +1403,15 @@ func (q *queue[T]) grow() {
 
 // pop removes an event from the front of the queue. If the
 // queue is empty, it returns an EventBad event.
-func (q *queue[T]) pop() (T, bool) {
+func (q *queue[T]) pop() (out T, okay bool) {
 	if q.end-q.start == 0 {
 		var zero T
 		return zero, false
 	}
 	elem := &q.buf[q.start%len(q.buf)]
 	value := *elem
-	var zero T
-	*elem = zero // Clear the entry before returning, so we don't hold onto old tables.
+	var zero2 T
+	*elem = zero2 // Clear the entry before returning, so we don't hold onto old tables.
 	q.start++
 	return value, true
 }
@@ -1396,13 +1421,13 @@ func (q *queue[T]) pop() (T, bool) {
 // It's just a convenience function; it's always OK to construct
 // an Event manually if this isn't quite the right way to express
 // the contents of the event.
-func makeEvent(table *evTable, ctx schedCtx, typ tracev2.EventType, time Time, args ...uint64) Event {
+func makeEvent(table *evTable, ctx schedCtx, typ tracev2.EventType, ts Time, args ...uint64) (out Event) {
 	ev := Event{
 		table: table,
 		ctx:   ctx,
 		base: baseEvent{
 			typ:  typ,
-			time: time,
+			time: ts,
 		},
 	}
 	copy(ev.base.args[:], args)
@@ -1428,4 +1453,4 @@ const (
 
 // _userGoReqs is a common requirement among events that are running
 // or are close to running user code.
-func _userGoReqs() schedReqs { return schedReqs{M: mustHave, P: mustHave, G: mustHave} }
+func _userGoReqs() (out schedReqs) { return schedReqs{M: mustHave, P: mustHave, G: mustHave} }

@@ -15,13 +15,13 @@ import (
 	"bytes"
 )
 
-func ratTok(ch rune) bool {
+func ratTok(ch rune) (rok bool) {
 	return bytes.ContainsRune("+-/0123456789.eE", ch)
 }
 
 // Scan is a support routine for fmt.Scanner. It accepts the formats
 // 'e', 'E', 'f', 'F', 'g', 'G', and 'v'. All formats are equivalent.
-func (z *Rat) Scan(s fmt.ScanState, ch rune) error {
+func (z *Rat) Scan(s fmt.ScanState, ch rune) (rerr error) {
 	tok, err := s.Token(true, ratTok)
 	if err != nil {
 		return err
@@ -53,7 +53,7 @@ func (z *Rat) Scan(s fmt.ScanState, ch rune) error {
 // is too large, the operation may fail.
 // The entire string, not just a prefix, must be valid for success. If the
 // operation failed, the value of z is undefined but the returned value is nil.
-func (z *Rat) SetString(s []byte) (*Rat, bool) {
+func (z *Rat) SetString(s []byte) (rrat *Rat, rok bool) {
 	if len(s) == 0 {
 		return nil, false
 	}
@@ -66,7 +66,7 @@ func (z *Rat) SetString(s []byte) (*Rat, bool) {
 		}
 		br := bytes.NewReader(s[sep+1:])
 		var scanErr error
-		if z.b.abs, _, _, scanErr = z.b.abs.scan(br, 0, false); scanErr != nil {
+		if z.b.abs, _, _, scanErr = natScan(z.b.abs, br, 0, false); scanErr != nil {
 			return nil, false
 		}
 		// entire string must have been consumed
@@ -91,7 +91,7 @@ func (z *Rat) SetString(s []byte) (*Rat, bool) {
 	// mantissa
 	var base int32
 	var fcount int32 // fractional digit count; valid if <= 0
-	z.a.abs, base, fcount, err = z.a.abs.scan(r, 0, true)
+	z.a.abs, base, fcount, err = natScan(z.a.abs, r, 0, true)
 	if err != nil {
 		return nil, false
 	}
@@ -179,15 +179,15 @@ func (z *Rat) SetString(s []byte) (*Rat, bool) {
 		if n > 1e6 {
 			return nil, false // avoid excessively large exponents
 		}
-		pow5 := z.b.abs.expNN(stk, _natFive(), nat(nil).setWord(Word(n)), nil, false) // use underlying array of z.b.abs
+		pow5 := natExpNN(z.b.abs, stk, _natFive(), natSetWord([]Word(nil), Word(n)), nil, false) // use underlying array of z.b.abs
 		if exp5 > 0 {
-			z.a.abs = z.a.abs.mul(stk, z.a.abs, pow5)
-			z.b.abs = z.b.abs.setWord(1)
+			z.a.abs = natMul(z.a.abs, stk, z.a.abs, pow5)
+			z.b.abs = natSetWord(z.b.abs, 1)
 		} else {
 			z.b.abs = pow5
 		}
 	} else {
-		z.b.abs = z.b.abs.setWord(1)
+		z.b.abs = natSetWord(z.b.abs, 1)
 	}
 
 	// apply exp2 contributions
@@ -195,9 +195,9 @@ func (z *Rat) SetString(s []byte) (*Rat, bool) {
 		return nil, false // avoid excessively large exponents
 	}
 	if exp2 > 0 {
-		z.a.abs = z.a.abs.lsh(z.a.abs, uint32(exp2))
+		z.a.abs = natLsh(z.a.abs, z.a.abs, uint32(exp2))
 	} else if exp2 < 0 {
-		z.b.abs = z.b.abs.lsh(z.b.abs, uint32(-exp2))
+		z.b.abs = natLsh(z.b.abs, z.b.abs, uint32(-exp2))
 	}
 
 	z.a.neg = neg && len(z.a.abs) > 0 // 0 has no sign
@@ -221,9 +221,10 @@ func (z *Rat) SetString(s []byte) (*Rat, bool) {
 //	digit    = "0" ... "9" .
 //
 // A base 2 exponent is only permitted if base2ok is set.
-func scanExponent(r io.ByteScanner, base2ok, sepOk bool) (exp int64, base int32, err error) {
+func scanExponent(r io.ByteScanner, base2ok, sepOk bool) (rexp int64, base int32, err error) {
 	// one char look-ahead
-	ch, err := r.ReadByte()
+	var ch byte
+	ch, err = r.ReadByte()
 	if err != nil {
 		if err == io.EOF {
 			err = nil
@@ -291,7 +292,7 @@ func scanExponent(r io.ByteScanner, base2ok, sepOk bool) (exp int64, base int32,
 		err = errNoDigits
 	}
 	if err == nil {
-		exp, err = strconv.ParseInt([]byte(digs), 10, 64)
+		rexp, err = strconv.ParseInt([]byte(digs), 10, 64)
 	}
 	// other errors take precedence over invalid separators
 	if err == nil && (invalSep || prev == '_') {
@@ -302,14 +303,14 @@ func scanExponent(r io.ByteScanner, base2ok, sepOk bool) (exp int64, base int32,
 }
 
 // String returns a string representation of x in the form "a/b" (even if b == 1).
-func (x *Rat) String() string {
+func (x *Rat) String() (rs2 string) {
 	return string(x.marshal(nil))
 }
 
 // marshal implements [Rat.String] returning a slice of bytes.
 // It appends the string representation of x in the form "a/b" (even if b == 1) to buf,
 // and returns the extended buffer.
-func (x *Rat) marshal(buf []byte) []byte {
+func (x *Rat) marshal(buf []byte) (rb []byte) {
 	buf = x.a.Append(buf, 10)
 	buf = mxutil.Ensure(buf, 1)
 	buf = push(buf, '/')
@@ -324,7 +325,7 @@ func (x *Rat) marshal(buf []byte) []byte {
 
 // RatString returns a string representation of x in the form "a/b" if b != 1,
 // and in the form "a" if b == 1.
-func (x *Rat) RatString() []byte {
+func (x *Rat) RatString() (rb []byte) {
 	if x.IsInt() {
 		return x.a.String()
 	}
@@ -334,7 +335,7 @@ func (x *Rat) RatString() []byte {
 // FloatString returns a string representation of x in decimal form with prec
 // digits of precision after the radix point. The last digit is rounded to
 // nearest, with halves rounded away from zero.
-func (x *Rat) FloatString(prec int32) []byte {
+func (x *Rat) FloatString(prec int32) (rb []byte) {
 	var buf []byte
 
 	if x.IsInt() {
@@ -353,23 +354,23 @@ func (x *Rat) FloatString(prec int32) []byte {
 
 	stk := getStack()
 	defer stk.free()
-	q, r := nat(nil).div(stk, nat(nil), x.a.abs, x.b.abs)
+	q, r := natDiv([]Word(nil), stk, []Word(nil), x.a.abs, x.b.abs)
 
 	p := _natOne()
 	if prec > 0 {
-		p = nat(nil).expNN(stk, _natTen(), nat(nil).setUint64(uint64(prec)), nil, false)
+		p = natExpNN([]Word(nil), stk, _natTen(), natSetUint64([]Word(nil), uint64(prec)), nil, false)
 	}
 
-	r = r.mul(stk, r, p)
-	r, r2 := r.div(stk, nat(nil), r, x.b.abs)
+	r = natMul(r, stk, r, p)
+	r, r2 := natDiv(r, stk, []Word(nil), r, x.b.abs)
 
 	// see if we need to round up
-	r2 = r2.add(r2, r2)
-	if x.b.abs.cmp(r2) <= 0 {
-		r = r.add(r, _natOne())
-		if r.cmp(p) >= 0 {
-			q = nat(nil).add(q, _natOne())
-			r = nat(nil).sub(r, p)
+	r2 = natAdd(r2, r2, r2)
+	if natCmp(x.b.abs, r2) <= 0 {
+		r = natAdd(r, r, _natOne())
+		if natCmp(r, p) >= 0 {
+			q = natAdd([]Word(nil), q, _natOne())
+			r = natSub([]Word(nil), r, p)
 		}
 	}
 
@@ -378,12 +379,12 @@ func (x *Rat) FloatString(prec int32) []byte {
 		buf = push(buf, '-')
 	}
 	buf = mxutil.Ensure(buf, 1)
-	buf = push(buf, q.utoa(10)...) // itoa ignores sign if q == 0
+	buf = push(buf, natUtoa(q, 10)...) // itoa ignores sign if q == 0
 
 	if prec > 0 {
 		buf = mxutil.Ensure(buf, 1)
 		buf = push(buf, '.')
-		rs := r.utoa(10)
+		rs := natUtoa(r, 10)
 		for i := prec - len(rs); i > 0; i-- {
 			buf = mxutil.Ensure(buf, 1)
 			buf = push(buf, '0')
@@ -429,9 +430,9 @@ func (x *Rat) FloatPrec() (n int32, exact bool) {
 	// Determine p2 by counting factors of 2.
 	// p2 corresponds to the trailing zero bits in d.
 	// Do this first to reduce q as much as possible.
-	var q nat
-	p2 := d.trailingZeroBits()
-	q = q.rsh(d, p2)
+	var q []Word
+	p2 := natTrailingZeroBits(d)
+	q = natRsh(q, d, p2)
 
 	// Determine p5 by counting factors of 5.
 	// Build a table starting with an initial power of 5,
@@ -439,16 +440,16 @@ func (x *Rat) FloatPrec() (n int32, exact bool) {
 	// divide q anymore. Then use the table to determine
 	// the power of 5 in q.
 	const fp = 13        // f == 5^fp
-	var tab []nat        // tab[i] == (5^fp)^(2^i) == 5^(fp·2^i)
-	f := nat{1220703125} // == 5^fp (must fit into a uint32 Word)
-	var t, r nat         // temporaries
+	var tab [][]Word        // tab[i] == (5^fp)^(2^i) == 5^(fp·2^i)
+	f := []Word{1220703125} // == 5^fp (must fit into a uint32 Word)
+	var t, r []Word         // temporaries
 	for {
-		if _, r = t.div(stk, r, q, f); len(r) != 0 {
+		if _, r = natDiv(t, stk, r, q, f); len(r) != 0 {
 			break // f doesn't divide q evenly
 		}
 		tab = mxutil.Ensure(tab, 1)
 		tab = push(tab, f)
-		f = nat(nil).sqr(stk, f) // nat(nil) to ensure a new f for each table entry
+		f = natSqr([]Word(nil), stk, f) // nat(nil) to ensure a new f for each table entry
 	}
 
 	// Factor q using the table entries, if any.
@@ -460,20 +461,20 @@ func (x *Rat) FloatPrec() (n int32, exact bool) {
 	// The same reasoning applies to the subsequent factors.
 	var p5 uint32
 	for i := len(tab) - 1; i >= 0; i-- {
-		if t, r = t.div(stk, r, q, tab[i]); len(r) == 0 {
+		if t, r = natDiv(t, stk, r, q, tab[i]); len(r) == 0 {
 			p5 += fp * (1 << i) // tab[i] == 5^(fp·2^i)
-			q = q.set(t)
+			q = natSet(q, t)
 		}
 	}
 
 	// If fp != 1, we may still have multiples of 5 left.
 	for {
-		if t, r = t.div(stk, r, q, _natFive()); len(r) != 0 {
+		if t, r = natDiv(t, stk, r, q, _natFive()); len(r) != 0 {
 			break
 		}
 		p5++
-		q = q.set(t)
+		q = natSet(q, t)
 	}
 
-	return int32(max(p2, p5)), q.cmp(_natOne()) == 0
+	return int32(max(p2, p5)), natCmp(q, _natOne()) == 0
 }

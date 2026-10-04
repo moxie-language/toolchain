@@ -28,9 +28,14 @@ import (
 	"crypto/internal/fips140hash"
 	"crypto/internal/fips140only"
 	"crypto/internal/randutil"
+	"crypto/md5"
+	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/sha3"
 	"crypto/sha512"
 	"crypto/subtle"
 	"errors"
+	stdhash "hash"
 	"io"
 	"math/big"
 	"unsafe"
@@ -63,7 +68,7 @@ type PublicKey struct {
 // ECDH returns k as a [ecdh.PublicKey]. It returns an error if the key is
 // invalid according to the definition of [ecdh.Curve.NewPublicKey], or if the
 // Curve is not supported by crypto/ecdh.
-func (k *PublicKey) ECDH() (*ecdh.PublicKey, error) {
+func (k *PublicKey) ECDH() (out *ecdh.PublicKey, derr error) {
 	c := curveToECDH(k.Curve)
 	if c == nil {
 		return nil, errors.New("ecdsa: unsupported curve by crypto/ecdh")
@@ -79,7 +84,7 @@ func (k *PublicKey) ECDH() (*ecdh.PublicKey, error) {
 // Two keys are only considered to have the same value if they have the same Curve value.
 // Note that for example [elliptic.P256] and elliptic.P256().Params() are different
 // values, as the latter is a generic not constant time implementation.
-func (pub *PublicKey) Equal(x crypto.PublicKey) bool {
+func (pub *PublicKey) Equal(x crypto.PublicKey) (okay bool) {
 	xx, ok := x.(*PublicKey)
 	if !ok {
 		return false
@@ -106,7 +111,7 @@ func (pub *PublicKey) Equal(x crypto.PublicKey) bool {
 //
 // Note that public keys are more commonly encoded in DER (or PEM) format, which
 // can be parsed with [crypto/x509.ParsePKIXPublicKey] (and [encoding/pem]).
-func ParseUncompressedPublicKey(curve elliptic.Curve, data []byte) (*PublicKey, error) {
+func ParseUncompressedPublicKey(curve elliptic.Curve, data []byte) (out *PublicKey, derr error) {
 	if len(data) < 1 || data[0] != 4 {
 		return nil, errors.New("ecdsa: invalid uncompressed public key")
 	}
@@ -124,7 +129,7 @@ func ParseUncompressedPublicKey(curve elliptic.Curve, data []byte) (*PublicKey, 
 	}
 }
 
-func parseUncompressedPublicKey[P ecdsa.Point[P]](c *ecdsa.Curve[P], curve elliptic.Curve, data []byte) (*PublicKey, error) {
+func parseUncompressedPublicKey[P ecdsa.Point[P]](c *ecdsa.Curve[P], curve elliptic.Curve, data []byte) (out *PublicKey, derr error) {
 	k, err := ecdsa.NewPublicKey(c, data)
 	if err != nil {
 		return nil, err
@@ -143,7 +148,7 @@ func parseUncompressedPublicKey[P ecdsa.Point[P]](c *ecdsa.Curve[P], curve ellip
 //
 // Note that public keys are more commonly encoded in DER (or PEM) format, which
 // can be generated with [crypto/x509.MarshalPKIXPublicKey] (and [encoding/pem]).
-func (pub *PublicKey) Bytes() ([]byte, error) {
+func (pub *PublicKey) Bytes() (b []byte, derr error) {
 	switch pub.Curve {
 	case elliptic.P224():
 		return publicKeyBytes(ecdsa.P224(), pub)
@@ -158,7 +163,7 @@ func (pub *PublicKey) Bytes() ([]byte, error) {
 	}
 }
 
-func publicKeyBytes[P ecdsa.Point[P]](c *ecdsa.Curve[P], pub *PublicKey) ([]byte, error) {
+func publicKeyBytes[P ecdsa.Point[P]](c *ecdsa.Curve[P], pub *PublicKey) (b []byte, derr error) {
 	k, err := publicKeyToFIPS(c, pub)
 	if err != nil {
 		return nil, err
@@ -186,7 +191,7 @@ type PrivateKey struct {
 // ECDH returns k as a [ecdh.PrivateKey]. It returns an error if the key is
 // invalid according to the definition of [ecdh.Curve.NewPrivateKey], or if the
 // Curve is not supported by [crypto/ecdh].
-func (k *PrivateKey) ECDH() (*ecdh.PrivateKey, error) {
+func (k *PrivateKey) ECDH() (out *ecdh.PrivateKey, derr error) {
 	c := curveToECDH(k.Curve)
 	if c == nil {
 		return nil, errors.New("ecdsa: unsupported curve by crypto/ecdh")
@@ -198,7 +203,7 @@ func (k *PrivateKey) ECDH() (*ecdh.PrivateKey, error) {
 	return c.NewPrivateKey(k.D.FillBytes([]byte{:size}))
 }
 
-func curveToECDH(c elliptic.Curve) ecdh.Curve {
+func curveToECDH(c elliptic.Curve) (out ecdh.Curve) {
 	switch c {
 	case elliptic.P256():
 		return ecdh.P256()
@@ -212,14 +217,14 @@ func curveToECDH(c elliptic.Curve) ecdh.Curve {
 }
 
 // Public returns the public key corresponding to priv.
-func (priv *PrivateKey) Public() crypto.PublicKey {
+func (priv *PrivateKey) Public() (out crypto.PublicKey) {
 	return &priv.PublicKey
 }
 
 // Equal reports whether priv and x have the same value.
 //
 // See [PublicKey.Equal] for details on how Curve is compared.
-func (priv *PrivateKey) Equal(x crypto.PrivateKey) bool {
+func (priv *PrivateKey) Equal(x crypto.PrivateKey) (okay bool) {
 	xx, ok := x.(*PrivateKey)
 	if !ok {
 		return false
@@ -229,7 +234,7 @@ func (priv *PrivateKey) Equal(x crypto.PrivateKey) bool {
 
 // bigIntEqual reports whether a and b are equal leaking only their bit length
 // through timing side-channels.
-func bigIntEqual(a, b *big.Int) bool {
+func bigIntEqual(a, b *big.Int) (ok bool) {
 	return subtle.ConstantTimeCompare(a.Bytes(), b.Bytes()) == 1
 }
 
@@ -247,7 +252,7 @@ func bigIntEqual(a, b *big.Int) bool {
 // Note that private keys are more commonly encoded in ASN.1 or PKCS#8 format,
 // which can be parsed with [crypto/x509.ParseECPrivateKey] or
 // [crypto/x509.ParsePKCS8PrivateKey] (and [encoding/pem]).
-func ParseRawPrivateKey(curve elliptic.Curve, data []byte) (*PrivateKey, error) {
+func ParseRawPrivateKey(curve elliptic.Curve, data []byte) (out *PrivateKey, derr error) {
 	switch curve {
 	case elliptic.P224():
 		return parseRawPrivateKey(ecdsa.P224(), nistec.NewP224Point, curve, data)
@@ -262,7 +267,7 @@ func ParseRawPrivateKey(curve elliptic.Curve, data []byte) (*PrivateKey, error) 
 	}
 }
 
-func parseRawPrivateKey[P ecdsa.Point[P]](c *ecdsa.Curve[P], newPoint func() P, curve elliptic.Curve, data []byte) (*PrivateKey, error) {
+func parseRawPrivateKey[P ecdsa.Point[P]](c *ecdsa.Curve[P], newPoint func() P, curve elliptic.Curve, data []byte) (out *PrivateKey, derr error) {
 	q, err := newPoint().ScalarBaseMult(data)
 	if err != nil {
 		return nil, err
@@ -286,7 +291,7 @@ func parseRawPrivateKey[P ecdsa.Point[P]](c *ecdsa.Curve[P], newPoint func() P, 
 // Note that private keys are more commonly encoded in ASN.1 or PKCS#8 format,
 // which can be generated with [crypto/x509.MarshalECPrivateKey] or
 // [crypto/x509.MarshalPKCS8PrivateKey] (and [encoding/pem]).
-func (priv *PrivateKey) Bytes() ([]byte, error) {
+func (priv *PrivateKey) Bytes() (b []byte, derr error) {
 	switch priv.Curve {
 	case elliptic.P224():
 		return privateKeyBytes(ecdsa.P224(), priv)
@@ -301,7 +306,7 @@ func (priv *PrivateKey) Bytes() ([]byte, error) {
 	}
 }
 
-func privateKeyBytes[P ecdsa.Point[P]](c *ecdsa.Curve[P], priv *PrivateKey) ([]byte, error) {
+func privateKeyBytes[P ecdsa.Point[P]](c *ecdsa.Curve[P], priv *PrivateKey) (b []byte, derr error) {
 	k, err := privateKeyToFIPS(c, priv)
 	if err != nil {
 		return nil, err
@@ -323,7 +328,7 @@ func privateKeyBytes[P ecdsa.Point[P]](c *ecdsa.Curve[P], priv *PrivateKey) ([]b
 // 6979. When producing a deterministic signature, opts.HashFunc() must be the
 // function used to produce digest and priv.Curve must be one of
 // [elliptic.P224], [elliptic.P256], [elliptic.P384], or [elliptic.P521].
-func (priv *PrivateKey) Sign(rnd io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+func (priv *PrivateKey) Sign(rnd io.Reader, digest []byte, opts crypto.SignerOpts) (b []byte, derr error) {
 	if rnd == nil {
 		return signRFC6979(priv, digest, opts)
 	}
@@ -335,7 +340,7 @@ func (priv *PrivateKey) Sign(rnd io.Reader, digest []byte, opts crypto.SignerOpt
 // Most applications should use [crypto/rand.Reader] as rand. Note that the
 // returned key does not depend deterministically on the bytes read from rand,
 // and may change between calls and/or between versions.
-func GenerateKey(c elliptic.Curve, rnd io.Reader) (*PrivateKey, error) {
+func GenerateKey(c elliptic.Curve, rnd io.Reader) (out *PrivateKey, derr error) {
 	randutil.MaybeReadByte(rnd)
 
 	if boring.Enabled && rnd == boring.RandReader {
@@ -361,7 +366,7 @@ func GenerateKey(c elliptic.Curve, rnd io.Reader) (*PrivateKey, error) {
 	}
 }
 
-func generateFIPS[P ecdsa.Point[P]](curve elliptic.Curve, c *ecdsa.Curve[P], rnd io.Reader) (*PrivateKey, error) {
+func generateFIPS[P ecdsa.Point[P]](curve elliptic.Curve, c *ecdsa.Curve[P], rnd io.Reader) (out *PrivateKey, derr error) {
 	if fips140only.Enabled && !fips140only.ApprovedRandomReader(rnd) {
 		return nil, errors.New("crypto/ecdsa: only crypto/rand.Reader is allowed in FIPS 140-only mode")
 	}
@@ -374,7 +379,7 @@ func generateFIPS[P ecdsa.Point[P]](curve elliptic.Curve, c *ecdsa.Curve[P], rnd
 
 // errNoAsm is returned by signAsm and verifyAsm when the assembly
 // implementation is not available.
-const errNoAsm = errors.Const("no assembly implementation available")
+var errNoAsm error
 
 // SignASN1 signs a hash (which should be the result of hashing a larger message)
 // using the private key, priv. If the hash is longer than the bit-length of the
@@ -384,7 +389,7 @@ const errNoAsm = errors.Const("no assembly implementation available")
 // The signature is randomized. Most applications should use [crypto/rand.Reader]
 // as rand. Note that the returned signature does not depend deterministically on
 // the bytes read from rand, and may change between calls and/or between versions.
-func SignASN1(rnd io.Reader, priv *PrivateKey, hash []byte) ([]byte, error) {
+func SignASN1(rnd io.Reader, priv *PrivateKey, hash []byte) (buf []byte, derr error) {
 	randutil.MaybeReadByte(rnd)
 
 	if boring.Enabled && rnd == boring.RandReader {
@@ -410,7 +415,7 @@ func SignASN1(rnd io.Reader, priv *PrivateKey, hash []byte) ([]byte, error) {
 	}
 }
 
-func signFIPS[P ecdsa.Point[P]](c *ecdsa.Curve[P], priv *PrivateKey, rnd io.Reader, hash []byte) ([]byte, error) {
+func signFIPS[P ecdsa.Point[P]](c *ecdsa.Curve[P], priv *PrivateKey, rnd io.Reader, hash []byte) (b []byte, derr error) {
 	if fips140only.Enabled && !fips140only.ApprovedRandomReader(rnd) {
 		return nil, errors.New("crypto/ecdsa: only crypto/rand.Reader is allowed in FIPS 140-only mode")
 	}
@@ -428,12 +433,12 @@ func signFIPS[P ecdsa.Point[P]](c *ecdsa.Curve[P], priv *PrivateKey, rnd io.Read
 	return encodeSignature(sig.R, sig.S)
 }
 
-func signRFC6979(priv *PrivateKey, hash []byte, opts crypto.SignerOpts) ([]byte, error) {
+func signRFC6979(priv *PrivateKey, hash []byte, opts crypto.SignerOpts) (b []byte, derr error) {
 	if opts == nil {
 		return nil, errors.New("ecdsa: Sign called with nil opts")
 	}
 	h := opts.HashFunc()
-	if h.Size() != len(hash) {
+	if crypto.HashSize(h) != len(hash) {
 		return nil, errors.New("ecdsa: hash length does not match hash function")
 	}
 	switch priv.Curve.Params() {
@@ -450,28 +455,90 @@ func signRFC6979(priv *PrivateKey, hash []byte, opts crypto.SignerOpts) ([]byte,
 	}
 }
 
-func signFIPSDeterministic[P ecdsa.Point[P]](c *ecdsa.Curve[P], hashFunc crypto.Hash, priv *PrivateKey, hash []byte) ([]byte, error) {
+func signFIPSDeterministic[P ecdsa.Point[P]](c *ecdsa.Curve[P], hashFunc crypto.Hash, priv *PrivateKey, hash []byte) (b []byte, derr error) {
 	k, err := privateKeyToFIPS(c, priv)
 	if err != nil {
 		return nil, err
 	}
-	if fips140only.Enabled && !fips140only.ApprovedHash(fips140hash.Unwrap(hashFunc.New())) {
+	hf, herr := hashConstructor(hashFunc)
+	if herr != nil {
+		return nil, herr
+	}
+	if fips140only.Enabled && !fips140only.ApprovedHash(fips140hash.Unwrap(hf())) {
 		return nil, errors.New("crypto/ecdsa: use of hash functions other than SHA-2 or SHA-3 is not allowed in FIPS 140-only mode")
 	}
-	sig, err := ecdsa.SignDeterministic(c, hashFunc.New, k, hash)
+	sig, err := ecdsa.SignDeterministic(c, hf, k, hash)
 	if err != nil {
 		return nil, err
 	}
 	return encodeSignature(sig.R, sig.S)
 }
 
-func encodeSignature(r, s []byte) ([]byte, error) {
+// hashConstructor returns a fresh-hash constructor for h. A crypto.Hash value
+// is a runtime value, so it cannot be bound into a func() hash.Hash without a
+// capture; each supported hash is dispatched to its own static constructor.
+func hashConstructor(h crypto.Hash) (f func() stdhash.Hash, derr error) {
+	switch h {
+	case crypto.MD5:
+		return md5.New, nil
+	case crypto.SHA1:
+		return sha1.New, nil
+	case crypto.SHA224:
+		return sha256.New224, nil
+	case crypto.SHA256:
+		return sha256.New, nil
+	case crypto.SHA384:
+		return sha512.New384, nil
+	case crypto.SHA512:
+		return sha512.New, nil
+	case crypto.SHA512_224:
+		return sha512.New512_224, nil
+	case crypto.SHA512_256:
+		return sha512.New512_256, nil
+	case crypto.SHA3_224:
+		return func() stdhash.Hash { return sha3.New224() }, nil
+	case crypto.SHA3_256:
+		return func() stdhash.Hash { return sha3.New256() }, nil
+	case crypto.SHA3_384:
+		return func() stdhash.Hash { return sha3.New384() }, nil
+	case crypto.SHA3_512:
+		return func() stdhash.Hash { return sha3.New512() }, nil
+	}
+	return nil, errors.New("crypto/ecdsa: unsupported hash function")
+}
+
+func encodeSignature(r, s []byte) (b []byte, derr error) {
+	var inner cryptobyte.Builder
+	addASN1IntBytes(&inner, r)
+	addASN1IntBytes(&inner, s)
+	innerBytes, ierr := inner.Bytes()
+	if ierr != nil {
+		return nil, ierr
+	}
 	var bld cryptobyte.Builder
-	bld.AddASN1(asn1.SEQUENCE, func(inner *cryptobyte.Builder) {
-		addASN1IntBytes(inner, r)
-		addASN1IntBytes(inner, s)
-	})
+	addASN1TagLen(&bld, uint8(asn1.SEQUENCE), int32(len(innerBytes)))
+	bld.AddBytes(innerBytes)
 	return bld.Bytes()
+}
+
+// addASN1TagLen writes an ASN.1 tag byte followed by a DER definite-length
+// prefix. It reproduces the tag+length framing AddASN1 emits, without a
+// continuation closure (closures cannot capture).
+func addASN1TagLen(b *cryptobyte.Builder, tag uint8, n int32) {
+	b.AddUint8(tag)
+	if n < 0x80 {
+		b.AddUint8(uint8(n))
+		return
+	}
+	var tmp [4]byte
+	i := int32(4)
+	for n > 0 {
+		i--
+		tmp[i] = byte(n)
+		n >>= 8
+	}
+	b.AddUint8(0x80 | uint8(4-i))
+	b.AddBytes(tmp[i:4])
 }
 
 // addASN1IntBytes encodes in ASN.1 a positive integer represented as
@@ -484,12 +551,14 @@ func addASN1IntBytes(b *cryptobyte.Builder, bytes []byte) {
 		b.SetError(errors.New("invalid integer"))
 		return
 	}
-	b.AddASN1(asn1.INTEGER, func(c *cryptobyte.Builder) {
-		if bytes[0]&0x80 != 0 {
-			c.AddUint8(0)
-		}
-		c.AddBytes(bytes)
-	})
+	n := int32(len(bytes))
+	if bytes[0]&0x80 != 0 {
+		addASN1TagLen(b, uint8(asn1.INTEGER), n+1)
+		b.AddUint8(0)
+	} else {
+		addASN1TagLen(b, uint8(asn1.INTEGER), n)
+	}
+	b.AddBytes(bytes)
 }
 
 // VerifyASN1 verifies the ASN.1 encoded signature, sig, of hash using the
@@ -497,7 +566,7 @@ func addASN1IntBytes(b *cryptobyte.Builder, bytes []byte) {
 //
 // The inputs are not considered confidential, and may leak through timing side
 // channels, or if an attacker has control of part of the inputs.
-func VerifyASN1(pub *PublicKey, hash, sig []byte) bool {
+func VerifyASN1(pub *PublicKey, hash, sig []byte) (ok bool) {
 	if boring.Enabled {
 		key, err := boringPublicKey(pub)
 		if err != nil {
@@ -521,7 +590,7 @@ func VerifyASN1(pub *PublicKey, hash, sig []byte) bool {
 	}
 }
 
-func verifyFIPS[P ecdsa.Point[P]](c *ecdsa.Curve[P], pub *PublicKey, hash, sig []byte) bool {
+func verifyFIPS[P ecdsa.Point[P]](c *ecdsa.Curve[P], pub *PublicKey, hash, sig []byte) (ok bool) {
 	r, s, err := parseSignature(sig)
 	if err != nil {
 		return false
@@ -549,7 +618,7 @@ func parseSignature(sig []byte) (r, s []byte, err error) {
 	return r, s, nil
 }
 
-func publicKeyFromFIPS(curve elliptic.Curve, pub *ecdsa.PublicKey) (*PublicKey, error) {
+func publicKeyFromFIPS(curve elliptic.Curve, pub *ecdsa.PublicKey) (out *PublicKey, derr error) {
 	x, y, err := pointToAffine(curve, pub.Bytes())
 	if err != nil {
 		return nil, err
@@ -557,7 +626,7 @@ func publicKeyFromFIPS(curve elliptic.Curve, pub *ecdsa.PublicKey) (*PublicKey, 
 	return &PublicKey{Curve: curve, X: x, Y: y}, nil
 }
 
-func privateKeyFromFIPS(curve elliptic.Curve, priv *ecdsa.PrivateKey) (*PrivateKey, error) {
+func privateKeyFromFIPS(curve elliptic.Curve, priv *ecdsa.PrivateKey) (out *PrivateKey, derr error) {
 	pub, err := publicKeyFromFIPS(curve, priv.PublicKey())
 	if err != nil {
 		return nil, err
@@ -565,7 +634,7 @@ func privateKeyFromFIPS(curve elliptic.Curve, priv *ecdsa.PrivateKey) (*PrivateK
 	return &PrivateKey{PublicKey: *pub, D: (&big.Int{}).SetBytes(priv.Bytes())}, nil
 }
 
-func publicKeyToFIPS[P ecdsa.Point[P]](c *ecdsa.Curve[P], pub *PublicKey) (*ecdsa.PublicKey, error) {
+func publicKeyToFIPS[P ecdsa.Point[P]](c *ecdsa.Curve[P], pub *PublicKey) (out *ecdsa.PublicKey, derr error) {
 	Q, err := pointFromAffine(pub.Curve, pub.X, pub.Y)
 	if err != nil {
 		return nil, err
@@ -573,7 +642,7 @@ func publicKeyToFIPS[P ecdsa.Point[P]](c *ecdsa.Curve[P], pub *PublicKey) (*ecds
 	return ecdsa.NewPublicKey(c, Q)
 }
 
-func privateKeyToFIPS[P ecdsa.Point[P]](c *ecdsa.Curve[P], priv *PrivateKey) (*ecdsa.PrivateKey, error) {
+func privateKeyToFIPS[P ecdsa.Point[P]](c *ecdsa.Curve[P], priv *PrivateKey) (out *ecdsa.PrivateKey, derr error) {
 	Q, err := pointFromAffine(priv.Curve, priv.X, priv.Y)
 	if err != nil {
 		return nil, err
@@ -581,7 +650,7 @@ func privateKeyToFIPS[P ecdsa.Point[P]](c *ecdsa.Curve[P], priv *PrivateKey) (*e
 	return ecdsa.NewPrivateKey(c, priv.D.Bytes(), Q)
 }
 
-func leftPadBytesEqual(a, b []byte) bool {
+func leftPadBytesEqual(a, b []byte) (ok bool) {
 	if len(a) < len(b) {
 		a, b = b, a
 	}
@@ -597,7 +666,7 @@ func leftPadBytesEqual(a, b []byte) bool {
 }
 
 // pointFromAffine is used to convert the PublicKey to a nistec SetBytes input.
-func pointFromAffine(curve elliptic.Curve, x, y *big.Int) ([]byte, error) {
+func pointFromAffine(curve elliptic.Curve, x, y *big.Int) (b []byte, derr error) {
 	bitSize := curve.Params().BitSize
 	// Reject values that would not get correctly encoded.
 	if x.Sign() < 0 || y.Sign() < 0 {
@@ -625,4 +694,9 @@ func pointToAffine(curve elliptic.Curve, p []byte) (x, y *big.Int, err error) {
 	x = (&big.Int{}).SetBytes(p[1 : 1+byteLen])
 	y = (&big.Int{}).SetBytes(p[1+byteLen:])
 	return x, y, nil
+}
+
+func init() {
+	errNoAsm = errors.New("no assembly implementation available")
+	errZeroParam = errors.New("zero parameter")
 }

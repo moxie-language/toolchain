@@ -29,7 +29,7 @@ import (
 	"unsafe"
 )
 
-const errBufferTooSmall = errors.Const("buffer too small")
+var errBufferTooSmall error
 
 // A ByteOrder specifies how to convert byte slices into
 // 16-, 32-, or 64-bit unsigned integers.
@@ -56,29 +56,41 @@ type AppendByteOrder interface {
 	String() string
 }
 
+// Singletons keep two calls to LittleEndian/BigEndian compare-equal, since
+// callers compare ByteOrder values with ==.
+var littleEndianInst *littleEndian
+var bigEndianInst *bigEndian
+
+func init() {
+	littleEndianInst = &littleEndian{}
+	bigEndianInst = &bigEndian{}
+	errBufferTooSmall = errors.New("buffer too small")
+	errOverflow = errors.New("binary: varint overflows a 64-bit integer")
+}
+
 // LittleEndian returns the little-endian implementation of [ByteOrder] and [AppendByteOrder].
-func LittleEndian() littleEndian { return littleEndian{} }
+func LittleEndian() (le *littleEndian) { return littleEndianInst }
 
 // BigEndian returns the big-endian implementation of [ByteOrder] and [AppendByteOrder].
-func BigEndian() bigEndian { return bigEndian{} }
+func BigEndian() (be *bigEndian) { return bigEndianInst }
 
 type littleEndian struct{}
 
 // Uint16 returns the uint16 representation of b[0:2].
-func (littleEndian) Uint16(b []byte) uint16 {
+func (l *littleEndian) Uint16(b []byte) (out uint16) {
 	_ = b[1] // bounds check hint to compiler; see golang.org/issue/14808
 	return uint16(b[0]) | uint16(b[1])<<8
 }
 
 // PutUint16 stores v into b[0:2].
-func (littleEndian) PutUint16(b []byte, v uint16) {
+func (l *littleEndian) PutUint16(b []byte, v uint16) {
 	_ = b[1] // early bounds check to guarantee safety of writes below
 	b[0] = byte(v)
 	b[1] = byte(v >> 8)
 }
 
 // AppendUint16 appends the bytes of v to b and returns the appended slice.
-func (littleEndian) AppendUint16(b []byte, v uint16) []byte {
+func (l *littleEndian) AppendUint16(b []byte, v uint16) (out []byte) {
 	return push(b,
 		byte(v),
 		byte(v>>8),
@@ -86,13 +98,13 @@ func (littleEndian) AppendUint16(b []byte, v uint16) []byte {
 }
 
 // Uint32 returns the uint32 representation of b[0:4].
-func (littleEndian) Uint32(b []byte) uint32 {
+func (l *littleEndian) Uint32(b []byte) (out uint32) {
 	_ = b[3] // bounds check hint to compiler; see golang.org/issue/14808
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
 }
 
 // PutUint32 stores v into b[0:4].
-func (littleEndian) PutUint32(b []byte, v uint32) {
+func (l *littleEndian) PutUint32(b []byte, v uint32) {
 	_ = b[3] // early bounds check to guarantee safety of writes below
 	b[0] = byte(v)
 	b[1] = byte(v >> 8)
@@ -101,7 +113,7 @@ func (littleEndian) PutUint32(b []byte, v uint32) {
 }
 
 // AppendUint32 appends the bytes of v to b and returns the appended slice.
-func (littleEndian) AppendUint32(b []byte, v uint32) []byte {
+func (l *littleEndian) AppendUint32(b []byte, v uint32) (out []byte) {
 	return push(b,
 		byte(v),
 		byte(v>>8),
@@ -111,14 +123,14 @@ func (littleEndian) AppendUint32(b []byte, v uint32) []byte {
 }
 
 // Uint64 returns the uint64 representation of b[0:8].
-func (littleEndian) Uint64(b []byte) uint64 {
+func (l *littleEndian) Uint64(b []byte) (out uint64) {
 	_ = b[7] // bounds check hint to compiler; see golang.org/issue/14808
 	return uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
 		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
 }
 
 // PutUint64 stores v into b[0:8].
-func (littleEndian) PutUint64(b []byte, v uint64) {
+func (l *littleEndian) PutUint64(b []byte, v uint64) {
 	_ = b[7] // early bounds check to guarantee safety of writes below
 	b[0] = byte(v)
 	b[1] = byte(v >> 8)
@@ -131,7 +143,7 @@ func (littleEndian) PutUint64(b []byte, v uint64) {
 }
 
 // AppendUint64 appends the bytes of v to b and returns the appended slice.
-func (littleEndian) AppendUint64(b []byte, v uint64) []byte {
+func (l *littleEndian) AppendUint64(b []byte, v uint64) (out []byte) {
 	return push(b,
 		byte(v),
 		byte(v>>8),
@@ -144,51 +156,51 @@ func (littleEndian) AppendUint64(b []byte, v uint64) []byte {
 	)
 }
 
-func (littleEndian) String() string { return "LittleEndian" }
+func (l *littleEndian) String() (s string) { return "LittleEndian" }
 
-func (littleEndian) GoString() []byte { return "binary.LittleEndian()" }
+func (l *littleEndian) GoString() (out []byte) { return "binary.LittleEndian()" }
 
 type bigEndian struct{}
 
 // Uint16 returns the uint16 representation of b[0:2].
-func (bigEndian) Uint16(b []byte) uint16 {
-	_ = b[1] // bounds check hint to compiler; see golang.org/issue/14808
-	return uint16(b[1]) | uint16(b[0])<<8
+func (b *bigEndian) Uint16(bin []byte) (out uint16) {
+	_ = bin[1] // bounds check hint to compiler; see golang.org/issue/14808
+	return uint16(bin[1]) | uint16(bin[0])<<8
 }
 
 // PutUint16 stores v into b[0:2].
-func (bigEndian) PutUint16(b []byte, v uint16) {
-	_ = b[1] // early bounds check to guarantee safety of writes below
-	b[0] = byte(v >> 8)
-	b[1] = byte(v)
+func (b *bigEndian) PutUint16(bin []byte, v uint16) {
+	_ = bin[1] // early bounds check to guarantee safety of writes below
+	bin[0] = byte(v >> 8)
+	bin[1] = byte(v)
 }
 
 // AppendUint16 appends the bytes of v to b and returns the appended slice.
-func (bigEndian) AppendUint16(b []byte, v uint16) []byte {
-	return push(b,
+func (b *bigEndian) AppendUint16(bin []byte, v uint16) (out []byte) {
+	return push(bin,
 		byte(v>>8),
 		byte(v),
 	)
 }
 
 // Uint32 returns the uint32 representation of b[0:4].
-func (bigEndian) Uint32(b []byte) uint32 {
-	_ = b[3] // bounds check hint to compiler; see golang.org/issue/14808
-	return uint32(b[3]) | uint32(b[2])<<8 | uint32(b[1])<<16 | uint32(b[0])<<24
+func (b *bigEndian) Uint32(bin []byte) (out uint32) {
+	_ = bin[3] // bounds check hint to compiler; see golang.org/issue/14808
+	return uint32(bin[3]) | uint32(bin[2])<<8 | uint32(bin[1])<<16 | uint32(bin[0])<<24
 }
 
 // PutUint32 stores v into b[0:4].
-func (bigEndian) PutUint32(b []byte, v uint32) {
-	_ = b[3] // early bounds check to guarantee safety of writes below
-	b[0] = byte(v >> 24)
-	b[1] = byte(v >> 16)
-	b[2] = byte(v >> 8)
-	b[3] = byte(v)
+func (b *bigEndian) PutUint32(bin []byte, v uint32) {
+	_ = bin[3] // early bounds check to guarantee safety of writes below
+	bin[0] = byte(v >> 24)
+	bin[1] = byte(v >> 16)
+	bin[2] = byte(v >> 8)
+	bin[3] = byte(v)
 }
 
 // AppendUint32 appends the bytes of v to b and returns the appended slice.
-func (bigEndian) AppendUint32(b []byte, v uint32) []byte {
-	return push(b,
+func (b *bigEndian) AppendUint32(bin []byte, v uint32) (out []byte) {
+	return push(bin,
 		byte(v>>24),
 		byte(v>>16),
 		byte(v>>8),
@@ -197,28 +209,28 @@ func (bigEndian) AppendUint32(b []byte, v uint32) []byte {
 }
 
 // Uint64 returns the uint64 representation of b[0:8].
-func (bigEndian) Uint64(b []byte) uint64 {
-	_ = b[7] // bounds check hint to compiler; see golang.org/issue/14808
-	return uint64(b[7]) | uint64(b[6])<<8 | uint64(b[5])<<16 | uint64(b[4])<<24 |
-		uint64(b[3])<<32 | uint64(b[2])<<40 | uint64(b[1])<<48 | uint64(b[0])<<56
+func (b *bigEndian) Uint64(bin []byte) (out uint64) {
+	_ = bin[7] // bounds check hint to compiler; see golang.org/issue/14808
+	return uint64(bin[7]) | uint64(bin[6])<<8 | uint64(bin[5])<<16 | uint64(bin[4])<<24 |
+		uint64(bin[3])<<32 | uint64(bin[2])<<40 | uint64(bin[1])<<48 | uint64(bin[0])<<56
 }
 
 // PutUint64 stores v into b[0:8].
-func (bigEndian) PutUint64(b []byte, v uint64) {
-	_ = b[7] // early bounds check to guarantee safety of writes below
-	b[0] = byte(v >> 56)
-	b[1] = byte(v >> 48)
-	b[2] = byte(v >> 40)
-	b[3] = byte(v >> 32)
-	b[4] = byte(v >> 24)
-	b[5] = byte(v >> 16)
-	b[6] = byte(v >> 8)
-	b[7] = byte(v)
+func (b *bigEndian) PutUint64(bin []byte, v uint64) {
+	_ = bin[7] // early bounds check to guarantee safety of writes below
+	bin[0] = byte(v >> 56)
+	bin[1] = byte(v >> 48)
+	bin[2] = byte(v >> 40)
+	bin[3] = byte(v >> 32)
+	bin[4] = byte(v >> 24)
+	bin[5] = byte(v >> 16)
+	bin[6] = byte(v >> 8)
+	bin[7] = byte(v)
 }
 
 // AppendUint64 appends the bytes of v to b and returns the appended slice.
-func (bigEndian) AppendUint64(b []byte, v uint64) []byte {
-	return push(b,
+func (b *bigEndian) AppendUint64(bin []byte, v uint64) (out []byte) {
+	return push(bin,
 		byte(v>>56),
 		byte(v>>48),
 		byte(v>>40),
@@ -230,13 +242,13 @@ func (bigEndian) AppendUint64(b []byte, v uint64) []byte {
 	)
 }
 
-func (bigEndian) String() string { return "BigEndian" }
+func (b *bigEndian) String() (s string) { return "BigEndian" }
 
-func (bigEndian) GoString() []byte { return "binary.BigEndian()" }
+func (b *bigEndian) GoString() (out []byte) { return "binary.BigEndian()" }
 
-func (nativeEndian) String() string { return "NativeEndian" }
+func (n *nativeEndian) String() (s string) { return "NativeEndian" }
 
-func (nativeEndian) GoString() []byte { return "binary.NativeEndian()" }
+func (n *nativeEndian) GoString() (out []byte) { return "binary.NativeEndian()" }
 
 // Read reads structured binary data from r into data.
 // Read reads structured binary data from r into the value at data, whose
@@ -249,7 +261,7 @@ func (nativeEndian) GoString() []byte { return "binary.NativeEndian()" }
 // The error is [io.EOF] only if no bytes were read.
 // If an [io.EOF] happens after reading some but not all the bytes,
 // Read returns [io.ErrUnexpectedEOF].
-func Read(r io.Reader, order ByteOrder, typ, data unsafe.Pointer) error {
+func Read(r io.Reader, order ByteOrder, typ, data unsafe.Pointer) (rerr error) {
 	t := (*runtime.RawType)(typ)
 	n := valueSize(t, data)
 	if n < 0 {
@@ -267,7 +279,7 @@ func Read(r io.Reader, order ByteOrder, typ, data unsafe.Pointer) error {
 // Decode decodes binary data from buf into the value at data, whose static
 // type is described by typ. It returns an error if buf is too small,
 // otherwise the number of bytes consumed from buf.
-func Decode(buf []byte, order ByteOrder, typ, data unsafe.Pointer) (int32, error) {
+func Decode(buf []byte, order ByteOrder, typ, data unsafe.Pointer) (out int32, derr error) {
 	t := (*runtime.RawType)(typ)
 	n := valueSize(t, data)
 	if n < 0 {
@@ -283,7 +295,7 @@ func Decode(buf []byte, order ByteOrder, typ, data unsafe.Pointer) (int32, error
 
 // Write writes the binary encoding of the value at data to w. data and typ
 // follow the same rules as for [Read].
-func Write(w io.Writer, order ByteOrder, typ, data unsafe.Pointer) error {
+func Write(w io.Writer, order ByteOrder, typ, data unsafe.Pointer) (werr error) {
 	t := (*runtime.RawType)(typ)
 	n := valueSize(t, data)
 	if n < 0 {
@@ -298,7 +310,7 @@ func Write(w io.Writer, order ByteOrder, typ, data unsafe.Pointer) error {
 
 // Encode writes the binary encoding of the value at data into buf. It returns
 // an error if buf is too small, otherwise the number of bytes written.
-func Encode(buf []byte, order ByteOrder, typ, data unsafe.Pointer) (int32, error) {
+func Encode(buf []byte, order ByteOrder, typ, data unsafe.Pointer) (out int32, derr error) {
 	t := (*runtime.RawType)(typ)
 	n := valueSize(t, data)
 	if n < 0 {
@@ -313,7 +325,7 @@ func Encode(buf []byte, order ByteOrder, typ, data unsafe.Pointer) (int32, error
 }
 
 // Append appends the binary encoding of the value at data to buf.
-func Append(buf []byte, order ByteOrder, typ, data unsafe.Pointer) ([]byte, error) {
+func Append(buf []byte, order ByteOrder, typ, data unsafe.Pointer) (res []byte, derr error) {
 	t := (*runtime.RawType)(typ)
 	n := valueSize(t, data)
 	if n < 0 {
@@ -331,14 +343,14 @@ func Append(buf []byte, order ByteOrder, typ, data unsafe.Pointer) ([]byte, erro
 // Size returns how many bytes [Write] would generate to encode the value at
 // data, whose static type is described by typ. If the type is not a
 // fixed-size value or a slice of fixed-size values, Size returns -1.
-func Size(typ, data unsafe.Pointer) int32 {
+func Size(typ, data unsafe.Pointer) (out int32) {
 	return valueSize((*runtime.RawType)(typ), data)
 }
 
 // valueSize returns the encoded size in bytes for the value at data of type
 // typ: the fixed width for fixed-size types, or len*elemSize for a slice of
 // fixed-size elements. Returns -1 for unsupported (variable) types.
-func valueSize(typ *runtime.RawType, data unsafe.Pointer) int32 {
+func valueSize(typ *runtime.RawType, data unsafe.Pointer) (out int32) {
 	if typ.MinLen() == typ.MaxLen() {
 		return int32(typ.MinLen())
 	}

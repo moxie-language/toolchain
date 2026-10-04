@@ -13,7 +13,7 @@ import (
 	"syscall"
 )
 
-func unixSocket(ctx context.Context, net []byte, laddr, raddr sockaddr, mode []byte, ctxCtrlFn func(context.Context, []byte, []byte, syscall.RawConn) error) (*netFD, error) {
+func unixSocket(ctx context.Context, net []byte, laddr, raddr sockaddr, mode []byte, ctxCtrlFn func(context.Context, []byte, []byte, syscall.RawConn) error) (rnetFD *netFD, rerr error) {
 	var sotype int32
 	switch net {
 	case "unix":
@@ -49,28 +49,28 @@ func unixSocket(ctx context.Context, net []byte, laddr, raddr sockaddr, mode []b
 	return fd, nil
 }
 
-func sockaddrToUnix(sa syscall.Sockaddr) Addr {
+func sockaddrToUnix(sa syscall.Sockaddr) (raddr2 Addr) {
 	if s, ok := sa.(*syscall.SockaddrUnix); ok {
 		return &UnixAddr{Name: s.Name, Net: "unix"}
 	}
 	return nil
 }
 
-func sockaddrToUnixgram(sa syscall.Sockaddr) Addr {
+func sockaddrToUnixgram(sa syscall.Sockaddr) (raddr2 Addr) {
 	if s, ok := sa.(*syscall.SockaddrUnix); ok {
 		return &UnixAddr{Name: s.Name, Net: "unixgram"}
 	}
 	return nil
 }
 
-func sockaddrToUnixpacket(sa syscall.Sockaddr) Addr {
+func sockaddrToUnixpacket(sa syscall.Sockaddr) (raddr2 Addr) {
 	if s, ok := sa.(*syscall.SockaddrUnix); ok {
 		return &UnixAddr{Name: s.Name, Net: "unixpacket"}
 	}
 	return nil
 }
 
-func sotypeToNet(sotype int32) []byte {
+func sotypeToNet(sotype int32) (rb []byte) {
 	switch sotype {
 	case syscall.SOCK_STREAM:
 		return "unix"
@@ -83,22 +83,22 @@ func sotypeToNet(sotype int32) []byte {
 	}
 }
 
-func (a *UnixAddr) family() int32 {
+func (a *UnixAddr) family() (rn int32) {
 	return syscall.AF_UNIX
 }
 
-func (a *UnixAddr) sockaddr(family int32) (syscall.Sockaddr, error) {
+func (a *UnixAddr) sockaddr(family int32) (rsockaddr syscall.Sockaddr, rerr error) {
 	if a == nil {
 		return nil, nil
 	}
 	return &syscall.SockaddrUnix{Name: a.Name}, nil
 }
 
-func (a *UnixAddr) toLocal(net []byte) sockaddr {
+func (a *UnixAddr) toLocal(net []byte) (rsockaddr sockaddr) {
 	return a
 }
 
-func (c *UnixConn) readFrom(b []byte) (int32, *UnixAddr, error) {
+func (c *UnixConn) readFrom(b []byte) (rn int32, runixAddr *UnixAddr, rerr error) {
 	var addr *UnixAddr
 	n, sa, err := c.fd.readFrom(b)
 	switch sa := sa.(type) {
@@ -126,7 +126,7 @@ func (c *UnixConn) readMsg(b, oob []byte) (n, oobn, flags int32, addr *UnixAddr,
 	return
 }
 
-func (c *UnixConn) writeTo(b []byte, addr *UnixAddr) (int32, error) {
+func (c *UnixConn) writeTo(b []byte, addr *UnixAddr) (rn int32, rerr error) {
 	if c.fd.isConnected {
 		return 0, ErrWriteToConnected
 	}
@@ -154,7 +154,7 @@ func (c *UnixConn) writeMsg(b, oob []byte, addr *UnixAddr) (n, oobn int32, err e
 	return c.fd.writeMsg(b, oob, sa)
 }
 
-func (sd *sysDialer) dialUnix(ctx context.Context, laddr, raddr *UnixAddr) (*UnixConn, error) {
+func (sd *sysDialer) dialUnix(ctx context.Context, laddr, raddr *UnixAddr) (runixConn *UnixConn, rerr error) {
 	ctrlCtxFn := sd.Dialer.ControlContext
 	if ctrlCtxFn == nil && sd.Dialer.Control != nil {
 		ctrlCtxFn = func(ctx context.Context, network, address []byte, c syscall.RawConn) error {
@@ -168,7 +168,7 @@ func (sd *sysDialer) dialUnix(ctx context.Context, laddr, raddr *UnixAddr) (*Uni
 	return newUnixConn(fd), nil
 }
 
-func (ln *UnixListener) accept() (*UnixConn, error) {
+func (ln *UnixListener) accept() (runixConn *UnixConn, rerr error) {
 	fd, err := ln.fd.accept()
 	if err != nil {
 		return nil, err
@@ -176,7 +176,7 @@ func (ln *UnixListener) accept() (*UnixConn, error) {
 	return newUnixConn(fd), nil
 }
 
-func (ln *UnixListener) close() error {
+func (ln *UnixListener) close() (rerr error) {
 	// The operating system doesn't clean up
 	// the file that announcing created, so
 	// we have to clean it up ourselves.
@@ -197,7 +197,7 @@ func (ln *UnixListener) close() error {
 	return ln.fd.Close()
 }
 
-func (ln *UnixListener) file() (*os.File, error) {
+func (ln *UnixListener) file() (rfile *os.File, rerr error) {
 	f, err := ln.fd.dup()
 	if err != nil {
 		return nil, err
@@ -217,7 +217,7 @@ func (l *UnixListener) SetUnlinkOnClose(unlink bool) {
 	l.unlink = unlink
 }
 
-func (sl *sysListener) listenUnix(ctx context.Context, laddr *UnixAddr) (*UnixListener, error) {
+func (sl *sysListener) listenUnix(ctx context.Context, laddr *UnixAddr) (runixListener *UnixListener, rerr error) {
 	var ctrlCtxFn func(ctx context.Context, network, address []byte, c syscall.RawConn) error
 	if sl.ListenConfig.Control != nil {
 		ctrlCtxFn = func(ctx context.Context, network, address []byte, c syscall.RawConn) error {
@@ -231,7 +231,7 @@ func (sl *sysListener) listenUnix(ctx context.Context, laddr *UnixAddr) (*UnixLi
 	return &UnixListener{fd: fd, path: fd.laddr.String(), unlink: true}, nil
 }
 
-func (sl *sysListener) listenUnixgram(ctx context.Context, laddr *UnixAddr) (*UnixConn, error) {
+func (sl *sysListener) listenUnixgram(ctx context.Context, laddr *UnixAddr) (runixConn *UnixConn, rerr error) {
 	var ctrlCtxFn func(ctx context.Context, network, address []byte, c syscall.RawConn) error
 	if sl.ListenConfig.Control != nil {
 		ctrlCtxFn = func(ctx context.Context, network, address []byte, c syscall.RawConn) error {

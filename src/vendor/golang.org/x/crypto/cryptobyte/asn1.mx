@@ -162,15 +162,15 @@ func (b *Builder) addBase128Int(n int64) {
 }
 
 func isValidOID(oid encoding_asn1.ObjectIdentifier) bool {
-	if len(oid) < 2 {
+	if len(oid.OID) < 2 {
 		return false
 	}
 
-	if oid[0] > 2 || (oid[0] <= 1 && oid[1] >= 40) {
+	if oid.OID[0] > 2 || (oid.OID[0] <= 1 && oid.OID[1] >= 40) {
 		return false
 	}
 
-	for _, v := range oid {
+	for _, v := range oid.OID {
 		if v < 0 {
 			return false
 		}
@@ -186,8 +186,8 @@ func (b *Builder) AddASN1ObjectIdentifier(oid encoding_asn1.ObjectIdentifier) {
 			return
 		}
 
-		bld.addBase128Int(int64(oid[0])*40 + int64(oid[1]))
-		for _, v := range oid[2:] {
+		bld.addBase128Int(int64(oid.OID[0])*40 + int64(oid.OID[1]))
+		for _, v := range oid.OID[2:] {
 			bld.addBase128Int(int64(v))
 		}
 	})
@@ -240,6 +240,42 @@ func (b *Builder) AddASN1(tag asn1.Tag, f BuilderContinuation) {
 	}
 	b.AddUint8(uint8(tag))
 	b.addLengthPrefixed(1, true, f)
+}
+
+// BeginASN1 opens an ASN.1 element with the given tag on the innermost open
+// builder. Close it with EndASN1 (or EndLengthPrefixed). It is the callback-free
+// counterpart of AddASN1: the caller writes the contents inline.
+func (b *Builder) BeginASN1(tag asn1.Tag) {
+	c := b
+	for c.child != nil {
+		c = c.child
+	}
+	if c.err != nil {
+		return
+	}
+	// Identifiers with the low five bits set indicate high-tag-number format
+	// (two or more octets), which we don't support.
+	if tag&0x1f == 0x1f {
+		c.err = fmt.Errorf("cryptobyte: high-tag number identifier octets not supported: 0x%x", tag)
+		return
+	}
+	b.AddUint8(uint8(tag))
+	b.beginLengthPrefixed(1, true)
+}
+
+// EndASN1 closes the innermost ASN.1 element opened with BeginASN1.
+func (b *Builder) EndASN1() {
+	b.EndLengthPrefixed()
+}
+
+// BeginSequence opens a DER SEQUENCE on the innermost open builder.
+func (b *Builder) BeginSequence() {
+	b.BeginASN1(asn1.SEQUENCE)
+}
+
+// EndSequence closes the innermost DER SEQUENCE opened with BeginSequence.
+func (b *Builder) EndSequence() {
+	b.EndLengthPrefixed()
 }
 
 // String
@@ -528,7 +564,7 @@ func (s *String) ReadASN1ObjectIdentifier(out *encoding_asn1.ObjectIdentifier) b
 		}
 		components[i] = v
 	}
-	*out = components[:i]
+	*out = encoding_asn1.ObjectIdentifier{OID: components[:i]}
 	return true
 }
 

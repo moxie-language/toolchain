@@ -14,7 +14,7 @@ import (
 func Sleep(d Duration)
 
 // syncTimer returns c as an unsafe.Pointer, for passing to newTimer.
-func syncTimer(c chan Time) unsafe.Pointer {
+func syncTimer(c chan Time) (rpointer unsafe.Pointer) {
 	return *(*unsafe.Pointer)(unsafe.Pointer(&c))
 }
 
@@ -22,7 +22,7 @@ func syncTimer(c chan Time) unsafe.Pointer {
 // It returns what the time will be, in nanoseconds, Duration d in the future.
 // If d is negative, it is ignored. If the returned value would be less than
 // zero because of an overflow, MaxInt64 is returned.
-func when(d Duration) int64 {
+func when(d Duration) (rn int64) {
 	if d <= 0 {
 		return runtimeNano()
 	}
@@ -42,13 +42,13 @@ func when(d Duration) int64 {
 // compare linknamed symbol definitions happier.
 //
 //:linkname newTimer
-func newTimer(whenNs, period int64, f func(unsafe.Pointer, uintptr, int64), arg unsafe.Pointer, cp unsafe.Pointer) *Timer
+func newTimer(whenNs, period int64, f func(unsafe.Pointer, uintptr, int64), arg unsafe.Pointer, cp unsafe.Pointer) (rtimer *Timer)
 
 //:linkname stopTimer
-func stopTimer(*Timer) bool
+func stopTimer(*Timer) (rok bool)
 
 //:linkname resetTimer
-func resetTimer(t *Timer, whenNs, period int64) bool
+func resetTimer(t *Timer, whenNs, period int64) (rok bool)
 
 // Note: The runtime knows the layout of struct Timer, since newTimer allocates it.
 // The runtime also knows that Ticker and Timer have the same layout.
@@ -83,7 +83,7 @@ type Timer struct {
 // Before Go 1.23, the only safe way to use Stop was insert an extra
 // <-t.C if Stop returned false to drain a potential stale value.
 // See the [NewTimer] documentation for more details.
-func (t *Timer) Stop() bool {
+func (t *Timer) Stop() (rok bool) {
 	if !t.initTimer {
 		panic("time: Stop called on uninitialized Timer")
 	}
@@ -113,7 +113,7 @@ func (t *Timer) Stop() bool {
 // behaviors: when set, unexpired timers won't be garbage collected, and
 // channels will have buffered capacity. This setting may be removed
 // in Go 1.27 or later.
-func NewTimer(d Duration) *Timer {
+func NewTimer(d Duration) (rtimer *Timer) {
 	c := chan Time{1}
 	t := (*Timer)(newTimer(when(d), 0, sendTime, syncTimer(c), syncTimer(c)))
 	t.C = c
@@ -141,7 +141,7 @@ func NewTimer(d Duration) *Timer {
 // Before Go 1.23, the only safe way to use Reset was to call [Timer.Stop]
 // and explicitly drain the timer first.
 // See the [NewTimer] documentation for more details.
-func (t *Timer) Reset(d Duration) bool {
+func (t *Timer) Reset(d Duration) (rok bool) {
 	if !t.initTimer {
 		panic("time: Reset called on uninitialized Timer")
 	}
@@ -172,7 +172,7 @@ func sendTime(c unsafe.Pointer, seq uintptr, delta int64) {
 // NewTimer instead and call [Timer.Stop] if the timer is no longer needed.
 // As of Go 1.23, the garbage collector can recover unreferenced,
 // unstopped timers. There is no reason to prefer NewTimer when After will do.
-func After(d Duration) <-chan Time {
+func After(d Duration) (rtime <-chan Time) {
 	return NewTimer(d).C
 }
 
@@ -180,7 +180,7 @@ func After(d Duration) <-chan Time {
 // in its own goroutine. It returns a [Timer] that can
 // be used to cancel the call using its Stop method.
 // The returned Timer's C field is not used and will be nil.
-func AfterFunc(d Duration, f func()) *Timer {
+func AfterFunc(d Duration, f func()) (rtimer *Timer) {
 	// A Moxie func value is the pair {env, code}. This used to pass only its
 	// first word (*(*unsafe.Pointer)(unsafe.Pointer(&f)) - the env) and goFunc
 	// rebuilt a func value from a pointer to that single word, so the code

@@ -7,6 +7,7 @@ package gzip
 import (
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"compress/flate"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -48,7 +49,7 @@ type Writer struct {
 //
 // Callers that wish to set the fields in Writer.[Header] must do so before
 // the first call to Write, Flush, or Close.
-func NewWriter(w io.Writer) *Writer {
+func NewWriter(w io.Writer) (out *Writer) {
 	z, _ := NewWriterLevel(w, DefaultCompression)
 	return z
 }
@@ -59,7 +60,7 @@ func NewWriter(w io.Writer) *Writer {
 // The compression level can be [DefaultCompression], [NoCompression], [HuffmanOnly]
 // or any integer value between [BestSpeed] and [BestCompression] inclusive.
 // The error returned will be nil if the level is valid.
-func NewWriterLevel(w io.Writer, level int32) (*Writer, error) {
+func NewWriterLevel(w io.Writer, level int32) (out *Writer, werr error) {
 	if level < HuffmanOnly || level > BestCompression {
 		return nil, fmt.Errorf("gzip: invalid compression level: %d", level)
 	}
@@ -97,11 +98,11 @@ func (z *Writer) Reset(w io.Writer) {
 }
 
 // writeBytes writes a length-prefixed byte slice to z.w.
-func (z *Writer) writeBytes(b []byte) error {
+func (z *Writer) writeBytes(b []byte) (werr error) {
 	if len(b) > 0xffff {
 		return errors.New("gzip.Write: Extra data is too large")
 	}
-	le.PutUint16(z.buf[:2], uint16(len(b)))
+	binary.LittleEndian().PutUint16(z.buf[:2], uint16(len(b)))
 	_, err := z.w.Write(z.buf[:2])
 	if err != nil {
 		return err
@@ -144,11 +145,10 @@ func (z *Writer) writeString(s []byte) (err error) {
 
 // Write writes a compressed form of p to the underlying [io.Writer]. The
 // compressed bytes are not necessarily flushed until the [Writer] is closed.
-func (z *Writer) Write(p []byte) (int32, error) {
+func (z *Writer) Write(p []byte) (n int32, rerr error) {
 	if z.err != nil {
 		return 0, z.err
 	}
-	var n int32
 	// Write the GZIP header lazily.
 	if !z.wroteHeader {
 		z.wroteHeader = true
@@ -165,7 +165,7 @@ func (z *Writer) Write(p []byte) (int32, error) {
 		if z.ModTime.After(time.Unix(0, 0)) {
 			// Section 2.3.1, the zero value for MTIME means that the
 			// modified time is not set.
-			le.PutUint32(z.buf[4:8], uint32(z.ModTime.Unix()))
+			binary.LittleEndian().PutUint32(z.buf[4:8], uint32(z.ModTime.Unix()))
 		}
 		if z.level == BestCompression {
 			z.buf[8] = 2
@@ -213,7 +213,7 @@ func (z *Writer) Write(p []byte) (int32, error) {
 // writer returns an error, Flush returns that error.
 //
 // In the terminology of the zlib library, Flush is equivalent to Z_SYNC_FLUSH.
-func (z *Writer) Flush() error {
+func (z *Writer) Flush() (err error) {
 	if z.err != nil {
 		return z.err
 	}
@@ -233,7 +233,7 @@ func (z *Writer) Flush() error {
 // Close closes the [Writer] by flushing any unwritten data to the underlying
 // [io.Writer] and writing the GZIP footer.
 // It does not close the underlying [io.Writer].
-func (z *Writer) Close() error {
+func (z *Writer) Close() (err error) {
 	if z.err != nil {
 		return z.err
 	}
@@ -251,8 +251,8 @@ func (z *Writer) Close() error {
 	if z.err != nil {
 		return z.err
 	}
-	le.PutUint32(z.buf[:4], z.digest)
-	le.PutUint32(z.buf[4:8], z.size)
+	binary.LittleEndian().PutUint32(z.buf[:4], z.digest)
+	binary.LittleEndian().PutUint32(z.buf[4:8], z.size)
 	_, z.err = z.w.Write(z.buf[:8])
 	return z.err
 }

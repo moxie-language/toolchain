@@ -14,11 +14,11 @@ import (
 	"unsafe"
 )
 
-func current() (*User, error) {
+func current() (ruser *User, rerr error) {
 	return lookupUnixUid(syscall.Getuid())
 }
 
-func lookupUser(username string) (*User, error) {
+func lookupUser(username string) (ruser *User, rerr error) {
 	bufferInit()
 	var pwd _C_struct_passwd
 	var found bool
@@ -40,7 +40,7 @@ func lookupUser(username string) (*User, error) {
 	return buildUser(&pwd), nil
 }
 
-func lookupUserId(uid string) (*User, error) {
+func lookupUserId(uid string) (ruser *User, rerr error) {
 	i, e := strconv.Atoi(uid)
 	if e != nil {
 		return nil, e
@@ -48,7 +48,7 @@ func lookupUserId(uid string) (*User, error) {
 	return lookupUnixUid(i)
 }
 
-func lookupUnixUid(uid int32) (*User, error) {
+func lookupUnixUid(uid int32) (ruser *User, rerr error) {
 	bufferInit()
 	var pwd _C_struct_passwd
 	var found bool
@@ -68,7 +68,7 @@ func lookupUnixUid(uid int32) (*User, error) {
 	return buildUser(&pwd), nil
 }
 
-func buildUser(pwd *_C_struct_passwd) *User {
+func buildUser(pwd *_C_struct_passwd) (ruser *User) {
 	u := &User{
 		Uid:      strconv.FormatUint(uint64(_C_pw_uid(pwd)), 10),
 		Gid:      strconv.FormatUint(uint64(_C_pw_gid(pwd)), 10),
@@ -84,7 +84,7 @@ func buildUser(pwd *_C_struct_passwd) *User {
 	return u
 }
 
-func lookupGroup(groupname string) (*Group, error) {
+func lookupGroup(groupname string) (rgroup *Group, rerr error) {
 	bufferInit()
 	var grp _C_struct_group
 	var found bool
@@ -107,7 +107,7 @@ func lookupGroup(groupname string) (*Group, error) {
 	return buildGroup(&grp), nil
 }
 
-func lookupGroupId(gid string) (*Group, error) {
+func lookupGroupId(gid string) (rgroup *Group, rerr error) {
 	i, e := strconv.Atoi(gid)
 	if e != nil {
 		return nil, e
@@ -115,7 +115,7 @@ func lookupGroupId(gid string) (*Group, error) {
 	return lookupUnixGid(i)
 }
 
-func lookupUnixGid(gid int32) (*Group, error) {
+func lookupUnixGid(gid int32) (rgroup *Group, rerr error) {
 	bufferInit()
 	var grp _C_struct_group
 	var found bool
@@ -135,7 +135,7 @@ func lookupUnixGid(gid int32) (*Group, error) {
 	return buildGroup(&grp), nil
 }
 
-func buildGroup(grp *_C_struct_group) *Group {
+func buildGroup(grp *_C_struct_group) (rgroup *Group) {
 	g := &Group{
 		Gid:  strconv.Itoa(int32(_C_gr_gid(grp))),
 		Name: _C_GoString(_C_gr_name(grp)),
@@ -158,7 +158,7 @@ func bufferInit() {
 	groupBuffer = bufferKind(_C__SC_GETGR_R_SIZE_MAX)
 }
 
-func (k bufferKind) initialSize() _C_size_t {
+func (k bufferKind) initialSize() (r_C_size_t _C_size_t) {
 	sz := _C_sysconf(_C_int(k))
 	if sz == -1 {
 		// DragonFly and FreeBSD do not have _SC_GETPW_R_SIZE_MAX.
@@ -176,7 +176,7 @@ func (k bufferKind) initialSize() _C_size_t {
 // retryWithBuffer repeatedly calls f(), increasing the size of the
 // buffer each time, until f succeeds, fails with a non-ERANGE error,
 // or the buffer exceeds a reasonable limit.
-func retryWithBuffer(kind bufferKind, f func([]byte) syscall.Errno) error {
+func retryWithBuffer(kind bufferKind, f func([]byte) syscall.Errno) (rerr error) {
 	buf := []byte{:kind.initialSize()}
 	for {
 		errno := f(buf)
@@ -195,12 +195,12 @@ func retryWithBuffer(kind bufferKind, f func([]byte) syscall.Errno) error {
 
 const maxBufferSize = 1 << 20
 
-func isSizeReasonable(sz int64) bool {
+func isSizeReasonable(sz int64) (rok bool) {
 	return sz > 0 && sz <= maxBufferSize
 }
 
 // Because we can't use cgo in tests:
-func structPasswdForNegativeTest() _C_struct_passwd {
+func structPasswdForNegativeTest() (r_C_struct_passwd _C_struct_passwd) {
 	sp := _C_struct_passwd{}
 	*_C_pw_uidp(&sp) = 1<<32 - 2
 	*_C_pw_gidp(&sp) = 1<<32 - 3

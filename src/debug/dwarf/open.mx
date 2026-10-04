@@ -42,7 +42,7 @@ type Data struct {
 	rngLists   []byte
 
 	// parsed data
-	abbrevCache map[uint64]abbrevTable
+	abbrevCache map[uint64]map[uint32]abbrev
 	bigEndian   bool
 	order       binary.ByteOrder
 	typeCache   map[Offset]Type
@@ -50,7 +50,7 @@ type Data struct {
 	unit        []unit
 }
 
-const errSegmentSelector = errors.Const("non-zero segment_selector size not supported")
+var errSegmentSelector error
 
 // New returns a new [Data] object initialized from the given parameters.
 // Rather than calling this function directly, clients should typically use
@@ -59,7 +59,7 @@ const errSegmentSelector = errors.Const("non-zero segment_selector size not supp
 // The []byte arguments are the data from the corresponding debug section
 // in the object file; for example, for an ELF object, abbrevData is the contents of
 // the ".debug_abbrev" section.
-func New(abbrevData, aranges, frame, info, line, pubnames, ranges, str []byte) (*Data, error) {
+func New(abbrevData, aranges, frame, info, line, pubnames, ranges, str []byte) (_r0 *Data, _r1 error) {
 	d := &Data{
 		abbrev:      abbrevData,
 		aranges:     aranges,
@@ -69,7 +69,7 @@ func New(abbrevData, aranges, frame, info, line, pubnames, ranges, str []byte) (
 		pubnames:    pubnames,
 		ranges:      ranges,
 		str:         str,
-		abbrevCache: map[uint64]abbrevTable{},
+		abbrevCache: map[uint64]map[uint32]abbrev{},
 		typeCache:   map[Offset]Type{},
 		typeSigs:    map[uint64]*typeUnit{},
 	}
@@ -78,12 +78,12 @@ func New(abbrevData, aranges, frame, info, line, pubnames, ranges, str []byte) (
 	// 32-bit DWARF: 4 byte length, 2 byte version.
 	// 64-bit DWARf: 4 bytes of 0xff, 8 byte length, 2 byte version.
 	if len(d.info) < 6 {
-		return nil, DecodeError{"info", Offset(len(d.info)), "too short"}
+		return nil, &DecodeError{"info", Offset(len(d.info)), "too short"}
 	}
 	offset := 4
 	if d.info[0] == 0xff && d.info[1] == 0xff && d.info[2] == 0xff && d.info[3] == 0xff {
 		if len(d.info) < 14 {
-			return nil, DecodeError{"info", Offset(len(d.info)), "too short"}
+			return nil, &DecodeError{"info", Offset(len(d.info)), "too short"}
 		}
 		offset = 12
 	}
@@ -91,7 +91,7 @@ func New(abbrevData, aranges, frame, info, line, pubnames, ranges, str []byte) (
 	x, y := d.info[offset], d.info[offset+1]
 	switch {
 	case x == 0 && y == 0:
-		return nil, DecodeError{"info", 4, "unsupported version 0"}
+		return nil, &DecodeError{"info", 4, "unsupported version 0"}
 	case x == 0:
 		d.bigEndian = true
 		d.order = binary.BigEndian()
@@ -99,7 +99,7 @@ func New(abbrevData, aranges, frame, info, line, pubnames, ranges, str []byte) (
 		d.bigEndian = false
 		d.order = binary.LittleEndian()
 	default:
-		return nil, DecodeError{"info", 4, "cannot determine byte order"}
+		return nil, &DecodeError{"info", 4, "cannot determine byte order"}
 	}
 
 	u, err := d.parseUnits()
@@ -114,7 +114,7 @@ func New(abbrevData, aranges, frame, info, line, pubnames, ranges, str []byte) (
 // typical object with DWARF version 4 debug info will have multiple
 // .debug_types sections. The name is used for error reporting only,
 // and serves to distinguish one .debug_types section from another.
-func (d *Data) AddTypes(name []byte, types []byte) error {
+func (d *Data) AddTypes(name []byte, types []byte) (_r0 error) {
 	return d.parseTypes(name, types)
 }
 
@@ -122,7 +122,7 @@ func (d *Data) AddTypes(name []byte, types []byte) error {
 // DWARF section name such as ".debug_addr", ".debug_str_offsets", and
 // so forth. This approach is used for new DWARF sections added in
 // DWARF 5 and later.
-func (d *Data) AddSection(name []byte, contents []byte) error {
+func (d *Data) AddSection(name []byte, contents []byte) (_r0 error) {
 	var err error
 	switch name {
 	case ".debug_addr":
@@ -136,4 +136,9 @@ func (d *Data) AddSection(name []byte, contents []byte) error {
 	}
 	// Just ignore names that we don't yet support.
 	return err
+}
+
+func init() {
+	errSegmentSelector = errors.New("non-zero segment_selector size not supported")
+	ErrUnknownPC = errors.New("ErrUnknownPC")
 }

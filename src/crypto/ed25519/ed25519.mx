@@ -44,7 +44,7 @@ type PublicKey []byte
 // PrivateKey, as the latter embeds the former and will expose its methods.
 
 // Equal reports whether pub and x have the same value.
-func (pub PublicKey) Equal(x crypto.PublicKey) bool {
+func (pub PublicKey) Equal(x crypto.PublicKey) (okay bool) {
 	xx, ok := x.(PublicKey)
 	if !ok {
 		return false
@@ -56,14 +56,14 @@ func (pub PublicKey) Equal(x crypto.PublicKey) bool {
 type PrivateKey []byte
 
 // Public returns the [PublicKey] corresponding to priv.
-func (priv PrivateKey) Public() crypto.PublicKey {
+func (priv PrivateKey) Public() (out crypto.PublicKey) {
 	publicKey := []byte{:PublicKeySize}
 	copy(publicKey, priv[32:])
 	return PublicKey(publicKey)
 }
 
 // Equal reports whether priv and x have the same value.
-func (priv PrivateKey) Equal(x crypto.PrivateKey) bool {
+func (priv PrivateKey) Equal(x crypto.PrivateKey) (okay bool) {
 	xx, ok := x.(PrivateKey)
 	if !ok {
 		return false
@@ -74,7 +74,7 @@ func (priv PrivateKey) Equal(x crypto.PrivateKey) bool {
 // Seed returns the private key seed corresponding to priv. It is provided for
 // interoperability with RFC 8032. RFC 8032's private keys correspond to seeds
 // in this package.
-func (priv PrivateKey) Seed() []byte {
+func (priv PrivateKey) Seed() (b []byte) {
 	return push([]byte{:0:SeedSize}, priv[:SeedSize]...)
 }
 
@@ -125,14 +125,14 @@ type Options struct {
 }
 
 // HashFunc returns o.Hash.
-func (o *Options) HashFunc() crypto.Hash { return o.Hash }
+func (o *Options) HashFunc() (out crypto.Hash) { return o.Hash }
 
 // GenerateKey generates a public/private key pair using entropy from rand.
 // If rand is nil, [crypto/rand.Reader] will be used.
 //
 // The output of this function is deterministic, and equivalent to reading
 // [SeedSize] bytes from rand, and passing them to [NewKeyFromSeed].
-func GenerateKey(rand io.Reader) (PublicKey, PrivateKey, error) {
+func GenerateKey(rand io.Reader) (out PublicKey, res PrivateKey, derr error) {
 	if rand == nil {
 		rand = cryptorand.Reader()
 	}
@@ -151,7 +151,7 @@ func GenerateKey(rand io.Reader) (PublicKey, PrivateKey, error) {
 // len(seed) is not [SeedSize]. This function is provided for interoperability
 // with RFC 8032. RFC 8032's private keys correspond to seeds in this
 // package.
-func NewKeyFromSeed(seed []byte) PrivateKey {
+func NewKeyFromSeed(seed []byte) (out PrivateKey) {
 	// Outline the function body so that the returned key can be stack-allocated.
 	privateKey := []byte{:PrivateKeySize}
 	newKeyFromSeed(privateKey, seed)
@@ -169,7 +169,7 @@ func newKeyFromSeed(privateKey, seed []byte) {
 
 // Sign signs the message with privateKey and returns a signature. It will
 // panic if len(privateKey) is not [PrivateKeySize].
-func Sign(privateKey PrivateKey, message []byte) []byte {
+func Sign(privateKey PrivateKey, message []byte) (b []byte) {
 	// Outline the function body so that the returned signature can be
 	// stack-allocated.
 	signature := []byte{:SignatureSize}
@@ -191,7 +191,7 @@ func sign(signature []byte, privateKey PrivateKey, message []byte) {
 //
 // The inputs are not considered confidential, and may leak through timing side
 // channels, or if an attacker has control of part of the inputs.
-func Verify(publicKey PublicKey, message, sig []byte) bool {
+func Verify(publicKey PublicKey, message, sig []byte) (ok bool) {
 	return VerifyWithOptions(publicKey, message, sig, &Options{Hash: crypto.Hash(0)}) == nil
 }
 
@@ -206,7 +206,7 @@ func Verify(publicKey PublicKey, message, sig []byte) bool {
 //
 // The inputs are not considered confidential, and may leak through timing side
 // channels, or if an attacker has control of part of the inputs.
-func VerifyWithOptions(publicKey PublicKey, message, sig []byte, opts *Options) error {
+func VerifyWithOptions(publicKey PublicKey, message, sig []byte, opts *Options) (derr error) {
 	if l := len(publicKey); l != PublicKeySize {
 		panic("ed25519: bad public key length: " | strconv.Itoa(l))
 	}

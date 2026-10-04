@@ -29,7 +29,7 @@ type replacer interface {
 // comparisons are done in argument order.
 //
 // NewReplacer panics if given an odd number of arguments.
-func NewReplacer(oldnew ...[]byte) *Replacer {
+func NewReplacer(oldnew ...[]byte) (rep *Replacer) {
 	if len(oldnew)%2 == 1 {
 		panic("bytes.NewReplacer: odd argument count")
 	}
@@ -41,7 +41,7 @@ func (r *Replacer) buildOnce() {
 	r.oldnew = nil
 }
 
-func (b *Replacer) build() replacer {
+func (b *Replacer) build() (rp replacer) {
 	oldnew := b.oldnew
 	if len(oldnew) == 2 && len(oldnew[0]) > 1 {
 		return makeSingleStringReplacer(oldnew[0], oldnew[1])
@@ -93,7 +93,7 @@ func (b *Replacer) build() replacer {
 }
 
 // Replace returns a copy of s with all replacements performed.
-func (r *Replacer) Replace(s []byte) []byte {
+func (r *Replacer) Replace(s []byte) (out []byte) {
 	if !r.done { r.done = true; r.buildOnce() }
 	return r.r.Replace(s)
 }
@@ -266,7 +266,7 @@ type genericReplacer struct {
 	mapping [256]byte
 }
 
-func makeGenericReplacer(oldnew [][]byte) *genericReplacer {
+func makeGenericReplacer(oldnew [][]byte) (rep *genericReplacer) {
 	r := &genericReplacer{}
 	// Find each byte used, then assign them each an index.
 	for i := 0; i < len(oldnew); i += 2 {
@@ -298,40 +298,26 @@ func makeGenericReplacer(oldnew [][]byte) *genericReplacer {
 	return r
 }
 
-type appendSliceWriter []byte
-
-// Write writes to the buffer to satisfy [io.Writer].
-func (w *appendSliceWriter) Write(p []byte) (int32, error) {
-	*w = push(*w, p...)
-	return len(p), nil
-}
-
-// WriteString writes to the buffer without string->[]byte->string allocations.
-func (w *appendSliceWriter) WriteString(s []byte) (int32, error) {
-	*w = push(*w, s...)
-	return len(s), nil
-}
-
 type stringWriter struct {
 	w io.Writer
 }
 
-func (w stringWriter) WriteString(s []byte) (int32, error) {
+func (w *stringWriter) WriteString(s []byte) (n int32, rerr error) {
 	return w.w.Write([]byte(s))
 }
 
-func getStringWriter(w io.Writer) io.StringWriter {
+func getStringWriter(w io.Writer) (out io.StringWriter) {
 	sw, ok := w.(io.StringWriter)
 	if !ok {
-		sw = stringWriter{w}
+		sw = &stringWriter{w}
 	}
 	return sw
 }
 
-func (r *genericReplacer) Replace(s []byte) []byte {
-	buf := appendSliceWriter{:0:len(s)}
+func (r *genericReplacer) Replace(s []byte) (out []byte) {
+	var buf Buffer
 	r.WriteString(&buf, s)
-	return []byte(buf)
+	return buf.Bytes()
 }
 
 func (r *genericReplacer) WriteString(w io.Writer, s []byte) (n int32, err error) {
@@ -383,11 +369,11 @@ type singleStringReplacer struct {
 	value []byte
 }
 
-func makeSingleStringReplacer(pattern []byte, value []byte) *singleStringReplacer {
+func makeSingleStringReplacer(pattern []byte, value []byte) (rep *singleStringReplacer) {
 	return &singleStringReplacer{finder: makeStringFinder(pattern), value: value}
 }
 
-func (r *singleStringReplacer) Replace(s []byte) []byte {
+func (r *singleStringReplacer) Replace(s []byte) (out []byte) {
 	var buf Buffer
 	i, matched := 0, false
 	for {
@@ -438,7 +424,7 @@ func (r *singleStringReplacer) WriteString(w io.Writer, s []byte) (n int32, err 
 // The array contains replacement bytes indexed by old byte.
 type byteReplacer [256]byte
 
-func (r *byteReplacer) Replace(s []byte) []byte {
+func (r *byteReplacer) Replace(s []byte) (out []byte) {
 	var buf []byte // lazily allocated
 	for i := 0; i < len(s); i++ {
 		b := s[i]
@@ -508,7 +494,7 @@ type byteStringReplacer struct {
 // TODO(tocarip) revisit once we have register-based abi/mid-stack inlining.
 const countCutOff = 8
 
-func (r *byteStringReplacer) Replace(s []byte) []byte {
+func (r *byteStringReplacer) Replace(s []byte) (out []byte) {
 	newSize := len(s)
 	anyChanges := false
 	// Is it faster to use Count?

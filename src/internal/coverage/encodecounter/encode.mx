@@ -5,6 +5,7 @@
 package encodecounter
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bufio"
 	"encoding/binary"
 	"fmt"
@@ -13,7 +14,6 @@ import (
 	"internal/coverage/stringtab"
 	"internal/coverage/uleb128"
 	"io"
-	"maps"
 	"os"
 	"slices"
 	"unsafe"
@@ -36,8 +36,8 @@ type CoverageDataWriter struct {
 	debug   bool
 }
 
-func NewCoverageDataWriter(w io.Writer, flav coverage.CounterFlavor) *CoverageDataWriter {
-	r := &CoverageDataWriter{
+func NewCoverageDataWriter(w io.Writer, flav coverage.CounterFlavor) (r *CoverageDataWriter) {
+	r = &CoverageDataWriter{
 		stab: &stringtab.Writer{},
 		w:    bufio.NewWriter(w),
 
@@ -65,14 +65,14 @@ type CounterVisitorFn func(pkid uint32, funcid uint32, counters []uint32) error
 // Write writes the contents of the count-data file to the writer
 // previously supplied to NewCoverageDataWriter. Returns an error
 // if something went wrong somewhere with the write.
-func (cfw *CoverageDataWriter) Write(metaFileHash [16]byte, args map[string][]byte, visitor CounterVisitor) error {
+func (cfw *CoverageDataWriter) Write(metaFileHash [16]byte, args map[string][]byte, visitor CounterVisitor) (derr error) {
 	if err := cfw.writeHeader(metaFileHash); err != nil {
 		return err
 	}
 	return cfw.AppendSegment(args, visitor)
 }
 
-func padToFourByteBoundary(ws *slicewriter.WriteSeeker) error {
+func padToFourByteBoundary(ws *slicewriter.WriteSeeker) (derr error) {
 	sz := len(ws.BytesWritten())
 	zeros := []byte{0, 0, 0, 0}
 	rem := uint32(sz) % 4
@@ -87,30 +87,43 @@ func padToFourByteBoundary(ws *slicewriter.WriteSeeker) error {
 	return nil
 }
 
-func (cfw *CoverageDataWriter) patchSegmentHeader(ws *slicewriter.WriteSeeker) error {
+func (cfw *CoverageDataWriter) patchSegmentHeader(ws *slicewriter.WriteSeeker) (derr error) {
+	var err error
+	var off int64
 	// record position
-	off, err := ws.Seek(0, io.SeekCurrent)
+	off, err = ws.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return fmt.Errorf("error seeking in patchSegmentHeader: %v", err)
 	}
 	// seek back to start so that we can update the segment header
-	if _, err := ws.Seek(0, io.SeekStart); err != nil {
+	if _, err = ws.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("error seeking in patchSegmentHeader: %v", err)
 	}
 	if cfw.debug {
 		fmt.Fprintf(os.Stderr, "=-= writing counter segment header: %+v", cfw.csh)
 	}
-	if err := binary.Write(ws, binary.LittleEndian(), unsafe.TypeOf(*cfw.csh), unsafe.Pointer(cfw.csh)); err != nil {
+	if err = binary.Write(ws, binary.LittleEndian(), unsafe.TypeOf(*cfw.csh), unsafe.Pointer(cfw.csh)); err != nil {
 		return err
 	}
 	// ... and finally return to the original offset.
-	if _, err := ws.Seek(off, io.SeekStart); err != nil {
+	if _, err = ws.Seek(off, io.SeekStart); err != nil {
 		return fmt.Errorf("error seeking in patchSegmentHeader: %v", err)
 	}
 	return nil
 }
 
-func (cfw *CoverageDataWriter) writeSegmentPreamble(args map[string][]byte, ws *slicewriter.WriteSeeker) error {
+// writeULEB128 writes one uleb128 value into ws. Standalone rather than a
+// closure: Moxie closures cannot capture the enclosing scope.
+func writeULEB128(cfw *CoverageDataWriter, ws *slicewriter.WriteSeeker, v uint32) (derr error) {
+	cfw.tmp = cfw.tmp[:0]
+	cfw.tmp = uleb128.AppendUleb128(cfw.tmp, v)
+	if _, err := ws.Write(cfw.tmp); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (cfw *CoverageDataWriter) writeSegmentPreamble(args map[string][]byte, ws *slicewriter.WriteSeeker) (derr error) {
 	if err := binary.Write(ws, binary.LittleEndian(), unsafe.TypeOf(*cfw.csh), unsafe.Pointer(cfw.csh)); err != nil {
 		return err
 	}
@@ -125,37 +138,32 @@ func (cfw *CoverageDataWriter) writeSegmentPreamble(args map[string][]byte, ws *
 	}
 	cfw.csh.StrTabLen = uint32(len(ws.BytesWritten())) - hdrsz
 
-	akeys := slices.Sorted(maps.Keys(args))
-
-	wrULEB128 := func(v uint32) error {
-		cfw.tmp = cfw.tmp[:0]
-		cfw.tmp = uleb128.AppendUleb128(cfw.tmp, v)
-		if _, err := ws.Write(cfw.tmp); err != nil {
-			return err
-		}
-		return nil
+	akeys := []string{}
+	for k := range args {
+		akeys = mxutil.Ensure(akeys, 1)
+		akeys = push(akeys, k)
 	}
+	slices.Sort(akeys)
 
 	// Count of arg pairs.
-	if err := wrULEB128(uint32(len(args))); err != nil {
+	if err := writeULEB128(cfw, ws, uint32(len(args))); err != nil {
 		return err
 	}
 	// Arg pairs themselves.
 	// Declared once, outside the loop: declarations in a loop in a
 	// self-mutating method are rejected, and the scratch would otherwise be
-	// allocated into the sovereign arena on every iteration. `argval`
-	// rather than `v` because the wrULEB128 closure binds a `v` parameter.
+	// allocated into the sovereign arena on every iteration.
 	var ki uint32
 	var argval []byte
 	var vi uint32
 	for _, k := range akeys {
 		ki = uint32(cfw.stab.Lookup(k))
-		if err := wrULEB128(ki); err != nil {
+		if err := writeULEB128(cfw, ws, ki); err != nil {
 			return err
 		}
 		argval = args[k]
 		vi = uint32(cfw.stab.Lookup(argval))
-		if err := wrULEB128(vi); err != nil {
+		if err := writeULEB128(cfw, ws, vi); err != nil {
 			return err
 		}
 	}
@@ -169,32 +177,31 @@ func (cfw *CoverageDataWriter) writeSegmentPreamble(args map[string][]byte, ws *
 
 // AppendSegment appends a new segment to a counter data, with a new
 // args section followed by a payload of counter data clauses.
-func (cfw *CoverageDataWriter) AppendSegment(args map[string][]byte, visitor CounterVisitor) error {
+func (cfw *CoverageDataWriter) AppendSegment(args map[string][]byte, visitor CounterVisitor) (derr error) {
 	cfw.stab = &stringtab.Writer{}
 	cfw.stab.InitWriter()
 	cfw.stab.Lookup("")
 
-	var err error
 	for k, v := range args {
 		cfw.stab.Lookup(k)
 		cfw.stab.Lookup(v)
 	}
 
 	ws := &slicewriter.WriteSeeker{}
-	if err = cfw.writeSegmentPreamble(args, ws); err != nil {
-		return err
+	if derr = cfw.writeSegmentPreamble(args, ws); derr != nil {
+		return derr
 	}
-	if err = cfw.writeCounters(visitor, ws); err != nil {
-		return err
+	if derr = cfw.writeCounters(visitor, ws); derr != nil {
+		return derr
 	}
-	if err = cfw.patchSegmentHeader(ws); err != nil {
-		return err
+	if derr = cfw.patchSegmentHeader(ws); derr != nil {
+		return derr
 	}
 	if err := cfw.writeBytes(ws.BytesWritten()); err != nil {
 		return err
 	}
-	if err = cfw.writeFooter(); err != nil {
-		return err
+	if derr = cfw.writeFooter(); derr != nil {
+		return derr
 	}
 	if err := cfw.w.Flush(); err != nil {
 		return fmt.Errorf("write error: %v", err)
@@ -203,7 +210,7 @@ func (cfw *CoverageDataWriter) AppendSegment(args map[string][]byte, visitor Cou
 	return nil
 }
 
-func (cfw *CoverageDataWriter) writeHeader(metaFileHash [16]byte) error {
+func (cfw *CoverageDataWriter) writeHeader(metaFileHash [16]byte) (derr error) {
 	// Emit file header.
 	ch := coverage.CounterFileHeader{
 		Magic:     coverage.CovCounterMagic(),
@@ -218,7 +225,7 @@ func (cfw *CoverageDataWriter) writeHeader(metaFileHash [16]byte) error {
 	return nil
 }
 
-func (cfw *CoverageDataWriter) writeBytes(b []byte) error {
+func (cfw *CoverageDataWriter) writeBytes(b []byte) (derr error) {
 	if len(b) == 0 {
 		return nil
 	}
@@ -232,65 +239,121 @@ func (cfw *CoverageDataWriter) writeBytes(b []byte) error {
 	return nil
 }
 
-func (cfw *CoverageDataWriter) writeCounters(visitor CounterVisitor, ws *slicewriter.WriteSeeker) error {
+// emitCounterValue encodes one counter value into ws. Standalone rather than
+// a closure: Moxie closures cannot capture the enclosing scope.
+func emitCounterValue(cfw *CoverageDataWriter, ws *slicewriter.WriteSeeker, val uint32) (derr error) {
+	ctrb := []byte{:4}
+	var buf []byte
+	var towr int32
+	if cfw.cflavor == coverage.CtrRaw {
+		binary.LittleEndian().PutUint32(ctrb, val)
+		buf = ctrb
+		towr = 4
+	} else if cfw.cflavor == coverage.CtrULeb128 {
+		cfw.tmp = cfw.tmp[:0]
+		cfw.tmp = uleb128.AppendUleb128(cfw.tmp, uint32(val))
+		buf = cfw.tmp
+		towr = len(buf)
+	} else {
+		panic("internal error: bad counter flavor")
+	}
+	if sz, err := ws.Write(buf); err != nil {
+		return err
+	} else if sz != towr {
+		return fmt.Errorf("writing counters: short write")
+	}
+	return nil
+}
+
+// emitCounterEntry emits one function's counter clause: the counter count, the
+// package and function ids, then each counter value.
+func emitCounterEntry(cfw *CoverageDataWriter, ws *slicewriter.WriteSeeker, pkid uint32, funcid uint32, counters []uint32) (derr error) {
+	cfw.csh.FcnEntries++
+	if err := emitCounterValue(cfw, ws, uint32(len(counters))); err != nil {
+		return err
+	}
+	if err := emitCounterValue(cfw, ws, pkid); err != nil {
+		return err
+	}
+	if err := emitCounterValue(cfw, ws, funcid); err != nil {
+		return err
+	}
+	for _, val := range counters {
+		if err := emitCounterValue(cfw, ws, val); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// counterBuf collects the entries a CounterVisitor emits. CounterVisitorFn is
+// a bare function type, so the callback the visitor invokes carries no room
+// for the writer state, and Moxie has no closure environment to capture it.
+// The visitor can therefore hand its entries nowhere but here; the encoder is
+// single-threaded and writeCounters is not reentrant, so one holder serves.
+type counterBuf struct {
+	pkids    []uint32
+	funcids  []uint32
+	counters [][]uint32
+}
+
+var cbHolder counterBuf
+
+func (cb *counterBuf) reset() {
+	cb.pkids = cb.pkids[:0]
+	cb.funcids = cb.funcids[:0]
+	cb.counters = cb.counters[:0]
+}
+
+func (cb *counterBuf) add(pkid uint32, funcid uint32, counters []uint32) (derr error) {
+	cb.pkids = mxutil.Ensure(cb.pkids, 1)
+	cb.pkids = push(cb.pkids, pkid)
+	cb.funcids = mxutil.Ensure(cb.funcids, 1)
+	cb.funcids = push(cb.funcids, funcid)
+	cb.counters = mxutil.Ensure(cb.counters, 1)
+	cb.counters = push(cb.counters, cloneCounters(counters))
+	return nil
+}
+
+// cloneCounters copies a visitor's counter slice into fresh storage. The
+// visitor's slice is backed by its frame arena, which is released when it
+// returns; the encoder reads it afterwards.
+func cloneCounters(in []uint32) (out []uint32) {
+	out = []uint32{:0:len(in)}
+	for i := 0; i < len(in); i++ {
+		out[i] = in[i]
+	}
+	return out
+}
+
+// cbAdd records one visitor callback. A free function reading only package
+// state: no capture, so it is a legal CounterVisitorFn.
+func cbAdd(pkid uint32, funcid uint32, counters []uint32) (derr error) {
+	return cbHolder.add(pkid, funcid, counters)
+}
+
+func (cfw *CoverageDataWriter) writeCounters(visitor CounterVisitor, ws *slicewriter.WriteSeeker) (derr error) {
 	// Notes:
 	// - this version writes everything little-endian, which means
 	//   a call is needed to encode every value (expensive)
 	// - we may want to move to a model in which we just blast out
 	//   all counters, or possibly mmap the file and do the write
 	//   implicitly.
-	ctrb := []byte{:4}
-	wrval := func(val uint32) error {
-		var buf []byte
-		var towr int32
-		if cfw.cflavor == coverage.CtrRaw {
-			binary.LittleEndian().PutUint32(ctrb, val)
-			buf = ctrb
-			towr = 4
-		} else if cfw.cflavor == coverage.CtrULeb128 {
-			cfw.tmp = cfw.tmp[:0]
-			cfw.tmp = uleb128.AppendUleb128(cfw.tmp, uint32(val))
-			buf = cfw.tmp
-			towr = len(buf)
-		} else {
-			panic("internal error: bad counter flavor")
-		}
-		if sz, err := ws.Write(buf); err != nil {
-			return err
-		} else if sz != towr {
-			return fmt.Errorf("writing counters: short write")
-		}
-		return nil
-	}
 
-	// Write out entries for each live function.
-	emitter := func(pkid uint32, funcid uint32, counters []uint32) error {
-		cfw.csh.FcnEntries++
-		if err := wrval(uint32(len(counters))); err != nil {
-			return err
-		}
-
-		if err := wrval(pkid); err != nil {
-			return err
-		}
-
-		if err := wrval(funcid); err != nil {
-			return err
-		}
-		for _, val := range counters {
-			if err := wrval(val); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if err := visitor.VisitFuncs(emitter); err != nil {
+	// Collect entries for each live function, then write them out.
+	cbHolder.reset()
+	if err := visitor.VisitFuncs(cbAdd); err != nil {
 		return err
+	}
+	for i := 0; i < len(cbHolder.pkids); i++ {
+		if err := emitCounterEntry(cfw, ws, cbHolder.pkids[i], cbHolder.funcids[i], cbHolder.counters[i]); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func (cfw *CoverageDataWriter) writeFooter() error {
+func (cfw *CoverageDataWriter) writeFooter() (derr error) {
 	cfw.segs++
 	cf := coverage.CounterFileFooter{
 		Magic:       coverage.CovCounterMagic(),

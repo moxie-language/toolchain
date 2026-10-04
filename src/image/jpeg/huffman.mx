@@ -40,12 +40,12 @@ type huffman struct {
 
 // errShortHuffmanData means that an unexpected EOF occurred while decoding
 // Huffman data.
-func errShortHuffmanData() FormatError { return FormatError("short Huffman data") }
+func errShortHuffmanData() (out *FormatError) { return newFormatError("short Huffman data") }
 
 // ensureNBits reads bytes from the byte buffer to ensure that d.bits.n is at
 // least n. For best performance (avoiding function calls inside hot loops),
 // the caller is the one responsible for first checking that d.bits.n < n.
-func (d *decoder) ensureNBits(n int32) error {
+func (d *decoder) ensureNBits(n int32) (out error) {
 	// Loop scratch is declared once, outside the loop: a declaration in a loop
 	// in a self-mutating method is rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
@@ -75,7 +75,7 @@ func (d *decoder) ensureNBits(n int32) error {
 
 // receiveExtend is the composition of RECEIVE and EXTEND, specified in section
 // F.2.2.1.
-func (d *decoder) receiveExtend(t uint8) (int32, error) {
+func (d *decoder) receiveExtend(t uint8) (out int32, derr error) {
 	if d.bits.n < int32(t) {
 		if err := d.ensureNBits(int32(t)); err != nil {
 			return 0, err
@@ -93,7 +93,7 @@ func (d *decoder) receiveExtend(t uint8) (int32, error) {
 
 // processDHT processes a Define Huffman Table marker, and initializes a huffman
 // struct from its contents. Specified in section B.2.4.2.
-func (d *decoder) processDHT(n int32) error {
+func (d *decoder) processDHT(n int32) (out error) {
 	// Loop scratch is declared once, outside the loop: a declaration in a loop
 	// in a self-mutating method is rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
@@ -109,19 +109,19 @@ func (d *decoder) processDHT(n int32) error {
 	)
 	for n > 0 {
 		if n < 17 {
-			return FormatError("DHT has wrong length")
+			return newFormatError("DHT has wrong length")
 		}
 		if err := d.readFull(d.tmp[:17]); err != nil {
 			return err
 		}
 		tc = d.tmp[0] >> 4
 		if tc > maxTc {
-			return FormatError("bad Tc value")
+			return newFormatError("bad Tc value")
 		}
 		th = d.tmp[0] & 0x0f
 		// The baseline th <= 1 restriction is specified in table B.5.
 		if th > maxTh || (d.baseline && th > 1) {
-			return FormatError("bad Th value")
+			return newFormatError("bad Th value")
 		}
 		h = &d.huff[tc][th]
 
@@ -134,14 +134,14 @@ func (d *decoder) processDHT(n int32) error {
 			h.nCodes += nCodes[i]
 		}
 		if h.nCodes == 0 {
-			return FormatError("Huffman table has zero length")
+			return newFormatError("Huffman table has zero length")
 		}
 		if h.nCodes > maxNCodes {
-			return FormatError("Huffman table has excessive length")
+			return newFormatError("Huffman table has excessive length")
 		}
 		n -= int32(h.nCodes) + 17
 		if n < 0 {
-			return FormatError("DHT has wrong length")
+			return newFormatError("DHT has wrong length")
 		}
 		if err := d.readFull(h.vals[:h.nCodes]); err != nil {
 			return err
@@ -170,17 +170,17 @@ func (d *decoder) processDHT(n int32) error {
 
 		// Derive minCodes, maxCodes, and valsIndices.
 		c, index = 0, 0
-		for i, n := range nCodes {
-			if n == 0 {
+		for i, nc := range nCodes {
+			if nc == 0 {
 				h.minCodes[i] = -1
 				h.maxCodes[i] = -1
 				h.valsIndices[i] = -1
 			} else {
 				h.minCodes[i] = c
-				h.maxCodes[i] = c + n - 1
+				h.maxCodes[i] = c + nc - 1
 				h.valsIndices[i] = index
-				c += n
-				index += n
+				c += nc
+				index += nc
 			}
 			c <<= 1
 		}
@@ -190,9 +190,9 @@ func (d *decoder) processDHT(n int32) error {
 
 // decodeHuffman returns the next Huffman-coded value from the bit-stream,
 // decoded according to h.
-func (d *decoder) decodeHuffman(h *huffman) (uint8, error) {
+func (d *decoder) decodeHuffman(h *huffman) (out uint8, derr error) {
 	if h.nCodes == 0 {
-		return 0, FormatError("uninitialized Huffman table")
+		return 0, newFormatError("uninitialized Huffman table")
 	}
 
 	if d.bits.n < 8 {
@@ -233,10 +233,10 @@ slowPath:
 		}
 		code <<= 1
 	}
-	return 0, FormatError("bad Huffman code")
+	return 0, newFormatError("bad Huffman code")
 }
 
-func (d *decoder) decodeBit() (bool, error) {
+func (d *decoder) decodeBit() (out bool, derr error) {
 	if d.bits.n == 0 {
 		if err := d.ensureNBits(1); err != nil {
 			return false, err
@@ -248,7 +248,7 @@ func (d *decoder) decodeBit() (bool, error) {
 	return ret, nil
 }
 
-func (d *decoder) decodeBits(n int32) (uint32, error) {
+func (d *decoder) decodeBits(n int32) (out uint32, derr error) {
 	if d.bits.n < n {
 		if err := d.ensureNBits(n); err != nil {
 			return 0, err

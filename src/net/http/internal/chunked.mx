@@ -18,7 +18,7 @@ import (
 
 const maxLineLength = 4096 // assumed <= bufio.defaultBufSize
 
-const ErrLineTooLong = errors.Const("header line too long")
+var ErrLineTooLong error
 
 // NewChunkedReader returns a new chunkedReader that translates the data read from r
 // out of HTTP "chunked" format before returning it.
@@ -26,7 +26,7 @@ const ErrLineTooLong = errors.Const("header line too long")
 //
 // NewChunkedReader is not needed by normal applications. The http package
 // automatically decodes chunking when reading response bodies.
-func NewChunkedReader(r io.Reader) io.Reader {
+func NewChunkedReader(r io.Reader) (rreader io.Reader) {
 	br, ok := r.(*bufio.Reader)
 	if !ok {
 		br = bufio.NewReader(r)
@@ -85,7 +85,7 @@ func (cr *chunkedReader) beginChunk() {
 	}
 }
 
-func (cr *chunkedReader) chunkHeaderAvailable() bool {
+func (cr *chunkedReader) chunkHeaderAvailable() (rok bool) {
 	n := cr.r.Buffered()
 	if n > 0 {
 		peek, _ := cr.r.Peek(n)
@@ -156,7 +156,7 @@ func (cr *chunkedReader) Read(b []uint8) (n int32, err error) {
 // Give up if the line exceeds maxLineLength.
 // The returned bytes are owned by the bufio.Reader
 // so they are only valid until the next bufio read.
-func readChunkLine(b *bufio.Reader) ([]byte, error) {
+func readChunkLine(b *bufio.Reader) (rb []byte, rerr error) {
 	p, err := b.ReadSlice('\n')
 	if err != nil {
 		// We always know when EOF is coming.
@@ -187,14 +187,14 @@ func readChunkLine(b *bufio.Reader) ([]byte, error) {
 	return p, nil
 }
 
-func trimTrailingWhitespace(b []byte) []byte {
+func trimTrailingWhitespace(b []byte) (rb []byte) {
 	for len(b) > 0 && isOWS(b[len(b)-1]) {
 		b = b[:len(b)-1]
 	}
 	return b
 }
 
-func isOWS(b byte) bool {
+func isOWS(b byte) (rok bool) {
 	return b == ' ' || b == '\t'
 }
 
@@ -207,7 +207,7 @@ const semi = ";"
 //	"0;token" => "0"
 //	"0;token=val" => "0"
 //	`0;token="quoted string"` => "0"
-func removeChunkExtension(p []byte) ([]byte, error) {
+func removeChunkExtension(p []byte) (rb []byte, rerr error) {
 	p, _, _ = bytes.Cut(p, semi)
 	// TODO: care about exact syntax of chunk extensions? We're
 	// ignoring and stripping them anyway. For now just never
@@ -226,7 +226,7 @@ func removeChunkExtension(p []byte) ([]byte, error) {
 // Content-Length header. Using newChunkedWriter inside a handler
 // would result in double chunking or chunking with a Content-Length
 // length, both of which are wrong.
-func NewChunkedWriter(w io.Writer) io.WriteCloser {
+func NewChunkedWriter(w io.Writer) (rwriteCloser io.WriteCloser) {
 	return &chunkedWriter{w}
 }
 
@@ -265,7 +265,7 @@ func (cw *chunkedWriter) Write(data []byte) (n int32, err error) {
 	return
 }
 
-func (cw *chunkedWriter) Close() error {
+func (cw *chunkedWriter) Close() (rerr error) {
 	_, err := io.WriteString(cw.Wire, "0\r\n")
 	return err
 }
@@ -301,4 +301,8 @@ func parseHexUint(v []byte) (n uint64, err error) {
 		n |= uint64(b)
 	}
 	return
+}
+
+func init() {
+	ErrLineTooLong = errors.New("header line too long")
 }

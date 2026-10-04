@@ -49,37 +49,55 @@ type Context interface {
 
 // Canceled is the error returned by [Context.Err] when the context is canceled
 // for some reason other than its deadline passing.
-const Canceled = errors.Const("context canceled")
+var Canceled error
 
-func DeadlineExceeded() error { return deadlineExceededError{} }
+// deadlineExceeded is the singleton returned by DeadlineExceeded: pointer
+// receivers make every call a distinct value otherwise, and errors.Is compares
+// the target with ==.
+var deadlineExceeded error
+
+func DeadlineExceeded() (err error) { return deadlineExceeded }
 
 type deadlineExceededError struct{}
 
-func (deadlineExceededError) Error() string   { return "context deadline exceeded" }
-func (deadlineExceededError) String() string  { return deadlineExceededError{}.Error() }
-func (deadlineExceededError) Timeout() bool   { return true }
-func (deadlineExceededError) Temporary() bool { return true }
+func (e *deadlineExceededError) Error() (msg string)   { return "context deadline exceeded" }
+func (e *deadlineExceededError) String() (msg string)  { return e.Error() }
+func (e *deadlineExceededError) Timeout() (ok bool)    { return true }
+func (e *deadlineExceededError) Temporary() (ok bool)  { return true }
 
 // emptyCtx is never canceled and has no deadline. Background and TODO both
 // return it directly - no embedding, so interface dispatch never needs to
 // resolve a promoted method across a package boundary.
 type emptyCtx struct{}
 
-func (emptyCtx) Deadline() (deadline time.Time, ok bool) { return }
-func (emptyCtx) Done() <-chan struct{}                   { return nil }
-func (emptyCtx) Err() error                              { return nil }
+func (e *emptyCtx) Deadline() (deadline time.Time, ok bool) { return }
+func (e *emptyCtx) Done() (d <-chan struct{})                { return nil }
+func (e *emptyCtx) Err() (err error)                         { return nil }
+
+// background and todo are stable singletons: with pointer receivers a fresh
+// &emptyCtx{} per call would make Background() != Background().
+var background Context
+var todo Context
+
+func init() {
+	deadlineExceeded = &deadlineExceededError{}
+	background = &emptyCtx{}
+	todo = &emptyCtx{}
+	Canceled = errors.New("context canceled")
+	deadlines = &deadlineScheduler{}
+}
 
 // Background returns a non-nil, empty Context. It is never canceled and has
 // no deadline. It is typically used by the main function, initialization,
 // and as the top-level Context for incoming requests.
-func Background() Context {
-	return emptyCtx{}
+func Background() (ctx Context) {
+	return background
 }
 
 // TODO returns a non-nil, empty Context. Code should use context.TODO when
 // it's unclear which Context to use or it is not yet available.
-func TODO() Context {
-	return emptyCtx{}
+func TODO() (ctx Context) {
+	return todo
 }
 
 // breakerCtx is the cancelable Context: a wrapper around a chan struct{}
@@ -100,23 +118,136 @@ func (c *breakerCtx) Deadline() (deadline time.Time, ok bool) {
 	return c.deadline, c.hasDeadline
 }
 
-func (c *breakerCtx) Done() <-chan struct{} {
+func (c *breakerCtx) Done() (d <-chan struct{}) {
 	if c.done == nil {
 		c.done = chan struct{}{}
 	}
 	return c.done
 }
 
-func (c *breakerCtx) Err() error { return c.err }
+func (c *breakerCtx) Err() (err error) { return c.err }
 
 // A CancelFunc tells an operation to abandon its work.
 // A CancelFunc does not wait for the work to stop.
 // After the first call, subsequent calls do nothing.
-type CancelFunc func()
+//
+// A Moxie func value carries no environment, so a callback that must remember
+// which context it cancels cannot be a func(): CancelFunc is a stateful type
+// whose method does the write.
+type CancelFunc struct {
+	c *breakerCtx
+}
+
+func (f *CancelFunc) Cancel() {
+	if f.c == nil {
+		return
+	}
+	deadlines.remove(f.c)
+	f.c.cancel(true, Canceled, nil)
+}
 
 // A CancelCauseFunc behaves like a [CancelFunc] but additionally sets the
 // cancellation cause.
-type CancelCauseFunc func(cause error)
+type CancelCauseFunc struct {
+	c *breakerCtx
+}
+
+func (f *CancelCauseFunc) Cancel(cause error) {
+	if f.c == nil {
+		return
+	}
+	deadlines.remove(f.c)
+	f.c.cancel(true, Canceled, cause)
+}
+
+// deadlineEntry is one pending WithDeadline timer.
+type deadlineEntry struct {
+	c    *breakerCtx
+	when time.Time
+}
+
+// deadlineScheduler holds the pending deadlines. Moxie has no goroutines to
+// watch each deadline, so one package-level timer is armed for the earliest
+// entry and re-armed as entries are added, cancelled, or fire. Its callback is
+// the top-level deadlineFired, which reaches the scheduler through the package
+// global: a func() cannot capture per-instance state.
+type deadlineScheduler struct {
+	entries []*deadlineEntry
+	timer   *time.Timer
+}
+
+var deadlines *deadlineScheduler
+
+func (s *deadlineScheduler) add(c *breakerCtx, when time.Time) {
+	s.entries = mxutil.Ensure(s.entries, 1)
+	s.entries = push(s.entries, &deadlineEntry{c: c, when: when})
+	s.arm()
+}
+
+func (s *deadlineScheduler) remove(c *breakerCtx) {
+	n := int32(0)
+	for _, e := range s.entries {
+		if e.c != c {
+			n++
+		}
+	}
+	if n == int32(len(s.entries)) {
+		return
+	}
+	keep := []*deadlineEntry{:0:n}
+	i := int32(0)
+	for _, e := range s.entries {
+		if e.c != c {
+			keep[i] = e
+			i++
+		}
+	}
+	s.entries = keep[:i]
+	s.arm()
+}
+
+func (s *deadlineScheduler) arm() {
+	if len(s.entries) == 0 {
+		return
+	}
+	earliest := s.entries[0]
+	for _, e := range s.entries {
+		if e.when.Before(earliest.when) {
+			earliest = e
+		}
+	}
+	if s.timer != nil {
+		s.timer.Stop()
+		s.timer = nil
+	}
+	dur := time.Until(earliest.when)
+	if dur <= 0 {
+		s.fire()
+		return
+	}
+	s.timer = time.AfterFunc(dur, deadlineFired)
+}
+
+func (s *deadlineScheduler) fire() {
+	now := time.Now()
+	snap := s.entries
+	keep := []*deadlineEntry{:0:len(snap)}
+	n := int32(0)
+	for _, e := range snap {
+		if e.when.After(now) {
+			keep[n] = e
+			n++
+		} else {
+			e.c.cancel(true, DeadlineExceeded(), nil)
+		}
+	}
+	s.entries = keep[:n]
+	s.arm()
+}
+
+func deadlineFired() {
+	deadlines.fire()
+}
 
 // cancel closes the breaker, cascades to children, and runs AfterFuncs.
 func (c *breakerCtx) cancel(removeFromParent bool, err, cause error) {
@@ -140,7 +271,7 @@ func (c *breakerCtx) cancel(removeFromParent bool, err, cause error) {
 	for _, a := range c.afterFuncs {
 		if a != nil && !a.done {
 			a.done = true
-			a.f()
+			a.f.Call()
 		}
 	}
 	c.afterFuncs = nil
@@ -153,37 +284,37 @@ func (c *breakerCtx) cancel(removeFromParent bool, err, cause error) {
 // when parent cancels, child cancels. Moxie has no goroutines to watch a
 // foreign parent's breaker, so a foreign parent that is not yet canceled and
 // does not support cancellation propagation is a panic.
-func newChild(parent Context) *breakerCtx {
+func newChild(parent Context) (child *breakerCtx) {
 	prevArena := runtime.CurrentArena()
 	runtime.SetCurrentArena(runtime.RootArena())
 	defer runtime.SetCurrentArena(prevArena)
 	if parent == nil {
 		panic("cannot create context from nil parent")
 	}
-	c := &breakerCtx{}
+	child = &breakerCtx{}
 	if p, ok := parent.(*breakerCtx); ok {
-		c.parent = p
+		child.parent = p
 		if p.err != nil {
-			c.cancel(false, p.err, p.cause)
+			child.cancel(false, p.err, p.cause)
 		} else {
 			if p.children == nil {
 				p.children = map[*breakerCtx]struct{}{}
 			}
-			p.children[c] = struct{}{}
+			p.children[child] = struct{}{}
 		}
-		return c
+		return child
 	}
 	// Foreign parent (Background, WithoutCancel wrapper, or custom type).
 	// Check its Done channel synchronously.
 	if d := parent.Done(); d != nil {
 		select {
 		case <-d:
-			c.cancel(false, parent.Err(), parent.Err())
+			child.cancel(false, parent.Err(), parent.Err())
 		default:
 			panic("context: parent does not support cancellation propagation")
 		}
 	}
-	return c
+	return child
 }
 
 // WithCancel returns a copy of parent with a new Done channel. The returned
@@ -195,7 +326,7 @@ func WithCancel(parent Context) (ctx Context, cancel CancelFunc) {
 	runtime.SetCurrentArena(runtime.RootArena())
 	defer runtime.SetCurrentArena(prevArena)
 	c := newChild(parent)
-	return c, func() { c.cancel(true, Canceled, nil) }
+	return c, CancelFunc{c: c}
 }
 
 // WithCancelCause behaves like [WithCancel] but returns a [CancelCauseFunc]
@@ -207,7 +338,7 @@ func WithCancelCause(parent Context) (ctx Context, cancel CancelCauseFunc) {
 	runtime.SetCurrentArena(runtime.RootArena())
 	defer runtime.SetCurrentArena(prevArena)
 	c := newChild(parent)
-	return c, func(cause error) { c.cancel(true, Canceled, cause) }
+	return c, CancelCauseFunc{c: c}
 }
 
 // Cause returns a non-nil error explaining why c was canceled.
@@ -215,7 +346,7 @@ func WithCancelCause(parent Context) (ctx Context, cancel CancelCauseFunc) {
 // If that cancellation happened via a call to CancelCauseFunc(err),
 // then Cause returns err. Otherwise Cause(c) returns the same value as
 // c.Err(). Cause returns nil if c has not been canceled yet.
-func Cause(c Context) error {
+func Cause(c Context) (err error) {
 	if b, ok := c.(*breakerCtx); ok {
 		return b.cause
 	}
@@ -225,20 +356,20 @@ func Cause(c Context) error {
 // WithoutCancel returns a derived context that points to the parent context
 // and is not canceled when parent is canceled. The returned context returns
 // no Deadline or Err, and its Done channel is nil.
-func WithoutCancel(parent Context) Context {
+func WithoutCancel(parent Context) (ctx Context) {
 	if parent == nil {
 		panic("cannot create context from nil parent")
 	}
-	return withoutCancelCtx{parent}
+	return &withoutCancelCtx{parent}
 }
 
 type withoutCancelCtx struct {
 	c Context
 }
 
-func (withoutCancelCtx) Deadline() (deadline time.Time, ok bool) { return }
-func (withoutCancelCtx) Done() <-chan struct{}                   { return nil }
-func (withoutCancelCtx) Err() error                              { return nil }
+func (w *withoutCancelCtx) Deadline() (deadline time.Time, ok bool) { return }
+func (w *withoutCancelCtx) Done() (d <-chan struct{})                { return nil }
+func (w *withoutCancelCtx) Err() (err error)                         { return nil }
 
 // WithDeadline returns a copy of the parent context with the deadline
 // adjusted to be no later than d. If the parent's deadline is already
@@ -246,7 +377,7 @@ func (withoutCancelCtx) Err() error                              { return nil }
 // parent. The returned Done channel is closed when the deadline expires,
 // when the returned cancel function is called, or when the parent context's
 // Done channel is closed, whichever happens first.
-func WithDeadline(parent Context, d time.Time) (Context, CancelFunc) {
+func WithDeadline(parent Context, d time.Time) (ctx Context, cancel CancelFunc) {
 	prevArena := runtime.CurrentArena()
 	runtime.SetCurrentArena(runtime.RootArena())
 	defer runtime.SetCurrentArena(prevArena)
@@ -260,39 +391,55 @@ func WithDeadline(parent Context, d time.Time) (Context, CancelFunc) {
 	c := newChild(parent)
 	c.deadline = d
 	c.hasDeadline = true
-	dur := time.Until(d)
-	if dur <= 0 {
+	if time.Until(d) <= 0 {
 		// deadline has already passed
 		c.cancel(true, DeadlineExceeded(), nil)
-		return c, func() { c.cancel(true, Canceled, nil) }
+		return c, CancelFunc{c: c}
 	}
-	timer := time.AfterFunc(dur, func() {
-		c.cancel(true, DeadlineExceeded(), nil)
-	})
-	return c, func() {
-		timer.Stop()
-		c.cancel(true, Canceled, nil)
-	}
+	deadlines.add(c, d)
+	return c, CancelFunc{c: c}
 }
 
 // WithTimeout returns WithDeadline(parent, time.Now().Add(timeout)).
-func WithTimeout(parent Context, timeout time.Duration) (Context, CancelFunc) {
+func WithTimeout(parent Context, timeout time.Duration) (ctx Context, cancel CancelFunc) {
 	return WithDeadline(parent, time.Now().Add(timeout))
 }
 
-// afterFunc registers a function to run when its breakerCtx cancels.
+// A Callback is the stateful callback [AfterFunc] runs. A Moxie func value
+// carries no environment, so a callback that must remember what to act on is a
+// type with a Call method rather than a func().
+type Callback interface {
+	Call()
+}
+
+// afterFunc registers a callback to run when its breakerCtx cancels.
 type afterFunc struct {
-	f    func()
+	f    Callback
 	done bool
+}
+
+// A StopFunc stops the association created by [AfterFunc].
+type StopFunc struct {
+	a *afterFunc
+}
+
+// Stop reports whether it stopped f from being run. If it returns false, the
+// context has been canceled and f has been run.
+func (s *StopFunc) Stop() (stopped bool) {
+	if s.a.done {
+		return false
+	}
+	s.a.done = true
+	return true
 }
 
 // AfterFunc arranges to call f after ctx is canceled.
 // If ctx is already canceled, AfterFunc calls f immediately.
 //
-// Calling the returned stop function stops the association of ctx with f.
-// It returns true if the call stopped f from being run.
-// If stop returns false, the context has been canceled and f has been run.
-func AfterFunc(ctx Context, f func()) (stop func() bool) {
+// Calling the returned StopFunc's Stop method stops the association of ctx
+// with f. Stop returns true if the call stopped f from being run.
+// If Stop returns false, the context has been canceled and f has been run.
+func AfterFunc(ctx Context, f Callback) (stop StopFunc) {
 	prevArena := runtime.CurrentArena()
 	runtime.SetCurrentArena(runtime.RootArena())
 	defer runtime.SetCurrentArena(prevArena)
@@ -300,36 +447,24 @@ func AfterFunc(ctx Context, f func()) (stop func() bool) {
 	if b, ok := ctx.(*breakerCtx); ok {
 		if b.err != nil {
 			a.done = true
-			f()
-			return func() bool { return false }
+			f.Call()
+			return StopFunc{a: a}
 		}
 		b.afterFuncs = mxutil.Ensure(b.afterFuncs, 1)
 		push(b.afterFuncs, a)
-		return func() bool {
-			if a.done {
-				return false
-			}
-			a.done = true
-			return true
-		}
+		return StopFunc{a: a}
 	}
 	// Foreign context: check its Done channel synchronously.
 	if d := ctx.Done(); d != nil {
 		select {
 		case <-d:
 			a.done = true
-			f()
-			return func() bool { return false }
+			f.Call()
+			return StopFunc{a: a}
 		default:
 			panic("context: parent does not support cancellation propagation")
 		}
 	}
-	// Never canceled (e.g. Background): f never runs; stop always reports true.
-	return func() bool {
-		if a.done {
-			return false
-		}
-		a.done = true
-		return true
-	}
+	// Never canceled (e.g. Background): f never runs; Stop is still defined.
+	return StopFunc{a: a}
 }

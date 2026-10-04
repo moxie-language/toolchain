@@ -17,25 +17,40 @@ const colon = ":"
 // The first call will cache the current user information.
 // Subsequent calls will return the cached value and will not reflect
 // changes to the current user.
-func Current() (*User, error) {
-	if !cache.done { cache.done = true; cache.u, cache.err = current() }
-	if cache.err != nil {
-		return nil, cache.err
-	}
-	u := *cache.u // copy
-	return &u, nil
+func Current() (ruser *User, rerr error) {
+	return userCacheHolder.get()
 }
 
-// cache of the current user
-var cache struct {
+// userCache caches the current user. It is a self-mutating type so the cache
+// survives the frame that filled it and its writes happen through a method
+// instead of into a package global.
+type userCache struct {
 	done bool
 	u    *User
 	err  error
 }
 
+var userCacheHolder *userCache
+
+func init() {
+	userCacheHolder = &userCache{}
+}
+
+func (c *userCache) get() (ruser *User, rerr error) {
+	if !c.done {
+		c.done = true
+		c.u, c.err = current()
+	}
+	if c.err != nil {
+		return nil, c.err
+	}
+	u := *c.u // copy
+	return &u, nil
+}
+
 // Lookup looks up a user by username. If the user cannot be found, the
 // returned error is of type [UnknownUserError].
-func Lookup(username string) (*User, error) {
+func Lookup(username string) (ruser *User, rerr error) {
 	if u, err := Current(); err == nil && u.Username == username {
 		return u, err
 	}
@@ -44,7 +59,7 @@ func Lookup(username string) (*User, error) {
 
 // LookupId looks up a user by userid. If the user cannot be found, the
 // returned error is of type [UnknownUserIdError].
-func LookupId(uid string) (*User, error) {
+func LookupId(uid string) (ruser *User, rerr error) {
 	if u, err := Current(); err == nil && u.Uid == uid {
 		return u, err
 	}
@@ -53,17 +68,17 @@ func LookupId(uid string) (*User, error) {
 
 // LookupGroup looks up a group by name. If the group cannot be found, the
 // returned error is of type [UnknownGroupError].
-func LookupGroup(name string) (*Group, error) {
+func LookupGroup(name string) (rgroup *Group, rerr error) {
 	return lookupGroup(name)
 }
 
 // LookupGroupId looks up a group by groupid. If the group cannot be found, the
 // returned error is of type [UnknownGroupIdError].
-func LookupGroupId(gid string) (*Group, error) {
+func LookupGroupId(gid string) (rgroup *Group, rerr error) {
 	return lookupGroupId(gid)
 }
 
 // GroupIds returns the list of group IDs that the user is a member of.
-func (u *User) GroupIds() ([]string, error) {
+func (u *User) GroupIds() (rss []string, rerr error) {
 	return listGroups(u)
 }

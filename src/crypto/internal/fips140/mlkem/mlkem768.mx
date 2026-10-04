@@ -87,7 +87,7 @@ type DecapsulationKey768 struct {
 // Bytes returns the decapsulation key as a 64-byte seed in the "d || z" form.
 //
 // The decapsulation key must be kept secret.
-func (dk *DecapsulationKey768) Bytes() []byte {
+func (dk *DecapsulationKey768) Bytes() (ret0 []byte) {
 	var b [SeedSize]byte
 	copy(b[:], dk.d[:])
 	copy(b[32:], dk.z[:])
@@ -99,7 +99,7 @@ func (dk *DecapsulationKey768) Bytes() []byte {
 //
 // This should only be used for ACVP testing. For all other purposes prefer
 // the Bytes method that returns the (much smaller) seed.
-func TestingOnlyExpandedBytes768(dk *DecapsulationKey768) []byte {
+func TestingOnlyExpandedBytes768(dk *DecapsulationKey768) (ret0 []byte) {
 	b := []byte{:0:decapsulationKeySize768}
 
 	// ByteEncode₁₂(s)
@@ -125,7 +125,7 @@ func TestingOnlyExpandedBytes768(dk *DecapsulationKey768) []byte {
 
 // EncapsulationKey returns the public encapsulation key necessary to produce
 // ciphertexts.
-func (dk *DecapsulationKey768) EncapsulationKey() *EncapsulationKey768 {
+func (dk *DecapsulationKey768) EncapsulationKey() (ret0 *EncapsulationKey768) {
 	return &EncapsulationKey768{
 		rho:             dk.rho,
 		h:             dk.h,
@@ -142,13 +142,13 @@ type EncapsulationKey768 struct {
 }
 
 // Bytes returns the encapsulation key as a byte slice.
-func (ek *EncapsulationKey768) Bytes() []byte {
+func (ek *EncapsulationKey768) Bytes() (ret0 []byte) {
 	// The actual logic is in a separate function to outline this allocation.
 	b := []byte{:0:EncapsulationKeySize768}
 	return ek.bytes(b)
 }
 
-func (ek *EncapsulationKey768) bytes(b []byte) []byte {
+func (ek *EncapsulationKey768) bytes(b []byte) (ret0 []byte) {
 	for i := range ek.t {
 		b = polyByteEncode(b, ek.t[i])
 	}
@@ -170,26 +170,30 @@ type decryptionKey struct {
 
 // GenerateKey768 generates a new decapsulation key, drawing random bytes from
 // a DRBG. The decapsulation key must be kept secret.
-func GenerateKey768() (*DecapsulationKey768, error) {
+func GenerateKey768() (ret0 *DecapsulationKey768, ret1 error) {
 	// The actual logic is in a separate function to outline this allocation.
 	dk := &DecapsulationKey768{}
 	return generateKey(dk)
 }
 
-func generateKey(dk *DecapsulationKey768) (*DecapsulationKey768, error) {
+func generateKey(dk *DecapsulationKey768) (ret0 *DecapsulationKey768, ret1 error) {
 	var d [32]byte
 	drbg.Read(d[:])
 	var z [32]byte
 	drbg.Read(z[:])
 	kemKeyGen(dk, d[:], z[:])
-	fips140.PCT("ML-KEM PCT", func() error { return kemPCT(dk) })
+	var pctErr error
+	if fips140.Enabled {
+		pctErr = kemPCT(dk)
+	}
+	fips140.PCT("ML-KEM PCT", pctErr)
 	fips140.RecordApproved()
 	return dk, nil
 }
 
 // GenerateKeyInternal768 is a derandomized version of GenerateKey768,
 // exclusively for use in tests.
-func GenerateKeyInternal768(d, z *[32]byte) *DecapsulationKey768 {
+func GenerateKeyInternal768(d, z *[32]byte) (ret0 *DecapsulationKey768) {
 	dk := &DecapsulationKey768{}
 	kemKeyGen(dk, d[:], z[:])
 	return dk
@@ -197,13 +201,13 @@ func GenerateKeyInternal768(d, z *[32]byte) *DecapsulationKey768 {
 
 // NewDecapsulationKey768 parses a decapsulation key from a 64-byte
 // seed in the "d || z" form. The seed must be uniformly random.
-func NewDecapsulationKey768(seed []byte) (*DecapsulationKey768, error) {
+func NewDecapsulationKey768(seed []byte) (ret0 *DecapsulationKey768, ret1 error) {
 	// The actual logic is in a separate function to outline this allocation.
 	dk := &DecapsulationKey768{}
 	return newKeyFromSeed(dk, seed)
 }
 
-func newKeyFromSeed(dk *DecapsulationKey768, seed []byte) (*DecapsulationKey768, error) {
+func newKeyFromSeed(dk *DecapsulationKey768, seed []byte) (ret0 *DecapsulationKey768, ret1 error) {
 	if len(seed) != SeedSize {
 		return nil, errors.New("mlkem: invalid seed length")
 	}
@@ -219,7 +223,7 @@ func newKeyFromSeed(dk *DecapsulationKey768, seed []byte) (*DecapsulationKey768,
 //
 // This function should only be used for ACVP testing. Prefer NewDecapsulationKey768 for all
 // other purposes.
-func TestingOnlyNewDecapsulationKey768(b []byte) (*DecapsulationKey768, error) {
+func TestingOnlyNewDecapsulationKey768(b []byte) (ret0 *DecapsulationKey768, ret1 error) {
 	if len(b) != decapsulationKeySize768 {
 		return nil, errors.New("mlkem: invalid NIST decapsulation key length")
 	}
@@ -316,7 +320,7 @@ func kemKeyGen(dk *DecapsulationKey768, d, z []byte) {
 // the two shared secret K values are equal. The PCT shall be performed either
 // when keys are generated/imported, prior to the first exportation, or prior to
 // the first operational use (if not exported before the first use)."
-func kemPCT(dk *DecapsulationKey768) error {
+func kemPCT(dk *DecapsulationKey768) (ret0 error) {
 	ek := dk.EncapsulationKey()
 	K, c := ek.Encapsulate()
 	K1, err := dk.Decapsulate(c)
@@ -370,7 +374,7 @@ func kemEncaps(cc *[CiphertextSize768]byte, ek *EncapsulationKey768, m *[message
 
 // NewEncapsulationKey768 parses an encapsulation key from its encoded form.
 // If the encapsulation key is not valid, NewEncapsulationKey768 returns an error.
-func NewEncapsulationKey768(encapsulationKey []byte) (*EncapsulationKey768, error) {
+func NewEncapsulationKey768(encapsulationKey []byte) (ret0 *EncapsulationKey768, ret1 error) {
 	// The actual logic is in a separate function to outline this allocation.
 	ek := &EncapsulationKey768{}
 	return parseEK(ek, encapsulationKey)
@@ -380,7 +384,7 @@ func NewEncapsulationKey768(encapsulationKey []byte) (*EncapsulationKey768, erro
 //
 // It implements the initial stages of K-PKE.Encrypt according to FIPS 203,
 // Algorithm 14.
-func parseEK(ek *EncapsulationKey768, ekPKE []byte) (*EncapsulationKey768, error) {
+func parseEK(ek *EncapsulationKey768, ekPKE []byte) (ret0 *EncapsulationKey768, ret1 error) {
 	if len(ekPKE) != EncapsulationKeySize768 {
 		return nil, errors.New("mlkem: invalid encapsulation key length")
 	}
@@ -412,7 +416,7 @@ func parseEK(ek *EncapsulationKey768, ekPKE []byte) (*EncapsulationKey768, error
 //
 // It implements K-PKE.Encrypt according to FIPS 203, Algorithm 14, although the
 // computation of t and AT is done in parseEK.
-func pkeEncrypt(cc *[CiphertextSize768]byte, ex *encryptionKey, m []byte, rnd []byte) []byte {
+func pkeEncrypt(cc *[CiphertextSize768]byte, ex *encryptionKey, m []byte, rnd []byte) (ret0 []byte) {
 	var N byte
 	r, e1 := []nttElement{:k}, []ringElement{:k}
 	for i := range r {
@@ -459,7 +463,7 @@ func (dk *DecapsulationKey768) Decapsulate(ciphertext []byte) (sharedKey []byte,
 	if len(ciphertext) != CiphertextSize768 {
 		return nil, errors.New("mlkem: invalid ciphertext length")
 	}
-	c := (*[CiphertextSize768]byte)(ciphertext)
+	c := ciphertext
 	// Note that the hash check (step 3 of the decapsulation input check from
 	// FIPS 203, Section 7.3) is foregone as a DecapsulationKey is always
 	// validly generated by ML-KEM.KeyGen_internal.
@@ -469,7 +473,7 @@ func (dk *DecapsulationKey768) Decapsulate(ciphertext []byte) (sharedKey []byte,
 // kemDecaps produces a shared key from a ciphertext.
 //
 // It implements ML-KEM.Decaps_internal according to FIPS 203, Algorithm 18.
-func kemDecaps(dk *DecapsulationKey768, c *[CiphertextSize768]byte) (K []byte) {
+func kemDecaps(dk *DecapsulationKey768, c []byte) (K []byte) {
 	fips140.RecordApproved()
 	m := pkeDecrypt(&dk.decryptionKey, c)
 	g := sha3.New512()
@@ -479,13 +483,13 @@ func kemDecaps(dk *DecapsulationKey768, c *[CiphertextSize768]byte) (K []byte) {
 	Kprime, r := G[:SharedKeySize], G[SharedKeySize:]
 	J := sha3.NewShake256()
 	J.Write(dk.z[:])
-	J.Write(c[:])
+	J.Write(c)
 	Kout := []byte{:SharedKeySize}
 	J.Read(Kout)
 	var cc [CiphertextSize768]byte
 	c1 := pkeEncrypt(&cc, &dk.encryptionKey, m, r)
 
-	subtle.ConstantTimeCopy(subtle.ConstantTimeCompare(c[:], c1), Kout, Kprime)
+	subtle.ConstantTimeCopy(subtle.ConstantTimeCompare(c, c1), Kout, Kprime)
 	return Kout
 }
 
@@ -493,14 +497,14 @@ func kemDecaps(dk *DecapsulationKey768, c *[CiphertextSize768]byte) (K []byte) {
 //
 // It implements K-PKE.Decrypt according to FIPS 203, Algorithm 15,
 // although s is retained from kemKeyGen.
-func pkeDecrypt(dx *decryptionKey, c *[CiphertextSize768]byte) []byte {
+func pkeDecrypt(dx *decryptionKey, c []byte) (ret0 []byte) {
 	u := []ringElement{:k}
 	for i := range u {
-		bv := (*[encodingSize10]byte)(c[encodingSize10*i : encodingSize10*(i+1)])
+		bv := c[encodingSize10*i : encodingSize10*(i+1)]
 		u[i] = ringDecodeAndDecompress10(bv)
 	}
 
-	b := (*[encodingSize4]byte)(c[encodingSize10*k:])
+	b := c[encodingSize10*k:]
 	v := ringDecodeAndDecompress4(b)
 
 	var mask nttElement // s⊺ ◦ NTT(u)

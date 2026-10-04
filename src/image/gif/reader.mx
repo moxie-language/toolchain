@@ -18,11 +18,6 @@ import (
 	"io"
 )
 
-const (
-	errNotEnough = errors.Const("gif: not enough image data")
-	errTooMuch   = errors.Const("gif: too much image data")
-	errBadPixel  = errors.Const("gif: invalid pixel value")
-)
 
 // If the io.Reader does not also have ReadByte, then decode will introduce its own buffering.
 type reader interface {
@@ -64,7 +59,7 @@ const (
 	eApplication    = 0xFF // Application
 )
 
-func readFull(r io.Reader, b []byte) error {
+func readFull(r io.Reader, b []byte) (out error) {
 	_, err := io.ReadFull(r, b)
 	if err == io.EOF {
 		err = io.ErrUnexpectedEOF
@@ -72,7 +67,7 @@ func readFull(r io.Reader, b []byte) error {
 	return err
 }
 
-func readByte(r io.ByteReader) (byte, error) {
+func readByte(r io.ByteReader) (out byte, derr error) {
 	b, err := r.ReadByte()
 	if err == io.EOF {
 		err = io.ErrUnexpectedEOF
@@ -101,7 +96,7 @@ type decoder struct {
 	hasTransparentIndex bool
 
 	// Computed.
-	globalColorTable color.Palette
+	globalColorTable []color.Color
 
 	// Used when decoding.
 	delay    []int32
@@ -143,7 +138,7 @@ func (b *blockReader) fill() {
 	}
 }
 
-func (b *blockReader) ReadByte() (byte, error) {
+func (b *blockReader) ReadByte() (out byte, derr error) {
 	if b.i == b.j {
 		b.fill()
 		if b.err != nil {
@@ -158,7 +153,7 @@ func (b *blockReader) ReadByte() (byte, error) {
 
 // blockReader must implement io.Reader, but its Read shouldn't ever actually
 // be called in practice. The compress/lzw package will only call [blockReader.ReadByte].
-func (b *blockReader) Read(p []byte) (int32, error) {
+func (b *blockReader) Read(p []byte) (out int32, derr error) {
 	if len(p) == 0 || b.err != nil {
 		return 0, b.err
 	}
@@ -182,7 +177,7 @@ func (b *blockReader) Read(p []byte) (int32, error) {
 // most one more sub-block of length 1 may exist before the block-terminator.
 // These accommodations allow us to support GIFs created by less strict encoders.
 // See https://golang.org/issue/16146.
-func (b *blockReader) close() error {
+func (b *blockReader) close() (out error) {
 	if b.err == io.EOF {
 		// A clean block-sequence terminator was encountered while reading.
 		return nil
@@ -217,7 +212,7 @@ func (b *blockReader) close() error {
 }
 
 // decode reads a GIF image from r and stores the result in d.
-func (d *decoder) decode(r io.Reader, configOnly, keepAllFrames bool) error {
+func (d *decoder) decode(r io.Reader, configOnly, keepAllFrames bool) (out error) {
 	// Add buffering if r does not provide ReadByte.
 	if rr, ok := r.(reader); ok {
 		d.r = rr
@@ -235,20 +230,22 @@ func (d *decoder) decode(r io.Reader, configOnly, keepAllFrames bool) error {
 		return nil
 	}
 
+	var c byte
+	var rerr error
 	for {
-		c, err := readByte(d.r)
-		if err != nil {
-			return fmt.Errorf("gif: reading frames: %v", err)
+		c, rerr = readByte(d.r)
+		if rerr != nil {
+			return fmt.Errorf("gif: reading frames: %v", rerr)
 		}
 		switch c {
 		case sExtension:
-			if err = d.readExtension(); err != nil {
-				return err
+			if rerr = d.readExtension(); rerr != nil {
+				return rerr
 			}
 
 		case sImageDescriptor:
-			if err = d.readImageDescriptor(keepAllFrames); err != nil {
-				return err
+			if rerr = d.readImageDescriptor(keepAllFrames); rerr != nil {
+				return rerr
 			}
 
 			if !keepAllFrames && len(d.image) == 1 {
@@ -267,7 +264,7 @@ func (d *decoder) decode(r io.Reader, configOnly, keepAllFrames bool) error {
 	}
 }
 
-func (d *decoder) readHeaderAndScreenDescriptor() error {
+func (d *decoder) readHeaderAndScreenDescriptor() (out error) {
 	err := readFull(d.r, d.tmp[:13])
 	if err != nil {
 		return fmt.Errorf("gif: reading header: %v", err)
@@ -289,21 +286,21 @@ func (d *decoder) readHeaderAndScreenDescriptor() error {
 	return nil
 }
 
-func (d *decoder) readColorTable(fields byte) (color.Palette, error) {
+func (d *decoder) readColorTable(fields byte) (out []color.Color, derr error) {
 	n := 1 << (1 + uint32(fields&fColorTableBitsMask))
 	err := readFull(d.r, d.tmp[:3*n])
 	if err != nil {
 		return nil, fmt.Errorf("gif: reading color table: %s", err)
 	}
-	j, p := 0, color.Palette{:n}
+	j, p := 0, []color.Color{:n}
 	for i := range p {
-		p[i] = color.RGBA{d.tmp[j+0], d.tmp[j+1], d.tmp[j+2], 0xFF}
+		p[i] = &color.RGBA{d.tmp[j+0], d.tmp[j+1], d.tmp[j+2], 0xFF}
 		j += 3
 	}
 	return p, nil
 }
 
-func (d *decoder) readExtension() error {
+func (d *decoder) readExtension() (out error) {
 	extension, err := readByte(d.r)
 	if err != nil {
 		return fmt.Errorf("gif: reading extension: %v", err)
@@ -317,9 +314,9 @@ func (d *decoder) readExtension() error {
 	case eComment:
 		// nothing to do but read the data.
 	case eApplication:
-		b, err := readByte(d.r)
-		if err != nil {
-			return fmt.Errorf("gif: reading extension: %v", err)
+		b, berr := readByte(d.r)
+		if berr != nil {
+			return fmt.Errorf("gif: reading extension: %v", berr)
 		}
 		// The spec requires size be 11, but Adobe sometimes uses 10.
 		size = int32(b)
@@ -327,17 +324,17 @@ func (d *decoder) readExtension() error {
 		return fmt.Errorf("gif: unknown extension 0x%.2x", extension)
 	}
 	if size > 0 {
-		if err := readFull(d.r, d.tmp[:size]); err != nil {
-			return fmt.Errorf("gif: reading extension: %v", err)
+		if serr := readFull(d.r, d.tmp[:size]); serr != nil {
+			return fmt.Errorf("gif: reading extension: %v", serr)
 		}
 	}
 
 	// Application Extension with "NETSCAPE2.0" as string and 1 in data means
 	// this extension defines a loop count.
 	if extension == eApplication && d.tmp[:size] == "NETSCAPE2.0" {
-		n, err := d.readBlock()
-		if err != nil {
-			return fmt.Errorf("gif: reading extension: %v", err)
+		n, nerr := d.readBlock()
+		if nerr != nil {
+			return fmt.Errorf("gif: reading extension: %v", nerr)
 		}
 		if n == 0 {
 			return nil
@@ -346,18 +343,20 @@ func (d *decoder) readExtension() error {
 			d.loopCount = int32(d.tmp[1]) | int32(d.tmp[2])<<8
 		}
 	}
+	var blkLen int32
+	var blkErr error
 	for {
-		n, err := d.readBlock()
-		if err != nil {
-			return fmt.Errorf("gif: reading extension: %v", err)
+		blkLen, blkErr = d.readBlock()
+		if blkErr != nil {
+			return fmt.Errorf("gif: reading extension: %v", blkErr)
 		}
-		if n == 0 {
+		if blkLen == 0 {
 			return nil
 		}
 	}
 }
 
-func (d *decoder) readGraphicControl() error {
+func (d *decoder) readGraphicControl() (out error) {
 	if err := readFull(d.r, d.tmp[:6]); err != nil {
 		return fmt.Errorf("gif: can't read graphic control: %s", err)
 	}
@@ -377,7 +376,7 @@ func (d *decoder) readGraphicControl() error {
 	return nil
 }
 
-func (d *decoder) readImageDescriptor(keepAllFrames bool) error {
+func (d *decoder) readImageDescriptor(keepAllFrames bool) (out error) {
 	m, err := d.newImageFromDescriptor()
 	if err != nil {
 		return err
@@ -397,19 +396,19 @@ func (d *decoder) readImageDescriptor(keepAllFrames bool) error {
 	if d.hasTransparentIndex {
 		if !useLocalColorTable {
 			// Clone the global color table.
-			m.Palette = push(color.Palette(nil), d.globalColorTable...)
+			m.Palette = push([]color.Color(nil), d.globalColorTable...)
 		}
 		if ti := int32(d.transparentIndex); ti < len(m.Palette) {
-			m.Palette[ti] = color.RGBA{}
+			m.Palette[ti] = &color.RGBA{}
 		} else {
 			// The transparentIndex is out of range, which is an error
 			// according to the spec, but Firefox and Google Chrome
 			// seem OK with this, so we enlarge the palette with
 			// transparent colors. See golang.org/issue/15059.
-			p := color.Palette{:ti+1}
+			p := []color.Color{:ti+1}
 			copy(p, m.Palette)
 			for i := len(m.Palette); i < len(p); i++ {
-				p[i] = color.RGBA{}
+				p[i] = &color.RGBA{}
 			}
 			m.Palette = p
 		}
@@ -442,19 +441,19 @@ func (d *decoder) readImageDescriptor(keepAllFrames bool) error {
 	// before the LZW decoder saw an explicit end code), provided that
 	// the io.ReadFull call above successfully read len(m.Pix) bytes.
 	// See https://golang.org/issue/9856 for an example GIF.
-	if n, err := lzwr.Read(d.tmp[256:257]); n != 0 || (err != io.EOF && err != io.ErrUnexpectedEOF) {
-		if err != nil {
-			return fmt.Errorf("gif: reading image data: %v", err)
+	if n, rerr := lzwr.Read(d.tmp[256:257]); n != 0 || (rerr != io.EOF && rerr != io.ErrUnexpectedEOF) {
+		if rerr != nil {
+			return fmt.Errorf("gif: reading image data: %v", rerr)
 		}
 		return errTooMuch
 	}
 
 	// In practice, some GIFs have an extra byte in the data sub-block
 	// stream, which we ignore. See https://golang.org/issue/16146.
-	if err := br.close(); err == errTooMuch {
+	if rerr := br.close(); rerr == errTooMuch {
 		return errTooMuch
-	} else if err != nil {
-		return fmt.Errorf("gif: reading image data: %v", err)
+	} else if rerr != nil {
+		return fmt.Errorf("gif: reading image data: %v", rerr)
 	}
 
 	// Check that the color indexes are inside the palette.
@@ -487,7 +486,7 @@ func (d *decoder) readImageDescriptor(keepAllFrames bool) error {
 	return nil
 }
 
-func (d *decoder) newImageFromDescriptor() (*image.Paletted, error) {
+func (d *decoder) newImageFromDescriptor() (out *image.Paletted, derr error) {
 	if err := readFull(d.r, d.tmp[:9]); err != nil {
 		return nil, fmt.Errorf("gif: can't read image descriptor: %s", err)
 	}
@@ -522,13 +521,13 @@ func (d *decoder) newImageFromDescriptor() (*image.Paletted, error) {
 	}, nil), nil
 }
 
-func (d *decoder) readBlock() (int32, error) {
+func (d *decoder) readBlock() (out int32, derr error) {
 	n, err := readByte(d.r)
 	if n == 0 || err != nil {
 		return 0, err
 	}
-	if err := readFull(d.r, d.tmp[:n]); err != nil {
-		return 0, err
+	if rerr := readFull(d.r, d.tmp[:n]); rerr != nil {
+		return 0, rerr
 	}
 	return int32(n), nil
 }
@@ -539,7 +538,7 @@ type interlaceScan struct {
 }
 
 // interlacing represents the set of scans in an interlaced GIF image.
-func _interlacing() [4]interlaceScan {
+func _interlacing() (out [4]interlaceScan) {
 	return [4]interlaceScan{
 		{8, 0}, // Group 1 : Every 8th. row, starting with row 0.
 		{8, 4}, // Group 2 : Every 8th. row, starting with row 4.
@@ -568,7 +567,7 @@ func uninterlace(m *image.Paletted) {
 
 // Decode reads a GIF image from r and returns the first embedded
 // image as an [image.Image].
-func Decode(r io.Reader) (image.Image, error) {
+func Decode(r io.Reader) (img image.Image, derr error) {
 	var d decoder
 	if err := d.decode(r, false, false); err != nil {
 		return nil, err
@@ -592,7 +591,7 @@ type GIF struct {
 	// specified).
 	Disposal []byte
 	// Config is the global color table (palette), width and height. A nil or
-	// empty-color.Palette Config.ColorModel means that each frame has its own
+	// empty-[]color.Color Config.ColorModel means that each frame has its own
 	// color table and there is no global color table. Each frame's bounds must
 	// be within the rectangle defined by the two points (0, 0) and
 	// (Config.Width, Config.Height).
@@ -608,7 +607,7 @@ type GIF struct {
 
 // DecodeAll reads a GIF image from r and returns the sequential frames
 // and timing information.
-func DecodeAll(r io.Reader) (*GIF, error) {
+func DecodeAll(r io.Reader) (out *GIF, derr error) {
 	var d decoder
 	if err := d.decode(r, false, true); err != nil {
 		return nil, err
@@ -630,7 +629,7 @@ func DecodeAll(r io.Reader) (*GIF, error) {
 
 // DecodeConfig returns the global color model and dimensions of a GIF image
 // without decoding the entire image.
-func DecodeConfig(r io.Reader) (image.Config, error) {
+func DecodeConfig(r io.Reader) (cfg image.Config, derr error) {
 	var d decoder
 	if err := d.decode(r, true, false); err != nil {
 		return image.Config{}, err
@@ -644,3 +643,12 @@ func DecodeConfig(r io.Reader) (image.Config, error) {
 
 // Magic is the magic byte prefix for GIF format detection.
 const Magic = "GIF8?a"
+
+var errBadPixel error
+var errNotEnough error
+var errTooMuch error
+func init() {
+	errNotEnough = errors.New("gif: not enough image data")
+	errTooMuch = errors.New("gif: too much image data")
+	errBadPixel = errors.New("gif: invalid pixel value")
+}

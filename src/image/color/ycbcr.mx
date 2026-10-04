@@ -5,7 +5,7 @@
 package color
 
 // RGBToYCbCr converts an RGB triple to a Y'CbCr triple.
-func RGBToYCbCr(r, g, b uint8) (uint8, uint8, uint8) {
+func RGBToYCbCr(r, g, b uint8) (yy uint8, cb uint8, cr uint8) {
 	// The JFIF specification says:
 	//	Y' =  0.2990*R + 0.5870*G + 0.1140*B
 	//	Cb = -0.1687*R - 0.3313*G + 0.5000*B + 128
@@ -19,7 +19,7 @@ func RGBToYCbCr(r, g, b uint8) (uint8, uint8, uint8) {
 	// yy is in range [0,0xff].
 	//
 	// Note that 19595 + 38470 + 7471 equals 65536.
-	yy := (19595*r1 + 38470*g1 + 7471*b1 + 1<<15) >> 16
+	yyv := (19595*r1 + 38470*g1 + 7471*b1 + 1<<15) >> 16
 
 	// The bit twiddling below is equivalent to
 	//
@@ -36,26 +36,29 @@ func RGBToYCbCr(r, g, b uint8) (uint8, uint8, uint8) {
 	// The code below to compute cr uses a similar pattern.
 	//
 	// Note that -11056 - 21712 + 32768 equals 0.
-	cb := -11056*r1 - 21712*g1 + 32768*b1 + 257<<15
-	if uint32(cb)&0xff000000 == 0 {
-		cb >>= 16
+	cbv := -11056*r1 - 21712*g1 + 32768*b1 + 257<<15
+	if uint32(cbv)&0xff000000 == 0 {
+		cbv >>= 16
 	} else {
-		cb = ^(cb >> 31)
+		cbv = ^(cbv >> 31)
 	}
 
 	// Note that 32768 - 27440 - 5328 equals 0.
-	cr := 32768*r1 - 27440*g1 - 5328*b1 + 257<<15
-	if uint32(cr)&0xff000000 == 0 {
-		cr >>= 16
+	crv := 32768*r1 - 27440*g1 - 5328*b1 + 257<<15
+	if uint32(crv)&0xff000000 == 0 {
+		crv >>= 16
 	} else {
-		cr = ^(cr >> 31)
+		crv = ^(crv >> 31)
 	}
 
-	return uint8(yy), uint8(cb), uint8(cr)
+	yy = uint8(yyv)
+	cb = uint8(cbv)
+	cr = uint8(crv)
+	return yy, cb, cr
 }
 
 // YCbCrToRGB converts a Y'CbCr triple to an RGB triple.
-func YCbCrToRGB(y, cb, cr uint8) (uint8, uint8, uint8) {
+func YCbCrToRGB(y, cb, cr uint8) (rout uint8, gout uint8, bout uint8) {
 	// The JFIF specification says:
 	//	R = Y' + 1.40200*(Cr-128)
 	//	G = Y' - 0.34414*(Cb-128) - 0.71414*(Cr-128)
@@ -168,7 +171,7 @@ type YCbCr struct {
 	Y, Cb, Cr uint8
 }
 
-func (c YCbCr) RGBA() (uint32, uint32, uint32, uint32) {
+func (c *YCbCr) RGBA() (rout uint32, gout uint32, bout uint32, aout uint32) {
 	// This code is a copy of the YCbCrToRGB function above, except that it
 	// returns values in the range [0, 0xffff] instead of [0, 0xff]. There is a
 	// subtle difference between doing this and having YCbCr satisfy the Color
@@ -226,15 +229,15 @@ func (c YCbCr) RGBA() (uint32, uint32, uint32, uint32) {
 }
 
 // YCbCrModel is the [Model] for Y'CbCr colors.
-func YCbCrModel() Model { return ModelFunc(yCbCrModel) }
+func YCbCrModel() (out Model) { return ModelFunc(yCbCrModel) }
 
-func yCbCrModel(c Color) Color {
-	if _, ok := c.(YCbCr); ok {
+func yCbCrModel(c Color) (out Color) {
+	if _, ok := c.(*YCbCr); ok {
 		return c
 	}
 	r, g, b, _ := c.RGBA()
 	y, u, v := RGBToYCbCr(uint8(r>>8), uint8(g>>8), uint8(b>>8))
-	return YCbCr{y, u, v}
+	return &YCbCr{y, u, v}
 }
 
 // NYCbCrA represents a non-alpha-premultiplied Y'CbCr-with-alpha color, having
@@ -244,7 +247,7 @@ type NYCbCrA struct {
 	A uint8
 }
 
-func (c NYCbCrA) RGBA() (uint32, uint32, uint32, uint32) {
+func (c *NYCbCrA) RGBA() (rout uint32, gout uint32, bout uint32, aout uint32) {
 	// The first part of this method is the same as YCbCr.RGBA.
 	yy1 := int32(c.Y) * 0x10101
 	cb1 := int32(c.Cb) - 128
@@ -289,14 +292,14 @@ func (c NYCbCrA) RGBA() (uint32, uint32, uint32, uint32) {
 
 // NYCbCrAModel is the [Model] for non-alpha-premultiplied Y'CbCr-with-alpha
 // colors.
-func NYCbCrAModel() Model { return ModelFunc(nYCbCrAModel) }
+func NYCbCrAModel() (out Model) { return ModelFunc(nYCbCrAModel) }
 
-func nYCbCrAModel(c Color) Color {
+func nYCbCrAModel(c Color) (out Color) {
 	switch col := c.(type) {
-	case NYCbCrA:
+	case *NYCbCrA:
 		return col
-	case YCbCr:
-		return NYCbCrA{col, 0xff}
+	case *YCbCr:
+		return &NYCbCrA{*col, 0xff}
 	}
 	r, g, b, a := c.RGBA()
 
@@ -308,11 +311,11 @@ func nYCbCrAModel(c Color) Color {
 	}
 
 	y, u, v := RGBToYCbCr(uint8(r>>8), uint8(g>>8), uint8(b>>8))
-	return NYCbCrA{YCbCr{Y: y, Cb: u, Cr: v}, uint8(a >> 8)}
+	return &NYCbCrA{YCbCr{Y: y, Cb: u, Cr: v}, uint8(a >> 8)}
 }
 
 // RGBToCMYK converts an RGB triple to a CMYK quadruple.
-func RGBToCMYK(r, g, b uint8) (uint8, uint8, uint8, uint8) {
+func RGBToCMYK(r, g, b uint8) (cout uint8, mout uint8, yout uint8, kout uint8) {
 	rr := uint32(r)
 	gg := uint32(g)
 	bb := uint32(b)
@@ -333,7 +336,7 @@ func RGBToCMYK(r, g, b uint8) (uint8, uint8, uint8, uint8) {
 }
 
 // CMYKToRGB converts a [CMYK] quadruple to an RGB triple.
-func CMYKToRGB(c, m, y, k uint8) (uint8, uint8, uint8) {
+func CMYKToRGB(c, m, y, k uint8) (rout uint8, gout uint8, bout uint8) {
 	w := 0xffff - uint32(k)*0x101
 	r := (0xffff - uint32(c)*0x101) * w / 0xffff
 	g := (0xffff - uint32(m)*0x101) * w / 0xffff
@@ -349,7 +352,7 @@ type CMYK struct {
 	C, M, Y, K uint8
 }
 
-func (c CMYK) RGBA() (uint32, uint32, uint32, uint32) {
+func (c *CMYK) RGBA() (rout uint32, gout uint32, bout uint32, aout uint32) {
 	// This code is a copy of the CMYKToRGB function above, except that it
 	// returns values in the range [0, 0xffff] instead of [0, 0xff].
 
@@ -361,13 +364,13 @@ func (c CMYK) RGBA() (uint32, uint32, uint32, uint32) {
 }
 
 // CMYKModel is the [Model] for CMYK colors.
-func CMYKModel() Model { return ModelFunc(cmykModel) }
+func CMYKModel() (out Model) { return ModelFunc(cmykModel) }
 
-func cmykModel(c Color) Color {
-	if _, ok := c.(CMYK); ok {
+func cmykModel(c Color) (out Color) {
+	if _, ok := c.(*CMYK); ok {
 		return c
 	}
 	r, g, b, _ := c.RGBA()
 	cc, mm, yy, kk := RGBToCMYK(uint8(r>>8), uint8(g>>8), uint8(b>>8))
-	return CMYK{cc, mm, yy, kk}
+	return &CMYK{cc, mm, yy, kk}
 }

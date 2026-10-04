@@ -26,9 +26,9 @@ const NoProc = ProcID(-1)
 // for each goroutine.
 type GoID int64
 
-func (GoID) Kind() ResourceKind   { return ResourceGoroutine }
-func (ProcID) Kind() ResourceKind { return ResourceProc }
-func (ThreadID) Kind() ResourceKind { return ResourceThread }
+func (g *GoID) Kind() (out ResourceKind)   { return ResourceGoroutine }
+func (p *ProcID) Kind() (out ResourceKind) { return ResourceProc }
+func (t *ThreadID) Kind() (out ResourceKind) { return ResourceThread }
 
 // NoGoroutine indicates that the relevant events don't correspond to any
 // goroutine in particular.
@@ -51,15 +51,15 @@ const (
 
 // Executing returns true if the state indicates that the goroutine is executing
 // and bound to its thread.
-func (s GoState) Executing() bool {
-	return s == GoRunning || s == GoSyscall
+func (s *GoState) Executing() (okay bool) {
+	return *s == GoRunning || *s == GoSyscall
 }
 
 // String returns a human-readable representation of a GoState.
 //
 // The format of the returned string is for debugging purposes and is subject to change.
-func (s GoState) String() string {
-	switch s {
+func (s *GoState) String() (out string) {
+	switch *s {
 	case GoUndetermined:
 		return "Undetermined"
 	case GoNotExist:
@@ -91,15 +91,15 @@ const (
 
 // Executing returns true if the state indicates that the proc is executing
 // and bound to its thread.
-func (s ProcState) Executing() bool {
-	return s == ProcRunning
+func (s *ProcState) Executing() (okay bool) {
+	return *s == ProcRunning
 }
 
 // String returns a human-readable representation of a ProcState.
 //
 // The format of the returned string is for debugging purposes and is subject to change.
-func (s ProcState) String() string {
-	switch s {
+func (s *ProcState) String() (out string) {
+	switch *s {
 	case ProcUndetermined:
 		return "Undetermined"
 	case ProcNotExist:
@@ -128,8 +128,8 @@ const (
 // String returns a human-readable representation of a ResourceKind.
 //
 // The format of the returned string is for debugging purposes and is subject to change.
-func (r ResourceKind) String() string {
-	switch r {
+func (r *ResourceKind) String() (out string) {
+	switch *r {
 	case ResourceNone:
 		return "None"
 	case ResourceGoroutine:
@@ -150,7 +150,7 @@ type ResourceID struct {
 }
 
 // MakeResourceID creates a general resource ID from a specific resource's ID.
-func MakeResourceID[T interface{ GoID | ProcID | ThreadID; Kind() ResourceKind }](id T) ResourceID {
+func MakeResourceID[T interface{ GoID | ProcID | ThreadID; Kind() ResourceKind }](id T) (out ResourceID) {
 	var rd ResourceID
 	rd.Kind = id.Kind()
 	rd.id = int64(id)
@@ -160,9 +160,9 @@ func MakeResourceID[T interface{ GoID | ProcID | ThreadID; Kind() ResourceKind }
 // Goroutine obtains a GoID from the resource ID.
 //
 // r.Kind must be ResourceGoroutine or this function will panic.
-func (r ResourceID) Goroutine() GoID {
+func (r *ResourceID) Goroutine() (out GoID) {
 	if r.Kind != ResourceGoroutine {
-		panic(fmt.Sprintf("attempted to get GoID from %s resource ID", r.Kind))
+		panic(fmt.Sprintf("attempted to get GoID from %s resource ID", &r.Kind))
 	}
 	return GoID(r.id)
 }
@@ -170,9 +170,9 @@ func (r ResourceID) Goroutine() GoID {
 // Proc obtains a ProcID from the resource ID.
 //
 // r.Kind must be ResourceProc or this function will panic.
-func (r ResourceID) Proc() ProcID {
+func (r *ResourceID) Proc() (out ProcID) {
 	if r.Kind != ResourceProc {
-		panic(fmt.Sprintf("attempted to get ProcID from %s resource ID", r.Kind))
+		panic(fmt.Sprintf("attempted to get ProcID from %s resource ID", &r.Kind))
 	}
 	return ProcID(r.id)
 }
@@ -180,9 +180,9 @@ func (r ResourceID) Proc() ProcID {
 // Thread obtains a ThreadID from the resource ID.
 //
 // r.Kind must be ResourceThread or this function will panic.
-func (r ResourceID) Thread() ThreadID {
+func (r *ResourceID) Thread() (out ThreadID) {
 	if r.Kind != ResourceThread {
-		panic(fmt.Sprintf("attempted to get ThreadID from %s resource ID", r.Kind))
+		panic(fmt.Sprintf("attempted to get ThreadID from %s resource ID", &r.Kind))
 	}
 	return ThreadID(r.id)
 }
@@ -190,11 +190,11 @@ func (r ResourceID) Thread() ThreadID {
 // String returns a human-readable string representation of the ResourceID.
 //
 // This representation is subject to change and is intended primarily for debugging.
-func (r ResourceID) String() string {
+func (r *ResourceID) String() (out string) {
 	if r.Kind == ResourceNone {
 		return r.Kind.String()
 	}
-	return fmt.Sprintf("%s(%d)", r.Kind, r.id)
+	return fmt.Sprintf("%s(%d)", &r.Kind, r.id)
 }
 
 // StateTransition provides details about a StateTransition event.
@@ -225,7 +225,7 @@ type StateTransition struct {
 	newState uint8
 }
 
-func goStateTransition(id GoID, from, to GoState) StateTransition {
+func goStateTransition(id GoID, from, to GoState) (out StateTransition) {
 	return StateTransition{
 		Resource: ResourceID{Kind: ResourceGoroutine, id: int64(id)},
 		oldState: uint8(from),
@@ -233,7 +233,7 @@ func goStateTransition(id GoID, from, to GoState) StateTransition {
 	}
 }
 
-func procStateTransition(id ProcID, from, to ProcState) StateTransition {
+func procStateTransition(id ProcID, from, to ProcState) (out StateTransition) {
 	return StateTransition{
 		Resource: ResourceID{Kind: ResourceProc, id: int64(id)},
 		oldState: uint8(from),
@@ -248,7 +248,7 @@ func procStateTransition(id ProcID, from, to ProcState) StateTransition {
 // on the same thread will feature the same goroutine until it stops running.
 //
 // Panics if d.Resource.Kind is not ResourceGoroutine.
-func (d StateTransition) Goroutine() (from, to GoState) {
+func (d *StateTransition) Goroutine() (from, to GoState) {
 	if d.Resource.Kind != ResourceGoroutine {
 		panic("Goroutine called on non-Goroutine state transition")
 	}
@@ -262,7 +262,7 @@ func (d StateTransition) Goroutine() (from, to GoState) {
 // on the same thread will feature the same goroutine until it stops running.
 //
 // Panics if d.Resource.Kind is not ResourceProc.
-func (d StateTransition) Proc() (from, to ProcState) {
+func (d *StateTransition) Proc() (from, to ProcState) {
 	if d.Resource.Kind != ResourceProc {
 		panic("Proc called on non-Proc state transition")
 	}

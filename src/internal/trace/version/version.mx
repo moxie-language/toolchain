@@ -24,7 +24,7 @@ const (
 	Current         = Go125
 )
 
-func _versions() map[Version][]tracev2.EventSpec {
+func _versions() (out map[Version][]tracev2.EventSpec) {
 	return map[Version][]tracev2.EventSpec{
 		// Go 1.11-1.21 use a different parser and are only set here for the sake of
 		// Version.Valid.
@@ -39,14 +39,14 @@ func _versions() map[Version][]tracev2.EventSpec {
 }
 
 // Specs returns the set of event.Specs for this version.
-func (v Version) Specs() []tracev2.EventSpec {
+func (v *Version) Specs() (specs []tracev2.EventSpec) {
 	m := _versions()
-	return m[v]
+	return m[*v]
 }
 
 // EventName returns a string name of a wire format event
 // for a particular trace version.
-func (v Version) EventName(typ tracev2.EventType) []byte {
+func (v *Version) EventName(typ tracev2.EventType) (name []byte) {
 	if !v.Valid() {
 		return "<invalid trace version>"
 	}
@@ -60,30 +60,67 @@ func (v Version) EventName(typ tracev2.EventType) []byte {
 	return fmt.Sprintf("Invalid(%d)", typ)
 }
 
-func (v Version) Valid() bool {
+func (v *Version) Valid() (okay bool) {
 	m := _versions()
-	_, ok := m[v]
+	_, ok := m[*v]
 	return ok
 }
 
 // headerFmt is the format of the header of all Go execution traces.
 const headerFmt = "go 1.%d trace\x00\x00\x00"
 
+// badHeader is the error returned for a malformed trace header.
+func badHeader() (err error) {
+	return fmt.Errorf("bad file format: not a Go execution trace?")
+}
+
 // ReadHeader reads the version of the trace out of the trace file's
-// header, whose prefix must be present in v.
-func ReadHeader(r io.Reader) (Version, error) {
-	var v Version
-	_, err := fmt.Fscanf(r, headerFmt, &v)
-	if err != nil {
-		return v, fmt.Errorf("bad file format: not a Go execution trace?")
+// header, whose prefix must be present in v. It consumes exactly the
+// header bytes ("go 1.<digits> trace\x00\x00\x00") and no more.
+func ReadHeader(r io.Reader) (v Version, err error) {
+	prefix := "go 1."
+	one := []byte{:1}
+	for i := int32(0); i < len(prefix); i++ {
+		if _, rerr := io.ReadFull(r, one); rerr != nil {
+			return v, badHeader()
+		}
+		if one[0] != prefix[i] {
+			return v, badHeader()
+		}
 	}
-	if !v.Valid() {
+	var num uint32
+	var nd int32
+	for {
+		if _, rerr := io.ReadFull(r, one); rerr != nil {
+			return v, badHeader()
+		}
+		ch := one[0]
+		if ch < '0' || ch > '9' {
+			if ch != ' ' || nd == 0 {
+				return v, badHeader()
+			}
+			break
+		}
+		num = num*10 + uint32(ch-'0')
+		nd++
+	}
+	suffix := "trace\x00\x00\x00"
+	for i := int32(0); i < len(suffix); i++ {
+		if _, rerr := io.ReadFull(r, one); rerr != nil {
+			return v, badHeader()
+		}
+		if one[0] != suffix[i] {
+			return v, badHeader()
+		}
+	}
+	v = Version(num)
+	if !(&v).Valid() {
 		return v, fmt.Errorf("unknown or unsupported trace version go 1.%d", v)
 	}
 	return v, nil
 }
 
 // WriteHeader writes a header for a trace version v to w.
-func WriteHeader(w io.Writer, v Version) (int32, error) {
+func WriteHeader(w io.Writer, v Version) (n int32, err error) {
 	return fmt.Fprintf(w, headerFmt, v)
 }

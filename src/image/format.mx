@@ -12,7 +12,7 @@ import (
 )
 
 // ErrFormat indicates that decoding encountered an unknown format.
-const ErrFormat = errors.Const("image: unknown format")
+var ErrFormat error
 
 // A format holds an image format's name, magic header and how to decode it.
 type format struct {
@@ -27,7 +27,7 @@ type Decoder struct {
 }
 
 // NewDecoder returns a Decoder with no registered formats.
-func NewDecoder() *Decoder {
+func NewDecoder() (out *Decoder) {
 	return &Decoder{}
 }
 
@@ -45,7 +45,7 @@ type reader interface {
 }
 
 // asReader converts an io.Reader to a reader.
-func asReader(r io.Reader) reader {
+func asReader(r io.Reader) (out reader) {
 	if rr, ok := r.(reader); ok {
 		return rr
 	}
@@ -53,7 +53,7 @@ func asReader(r io.Reader) reader {
 }
 
 // match reports whether magic matches b. Magic may contain "?" wildcards.
-func match(magic []byte, b []byte) bool {
+func match(magic []byte, b []byte) (ok bool) {
 	if len(magic) != len(b) {
 		return false
 	}
@@ -65,7 +65,7 @@ func match(magic []byte, b []byte) bool {
 	return true
 }
 
-func (d *Decoder) sniff(r reader) format {
+func (d *Decoder) sniff(r reader) (out format) {
 	for _, f := range d.formats {
 		b, err := r.Peek(len(f.magic))
 		if err == nil && match(f.magic, b) {
@@ -77,7 +77,7 @@ func (d *Decoder) sniff(r reader) format {
 
 // Decode decodes an image in one of the registered formats.
 // Returns the decoded image, the format name, and any error.
-func (d *Decoder) Decode(r io.Reader) (Image, []byte, error) {
+func (d *Decoder) Decode(r io.Reader) (img Image, name []byte, derr error) {
 	rr := asReader(r)
 	f := d.sniff(rr)
 	if f.decode == nil {
@@ -89,7 +89,7 @@ func (d *Decoder) Decode(r io.Reader) (Image, []byte, error) {
 
 // DecodeConfig decodes the color model and dimensions of an image
 // in one of the registered formats without decoding the entire image.
-func (d *Decoder) DecodeConfig(r io.Reader) (Config, []byte, error) {
+func (d *Decoder) DecodeConfig(r io.Reader) (cfg Config, name []byte, derr error) {
 	rr := asReader(r)
 	f := d.sniff(rr)
 	if f.decodeConfig == nil {
@@ -97,4 +97,8 @@ func (d *Decoder) DecodeConfig(r io.Reader) (Config, []byte, error) {
 	}
 	c, err := f.decodeConfig(rr)
 	return c, f.name, err
+}
+
+func init() {
+	ErrFormat = errors.New("image: unknown format")
 }

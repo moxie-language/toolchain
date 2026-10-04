@@ -67,14 +67,14 @@ const (
 // xorshift paper: https://www.jstatsoft.org/article/view/v008i14/xorshift.pdf
 type xorshift uint64
 
-func (r *xorshift) Next() uint64 {
+func (r *xorshift) Next() (v uint64) {
 	*r ^= *r << 13
 	*r ^= *r >> 7
 	*r ^= *r << 17
 	return uint64(*r)
 }
 
-func nextPowerOfTwo(length int32) uint32 {
+func nextPowerOfTwo(length int32) (n uint32) {
 	shift := uint32(bits.Len(uint32(length)))
 	return uint32(1 << shift)
 }
@@ -94,12 +94,12 @@ type reverse struct {
 }
 
 // Less returns the opposite of the embedded implementation's Less method.
-func (r reverse) Less(i, j int32) bool {
+func (r *reverse) Less(i, j int32) (less bool) {
 	return r.Interface.Less(j, i)
 }
 
 // Reverse returns the reverse order for data.
-func Reverse(data Interface) Interface {
+func Reverse(data Interface) (out Interface) {
 	return &reverse{data}
 }
 
@@ -107,7 +107,7 @@ func Reverse(data Interface) Interface {
 //
 // Note: in many situations, the newer [slices.IsSortedFunc] function is more
 // ergonomic and runs faster.
-func IsSorted(data Interface) bool {
+func IsSorted(data Interface) (sorted bool) {
 	n := data.Len()
 	for i := n - 1; i > 0; i-- {
 		if data.Less(i, i-1) {
@@ -117,50 +117,22 @@ func IsSorted(data Interface) bool {
 	return true
 }
 
-// Convenience types for common cases
-
-// IntSlice attaches the methods of Interface to []int32, sorting in increasing order.
-type IntSlice []int32
-
-func (x IntSlice) Len() int32           { return len(x) }
-func (x IntSlice) Less(i, j int32) bool { return x[i] < x[j] }
-func (x IntSlice) Swap(i, j int32)      { x[i], x[j] = x[j], x[i] }
-
-// Sort is a convenience method: x.Sort() calls Sort(x).
-func (x IntSlice) Sort() { Sort(x) }
-
-// Float64Slice implements Interface for a []float64, sorting in increasing order,
-// with not-a-number (NaN) values ordered before other values.
-type Float64Slice []float64
-
-func (x Float64Slice) Len() int32 { return len(x) }
-
-// Less reports whether x[i] should be ordered before x[j], as required by the sort Interface.
-// Note that floating-point comparison by itself is not a transitive relation: it does not
-// report a consistent ordering for not-a-number (NaN) values.
-// This implementation of Less places NaN values before any others, by using:
+// Convenience types for common cases.
 //
-//	x[i] < x[j] || (math.IsNaN(x[i]) && !math.IsNaN(x[j]))
-func (x Float64Slice) Less(i, j int32) bool { return x[i] < x[j] || (isNaN(x[i]) && !isNaN(x[j])) }
-func (x Float64Slice) Swap(i, j int32)      { x[i], x[j] = x[j], x[i] }
+// Moxie has no named slice types. []int32 and []float64 are handled by
+// slices.Sort directly; [][]byte needs compareByteSlices because []byte is
+// not cmp.Ordered.
 
-// isNaN is a copy of math.IsNaN to avoid a dependency on the math package.
-func isNaN(f float64) bool {
-	return f != f
+// compareByteSlices orders two byte slices lexicographically.
+func compareByteSlices(a, b []byte) (c int32) {
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
 }
-
-// Sort is a convenience method: x.Sort() calls Sort(x).
-func (x Float64Slice) Sort() { Sort(x) }
-
-// StringSlice attaches the methods of Interface to [][]byte, sorting in increasing order.
-type StringSlice [][]byte
-
-func (x StringSlice) Len() int32           { return len(x) }
-func (x StringSlice) Less(i, j int32) bool { return []byte(x[i]) < []byte(x[j]) }
-func (x StringSlice) Swap(i, j int32)      { x[i], x[j] = x[j], x[i] }
-
-// Sort is a convenience method: x.Sort() calls Sort(x).
-func (x StringSlice) Sort() { Sort(x) }
 
 // Convenience wrappers for common cases
 
@@ -176,21 +148,21 @@ func Ints(x []int32) { slices.Sort(x) }
 func Float64s(x []float64) { slices.Sort(x) }
 
 // Strings sorts a slice of byte slices in increasing order.
-func Strings(x [][]byte) { Sort(StringSlice(x)) }
+func Strings(x [][]byte) { slices.SortFunc(x, compareByteSlices) }
 
 // IntsAreSorted reports whether the slice x is sorted in increasing order.
 //
 // Note: as of Go 1.22, this function simply calls [slices.IsSorted].
-func IntsAreSorted(x []int32) bool { return slices.IsSorted(x) }
+func IntsAreSorted(x []int32) (sorted bool) { return slices.IsSorted(x) }
 
 // Float64sAreSorted reports whether the slice x is sorted in increasing order,
 // with not-a-number (NaN) values before any other values.
 //
 // Note: as of Go 1.22, this function simply calls [slices.IsSorted].
-func Float64sAreSorted(x []float64) bool { return slices.IsSorted(x) }
+func Float64sAreSorted(x []float64) (sorted bool) { return slices.IsSorted(x) }
 
 // StringsAreSorted reports whether the slice x is sorted in increasing order.
-func StringsAreSorted(x [][]byte) bool { return IsSorted(StringSlice(x)) }
+func StringsAreSorted(x [][]byte) (sorted bool) { return slices.IsSortedFunc(x, compareByteSlices) }
 
 // Notes on stable sorting:
 // The used algorithms are simple and provable correct on all input and use

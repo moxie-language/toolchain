@@ -17,7 +17,7 @@ import (
 
 // TODO: This should be a distinguishable error (ErrMessageTooLarge)
 // to allow mime/multipart to detect it.
-const errMessageTooLarge = errors.Const("message too large")
+var errMessageTooLarge error
 
 // A Reader implements convenience methods for reading requests
 // or responses from a text protocol network connection.
@@ -32,19 +32,19 @@ type Reader struct {
 // To avoid denial of service attacks, the provided [bufio.Reader]
 // should be reading from an [io.LimitReader] or similar Reader to bound
 // the size of responses.
-func NewReader(r *bufio.Reader) *Reader {
+func NewReader(r *bufio.Reader) (rreader *Reader) {
 	return &Reader{R: r}
 }
 
 // ReadLine reads a single line from r,
 // eliding the final \n or \r\n from the returned string.
-func (r *Reader) ReadLine() (string, error) {
+func (r *Reader) ReadLine() (rs string, rerr2 error) {
 	line, err := r.readLineSlice(-1)
 	return string(line), err
 }
 
 // ReadLineBytes is like [Reader.ReadLine] but returns a []byte instead of a string.
-func (r *Reader) ReadLineBytes() ([]byte, error) {
+func (r *Reader) ReadLineBytes() (rb []byte, rerr2 error) {
 	line, err := r.readLineSlice(-1)
 	if line != nil {
 		line = bytes.Clone(line)
@@ -55,7 +55,7 @@ func (r *Reader) ReadLineBytes() ([]byte, error) {
 // readLineSlice reads a single line from r,
 // up to lim bytes long (or unlimited if lim is less than 0),
 // eliding the final \r or \r\n from the returned string.
-func (r *Reader) readLineSlice(lim int64) ([]byte, error) {
+func (r *Reader) readLineSlice(lim int64) (rb []byte, rerr2 error) {
 	r.closeDot()
 	var line []byte
 	for {
@@ -97,14 +97,14 @@ func (r *Reader) readLineSlice(lim int64) ([]byte, error) {
 // and the second will return "Line 2".
 //
 // Empty lines are never continued.
-func (r *Reader) ReadContinuedLine() (string, error) {
+func (r *Reader) ReadContinuedLine() (rs string, rerr2 error) {
 	line, err := r.readContinuedLineSlice(-1, noValidation)
 	return string(line), err
 }
 
 // trim returns s with leading and trailing spaces and tabs removed.
 // It does not assume Unicode or UTF-8.
-func trim(s []byte) []byte {
+func trim(s []byte) (rb []byte) {
 	i := 0
 	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
 		i++
@@ -118,7 +118,7 @@ func trim(s []byte) []byte {
 
 // ReadContinuedLineBytes is like [Reader.ReadContinuedLine] but
 // returns a []byte instead of a string.
-func (r *Reader) ReadContinuedLineBytes() ([]byte, error) {
+func (r *Reader) ReadContinuedLineBytes() (rb []byte, rerr2 error) {
 	line, err := r.readContinuedLineSlice(-1, noValidation)
 	if line != nil {
 		line = bytes.Clone(line)
@@ -131,7 +131,7 @@ func (r *Reader) ReadContinuedLineBytes() ([]byte, error) {
 // is run on the first read line, and if it returns an error then this
 // error is returned from readContinuedLineSlice.
 // It reads up to lim bytes of data (or unlimited if lim is less than 0).
-func (r *Reader) readContinuedLineSlice(lim int64, validateFirstLine func([]byte) error) ([]byte, error) {
+func (r *Reader) readContinuedLineSlice(lim int64, validateFirstLine func([]byte) error) (rb []byte, rerr2 error) {
 	if validateFirstLine == nil {
 		return nil, fmt.Errorf("missing validateFirstLine func")
 	}
@@ -189,7 +189,7 @@ func (r *Reader) readContinuedLineSlice(lim int64, validateFirstLine func([]byte
 }
 
 // skipSpace skips R over all spaces and returns the number of bytes skipped.
-func (r *Reader) skipSpace() int32 {
+func (r *Reader) skipSpace() (rn int32) {
 	n := 0
 	var c byte
 	var err error
@@ -334,7 +334,7 @@ func (r *Reader) ReadResponse(expectCode int32) (code int32, message string, err
 // rewrites the "\r\n" line endings into the simpler "\n",
 // removes leading dot escapes if present, and stops with error [io.EOF]
 // after consuming (and discarding) the end-of-sequence line.
-func (r *Reader) DotReader() io.Reader {
+func (r *Reader) DotReader() (rreader io.Reader) {
 	r.closeDot()
 	r.dot = &dotReader{r: r}
 	return r.dot
@@ -452,7 +452,7 @@ func (r *Reader) closeDot() {
 // ReadDotBytes reads a dot-encoding and returns the decoded data.
 //
 // See the documentation for the [Reader.DotReader] method for details about dot-encoding.
-func (r *Reader) ReadDotBytes() ([]byte, error) {
+func (r *Reader) ReadDotBytes() (rb []byte, rerr error) {
 	return io.ReadAll(r.DotReader())
 }
 
@@ -460,7 +460,7 @@ func (r *Reader) ReadDotBytes() ([]byte, error) {
 // containing the decoded lines, with the final \r\n or \n elided from each.
 //
 // See the documentation for the [Reader.DotReader] method for details about dot-encoding.
-func (r *Reader) ReadDotLines() ([][]byte, error) {
+func (r *Reader) ReadDotLines() (rbyte [][]byte, rerr error) {
 	// We could use ReadDotBytes and then Split it,
 	// but reading a line at a time avoids needing a
 	// large contiguous block of memory and is simpler.
@@ -510,7 +510,7 @@ const colon = ":"
 //		"My-Key": {"Value 1", "Value 2"},
 //		"Long-Key": {"Even Longer Value"},
 //	}
-func (r *Reader) ReadMIMEHeader() (MIMEHeader, error) {
+func (r *Reader) ReadMIMEHeader() (rmIMEHeader MIMEHeader, rerr error) {
 	return readMIMEHeader(r, math.MaxInt64, math.MaxInt64)
 }
 
@@ -519,7 +519,7 @@ func (r *Reader) ReadMIMEHeader() (MIMEHeader, error) {
 
 // readMIMEHeader is a version of ReadMIMEHeader which takes a limit on the header size.
 // It is called by the mime/multipart package.
-func readMIMEHeader(r *Reader, maxMemory, maxHeaders int64) (MIMEHeader, error) {
+func readMIMEHeader(r *Reader, maxMemory, maxHeaders int64) (rmIMEHeader MIMEHeader, rerr error) {
 	var strs [][]byte
 	hint := r.upcomingHeaderKeys()
 	if hint > 0 {
@@ -601,12 +601,12 @@ func readMIMEHeader(r *Reader, maxMemory, maxHeaders int64) (MIMEHeader, error) 
 
 // noValidation is a no-op validation func for readContinuedLineSlice
 // that permits any lines.
-func noValidation(_ []byte) error { return nil }
+func noValidation(_ []byte) (rerr error) { return nil }
 
 // mustHaveFieldNameColon ensures that, per RFC 7230, the
 // field-name is on a single line, so the first line must
 // contain a colon.
-func mustHaveFieldNameColon(line []byte) error {
+func mustHaveFieldNameColon(line []byte) (rerr error) {
 	if bytes.IndexByte(line, ':') < 0 {
 		return ProtocolError(fmt.Sprintf("malformed MIME header: missing colon: %q", line))
 	}
@@ -649,7 +649,7 @@ func (r *Reader) upcomingHeaderKeys() (n int32) {
 // MIME header keys are assumed to be ASCII only.
 // If s contains a space or invalid header field bytes as
 // defined by RFC 9112, it is returned without modifications.
-func CanonicalMIMEHeaderKey(s string) string {
+func CanonicalMIMEHeaderKey(s string) (rs string) {
 	// Quick check for canonical encoding.
 	upper := true
 	for i := 0; i < len(s); i++ {
@@ -680,7 +680,7 @@ const toLower = 'a' - 'A'
 //	tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
 //	        "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
 //	token = 1*tchar
-func validHeaderFieldByte(c byte) bool {
+func validHeaderFieldByte(c byte) (rok bool) {
 	// mask is a 128-bit bitmap with 1s for allowed bytes,
 	// so that the byte c can be tested with a shift and an and.
 	// If c >= 128, then 1<<c and 1<<(c-64) will both be zero,
@@ -720,7 +720,7 @@ func validHeaderFieldByte(c byte) bool {
 //	HTAB           =  %x09
 //	SP             =  %x20
 //	VCHAR          =  %x21-7E
-func validHeaderValueByte(c byte) bool {
+func validHeaderValueByte(c byte) (rok bool) {
 	if c == '\t' { return true }
 	if c >= 0x20 && c <= 0x7e { return true }
 	if c >= 0x80 { return true }
@@ -839,4 +839,8 @@ func initCommonHeader() {
 	} {
 		commonHeader[v] = v
 	}
+}
+
+func init() {
+	errMessageTooLarge = errors.New("message too large")
 }

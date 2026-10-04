@@ -29,13 +29,16 @@ const (
 // Table is a 256-word table representing the polynomial for efficient processing.
 type Table [256]uint64
 
+// slicing8Table is a set of 8 Tables, used by the slicing-by-8 algorithm.
+type slicing8Table [8]Table
+
 var slicing8Tables struct {
 	Done bool
-	ISO  *[8]Table
-	ECMA *[8]Table
+	ISO  slicing8Table
+	ECMA slicing8Table
 }
 
-func buildSlicing8TablesOnce() {
+func initSlicing8TablesOnce() {
 	if slicing8Tables.Done {
 		return
 	}
@@ -46,8 +49,8 @@ func buildSlicing8TablesOnce() {
 
 // MakeTable returns a [Table] constructed from the specified polynomial.
 // The contents of this [Table] must not be modified.
-func MakeTable(poly uint64) *Table {
-	buildSlicing8TablesOnce()
+func MakeTable(poly uint64) (tab *Table) {
+	initSlicing8TablesOnce()
 	switch poly {
 	case ISO:
 		return &slicing8Tables.ISO[0]
@@ -58,8 +61,8 @@ func MakeTable(poly uint64) *Table {
 	}
 }
 
-func makeTable(poly uint64) *Table {
-	t := &Table{}
+func makeTable(poly uint64) (tab *Table) {
+	tab = &Table{}
 	for i := 0; i < 256; i++ {
 		crc := uint64(i)
 		for j := 0; j < 8; j++ {
@@ -69,22 +72,21 @@ func makeTable(poly uint64) *Table {
 				crc >>= 1
 			}
 		}
-		t[i] = crc
+		tab[i] = crc
 	}
-	return t
+	return tab
 }
 
-func makeSlicingBy8Table(t *Table) *[8]Table {
-	var helperTable [8]Table
-	helperTable[0] = *t
+func makeSlicingBy8Table(t *Table) (tab slicing8Table) {
+	tab[0] = *t
 	for i := 0; i < 256; i++ {
 		crc := t[i]
 		for j := 1; j < 8; j++ {
 			crc = t[crc&0xff] ^ (crc >> 8)
-			helperTable[j][i] = crc
+			tab[j][i] = crc
 		}
 	}
-	return &helperTable
+	return tab
 }
 
 // digest represents the partial evaluation of a checksum.
@@ -98,11 +100,11 @@ type digest struct {
 // value out in big-endian byte order. The returned Hash64 also
 // implements [encoding.BinaryMarshaler] and [encoding.BinaryUnmarshaler] to
 // marshal and unmarshal the internal state of the hash.
-func New(tab *Table) hash.Hash64 { return &digest{0, tab} }
+func New(tab *Table) (h hash.Hash64) { return &digest{0, tab} }
 
-func (d *digest) Size() int32 { return Size }
+func (d *digest) Size() (size int32) { return Size }
 
-func (d *digest) BlockSize() int32 { return 1 }
+func (d *digest) BlockSize() (size int32) { return 1 }
 
 func (d *digest) Reset() { d.crc = 0 }
 
@@ -111,19 +113,19 @@ const (
 	marshaledSize = len(magic) + 8 + 8
 )
 
-func (d *digest) AppendBinary(b []byte) ([]byte, error) {
-	b = mxutil.Ensure(b, len(magic))
-	b = push(b, magic...)
-	b = byteorder.BEAppendUint64(b, tableSum(d.tab))
-	b = byteorder.BEAppendUint64(b, d.crc)
-	return b, nil
+func (d *digest) AppendBinary(b []byte) (out []byte, aerr error) {
+	out = mxutil.Ensure(b, len(magic))
+	out = push(out, magic...)
+	out = byteorder.BEAppendUint64(out, tableSum(d.tab))
+	out = byteorder.BEAppendUint64(out, d.crc)
+	return out, nil
 }
 
-func (d *digest) MarshalBinary() ([]byte, error) {
+func (d *digest) MarshalBinary() (out []byte, merr error) {
 	return d.AppendBinary([]byte{:0:marshaledSize})
 }
 
-func (d *digest) UnmarshalBinary(b []byte) error {
+func (d *digest) UnmarshalBinary(b []byte) (uerr error) {
 	if len(b) < len(magic) || b[:len(magic)] != magic {
 		return errors.New("hash/crc64: invalid hash state identifier")
 	}
@@ -137,17 +139,17 @@ func (d *digest) UnmarshalBinary(b []byte) error {
 	return nil
 }
 
-func (d *digest) Clone() (hash.Cloner, error) {
+func (d *digest) Clone() (cl hash.Cloner, cerr error) {
 	r := *d
 	return &r, nil
 }
 
-func update(crc uint64, tab *Table, p []byte) uint64 {
-	buildSlicing8TablesOnce()
+func update(crc uint64, tab *Table, p []byte) (out uint64) {
+	initSlicing8TablesOnce()
 	crc = ^crc
 	// Table comparison is somewhat expensive, so avoid it for small sizes
 	for len(p) >= 64 {
-		var helperTable *[8]Table
+		var helperTable slicing8Table
 		if *tab == slicing8Tables.ECMA[0] {
 			helperTable = slicing8Tables.ECMA
 		} else if *tab == slicing8Tables.ISO[0] {
@@ -182,7 +184,7 @@ func update(crc uint64, tab *Table, p []byte) uint64 {
 }
 
 // Update returns the result of adding the bytes in p to the crc.
-func Update(crc uint64, tab *Table, p []byte) uint64 {
+func Update(crc uint64, tab *Table, p []byte) (out uint64) {
 	return update(crc, tab, p)
 }
 
@@ -191,19 +193,19 @@ func (d *digest) Write(p []byte) (n int32, err error) {
 	return len(p), nil
 }
 
-func (d *digest) Sum64() uint64 { return d.crc }
+func (d *digest) Sum64() (s uint64) { return d.crc }
 
-func (d *digest) Sum(in []byte) []byte {
+func (d *digest) Sum(in []byte) (out []byte) {
 	s := d.Sum64()
 	return push(in, byte(s>>56), byte(s>>48), byte(s>>40), byte(s>>32), byte(s>>24), byte(s>>16), byte(s>>8), byte(s))
 }
 
 // Checksum returns the CRC-64 checksum of data
 // using the polynomial represented by the [Table].
-func Checksum(data []byte, tab *Table) uint64 { return update(0, tab, data) }
+func Checksum(data []byte, tab *Table) (sum uint64) { return update(0, tab, data) }
 
 // tableSum returns the ISO checksum of table t.
-func tableSum(t *Table) uint64 {
+func tableSum(t *Table) (sum uint64) {
 	var a [2048]byte
 	b := a[:0]
 	if t != nil {

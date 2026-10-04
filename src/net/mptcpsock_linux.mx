@@ -24,7 +24,7 @@ const (
 	_MPTCP_INFO    = 0x1
 )
 
-func supportsMultipathTCP() bool {
+func supportsMultipathTCP() (rok bool) {
 	if !mptcpDone { mptcpDone = true; initMPTCPavailable() }
 	return mptcpAvailable
 }
@@ -56,7 +56,7 @@ func initMPTCPavailable() {
 	hasSOLMPTCP = major > 5 || (major == 5 && minor >= 16)
 }
 
-func (sd *sysDialer) dialMPTCP(ctx context.Context, laddr, raddr *TCPAddr) (*TCPConn, error) {
+func (sd *sysDialer) dialMPTCP(ctx context.Context, laddr, raddr *TCPAddr) (rtCPConn *TCPConn, rerr error) {
 	if supportsMultipathTCP() {
 		if conn1, err := sd.doDialTCPProto(ctx, laddr, raddr, _IPPROTO_MPTCP); err == nil {
 			return conn1, nil
@@ -72,7 +72,7 @@ func (sd *sysDialer) dialMPTCP(ctx context.Context, laddr, raddr *TCPAddr) (*TCP
 	return sd.dialTCP(ctx, laddr, raddr)
 }
 
-func (sl *sysListener) listenMPTCP(ctx context.Context, laddr *TCPAddr) (*TCPListener, error) {
+func (sl *sysListener) listenMPTCP(ctx context.Context, laddr *TCPAddr) (rtCPListener *TCPListener, rerr error) {
 	if supportsMultipathTCP() {
 		if dial, err := sl.listenTCPProto(ctx, laddr, _IPPROTO_MPTCP); err == nil {
 			return dial, nil
@@ -99,7 +99,7 @@ func (sl *sysListener) listenMPTCP(ctx context.Context, laddr *TCPAddr) (*TCPLis
 //
 // Kernel >= 5.16 returns EOPNOTSUPP/ENOPROTOOPT in case of fallback.
 // Older kernels will always return them even if MPTCP is used: not usable.
-func hasFallenBack(fd *netFD) bool {
+func hasFallenBack(fd *netFD) (rok bool) {
 	_, err := fd.pfd.GetsockoptInt(_SOL_MPTCP, _MPTCP_INFO)
 
 	// 2 expected errors in case of fallback depending on the address family
@@ -113,7 +113,7 @@ func hasFallenBack(fd *netFD) bool {
 // Compared to hasFallenBack method, here only the socket protocol being used is
 // checked: it can be MPTCP but it doesn't mean MPTCP is used on the wire, maybe
 // a fallback to TCP has been done.
-func isUsingMPTCPProto(fd *netFD) bool {
+func isUsingMPTCPProto(fd *netFD) (rok bool) {
 	proto, _ := fd.pfd.GetsockoptInt(syscall.SOL_SOCKET, syscall.SO_PROTOCOL)
 
 	return proto == _IPPROTO_MPTCP
@@ -123,7 +123,7 @@ func isUsingMPTCPProto(fd *netFD) bool {
 //
 // Please look at the description of hasFallenBack (kernel >=5.16) and
 // isUsingMPTCPProto methods for more details about what is being checked here.
-func isUsingMultipathTCP(fd *netFD) bool {
+func isUsingMultipathTCP(fd *netFD) (rok bool) {
 	if !supportsMultipathTCP() {
 		return false
 	}

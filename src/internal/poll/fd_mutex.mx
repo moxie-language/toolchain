@@ -49,7 +49,7 @@ const overflowMsg = "too many concurrent operations on a single file or socket (
 
 // incref adds a reference to mu.
 // It reports whether mu is available for reading or writing.
-func (mu *fdMutex) incref() bool {
+func (mu *fdMutex) incref() (okay bool) {
 	if mu.state&mutexClosed != 0 {
 		return false
 	}
@@ -62,7 +62,7 @@ func (mu *fdMutex) incref() bool {
 
 // increfAndClose sets the state of mu to closed.
 // It returns false if the file was already closed.
-func (mu *fdMutex) increfAndClose() bool {
+func (mu *fdMutex) increfAndClose() (okay bool) {
 	old := mu.state
 	if old&mutexClosed != 0 {
 		return false
@@ -90,7 +90,7 @@ func (mu *fdMutex) increfAndClose() bool {
 
 // decref removes a reference from mu.
 // It reports whether there is no remaining reference.
-func (mu *fdMutex) decref() bool {
+func (mu *fdMutex) decref() (okay bool) {
 	if mu.state&mutexRefMask == 0 {
 		panic("inconsistent poll.fdMutex")
 	}
@@ -100,7 +100,7 @@ func (mu *fdMutex) decref() bool {
 
 // lock adds a reference to mu and locks mu.
 // It reports whether mu is available for reading or writing.
-func (mu *fdMutex) rwlock(read bool) bool {
+func (mu *fdMutex) rwlock(read bool) (okay bool) {
 	var mutexBit, mutexWait, mutexMask uint64
 	var mutexSema *uint32
 	if read {
@@ -139,7 +139,7 @@ func (mu *fdMutex) rwlock(read bool) bool {
 
 // unlock removes a reference from mu and unlocks mu.
 // It reports whether there is no remaining reference.
-func (mu *fdMutex) rwunlock(read bool) bool {
+func (mu *fdMutex) rwunlock(read bool) (okay bool) {
 	var mutexBit, mutexWait, mutexMask uint64
 	var mutexSema *uint32
 	if read {
@@ -174,7 +174,7 @@ func runtime_Semrelease(sema *uint32)
 
 // incref adds a reference to fd.
 // It returns an error when fd cannot be used.
-func (fd *FD) incref() error {
+func (fd *FD) incref() (rerr error) {
 	if !fd.fdmu.incref() {
 		return errClosing(fd.isFile)
 	}
@@ -184,7 +184,7 @@ func (fd *FD) incref() error {
 // decref removes a reference from fd.
 // It also closes fd when the state of fd is set to closed and there
 // is no remaining reference.
-func (fd *FD) decref() error {
+func (fd *FD) decref() (rerr error) {
 	if fd.fdmu.decref() {
 		return fd.destroy()
 	}
@@ -193,7 +193,7 @@ func (fd *FD) decref() error {
 
 // readLock adds a reference to fd and locks fd for reading.
 // It returns an error when fd cannot be used for reading.
-func (fd *FD) readLock() error {
+func (fd *FD) readLock() (rerr error) {
 	if !fd.fdmu.rwlock(true) {
 		return errClosing(fd.isFile)
 	}
@@ -211,7 +211,7 @@ func (fd *FD) readUnlock() {
 
 // writeLock adds a reference to fd and locks fd for writing.
 // It returns an error when fd cannot be used for writing.
-func (fd *FD) writeLock() error {
+func (fd *FD) writeLock() (rerr error) {
 	if !fd.fdmu.rwlock(false) {
 		return errClosing(fd.isFile)
 	}
@@ -228,6 +228,6 @@ func (fd *FD) writeUnlock() {
 }
 
 // closing returns true if fd is closing.
-func (fd *FD) closing() bool {
+func (fd *FD) closing() (okay bool) {
 	return fd.fdmu.state&mutexClosed != 0
 }

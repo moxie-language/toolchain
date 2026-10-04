@@ -89,7 +89,7 @@ type File struct {
 }
 
 // Open opens the named file using os.Open and prepares it for use as an XCOFF binary.
-func Open(name []byte) (*File, error) {
+func Open(name []byte) (out *File, rerr error) {
 	f, err := os.Open(name)
 	if err != nil {
 		return nil, err
@@ -106,7 +106,7 @@ func Open(name []byte) (*File, error) {
 // Close closes the File.
 // If the File was created using NewFile directly instead of Open,
 // Close has no effect.
-func (f *File) Close() error {
+func (f *File) Close() (rerr error) {
 	var err error
 	if f.closer != nil {
 		err = f.closer.Close()
@@ -119,7 +119,7 @@ func (f *File) Close() error {
 // section exists.
 // Xcoff have section's name limited to 8 bytes. Some sections like .gosymtab
 // can be trunked but this method will still find them.
-func (f *File) Section(name []byte) *Section {
+func (f *File) Section(name []byte) (out *Section) {
 	for _, s := range f.Sections {
 		if s.Name == name || (len(name) > 8 && s.Name == name[:8]) {
 			return s
@@ -130,7 +130,7 @@ func (f *File) Section(name []byte) *Section {
 
 // SectionByType returns the first section in f with the
 // given type, or nil if there is no such section.
-func (f *File) SectionByType(typ uint32) *Section {
+func (f *File) SectionByType(typ uint32) (out *Section) {
 	for _, s := range f.Sections {
 		if s.Type == typ {
 			return s
@@ -141,7 +141,7 @@ func (f *File) SectionByType(typ uint32) *Section {
 
 // cstring converts ASCII byte sequence b to string.
 // It stops once it finds 0 or reaches end of b.
-func cstring(b []byte) []byte {
+func cstring(b []byte) (out []byte) {
 	var i int32
 	for i = 0; i < len(b) && b[i] != 0; i++ {
 	}
@@ -149,7 +149,7 @@ func cstring(b []byte) []byte {
 }
 
 // getString extracts a string from an XCOFF string table.
-func getString(st []byte, offset uint32) ([]byte, bool) {
+func getString(st []byte, offset uint32) (out []byte, okay bool) {
 	if offset < 4 || int32(offset) >= len(st) {
 		return "", false
 	}
@@ -157,7 +157,7 @@ func getString(st []byte, offset uint32) ([]byte, bool) {
 }
 
 // NewFile creates a new File for accessing an XCOFF binary in an underlying reader.
-func NewFile(r io.ReaderAt) (*File, error) {
+func NewFile(r io.ReaderAt) (out *File, rerr error) {
 	sr := io.NewSectionReader(r, 0, 1<<63-1)
 	// Read XCOFF target machine
 	var magic uint16
@@ -300,8 +300,8 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			if zeroes != 0 {
 				sym.Name = cstring(se.Nname[:])
 			} else {
-				offset := binary.BigEndian().Uint32(se.Nname[4:])
-				sym.Name, ok = getString(f.StringTable, offset)
+				stroff := binary.BigEndian().Uint32(se.Nname[4:])
+				sym.Name, ok = getString(f.StringTable, stroff)
 				if !ok {
 					goto skip
 				}
@@ -405,11 +405,11 @@ func NewFile(r io.ReaderAt) (*File, error) {
 		if sect.Relptr == 0 {
 			continue
 		}
-		c := saferio.SliceCap[Reloc](uint64(sect.Nreloc))
-		if c < 0 {
+		relocCap := saferio.SliceCap[Reloc](uint64(sect.Nreloc))
+		if relocCap < 0 {
 			return nil, fmt.Errorf("too many relocs (%d) for section %d", sect.Nreloc, sectNum)
 		}
-		sect.Relocs = []Reloc{:0:c}
+		sect.Relocs = []Reloc{:0:relocCap}
 		if _, err := sr.Seek(int64(sect.Relptr), io.SeekStart); err != nil {
 			return nil, err
 		}
@@ -465,7 +465,7 @@ func (*nobitsSectionReader) ReadAt(p []byte, off int64) (n int32, err error) {
 }
 
 // Data reads and returns the contents of the XCOFF section s.
-func (s *Section) Data() ([]byte, error) {
+func (s *Section) Data() (out []byte, rerr error) {
 	dat := []byte{:s.sr.Size()}
 	n, err := s.sr.ReadAt(dat, 0)
 	if n == len(dat) {
@@ -475,7 +475,7 @@ func (s *Section) Data() ([]byte, error) {
 }
 
 // CSect reads and returns the contents of a csect.
-func (f *File) CSect(name []byte) []byte {
+func (f *File) CSect(name []byte) (out []byte) {
 	for _, sym := range f.Symbols {
 		if sym.Name == name && sym.AuxCSect.SymbolType == XTY_SD {
 			if i := sym.SectionNumber - 1; 0 <= i && i < len(f.Sections) {
@@ -495,7 +495,7 @@ func (f *File) CSect(name []byte) []byte {
 	return nil
 }
 
-func (f *File) DWARF() (*dwarf.Data, error) {
+func (f *File) DWARF() (out *dwarf.Data, rerr error) {
 	// There are many other DWARF sections, but these
 	// are the ones the debug/dwarf package uses.
 	// Don't bother loading others.
@@ -518,7 +518,7 @@ func (f *File) DWARF() (*dwarf.Data, error) {
 
 // readImportID returns the import file IDs stored inside the .loader section.
 // Library name pattern is either path/base/member or base/member
-func (f *File) readImportIDs(s *Section) ([][]byte, error) {
+func (f *File) readImportIDs(s *Section) (out [][]byte, rerr error) {
 	// Read loader header
 	if _, err := s.sr.Seek(0, io.SeekStart); err != nil {
 		return nil, err
@@ -559,7 +559,15 @@ func (f *File) readImportIDs(s *Section) ([][]byte, error) {
 	libpath := cstring(table[offset:])
 	f.LibraryPaths = bytes.Split(libpath, ":")
 	offset += len(libpath) + 3 // 3 null bytes
-	all := [][]byte{:0}
+
+	return readImportIDTable(table, offset, nimpid), nil
+}
+
+// readImportIDTable parses the loader import file ID table. It is a free
+// function so the loop scratch never lands in File's sovereign arena.
+func readImportIDTable(table []byte, start int32, nimpid uint32) (all [][]byte) {
+	offset := start
+	all = [][]byte{:0}
 	for i := 1; i < int32(nimpid); i++ {
 		impidpath := cstring(table[offset:])
 		offset += len(impidpath) + 1
@@ -576,15 +584,14 @@ func (f *File) readImportIDs(s *Section) ([][]byte, error) {
 		all = mxutil.Ensure(all, 1)
 		all = push(all, path)
 	}
-
-	return all, nil
+	return all
 }
 
 // ImportedSymbols returns the names of all symbols
 // referred to by the binary f that are expected to be
 // satisfied by other libraries at dynamic load time.
 // It does not return weak symbols.
-func (f *File) ImportedSymbols() ([]ImportedSymbol, error) {
+func (f *File) ImportedSymbols() (out []ImportedSymbol, rerr error) {
 	s := f.SectionByType(STYP_LOADER)
 	if s == nil {
 		return nil, nil
@@ -628,9 +635,9 @@ func (f *File) ImportedSymbols() ([]ImportedSymbol, error) {
 	}
 
 	// Read imported libraries
-	libs, err := f.readImportIDs(s)
-	if err != nil {
-		return nil, err
+	libs, derr := f.readImportIDs(s)
+	if derr != nil {
+		return nil, derr
 	}
 
 	// Read loader symbol table
@@ -691,7 +698,7 @@ func (f *File) ImportedSymbols() ([]ImportedSymbol, error) {
 // ImportedLibraries returns the names of all libraries
 // referred to by the binary f that are expected to be
 // linked with the binary at dynamic link time.
-func (f *File) ImportedLibraries() ([][]byte, error) {
+func (f *File) ImportedLibraries() (out [][]byte, rerr error) {
 	s := f.SectionByType(STYP_LOADER)
 	if s == nil {
 		return nil, nil

@@ -8,16 +8,12 @@ import (
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"encoding/asn1"
-	"errors"
 	"math"
 	"math/big"
 	"math/bits"
 	"strconv"
 )
 
-const (
-	errInvalidOID = errors.Const("invalid oid")
-)
 
 // An OID represents an ASN.1 OBJECT IDENTIFIER.
 type OID struct {
@@ -25,12 +21,12 @@ type OID struct {
 }
 
 // ParseOID parses a Object Identifier string, represented by ASCII numbers separated by dots.
-func ParseOID(oid string) (OID, error) {
+func ParseOID(oid string) (roID OID, rerr error) {
 	var o OID
 	return o, o.unmarshalOIDText(oid)
 }
 
-func newOIDFromDER(der []byte) (OID, bool) {
+func newOIDFromDER(der []byte) (roID OID, rok bool) {
 	if len(der) == 0 || der[len(der)-1]&0x80 != 0 {
 		return OID{}, false
 	}
@@ -52,7 +48,7 @@ func newOIDFromDER(der []byte) (OID, bool) {
 }
 
 // OIDFromInts creates a new OID using ints, each integer is a separate component.
-func OIDFromInts(oid []uint64) (OID, error) {
+func OIDFromInts(oid []uint64) (roID OID, rerr error) {
 	if len(oid) < 2 || oid[0] > 2 || (oid[0] < 2 && oid[1] >= 40) {
 		return OID{}, errInvalidOID
 	}
@@ -70,14 +66,14 @@ func OIDFromInts(oid []uint64) (OID, error) {
 	return OID{der}, nil
 }
 
-func base128IntLength(n uint64) int32 {
+func base128IntLength(n uint64) (rn int32) {
 	if n == 0 {
 		return 1
 	}
 	return (bits.Len64(n) + 6) / 7
 }
 
-func appendBase128Int(dst []byte, n uint64) []byte {
+func appendBase128Int(dst []byte, n uint64) (rb []byte) {
 	for i := base128IntLength(n) - 1; i >= 0; i-- {
 		o := byte(n >> uint32(i*7))
 		o &= 0x7f
@@ -90,14 +86,14 @@ func appendBase128Int(dst []byte, n uint64) []byte {
 	return dst
 }
 
-func base128BigIntLength(n *big.Int) int32 {
+func base128BigIntLength(n *big.Int) (rn int32) {
 	if n.Cmp(big.NewInt(0)) == 0 {
 		return 1
 	}
 	return (n.BitLen() + 6) / 7
 }
 
-func appendBase128BigInt(dst []byte, n *big.Int) []byte {
+func appendBase128BigInt(dst []byte, n *big.Int) (rb []byte) {
 	if n.Cmp(big.NewInt(0)) == 0 {
 		return push(dst, 0)
 	}
@@ -115,21 +111,21 @@ func appendBase128BigInt(dst []byte, n *big.Int) []byte {
 }
 
 // AppendText implements [encoding.TextAppender]
-func (o OID) AppendText(b []byte) ([]byte, error) {
+func (o *OID) AppendText(b []byte) (rb []byte, rerr error) {
 	return push(b, o.String()...), nil
 }
 
 // MarshalText implements [encoding.TextMarshaler]
-func (o OID) MarshalText() ([]byte, error) {
+func (o *OID) MarshalText() (rb []byte, rerr error) {
 	return o.AppendText(nil)
 }
 
 // UnmarshalText implements [encoding.TextUnmarshaler]
-func (o *OID) UnmarshalText(text []byte) error {
+func (o *OID) UnmarshalText(text []byte) (rerr error) {
 	return o.unmarshalOIDText(string(text))
 }
 
-func (o *OID) unmarshalOIDText(oid string) error {
+func (o *OID) unmarshalOIDText(oid string) (rerr error) {
 	// (*big.Int).SetString allows +/- signs, but we don't want
 	// to allow them in the string representation of Object Identifier, so
 	// reject such encodings.
@@ -193,17 +189,17 @@ func (o *OID) unmarshalOIDText(oid string) error {
 }
 
 // AppendBinary implements [encoding.BinaryAppender]
-func (o OID) AppendBinary(b []byte) ([]byte, error) {
+func (o *OID) AppendBinary(b []byte) (rb []byte, rerr error) {
 	return push(b, o.der...), nil
 }
 
 // MarshalBinary implements [encoding.BinaryMarshaler]
-func (o OID) MarshalBinary() ([]byte, error) {
+func (o *OID) MarshalBinary() (rb []byte, rerr error) {
 	return o.AppendBinary(nil)
 }
 
 // UnmarshalBinary implements [encoding.BinaryUnmarshaler]
-func (o *OID) UnmarshalBinary(b []byte) error {
+func (o *OID) UnmarshalBinary(b []byte) (rerr error) {
 	oid, ok := newOIDFromDER(bytes.Clone(b))
 	if !ok {
 		return errInvalidOID
@@ -213,7 +209,7 @@ func (o *OID) UnmarshalBinary(b []byte) error {
 }
 
 // Equal returns true when oid and other represents the same Object Identifier.
-func (oid OID) Equal(other OID) bool {
+func (oid *OID) Equal(other OID) (rok bool) {
 	// There is only one possible DER encoding of
 	// each unique Object Identifier.
 	return bytes.Equal(oid.der, other.der)
@@ -255,8 +251,8 @@ func parseBase128Int(der []byte, initOffset int32) (ret, offset int32, failed bo
 // EqualASN1OID returns whether an OID equals an asn1.ObjectIdentifier. If
 // asn1.ObjectIdentifier cannot represent the OID specified by oid, because
 // a component of OID requires more than 31 bits, it returns false.
-func (oid OID) EqualASN1OID(other asn1.ObjectIdentifier) bool {
-	if len(other) < 2 {
+func (oid *OID) EqualASN1OID(other asn1.ObjectIdentifier) (rok bool) {
+	if len(other.OID) < 2 {
 		return false
 	}
 	v, offset, failed := parseBase128Int(oid.der, 0)
@@ -267,12 +263,12 @@ func (oid OID) EqualASN1OID(other asn1.ObjectIdentifier) bool {
 	}
 	if v < 80 {
 		a, b := v/40, v%40
-		if other[0] != a || other[1] != b {
+		if other.OID[0] != a || other.OID[1] != b {
 			return false
 		}
 	} else {
 		a, b := 2, v-80
-		if other[0] != a || other[1] != b {
+		if other.OID[0] != a || other.OID[1] != b {
 			return false
 		}
 	}
@@ -285,16 +281,16 @@ func (oid OID) EqualASN1OID(other asn1.ObjectIdentifier) bool {
 			// the OID, but better safe than sorry.
 			return false
 		}
-		if i >= len(other) || v != other[i] {
+		if i >= len(other.OID) || v != other.OID[i] {
 			return false
 		}
 	}
 
-	return i == len(other)
+	return i == len(other.OID)
 }
 
 // Strings returns the string representation of the Object Identifier.
-func (oid OID) String() string {
+func (oid *OID) String() (rs string) {
 	var b bytes.Buffer
 	b.Grow(32)
 	const (
@@ -362,7 +358,7 @@ func (oid OID) String() string {
 	return b.String()
 }
 
-func (oid OID) toASN1OID() (asn1.ObjectIdentifier, bool) {
+func (oid *OID) toASN1OID() (robjectIdentifier asn1.ObjectIdentifier, rok bool) {
 	out := []int32{:0:len(oid.der)+1}
 
 	const (
@@ -403,5 +399,5 @@ func (oid OID) toASN1OID() (asn1.ObjectIdentifier, bool) {
 		}
 	}
 
-	return out, true
+	return asn1.ObjectIdentifier{OID: out}, true
 }

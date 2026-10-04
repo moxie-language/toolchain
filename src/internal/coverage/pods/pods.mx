@@ -50,7 +50,7 @@ type Pod struct {
 // corresponding meta-data file). If "warn" is true, CollectPods will
 // issue warnings to stderr when it encounters non-fatal problems (for
 // orphans or a directory with no meta-data files).
-func CollectPods(dirs [][]byte, warn bool) ([]Pod, error) {
+func CollectPods(dirs [][]byte, warn bool) (pods []Pod, derr error) {
 	files := [][]byte{}
 	dirIndices := []int32{}
 	for k, dir := range dirs {
@@ -73,7 +73,7 @@ func CollectPods(dirs [][]byte, warn bool) ([]Pod, error) {
 
 // CollectPodsFromFiles functions the same as "CollectPods" but
 // operates on an explicit list of files instead of a directory.
-func CollectPodsFromFiles(files [][]byte, warn bool) []Pod {
+func CollectPodsFromFiles(files [][]byte, warn bool) (pods []Pod) {
 	return collectPodsImpl(files, nil, warn)
 }
 
@@ -121,7 +121,7 @@ type protoPod struct {
 // first pod (with meta-file M1) will have four counter data files
 // (C1, C2, C3, C4) and the second pod will have two counter data files
 // (C5, C6).
-func collectPodsImpl(files [][]byte, dirIndices []int32, warn bool) []Pod {
+func collectPodsImpl(files [][]byte, dirIndices []int32, warn bool) (pods []Pod) {
 	metaRE := regexp.MustCompile(fmt.Sprintf(`^%s\.(\S+)$`, coverage.MetaFilePref))
 	mm := map[string]protoPod{}
 	for _, f := range files {
@@ -143,8 +143,8 @@ func collectPodsImpl(files [][]byte, dirIndices []int32, warn bool) []Pod {
 		base := filepath.Base(f)
 		if m := counterRE.FindStringSubmatch(base); m != nil {
 			tag := m[1] // meta hash
-			pid, err := strconv.Atoi(m[2])
-			if err != nil {
+			pid, perr := strconv.Atoi(m[2])
+			if perr != nil {
 				continue
 			}
 			if v, ok := mm[tag]; ok {
@@ -169,7 +169,7 @@ func collectPodsImpl(files [][]byte, dirIndices []int32, warn bool) []Pod {
 		}
 		return nil
 	}
-	pods := []Pod{:0:len(mm)}
+	pods = []Pod{:0:len(mm)}
 	for _, p := range mm {
 		slices.SortFunc(p.elements, func(a, b fileWithAnnotations) int32 {
 			if r := cmp.Compare(a.origin, b.origin); r != 0 {
@@ -177,22 +177,22 @@ func collectPodsImpl(files [][]byte, dirIndices []int32, warn bool) []Pod {
 			}
 			return bytes.Compare(a.file, b.file)
 		})
-		pod := Pod{
+		pd := Pod{
 			MetaFile:         p.mf,
 			CounterDataFiles: [][]byte{:0:len(p.elements)},
 			Origins:          []int32{:0:len(p.elements)},
 			ProcessIDs:       []int32{:0:len(p.elements)},
 		}
 		for _, e := range p.elements {
-			pod.CounterDataFiles = mxutil.Ensure(pod.CounterDataFiles, 1)
-			pod.CounterDataFiles = push(pod.CounterDataFiles, e.file)
-			pod.Origins = mxutil.Ensure(pod.Origins, 1)
-			pod.Origins = push(pod.Origins, e.origin)
-			pod.ProcessIDs = mxutil.Ensure(pod.ProcessIDs, 1)
-			pod.ProcessIDs = push(pod.ProcessIDs, e.pid)
+			pd.CounterDataFiles = mxutil.Ensure(pd.CounterDataFiles, 1)
+			pd.CounterDataFiles = push(pd.CounterDataFiles, e.file)
+			pd.Origins = mxutil.Ensure(pd.Origins, 1)
+			pd.Origins = push(pd.Origins, e.origin)
+			pd.ProcessIDs = mxutil.Ensure(pd.ProcessIDs, 1)
+			pd.ProcessIDs = push(pd.ProcessIDs, e.pid)
 		}
 		pods = mxutil.Ensure(pods, 1)
-		pods = push(pods, pod)
+		pods = push(pods, pd)
 	}
 	slices.SortFunc(pods, func(a, b Pod) int32 {
 		return bytes.Compare(a.MetaFile, b.MetaFile)
@@ -200,8 +200,9 @@ func collectPodsImpl(files [][]byte, dirIndices []int32, warn bool) []Pod {
 	return pods
 }
 
-func warning(s []byte, a ...fmt.Stringer) {
+func warning(s []byte, a ...fmt.Stringer) (derr error) {
 	fmt.Fprintf(os.Stderr, "warning: ")
 	fmt.Fprintf(os.Stderr, s, a...)
 	fmt.Fprintf(os.Stderr, "\n")
+	return nil
 }

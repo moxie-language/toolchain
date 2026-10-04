@@ -13,14 +13,11 @@ import (
 	"hash/crc32"
 	"io"
 	"io/fs"
+	"path"
 	"bytes"
 	"unicode/utf8"
 )
 
-const (
-	errLongName  = errors.Const("zip: FileHeader.Name too long")
-	errLongExtra = errors.Const("zip: FileHeader.Extra too long")
-)
 
 // Writer implements a zip file writer.
 type Writer struct {
@@ -44,7 +41,7 @@ type header struct {
 }
 
 // NewWriter returns a new [Writer] writing a zip file to w.
-func NewWriter(w io.Writer) *Writer {
+func NewWriter(w io.Writer) (zw *Writer) {
 	return &Writer{cw: &countWriter{w: bufio.NewWriter(w)}, cc: crc32.NewCRC32()}
 }
 
@@ -61,13 +58,13 @@ func (w *Writer) SetOffset(n int64) {
 
 // Flush flushes any buffered data to the underlying writer.
 // Calling Flush is not normally necessary; calling Close is sufficient.
-func (w *Writer) Flush() error {
+func (w *Writer) Flush() (err error) {
 	return w.cw.w.(*bufio.Writer).Flush()
 }
 
 // SetComment sets the end-of-central-directory comment field.
 // It can only be called before [Writer.Close].
-func (w *Writer) SetComment(comment string) error {
+func (w *Writer) SetComment(comment string) (oerr error) {
 	if len(comment) > uint16max {
 		return errors.New("zip: Writer.Comment too long")
 	}
@@ -77,7 +74,7 @@ func (w *Writer) SetComment(comment string) error {
 
 // Close finishes writing the zip file by writing the central directory.
 // It does not close the underlying writer.
-func (w *Writer) Close() error {
+func (w *Writer) Close() (oerr error) {
 	if w.last != nil && !w.last.closed {
 		if err := w.last.close(); err != nil {
 			return err
@@ -97,49 +94,49 @@ func (w *Writer) Close() error {
 	// a prefix because `buf` and `b` are declared again below in this
 	// function, at scopes that would then shadow these.
 	var hdrBuf [directoryHeaderLen]byte
-	var hdrB writeBuf
+	var hdrB []byte
 	var zipBuf [28]byte // 2x uint16 + 3x uint64
-	var zipB writeBuf
+	var zipB []byte
 	for _, h := range w.dir {
-		hdrB = writeBuf(hdrBuf[:])
-		hdrB.uint32(uint32(directoryHeaderSignature))
-		hdrB.uint16(h.CreatorVersion)
-		hdrB.uint16(h.ReaderVersion)
-		hdrB.uint16(h.Flags)
-		hdrB.uint16(h.Method)
-		hdrB.uint16(h.ModifiedTime)
-		hdrB.uint16(h.ModifiedDate)
-		hdrB.uint32(h.CRC32)
+		hdrB = hdrBuf[:]
+		hdrB = writeBufUint32(hdrB, uint32(directoryHeaderSignature))
+		hdrB = writeBufUint16(hdrB, h.CreatorVersion)
+		hdrB = writeBufUint16(hdrB, h.ReaderVersion)
+		hdrB = writeBufUint16(hdrB, h.Flags)
+		hdrB = writeBufUint16(hdrB, h.Method)
+		hdrB = writeBufUint16(hdrB, h.ModifiedTime)
+		hdrB = writeBufUint16(hdrB, h.ModifiedDate)
+		hdrB = writeBufUint32(hdrB, h.CRC32)
 		if h.isZip64() || h.offset >= uint32max {
 			// the file needs a zip64 header. store maxint in both
 			// 32 bit size fields (and offset later) to signal that the
 			// zip64 extra header should be used.
-			hdrB.uint32(uint32max) // compressed size
-			hdrB.uint32(uint32max) // uncompressed size
+			hdrB = writeBufUint32(hdrB, uint32max) // compressed size
+			hdrB = writeBufUint32(hdrB, uint32max) // uncompressed size
 
 			// append a zip64 extra block to Extra
-			zipB = writeBuf(zipBuf[:])
-			zipB.uint16(zip64ExtraID)
-			zipB.uint16(24) // size = 3x uint64
-			zipB.uint64(h.UncompressedSize64)
-			zipB.uint64(h.CompressedSize64)
-			zipB.uint64(h.offset)
+			zipB = zipBuf[:]
+			zipB = writeBufUint16(zipB, zip64ExtraID)
+			zipB = writeBufUint16(zipB, 24) // size = 3x uint64
+			zipB = writeBufUint64(zipB, h.UncompressedSize64)
+			zipB = writeBufUint64(zipB, h.CompressedSize64)
+			zipB = writeBufUint64(zipB, h.offset)
 			h.Extra = mxutil.Ensure(h.Extra, len(zipBuf[:]))
 			h.Extra = push(h.Extra, zipBuf[:]...)
 		} else {
-			hdrB.uint32(h.CompressedSize)
-			hdrB.uint32(h.UncompressedSize)
+			hdrB = writeBufUint32(hdrB, h.CompressedSize)
+			hdrB = writeBufUint32(hdrB, h.UncompressedSize)
 		}
 
-		hdrB.uint16(uint16(len(h.Name)))
-		hdrB.uint16(uint16(len(h.Extra)))
-		hdrB.uint16(uint16(len(h.Comment)))
+		hdrB = writeBufUint16(hdrB, uint16(len(h.Name)))
+		hdrB = writeBufUint16(hdrB, uint16(len(h.Extra)))
+		hdrB = writeBufUint16(hdrB, uint16(len(h.Comment)))
 		hdrB = hdrB[4:] // skip disk number start and internal file attr (2x uint16)
-		hdrB.uint32(h.ExternalAttrs)
+		hdrB = writeBufUint32(hdrB, h.ExternalAttrs)
 		if h.offset > uint32max {
-			hdrB.uint32(uint32max)
+			hdrB = writeBufUint32(hdrB, uint32max)
 		} else {
-			hdrB.uint32(uint32(h.offset))
+			hdrB = writeBufUint32(hdrB, uint32(h.offset))
 		}
 		if _, err := w.cw.Write(hdrBuf[:]); err != nil {
 			return err
@@ -165,28 +162,28 @@ func (w *Writer) Close() error {
 	}
 
 	if records >= uint16max || size >= uint32max || offset >= uint32max {
-		var buf [directory64EndLen + directory64LocLen]byte
-		b := writeBuf(buf[:])
+		var zbuf [directory64EndLen + directory64LocLen]byte
+		zb := zbuf[:]
 
 		// zip64 end of central directory record
-		b.uint32(directory64EndSignature)
-		b.uint64(directory64EndLen - 12) // length minus signature (uint32) and length fields (uint64)
-		b.uint16(zipVersion45)           // version made by
-		b.uint16(zipVersion45)           // version needed to extract
-		b.uint32(0)                      // number of this disk
-		b.uint32(0)                      // number of the disk with the start of the central directory
-		b.uint64(records)                // total number of entries in the central directory on this disk
-		b.uint64(records)                // total number of entries in the central directory
-		b.uint64(size)                   // size of the central directory
-		b.uint64(offset)                 // offset of start of central directory with respect to the starting disk number
+		zb = writeBufUint32(zb, directory64EndSignature)
+		zb = writeBufUint64(zb, directory64EndLen-12) // length minus signature (uint32) and length fields (uint64)
+		zb = writeBufUint16(zb, zipVersion45)         // version made by
+		zb = writeBufUint16(zb, zipVersion45)         // version needed to extract
+		zb = writeBufUint32(zb, 0)                    // number of this disk
+		zb = writeBufUint32(zb, 0)                    // number of the disk with the start of the central directory
+		zb = writeBufUint64(zb, records)              // total number of entries in the central directory on this disk
+		zb = writeBufUint64(zb, records)              // total number of entries in the central directory
+		zb = writeBufUint64(zb, size)                 // size of the central directory
+		zb = writeBufUint64(zb, offset)               // offset of start of central directory with respect to the starting disk number
 
 		// zip64 end of central directory locator
-		b.uint32(directory64LocSignature)
-		b.uint32(0)           // number of the disk with the start of the zip64 end of central directory
-		b.uint64(uint64(end)) // relative offset of the zip64 end of central directory record
-		b.uint32(1)           // total number of disks
+		zb = writeBufUint32(zb, directory64LocSignature)
+		zb = writeBufUint32(zb, 0)           // number of the disk with the start of the zip64 end of central directory
+		zb = writeBufUint64(zb, uint64(end)) // relative offset of the zip64 end of central directory record
+		zb = writeBufUint32(zb, 1)           // total number of disks
 
-		if _, err := w.cw.Write(buf[:]); err != nil {
+		if _, err := w.cw.Write(zbuf[:]); err != nil {
 			return err
 		}
 
@@ -199,14 +196,14 @@ func (w *Writer) Close() error {
 
 	// write end record
 	var buf [directoryEndLen]byte
-	b := writeBuf(buf[:])
-	b.uint32(uint32(directoryEndSignature))
-	b = b[4:]                        // skip over disk number and first disk number (2x uint16)
-	b.uint16(uint16(records))        // number of entries this disk
-	b.uint16(uint16(records))        // number of entries total
-	b.uint32(uint32(size))           // size of directory
-	b.uint32(uint32(offset))         // start of directory
-	b.uint16(uint16(len(w.comment))) // byte size of EOCD comment
+	b := buf[:]
+	b = writeBufUint32(b, uint32(directoryEndSignature))
+	b = b[4:]                             // skip over disk number and first disk number (2x uint16)
+	b = writeBufUint16(b, uint16(records)) // number of entries this disk
+	b = writeBufUint16(b, uint16(records)) // number of entries total
+	b = writeBufUint32(b, uint32(size))    // size of directory
+	b = writeBufUint32(b, uint32(offset))  // start of directory
+	b = writeBufUint16(b, uint16(len(w.comment))) // byte size of EOCD comment
 	if _, err := w.cw.Write(buf[:]); err != nil {
 		return err
 	}
@@ -227,12 +224,12 @@ func (w *Writer) Close() error {
 // and are appended to the zip file.
 // The file's contents must be written to the [io.Writer] before the next
 // call to [Writer.Create], [Writer.CreateHeader], or [Writer.Close].
-func (w *Writer) Create(name string) (io.Writer, error) {
-	header := &FileHeader{
+func (w *Writer) Create(name string) (out io.Writer, oerr error) {
+	fh := &FileHeader{
 		Name:   name,
 		Method: Deflate,
 	}
-	return w.CreateHeader(header)
+	return w.CreateHeader(fh)
 }
 
 // detectUTF8 reports whether s is a valid UTF-8 string, and whether the string
@@ -260,7 +257,7 @@ func detectUTF8(s string) (valid, require bool) {
 
 // prepare performs the bookkeeping operations required at the start of
 // CreateHeader and CreateRaw.
-func (w *Writer) prepare(fh *FileHeader) error {
+func (w *Writer) prepare(fh *FileHeader) (oerr error) {
 	if w.last != nil && !w.last.closed {
 		if err := w.last.close(); err != nil {
 			return err
@@ -280,7 +277,7 @@ func (w *Writer) prepare(fh *FileHeader) error {
 // This returns a [Writer] to which the file contents should be written.
 // The file's contents must be written to the io.Writer before the next
 // call to [Writer.Create], [Writer.CreateHeader], [Writer.CreateRaw], or [Writer.Close].
-func (w *Writer) CreateHeader(fh *FileHeader) (io.Writer, error) {
+func (w *Writer) CreateHeader(fh *FileHeader) (out io.Writer, oerr error) {
 	if err := w.prepare(fh); err != nil {
 		return nil, err
 	}
@@ -333,11 +330,11 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.Writer, error) {
 		// if modification time is the only timestamp being encoded.
 		var mbuf [9]byte // 2*SizeOf(uint16) + SizeOf(uint8) + SizeOf(uint32)
 		mt := uint32(fh.Modified.Unix())
-		eb := writeBuf(mbuf[:])
-		eb.uint16(extTimeExtraID)
-		eb.uint16(5)  // Size: SizeOf(uint8) + SizeOf(uint32)
-		eb.uint8(1)   // Flags: ModTime
-		eb.uint32(mt) // ModTime
+		eb := mbuf[:]
+		eb = writeBufUint16(eb, extTimeExtraID)
+		eb = writeBufUint16(eb, 5)  // Size: SizeOf(uint8) + SizeOf(uint32)
+		eb = writeBufUint8(eb, 1)   // Flags: ModTime
+		eb = writeBufUint32(eb, mt) // ModTime
 		fh.Extra = mxutil.Ensure(fh.Extra, len(mbuf[:]))
 		fh.Extra = push(fh.Extra, mbuf[:]...)
 	}
@@ -365,7 +362,7 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.Writer, error) {
 		fh.UncompressedSize = 0
 		fh.UncompressedSize64 = 0
 
-		ow = dirWriter{}
+		ow = &dirWriter{}
 	} else {
 		fh.Flags |= 0x8 // we will write a data descriptor
 
@@ -397,7 +394,7 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.Writer, error) {
 	return ow, nil
 }
 
-func writeHeader(w io.Writer, h *header) error {
+func writeHeader(w io.Writer, h *header) (oerr error) {
 	const maxUint16 = 1<<16 - 1
 	if len(h.Name) > maxUint16 {
 		return errLongName
@@ -407,37 +404,37 @@ func writeHeader(w io.Writer, h *header) error {
 	}
 
 	var buf [fileHeaderLen]byte
-	b := writeBuf(buf[:])
-	b.uint32(uint32(fileHeaderSignature))
-	b.uint16(h.ReaderVersion)
-	b.uint16(h.Flags)
-	b.uint16(h.Method)
-	b.uint16(h.ModifiedTime)
-	b.uint16(h.ModifiedDate)
+	b := buf[:]
+	b = writeBufUint32(b, uint32(fileHeaderSignature))
+	b = writeBufUint16(b, h.ReaderVersion)
+	b = writeBufUint16(b, h.Flags)
+	b = writeBufUint16(b, h.Method)
+	b = writeBufUint16(b, h.ModifiedTime)
+	b = writeBufUint16(b, h.ModifiedDate)
 	// In raw mode (caller does the compression), the values are either
 	// written here or in the trailing data descriptor based on the header
 	// flags.
 	if h.raw && !h.hasDataDescriptor() {
-		b.uint32(h.CRC32)
-		b.uint32(uint32(min(h.CompressedSize64, uint32max)))
-		b.uint32(uint32(min(h.UncompressedSize64, uint32max)))
+		b = writeBufUint32(b, h.CRC32)
+		b = writeBufUint32(b, uint32(min(h.CompressedSize64, uint32max)))
+		b = writeBufUint32(b, uint32(min(h.UncompressedSize64, uint32max)))
 	} else {
 		// When this package handle the compression, these values are
 		// always written to the trailing data descriptor.
-		b.uint32(0) // crc32
-		b.uint32(0) // compressed size
-		b.uint32(0) // uncompressed size
+		b = writeBufUint32(b, 0) // crc32
+		b = writeBufUint32(b, 0) // compressed size
+		b = writeBufUint32(b, 0) // uncompressed size
 	}
-	b.uint16(uint16(len(h.Name)))
-	b.uint16(uint16(len(h.Extra)))
+	b = writeBufUint16(b, uint16(len(h.Name)))
+	b = writeBufUint16(b, uint16(len(h.Extra)))
 	if _, err := w.Write(buf[:]); err != nil {
 		return err
 	}
 	if _, err := io.WriteString(w, h.Name); err != nil {
 		return err
 	}
-	_, err := w.Write(h.Extra)
-	return err
+	_, oerr = w.Write(h.Extra)
+	return oerr
 }
 
 // CreateRaw adds a file to the zip archive using the provided [FileHeader] and
@@ -450,7 +447,7 @@ func writeHeader(w io.Writer, h *header) error {
 // CreateRaw's argument is stored in w. If the argument is a pointer to the embedded
 // [FileHeader] in a [File] obtained from a [Reader] created from in-memory data,
 // then w will refer to all of that memory.
-func (w *Writer) CreateRaw(fh *FileHeader) (io.Writer, error) {
+func (w *Writer) CreateRaw(fh *FileHeader) (out io.Writer, oerr error) {
 	if err := w.prepare(fh); err != nil {
 		return nil, err
 	}
@@ -471,7 +468,7 @@ func (w *Writer) CreateRaw(fh *FileHeader) (io.Writer, error) {
 
 	if bytes.HasSuffix(fh.Name, "/") {
 		w.last = nil
-		return dirWriter{}, nil
+		return &dirWriter{}, nil
 	}
 
 	fw := &fileWriter{
@@ -484,7 +481,7 @@ func (w *Writer) CreateRaw(fh *FileHeader) (io.Writer, error) {
 
 // Copy copies the file f (obtained from a [Reader]) into w. It copies the raw
 // form directly bypassing decompression, compression, and validation.
-func (w *Writer) Copy(f *File) error {
+func (w *Writer) Copy(f *File) (oerr error) {
 	r, err := f.OpenRaw()
 	if err != nil {
 		return err
@@ -510,52 +507,81 @@ func (w *Writer) RegisterCompressor(method uint16, comp Compressor) {
 	w.compressors[method] = comp
 }
 
+// fsWalker carries the Writer and filesystem that AddFS walks. Moxie closures
+// capture nothing and a method value captures its receiver, so AddFS descends
+// the tree itself with ReadDir instead of handing fs.WalkDir a callback.
+type fsWalker struct {
+	w    *Writer
+	fsys fs.FS
+}
+
+// addDir walks dir and its subdirectories in lexical order (fs.ReadDir returns
+// entries sorted by name, the order fs.WalkDir visits them in).
+func (fw *fsWalker) addDir(dir string) (oerr error) {
+	entries, derr := fs.ReadDir(fw.fsys, dir)
+	if derr != nil {
+		return derr
+	}
+	for _, d := range entries {
+		name := path.Join(dir, d.Name())
+		if err := fw.add(name, d); err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if err := fw.addDir(name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (fw *fsWalker) add(name []byte, d fs.DirEntry) (oerr error) {
+	info, derr := d.Info()
+	if derr != nil {
+		return derr
+	}
+	m := info.Mode()
+	if !d.IsDir() && !m.IsRegular() {
+		return errors.New("zip: cannot add non-regular file")
+	}
+	h, herr := FileInfoHeader(info)
+	if herr != nil {
+		return herr
+	}
+	h.Name = name
+	if d.IsDir() {
+		h.Name = h.Name | "/"
+	}
+	h.Method = Deflate
+	fwOut, cerr := fw.w.CreateHeader(h)
+	if cerr != nil {
+		return cerr
+	}
+	if d.IsDir() {
+		return nil
+	}
+	f, ferr := fw.fsys.Open(name)
+	if ferr != nil {
+		return ferr
+	}
+	defer f.Close()
+	_, ierr := io.Copy(fwOut, f)
+	return ierr
+}
+
 // AddFS adds the files from fs.FS to the archive.
 // It walks the directory tree starting at the root of the filesystem
 // adding each file to the zip using deflate while maintaining the directory structure.
-func (w *Writer) AddFS(fsys fs.FS) error {
-	return fs.WalkDir(fsys, ".", func(name string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if name == "." {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() && !info.Mode().IsRegular() {
-			return errors.New("zip: cannot add non-regular file")
-		}
-		h, err := FileInfoHeader(info)
-		if err != nil {
-			return err
-		}
-		h.Name = name
-		if d.IsDir() {
-			h.Name += "/"
-		}
-		h.Method = Deflate
-		fw, err := w.CreateHeader(h)
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		f, err := fsys.Open(name)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		_, err = io.Copy(fw, f)
-		return err
-	})
+func (w *Writer) AddFS(fsys fs.FS) (oerr error) {
+	var fw fsWalker
+	fw.w = w
+	fw.fsys = fsys
+	return fw.addDir(".")
 }
 
-func (w *Writer) compressor(method uint16) Compressor {
-	comp := w.compressors[method]
+func (w *Writer) compressor(method uint16) (comp Compressor) {
+	comp = w.compressors[method]
 	if comp == nil {
 		comp = compressor(method)
 	}
@@ -564,7 +590,7 @@ func (w *Writer) compressor(method uint16) Compressor {
 
 type dirWriter struct{}
 
-func (dirWriter) Write(b []byte) (int32, error) {
+func (w *dirWriter) Write(b []byte) (n int32, err error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
@@ -581,7 +607,7 @@ type fileWriter struct {
 	closed    bool
 }
 
-func (w *fileWriter) Write(p []byte) (int32, error) {
+func (w *fileWriter) Write(p []byte) (n int32, err error) {
 	if w.closed {
 		return 0, errors.New("zip: write to closed file")
 	}
@@ -592,7 +618,7 @@ func (w *fileWriter) Write(p []byte) (int32, error) {
 	return w.rawCount.Write(p)
 }
 
-func (w *fileWriter) close() error {
+func (w *fileWriter) close() (oerr error) {
 	if w.closed {
 		return errors.New("zip: file closed twice")
 	}
@@ -622,7 +648,7 @@ func (w *fileWriter) close() error {
 	return w.writeDataDescriptor()
 }
 
-func (w *fileWriter) writeDataDescriptor() error {
+func (w *fileWriter) writeDataDescriptor() (oerr error) {
 	if !w.hasDataDescriptor() {
 		return nil
 	}
@@ -637,18 +663,18 @@ func (w *fileWriter) writeDataDescriptor() error {
 	} else {
 		buf = []byte{:dataDescriptorLen}
 	}
-	b := writeBuf(buf)
-	b.uint32(dataDescriptorSignature) // de-facto standard, required by OS X
-	b.uint32(w.CRC32)
+	b := buf
+	b = writeBufUint32(b, dataDescriptorSignature) // de-facto standard, required by OS X
+	b = writeBufUint32(b, w.CRC32)
 	if w.isZip64() {
-		b.uint64(w.CompressedSize64)
-		b.uint64(w.UncompressedSize64)
+		b = writeBufUint64(b, w.CompressedSize64)
+		b = writeBufUint64(b, w.UncompressedSize64)
 	} else {
-		b.uint32(w.CompressedSize)
-		b.uint32(w.UncompressedSize)
+		b = writeBufUint32(b, w.CompressedSize)
+		b = writeBufUint32(b, w.UncompressedSize)
 	}
-	_, err := w.zipw.Write(buf)
-	return err
+	_, oerr = w.zipw.Write(buf)
+	return oerr
 }
 
 type countWriter struct {
@@ -656,8 +682,8 @@ type countWriter struct {
 	count int64
 }
 
-func (w *countWriter) Write(p []byte) (int32, error) {
-	n, err := w.w.Write(p)
+func (w *countWriter) Write(p []byte) (n int32, err error) {
+	n, err = w.w.Write(p)
 	w.count += int64(n)
 	return n, err
 }
@@ -666,28 +692,33 @@ type nopCloser struct {
 	io.Writer
 }
 
-func (w nopCloser) Close() error {
+func (w *nopCloser) Close() (err error) {
 	return nil
 }
 
-type writeBuf []byte
-
-func (b *writeBuf) uint8(v uint8) {
-	(*b)[0] = v
-	*b = (*b)[1:]
+// writeBufUint8, writeBufUint16, writeBufUint32 and writeBufUint64 are the
+// former cursor methods of a named []byte type, written out as free functions
+// that return the advanced remainder.
+func writeBufUint8(b []byte, v uint8) (rest []byte) {
+	b[0] = v
+	rest = b[1:]
+	return
 }
 
-func (b *writeBuf) uint16(v uint16) {
-	binary.LittleEndian().PutUint16(*b, v)
-	*b = (*b)[2:]
+func writeBufUint16(b []byte, v uint16) (rest []byte) {
+	binary.LittleEndian().PutUint16(b, v)
+	rest = b[2:]
+	return
 }
 
-func (b *writeBuf) uint32(v uint32) {
-	binary.LittleEndian().PutUint32(*b, v)
-	*b = (*b)[4:]
+func writeBufUint32(b []byte, v uint32) (rest []byte) {
+	binary.LittleEndian().PutUint32(b, v)
+	rest = b[4:]
+	return
 }
 
-func (b *writeBuf) uint64(v uint64) {
-	binary.LittleEndian().PutUint64(*b, v)
-	*b = (*b)[8:]
+func writeBufUint64(b []byte, v uint64) (rest []byte) {
+	binary.LittleEndian().PutUint64(b, v)
+	rest = b[8:]
+	return
 }

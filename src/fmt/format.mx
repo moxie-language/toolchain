@@ -40,7 +40,7 @@ type fmtFlags struct {
 // A fmt is the raw formatter used by Printf etc.
 // It prints into a buffer that must be set up separately.
 type fmt struct {
-	buf *buffer
+	buf *[]byte
 
 	fmtFlags
 
@@ -58,7 +58,7 @@ func (f *fmt) clearflags() {
 	f.prec = 0
 }
 
-func (f *fmt) init(buf *buffer) {
+func (f *fmt) init(buf *[]byte) {
 	f.buf = buf
 	f.clearflags()
 }
@@ -73,7 +73,7 @@ func (f *fmt) writePadding(n int32) {
 	newLen := oldLen + n
 	// Make enough room for padding.
 	if newLen > cap(buf) {
-		buf = buffer{:cap(buf)*2+n}
+		buf = []byte{:cap(buf)*2 + n}
 		copy(buf, *f.buf)
 	}
 	// Decide which byte the padding should be filled with.
@@ -93,17 +93,17 @@ func (f *fmt) writePadding(n int32) {
 // pad appends b to f.buf, padded on left (!f.minus) or right (f.minus).
 func (f *fmt) pad(b []byte) {
 	if !f.widPresent || f.wid == 0 {
-		f.buf.write(b)
+		*f.buf = bufWrite(*f.buf, b)
 		return
 	}
 	width := f.wid - utf8.RuneCount(b)
 	if !f.minus {
 		// left padding
 		f.writePadding(width)
-		f.buf.write(b)
+		*f.buf = bufWrite(*f.buf, b)
 	} else {
 		// right padding
-		f.buf.write(b)
+		*f.buf = bufWrite(*f.buf, b)
 		f.writePadding(width)
 	}
 }
@@ -111,17 +111,17 @@ func (f *fmt) pad(b []byte) {
 // padString appends s to f.buf, padded on left (!f.minus) or right (f.minus).
 func (f *fmt) padString(s []byte) {
 	if !f.widPresent || f.wid == 0 {
-		f.buf.writeString(s)
+		*f.buf = bufWriteString(*f.buf, s)
 		return
 	}
 	width := f.wid - utf8.RuneCountInString(s)
 	if !f.minus {
 		// left padding
 		f.writePadding(width)
-		f.buf.writeString(s)
+		*f.buf = bufWriteString(*f.buf, s)
 	} else {
 		// right padding
-		f.buf.writeString(s)
+		*f.buf = bufWriteString(*f.buf, s)
 		f.writePadding(width)
 	}
 }
@@ -327,7 +327,7 @@ func (f *fmt) fmtInteger(u uint64, base int32, isSigned bool, verb rune, digits 
 }
 
 // truncateString truncates the string s to the specified precision, if present.
-func (f *fmt) truncateString(s []byte) []byte {
+func (f *fmt) truncateString(s []byte) (ret []byte) {
 	if f.precPresent {
 		n := f.prec
 		for i := range s {
@@ -341,7 +341,7 @@ func (f *fmt) truncateString(s []byte) []byte {
 }
 
 // truncate truncates the byte slice b as a string of the specified precision, if present.
-func (f *fmt) truncate(b []byte) []byte {
+func (f *fmt) truncate(b []byte) (ret []byte) {
 	if f.precPresent {
 		n := f.prec
 		for i := 0; i < len(b); {
@@ -602,9 +602,9 @@ func (f *fmt) fmtFloat(v float64, size int32, verb rune, prec int32) {
 		// Achieve this by writing the sign out and then padding the unsigned number.
 		// Zero padding is allowed only to the left.
 		if f.zero && !f.minus && f.widPresent && f.wid > len(num) {
-			f.buf.writeByte(num[0])
+			*f.buf = bufWriteByte(*f.buf, num[0])
 			f.writePadding(f.wid - len(num))
-			f.buf.write(num[1:])
+			*f.buf = bufWrite(*f.buf, num[1:])
 			return
 		}
 		f.pad(num)

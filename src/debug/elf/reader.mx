@@ -14,19 +14,19 @@ type errorReader struct {
 	error
 }
 
-func (r errorReader) Read(p []byte) (n int32, err error) {
+func (r *errorReader) Read(p []byte) (n int32, err error) {
 	return 0, r.error
 }
 
-func (r errorReader) ReadAt(p []byte, off int64) (n int32, err error) {
+func (r *errorReader) ReadAt(p []byte, off int64) (n int32, err error) {
 	return 0, r.error
 }
 
-func (r errorReader) Seek(offset int64, whence int32) (int64, error) {
+func (r *errorReader) Seek(offset int64, whence int32) (_r0 int64, _r1 error) {
 	return 0, r.error
 }
 
-func (r errorReader) Close() error {
+func (r *errorReader) Close() (_r0 error) {
 	return r.error
 }
 
@@ -34,17 +34,22 @@ func (r errorReader) Close() error {
 // In general Seek may not be efficient, but it is optimized for
 // common cases such as seeking to the end to find the length of the
 // data.
+// streamResetter produces a fresh reader over the underlying stream.
+type streamResetter interface {
+	reset() (io.Reader, error)
+}
+
 type readSeekerFromReader struct {
-	reset  func() (io.Reader, error)
+	reset  streamResetter
 	r      io.Reader
 	size   int64
 	offset int64
 }
 
 func (r *readSeekerFromReader) start() {
-	x, err := r.reset()
+	x, err := r.reset.reset()
 	if err != nil {
-		r.r = errorReader{err}
+		r.r = &errorReader{err}
 	} else {
 		r.r = x
 	}
@@ -60,7 +65,7 @@ func (r *readSeekerFromReader) Read(p []byte) (n int32, err error) {
 	return n, err
 }
 
-func (r *readSeekerFromReader) Seek(offset int64, whence int32) (int64, error) {
+func (r *readSeekerFromReader) Seek(offset int64, whence int32) (_r0 int64, _r1 error) {
 	var newOffset int64
 	switch whence {
 	case io.SeekStart:
@@ -84,7 +89,7 @@ func (r *readSeekerFromReader) Seek(offset int64, whence int32) (int64, error) {
 		r.r = nil
 
 	case newOffset == r.size:
-		r.r = errorReader{io.EOF}
+		r.r = &errorReader{io.EOF}
 
 	default:
 		if newOffset < r.offset {
@@ -93,13 +98,15 @@ func (r *readSeekerFromReader) Seek(offset int64, whence int32) (int64, error) {
 		}
 		// Read until we reach offset.
 		var buf [512]byte
+		var b []byte
+		var rerr error
 		for r.offset < newOffset {
-			b := buf[:]
+			b = buf[:]
 			if newOffset-r.offset < int64(len(buf)) {
 				b = buf[:newOffset-r.offset]
 			}
-			if _, err := r.Read(b); err != nil {
-				return 0, err
+			if _, rerr = r.Read(b); rerr != nil {
+				return 0, rerr
 			}
 		}
 	}

@@ -91,7 +91,7 @@ const (
 	sLast
 )
 
-func (it *traceV1Converter) init(pr tracev1.Trace) error {
+func (it *traceV1Converter) init(pr tracev1.Trace) (rerr error) {
 	it.trace = pr
 	it.preInit = true
 	it.createdPreInit = map[GoID]struct{}{}
@@ -106,74 +106,46 @@ func (it *traceV1Converter) init(pr tracev1.Trace) error {
 	evt := it.evt
 
 	// Convert from trace v1's Strings map to our dataTable.
-	var max uint64
+	var maxID uint64
 	for id, s := range pr.Strings {
 		evt.strings.insert(stringID(id), s)
-		if id > max {
-			max = id
+		if id > maxID {
+			maxID = id
 		}
 	}
 	pr.Strings = nil
 
 	// Add all strings used for UserLog. In the trace v1 format, these were
 	// stored inline and didn't have IDs. We generate IDs for them.
-	if max+uint64(len(pr.InlineStrings)) < max {
+	if maxID+uint64(len(pr.InlineStrings)) < maxID {
 		return errors.New("trace contains too many strings")
 	}
 	var addErr error
-	add := func(id stringID, s []byte) {
-		if err := evt.strings.insert(id, s); err != nil && addErr == nil {
-			addErr = err
-		}
-	}
+	var nid uint64
 	for id, s := range pr.InlineStrings {
-		nid := max + 1 + uint64(id)
+		nid = maxID + 1 + uint64(id)
 		it.inlineToStringID = mxutil.Ensure(it.inlineToStringID, 1)
 		it.inlineToStringID = push(it.inlineToStringID, nid)
-		add(stringID(nid), s)
+		if ierr := evt.strings.insert(stringID(nid), s); ierr != nil && addErr == nil {
+			addErr = ierr
+		}
 	}
-	max += uint64(len(pr.InlineStrings))
+	maxID += uint64(len(pr.InlineStrings))
 	pr.InlineStrings = nil
 
 	// Add strings that the converter emits explicitly.
-	if max+uint64(sLast) < max {
+	if maxID+uint64(sLast) < maxID {
 		return errors.New("trace contains too many strings")
 	}
 	it.builtinToStringID = []uint64{:sLast}
-	addBuiltin := func(c int32, s []byte) {
-		nid := max + 1 + uint64(c)
-		it.builtinToStringID[c] = nid
-		add(stringID(nid), s)
+	var bnid uint64
+	for c := 0; c < sLast; c++ {
+		bnid = maxID + 1 + uint64(c)
+		it.builtinToStringID[c] = bnid
+		if ierr := evt.strings.insert(stringID(bnid), v1BuiltinStrings[c]); ierr != nil && addErr == nil {
+			addErr = ierr
+		}
 	}
-	addBuiltin(sForever, "forever")
-	addBuiltin(sPreempted, "preempted")
-	addBuiltin(sGosched, "runtime.Gosched")
-	addBuiltin(sSleep, "sleep")
-	addBuiltin(sChanSend, "chan send")
-	addBuiltin(sChanRecv, "chan receive")
-	addBuiltin(sNetwork, "network")
-	addBuiltin(sSync, "sync")
-	addBuiltin(sSyncCond, "sync.(*Cond).Wait")
-	addBuiltin(sSelect, "select")
-	addBuiltin(sEmpty, "")
-	addBuiltin(sMarkAssistWait, "GC mark assist wait for work")
-	addBuiltin(sSTWUnknown, "")
-	addBuiltin(sSTWGCMarkTermination, "GC mark termination")
-	addBuiltin(sSTWGCSweepTermination, "GC sweep termination")
-	addBuiltin(sSTWWriteHeapDump, "write heap dump")
-	addBuiltin(sSTWGoroutineProfile, "goroutine profile")
-	addBuiltin(sSTWGoroutineProfileCleanup, "goroutine profile cleanup")
-	addBuiltin(sSTWAllGoroutinesStackTrace, "all goroutine stack trace")
-	addBuiltin(sSTWReadMemStats, "read mem stats")
-	addBuiltin(sSTWAllThreadsSyscall, "AllThreadsSyscall")
-	addBuiltin(sSTWGOMAXPROCS, "GOMAXPROCS")
-	addBuiltin(sSTWStartTrace, "start trace")
-	addBuiltin(sSTWStopTrace, "stop trace")
-	addBuiltin(sSTWCountPagesInUse, "CountPagesInUse (test)")
-	addBuiltin(sSTWReadMetricsSlow, "ReadMetricsSlow (test)")
-	addBuiltin(sSTWReadMemStatsSlow, "ReadMemStatsSlow (test)")
-	addBuiltin(sSTWPageCachePagesLeaked, "PageCachePagesLeaked (test)")
-	addBuiltin(sSTWResetDebugLog, "ResetDebugLog (test)")
 
 	if addErr != nil {
 		// This should be impossible but let's be safe.
@@ -205,7 +177,7 @@ func (it *traceV1Converter) init(pr tracev1.Trace) error {
 
 // next returns the next event, io.EOF if there are no more events, or a
 // descriptive error for invalid events.
-func (it *traceV1Converter) next() (Event, error) {
+func (it *traceV1Converter) next() (out Event, rerr error) {
 	if len(it.extra) > 0 {
 		ev := it.extra[0]
 		it.extra = it.extra[1:]
@@ -227,7 +199,7 @@ func (it *traceV1Converter) next() (Event, error) {
 		return Event{}, io.EOF
 	}
 
-	ev, err := it.convertEvent(oev)
+	nev, err := it.convertEvent(oev)
 
 	if err == errSkip {
 		return it.next()
@@ -237,14 +209,18 @@ func (it *traceV1Converter) next() (Event, error) {
 
 	// Two events aren't allowed to fall on the same timestamp in the new API,
 	// but this may happen when we produce EvGoStatus events
-	if ev.base.time <= it.lastTs {
-		ev.base.time = it.lastTs + 1
+	if nev.base.time <= it.lastTs {
+		nev.base.time = it.lastTs + 1
 	}
-	it.lastTs = ev.base.time
-	return ev, nil
+	it.lastTs = nev.base.time
+	return nev, nil
 }
 
-const errSkip = errors.Const("skip event")
+var errSkip error
+
+// v1BuiltinStrings are the block and STW reason strings the converter emits,
+// indexed by the s* constants below.
+var v1BuiltinStrings []string
 
 // convertEvent converts an event from the trace v1 format to zero or more
 // events in the new format. Most events translate 1 to 1. Some events don't
@@ -408,9 +384,11 @@ func (it *traceV1Converter) convertEvent(ev *tracev1.Event) (OUT Event, ERR erro
 		// Look for the next event for the same G to determine if the syscall
 		// blocked.
 		blocked := false
-		it.events.All()(func(nev *tracev1.Event) bool {
+		var nev *tracev1.Event
+		for i := 0; i < it.events.Len(); i++ {
+			nev = it.events.Ptr(i)
 			if nev.G != ev.G {
-				return true
+				continue
 			}
 			// After an EvGoSysCall, the next event on the same G will either be
 			// EvGoSysBlock to denote a blocking syscall, or some other event
@@ -418,8 +396,8 @@ func (it *traceV1Converter) convertEvent(ev *tracev1.Event) (OUT Event, ERR erro
 			if nev.Type == tracev1.EvGoSysBlock {
 				blocked = true
 			}
-			return false
-		})
+			break
+		}
 		if blocked {
 			mappedType = tracev2.EvGoSyscallBegin
 			mappedArgs = timedEventArgs{1: uint64(ev.StkID)}
@@ -486,7 +464,9 @@ func (it *traceV1Converter) convertEvent(ev *tracev1.Event) (OUT Event, ERR erro
 			parent = uint64(NoTask)
 		}
 		mappedArgs = timedEventArgs{ev.Args[0], parent, ev.Args[2], uint64(ev.StkID)}
-		name, _ := it.evt.strings.get(stringID(ev.Args[2]))
+		strs := it.evt.strings
+		var name []byte
+		name, _ = strs.get(stringID(ev.Args[2]))
 		it.tasks[TaskID(ev.Args[0])] = taskState{name: name, parentID: TaskID(ev.Args[1])}
 	case tracev1.EvUserTaskEnd:
 		mappedType = tracev2.EvUserTaskEnd
@@ -565,8 +545,23 @@ func (it *traceV1Converter) convertEvent(ev *tracev1.Event) (OUT Event, ERR erro
 
 // convertV1Trace takes a fully loaded trace in the v1 trace format and
 // returns an iterator over events in the new format.
-func convertV1Trace(pr tracev1.Trace) *traceV1Converter {
+func convertV1Trace(pr tracev1.Trace) (out *traceV1Converter) {
 	it := &traceV1Converter{}
 	it.init(pr)
 	return it
+}
+
+func init() {
+	errSkip = errors.New("skip event")
+	initOrderConsts()
+	v1BuiltinStrings = []string{
+		"forever", "preempted", "runtime.Gosched", "sleep",
+		"chan send", "chan receive", "network", "sync",
+		"sync.(*Cond).Wait", "select", "", "GC mark assist wait for work",
+		"", "GC mark termination", "GC sweep termination", "write heap dump",
+		"goroutine profile", "goroutine profile cleanup", "all goroutine stack trace",
+		"read mem stats", "AllThreadsSyscall", "GOMAXPROCS", "start trace", "stop trace",
+		"CountPagesInUse (test)", "ReadMetricsSlow (test)", "ReadMemStatsSlow (test)",
+		"PageCachePagesLeaked (test)", "ResetDebugLog (test)",
+	}
 }

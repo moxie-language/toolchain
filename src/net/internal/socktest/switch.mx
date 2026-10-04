@@ -17,18 +17,18 @@ type Switch struct {
 
 	fltab map[FilterType]Filter
 
-	sotab Sockets
-	stats stats
+	sotab map[int32]Status
+	stats map[Cookie]*Stat
 }
 
 func (sw *Switch) init() {
 	sw.fltab = map[FilterType]Filter{}
-	sw.sotab = Sockets{}
-	sw.stats = stats{}
+	sw.sotab = map[int32]Status{}
+	sw.stats = map[Cookie]*Stat{}
 }
 
 // Stats returns a list of per-cookie socket statistics.
-func (sw *Switch) Stats() []Stat {
+func (sw *Switch) Stats() (rstat []Stat) {
 	var st []Stat
 	for _, s := range sw.stats {
 		ns := *s
@@ -39,8 +39,8 @@ func (sw *Switch) Stats() []Stat {
 }
 
 // Sockets returns mappings of socket descriptor to socket status.
-func (sw *Switch) Sockets() Sockets {
-	tab := Sockets{}
+func (sw *Switch) Sockets() (rsockets map[int32]Status) {
+	tab := map[int32]Status{}
 	for i, s := range sw.sotab {
 		tab[i] = s
 	}
@@ -52,15 +52,15 @@ func (sw *Switch) Sockets() Sockets {
 type Cookie uint64
 
 // Family returns an address family.
-func (c Cookie) Family() int32 { return int32(c >> 48) }
+func (c *Cookie) Family() (rn int32) { return int32(*c >> 48) }
 
 // Type returns a socket type.
-func (c Cookie) Type() int32 { return int32(c << 16 >> 32) }
+func (c *Cookie) Type() (rn int32) { return int32(*c << 16 >> 32) }
 
 // Protocol returns a protocol number.
-func (c Cookie) Protocol() int32 { return int32(c & 0xff) }
+func (c *Cookie) Protocol() (rn int32) { return int32(*c & 0xff) }
 
-func cookie(family, sotype, proto int32) Cookie {
+func cookie(family, sotype, proto int32) (rcookie Cookie) {
 	return Cookie(family)<<48 | Cookie(sotype)&0xffffffff<<16 | Cookie(proto)&0xff
 }
 
@@ -71,7 +71,7 @@ type Status struct {
 	SocketErr error // error status of socket by SO_ERROR
 }
 
-func (so Status) String() string {
+func (so *Status) String() (rs string) {
 	return fmt.Sprintf("(%s, %s, %s): syscallerr=%v socketerr=%v", familyString(so.Cookie.Family()), typeString(so.Cookie.Type()), protocolString(so.Cookie.Protocol()), so.Err, so.SocketErr)
 }
 
@@ -94,13 +94,11 @@ type Stat struct {
 	CloseFailed   uint64 // number of sockets close failed
 }
 
-func (st Stat) String() string {
+func (st *Stat) String() (rs string) {
 	return fmt.Sprintf("(%s, %s, %s): opened=%d connected=%d listened=%d accepted=%d closed=%d openfailed=%d connectfailed=%d listenfailed=%d acceptfailed=%d closefailed=%d", familyString(st.Family), typeString(st.Type), protocolString(st.Protocol), st.Opened, st.Connected, st.Listened, st.Accepted, st.Closed, st.OpenFailed, st.ConnectFailed, st.ListenFailed, st.AcceptFailed, st.CloseFailed)
 }
 
-type stats map[Cookie]*Stat
-
-func (st stats) getLocked(c Cookie) *Stat {
+func statsGetLocked(st map[Cookie]*Stat, c Cookie) (rstat *Stat) {
 	s, ok := st[c]
 	if !ok {
 		s = &Stat{Family: c.Family(), Type: c.Type(), Protocol: c.Protocol()}
@@ -132,8 +130,8 @@ const (
 // execution of the system call.
 type Filter func(*Status) (AfterFilter, error)
 
-func (f Filter) apply(st *Status) (AfterFilter, error) {
-	if f == nil {
+func (f *Filter) apply(st *Status) (rafterFilter AfterFilter, rerr error) {
+	if *f == nil {
 		return nil, nil
 	}
 	return f(st)
@@ -148,8 +146,8 @@ func (f Filter) apply(st *Status) (AfterFilter, error) {
 // returns the non-nil error.
 type AfterFilter func(*Status) error
 
-func (f AfterFilter) apply(st *Status) error {
-	if f == nil {
+func (f *AfterFilter) apply(st *Status) (rerr error) {
+	if *f == nil {
 		return nil
 	}
 	return f(st)

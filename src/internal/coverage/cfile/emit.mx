@@ -34,7 +34,7 @@ import (
 // runtime.
 //
 //:linkname getCovCounterList
-func getCovCounterList() []rtcov.CovCounterBlob
+func getCovCounterList() (blobs []rtcov.CovCounterBlob)
 
 // emitState holds useful state information during the emit process.
 //
@@ -78,7 +78,11 @@ type emitState struct {
 	debug bool
 }
 
-var (
+// covState holds the mutable state used while emitting coverage data. It is
+// a self-mutating type: the package-level holder is only read directly, and
+// every write goes through a pointer-receiver method, so the global itself
+// is never stored to outside init.
+type covState struct {
 	// finalHash is computed at init time from the list of meta-data
 	// symbols registered during init. It is used both for writing the
 	// meta-data file and counter-data files.
@@ -99,7 +103,43 @@ var (
 	capturedOsArgs map[string][]byte
 	// Flag used in tests to signal that coverage data already written.
 	covProfileAlreadyEmitted bool
-)
+}
+
+// cs is the single package-level holder for coverage emit state.
+var cs covState
+
+func (st *covState) setCoverDir(dir []byte) { st.goCoverDir = dir }
+
+func (st *covState) setCapturedOsArgs(args map[string][]byte) { st.capturedOsArgs = args }
+
+func (st *covState) setFinalHash(fh []byte, mlen uint64) {
+	copy(st.finalHash[:], fh)
+	st.finalHashComputed = true
+	st.finalMetaLen = mlen
+}
+
+func (st *covState) setMetaDataEmitAttempted() { st.metaDataEmitAttempted = true }
+
+func (st *covState) setProfileEmitted(v bool) { st.covProfileAlreadyEmitted = v }
+
+func (st *covState) modeClash(m coverage.CounterMode) (clash bool) {
+	if m == coverage.CtrModeRegOnly || m == coverage.CtrModeTestMain {
+		return false
+	}
+	if st.cmode == coverage.CtrModeInvalid {
+		st.cmode = m
+		return false
+	}
+	return st.cmode != m
+}
+
+func (st *covState) granClash(g coverage.CounterGranularity) (clash bool) {
+	if st.cgran == coverage.CtrGranularityInvalid {
+		st.cgran = g
+		return false
+	}
+	return st.cgran != g
+}
 
 // fileType is used to select between counter-data files and
 // meta-data files.
@@ -115,12 +155,12 @@ const (
 // This entry point is intended to be invoked by the compiler from
 // an instrumented program's main package init func.
 func emitMetaData() {
-	if covProfileAlreadyEmitted {
+	if cs.covProfileAlreadyEmitted {
 		return
 	}
-	ml, err := prepareForMetaEmit()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: coverage meta-data prep failed: %v\n", err)
+	ml, perr := prepareForMetaEmit()
+	if perr != nil {
+		fmt.Fprintf(os.Stderr, "error: coverage meta-data prep failed: %v\n", perr)
 		if os.Getenv("GOCOVERDEBUG") != "" {
 			panic("meta-data write failure")
 		}
@@ -130,13 +170,13 @@ func emitMetaData() {
 		return
 	}
 
-	goCoverDir = os.Getenv("GOCOVERDIR")
-	if goCoverDir == "" {
+	cs.setCoverDir(os.Getenv("GOCOVERDIR"))
+	if cs.goCoverDir == "" {
 		fmt.Fprintf(os.Stderr, "warning: GOCOVERDIR not set, no coverage data emitted\n")
 		return
 	}
 
-	if err := emitMetaDataToDirectory(goCoverDir, ml); err != nil {
+	if err := emitMetaDataToDirectory(cs.goCoverDir, ml); err != nil {
 		fmt.Fprintf(os.Stderr, "error: coverage meta-data emit failed: %v\n", err)
 		if os.Getenv("GOCOVERDEBUG") != "" {
 			panic("meta-data write failure")
@@ -144,29 +184,10 @@ func emitMetaData() {
 	}
 }
 
-func modeClash(m coverage.CounterMode) bool {
-	if m == coverage.CtrModeRegOnly || m == coverage.CtrModeTestMain {
-		return false
-	}
-	if cmode == coverage.CtrModeInvalid {
-		cmode = m
-		return false
-	}
-	return cmode != m
-}
-
-func granClash(g coverage.CounterGranularity) bool {
-	if cgran == coverage.CtrGranularityInvalid {
-		cgran = g
-		return false
-	}
-	return cgran != g
-}
-
 // prepareForMetaEmit performs preparatory steps needed prior to
 // emitting a meta-data file, notably computing a final hash of
 // all meta-data blobs and capturing os args.
-func prepareForMetaEmit() ([]rtcov.CovMetaBlob, error) {
+func prepareForMetaEmit() (out []rtcov.CovMetaBlob, derr error) {
 	// Ask the runtime for the list of coverage meta-data symbols.
 	ml := rtcov.Meta.List
 
@@ -186,7 +207,7 @@ func prepareForMetaEmit() ([]rtcov.CovMetaBlob, error) {
 
 	// Capture os.Args() now so as to avoid issues if args
 	// are rewritten during program execution.
-	capturedOsArgs = captureOsArgs()
+	cs.setCapturedOsArgs(captureOsArgs())
 
 	if s.debug {
 		fmt.Fprintf(os.Stderr, "=+= GOCOVERDIR is %s\n", os.Getenv("GOCOVERDIR"))
@@ -214,55 +235,53 @@ func prepareForMetaEmit() ([]rtcov.CovMetaBlob, error) {
 		}
 		tlen += uint64(entry.Len)
 		ecm := coverage.CounterMode(entry.CounterMode)
-		if modeClash(ecm) {
-			return nil, fmt.Errorf("coverage counter mode clash: package %s uses mode=%d, but package %s uses mode=%s\n", ml[0].PkgPath, cmode, entry.PkgPath, ecm)
+		if cs.modeClash(ecm) {
+			return nil, fmt.Errorf("coverage counter mode clash: package %s uses mode=%d, but package %s uses mode=%s\n", ml[0].PkgPath, &cs.cmode, entry.PkgPath, &ecm)
 		}
 		ecg := coverage.CounterGranularity(entry.CounterGranularity)
-		if granClash(ecg) {
-			return nil, fmt.Errorf("coverage counter granularity clash: package %s uses gran=%d, but package %s uses gran=%s\n", ml[0].PkgPath, cgran, entry.PkgPath, ecg)
+		if cs.granClash(ecg) {
+			return nil, fmt.Errorf("coverage counter granularity clash: package %s uses gran=%d, but package %s uses gran=%s\n", ml[0].PkgPath, &cs.cgran, entry.PkgPath, &ecg)
 		}
 	}
 
 	// Hash mode and granularity as well.
-	h.Write([]byte(cmode.String()))
-	h.Write([]byte(cgran.String()))
+	h.Write([]byte(cs.cmode.String()))
+	h.Write([]byte(cs.cgran.String()))
 
 	// Compute final digest.
 	fh := h.Sum(nil)
-	copy(finalHash[:], fh)
-	finalHashComputed = true
-	finalMetaLen = tlen
+	cs.setFinalHash(fh, tlen)
 
 	return ml, nil
 }
 
 // emitMetaDataToDirectory emits the meta-data output file to the specified
 // directory, returning an error if something went wrong.
-func emitMetaDataToDirectory(outdir []byte, ml []rtcov.CovMetaBlob) error {
-	ml, err := prepareForMetaEmit()
-	if err != nil {
-		return err
+func emitMetaDataToDirectory(outdir []byte, ml []rtcov.CovMetaBlob) (derr error) {
+	mlist, rerr := prepareForMetaEmit()
+	if rerr != nil {
+		return rerr
 	}
-	if len(ml) == 0 {
+	if len(mlist) == 0 {
 		return nil
 	}
 
-	metaDataEmitAttempted = true
+	cs.setMetaDataEmitAttempted()
 
 	s := &emitState{
-		metalist: ml,
+		metalist: mlist,
 		debug:    os.Getenv("GOCOVERDEBUG") != "",
 		outdir:   outdir,
 	}
 
 	// Open output files.
-	if err := s.openOutputFiles(finalHash, finalMetaLen, metaDataFile); err != nil {
+	if err := s.openOutputFiles(cs.finalHash, cs.finalMetaLen, metaDataFile); err != nil {
 		return err
 	}
 
 	// Emit meta-data file only if needed (may already be present).
 	if s.needMetaDataFile() {
-		if err := s.emitMetaDataFile(finalHash, finalMetaLen); err != nil {
+		if err := s.emitMetaDataFile(cs.finalHash, cs.finalMetaLen); err != nil {
 			return err
 		}
 	}
@@ -273,10 +292,10 @@ func emitMetaDataToDirectory(outdir []byte, ml []rtcov.CovMetaBlob) error {
 // This entry point is intended to be invoked by the runtime when an
 // instrumented program is terminating or calling os.Exit().
 func emitCounterData() {
-	if goCoverDir == "" || !finalHashComputed || covProfileAlreadyEmitted {
+	if cs.goCoverDir == "" || !cs.finalHashComputed || cs.covProfileAlreadyEmitted {
 		return
 	}
-	if err := emitCounterDataToDirectory(goCoverDir); err != nil {
+	if err := emitCounterDataToDirectory(cs.goCoverDir); err != nil {
 		fmt.Fprintf(os.Stderr, "error: coverage counter data emit failed: %v\n", err)
 		if os.Getenv("GOCOVERDEBUG") != "" {
 			panic("counter-data write failure")
@@ -285,7 +304,7 @@ func emitCounterData() {
 }
 
 // emitCounterDataToDirectory emits the counter-data output file for this coverage run.
-func emitCounterDataToDirectory(outdir []byte) error {
+func emitCounterDataToDirectory(outdir []byte) (derr error) {
 	// Ask the runtime for the list of coverage counter symbols.
 	cl := getCovCounterList()
 	if len(cl) == 0 {
@@ -293,7 +312,7 @@ func emitCounterDataToDirectory(outdir []byte) error {
 		return nil
 	}
 
-	if !finalHashComputed {
+	if !cs.finalHashComputed {
 		return fmt.Errorf("error: meta-data not available (binary not built with -cover?)")
 	}
 
@@ -307,7 +326,7 @@ func emitCounterDataToDirectory(outdir []byte) error {
 	}
 
 	// Open output file.
-	if err := s.openOutputFiles(finalHash, finalMetaLen, counterDataFile); err != nil {
+	if err := s.openOutputFiles(cs.finalHash, cs.finalMetaLen, counterDataFile); err != nil {
 		return err
 	}
 	if s.cf == nil {
@@ -315,7 +334,7 @@ func emitCounterDataToDirectory(outdir []byte) error {
 	}
 
 	// Emit counter data file.
-	if err := s.emitCounterDataFile(finalHash, s.cf); err != nil {
+	if err := s.emitCounterDataFile(cs.finalHash, s.cf); err != nil {
 		return err
 	}
 	if err := s.cf.Close(); err != nil {
@@ -332,8 +351,8 @@ func emitCounterDataToDirectory(outdir []byte) error {
 }
 
 // emitCounterDataToWriter emits counter data for this coverage run to an io.Writer.
-func (s *emitState) emitCounterDataToWriter(w io.Writer) error {
-	if err := s.emitCounterDataFile(finalHash, w); err != nil {
+func (s *emitState) emitCounterDataToWriter(w io.Writer) (derr error) {
+	if err := s.emitCounterDataFile(cs.finalHash, w); err != nil {
 		return err
 	}
 	return nil
@@ -344,7 +363,7 @@ func (s *emitState) emitCounterDataToWriter(w io.Writer) error {
 // dir. It updates mfname/mftmp/mf fields in 's', returning an error
 // if something went wrong. See the comment on the emitState type
 // definition above for more on how file opening is managed.
-func (s *emitState) openMetaFile(metaHash [16]byte, metaLen uint64) error {
+func (s *emitState) openMetaFile(metaHash [16]byte, metaLen uint64) (derr error) {
 
 	// Open meta-outfile for reading to see if it exists.
 	fn := fmt.Sprintf("%s.%x", coverage.MetaFilePref, metaHash)
@@ -352,7 +371,7 @@ func (s *emitState) openMetaFile(metaHash [16]byte, metaLen uint64) error {
 	fi, err := os.Stat(s.mfname)
 	if err != nil || fi.Size() != int64(metaLen) {
 		// We need a new meta-file.
-		tname := "tmp." | fn + strconv.FormatInt(time.Now().UnixNano(), 10)
+		tname := "tmp." | fn | strconv.FormatInt(time.Now().UnixNano(), 10)
 		s.mftmp = filepath.Join(s.outdir, tname)
 		s.mf, err = os.Create(s.mftmp)
 		if err != nil {
@@ -365,7 +384,7 @@ func (s *emitState) openMetaFile(metaHash [16]byte, metaLen uint64) error {
 // openCounterFile opens an output file for the counter data portion
 // of a test coverage run. If updates the 'cfname' and 'cf' fields in
 // 's', returning an error if something went wrong.
-func (s *emitState) openCounterFile(metaHash [16]byte) error {
+func (s *emitState) openCounterFile(metaHash [16]byte) (derr error) {
 	processID := os.Getpid()
 	fn := fmt.Sprintf(coverage.CounterFileTempl, coverage.CounterFilePref, metaHash, processID, time.Now().UnixNano())
 	s.cfname = filepath.Join(s.outdir, fn)
@@ -389,10 +408,10 @@ func (s *emitState) openCounterFile(metaHash [16]byte) error {
 // 'mf', close it, and then rename 'mftmp' to 'mfname'. This function
 // also opens the counter data output file, setting 'cf' and 'cfname'
 // in the state struct.
-func (s *emitState) openOutputFiles(metaHash [16]byte, metaLen uint64, which fileType) error {
-	fi, err := os.Stat(s.outdir)
-	if err != nil {
-		return fmt.Errorf("output directory %q inaccessible (err: %v); no coverage data written", s.outdir, err)
+func (s *emitState) openOutputFiles(metaHash [16]byte, metaLen uint64, which fileType) (derr error) {
+	fi, oerr := os.Stat(s.outdir)
+	if oerr != nil {
+		return fmt.Errorf("output directory %q inaccessible (err: %v); no coverage data written", s.outdir, oerr)
 	}
 	if !fi.IsDir() {
 		return fmt.Errorf("output directory %q not a directory; no coverage data written", s.outdir)
@@ -414,8 +433,8 @@ func (s *emitState) openOutputFiles(metaHash [16]byte, metaLen uint64, which fil
 // emitMetaDataFile emits coverage meta-data to a previously opened
 // temporary file (s.mftmp), then renames the generated file to the
 // final path (s.mfname).
-func (s *emitState) emitMetaDataFile(finalHash [16]byte, tlen uint64) error {
-	if err := writeMetaData(s.mf, s.metalist, cmode, cgran, finalHash); err != nil {
+func (s *emitState) emitMetaDataFile(finalHash [16]byte, tlen uint64) (derr error) {
+	if err := writeMetaData(s.mf, s.metalist, cs.cmode, cs.cgran, finalHash); err != nil {
 		return fmt.Errorf("writing %s: %v\n", s.mftmp, err)
 	}
 	if err := s.mf.Close(); err != nil {
@@ -434,11 +453,11 @@ func (s *emitState) emitMetaDataFile(finalHash [16]byte, tlen uint64) error {
 // needMetaDataFile returns TRUE if we need to emit a meta-data file
 // for this program run. It should be used only after
 // openOutputFiles() has been invoked.
-func (s *emitState) needMetaDataFile() bool {
+func (s *emitState) needMetaDataFile() (needed bool) {
 	return s.mf != nil
 }
 
-func writeMetaData(w io.Writer, metalist []rtcov.CovMetaBlob, cmode coverage.CounterMode, gran coverage.CounterGranularity, finalHash [16]byte) error {
+func writeMetaData(w io.Writer, metalist []rtcov.CovMetaBlob, cmode coverage.CounterMode, gran coverage.CounterGranularity, finalHash [16]byte) (derr error) {
 	mfw := encodemeta.NewCoverageMetaFileWriter("<io.Writer>", w)
 
 	var blobs [][]byte
@@ -450,7 +469,7 @@ func writeMetaData(w io.Writer, metalist []rtcov.CovMetaBlob, cmode coverage.Cou
 	return mfw.Write(finalHash, blobs, cmode, gran)
 }
 
-func (s *emitState) VisitFuncs(f encodecounter.CounterVisitorFn) error {
+func (s *emitState) VisitFuncs(f encodecounter.CounterVisitorFn) (derr error) {
 	var tcounters []uint32
 
 	rdCounters := func(actrs []uint32, ctrs []uint32) []uint32 {
@@ -483,8 +502,8 @@ func (s *emitState) VisitFuncs(f encodecounter.CounterVisitorFn) error {
 			// counter. See the implementation note in ClearCoverageCounters
 			// for a description of why this is needed.
 			isLive := false
-			for i := 0; i < len(counters); i++ {
-				if counters[i] != 0 {
+			for j := 0; j < len(counters); j++ {
+				if counters[j] != 0 {
 					isLive = true
 					break
 				}
@@ -550,7 +569,7 @@ func (s *emitState) VisitFuncs(f encodecounter.CounterVisitorFn) error {
 // section is a generic key-value collection). See the 'args' section
 // in internal/coverage/defs.go for more info. The args map
 // is also used to capture GOOS + GOARCH values as well.
-func captureOsArgs() map[string][]byte {
+func captureOsArgs() (args map[string][]byte) {
 	m := map[string][]byte{}
 	m["argc"] = strconv.Itoa(len(os.Args()))
 	for k, a := range os.Args() {
@@ -563,9 +582,9 @@ func captureOsArgs() map[string][]byte {
 
 // emitCounterDataFile emits the counter data portion of a
 // coverage output file (to the file 's.cf').
-func (s *emitState) emitCounterDataFile(finalHash [16]byte, w io.Writer) error {
+func (s *emitState) emitCounterDataFile(finalHash [16]byte, w io.Writer) (derr error) {
 	cfw := encodecounter.NewCoverageDataWriter(w, coverage.CtrULeb128)
-	if err := cfw.Write(finalHash, capturedOsArgs, s); err != nil {
+	if err := cfw.Write(finalHash, cs.capturedOsArgs, s); err != nil {
 		return err
 	}
 	return nil
@@ -577,7 +596,7 @@ func (s *emitState) emitCounterDataFile(finalHash [16]byte, w io.Writer) error {
 // function is called from the coverage-related boilerplate code in _testmain.go
 // emitted for go unit tests.
 func MarkProfileEmitted(val bool) {
-	covProfileAlreadyEmitted = val
+	cs.setProfileEmitted(val)
 }
 
 func reportErrorInHardcodedList(slot, pkgID int32, fnID, nCtrs uint32) {

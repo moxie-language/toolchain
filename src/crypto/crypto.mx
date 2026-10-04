@@ -22,12 +22,16 @@ import (
 // package.
 type Hash uint32
 
-// HashFunc simply returns the value of h so that [Hash] implements [SignerOpts].
-func (h Hash) HashFunc() Hash {
-	return h
+// HashFunc simply returns the value of h so that *Hash implements [SignerOpts].
+// It is a pointer method because the rule forbids value receivers; callers
+// converting a hash to SignerOpts take the address of their local.
+func (h *Hash) HashFunc() (out Hash) {
+	return *h
 }
 
-func (h Hash) String() string {
+// HashString names h. It is a free function because Hash's values are typed
+// constants (switch case labels) that cannot be addressed for a method call.
+func HashString(h Hash) (s string) {
 	switch h {
 	case MD4:
 		return "MD4"
@@ -95,7 +99,7 @@ const (
 	maxHash
 )
 
-func _digestSizes() [maxHash]uint8 {
+func _digestSizes() (sizes [maxHash]uint8) {
 	return [maxHash]uint8{
 		MD4:         16,
 		MD5:         16,
@@ -122,7 +126,7 @@ func _digestSizes() [maxHash]uint8 {
 // Size returns the length, in bytes, of a digest resulting from the given hash
 // function. It doesn't require that the hash function in question be linked
 // into the program.
-func (h Hash) Size() int32 {
+func HashSize(h Hash) (n int32) {
 	if h > 0 && h < maxHash {
 		ds := _digestSizes()
 		return int32(ds[h])
@@ -132,7 +136,7 @@ func (h Hash) Size() int32 {
 
 // New returns a new hash.Hash calculating the given hash function. New panics
 // if the hash function is not supported.
-func (h Hash) New() hash.Hash {
+func HashNew(h Hash) (nh hash.Hash) {
 	switch h {
 	case MD5:
 		return md5.New()
@@ -170,7 +174,7 @@ func (h Hash) New() hash.Hash {
 }
 
 // Available reports whether the given hash function is supported.
-func (h Hash) Available() bool {
+func HashAvailable(h Hash) (okay bool) {
 	switch h {
 	case MD5, SHA1, SHA224, SHA256, SHA384, SHA512,
 		SHA512_224, SHA512_256, SHA3_224, SHA3_256, SHA3_384, SHA3_512:
@@ -294,7 +298,7 @@ func SignMessage(signer Signer, rand io.Reader, msg []byte, opts SignerOpts) (si
 		return ms.SignMessage(rand, msg, opts)
 	}
 	if opts.HashFunc() != 0 {
-		h := opts.HashFunc().New()
+		h := HashNew(opts.HashFunc())
 		h.Write(msg)
 		msg = h.Sum(nil)
 	}

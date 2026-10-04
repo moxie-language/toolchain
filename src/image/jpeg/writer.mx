@@ -13,14 +13,14 @@ import (
 )
 
 // div returns a/b rounded to the nearest integer, instead of rounded to zero.
-func div(a, b int32) int32 {
+func div(a, b int32) (out int32) {
 	if a >= 0 {
 		return (a + (b >> 1)) / b
 	}
 	return -((-a + (b >> 1)) / b)
 }
 
-func _bitCount() [256]byte {
+func _bitCount() (out [256]byte) {
 	return [256]byte{
 	0, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4,
 	5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
@@ -53,7 +53,7 @@ const (
 // encoder copies and scales the tables according to its quality parameter.
 // The values are derived from section K.1 of the spec, after converting from
 // natural to zig-zag order.
-func _unscaledQuant() [nQuantIndex][blockSize]byte {
+func _unscaledQuant() (out [nQuantIndex][blockSize]byte) {
 	return [nQuantIndex][blockSize]byte{
 	// Luminance.
 	{
@@ -108,7 +108,7 @@ type huffmanSpec struct {
 // The AC tables have 162 decoded values: bytes that pack a 4-bit Run and a
 // 4-bit Size. There are 16 valid Runs and 10 valid Sizes, plus two special R|S
 // cases: 0|0 (meaning EOB) and F|0 (meaning ZRL).
-func _theHuffmanSpec() [nHuffIndex]huffmanSpec {
+func _theHuffmanSpec() (out [nHuffIndex]huffmanSpec) {
 	return [nHuffIndex]huffmanSpec{
 	// Luminance DC.
 	{
@@ -181,16 +181,14 @@ func _theHuffmanSpec() [nHuffIndex]huffmanSpec {
 // Each value maps to a uint32 of which the 8 most significant bits hold the
 // codeword size in bits and the 24 least significant bits hold the codeword.
 // The maximum codeword size is 16 bits.
-type huffmanLUT []uint32
-
-func (h *huffmanLUT) init(s huffmanSpec) {
+func initHuffmanLUT(s huffmanSpec) (out []uint32) {
 	maxValue := 0
 	for _, v := range s.value {
 		if int32(v) > maxValue {
 			maxValue = int32(v)
 		}
 	}
-	*h = []uint32{:maxValue+1}
+	h := []uint32{:maxValue+1}
 	code, k := uint32(0), 0
 	// Loop scratch is declared once, outside the loop: a declaration in a loop
 	// in a self-mutating method is rejected, and the scratch would otherwise be
@@ -199,19 +197,20 @@ func (h *huffmanLUT) init(s huffmanSpec) {
 	for i := 0; i < len(s.count); i++ {
 		nBits = uint32(i+1) << 24
 		for j := uint8(0); j < s.count[i]; j++ {
-			(*h)[s.value[k]] = nBits | code
+			h[s.value[k]] = nBits | code
 			code++
 			k++
 		}
 		code <<= 1
 	}
+	return h
 }
 
-func _initHuffmanLUT() [4]huffmanLUT {
-	var lut [4]huffmanLUT
+func _initHuffmanLUT() (out [4][]uint32) {
+	var lut [4][]uint32
 	specs := _theHuffmanSpec()
 	for i, s := range specs {
-		lut[i].init(s)
+		lut[i] = initHuffmanLUT(s)
 	}
 	return lut
 }
@@ -235,7 +234,7 @@ type encoder struct {
 	bits, nBits uint32
 	// quant is the scaled quantization tables, in zig-zag order.
 	quant    [nQuantIndex][blockSize]byte
-	huffLUT  [4]huffmanLUT
+	huffLUT  [4][]uint32
 	bitCount [256]byte
 }
 
@@ -262,24 +261,24 @@ func (e *encoder) writeByte(b byte) {
 
 // emit emits the least significant nBits bits of bits to the bit-stream.
 // The precondition is bits < 1<<nBits && nBits <= 16.
-func (e *encoder) emit(bits, nBits uint32) {
+func (e *encoder) emit(bitsVal, nBits uint32) {
 	nBits += e.nBits
-	bits <<= 32 - nBits
-	bits |= e.bits
+	bitsVal <<= 32 - nBits
+	bitsVal |= e.bits
 	// Loop scratch is declared once, outside the loop: a declaration in a loop
 	// in a self-mutating method is rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
 	var b uint8
 	for nBits >= 8 {
-		b = uint8(bits >> 24)
+		b = uint8(bitsVal >> 24)
 		e.writeByte(b)
 		if b == 0xff {
 			e.writeByte(0x00)
 		}
-		bits <<= 8
+		bitsVal <<= 8
 		nBits -= 8
 	}
-	e.bits, e.nBits = bits, nBits
+	e.bits, e.nBits = bitsVal, nBits
 }
 
 // emitHuff emits the given value with the given Huffman encoder.
@@ -375,7 +374,7 @@ func (e *encoder) writeDHT(nComponent int32) {
 // writeBlock writes a block of pixel data using the given quantization table,
 // returning the post-quantized DC value of the DCT-transformed block. b is in
 // natural (not zig-zag) order.
-func (e *encoder) writeBlock(b *block, q quantIndex, prevDC int32) int32 {
+func (e *encoder) writeBlock(b *block, q quantIndex, prevDC int32) (out int32) {
 	unzig := _unzig()
 	fdct(b)
 	// Emit the DC delta.
@@ -410,8 +409,8 @@ func toYCbCr(m image.Image, p image.Point, yBlock, cbBlock, crBlock *block) {
 	ymax := b.Max.Y - 1
 	for j := 0; j < 8; j++ {
 		for i := 0; i < 8; i++ {
-			r, g, b, _ := m.At(min(p.X+i, xmax), min(p.Y+j, ymax)).RGBA()
-			yy, cb, cr := color.RGBToYCbCr(uint8(r>>8), uint8(g>>8), uint8(b>>8))
+			r, g, bb, _ := m.At(min(p.X+i, xmax), min(p.Y+j, ymax)).RGBA()
+			yy, cb, cr := color.RGBToYCbCr(uint8(r>>8), uint8(g>>8), uint8(bb>>8))
 			yBlock[8*j+i] = int32(yy)
 			cbBlock[8*j+i] = int32(cb)
 			crBlock[8*j+i] = int32(cr)
@@ -590,7 +589,7 @@ type Options struct {
 
 // Encode writes the Image m to w in JPEG 4:2:0 baseline format with the given
 // options. Default parameters are used if a nil *[Options] is passed.
-func Encode(w io.Writer, m image.Image, o *Options) error {
+func Encode(w io.Writer, m image.Image, o *Options) (out error) {
 	b := m.Bounds()
 	if b.Dx() >= 1<<16 || b.Dy() >= 1<<16 {
 		return errors.New("jpeg: image is too large to encode")
@@ -614,18 +613,18 @@ func Encode(w io.Writer, m image.Image, o *Options) error {
 		}
 	}
 	// Convert from a quality rating to a scaling factor.
-	var scale int32
+	var scaleFactor int32
 	if quality < 50 {
-		scale = 5000 / quality
+		scaleFactor = 5000 / quality
 	} else {
-		scale = 200 - quality*2
+		scaleFactor = 200 - quality*2
 	}
 	// Initialize the quantization tables.
 	uq := _unscaledQuant()
 	for i := range e.quant {
 		for j := range e.quant[i] {
 			x := int32(uq[i][j])
-			x = (x*scale + 50) / 100
+			x = (x*scaleFactor + 50) / 100
 			if x < 1 {
 				x = 1
 			} else if x > 255 {

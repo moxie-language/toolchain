@@ -8,7 +8,6 @@ import (
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"fmt"
-	"sort"
 )
 
 // A pair is a pair of values tracked for both the x and y side of a diff.
@@ -43,7 +42,7 @@ type pair struct{ x, y int32 }
 // Second, the name is frequently interpreted as meaning that you have
 // to wait longer (to be patient) for the diff, meaning that it is a slower algorithm,
 // when in fact the algorithm is faster than the standard one.
-func Diff(oldName []byte, old []byte, newName []byte, new []byte) []byte {
+func Diff(oldName []byte, old []byte, newName []byte, new []byte) (ret []byte) {
 	if bytes.Equal(old, new) {
 		return nil
 	}
@@ -171,7 +170,7 @@ func Diff(oldName []byte, old []byte, newName []byte, new []byte) []byte {
 // lines returns the lines in the file x, including newlines.
 // If the file does not end in a newline, one is supplied
 // along with a warning about the missing newline.
-func lines(x []byte) [][]byte {
+func lines(x []byte) (out [][]byte) {
 	l := bytes.SplitAfter([]byte(x), "\n")
 	if l[len(l)-1] == "" {
 		l = l[:len(l)-1]
@@ -191,7 +190,7 @@ func lines(x []byte) [][]byte {
 // Thomas G. Szymanski, "A Special Case of the Maximal Common
 // Subsequence Problem," Princeton TR #170 (January 1975),
 // available at https://research.swtch.com/tgs170.pdf.
-func tgs(x, y [][]byte) []pair {
+func tgs(x, y [][]byte) (out []pair) {
 	// Count the number of times each string appears in a and b.
 	// We only care about 0, 1, many, counted as 0, -1, -2
 	// for the x side and 0, -4, -8 for the y side.
@@ -243,9 +242,18 @@ func tgs(x, y [][]byte) []pair {
 		T[i] = n + 1
 	}
 	for i := 0; i < n; i++ {
-		kb := sort.Search(n, func(idx int32) bool {
-			return T[idx] >= J[i]
-		})
+		// Inline of sort.Search: closures cannot capture T, J, i. Finds the
+		// smallest kb with T[kb] >= J[i] (or n when none is).
+		lo, hi := int32(0), n
+		for lo < hi {
+			h := int32(uint32(lo+hi) >> 1)
+			if T[h] >= J[i] {
+				hi = h
+			} else {
+				lo = h + 1
+			}
+		}
+		kb := lo
 		T[kb] = J[i]
 		L[i] = kb + 1
 	}

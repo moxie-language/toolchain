@@ -52,9 +52,14 @@ func NewFixedBuilder(buffer []byte) *Builder {
 }
 
 // SetError sets the value to be returned as the error from Bytes. Writes
-// performed after calling SetError are ignored.
+// performed after calling SetError are ignored. The error is recorded on the
+// innermost open frame so EndLengthPrefixed propagates it outward.
 func (b *Builder) SetError(err error) {
-	b.err = err
+	c := b
+	for c.child != nil {
+		c = c.child
+	}
+	c.err = err
 }
 
 // Bytes returns the bytes written by the builder or an error if one has
@@ -160,6 +165,75 @@ func (b *Builder) AddUint24LengthPrefixed(f BuilderContinuation) {
 // AddUint32LengthPrefixed adds a big-endian, 32-bit length-prefixed byte sequence.
 func (b *Builder) AddUint32LengthPrefixed(f BuilderContinuation) {
 	b.addLengthPrefixed(4, false, f)
+}
+
+// beginLengthPrefixed opens a length-prefixed frame on the innermost open
+// builder. EndLengthPrefixed closes it. Unlike the callback API, no closure is
+// involved, so the contents can be written inline by the caller.
+func (b *Builder) beginLengthPrefixed(lenLen int32, isASN1 bool) {
+	c := b
+	for c.child != nil {
+		c = c.child
+	}
+	if c.err != nil {
+		return
+	}
+	offset := len(c.result)
+	c.add([]byte{:lenLen}...)
+
+	if c.inContinuation == nil {
+		v := false
+		c.inContinuation = &v
+	}
+
+	c.child = &Builder{
+		result:         c.result,
+		fixedSize:      c.fixedSize,
+		offset:         offset,
+		pendingLenLen:  lenLen,
+		pendingIsASN1:  isASN1,
+		inContinuation: c.inContinuation,
+	}
+}
+
+// BeginUint8LengthPrefixed opens an 8-bit length-prefixed frame.
+func (b *Builder) BeginUint8LengthPrefixed() {
+	b.beginLengthPrefixed(1, false)
+}
+
+// BeginUint16LengthPrefixed opens a big-endian, 16-bit length-prefixed frame.
+func (b *Builder) BeginUint16LengthPrefixed() {
+	b.beginLengthPrefixed(2, false)
+}
+
+// BeginUint24LengthPrefixed opens a big-endian, 24-bit length-prefixed frame.
+func (b *Builder) BeginUint24LengthPrefixed() {
+	b.beginLengthPrefixed(3, false)
+}
+
+// BeginUint32LengthPrefixed opens a big-endian, 32-bit length-prefixed frame.
+func (b *Builder) BeginUint32LengthPrefixed() {
+	b.beginLengthPrefixed(4, false)
+}
+
+// EndLengthPrefixed closes the most recently opened length-prefixed frame. It
+// is a no-op if no frame was opened because an error was already recorded.
+func (b *Builder) EndLengthPrefixed() {
+	c := b
+	for c.child != nil && c.child.child != nil {
+		c = c.child
+	}
+	if c.child == nil {
+		e := b
+		for e.child != nil {
+			e = e.child
+		}
+		if e.err != nil {
+			return
+		}
+		panic("cryptobyte: EndLengthPrefixed without a matching Begin")
+	}
+	c.flushChild()
 }
 
 func (b *Builder) callContinuation(f BuilderContinuation, arg *Builder) {
@@ -289,21 +363,22 @@ func (b *Builder) flushChild() {
 }
 
 func (b *Builder) add(bytes ...byte) {
-	if b.err != nil {
+	c := b
+	for c.child != nil {
+		c = c.child
+	}
+	if c.err != nil {
 		return
 	}
-	if b.child != nil {
-		panic("cryptobyte: attempted write while child is pending")
+	if len(c.result)+len(bytes) < len(bytes) {
+		c.err = errors.New("cryptobyte: length overflow")
 	}
-	if len(b.result)+len(bytes) < len(bytes) {
-		b.err = errors.New("cryptobyte: length overflow")
-	}
-	if b.fixedSize && len(b.result)+len(bytes) > cap(b.result) {
-		b.err = errors.New("cryptobyte: Builder is exceeding its fixed-size buffer")
+	if c.fixedSize && len(c.result)+len(bytes) > cap(c.result) {
+		c.err = errors.New("cryptobyte: Builder is exceeding its fixed-size buffer")
 		return
 	}
-	b.result = mxutil.Ensure(b.result, len(bytes))
-	b.result = push(b.result, bytes...)
+	c.result = mxutil.Ensure(c.result, len(bytes))
+	c.result = push(c.result, bytes...)
 }
 
 // Unwrite rolls back non-negative n bytes written directly to the Builder.

@@ -12,7 +12,7 @@ import (
 // readLiterals reads and decompresses the literals from data at off.
 // The literals are appended to outbuf, which is returned.
 // Also returns the new input offset. RFC 3.1.1.3.1.
-func (r *Reader) readLiterals(data block, off int32, outbuf []byte) (int32, []byte, error) {
+func (r *Reader) readLiterals(data []byte, off int32, outbuf []byte) (noff int32, out []byte, rerr error) {
 	if off >= len(data) {
 		return 0, nil, r.makeEOFError(off)
 	}
@@ -30,7 +30,7 @@ func (r *Reader) readLiterals(data block, off int32, outbuf []byte) (int32, []by
 
 // readRawRLELiterals reads and decompresses a Raw_Literals_Block or
 // a RLE_Literals_Block. RFC 3.1.1.3.1.1.
-func (r *Reader) readRawRLELiterals(data block, off int32, hdr byte, outbuf []byte) (int32, []byte, error) {
+func (r *Reader) readRawRLELiterals(data []byte, off int32, hdr byte, outbuf []byte) (noff int32, out []byte, rerr error) {
 	raw := (hdr & 3) == 0
 
 	var regeneratedSize int32
@@ -84,7 +84,7 @@ func (r *Reader) readRawRLELiterals(data block, off int32, hdr byte, outbuf []by
 
 // readHuffLiterals reads and decompresses a Compressed_Literals_Block or
 // a Treeless_Literals_Block. RFC 3.1.1.3.1.4.
-func (r *Reader) readHuffLiterals(data block, off int32, hdr byte, outbuf []byte) (int32, []byte, error) {
+func (r *Reader) readHuffLiterals(data []byte, off int32, hdr byte, outbuf []byte) (noff int32, out []byte, rerr error) {
 	var (
 		regeneratedSize int32
 		compressedSize  int32
@@ -179,7 +179,7 @@ func (r *Reader) readHuffLiterals(data block, off int32, hdr byte, outbuf []byte
 }
 
 // readLiteralsOneStream reads a single stream of compressed literals.
-func (r *Reader) readLiteralsOneStream(data block, off, compressedSize, regeneratedSize int32, outbuf []byte) ([]byte, error) {
+func (r *Reader) readLiteralsOneStream(data []byte, off, compressedSize, regeneratedSize int32, outbuf []byte) (out []byte, rerr error) {
 	// We let the reverse bit reader read earlier bytes,
 	// because the Huffman table ignores bits that it doesn't need.
 	rbr, err := r.makeReverseBitReader(data, off+compressedSize-1, off-2)
@@ -209,7 +209,7 @@ func (r *Reader) readLiteralsOneStream(data block, off, compressedSize, regenera
 
 // readLiteralsFourStreams reads four interleaved streams of
 // compressed literals.
-func (r *Reader) readLiteralsFourStreams(data block, off, totalStreamsSize, regeneratedSize int32, outbuf []byte) ([]byte, error) {
+func (r *Reader) readLiteralsFourStreams(data []byte, off, totalStreamsSize, regeneratedSize int32, outbuf []byte) (out []byte, rerr error) {
 	// Read the jump table to find out where the streams are.
 	// RFC 3.1.1.3.1.6.
 	if off+5 >= len(data) {
@@ -291,31 +291,23 @@ func (r *Reader) readLiteralsFourStreams(data block, off, totalStreamsSize, rege
 	for i := 0; i < regeneratedStreamSize; i++ {
 		use4 := i < regeneratedStreamSize4
 
-		fetchHuff := func(rbr *reverseBitReader) (uint16, error) {
-			if !rbr.fetch(uint8(huffBits)) {
-				return 0, rbr.makeError("literals Huffman stream out of bits")
-			}
-			idx := (rbr.bits >> (rbr.cnt - huffBits)) & huffMask
-			return huffTable[idx], nil
-		}
-
-		t1, herr := fetchHuff(&rbr1)
+		t1, herr := fetchHuff(&rbr1, huffTable, huffBits, huffMask)
 		if herr != nil {
 			return nil, herr
 		}
 
-		t2, herr := fetchHuff(&rbr2)
+		t2, herr := fetchHuff(&rbr2, huffTable, huffBits, huffMask)
 		if herr != nil {
 			return nil, herr
 		}
 
-		t3, herr := fetchHuff(&rbr3)
+		t3, herr := fetchHuff(&rbr3, huffTable, huffBits, huffMask)
 		if herr != nil {
 			return nil, herr
 		}
 
 		if use4 {
-			t4, err4 := fetchHuff(&rbr4)
+			t4, err4 := fetchHuff(&rbr4, huffTable, huffBits, huffMask)
 			if err4 != nil {
 				return nil, err4
 			}
@@ -338,4 +330,13 @@ func (r *Reader) readLiteralsFourStreams(data block, off, totalStreamsSize, rege
 	}
 
 	return outbuf, nil
+}
+
+// fetchHuff decodes one Huffman symbol from rbr using the given table.
+func fetchHuff(rbr *reverseBitReader, huffTable []uint16, huffBits, huffMask uint32) (tval uint16, rerr error) {
+	if !rbr.fetch(uint8(huffBits)) {
+		return 0, rbr.makeError("literals Huffman stream out of bits")
+	}
+	idx := (rbr.bits >> (rbr.cnt - huffBits)) & huffMask
+	return huffTable[idx], nil
 }

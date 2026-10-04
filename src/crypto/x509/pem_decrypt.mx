@@ -44,7 +44,7 @@ type rfc1423Algo struct {
 
 // _rfc1423Algos returns the possible ways to encrypt a PEM
 // block. The ivSize numbers were taken from the OpenSSL source.
-func _rfc1423Algos() []rfc1423Algo {
+func _rfc1423Algos() (rrfc1423Algo []rfc1423Algo) {
 	return []rfc1423Algo{{
 		cipher:     PEMCipherDES,
 		name:       "DES-CBC",
@@ -82,7 +82,7 @@ func _rfc1423Algos() []rfc1423Algo {
 // deriveKey uses a key derivation function to stretch the password into a key
 // with the number of bits our cipher requires. This algorithm was derived from
 // the OpenSSL source.
-func (c rfc1423Algo) deriveKey(password, salt []byte) []byte {
+func (c *rfc1423Algo) deriveKey(password, salt []byte) (rb []byte) {
 	hash := md5.New()
 	out := []byte{:c.keySize}
 	var digest []byte
@@ -104,13 +104,13 @@ func (c rfc1423Algo) deriveKey(password, salt []byte) []byte {
 // Deprecated: Legacy PEM encryption as specified in RFC 1423 is insecure by
 // design. Since it does not authenticate the ciphertext, it is vulnerable to
 // padding oracle attacks that can let an attacker recover the plaintext.
-func IsEncryptedPEMBlock(b *pem.Block) bool {
+func IsEncryptedPEMBlock(b *pem.Block) (rok bool) {
 	_, ok := b.Headers["DEK-Info"]
 	return ok
 }
 
 // IncorrectPasswordError is returned when an incorrect password is detected.
-const IncorrectPasswordError = errors.Const("x509: decryption password incorrect")
+var IncorrectPasswordError error
 
 // DecryptPEMBlock takes a PEM block encrypted according to RFC 1423 and the
 // password used to encrypt it and returns a slice of decrypted DER encoded
@@ -124,7 +124,7 @@ const IncorrectPasswordError = errors.Const("x509: decryption password incorrect
 // Deprecated: Legacy PEM encryption as specified in RFC 1423 is insecure by
 // design. Since it does not authenticate the ciphertext, it is vulnerable to
 // padding oracle attacks that can let an attacker recover the plaintext.
-func DecryptPEMBlock(b *pem.Block, password []byte) ([]byte, error) {
+func DecryptPEMBlock(b *pem.Block, password []byte) (rb []byte, rerr error) {
 	dek, ok := b.Headers["DEK-Info"]
 	if !ok {
 		return nil, errors.New("x509: no DEK-Info header in block")
@@ -195,7 +195,7 @@ func DecryptPEMBlock(b *pem.Block, password []byte) ([]byte, error) {
 // Deprecated: Legacy PEM encryption as specified in RFC 1423 is insecure by
 // design. Since it does not authenticate the ciphertext, it is vulnerable to
 // padding oracle attacks that can let an attacker recover the plaintext.
-func EncryptPEMBlock(rand io.Reader, blockType string, data, password []byte, alg PEMCipher) (*pem.Block, error) {
+func EncryptPEMBlock(rand io.Reader, blockType string, data, password []byte, alg PEMCipher) (rblock *pem.Block, rerr error) {
 	ciph := cipherByKey(alg)
 	if ciph == nil {
 		return nil, errors.New("x509: unknown encryption mode")
@@ -235,7 +235,7 @@ func EncryptPEMBlock(rand io.Reader, blockType string, data, password []byte, al
 	}, nil
 }
 
-func cipherByName(name string) *rfc1423Algo {
+func cipherByName(name string) (rrfc1423Algo *rfc1423Algo) {
 	algos := _rfc1423Algos()
 	for i := range algos {
 		alg := &algos[i]
@@ -246,7 +246,7 @@ func cipherByName(name string) *rfc1423Algo {
 	return nil
 }
 
-func cipherByKey(key PEMCipher) *rfc1423Algo {
+func cipherByKey(key PEMCipher) (rrfc1423Algo *rfc1423Algo) {
 	algos := _rfc1423Algos()
 	for i := range algos {
 		alg := &algos[i]
@@ -255,4 +255,12 @@ func cipherByKey(key PEMCipher) *rfc1423Algo {
 		}
 	}
 	return nil
+}
+
+var errInvalidOID error
+func init() {
+	IncorrectPasswordError = errors.New("x509: decryption password incorrect")
+	ErrUnsupportedAlgorithm = errors.New("x509: cannot verify signature: algorithm unimplemented")
+	errInvalidOID = errors.New("invalid oid")
+	errNotParsed = errors.New("x509: missing ASN.1 contents; use ParseCertificate")
 }

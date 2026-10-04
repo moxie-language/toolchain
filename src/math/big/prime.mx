@@ -23,7 +23,7 @@ import "math/rand"
 //
 // As of Go 1.8, ProbablyPrime(0) is allowed and applies only a Baillie-PSW test.
 // Before Go 1.8, ProbablyPrime applied only the Miller-Rabin tests, and ProbablyPrime(0) panicked.
-func (x *Int) ProbablyPrime(n int32) bool {
+func (x *Int) ProbablyPrime(n int32) (rok bool) {
 	// Note regarding the doc comment above:
 	// It would be more precise to say that the Baillie-PSW test uses the
 	// extra strong Lucas test as its Lucas test, but since no one knows
@@ -60,10 +60,10 @@ func (x *Int) ProbablyPrime(n int32) bool {
 	var rA, rB uint32
 	switch _W {
 	case 32:
-		rA = uint32(x.abs.modW(primesA))
-		rB = uint32(x.abs.modW(primesB))
+		rA = uint32(natModW(x.abs, primesA))
+		rB = uint32(natModW(x.abs, primesB))
 	case 64:
-		r := x.abs.modW((primesA * primesB) & _M)
+		r := natModW(x.abs, (primesA * primesB) & _M)
 		rA = uint32(r % primesA)
 		rB = uint32(r % primesB)
 	default:
@@ -77,7 +77,7 @@ func (x *Int) ProbablyPrime(n int32) bool {
 
 	stk := getStack()
 	defer stk.free()
-	return x.abs.probablyPrimeMillerRabin(stk, n+1, true) && x.abs.probablyPrimeLucas(stk)
+	return natProbablyPrimeMillerRabin(x.abs, stk, n+1, true) && natProbablyPrimeLucas(x.abs, stk)
 }
 
 // probablyPrimeMillerRabin reports whether n passes reps rounds of the
@@ -85,37 +85,37 @@ func (x *Int) ProbablyPrime(n int32) bool {
 // If force2 is true, one of the rounds is forced to use base 2.
 // See Handbook of Applied Cryptography, p. 139, Algorithm 4.24.
 // The number n is known to be non-zero.
-func (n nat) probablyPrimeMillerRabin(stk *stack, reps int32, force2 bool) bool {
-	nm1 := nat(nil).sub(n, _natOne())
+func natProbablyPrimeMillerRabin(n []Word, stk *stack, reps int32, force2 bool) (rok bool) {
+	nm1 := natSub([]Word(nil), n, _natOne())
 	// determine q, k such that nm1 = q << k
-	k := nm1.trailingZeroBits()
-	q := nat(nil).rsh(nm1, k)
+	k := natTrailingZeroBits(nm1)
+	q := natRsh([]Word(nil), nm1, k)
 
-	nm3 := nat(nil).sub(nm1, _natTwo())
+	nm3 := natSub([]Word(nil), nm1, _natTwo())
 	rnd := rand.New(rand.NewSource(int64(n[0])))
 
-	var x, y, quotient nat
-	nm3Len := nm3.bitLen()
+	var x, y, quotient []Word
+	nm3Len := natBitLen(nm3)
 
 NextRandom:
 	for i := 0; i < reps; i++ {
 		if i == reps-1 && force2 {
-			x = x.set(_natTwo())
+			x = natSet(x, _natTwo())
 		} else {
-			x = x.random(rnd, nm3, nm3Len)
-			x = x.add(x, _natTwo())
+			x = natRandom(x, rnd, nm3, nm3Len)
+			x = natAdd(x, x, _natTwo())
 		}
-		y = y.expNN(stk, x, q, n, false)
-		if y.cmp(_natOne()) == 0 || y.cmp(nm1) == 0 {
+		y = natExpNN(y, stk, x, q, n, false)
+		if natCmp(y, _natOne()) == 0 || natCmp(y, nm1) == 0 {
 			continue
 		}
 		for j := uint32(1); j < k; j++ {
-			y = y.sqr(stk, y)
-			quotient, y = quotient.div(stk, y, y, n)
-			if y.cmp(nm1) == 0 {
+			y = natSqr(y, stk, y)
+			quotient, y = natDiv(quotient, stk, y, y, n)
+			if natCmp(y, nm1) == 0 {
 				continue NextRandom
 			}
-			if y.cmp(_natOne()) == 0 {
+			if natCmp(y, _natOne()) == 0 {
 				return false
 			}
 		}
@@ -149,15 +149,15 @@ NextRandom:
 //
 // Crandall and Pomerance, Prime Numbers: A Computational Perspective, 2nd ed.
 // Springer, 2005.
-func (n nat) probablyPrimeLucas(stk *stack) bool {
+func natProbablyPrimeLucas(n []Word, stk *stack) (rok bool) {
 	// Discard 0, 1.
-	if len(n) == 0 || n.cmp(_natOne()) == 0 {
+	if len(n) == 0 || natCmp(n, _natOne()) == 0 {
 		return false
 	}
 	// Two is the only even prime.
 	// Already checked by caller, but here to allow testing in isolation.
 	if n[0]&1 == 0 {
-		return n.cmp(_natTwo()) == 0
+		return natCmp(n, _natTwo()) == 0
 	}
 
 	// Baillie-OEIS "method C" for choosing D, P, Q,
@@ -168,8 +168,8 @@ func (n nat) probablyPrimeLucas(stk *stack) bool {
 	// After more than expected failures, check whether n is square
 	// (which would cause Jacobi(D, n) = 1 for all D not dividing n).
 	p := Word(3)
-	d := nat{1}
-	t1 := nat(nil) // temp
+	d := []Word{1}
+	t1 := []Word(nil) // temp
 	intD := &Int{abs: d}
 	intN := &Int{abs: n}
 	for ; ; p++ {
@@ -195,9 +195,9 @@ func (n nat) probablyPrimeLucas(stk *stack) bool {
 			// We'll never find (d/n) = -1 if n is a square.
 			// If n is a non-square we expect to find a d in just a few attempts on average.
 			// After 40 attempts, take a moment to check if n is indeed a square.
-			t1 = t1.sqrt(stk, n)
-			t1 = t1.sqr(stk, t1)
-			if t1.cmp(n) == 0 {
+			t1 = natSqrt(t1, stk, n)
+			t1 = natSqr(t1, stk, t1)
+			if natCmp(t1, n) == 0 {
 				return false
 			}
 		}
@@ -215,10 +215,10 @@ func (n nat) probablyPrimeLucas(stk *stack) bool {
 	// We know gcd(n, 2) = 1 because n is odd.
 	//
 	// Arrange s = (n - Jacobi(Δ, n)) / 2^r = (n+1) / 2^r.
-	s := nat(nil).add(n, _natOne())
-	r := int32(s.trailingZeroBits())
-	s = s.rsh(s, uint32(r))
-	nm2 := nat(nil).sub(n, _natTwo()) // n-2
+	s := natAdd([]Word(nil), n, _natOne())
+	r := int32(natTrailingZeroBits(s))
+	s = natRsh(s, s, uint32(r))
+	nm2 := natSub([]Word(nil), n, _natTwo()) // n-2
 
 	// We apply the "almost extra strong" test, which checks the above conditions
 	// except for U_s ≡ 0 mod n, which allows us to avoid computing any U_k values.
@@ -248,38 +248,38 @@ func (n nat) probablyPrimeLucas(stk *stack) bool {
 	//	V(2k+1) = V(k) V(k+1) - P
 	//
 	// We can therefore start with k=0 and build up to k=s in log₂(s) steps.
-	natP := nat(nil).setWord(p)
-	vk := nat(nil).setWord(2)
-	vk1 := nat(nil).setWord(p)
-	t2 := nat(nil) // temp
-	for i := int32(s.bitLen()); i >= 0; i-- {
-		if s.bit(uint32(i)) != 0 {
+	natP := natSetWord([]Word(nil), p)
+	vk := natSetWord([]Word(nil), 2)
+	vk1 := natSetWord([]Word(nil), p)
+	t2 := []Word(nil) // temp
+	for i := int32(natBitLen(s)); i >= 0; i-- {
+		if natBit(s, uint32(i)) != 0 {
 			// k' = 2k+1
 			// V(k') = V(2k+1) = V(k) V(k+1) - P.
-			t1 = t1.mul(stk, vk, vk1)
-			t1 = t1.add(t1, n)
-			t1 = t1.sub(t1, natP)
-			t2, vk = t2.div(stk, vk, t1, n)
+			t1 = natMul(t1, stk, vk, vk1)
+			t1 = natAdd(t1, t1, n)
+			t1 = natSub(t1, t1, natP)
+			t2, vk = natDiv(t2, stk, vk, t1, n)
 			// V(k'+1) = V(2k+2) = V(k+1)² - 2.
-			t1 = t1.sqr(stk, vk1)
-			t1 = t1.add(t1, nm2)
-			t2, vk1 = t2.div(stk, vk1, t1, n)
+			t1 = natSqr(t1, stk, vk1)
+			t1 = natAdd(t1, t1, nm2)
+			t2, vk1 = natDiv(t2, stk, vk1, t1, n)
 		} else {
 			// k' = 2k
 			// V(k'+1) = V(2k+1) = V(k) V(k+1) - P.
-			t1 = t1.mul(stk, vk, vk1)
-			t1 = t1.add(t1, n)
-			t1 = t1.sub(t1, natP)
-			t2, vk1 = t2.div(stk, vk1, t1, n)
+			t1 = natMul(t1, stk, vk, vk1)
+			t1 = natAdd(t1, t1, n)
+			t1 = natSub(t1, t1, natP)
+			t2, vk1 = natDiv(t2, stk, vk1, t1, n)
 			// V(k') = V(2k) = V(k)² - 2
-			t1 = t1.sqr(stk, vk)
-			t1 = t1.add(t1, nm2)
-			t2, vk = t2.div(stk, vk, t1, n)
+			t1 = natSqr(t1, stk, vk)
+			t1 = natAdd(t1, t1, nm2)
+			t2, vk = natDiv(t2, stk, vk, t1, n)
 		}
 	}
 
 	// Now k=s, so vk = V(s). Check V(s) ≡ ±2 (mod n).
-	if vk.cmp(_natTwo()) == 0 || vk.cmp(nm2) == 0 {
+	if natCmp(vk, _natTwo()) == 0 || natCmp(vk, nm2) == 0 {
 		// Check U(s) ≡ 0.
 		// As suggested by Jacobsen, apply Crandall and Pomerance equation 3.13:
 		//
@@ -287,16 +287,16 @@ func (n nat) probablyPrimeLucas(stk *stack) bool {
 		//
 		// Since we are checking for U(k) == 0 it suffices to check 2 V(k+1) == P V(k) mod n,
 		// or P V(k) - 2 V(k+1) == 0 mod n.
-		u1 := t1.mul(stk, vk, natP)
-		u2 := t2.lsh(vk1, 1)
-		if u1.cmp(u2) < 0 {
+		u1 := natMul(t1, stk, vk, natP)
+		u2 := natLsh(t2, vk1, 1)
+		if natCmp(u1, u2) < 0 {
 			u1, u2 = u2, u1
 		}
-		u1 = u1.sub(u1, u2)
+		u1 = natSub(u1, u1, u2)
 		t3 := vk1 // steal vk1, no longer needed below
 		vk1 = nil
 		_ = vk1
-		u2, t3 = u2.div(stk, t3, u1, n)
+		u2, t3 = natDiv(u2, stk, t3, u1, n)
 		if len(t3) == 0 {
 			return true
 		}
@@ -314,9 +314,9 @@ func (n nat) probablyPrimeLucas(stk *stack) bool {
 		}
 		// k' = 2k
 		// V(k') = V(2k) = V(k)² - 2
-		t1 = t1.sqr(stk, vk)
-		t1 = t1.sub(t1, _natTwo())
-		t2, vk = t2.div(stk, vk, t1, n)
+		t1 = natSqr(t1, stk, vk)
+		t1 = natSub(t1, t1, _natTwo())
+		t2, vk = natDiv(t2, stk, vk, t1, n)
 	}
 	return false
 }

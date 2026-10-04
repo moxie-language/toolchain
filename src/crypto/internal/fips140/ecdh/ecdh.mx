@@ -27,11 +27,11 @@ type PrivateKey struct {
 	d   []byte // bigmod.(*Nat).Bytes output (fixed length)
 }
 
-func (priv *PrivateKey) Bytes() []byte {
+func (priv *PrivateKey) Bytes() (ret0 []byte) {
 	return priv.d
 }
 
-func (priv *PrivateKey) PublicKey() *PublicKey {
+func (priv *PrivateKey) PublicKey() (ret0 *PublicKey) {
 	return &priv.pub
 }
 
@@ -40,7 +40,7 @@ type PublicKey struct {
 	q     []byte // uncompressed nistec Point.Bytes output
 }
 
-func (pub *PublicKey) Bytes() []byte {
+func (pub *PublicKey) Bytes() (ret0 []byte) {
 	return pub.q
 }
 
@@ -69,16 +69,23 @@ type Point[P comparable] interface {
 	ScalarBaseMult([]byte) (P, error)
 }
 
-func P224() *Curve[*nistec.P224Point] {
-	o := _p224Order()
-	return &Curve[*nistec.P224Point]{
-		curve:    p224,
-		newPoint: nistec.NewP224Point,
-		N:        o[:],
+// newCurve builds a Curve. The struct literal is kept generic here because a
+// literal instantiated directly with a concrete Point type does not substitute
+// P in the newPoint field.
+func newCurve[P Point[P]](id curveID, np func() P, order []byte) (ret0 *Curve[P]) {
+	return &Curve[P]{
+		curve:    id,
+		newPoint: np,
+		N:        order,
 	}
 }
 
-func _p224Order() [28]byte {
+func P224() (ret0 *Curve[*nistec.P224Point]) {
+	o := _p224Order()
+	return newCurve(p224, nistec.NewP224Point, o[:])
+}
+
+func _p224Order() (ret0 [28]byte) {
 	return [28]byte{
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x16, 0xa2,
@@ -87,16 +94,12 @@ func _p224Order() [28]byte {
 	}
 }
 
-func P256() *Curve[*nistec.P256Point] {
+func P256() (ret0 *Curve[*nistec.P256Point]) {
 	o := _p256Order()
-	return &Curve[*nistec.P256Point]{
-		curve:    p256,
-		newPoint: nistec.NewP256Point,
-		N:        o[:],
-	}
+	return newCurve(p256, nistec.NewP256Point, o[:])
 }
 
-func _p256Order() [32]byte {
+func _p256Order() (ret0 [32]byte) {
 	return [32]byte{
 		0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -105,16 +108,12 @@ func _p256Order() [32]byte {
 	}
 }
 
-func P384() *Curve[*nistec.P384Point] {
+func P384() (ret0 *Curve[*nistec.P384Point]) {
 	o := _p384Order()
-	return &Curve[*nistec.P384Point]{
-		curve:    p384,
-		newPoint: nistec.NewP384Point,
-		N:        o[:],
-	}
+	return newCurve(p384, nistec.NewP384Point, o[:])
 }
 
-func _p384Order() [48]byte {
+func _p384Order() (ret0 [48]byte) {
 	return [48]byte{
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -125,16 +124,12 @@ func _p384Order() [48]byte {
 	}
 }
 
-func P521() *Curve[*nistec.P521Point] {
+func P521() (ret0 *Curve[*nistec.P521Point]) {
 	o := _p521Order()
-	return &Curve[*nistec.P521Point]{
-		curve:    p521,
-		newPoint: nistec.NewP521Point,
-		N:        o[:],
-	}
+	return newCurve(p521, nistec.NewP521Point, o[:])
 }
 
-func _p521Order() [66]byte {
+func _p521Order() (ret0 [66]byte) {
 	return [66]byte{0x01, 0xff,
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -148,7 +143,7 @@ func _p521Order() [66]byte {
 }
 
 // GenerateKey generates a new ECDSA private key pair for the specified curve.
-func GenerateKey[P Point[P]](c *Curve[P], rand io.Reader) (*PrivateKey, error) {
+func GenerateKey[P Point[P]](c *Curve[P], rand io.Reader) (ret0 *PrivateKey, ret1 error) {
 	fips140.RecordApproved()
 	// This procedure is equivalent to Key Pair Generation by Testing
 	// Candidates, specified in NIST SP 800-56A Rev. 3, Section 5.6.1.2.2.
@@ -183,22 +178,22 @@ func GenerateKey[P Point[P]](c *Curve[P], rand io.Reader) (*PrivateKey, error) {
 		// Comment 1 goes out of its way to say that "the PCT shall be performed
 		// consistent [...], even if the underlying standard does not require a
 		// PCT". So we do it. And make ECDH nearly 50% slower (only) in FIPS mode.
-		fips140.PCT("ECDH PCT", func() error {
+		var pctErr error
+		if fips140.Enabled {
 			p1, perr := c.newPoint().ScalarBaseMult(privateKey.d)
 			if perr != nil {
-				return perr
+				pctErr = perr
+			} else if !bytes.Equal(p1.Bytes(), privateKey.pub.q) {
+				pctErr = errors.New("crypto/ecdh: public key does not match private key")
 			}
-			if !bytes.Equal(p1.Bytes(), privateKey.pub.q) {
-				return errors.New("crypto/ecdh: public key does not match private key")
-			}
-			return nil
-		})
+		}
+		fips140.PCT("ECDH PCT", pctErr)
 
 		return privateKey, nil
 	}
 }
 
-func NewPrivateKey[P Point[P]](c *Curve[P], key []byte) (*PrivateKey, error) {
+func NewPrivateKey[P Point[P]](c *Curve[P], key []byte) (ret0 *PrivateKey, ret1 error) {
 	// SP 800-56A Rev. 3, Section 5.6.1.2.2 checks that c <= n - 2 and then
 	// returns d = c + 1. Note that it follows that 0 < d < n. Equivalently,
 	// we check that 0 < d < n, and return d.
@@ -225,7 +220,7 @@ func NewPrivateKey[P Point[P]](c *Curve[P], key []byte) (*PrivateKey, error) {
 	return k, nil
 }
 
-func NewPublicKey[P Point[P]](c *Curve[P], key []byte) (*PublicKey, error) {
+func NewPublicKey[P Point[P]](c *Curve[P], key []byte) (ret0 *PublicKey, ret1 error) {
 	// Reject the point at infinity and compressed encodings.
 	if len(key) == 0 || key[0] != 4 {
 		return nil, errors.New("crypto/ecdh: invalid public key")
@@ -242,13 +237,13 @@ func NewPublicKey[P Point[P]](c *Curve[P], key []byte) (*PublicKey, error) {
 	return &PublicKey{curve: c.curve, q: bytes.Clone(key)}, nil
 }
 
-func ECDH[P Point[P]](c *Curve[P], k *PrivateKey, peer *PublicKey) ([]byte, error) {
+func ECDH[P Point[P]](c *Curve[P], k *PrivateKey, peer *PublicKey) (ret0 []byte, ret1 error) {
 	fipsSelfTest()
 	fips140.RecordApproved()
 	return ecdh(c, k, peer)
 }
 
-func ecdh[P Point[P]](c *Curve[P], k *PrivateKey, peer *PublicKey) ([]byte, error) {
+func ecdh[P Point[P]](c *Curve[P], k *PrivateKey, peer *PublicKey) (ret0 []byte, ret1 error) {
 	if c.curve != k.pub.curve {
 		return nil, errors.New("crypto/ecdh: mismatched curves")
 	}
@@ -282,7 +277,7 @@ func ecdh[P Point[P]](c *Curve[P], k *PrivateKey, peer *PublicKey) ([]byte, erro
 }
 
 // isZero reports whether x is all zeroes in constant time.
-func isZero(x []byte) bool {
+func isZero(x []byte) (ret0 bool) {
 	var acc byte
 	for _, b := range x {
 		acc |= b
@@ -292,7 +287,7 @@ func isZero(x []byte) bool {
 
 // isLess reports whether a < b, where a and b are big-endian buffers of the
 // same length and shorter than 72 bytes.
-func isLess(a, b []byte) bool {
+func isLess(a, b []byte) (ret0 bool) {
 	if len(a) != len(b) {
 		panic("crypto/ecdh: internal error: mismatched isLess inputs")
 	}

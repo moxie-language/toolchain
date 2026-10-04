@@ -19,11 +19,11 @@ const DevNull = "/dev/null"
 type syscallFd = int32
 
 // fixLongPath is a noop on non-Windows platforms.
-func fixLongPath(path string) string {
+func fixLongPath(path string) (rs string) {
 	return path
 }
 
-func rename(oldname, newname string) error {
+func rename(oldname, newname string) (rerr error) {
 	// TODO: import rest of upstream tests, handle fancy cases
 	err := syscall.Rename(oldname, newname)
 	if err != nil {
@@ -51,17 +51,15 @@ func (f *file) close() (err error) {
 	return f.handle.Close()
 }
 
-func NewFile(h uintptr, name string) *File {
+func NewFile(h uintptr, name string) (rfile *File) {
 	return &File{&file{handle: unixFileHandle(h), name: name}}
 }
 
 // Truncate changes the size of the named file.
 // If the file is a symbolic link, it changes the size of the link's target.
 // If there is an error, it will be of type *PathError.
-func Truncate(name string, size int64) error {
-	e := ignoringEINTR(func() error {
-		return syscall.Truncate(name, size)
-	})
+func Truncate(name string, size int64) (rerr error) {
+	e := truncateEINTR(name, size)
 	if e != nil {
 		return &PathError{Op: "truncate", Path: name, Err: e}
 	}
@@ -79,7 +77,7 @@ func Pipe() (r *File, w *File, err error) {
 	return
 }
 
-func tempDir() string {
+func tempDir() (rs string) {
 	dir := Getenv("TMPDIR")
 	if dir == "" {
 		dir = "/tmp"
@@ -89,10 +87,8 @@ func tempDir() string {
 
 // Link creates newname as a hard link to the oldname file.
 // If there is an error, it will be of type *LinkError.
-func Link(oldname, newname string) error {
-	e := ignoringEINTR(func() error {
-		return syscall.Link(oldname, newname)
-	})
+func Link(oldname, newname string) (rerr error) {
+	e := linkEINTR(oldname, newname)
 
 	if e != nil {
 		return &LinkError{"link", oldname, newname, e}
@@ -104,10 +100,8 @@ func Link(oldname, newname string) error {
 // On Windows, a symlink to a non-existent oldname creates a file symlink;
 // if oldname is later created as a directory the symlink will not work.
 // If there is an error, it will be of type *LinkError.
-func Symlink(oldname, newname string) error {
-	e := ignoringEINTR(func() error {
-		return syscall.Symlink(oldname, newname)
-	})
+func Symlink(oldname, newname string) (rerr error) {
+	e := symlinkEINTR(oldname, newname)
 	if e != nil {
 		return &LinkError{"symlink", oldname, newname, e}
 	}
@@ -116,7 +110,7 @@ func Symlink(oldname, newname string) error {
 
 // Readlink returns the destination of the named symbolic link.
 // If there is an error, it will be of type *PathError.
-func Readlink(name string) (string, error) {
+func Readlink(name string) (rs string, rerr error) {
 	for size := 128; ; size *= 2 {
 		b := []byte{:size}
 		var (
@@ -150,31 +144,27 @@ func (f *File) Truncate(size int64) (err error) {
 	return Truncate(f.name, size)
 }
 
-func (f *File) chmod(mode FileMode) error {
+func (f *File) chmod(mode FileMode) (rerr error) {
 	if f.handle == nil {
 		return ErrClosed
 	}
 
 	longName := fixLongPath(f.name)
-	e := ignoringEINTR(func() error {
-		return syscall.Chmod(longName, syscallMode(mode))
-	})
+	e := chmodEINTR(longName, syscallMode(mode))
 	if e != nil {
 		return &PathError{Op: "chmod", Path: f.name, Err: e}
 	}
 	return nil
 }
 
-func (f *File) chdir() error {
+func (f *File) chdir() (rerr error) {
 	if f.handle == nil {
 		return ErrClosed
 	}
 
 	// TODO: use syscall.Fchdir instead
 	longName := fixLongPath(f.name)
-	e := ignoringEINTR(func() error {
-		return syscall.Chdir(longName)
-	})
+	e := chdirEINTR(longName)
 	if e != nil {
 		return &PathError{Op: "chdir", Path: f.name, Err: e}
 	}
@@ -185,8 +175,8 @@ func (f *File) chdir() error {
 // It returns the number of bytes read and any error encountered, possibly io.EOF.
 // At end of file, Pread returns 0, io.EOF.
 // TODO: move to file_anyos once ReadAt is implemented for windows
-func (f unixFileHandle) ReadAt(b []byte, offset int64) (n int32, err error) {
-	n, err = syscall.Pread(syscallFd(f), b, offset)
+func (f *unixFileHandle) ReadAt(b []byte, offset int64) (n int32, err error) {
+	n, err = syscall.Pread(syscallFd(*f), b, offset)
 	err = handleSyscallError(err)
 	if n == 0 && len(b) > 0 && err == nil {
 		err = io.EOF
@@ -201,19 +191,19 @@ func (f unixFileHandle) ReadAt(b []byte, offset int64) (n int32, err error) {
 // If file was opened with the O_APPEND flag, WriteAt returns an error.
 //
 // TODO: move to file_anyos once WriteAt is implemented for windows.
-func (f unixFileHandle) WriteAt(b []byte, offset int64) (int32, error) {
-	n, err := syscall.Pwrite(syscallFd(f), b, offset)
+func (f *unixFileHandle) WriteAt(b []byte, offset int64) (rn int32, rerr error) {
+	n, err := syscall.Pwrite(syscallFd(*f), b, offset)
 	return n, handleSyscallError(err)
 }
 
 // Seek wraps syscall.Seek.
-func (f unixFileHandle) Seek(offset int64, whence int32) (int64, error) {
-	newoffset, err := syscall.Seek(syscallFd(f), offset, whence)
+func (f *unixFileHandle) Seek(offset int64, whence int32) (rn int64, rerr error) {
+	newoffset, err := syscall.Seek(syscallFd(*f), offset, whence)
 	return newoffset, handleSyscallError(err)
 }
 
-func (f unixFileHandle) Sync() error {
-	err := syscall.Fsync(syscallFd(f))
+func (f *unixFileHandle) Sync() (rerr error) {
+	err := syscall.Fsync(syscallFd(*f))
 	return handleSyscallError(err)
 }
 
@@ -224,18 +214,18 @@ type unixDirent struct {
 	info   FileInfo
 }
 
-func (d *unixDirent) Name() string   { return d.name }
-func (d *unixDirent) IsDir() bool    { return d.typ.IsDir() }
-func (d *unixDirent) Type() FileMode { return d.typ }
+func (d *unixDirent) Name() (rs string) { return d.name }
+func (d *unixDirent) IsDir() (rok bool) { return d.typ.IsDir() }
+func (d *unixDirent) Type() (rfileMode FileMode) { return d.typ }
 
-func (d *unixDirent) Info() (FileInfo, error) {
+func (d *unixDirent) Info() (rfileInfo FileInfo, rerr error) {
 	if d.info != nil {
 		return d.info, nil
 	}
-	return Lstat(d.parent + "/" + d.name)
+	return Lstat(d.parent | "/" | d.name)
 }
 
-func newUnixDirent(parent, name string, typ FileMode) (DirEntry, error) {
+func newUnixDirent(parent, name string, typ FileMode) (rdirEntry DirEntry, rerr error) {
 	ude := &unixDirent{
 		parent: parent,
 		name:   name,
@@ -245,12 +235,13 @@ func newUnixDirent(parent, name string, typ FileMode) (DirEntry, error) {
 		return ude, nil
 	}
 
-	info, err := Lstat(parent + "/" + name)
+	info, err := Lstat(parent | "/" | name)
 	if err != nil {
 		return nil, err
 	}
 
-	ude.typ = info.Mode().Type()
+	m := info.Mode()
+	ude.typ = m.Type()
 	ude.info = info
 	return ude, nil
 }
@@ -259,7 +250,7 @@ func newUnixDirent(parent, name string, typ FileMode) (DirEntry, error) {
 // Big go requires the option to add the fd to the polling system.
 //
 //:linkname net_newUnixFile net.newUnixFile
-func net_newUnixFile(h int32, name string) *File {
+func net_newUnixFile(h int32, name string) (rfile *File) {
 	if h < 0 {
 		panic("invalid FD")
 	}

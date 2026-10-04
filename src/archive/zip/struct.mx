@@ -162,8 +162,8 @@ type FileHeader struct {
 }
 
 // FileInfo returns an fs.FileInfo for the [FileHeader].
-func (h *FileHeader) FileInfo() fs.FileInfo {
-	return headerFileInfo{h}
+func (h *FileHeader) FileInfo() (fi fs.FileInfo) {
+	return &headerFileInfo{h}
 }
 
 // headerFileInfo implements [fs.FileInfo].
@@ -171,27 +171,33 @@ type headerFileInfo struct {
 	fh *FileHeader
 }
 
-func (fi headerFileInfo) Name() []byte { return path.Base(fi.fh.Name) }
-func (fi headerFileInfo) Size() int64 {
+func (fi *headerFileInfo) Name() (name []byte) { return path.Base(fi.fh.Name) }
+func (fi *headerFileInfo) Size() (n int64) {
 	if fi.fh.UncompressedSize64 > 0 {
 		return int64(fi.fh.UncompressedSize64)
 	}
 	return int64(fi.fh.UncompressedSize)
 }
-func (fi headerFileInfo) IsDir() bool { return fi.Mode().IsDir() }
-func (fi headerFileInfo) ModTime() time.Time {
+func (fi *headerFileInfo) IsDir() (ok bool) {
+	m := fi.Mode()
+	return m.IsDir()
+}
+func (fi *headerFileInfo) ModTime() (t time.Time) {
 	if fi.fh.Modified.IsZero() {
 		return fi.fh.ModTime()
 	}
 	return fi.fh.Modified.UTC()
 }
-func (fi headerFileInfo) Mode() fs.FileMode { return fi.fh.Mode() }
-func (fi headerFileInfo) Type() fs.FileMode { return fi.fh.Mode().Type() }
-func (fi headerFileInfo) Sys() unsafe.Pointer { return unsafe.Pointer(&fi.fh) }
+func (fi *headerFileInfo) Mode() (mode fs.FileMode) { return fi.fh.Mode() }
+func (fi *headerFileInfo) Type() (mode fs.FileMode) {
+	m := fi.Mode()
+	return m.Type()
+}
+func (fi *headerFileInfo) Sys() (p unsafe.Pointer) { return unsafe.Pointer(&fi.fh) }
 
-func (fi headerFileInfo) Info() (fs.FileInfo, error) { return fi, nil }
+func (fi *headerFileInfo) Info() (out fs.FileInfo, ierr error) { return fi, nil }
 
-func (fi headerFileInfo) String() string {
+func (fi *headerFileInfo) String() (s string) {
 	return fs.FormatFileInfo(fi)
 }
 
@@ -202,9 +208,9 @@ func (fi headerFileInfo) String() string {
 // of the returned header to provide the full path name of the file.
 // If compression is desired, callers should set the FileHeader.Method
 // field; it is unset by default.
-func FileInfoHeader(fi fs.FileInfo) (*FileHeader, error) {
+func FileInfoHeader(fi fs.FileInfo) (fh *FileHeader, ferr error) {
 	size := fi.Size()
-	fh := &FileHeader{
+	fh = &FileHeader{
 		Name:               fi.Name(),
 		UncompressedSize64: uint64(size),
 	}
@@ -231,7 +237,7 @@ type directoryEnd struct {
 
 // timeZone returns a *time.Location based on the provided offset.
 // If the offset is non-sensible, then this uses an offset of zero.
-func timeZone(offset time.Duration) *time.Location {
+func timeZone(offset time.Duration) (loc *time.Location) {
 	const (
 		minOffset   = -12 * time.Hour  // E.g., Baker island at -12:00
 		maxOffset   = +14 * time.Hour  // E.g., Line island at +14:00
@@ -247,7 +253,7 @@ func timeZone(offset time.Duration) *time.Location {
 // msDosTimeToTime converts an MS-DOS date and time into a time.Time.
 // The resolution is 2s.
 // See: https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-dosdatetimetofiletime
-func msDosTimeToTime(dosDate, dosTime uint16) time.Time {
+func msDosTimeToTime(dosDate, dosTime uint16) (t time.Time) {
 	return time.Date(
 		// date bits 0-4: day of month; 5-8: month; 9-15: years since 1980
 		int32(dosDate>>9+1980),
@@ -277,7 +283,7 @@ func timeToMsDosTime(t time.Time) (fDate uint16, fTime uint16) {
 // [ModifiedDate] and [ModifiedTime] fields.
 //
 // Deprecated: Use [Modified] instead.
-func (h *FileHeader) ModTime() time.Time {
+func (h *FileHeader) ModTime() (t time.Time) {
 	return msDosTimeToTime(h.ModifiedDate, h.ModifiedTime)
 }
 
@@ -339,11 +345,11 @@ func (h *FileHeader) SetMode(mode fs.FileMode) {
 }
 
 // isZip64 reports whether the file size exceeds the 32 bit limit
-func (h *FileHeader) isZip64() bool {
+func (h *FileHeader) isZip64() (ok bool) {
 	return h.CompressedSize64 >= uint32max || h.UncompressedSize64 >= uint32max
 }
 
-func (h *FileHeader) hasDataDescriptor() bool {
+func (h *FileHeader) hasDataDescriptor() (ok bool) {
 	return h.Flags&0x8 != 0
 }
 
@@ -359,8 +365,7 @@ func msdosModeToFileMode(m uint32) (mode fs.FileMode) {
 	return mode
 }
 
-func fileModeToUnixMode(mode fs.FileMode) uint32 {
-	var m uint32
+func fileModeToUnixMode(mode fs.FileMode) (m uint32) {
 	switch mode & fs.ModeType {
 	default:
 		m = s_IFREG
@@ -389,8 +394,8 @@ func fileModeToUnixMode(mode fs.FileMode) uint32 {
 	return m | uint32(mode&0777)
 }
 
-func unixModeToFileMode(m uint32) fs.FileMode {
-	mode := fs.FileMode(m & 0777)
+func unixModeToFileMode(m uint32) (mode fs.FileMode) {
+	mode = fs.FileMode(m & 0777)
 	switch m & s_IFMT {
 	case s_IFBLK:
 		mode |= fs.ModeDevice

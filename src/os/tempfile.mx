@@ -5,36 +5,46 @@
 package os
 
 import (
-	"errors"
 	"internal/itoa"
 	"time"
 )
 
-var minrandPreviousValue uint32
-var minrandSeeded bool
+// minrandState holds the placeholder PRNG state. It is a self-mutating type
+// because minrand is called long after init and must persist its stream across
+// calls.
+type minrandState struct {
+	previousValue uint32
+	seeded        bool
+}
 
-func initMinrand() {
-	if minrandSeeded {
+var minrandHolder *minrandState
+
+func (m *minrandState) ensure() {
+	if m.seeded {
 		return
 	}
-	minrandSeeded = true
+	m.seeded = true
 	now := time.Now()
 	seed := uint32(Getpid()) ^ uint32(now.Nanosecond()) ^ uint32(now.Unix())
-	minrandPreviousValue = seed | 1
+	m.previousValue = seed | 1
 }
 
 // minrand() is a simple and rather poor placeholder for fastrand()
 // TODO: provide fastrand in runtime, as go does.  It is hard to implement properly elsewhere.
-func minrand() uint32 {
-	initMinrand()
-	minrandPreviousValue *= 48271
-	return minrandPreviousValue
+func (m *minrandState) next() (rn uint32) {
+	m.ensure()
+	m.previousValue *= 48271
+	return m.previousValue
+}
+
+func minrand() (rn uint32) {
+	return minrandHolder.next()
 }
 
 // We generate random temporary file names so that there's a good
 // chance the file doesn't exist yet - keeps the number of tries in
 // TempFile to a minimum.
-func nextRandom() string {
+func nextRandom() (rs string) {
 	// Discard lower four bits of minrand.
 	// They're not very random, and we don't need the full range here.
 	return itoa.Uitoa(uint32(minrand() >> 4))
@@ -48,7 +58,7 @@ func nextRandom() string {
 // Multiple programs or goroutines calling CreateTemp simultaneously will not choose the same file.
 // The caller can use the file's Name method to find the pathname of the file.
 // It is the caller's responsibility to remove the file when it is no longer needed.
-func CreateTemp(dir, pattern string) (*File, error) {
+func CreateTemp(dir, pattern string) (rfile *File, rerr error) {
 	if dir == "" {
 		dir = TempDir()
 	}
@@ -67,13 +77,13 @@ func CreateTemp(dir, pattern string) (*File, error) {
 			if try++; try < 10000 {
 				continue
 			}
-			return nil, &PathError{Op: "createtemp", Path: dir + string(PathSeparator) + prefix + "*" + suffix, Err: ErrExist}
+			return nil, &PathError{Op: "createtemp", Path: dir | string(PathSeparator) | prefix | "*" | suffix, Err: ErrExist}
 		}
 		return f, oerr
 	}
 }
 
-const errPatternHasSeparator = errors.Const("pattern contains path separator")
+var errPatternHasSeparator error
 
 // prefixAndSuffix splits pattern by the last wildcard "*", if applicable,
 // returning prefix as the part before "*" and suffix as the part after "*".
@@ -98,7 +108,7 @@ func prefixAndSuffix(pattern string) (prefix, suffix string, err error) {
 // If dir is the empty string, MkdirTemp uses the default directory for temporary files, as returned by TempDir.
 // Multiple programs or goroutines calling MkdirTemp simultaneously will not choose the same directory.
 // It is the caller's responsibility to remove the directory when it is no longer needed.
-func MkdirTemp(dir, pattern string) (string, error) {
+func MkdirTemp(dir, pattern string) (rs string, rerr error) {
 	if dir == "" {
 		dir = TempDir()
 	}
@@ -120,7 +130,7 @@ func MkdirTemp(dir, pattern string) (string, error) {
 			if try++; try < 10000 {
 				continue
 			}
-			return "", &PathError{Op: "mkdirtemp", Path: dir + string(PathSeparator) + prefix + "*" + suffix, Err: ErrExist}
+			return "", &PathError{Op: "mkdirtemp", Path: dir | string(PathSeparator) | prefix | "*" | suffix, Err: ErrExist}
 		}
 		if IsNotExist(merr) {
 			if _, serr := Stat(dir); IsNotExist(serr) {
@@ -131,7 +141,7 @@ func MkdirTemp(dir, pattern string) (string, error) {
 	}
 }
 
-func joinPath(dir, name string) string {
+func joinPath(dir, name string) (rs string) {
 	if len(dir) > 0 && IsPathSeparator(dir[len(dir)-1]) {
 		return dir + name
 	}
@@ -139,7 +149,7 @@ func joinPath(dir, name string) string {
 }
 
 // lastIndex from the strings package.
-func lastIndex(s string, sep byte) int32 {
+func lastIndex(s string, sep byte) (rn int32) {
 	for i := len(s) - 1; i >= 0; i-- {
 		if s[i] == sep {
 			return i

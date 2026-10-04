@@ -44,7 +44,7 @@ type Loop struct {
 }
 
 // New creates a Loop with the given handler.
-func New(h Handler) *Loop {
+func New(h Handler) (out *Loop) {
 	return &Loop{
 		epfd:     -1,
 		lnFD:     -1,
@@ -57,7 +57,7 @@ func New(h Handler) *Loop {
 
 // Run starts the event loop listening on lnFD (a non-blocking TCP listen socket).
 // Blocks until SIGTERM/SIGINT or a fatal epoll error.
-func (l *Loop) Run(lnFD int32) error {
+func (l *Loop) Run(lnFD int32) (rerr error) {
 	epfd, err := syscall.EpollCreate1(syscall.EPOLL_CLOEXEC)
 	if err != nil {
 		return fmt.Errorf("evloop: epoll_create1: %w", err)
@@ -149,17 +149,20 @@ func (l *Loop) RemoveFD(fd int32) {
 }
 
 // Conn returns the Conn for a given fd, or nil.
-func (l *Loop) Conn(fd int32) *Conn {
+func (l *Loop) Conn(fd int32) (out *Conn) {
 	return l.conns[fd]
 }
 
 func (l *Loop) acceptAll() {
+	var nfd int32
+	var err error
+	var c *Conn
 	for {
-		nfd, _, err := syscall.Accept4(l.lnFD, syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC)
+		nfd, _, err = syscall.Accept4(l.lnFD, syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC)
 		if err != nil {
 			return // EAGAIN = no more pending connections
 		}
-		c := &Conn{
+		c = &Conn{
 			FD:   nfd,
 			loop: l,
 		}
@@ -206,7 +209,7 @@ func (l *Loop) modRead(fd int32) {
 	syscall.EpollCtl(l.epfd, syscall.EPOLL_CTL_MOD, fd, &ev)
 }
 
-func (l *Loop) epollAdd(fd int32, events uint32) error {
+func (l *Loop) epollAdd(fd int32, events uint32) (aerr error) {
 	ev := syscall.EpollEvent{Events: events, Fd: int32(fd)}
 	return syscall.EpollCtl(l.epfd, syscall.EPOLL_CTL_ADD, fd, &ev)
 }

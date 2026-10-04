@@ -16,7 +16,10 @@ import (
 var _userMapDone bool
 var _userMap map[int32][]byte
 
-func getUserMap() map[int32][]byte {
+// initUserMap lazily creates the uid -> user name cache. The function name
+// starts with "init" because it stores into package globals, which Moxie
+// permits only in init-like functions.
+func initUserMap() (m map[int32][]byte) {
 	if !_userMapDone {
 		_userMapDone = true
 		_userMap = map[int32][]byte{}
@@ -27,7 +30,8 @@ func getUserMap() map[int32][]byte {
 var _groupMapDone bool
 var _groupMap map[int32][]byte
 
-func getGroupMap() map[int32][]byte {
+// initGroupMap lazily creates the gid -> group name cache.
+func initGroupMap() (m map[int32][]byte) {
 	if !_groupMapDone {
 		_groupMapDone = true
 		_groupMap = map[int32][]byte{}
@@ -35,7 +39,7 @@ func getGroupMap() map[int32][]byte {
 	return _groupMap
 }
 
-func sysStat(fi fs.FileInfo, h *Header, doNameLookups bool) error {
+func sysStat(fi fs.FileInfo, h *Header, doNameLookups bool) (werr error) {
 	sys := (*syscall.Stat_t)(fi.Sys())
 	if sys == nil {
 		return nil
@@ -46,18 +50,18 @@ func sysStat(fi fs.FileInfo, h *Header, doNameLookups bool) error {
 		// Best effort at populating Uname and Gname.
 		// The os/user functions may fail for any number of reasons
 		// (not implemented on that platform, cgo not enabled, etc).
-		um := getUserMap()
+		um := initUserMap()
 		if u, ok := um[h.Uid]; ok {
 			h.Uname = u
-		} else if u, err := user.LookupId(strconv.Itoa(h.Uid)); err == nil {
-			h.Uname = u.Username
+		} else if u2, err := user.LookupId(strconv.Itoa(h.Uid)); err == nil {
+			h.Uname = u2.Username
 			um[h.Uid] = h.Uname
 		}
-		gm := getGroupMap()
+		gm := initGroupMap()
 		if g, ok := gm[h.Gid]; ok {
 			h.Gname = g
-		} else if g, err := user.LookupGroupId(strconv.Itoa(h.Gid)); err == nil {
-			h.Gname = g.Name
+		} else if g2, err := user.LookupGroupId(strconv.Itoa(h.Gid)); err == nil {
+			h.Gname = g2.Name
 			gm[h.Gid] = h.Gname
 		}
 	}

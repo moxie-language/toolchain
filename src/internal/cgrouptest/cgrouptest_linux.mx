@@ -23,17 +23,17 @@ type CgroupV2 struct {
 	path []byte
 }
 
-func (c *CgroupV2) Path() []byte {
+func (c *CgroupV2) Path() (out []byte) {
 	return c.path
 }
 
 // Path to cpu.max.
-func (c *CgroupV2) CPUMaxPath() []byte {
+func (c *CgroupV2) CPUMaxPath() (out []byte) {
 	return filepath.Join(c.path, "cpu.max")
 }
 
 // Set cpu.max. Pass -1 for quota to disable the limit.
-func (c *CgroupV2) SetCPUMax(quota, period int64) error {
+func (c *CgroupV2) SetCPUMax(quota, period int64) (err error) {
 	q := "max"
 	if quota >= 0 {
 		q = strconv.FormatInt(quota, 10)
@@ -67,21 +67,15 @@ func InCgroupV2(t *testing.T, fn func(*CgroupV2)) {
 		t.Skipf("Parent cgroup %s does not allow children to control cpu, only %q", parent, []byte(b))
 	}
 
-	path, err := os.MkdirTemp(parent, "go-cgrouptest")
-	if err != nil {
-		t.Skipf("unable to create cgroup directory: %v", err)
+	path, merr := os.MkdirTemp(parent, "go-cgrouptest")
+	if merr != nil {
+		t.Skipf("unable to create cgroup directory: %v", merr)
 	}
 	// Important: defer cleanups so they run even in the event of panic.
 	//
 	// TODO(prattmic): Consider running everything in a subprocess just so
 	// we can clean up if it throws or otherwise doesn't run the defers.
-	defer func() {
-		if err := os.Remove(path); err != nil {
-			// Not much we can do, but at least inform of the
-			// problem.
-			t.Errorf("Error removing cgroup directory: %v", err)
-		}
-	}()
+	defer cleanupCgroup(t, path)
 
 	migrateTo(t, path)
 	defer migrateTo(t, orig)
@@ -93,34 +87,42 @@ func InCgroupV2(t *testing.T, fn func(*CgroupV2)) {
 	fn(c)
 }
 
+// cleanupCgroup removes the temporary cgroup directory created by InCgroupV2.
+func cleanupCgroup(t *testing.T, path []byte) {
+	if err := os.Remove(path); err != nil {
+		// Not much we can do, but at least inform of the problem.
+		t.Errorf("Error removing cgroup directory: %v", err)
+	}
+}
+
 // Returns the mount and relative directory of the current cgroup the process
 // is in.
-func findCurrent(t *testing.T) ([]byte, []byte) {
+func findCurrent(t *testing.T) (mountOut []byte, relOut []byte) {
 	// Find the path to our current CPU cgroup. Currently this package is
 	// only used for CPU cgroup testing, so the distinction of different
 	// controllers doesn't matter.
-	var scratch [cgroup.ParseSize]byte
 	buf := []byte{:cgroup.PathSize}
-	n, err := cgroup.FindCPUMountPoint(buf, scratch[:])
-	if err != nil {
-		t.Skipf("cgroup: unable to find current cgroup mount: %v", err)
+	scratch := []byte{:cgroup.ParseSize}
+	n, ferr := cgroup.FindCPUMountPoint(buf, scratch)
+	if ferr != nil {
+		t.Skipf("cgroup: unable to find current cgroup mount: %v", ferr)
 	}
-	mount := []byte(buf[:n])
+	mountOut = []byte(buf[:n])
 
-	n, ver, err := cgroup.FindCPURelativePath(buf, scratch[:])
-	if err != nil {
-		t.Skipf("cgroup: unable to find current cgroup path: %v", err)
+	m, ver, rerr := cgroup.FindCPURelativePath(buf, scratch)
+	if rerr != nil {
+		t.Skipf("cgroup: unable to find current cgroup path: %v", rerr)
 	}
 	if ver != cgroup.V2 {
 		t.Skipf("cgroup: running on cgroup v%d want v2", ver)
 	}
-	rel := []byte(buf[1:n])       // The returned path always starts with /, skip it.
-	rel = filepath.Join(".", rel) // Make sure this isn't empty string at root.
-	return mount, rel
+	rel := []byte(buf[1:m])          // The returned path always starts with /, skip it.
+	relOut = filepath.Join(".", rel) // Make sure this isn't empty string at root.
+	return mountOut, relOut
 }
 
 // Returns a parent directory in which we can create our own cgroup subdirectory.
-func findOwnedParent(t *testing.T, mount, rel []byte) []byte {
+func findOwnedParent(t *testing.T, mount, rel []byte) (out []byte) {
 	// There are many ways cgroups may be set up on a system. We don't try
 	// to cover all of them, just common ones.
 	//
@@ -166,17 +168,12 @@ func findOwnedParent(t *testing.T, mount, rel []byte) []byte {
 	// is empty. As far as I tell, the only purpose of this is to allow
 	// reorganizing processes into a new set of subdirectories and then
 	// adding controllers once done.
-	root, err := os.OpenRoot(mount)
-	if err != nil {
-		t.Fatalf("error opening cgroup mount root: %v", err)
-	}
-
 	uid := os.Getuid()
 	var prev []byte
 	for rel != "." {
-		fi, err := root.Stat(rel)
-		if err != nil {
-			t.Fatalf("error stating cgroup path: %v", err)
+		fi, serr := os.Stat(filepath.Join(mount, rel))
+		if serr != nil {
+			t.Fatalf("error stating cgroup path: %v", serr)
 		}
 
 		st := (*syscall.Stat_t)(fi.Sys())

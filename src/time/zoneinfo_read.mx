@@ -18,10 +18,11 @@ import (
 )
 
 // registerLoadFromEmbeddedTZData is called by the time/tzdata package,
-// if it is imported.
+// if it is imported. The init-prefixed name exempts the one-time store to
+// loadFromEmbeddedTZData; the linkname keeps the symbol tzdata references.
 //
 //:linkname registerLoadFromEmbeddedTZData
-func registerLoadFromEmbeddedTZData(f func([]byte) ([]byte, error)) {
+func initRegisterLoadFromEmbeddedTZData(f func([]byte) ([]byte, error)) {
 	loadFromEmbeddedTZData = f
 }
 
@@ -38,11 +39,11 @@ const maxFileSize = 10 << 20
 
 type fileSizeError struct{ name string }
 
-func (f *fileSizeError) Error() string {
+func (f *fileSizeError) Error() (rs string) {
 	return "time: file " | f.name | " is too large"
 }
 
-func (f *fileSizeError) String() string { return f.Error() }
+func (f *fileSizeError) String() (rs string) { return f.Error() }
 
 // Copies of io.Seek* constants to avoid importing "io":
 const (
@@ -57,7 +58,7 @@ type dataIO struct {
 	error bool
 }
 
-func (d *dataIO) read(n int32) []byte {
+func (d *dataIO) read(n int32) (rb []byte) {
 	if len(d.p) < n {
 		d.p = nil
 		d.error = true
@@ -97,27 +98,27 @@ func (d *dataIO) byte() (n byte, ok bool) {
 }
 
 // rest returns the rest of the data in the buffer.
-func (d *dataIO) rest() []byte {
+func (d *dataIO) rest() (rb []byte) {
 	r := d.p
 	d.p = nil
 	return r
 }
 
 // Make a string by stopping at the first NUL
-func byteString(p []byte) []byte {
+func byteString(p []byte) (rb []byte) {
 	if i := bytealg.IndexByte(p, 0); i != -1 {
 		p = p[:i]
 	}
 	return []byte(p)
 }
 
-const errBadData = errors.Const("malformed time zone information")
+var errBadData error
 
 // LoadLocationFromTZData returns a Location with the given name
 // initialized from the IANA Time Zone database-formatted data.
 // The data should be in the format of a standard IANA time zone file
 // (for example, the content of /etc/localtime on Unix systems).
-func LoadLocationFromTZData(name []byte, data []byte) (*Location, error) {
+func LoadLocationFromTZData(name []byte, data []byte) (rlocation *Location, rerr error) {
 	d := dataIO{data, false}
 
 	// 4-byte magic "TZif"
@@ -352,7 +353,7 @@ func LoadLocationFromTZData(name []byte, data []byte) (*Location, error) {
 	return l, nil
 }
 
-func findZone(zones []zone, name []byte, offset int32, isDST bool) int32 {
+func findZone(zones []zone, name []byte, offset int32, isDST bool) (rn int32) {
 	for i, z := range zones {
 		if z.name == name && z.offset == offset && z.isDST == isDST {
 			return i
@@ -363,7 +364,7 @@ func findZone(zones []zone, name []byte, offset int32, isDST bool) int32 {
 
 // loadTzinfoFromDirOrZip returns the contents of the file with the given name
 // in dir. dir can either be an uncompressed zip file, or a directory.
-func loadTzinfoFromDirOrZip(dir, name []byte) ([]byte, error) {
+func loadTzinfoFromDirOrZip(dir, name []byte) (rb []byte, rerr error) {
 	if len(dir) > 4 && dir[len(dir)-4:] == ".zip" {
 		return loadTzinfoFromZip(dir, name)
 	}
@@ -382,7 +383,7 @@ func loadTzinfoFromDirOrZip(dir, name []byte) ([]byte, error) {
 // in a zip file is considerably less than tar's 512 bytes.
 
 // get4 returns the little-endian 32-bit value in b.
-func get4(b []byte) int32 {
+func get4(b []byte) (rn int32) {
 	if len(b) < 4 {
 		return 0
 	}
@@ -390,7 +391,7 @@ func get4(b []byte) int32 {
 }
 
 // get2 returns the little-endian 16-bit value in b.
-func get2(b []byte) int32 {
+func get2(b []byte) (rn int32) {
 	if len(b) < 2 {
 		return 0
 	}
@@ -399,7 +400,7 @@ func get2(b []byte) int32 {
 
 // loadTzinfoFromZip returns the contents of the file with the given name
 // in the given uncompressed zip file.
-func loadTzinfoFromZip(zipfile, name []byte) ([]byte, error) {
+func loadTzinfoFromZip(zipfile, name []byte) (rb []byte, rerr error) {
 	fd, err := open(zipfile)
 	if err != nil {
 		return nil, err
@@ -516,7 +517,7 @@ var loadTzinfoFromTzdata func(file, name []byte) ([]byte, error)
 // with the given name, from a given source. A source may be a
 // timezone database directory, tzdata database file or an uncompressed
 // zip file, containing the contents of such a directory.
-func loadTzinfo(name []byte, source []byte) ([]byte, error) {
+func loadTzinfo(name []byte, source []byte) (rb []byte, rerr error) {
 	if len(source) >= 6 && source[len(source)-6:] == "tzdata" {
 		return loadTzinfoFromTzdata(source, name)
 	}
@@ -571,7 +572,7 @@ func loadLocation(name []byte, sources [][]byte) (z *Location, firstErr error) {
 // It is a trivial implementation of os.ReadFile, reimplemented
 // here to avoid depending on io/ioutil or os.
 // It returns an error if name exceeds maxFileSize bytes.
-func readFile(name []byte) ([]byte, error) {
+func readFile(name []byte) (rb []byte, rerr error) {
 	f, err := open(name)
 	if err != nil {
 		return nil, err

@@ -122,39 +122,44 @@ type Function struct {
 
 // Parse parses a profile and checks for its validity. The input must be an
 // encoded pprof protobuf, which may optionally be gzip-compressed.
-func Parse(r io.Reader) (*Profile, error) {
-	orig, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
+func Parse(r io.Reader) (out *Profile, rerr error) {
+	orig, oerr := io.ReadAll(r)
+	if oerr != nil {
+		return nil, oerr
 	}
 
 	if len(orig) >= 2 && orig[0] == 0x1f && orig[1] == 0x8b {
-		gz, err := gzip.NewReader(bytes.NewBuffer(orig))
-		if err != nil {
-			return nil, fmt.Errorf("decompressing profile: %v", err)
+		gz, gerr := gzip.NewReader(bytes.NewBuffer(orig))
+		if gerr != nil {
+			return nil, fmt.Errorf("decompressing profile: %v", gerr)
 		}
-		data, err := io.ReadAll(gz)
-		if err != nil {
-			return nil, fmt.Errorf("decompressing profile: %v", err)
+		data, derr := io.ReadAll(gz)
+		if derr != nil {
+			return nil, fmt.Errorf("decompressing profile: %v", derr)
 		}
 		orig = data
 	}
 
-	p, err := parseUncompressed(orig)
-	if err != nil {
-		return nil, fmt.Errorf("parsing profile: %w", err)
+	p, perr := parseUncompressed(orig)
+	if perr != nil {
+		return nil, fmt.Errorf("parsing profile: %w", perr)
 	}
 
-	if err := p.CheckValid(); err != nil {
-		return nil, fmt.Errorf("malformed profile: %v", err)
+	if cerr := p.CheckValid(); cerr != nil {
+		return nil, fmt.Errorf("malformed profile: %v", cerr)
 	}
 	return p, nil
 }
 
-const errMalformed = errors.Const("malformed profile format")
-const ErrNoData = errors.Const("empty input file")
+var errMalformed error
+var ErrNoData error
 
-func parseUncompressed(data []byte) (*Profile, error) {
+func init() {
+	errMalformed = errors.New("malformed profile format")
+	ErrNoData = errors.New("empty input file")
+}
+
+func parseUncompressed(data []byte) (out *Profile, rerr error) {
 	if len(data) == 0 {
 		return nil, ErrNoData
 	}
@@ -172,7 +177,7 @@ func parseUncompressed(data []byte) (*Profile, error) {
 }
 
 // Write writes the profile as a gzip-compressed marshaled protobuf.
-func (p *Profile) Write(w io.Writer) error {
+func (p *Profile) Write(w io.Writer) (rerr error) {
 	p.preEncode()
 	b := marshal(p)
 	zw := gzip.NewWriter(w)
@@ -185,7 +190,7 @@ func (p *Profile) Write(w io.Writer) error {
 // not limited to:
 //   - len(Profile.Sample[n].value) == len(Profile.value_unit)
 //   - Sample.id has a corresponding Profile.Location
-func (p *Profile) CheckValid() error {
+func (p *Profile) CheckValid() (rerr error) {
 	// Check that sample values are consistent
 	sampleLen := len(p.SampleType)
 	if sampleLen == 0 && len(p.Sample) != 0 {
@@ -247,7 +252,7 @@ func (p *Profile) CheckValid() error {
 // Aggregate merges the locations in the profile into equivalence
 // classes preserving the request attributes. It also updates the
 // samples to point to the merged locations.
-func (p *Profile) Aggregate(inlineFrame, function, filename, linenumber, address bool) error {
+func (p *Profile) Aggregate(inlineFrame, function, filename, linenumber, address bool) (rerr error) {
 	for _, m := range p.Mapping {
 		m.HasInlineFrames = m.HasInlineFrames && inlineFrame
 		m.HasFunctions = m.HasFunctions && function
@@ -290,7 +295,7 @@ func (p *Profile) Aggregate(inlineFrame, function, filename, linenumber, address
 
 // Print dumps a text representation of a profile. Intended mainly
 // for debugging purposes.
-func (p *Profile) String() string {
+func (p *Profile) String() (out string) {
 
 	ss := [][]byte{:0:len(p.Sample)+len(p.Mapping)+len(p.Location)}
 	if pt := p.PeriodType; pt != nil {
@@ -312,7 +317,7 @@ func (p *Profile) String() string {
 	ss = push(ss, "Samples:")
 	var sh1 string
 	for _, s := range p.SampleType {
-		sh1 = sh1 + fmt.Sprintf("%s/%s ", s.Type, s.Unit)
+		sh1 = sh1 | fmt.Sprintf("%s/%s ", s.Type, s.Unit)
 	}
 	ss = mxutil.Ensure(ss, 1)
 	ss = push(ss, bytes.TrimSpace(sh1))
@@ -323,7 +328,7 @@ func (p *Profile) String() string {
 		}
 		sv = sv | ": "
 		for _, l := range s.Location {
-			sv = sv + fmt.Sprintf("%d ", l.ID)
+			sv = sv | fmt.Sprintf("%d ", l.ID)
 		}
 		ss = mxutil.Ensure(ss, 1)
 		ss = push(ss, sv)
@@ -331,7 +336,7 @@ func (p *Profile) String() string {
 		if len(s.Label) > 0 {
 			ls := labelHeader
 			for k, v := range s.Label {
-				ls = ls + fmt.Sprintf("%s:%v ", k, v)
+				ls = ls | fmt.Sprintf("%s:%v ", k, v)
 			}
 			ss = mxutil.Ensure(ss, 1)
 			ss = push(ss, ls)
@@ -339,7 +344,7 @@ func (p *Profile) String() string {
 		if len(s.NumLabel) > 0 {
 			ls := labelHeader
 			for k, v := range s.NumLabel {
-				ls = ls + fmt.Sprintf("%s:%v ", k, v)
+				ls = ls | fmt.Sprintf("%s:%v ", k, v)
 			}
 			ss = mxutil.Ensure(ss, 1)
 			ss = push(ss, ls)
@@ -351,7 +356,7 @@ func (p *Profile) String() string {
 	for _, l := range p.Location {
 		locStr := fmt.Sprintf("%6d: %#x ", l.ID, l.Address)
 		if m := l.Mapping; m != nil {
-			locStr = locStr + fmt.Sprintf("M=%d ", m.ID)
+			locStr = locStr | fmt.Sprintf("M=%d ", m.ID)
 		}
 		if len(l.Line) == 0 {
 			ss = mxutil.Ensure(ss, 1)
@@ -370,7 +375,7 @@ func (p *Profile) String() string {
 				}
 			}
 			ss = mxutil.Ensure(ss, 1)
-			ss = push(ss, locStr+lnStr)
+			ss = push(ss, locStr|lnStr)
 			// Do not print location details past the first line
 			locStr = "             "
 		}
@@ -408,7 +413,7 @@ func (p *Profile) String() string {
 // must be compatible (same Type and SampleType).
 // TODO(rsilvera): consider normalizing the profiles based on the
 // total samples collected.
-func (p *Profile) Merge(pb *Profile, r float64) error {
+func (p *Profile) Merge(pb *Profile, r float64) (rerr error) {
 	if err := p.Compatible(pb); err != nil {
 		return err
 	}
@@ -453,7 +458,7 @@ func (p *Profile) Merge(pb *Profile, r float64) error {
 // Compatible determines if two profiles can be compared/merged.
 // returns nil if the profiles are compatible; otherwise an error with
 // details on the incompatibility.
-func (p *Profile) Compatible(pb *Profile) error {
+func (p *Profile) Compatible(pb *Profile) (rerr error) {
 	if !compatibleValueTypes(p.PeriodType, pb.PeriodType) {
 		return fmt.Errorf("incompatible period types %v and %v", p.PeriodType, pb.PeriodType)
 	}
@@ -473,7 +478,7 @@ func (p *Profile) Compatible(pb *Profile) error {
 
 // HasFunctions determines if all locations in this profile have
 // symbolized function information.
-func (p *Profile) HasFunctions() bool {
+func (p *Profile) HasFunctions() (has bool) {
 	for _, l := range p.Location {
 		if l.Mapping == nil || !l.Mapping.HasFunctions {
 			return false
@@ -484,7 +489,7 @@ func (p *Profile) HasFunctions() bool {
 
 // HasFileLines determines if all locations in this profile have
 // symbolized file and line number information.
-func (p *Profile) HasFileLines() bool {
+func (p *Profile) HasFileLines() (has bool) {
 	for _, l := range p.Location {
 		if l.Mapping == nil || (!l.Mapping.HasFilenames || !l.Mapping.HasLineNumbers) {
 			return false
@@ -493,7 +498,7 @@ func (p *Profile) HasFileLines() bool {
 	return true
 }
 
-func compatibleValueTypes(v1, v2 *ValueType) bool {
+func compatibleValueTypes(v1, v2 *ValueType) (eq bool) {
 	if v1 == nil || v2 == nil {
 		return true // No grounds to disqualify.
 	}
@@ -501,7 +506,7 @@ func compatibleValueTypes(v1, v2 *ValueType) bool {
 }
 
 // Copy makes a fully independent copy of a profile.
-func (p *Profile) Copy() *Profile {
+func (p *Profile) Copy() (out *Profile) {
 	p.preEncode()
 	b := marshal(p)
 
@@ -524,7 +529,7 @@ type Demangler func(name [][]byte) (map[string][]byte, error)
 // Demangle attempts to demangle and optionally simplify any function
 // names referenced in the profile. It works on a best-effort basis:
 // it will silently preserve the original names in case of any errors.
-func (p *Profile) Demangle(d Demangler) error {
+func (p *Profile) Demangle(d Demangler) (rerr error) {
 	// Collect names to demangle.
 	var names [][]byte
 	for _, fn := range p.Function {
@@ -546,7 +551,7 @@ func (p *Profile) Demangle(d Demangler) error {
 }
 
 // Empty reports whether the profile contains no samples.
-func (p *Profile) Empty() bool {
+func (p *Profile) Empty() (empty bool) {
 	return len(p.Sample) == 0
 }
 
@@ -563,7 +568,7 @@ func (p *Profile) Scale(ratio float64) {
 }
 
 // ScaleN multiplies each sample values in a sample by a different amount.
-func (p *Profile) ScaleN(ratios []float64) error {
+func (p *Profile) ScaleN(ratios []float64) (rerr error) {
 	if len(p.SampleType) != len(ratios) {
 		return fmt.Errorf("mismatched scale ratios, got %d, want %d", len(ratios), len(p.SampleType))
 	}

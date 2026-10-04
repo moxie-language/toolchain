@@ -21,34 +21,42 @@ import (
 
 // nextTrafficSecret generates the next traffic secret, given the current one,
 // according to RFC 8446, Section 7.2.
-func (c *cipherSuiteTLS13) nextTrafficSecret(trafficSecret []byte) []byte {
-	return tls13.ExpandLabel(c.hash.New, trafficSecret, "traffic upd", nil, c.hash.Size())
+func (c *cipherSuiteTLS13) nextTrafficSecret(trafficSecret []byte) (rb []byte) {
+	return tls13.ExpandLabel(c.hashNew, trafficSecret, "traffic upd", nil, crypto.HashSize(c.hash))
 }
 
 // trafficKey generates traffic keys according to RFC 8446, Section 7.3.
 func (c *cipherSuiteTLS13) trafficKey(trafficSecret []byte) (key, iv []byte) {
-	key = tls13.ExpandLabel(c.hash.New, trafficSecret, "key", nil, c.keyLen)
-	iv = tls13.ExpandLabel(c.hash.New, trafficSecret, "iv", nil, aeadNonceLength)
+	key = tls13.ExpandLabel(c.hashNew, trafficSecret, "key", nil, c.keyLen)
+	iv = tls13.ExpandLabel(c.hashNew, trafficSecret, "iv", nil, aeadNonceLength)
 	return
 }
 
 // finishedHash generates the Finished verify_data or PskBinderEntry according
 // to RFC 8446, Section 4.4.4. See sections 4.4 and 4.2.11.2 for the baseKey
 // selection.
-func (c *cipherSuiteTLS13) finishedHash(baseKey []byte, transcript hash.Hash) []byte {
-	finishedKey := tls13.ExpandLabel(c.hash.New, baseKey, "finished", nil, c.hash.Size())
-	verifyData := hmac.New(c.hash.New, finishedKey)
+func (c *cipherSuiteTLS13) finishedHash(baseKey []byte, transcript hash.Hash) (rb []byte) {
+	finishedKey := tls13.ExpandLabel(c.hashNew, baseKey, "finished", nil, crypto.HashSize(c.hash))
+	verifyData := hmac.New(c.hashNew, finishedKey)
 	verifyData.Write(transcript.Sum(nil))
 	return verifyData.Sum(nil)
 }
 
+// exporterMasterSecretEKM exports keying material from a TLS 1.3 exporter
+// master secret. It carries its state as a field because a closure would
+// capture the enclosing frame.
+type exporterMasterSecretEKM struct {
+	expMasterSecret *tls13.ExporterMasterSecret
+}
+
+func (e *exporterMasterSecretEKM) ekm(label []byte, ctxInfo []byte, length int32) (rb []byte, rerr error) {
+	return e.expMasterSecret.Exporter(label, ctxInfo, length), nil
+}
+
 // exportKeyingMaterial implements RFC5705 exporters for TLS 1.3 according to
 // RFC 8446, Section 7.5.
-func (c *cipherSuiteTLS13) exportKeyingMaterial(s *tls13.MasterSecret, transcript hash.Hash) func([]byte, []byte, int32) ([]byte, error) {
-	expMasterSecret := s.ExporterMasterSecret(transcript)
-	return func(label []byte, context []byte, length int32) ([]byte, error) {
-		return expMasterSecret.Exporter(label, context, length), nil
-	}
+func (c *cipherSuiteTLS13) exportKeyingMaterial(s *tls13.MasterSecret, transcript hash.Hash) (rekm ekmFunc) {
+	return &exporterMasterSecretEKM{expMasterSecret: s.ExporterMasterSecret(transcript)}
 }
 
 type keySharePrivateKeys struct {
@@ -73,7 +81,7 @@ type keyExchange interface {
 	clientSharedSecret(priv *keySharePrivateKeys, serverKeyShare []byte) ([]byte, error)
 }
 
-func keyExchangeForCurveID(id CurveID) (keyExchange, error) {
+func keyExchangeForCurveID(id CurveID) (rkeyExchange keyExchange, rerr error) {
 	newMLKEMPrivateKey768 := func(b []byte) (crypto.Decapsulator, error) {
 		return mlkem.NewDecapsulationKey768(b)
 	}
@@ -117,7 +125,7 @@ type ecdhKeyExchange struct {
 	curve ecdh.Curve
 }
 
-func (ke *ecdhKeyExchange) keyShares(rnd io.Reader) (*keySharePrivateKeys, []keyShare, error) {
+func (ke *ecdhKeyExchange) keyShares(rnd io.Reader) (rkeySharePrivateKeys *keySharePrivateKeys, rkeyShare []keyShare, rerr error) {
 	priv, err1 := ke.curve.GenerateKey(rnd)
 	if err1 != nil {
 		return nil, nil, err1
@@ -125,7 +133,7 @@ func (ke *ecdhKeyExchange) keyShares(rnd io.Reader) (*keySharePrivateKeys, []key
 	return &keySharePrivateKeys{ecdhe: priv}, []keyShare{{ke.id, priv.PublicKey().Bytes()}}, nil
 }
 
-func (ke *ecdhKeyExchange) serverSharedSecret(rnd io.Reader, clientKeyShare []byte) ([]byte, keyShare, error) {
+func (ke *ecdhKeyExchange) serverSharedSecret(rnd io.Reader, clientKeyShare []byte) (rb []byte, rkeyShare keyShare, rerr error) {
 	key, err := ke.curve.GenerateKey(rnd)
 	if err != nil {
 		return nil, keyShare{}, err
@@ -141,7 +149,7 @@ func (ke *ecdhKeyExchange) serverSharedSecret(rnd io.Reader, clientKeyShare []by
 	return sharedKey, keyShare{ke.id, key.PublicKey().Bytes()}, nil
 }
 
-func (ke *ecdhKeyExchange) clientSharedSecret(priv *keySharePrivateKeys, serverKeyShare []byte) ([]byte, error) {
+func (ke *ecdhKeyExchange) clientSharedSecret(priv *keySharePrivateKeys, serverKeyShare []byte) (rb []byte, rerr error) {
 	peerKey, err := ke.curve.NewPublicKey(serverKeyShare)
 	if err != nil {
 		return nil, err
@@ -165,7 +173,7 @@ type hybridKeyExchange struct {
 	newMLKEMPublicKey  func([]byte) (crypto.Encapsulator, error)
 }
 
-func (ke *hybridKeyExchange) keyShares(rnd io.Reader) (*keySharePrivateKeys, []keyShare, error) {
+func (ke *hybridKeyExchange) keyShares(rnd io.Reader) (rkeySharePrivateKeys *keySharePrivateKeys, rkeyShare []keyShare, rerr error) {
 	priv, ecdhShares, err2 := ke.ecdh.keyShares(rnd)
 	if err2 != nil {
 		return nil, nil, err2
@@ -190,7 +198,7 @@ func (ke *hybridKeyExchange) keyShares(rnd io.Reader) (*keySharePrivateKeys, []k
 	return priv, []keyShare{{ke.id, shareData}, ecdhShares[0]}, nil
 }
 
-func (ke *hybridKeyExchange) serverSharedSecret(rnd io.Reader, clientKeyShare []byte) ([]byte, keyShare, error) {
+func (ke *hybridKeyExchange) serverSharedSecret(rnd io.Reader, clientKeyShare []byte) (rb []byte, rkeyShare keyShare, rerr error) {
 	if len(clientKeyShare) != ke.ecdhElementSize+ke.mlkemPublicKeySize {
 		return nil, keyShare{}, errors.New("tls: invalid client key share length for hybrid key exchange")
 	}
@@ -224,7 +232,7 @@ func (ke *hybridKeyExchange) serverSharedSecret(rnd io.Reader, clientKeyShare []
 	return sharedKey, ks, nil
 }
 
-func (ke *hybridKeyExchange) clientSharedSecret(priv *keySharePrivateKeys, serverKeyShare []byte) ([]byte, error) {
+func (ke *hybridKeyExchange) clientSharedSecret(priv *keySharePrivateKeys, serverKeyShare []byte) (rb []byte, rerr error) {
 	if len(serverKeyShare) != ke.ecdhElementSize+ke.mlkemCiphertextSize {
 		return nil, errors.New("tls: invalid server key share length for hybrid key exchange")
 	}

@@ -31,20 +31,20 @@ func (stw *Writer) InitWriter() {
 }
 
 // Nentries returns the number of strings interned so far.
-func (stw *Writer) Nentries() uint32 {
+func (stw *Writer) Nentries() (n uint32) {
 	return uint32(len(stw.strs))
 }
 
 // Lookup looks up string 's' in the writer's table, adding
 // a new entry if need be, and returning an index into the table.
-func (stw *Writer) Lookup(s []byte) uint32 {
+func (stw *Writer) Lookup(s []byte) (idx uint32) {
 	if sid, ok := stw.stab[s]; ok {
 		return sid
 	}
 	if stw.frozen {
 		panic("internal error: string table previously frozen")
 	}
-	idx := uint32(len(stw.strs))
+	idx = uint32(len(stw.strs))
 	stw.stab[s] = idx
 	stw.strs = mxutil.Ensure(stw.strs, 1)
 	stw.strs = push(stw.strs, s)
@@ -53,8 +53,8 @@ func (stw *Writer) Lookup(s []byte) uint32 {
 
 // Size computes the memory in bytes needed for the serialized
 // version of a stringtab.Writer.
-func (stw *Writer) Size() uint32 {
-	rval := uint32(0)
+func (stw *Writer) Size() (rval uint32) {
+	rval = uint32(0)
 	stw.tmp = stw.tmp[:0]
 	stw.tmp = uleb128.AppendUleb128(stw.tmp, uint32(len(stw.strs)))
 	rval += uint32(len(stw.tmp))
@@ -71,24 +71,27 @@ func (stw *Writer) Size() uint32 {
 	return rval
 }
 
+// stabWriteULEB writes one uleb128 value into w. Standalone rather than a
+// closure: Moxie closures cannot capture the enclosing scope.
+func stabWriteULEB(w io.Writer, stw *Writer, v uint32) (derr error) {
+	stw.tmp = stw.tmp[:0]
+	stw.tmp = uleb128.AppendUleb128(stw.tmp, v)
+	if nw, err := w.Write(stw.tmp); err != nil {
+		return fmt.Errorf("writing string table: %v", err)
+	} else if nw != len(stw.tmp) {
+		return fmt.Errorf("short write emitting stringtab uleb")
+	}
+	return nil
+}
+
 // Write writes the string table in serialized form to the specified
 // io.Writer.
-func (stw *Writer) Write(w io.Writer) error {
-	wr128 := func(v uint32) error {
-		stw.tmp = stw.tmp[:0]
-		stw.tmp = uleb128.AppendUleb128(stw.tmp, v)
-		if nw, err := w.Write(stw.tmp); err != nil {
-			return fmt.Errorf("writing string table: %v", err)
-		} else if nw != len(stw.tmp) {
-			return fmt.Errorf("short write emitting stringtab uleb")
-		}
-		return nil
-	}
-	if err := wr128(uint32(len(stw.strs))); err != nil {
+func (stw *Writer) Write(w io.Writer) (derr error) {
+	if err := stabWriteULEB(w, stw, uint32(len(stw.strs))); err != nil {
 		return err
 	}
 	for _, s := range stw.strs {
-		if err := wr128(uint32(len(s))); err != nil {
+		if err := stabWriteULEB(w, stw, uint32(len(s))); err != nil {
 			return err
 		}
 		if nw, err := w.Write([]byte(s)); err != nil {
@@ -117,8 +120,8 @@ type Reader struct {
 
 // NewReader creates a stringtab.Reader to read the contents
 // of a string table from 'r'.
-func NewReader(r *slicereader.Reader) *Reader {
-	str := &Reader{
+func NewReader(r *slicereader.Reader) (str *Reader) {
+	str = &Reader{
 		r: r,
 	}
 	return str
@@ -140,11 +143,11 @@ func (str *Reader) Read() {
 }
 
 // Entries returns the number of decoded entries in a string table.
-func (str *Reader) Entries() int32 {
+func (str *Reader) Entries() (n int32) {
 	return len(str.strs)
 }
 
 // Get returns string 'idx' within the string table.
-func (str *Reader) Get(idx uint32) []byte {
+func (str *Reader) Get(idx uint32) (out []byte) {
 	return str.strs[idx]
 }

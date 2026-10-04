@@ -102,7 +102,7 @@ type netConn struct {
 // write to the returned writer sends a log message with the given
 // priority (a combination of the syslog facility and severity) and
 // prefix tag. If tag is empty, the [os.Args][0] is used.
-func New(priority Priority, tag []byte) (*Writer, error) {
+func New(priority Priority, tag []byte) (rwriter *Writer, rerr error) {
 	return Dial("", "", priority, tag)
 }
 
@@ -113,7 +113,7 @@ func New(priority Priority, tag []byte) (*Writer, error) {
 // If network is empty, Dial will connect to the local syslog server.
 // Otherwise, see the documentation for net.Dial for valid values
 // of network and raddr.
-func Dial(network, raddr []byte, priority Priority, tag []byte) (*Writer, error) {
+func Dial(network, raddr []byte, priority Priority, tag []byte) (rwriter *Writer, rerr error) {
 	if priority < 0 || priority > LOG_LOCAL7|LOG_DEBUG {
 		return nil, errors.New("log/syslog: invalid priority")
 	}
@@ -168,12 +168,12 @@ func (w *Writer) connect() (err error) {
 }
 
 // Write sends a log message to the syslog daemon.
-func (w *Writer) Write(b []byte) (int32, error) {
+func (w *Writer) Write(b []byte) (rn int32, rerr error) {
 	return w.writeAndRetry(w.priority, []byte(b))
 }
 
 // Close closes a connection to the syslog daemon.
-func (w *Writer) Close() error {
+func (w *Writer) Close() (rerr error) {
 	if w.conn != nil {
 		err := w.conn.close()
 		w.conn = nil
@@ -184,61 +184,61 @@ func (w *Writer) Close() error {
 
 // Emerg logs a message with severity [LOG_EMERG], ignoring the severity
 // passed to New.
-func (w *Writer) Emerg(m []byte) error {
+func (w *Writer) Emerg(m []byte) (rerr error) {
 	_, err := w.writeAndRetry(LOG_EMERG, m)
 	return err
 }
 
 // Alert logs a message with severity [LOG_ALERT], ignoring the severity
 // passed to New.
-func (w *Writer) Alert(m []byte) error {
+func (w *Writer) Alert(m []byte) (rerr error) {
 	_, err := w.writeAndRetry(LOG_ALERT, m)
 	return err
 }
 
 // Crit logs a message with severity [LOG_CRIT], ignoring the severity
 // passed to New.
-func (w *Writer) Crit(m []byte) error {
+func (w *Writer) Crit(m []byte) (rerr error) {
 	_, err := w.writeAndRetry(LOG_CRIT, m)
 	return err
 }
 
 // Err logs a message with severity [LOG_ERR], ignoring the severity
 // passed to New.
-func (w *Writer) Err(m []byte) error {
+func (w *Writer) Err(m []byte) (rerr error) {
 	_, err := w.writeAndRetry(LOG_ERR, m)
 	return err
 }
 
 // Warning logs a message with severity [LOG_WARNING], ignoring the
 // severity passed to New.
-func (w *Writer) Warning(m []byte) error {
+func (w *Writer) Warning(m []byte) (rerr error) {
 	_, err := w.writeAndRetry(LOG_WARNING, m)
 	return err
 }
 
 // Notice logs a message with severity [LOG_NOTICE], ignoring the
 // severity passed to New.
-func (w *Writer) Notice(m []byte) error {
+func (w *Writer) Notice(m []byte) (rerr error) {
 	_, err := w.writeAndRetry(LOG_NOTICE, m)
 	return err
 }
 
 // Info logs a message with severity [LOG_INFO], ignoring the severity
 // passed to New.
-func (w *Writer) Info(m []byte) error {
+func (w *Writer) Info(m []byte) (rerr error) {
 	_, err := w.writeAndRetry(LOG_INFO, m)
 	return err
 }
 
 // Debug logs a message with severity [LOG_DEBUG], ignoring the severity
 // passed to New.
-func (w *Writer) Debug(m []byte) error {
+func (w *Writer) Debug(m []byte) (rerr error) {
 	_, err := w.writeAndRetry(LOG_DEBUG, m)
 	return err
 }
 
-func (w *Writer) writeAndRetry(p Priority, s []byte) (int32, error) {
+func (w *Writer) writeAndRetry(p Priority, s []byte) (rn int32, rerr error) {
 	pr := (w.priority & facilityMask) | (p & severityMask)
 
 	if w.conn != nil {
@@ -254,7 +254,7 @@ func (w *Writer) writeAndRetry(p Priority, s []byte) (int32, error) {
 
 // write generates and writes a syslog formatted string. The
 // format is as follows: <PRI>TIMESTAMP HOSTNAME TAG[PID]: MSG
-func (w *Writer) write(p Priority, msg []byte) (int32, error) {
+func (w *Writer) write(p Priority, msg []byte) (rn int32, rerr error) {
 	// ensure it ends in a \n
 	nl := ""
 	if !bytes.HasSuffix(msg, "\n") {
@@ -271,7 +271,7 @@ func (w *Writer) write(p Priority, msg []byte) (int32, error) {
 	return len(msg), nil
 }
 
-func (n *netConn) writeString(p Priority, hostname, tag, msg, nl []byte) error {
+func (n *netConn) writeString(p Priority, hostname, tag, msg, nl []byte) (rerr error) {
 	if n.local {
 		// Compared to the network form below, the changes are:
 		//	1. Use time.Stamp instead of time.RFC3339.
@@ -289,7 +289,7 @@ func (n *netConn) writeString(p Priority, hostname, tag, msg, nl []byte) error {
 	return err
 }
 
-func (n *netConn) close() error {
+func (n *netConn) close() (rerr error) {
 	return n.conn.Close()
 }
 
@@ -297,7 +297,7 @@ func (n *netConn) close() error {
 // system log service with the specified priority, a combination of
 // the syslog facility and severity. The logFlag argument is the flag
 // set passed through to [log.New] to create the Logger.
-func NewLogger(p Priority, logFlag int32) (*log.Logger, error) {
+func NewLogger(p Priority, logFlag int32) (rlogger *log.Logger, rerr error) {
 	s, err := New(p, "")
 	if err != nil {
 		return nil, err

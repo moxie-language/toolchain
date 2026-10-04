@@ -22,7 +22,7 @@ type PCG struct {
 }
 
 // NewPCG returns a new PCG seeded with the given values.
-func NewPCG(seed1, seed2 uint64) *PCG {
+func NewPCG(seed1, seed2 uint64) (rpCG *PCG) {
 	return &PCG{seed1, seed2}
 }
 
@@ -33,7 +33,7 @@ func (p *PCG) Seed(seed1, seed2 uint64) {
 }
 
 // AppendBinary implements the [encoding.BinaryAppender] interface.
-func (p *PCG) AppendBinary(b []byte) ([]byte, error) {
+func (p *PCG) AppendBinary(b []byte) (rb []byte, rerr error) {
 	b = mxutil.Ensure(b, len("pcg:"))
 	b = push(b, "pcg:"...)
 	b = byteorder.BEAppendUint64(b, p.hi)
@@ -42,14 +42,14 @@ func (p *PCG) AppendBinary(b []byte) ([]byte, error) {
 }
 
 // MarshalBinary implements the [encoding.BinaryMarshaler] interface.
-func (p *PCG) MarshalBinary() ([]byte, error) {
+func (p *PCG) MarshalBinary() (rb []byte, rerr error) {
 	return p.AppendBinary([]byte{:0:20})
 }
 
-const errUnmarshalPCG = errors.Const("invalid PCG encoding")
+var errUnmarshalPCG error
 
 // UnmarshalBinary implements the [encoding.BinaryUnmarshaler] interface.
-func (p *PCG) UnmarshalBinary(data []byte) error {
+func (p *PCG) UnmarshalBinary(data []byte) (rerr error) {
 	if len(data) != 20 || data[:4] != "pcg:" {
 		return errUnmarshalPCG
 	}
@@ -85,7 +85,7 @@ func (p *PCG) next() (hi, lo uint64) {
 }
 
 // Uint64 return a uniformly-distributed random uint64 value.
-func (p *PCG) Uint64() uint64 {
+func (p *PCG) Uint64() (rn uint64) {
 	hi, lo := p.next()
 
 	// XSL-RR would be
@@ -105,4 +105,8 @@ func (p *PCG) Uint64() uint64 {
 	hi ^= hi >> 48
 	hi *= (lo | 1)
 	return hi
+}
+
+func init() {
+	errUnmarshalPCG = errors.New("invalid PCG encoding")
 }

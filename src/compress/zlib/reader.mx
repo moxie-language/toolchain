@@ -38,14 +38,6 @@ const (
 	zlibMaxWindow = 7
 )
 
-const (
-	// ErrChecksum is returned when reading ZLIB data that has an invalid checksum.
-	ErrChecksum = errors.Const("zlib: invalid checksum")
-	// ErrDictionary is returned when reading ZLIB data that has an invalid dictionary.
-	ErrDictionary = errors.Const("zlib: invalid dictionary")
-	// ErrHeader is returned when reading ZLIB data that has an invalid header.
-	ErrHeader = errors.Const("zlib: invalid header")
-)
 
 type reader struct {
 	r            flate.Reader
@@ -71,7 +63,7 @@ type Resetter interface {
 // It is the caller's responsibility to call Close on the ReadCloser when done.
 //
 // The [io.ReadCloser] returned by NewReader also implements [Resetter].
-func NewReader(r io.Reader) (io.ReadCloser, error) {
+func NewReader(r io.Reader) (rc io.ReadCloser, werr error) {
 	return NewReaderDict(r, nil)
 }
 
@@ -80,7 +72,7 @@ func NewReader(r io.Reader) (io.ReadCloser, error) {
 // If the compressed data refers to a different dictionary, NewReaderDict returns [ErrDictionary].
 //
 // The ReadCloser returned by NewReaderDict also implements [Resetter].
-func NewReaderDict(r io.Reader, dict []byte) (io.ReadCloser, error) {
+func NewReaderDict(r io.Reader, dict []byte) (rc io.ReadCloser, werr error) {
 	z := &reader{}
 	err := z.Reset(r, dict)
 	if err != nil {
@@ -89,12 +81,11 @@ func NewReaderDict(r io.Reader, dict []byte) (io.ReadCloser, error) {
 	return z, nil
 }
 
-func (z *reader) Read(p []byte) (int32, error) {
+func (z *reader) Read(p []byte) (n int32, rerr error) {
 	if z.err != nil {
 		return 0, z.err
 	}
 
-	var n int32
 	n, z.err = z.decompressor.Read(p)
 	z.digest.Write(p[0:n])
 	if z.err != io.EOF {
@@ -122,7 +113,7 @@ func (z *reader) Read(p []byte) (int32, error) {
 // Calling Close does not close the wrapped [io.Reader] originally passed to [NewReader].
 // In order for the ZLIB checksum to be verified, the reader must be
 // fully consumed until the [io.EOF].
-func (z *reader) Close() error {
+func (z *reader) Close() (err error) {
 	if z.err != nil && z.err != io.EOF {
 		return z.err
 	}
@@ -130,7 +121,7 @@ func (z *reader) Close() error {
 	return z.err
 }
 
-func (z *reader) Reset(r io.Reader, dict []byte) error {
+func (z *reader) Reset(r io.Reader, dict []byte) (err error) {
 	*z = reader{decompressor: z.decompressor}
 	if fr, ok := r.(flate.Reader); ok {
 		z.r = fr
@@ -178,4 +169,13 @@ func (z *reader) Reset(r io.Reader, dict []byte) error {
 	}
 	z.digest = adler32.New()
 	return nil
+}
+
+var ErrChecksum error
+var ErrDictionary error
+var ErrHeader error
+func init() {
+	ErrChecksum = errors.New("zlib: invalid checksum")
+	ErrDictionary = errors.New("zlib: invalid dictionary")
+	ErrHeader = errors.New("zlib: invalid header")
 }

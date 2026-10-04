@@ -16,13 +16,12 @@ import (
 	"fmt"
 	"hash"
 	"io"
-	"slices"
 )
 
 // verifyHandshakeSignature verifies a signature against unhashed handshake contents.
-func verifyHandshakeSignature(sigType uint8, pubkey crypto.PublicKey, hashFunc crypto.Hash, signed, sig []byte) error {
+func verifyHandshakeSignature(sigType uint8, pubkey crypto.PublicKey, hashFunc crypto.Hash, signed, sig []byte) (rerr error) {
 	if hashFunc != directSigning {
-		h := hashFunc.New()
+		h := crypto.HashNew(hashFunc)
 		h.Write(signed)
 		signed = h.Sum(nil)
 	}
@@ -68,7 +67,7 @@ func verifyHandshakeSignature(sigType uint8, pubkey crypto.PublicKey, hashFunc c
 
 // verifyLegacyHandshakeSignature verifies a TLS 1.0 and 1.1 signature against
 // pre-hashed handshake contents.
-func verifyLegacyHandshakeSignature(sigType uint8, pubkey crypto.PublicKey, hashFunc crypto.Hash, hashed, sig []byte) error {
+func verifyLegacyHandshakeSignature(sigType uint8, pubkey crypto.PublicKey, hashFunc crypto.Hash, hashed, sig []byte) (rerr error) {
 	switch sigType {
 	case signatureECDSA:
 		pubKey, ok := pubkey.(*ecdsa.PublicKey)
@@ -97,7 +96,7 @@ const (
 	clientSignatureContext = "TLS 1.3, client CertificateVerify\x00"
 )
 
-func _signaturePadding() []byte {
+func _signaturePadding() (rb []byte) {
 	return []byte{
 		0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
 		0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
@@ -112,7 +111,7 @@ func _signaturePadding() []byte {
 
 // signedMessage returns the (unhashed) message to be signed by certificate keys
 // in TLS 1.3. See RFC 8446, Section 4.4.3.
-func signedMessage(ctxInfo []byte, transcript hash.Hash) []byte {
+func signedMessage(ctxInfo []byte, transcript hash.Hash) (rb []byte) {
 	b := bytes.NewBuffer([]byte{:0:64+len(serverSignatureContext)+64})
 	b.Write(_signaturePadding())
 	io.WriteString(b, ctxInfo)
@@ -172,29 +171,29 @@ func legacyTypeAndHashFromPublicKey(pub crypto.PublicKey) (sigType uint8, h cryp
 	}
 }
 
-func _rsaSignatureSchemes() []struct {
+func _rsaSignatureSchemes() (rint32 []struct {
 	scheme          SignatureScheme
 	minModulusBytes int32
-} {
+}) {
 	return []struct {
 		scheme          SignatureScheme
 		minModulusBytes int32
 	}{
 		// RSA-PSS is used with PSSSaltLengthEqualsHash, and requires
 		//    emLen >= hLen + sLen + 2
-		{PSSWithSHA256, crypto.SHA256.Size()*2 + 2},
-		{PSSWithSHA384, crypto.SHA384.Size()*2 + 2},
-		{PSSWithSHA512, crypto.SHA512.Size()*2 + 2},
+		{PSSWithSHA256, crypto.HashSize(crypto.SHA256)*2 + 2},
+		{PSSWithSHA384, crypto.HashSize(crypto.SHA384)*2 + 2},
+		{PSSWithSHA512, crypto.HashSize(crypto.SHA512)*2 + 2},
 		// PKCS #1 v1.5 uses prefixes from hashPrefixes in crypto/rsa, and requires
 		//    emLen >= len(prefix) + hLen + 11
-		{PKCS1WithSHA256, 19 + crypto.SHA256.Size() + 11},
-		{PKCS1WithSHA384, 19 + crypto.SHA384.Size() + 11},
-		{PKCS1WithSHA512, 19 + crypto.SHA512.Size() + 11},
-		{PKCS1WithSHA1, 15 + crypto.SHA1.Size() + 11},
+		{PKCS1WithSHA256, 19 + crypto.HashSize(crypto.SHA256) + 11},
+		{PKCS1WithSHA384, 19 + crypto.HashSize(crypto.SHA384) + 11},
+		{PKCS1WithSHA512, 19 + crypto.HashSize(crypto.SHA512) + 11},
+		{PKCS1WithSHA1, 15 + crypto.HashSize(crypto.SHA1) + 11},
 	}
 }
 
-func signatureSchemesForPublicKey(version uint16, pub crypto.PublicKey) []SignatureScheme {
+func signatureSchemesForPublicKey(version uint16, pub crypto.PublicKey) (rsignatureScheme []SignatureScheme) {
 	switch pub := pub.(type) {
 	case *ecdsa.PublicKey:
 		if version < VersionTLS13 {
@@ -238,22 +237,34 @@ func signatureSchemesForPublicKey(version uint16, pub crypto.PublicKey) []Signat
 // selectSignatureScheme picks a SignatureScheme from the peer's preference list
 // that works with the selected certificate. It's only called for protocol
 // versions that support signature algorithms, so TLS 1.2 and 1.3.
-func selectSignatureScheme(vers uint16, c *Certificate, peerAlgs []SignatureScheme) (SignatureScheme, error) {
+func selectSignatureScheme(vers uint16, c *Certificate, peerAlgs []SignatureScheme) (rsignatureScheme SignatureScheme, rerr error) {
 	priv, ok := c.PrivateKey.(crypto.Signer)
 	if !ok {
 		return 0, unsupportedCertificateError(c)
 	}
 	supportedAlgs := signatureSchemesForPublicKey(vers, priv.Public())
 	if c.SupportedSignatureAlgorithms != nil {
-		supportedAlgs = slices.DeleteFunc(supportedAlgs, func(sigAlg SignatureScheme) bool {
-			return !isSupportedSignatureAlgorithm(sigAlg, c.SupportedSignatureAlgorithms)
-		})
+		allowed := []SignatureScheme{:0:len(supportedAlgs)}
+		n := int32(0)
+		for _, sigAlg := range supportedAlgs {
+			if isSupportedSignatureAlgorithm(sigAlg, c.SupportedSignatureAlgorithms) {
+				allowed[n] = sigAlg
+				n++
+			}
+		}
+		supportedAlgs = allowed[:n]
 	}
 	// Filter out any unsupported signature algorithms, for example due to
 	// FIPS 140-3 policy, tlssha1=0, or protocol version.
-	supportedAlgs = slices.DeleteFunc(supportedAlgs, func(sigAlg SignatureScheme) bool {
-		return isDisabledSignatureAlgorithm(vers, sigAlg, false)
-	})
+	stillAllowed := []SignatureScheme{:0:len(supportedAlgs)}
+	n2 := int32(0)
+	for _, sigAlg := range supportedAlgs {
+		if !isDisabledSignatureAlgorithm(vers, sigAlg, false) {
+			stillAllowed[n2] = sigAlg
+			n2++
+		}
+	}
+	supportedAlgs = stillAllowed[:n2]
 	if len(supportedAlgs) == 0 {
 		return 0, unsupportedCertificateError(c)
 	}
@@ -275,7 +286,7 @@ func selectSignatureScheme(vers uint16, c *Certificate, peerAlgs []SignatureSche
 
 // unsupportedCertificateError returns a helpful error for certificates with
 // an unsupported private key.
-func unsupportedCertificateError(cert *Certificate) error {
+func unsupportedCertificateError(cert *Certificate) (rerr error) {
 	switch cert.PrivateKey.(type) {
 	case rsa.PrivateKey, ecdsa.PrivateKey:
 		return fmt.Errorf("tls: unsupported certificate: private key is %T, expected *%T",

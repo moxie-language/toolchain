@@ -25,11 +25,22 @@ import (
 
 const ErrLineTooLong = internal.ErrLineTooLong
 
+// httpMsg is the concrete union of *Request and *Response accepted by the
+// transfer reader and writer. Moxie has no empty interface, so the two
+// message types carry a marker method instead.
+type httpMsg interface {
+	httpMsg()
+}
+
+func (*Request) httpMsg() {}
+
+func (*Response) httpMsg() {}
+
 type errorReader struct {
 	err error
 }
 
-func (r errorReader) Read(p []byte) (n int32, err error) {
+func (r *errorReader) Read(p []byte) (n int32, err error) {
 	return 0, r.err
 }
 
@@ -70,7 +81,7 @@ type transferWriter struct {
 	ByteReadCh   chan readResult // non-nil if probeRequestBody called
 }
 
-func newTransferWriter(r any) (t *transferWriter, err error) {
+func newTransferWriter(r httpMsg) (t *transferWriter, err error) {
 	t = &transferWriter{}
 
 	// Extract relevant fields
@@ -162,7 +173,7 @@ func newTransferWriter(r any) (t *transferWriter, err error) {
 // a non-nil content-less ReadCloser (the more common case). In that more
 // common case, we act as if their Body were nil instead, and don't send
 // a body.
-func (t *transferWriter) shouldSendChunkedRequestBody() bool {
+func (t *transferWriter) shouldSendChunkedRequestBody() (rok bool) {
 	// Note that t.ContentLength is the corrected content length
 	// from rr.outgoingLength, so 0 actually means zero, not unknown.
 	if t.ContentLength >= 0 || t.Body == nil { // redundant checks; caller did them
@@ -242,11 +253,11 @@ func (t *transferWriter) probeRequestBody() {
 	}
 }
 
-func noResponseBodyExpected(requestMethod string) bool {
+func noResponseBodyExpected(requestMethod string) (rok bool) {
 	return requestMethod == "HEAD"
 }
 
-func (t *transferWriter) shouldSendContentLength() bool {
+func (t *transferWriter) shouldSendContentLength() (rok bool) {
 	if chunked(t.TransferEncoding) {
 		return false
 	}
@@ -270,7 +281,7 @@ func (t *transferWriter) shouldSendContentLength() bool {
 	return false
 }
 
-func (t *transferWriter) writeHeader(w io.Writer, trace *httptrace.ClientTrace) error {
+func (t *transferWriter) writeHeader(w io.Writer, trace *httptrace.ClientTrace) (rerr error) {
 	if t.Close && !hasToken(t.Header.get("Connection"), "close") {
 		if _, err := io.WriteString(w, "Connection: close\r\n"); err != nil {
 			return err
@@ -427,7 +438,7 @@ func (t *transferWriter) doBodyCopy(dst io.Writer, src io.Reader) (n int64, err 
 // files (*os.File types) are properly optimized.
 //
 // This function is only intended for use in writeBody.
-func (t *transferWriter) unwrapBody() io.Reader {
+func (t *transferWriter) unwrapBody() (rreader io.Reader) {
 	if r, ok := unwrapNopCloser(t.Body); ok {
 		return r
 	}
@@ -453,13 +464,13 @@ type transferReader struct {
 	Trailer       Header
 }
 
-func (t *transferReader) protoAtLeast(m, n int32) bool {
+func (t *transferReader) protoAtLeast(m, n int32) (rok bool) {
 	return t.ProtoMajor > m || (t.ProtoMajor == m && t.ProtoMinor >= n)
 }
 
 // bodyAllowedForStatus reports whether a given response status code
 // permits a body. See RFC 7230, section 3.3.
-func bodyAllowedForStatus(status int32) bool {
+func bodyAllowedForStatus(status int32) (rok bool) {
 	switch {
 	case status >= 100 && status <= 199:
 		return false
@@ -471,17 +482,17 @@ func bodyAllowedForStatus(status int32) bool {
 	return true
 }
 
-func _suppressedHeaders304() [][]byte {
+func _suppressedHeaders304() (rbyte [][]byte) {
 	return [][]byte{"Content-Type", "Content-Length", "Transfer-Encoding"}
 }
-func _suppressedHeadersNoBody() [][]byte {
+func _suppressedHeadersNoBody() (rbyte [][]byte) {
 	return [][]byte{"Content-Length", "Transfer-Encoding"}
 }
-func _excludedHeadersNoBody() map[string]bool {
+func _excludedHeadersNoBody() (rm map[string]bool) {
 	return map[string]bool{"Content-Length": true, "Transfer-Encoding": true}
 }
 
-func suppressedHeaders(status int32) [][]byte {
+func suppressedHeaders(status int32) (rbyte [][]byte) {
 	switch {
 	case status == 304:
 		// RFC 7232 section 4.1
@@ -493,7 +504,7 @@ func suppressedHeaders(status int32) [][]byte {
 }
 
 // msg is *Request or *Response.
-func readTransfer(msg any, r *bufio.Reader) (err error) {
+func readTransfer(msg httpMsg, r *bufio.Reader) (err error) {
 	t := &transferReader{RequestMethod: "GET"}
 
 	// Unify input
@@ -611,31 +622,31 @@ func readTransfer(msg any, r *bufio.Reader) (err error) {
 }
 
 // Checks whether chunked is part of the encodings stack.
-func chunked(te [][]byte) bool { return len(te) > 0 && te[0] == "chunked" }
+func chunked(te [][]byte) (rok bool) { return len(te) > 0 && te[0] == "chunked" }
 
 // Checks whether the encoding is explicitly "identity".
-func isIdentity(te [][]byte) bool { return len(te) == 1 && te[0] == "identity" }
+func isIdentity(te [][]byte) (rok bool) { return len(te) == 1 && te[0] == "identity" }
 
 // unsupportedTEError reports unsupported transfer-encodings.
 type unsupportedTEError struct {
 	err string
 }
 
-func (uste *unsupportedTEError) Error() string {
+func (uste *unsupportedTEError) Error() (rs string) {
 	return uste.err
 }
 
-func (uste *unsupportedTEError) String() string { return uste.Error() }
+func (uste *unsupportedTEError) String() (rs string) { return uste.Error() }
 
 // isUnsupportedTEError checks if the error is of type
 // unsupportedTEError. It is usually invoked with a non-nil err.
-func isUnsupportedTEError(err error) bool {
+func isUnsupportedTEError(err error) (rok bool) {
 	_, ok := err.(*unsupportedTEError)
 	return ok
 }
 
 // parseTransferEncoding sets t.Chunked based on the Transfer-Encoding header.
-func (t *transferReader) parseTransferEncoding() error {
+func (t *transferReader) parseTransferEncoding() (rerr error) {
 	raw, present := t.Header["Transfer-Encoding"]
 	if !present {
 		return nil
@@ -752,7 +763,7 @@ func fixLength(isResponse bool, status int32, requestMethod string, header Heade
 // Determine whether to hang up after sending a request and body, or
 // receiving a response and body
 // 'header' is the request headers.
-func shouldClose(major, minor int32, header Header, removeCloseHeader bool) bool {
+func shouldClose(major, minor int32, header Header, removeCloseHeader bool) (rok bool) {
 	if major < 1 {
 		return true
 	}
@@ -771,7 +782,7 @@ func shouldClose(major, minor int32, header Header, removeCloseHeader bool) bool
 }
 
 // Parse the trailer header.
-func fixTrailer(header Header, chunked bool) (Header, error) {
+func fixTrailer(header Header, chunked bool) (rheader Header, rerr error) {
 	vv, ok := header["Trailer"]
 	if !ok {
 		return nil, nil
@@ -817,7 +828,7 @@ func fixTrailer(header Header, chunked bool) (Header, error) {
 // and then reads the trailer if necessary.
 type body struct {
 	src          io.Reader
-	hdr          any           // non-nil (Response or Request) value means read trailer
+	hdr          httpMsg       // non-nil (Response or Request) value means read trailer
 	r            *bufio.Reader // underlying wire-format reader for the trailer
 	closing      bool          // is the connection to be closed after reading body?
 	doEarlyClose bool          // whether Close should stop early
@@ -832,7 +843,7 @@ type body struct {
 // Body after the body has been closed. This typically happens when the body is
 // read after an HTTP [Handler] calls WriteHeader or Write on its
 // [ResponseWriter].
-const ErrBodyReadAfterClose = errors.Const("http: invalid Read on closed Body")
+var ErrBodyReadAfterClose error
 
 func (b *body) Read(p []byte) (n int32, err error) {
 	if b.closed {
@@ -895,7 +906,7 @@ const (
 	doubleCRLF = "\r\n\r\n"
 )
 
-func seeUpcomingDoubleCRLF(r *bufio.Reader) bool {
+func seeUpcomingDoubleCRLF(r *bufio.Reader) (rok bool) {
 	for peekSize := 4; ; peekSize++ {
 		// This loop stops when Peek returns an error,
 		// which it does when r's buffer has been filled.
@@ -910,9 +921,9 @@ func seeUpcomingDoubleCRLF(r *bufio.Reader) bool {
 	return false
 }
 
-const errTrailerEOF = errors.Const("http: unexpected EOF reading trailer")
+var errTrailerEOF error
 
-func (b *body) readTrailer() error {
+func (b *body) readTrailer() (rerr error) {
 	// The common case, since nobody uses trailers.
 	buf, err := b.r.Peek(2)
 	if bytes.Equal(buf, singleCRLF) {
@@ -965,14 +976,14 @@ func mergeSetHeader(dst *Header, src Header) {
 // unreadDataSizeLocked returns the number of bytes of unread input.
 // It returns -1 if unknown.
 // b.mu must be held.
-func (b *body) unreadDataSizeLocked() int64 {
+func (b *body) unreadDataSizeLocked() (rn int64) {
 	if lr, ok := b.src.(*io.LimitedReader); ok {
 		return lr.N
 	}
 	return -1
 }
 
-func (b *body) Close() error {
+func (b *body) Close() (rerr error) {
 	if b.closed {
 		return nil
 	}
@@ -1011,13 +1022,13 @@ func (b *body) Close() error {
 	return err
 }
 
-func (b *body) didEarlyClose() bool {
+func (b *body) didEarlyClose() (rok bool) {
 	return b.earlyClose
 }
 
 // bodyRemains reports whether future Read calls might
 // yield data.
-func (b *body) bodyRemains() bool {
+func (b *body) bodyRemains() (rok bool) {
 	return !b.sawEOF
 }
 
@@ -1031,7 +1042,7 @@ type bodyLocked struct {
 	b *body
 }
 
-func (bl bodyLocked) Read(p []byte) (n int32, err error) {
+func (bl *bodyLocked) Read(p []byte) (n int32, err error) {
 	if bl.b.closed {
 		return 0, ErrBodyReadAfterClose
 	}
@@ -1041,7 +1052,7 @@ func (bl bodyLocked) Read(p []byte) (n int32, err error) {
 // parseContentLength checks that the header is valid and then trims
 // whitespace. It returns -1 if no value is set otherwise the value
 // if it's >= 0.
-func parseContentLength(clHeaders [][]byte) (int64, error) {
+func parseContentLength(clHeaders [][]byte) (rn int64, rerr error) {
 	if len(clHeaders) == 0 {
 		return -1, nil
 	}
@@ -1065,7 +1076,7 @@ type finishAsyncByteRead struct {
 	tw *transferWriter
 }
 
-func (fr finishAsyncByteRead) Read(p []byte) (n int32, err error) {
+func (fr *finishAsyncByteRead) Read(p []byte) (n int32, err error) {
 	if len(p) == 0 {
 		return
 	}
@@ -1089,7 +1100,7 @@ func unwrapNopCloser(r io.Reader) (underlyingReader io.Reader, isNopCloser bool)
 // isKnownInMemoryReader reports whether r is a type known to not
 // block on Read. Its caller uses this as an optional optimization to
 // send fewer TCP packets.
-func isKnownInMemoryReader(r io.Reader) bool {
+func isKnownInMemoryReader(r io.Reader) (rok bool) {
 	switch r.(type) {
 	case *bytes.Reader, *bytes.Buffer:
 		return true
@@ -1107,7 +1118,7 @@ func isKnownInMemoryReader(r io.Reader) bool {
 // on its wrapped writer if it's a *bufio.Writer.
 type bufioFlushWriter struct{ w io.Writer }
 
-func (fw bufioFlushWriter) Write(p []byte) (n int32, err error) {
+func (fw *bufioFlushWriter) Write(p []byte) (n int32, err error) {
 	n, err = fw.w.Write(p)
 	if bw, ok := fw.w.(*bufio.Writer); n > 0 && ok {
 		ferr := bw.Flush()

@@ -142,7 +142,7 @@ type ModNScalar struct {
 // String returns the scalar as a human-readable hex string.
 //
 // This is NOT constant time.
-func (s ModNScalar) String() string {
+func (s *ModNScalar) String() (str string) {
 	b := s.Bytes()
 	return string(hex.EncodeToString(b[:]))
 }
@@ -152,7 +152,7 @@ func (s ModNScalar) String() string {
 // The scalar is returned to support chaining.  This enables syntax like:
 // s := new(ModNScalar).Set(s2).Add(1) so that s = s2 + 1 where s2 is not
 // modified.
-func (s *ModNScalar) Set(val *ModNScalar) *ModNScalar {
+func (s *ModNScalar) Set(val *ModNScalar) (out *ModNScalar) {
 	*s = *val
 	return s
 }
@@ -178,14 +178,14 @@ func (s *ModNScalar) Zero() {
 // from a bool to numeric value in constant time and many constant-time
 // operations require a numeric value.  See IsZero for the version that returns
 // a bool.
-func (s *ModNScalar) IsZeroBit() uint32 {
+func (s *ModNScalar) IsZeroBit() (i uint32) {
 	// The scalar can only be zero if no bits are set in any of the words.
 	acc := s.n[0] | s.n[1] | s.n[2] | s.n[3] | s.n[4] | s.n[5] | s.n[6] | s.n[7]
 	return constantTimeEq(acc, 0)
 }
 
 // IsZero returns whether or not the scalar is equal to zero in constant time.
-func (s *ModNScalar) IsZero() bool {
+func (s *ModNScalar) IsZero() (ok bool) {
 	// The scalar can only be zero if no bits are set in any of the words.
 	acc := s.n[0] | s.n[1] | s.n[2] | s.n[3] | s.n[4] | s.n[5] | s.n[6] | s.n[7]
 	return acc == 0
@@ -197,50 +197,50 @@ func (s *ModNScalar) IsZero() bool {
 //
 // The scalar is returned to support chaining.  This enables syntax like:
 // s := new(ModNScalar).SetInt(2).Mul(s2) so that s = 2 * s2.
-func (s *ModNScalar) SetInt(ui uint32) *ModNScalar {
+func (s *ModNScalar) SetInt(ui uint32) (out *ModNScalar) {
 	s.Zero()
 	s.n[0] = ui
 	return s
 }
 
 // constantTimeEq returns 1 if a == b or 0 otherwise in constant time.
-func constantTimeEq(a, b uint32) uint32 {
+func constantTimeEq(a, b uint32) (n uint32) {
 	return uint32((uint64(a^b) - 1) >> 63)
 }
 
 // constantTimeNotEq returns 1 if a != b or 0 otherwise in constant time.
-func constantTimeNotEq(a, b uint32) uint32 {
+func constantTimeNotEq(a, b uint32) (n uint32) {
 	return ^uint32((uint64(a^b)-1)>>63) & 1
 }
 
 // constantTimeLess returns 1 if a < b or 0 otherwise in constant time.
-func constantTimeLess(a, b uint32) uint32 {
+func constantTimeLess(a, b uint32) (n uint32) {
 	return uint32((uint64(a) - uint64(b)) >> 63)
 }
 
 // constantTimeLessOrEq returns 1 if a <= b or 0 otherwise in constant time.
-func constantTimeLessOrEq(a, b uint32) uint32 {
+func constantTimeLessOrEq(a, b uint32) (n uint32) {
 	return uint32((uint64(a) - uint64(b) - 1) >> 63)
 }
 
 // constantTimeGreater returns 1 if a > b or 0 otherwise in constant time.
-func constantTimeGreater(a, b uint32) uint32 {
+func constantTimeGreater(a, b uint32) (n uint32) {
 	return constantTimeLess(b, a)
 }
 
 // constantTimeGreaterOrEq returns 1 if a >= b or 0 otherwise in constant time.
-func constantTimeGreaterOrEq(a, b uint32) uint32 {
+func constantTimeGreaterOrEq(a, b uint32) (n uint32) {
 	return constantTimeLessOrEq(b, a)
 }
 
 // constantTimeMin returns min(a,b) in constant time.
-func constantTimeMin(a, b uint32) uint32 {
+func constantTimeMin(a, b uint32) (n uint32) {
 	return b ^ ((a ^ b) & -constantTimeLess(a, b))
 }
 
 // overflows determines if the current scalar is greater than or equal to the
 // group order in constant time and returns 1 if it is or 0 otherwise.
-func (s *ModNScalar) overflows() uint32 {
+func (s *ModNScalar) overflows() (i uint32) {
 	// The intuition here is that the scalar is greater than the group order if
 	// one of the higher individual words is greater than corresponding word of
 	// the group order and all higher words in the scalar are equal to their
@@ -313,7 +313,7 @@ func (s *ModNScalar) reduce256(overflows uint32) {
 // Note that a bool is not used here because it is not possible in Go to convert
 // from a bool to numeric value in constant time and many constant-time
 // operations require a numeric value.
-func (s *ModNScalar) SetBytes(b *[32]byte) uint32 {
+func (s *ModNScalar) SetBytes(b *[32]byte) (i uint32) {
 	// Pack the 256 total bits across the 8 uint32 words.  This could be done
 	// with a for loop, but benchmarks show this unrolled version is about 2
 	// times faster than the variant that uses a loop.
@@ -346,7 +346,7 @@ func zeroArray32(b *[32]byte) { *b = [32]byte{} }
 // the caller to decide whether it needs to provide numbers of the appropriate
 // size or it is acceptable to use this function with the described truncation
 // and overflow behavior.
-func (s *ModNScalar) SetByteSlice(b []byte) bool {
+func (s *ModNScalar) SetByteSlice(b []byte) (ok bool) {
 	var b32 [32]byte
 	b = b[:constantTimeMin(uint32(len(b)), 32)]
 	copy(b32[:], b32[:32-len(b)])
@@ -423,20 +423,20 @@ func (s *ModNScalar) PutBytes(b *[32]byte) { s.PutBytesUnchecked(b[:]) }
 // to be passed which can be useful to cut down on the number of allocations
 // by allowing the caller to reuse a buffer or write directly into part of a
 // larger buffer.
-func (s *ModNScalar) Bytes() [32]byte {
+func (s *ModNScalar) Bytes() (out [32]byte) {
 	var b [32]byte
 	s.PutBytesUnchecked(b[:])
 	return b
 }
 
 // IsOdd returns whether the scalar is an odd number in constant time.
-func (s *ModNScalar) IsOdd() bool {
+func (s *ModNScalar) IsOdd() (ok bool) {
 	// Only odd numbers have the bottom bit set.
 	return s.n[0]&1 == 1
 }
 
 // Equals returns whether or not the two scalars are the same in constant time.
-func (s *ModNScalar) Equals(val *ModNScalar) bool {
+func (s *ModNScalar) Equals(val *ModNScalar) (ok bool) {
 	// Xor only sets bits when they are different, so the two scalars can only
 	// be the same if no bits are set after xoring each word.
 	acc := (s.n[0] ^ val.n[0]) | (s.n[1] ^ val.n[1]) | (s.n[2] ^ val.n[2]) |
@@ -451,7 +451,7 @@ func (s *ModNScalar) Equals(val *ModNScalar) bool {
 //
 // The scalar is returned to support chaining.  This enables syntax like:
 // s3.Add2(s, s2).AddInt(1) so that s3 = s + s2 + 1.
-func (s *ModNScalar) Add2(val1, val2 *ModNScalar) *ModNScalar {
+func (s *ModNScalar) Add2(val1, val2 *ModNScalar) (out *ModNScalar) {
 	c := uint64(val1.n[0]) + uint64(val2.n[0])
 	s.n[0] = uint32(c & uint32Mask)
 	c = (c >> 32) + uint64(val1.n[1]) + uint64(val2.n[1])
@@ -479,7 +479,7 @@ func (s *ModNScalar) Add2(val1, val2 *ModNScalar) *ModNScalar {
 //
 // The scalar is returned to support chaining.  This enables syntax like:
 // s.Add(s2).AddInt(1) so that s = s + s2 + 1.
-func (s *ModNScalar) Add(val *ModNScalar) *ModNScalar { return s.Add2(s, val) }
+func (s *ModNScalar) Add(val *ModNScalar) (out *ModNScalar) { return s.Add2(s, val) }
 
 // accumulator96 provides a 96-bit accumulator for use in the intermediate
 // calculations requiring more than 64-bits.
@@ -775,7 +775,7 @@ func (s *ModNScalar) reduce512(t0, t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11,
 //
 // The scalar is returned to support chaining.  This enables syntax like:
 // s3.Mul2(s, s2).AddInt(1) so that s3 = (s * s2) + 1.
-func (s *ModNScalar) Mul2(val, val2 *ModNScalar) *ModNScalar {
+func (s *ModNScalar) Mul2(val, val2 *ModNScalar) (out *ModNScalar) {
 	// This could be done with for loops and an array to store the intermediate
 	// terms, but this unrolled version is significantly faster.
 	//
@@ -923,7 +923,7 @@ func (s *ModNScalar) Mul2(val, val2 *ModNScalar) *ModNScalar {
 //
 // The scalar is returned to support chaining.  This enables syntax like:
 // s.Mul(s2).AddInt(1) so that s = (s * s2) + 1.
-func (s *ModNScalar) Mul(val *ModNScalar) *ModNScalar {
+func (s *ModNScalar) Mul(val *ModNScalar) (out *ModNScalar) {
 	return s.Mul2(s, val)
 }
 
@@ -932,7 +932,7 @@ func (s *ModNScalar) Mul(val *ModNScalar) *ModNScalar {
 //
 // The scalar is returned to support chaining.  This enables syntax like:
 // s3.SquareVal(s).Mul(s) so that s3 = s^2 * s = s^3.
-func (s *ModNScalar) SquareVal(val *ModNScalar) *ModNScalar {
+func (s *ModNScalar) SquareVal(val *ModNScalar) (out *ModNScalar) {
 	// This could technically be optimized slightly to take advantage of the
 	// fact that many of the intermediate calculations in squaring are just
 	// doubling, however, benchmarking has shown that due to the need to use a
@@ -948,7 +948,7 @@ func (s *ModNScalar) SquareVal(val *ModNScalar) *ModNScalar {
 //
 // The scalar is returned to support chaining.  This enables syntax like:
 // s.Square().Mul(s2) so that s = s^2 * s2.
-func (s *ModNScalar) Square() *ModNScalar {
+func (s *ModNScalar) Square() (out *ModNScalar) {
 	return s.SquareVal(s)
 }
 
@@ -957,7 +957,7 @@ func (s *ModNScalar) Square() *ModNScalar {
 //
 // The scalar is returned to support chaining.  This enables syntax like:
 // s.NegateVal(s2).AddInt(1) so that s = -s2 + 1.
-func (s *ModNScalar) NegateVal(val *ModNScalar) *ModNScalar {
+func (s *ModNScalar) NegateVal(val *ModNScalar) (out *ModNScalar) {
 	// Since the scalar is already in the range 0 <= val < N, where N is the
 	// group order, negation modulo the group order is just the group order
 	// minus the value.  This implies that the result will always be in the
@@ -997,14 +997,14 @@ func (s *ModNScalar) NegateVal(val *ModNScalar) *ModNScalar {
 //
 // The scalar is returned to support chaining.  This enables syntax like:
 // s.Negate().AddInt(1) so that s = -s + 1.
-func (s *ModNScalar) Negate() *ModNScalar { return s.NegateVal(s) }
+func (s *ModNScalar) Negate() (out *ModNScalar) { return s.NegateVal(s) }
 
 // InverseValNonConst finds the modular multiplicative inverse of the passed
 // scalar and stores result in s in *non-constant* time.
 //
 // The scalar is returned to support chaining.  This enables syntax like:
 // s3.InverseVal(s1).Mul(s2) so that s3 = s1^-1 * s2.
-func (s *ModNScalar) InverseValNonConst(val *ModNScalar) *ModNScalar {
+func (s *ModNScalar) InverseValNonConst(val *ModNScalar) (out *ModNScalar) {
 	// This is making use of big integers for now.  Ideally it will be replaced
 	// with an implementation that does not depend on big integers.
 	valBytes := val.Bytes()
@@ -1019,13 +1019,13 @@ func (s *ModNScalar) InverseValNonConst(val *ModNScalar) *ModNScalar {
 //
 // The scalar is returned to support chaining.  This enables syntax like:
 // s.Inverse().Mul(s2) so that s = s^-1 * s2.
-func (s *ModNScalar) InverseNonConst() *ModNScalar {
+func (s *ModNScalar) InverseNonConst() (out *ModNScalar) {
 	return s.InverseValNonConst(s)
 }
 
 // IsOverHalfOrder returns whether the scalar exceeds the group order
 // divided by 2 in constant time.
-func (s *ModNScalar) IsOverHalfOrder() bool {
+func (s *ModNScalar) IsOverHalfOrder() (ok bool) {
 	// The intuition here is that the scalar is greater than half of the group
 	// order if one of the higher individual words is greater than the
 	// corresponding word of the half group order and all higher words in the

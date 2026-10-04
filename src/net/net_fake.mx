@@ -38,7 +38,7 @@ type fakeSockAddr struct {
 	address string
 }
 
-func fakeAddr(sa sockaddr) fakeSockAddr {
+func fakeAddr(sa sockaddr) (rfakeSockAddr fakeSockAddr) {
 	return fakeSockAddr{
 		family:  sa.family(),
 		address: sa.String(),
@@ -47,7 +47,7 @@ func fakeAddr(sa sockaddr) fakeSockAddr {
 
 // socket returns a network file descriptor that is ready for
 // I/O using the fake network.
-func socket(ctx context.Context, net string, family, sotype, proto int32, ipv6only bool, laddr, raddr sockaddr, ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) (*netFD, error) {
+func socket(ctx context.Context, net string, family, sotype, proto int32, ipv6only bool, laddr, raddr sockaddr, ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) (rnetFD *netFD, rerr error) {
 	fakeNetInit()
 	if raddr != nil && ctrlCtxFn != nil {
 		return nil, os.NewSyscallError("socket", syscall.ENOTSUP)
@@ -80,7 +80,7 @@ func socket(ctx context.Context, net string, family, sotype, proto int32, ipv6on
 	return fd, nil
 }
 
-func validateResolvedAddr(net string, family int32, sa sockaddr) error {
+func validateResolvedAddr(net string, family int32, sa sockaddr) (rerr error) {
 	validateIP := func(ip IP) error {
 		switch family {
 		case syscall.AF_INET:
@@ -181,7 +181,7 @@ func validateResolvedAddr(net string, family int32, sa sockaddr) error {
 	}
 }
 
-func matchIPFamily(family int32, addr sockaddr) sockaddr {
+func matchIPFamily(family int32, addr sockaddr) (rsockaddr sockaddr) {
 	convertIP := func(ip IP) IP {
 		switch family {
 		case syscall.AF_INET:
@@ -229,7 +229,7 @@ type fakeNetFD struct {
 	incomingEmpty chan bool     // holds true when the incoming queue is empty
 }
 
-func newFakeNetFD(fd *netFD) *fakeNetFD {
+func newFakeNetFD(fd *netFD) (rfakeNetFD *fakeNetFD) {
 	ffd := &fakeNetFD{fd: fd}
 	ffd.readDeadline = newDeadlineTimer(noDeadline())
 	ffd.writeDeadline = newDeadlineTimer(noDeadline())
@@ -313,18 +313,18 @@ func (ffd *fakeNetFD) Close() (err error) {
 	return err
 }
 
-func (ffd *fakeNetFD) closeRead() error {
+func (ffd *fakeNetFD) closeRead() (rerr error) {
 	return ffd.queue.closeRead()
 }
 
-func (ffd *fakeNetFD) closeWrite() error {
+func (ffd *fakeNetFD) closeWrite() (rerr error) {
 	if ffd.peer == nil {
 		return os.NewSyscallError("closeWrite", syscall.ENOTCONN)
 	}
 	return ffd.peer.queue.closeWrite()
 }
 
-func (ffd *fakeNetFD) accept(laddr Addr) (*netFD, error) {
+func (ffd *fakeNetFD) accept(laddr Addr) (rnetFD *netFD, rerr error) {
 	if ffd.incoming == nil {
 		return nil, os.NewSyscallError("accept", syscall.EINVAL)
 	}
@@ -366,7 +366,7 @@ func (ffd *fakeNetFD) accept(laddr Addr) (*netFD, error) {
 	return peer, nil
 }
 
-func (ffd *fakeNetFD) SetDeadline(t time.Time) error {
+func (ffd *fakeNetFD) SetDeadline(t time.Time) (rerr error) {
 	err1 := ffd.SetReadDeadline(t)
 	err2 := ffd.SetWriteDeadline(t)
 	if err1 != nil {
@@ -375,14 +375,14 @@ func (ffd *fakeNetFD) SetDeadline(t time.Time) error {
 	return err2
 }
 
-func (ffd *fakeNetFD) SetReadDeadline(t time.Time) error {
+func (ffd *fakeNetFD) SetReadDeadline(t time.Time) (rerr error) {
 	if !ffd.readDeadline.Reset(t) {
 		ffd.readDeadline = newDeadlineTimer(t)
 	}
 	return nil
 }
 
-func (ffd *fakeNetFD) SetWriteDeadline(t time.Time) error {
+func (ffd *fakeNetFD) SetWriteDeadline(t time.Time) (rerr error) {
 	if !ffd.writeDeadline.Reset(t) {
 		ffd.writeDeadline = newDeadlineTimer(t)
 	}
@@ -423,7 +423,7 @@ type packetQueue struct {
 	full  chan packetQueueState // contains the packets when buffer is full and not closed
 }
 
-func newPacketQueue(readBufferBytes int32) *packetQueue {
+func newPacketQueue(readBufferBytes int32) (rpacketQueue *packetQueue) {
 	pq := &packetQueue{
 		empty: chan packetQueueState{1},
 		ready: chan packetQueueState{1},
@@ -435,7 +435,7 @@ func newPacketQueue(readBufferBytes int32) *packetQueue {
 	return pq
 }
 
-func (pq *packetQueue) get() packetQueueState {
+func (pq *packetQueue) get() (rpacketQueueState packetQueueState) {
 	var q packetQueueState
 	select {
 	case q = <-pq.empty:
@@ -461,21 +461,21 @@ func (pq *packetQueue) put(q packetQueueState) {
 	}
 }
 
-func (pq *packetQueue) closeRead() error {
+func (pq *packetQueue) closeRead() (rerr error) {
 	q := pq.get()
 	q.readClosed = true
 	pq.put(q)
 	return nil
 }
 
-func (pq *packetQueue) closeWrite() error {
+func (pq *packetQueue) closeWrite() (rerr error) {
 	q := pq.get()
 	q.writeClosed = true
 	pq.put(q)
 	return nil
 }
 
-func (pq *packetQueue) setLinger(linger bool) error {
+func (pq *packetQueue) setLinger(linger bool) (rerr error) {
 	q := pq.get()
 	defer func() { pq.put(q) }()
 
@@ -630,7 +630,7 @@ func (pq *packetQueue) recvfrom(dt *deadlineTimer, b []byte, wholePacket bool, c
 
 // setReadBuffer sets a soft limit on the number of bytes available to read
 // from the pipe.
-func (pq *packetQueue) setReadBuffer(bytes int32) error {
+func (pq *packetQueue) setReadBuffer(bytes int32) (rerr error) {
 	if bytes <= 0 {
 		return os.NewSyscallError("setReadBuffer", syscall.EINVAL)
 	}
@@ -645,7 +645,7 @@ type deadlineTimer struct {
 	expired chan struct{}
 }
 
-func newDeadlineTimer(deadline time.Time) *deadlineTimer {
+func newDeadlineTimer(deadline time.Time) (rdeadlineTimer *deadlineTimer) {
 	dt := &deadlineTimer{
 		timer:   chan *time.Timer{1},
 		expired: chan struct{}{},
@@ -657,7 +657,7 @@ func newDeadlineTimer(deadline time.Time) *deadlineTimer {
 
 // Reset attempts to reset the timer.
 // If the timer has already expired, Reset returns false.
-func (dt *deadlineTimer) Reset(deadline time.Time) bool {
+func (dt *deadlineTimer) Reset(deadline time.Time) (rok bool) {
 	timer := <-dt.timer
 	defer func() { dt.timer <- timer }()
 
@@ -685,7 +685,7 @@ func (dt *deadlineTimer) Reset(deadline time.Time) bool {
 	return true
 }
 
-func sysSocket(family, sotype, proto int32) (int32, error) {
+func sysSocket(family, sotype, proto int32) (rn int32, rerr error) {
 	return 0, os.NewSyscallError("sysSocket", syscall.ENOSYS)
 }
 
@@ -743,7 +743,7 @@ func fakeListen(fd *netFD, laddr sockaddr) (err error) {
 	return nil
 }
 
-func fakeConnect(ctx context.Context, fd *netFD, laddr, raddr sockaddr) error {
+func fakeConnect(ctx context.Context, fd *netFD, laddr, raddr sockaddr) (rerr error) {
 	wrapErr := func(err error) error {
 		if errno, ok := err.(syscall.Errno); ok {
 			err = os.NewSyscallError("connect", errno)
@@ -855,7 +855,7 @@ func fakeConnect(ctx context.Context, fd *netFD, laddr, raddr sockaddr) error {
 	return nil
 }
 
-func (ffd *fakeNetFD) assignFakeAddr(addr sockaddr) error {
+func (ffd *fakeNetFD) assignFakeAddr(addr sockaddr) (rerr error) {
 	validate := func(sa sockaddr) error {
 		if err := validateResolvedAddr(ffd.fd.net, ffd.fd.family, sa); err != nil {
 			return err
@@ -1135,7 +1135,7 @@ func (ffd *fakeNetFD) dup() (f *os.File, err error) {
 	return nil, os.NewSyscallError("dup", syscall.ENOSYS)
 }
 
-func (ffd *fakeNetFD) setReadBuffer(bytes int32) error {
+func (ffd *fakeNetFD) setReadBuffer(bytes int32) (rerr error) {
 	if ffd.queue == nil {
 		return os.NewSyscallError("setReadBuffer", syscall.EINVAL)
 	}
@@ -1143,11 +1143,11 @@ func (ffd *fakeNetFD) setReadBuffer(bytes int32) error {
 	return nil
 }
 
-func (ffd *fakeNetFD) setWriteBuffer(bytes int32) error {
+func (ffd *fakeNetFD) setWriteBuffer(bytes int32) (rerr error) {
 	return os.NewSyscallError("setWriteBuffer", syscall.ENOTSUP)
 }
 
-func (ffd *fakeNetFD) setLinger(sec int32) error {
+func (ffd *fakeNetFD) setLinger(sec int32) (rerr error) {
 	if sec < 0 || ffd.peer == nil {
 		return os.NewSyscallError("setLinger", syscall.EINVAL)
 	}

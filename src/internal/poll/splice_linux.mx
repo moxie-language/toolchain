@@ -82,7 +82,7 @@ func Splice(dst, src *FD, remain int64) (written int64, handled bool, err error)
 // ready for reading.
 //
 // If spliceDrain returns (0, nil), src is at EOF.
-func spliceDrain(pipefd int32, sock *FD, limit int32) (int32, error) {
+func spliceDrain(pipefd int32, sock *FD, limit int32) (rn int32, rerr error) {
 	if err := sock.readLock(); err != nil {
 		return 0, err
 	}
@@ -103,8 +103,8 @@ func spliceDrain(pipefd int32, sock *FD, limit int32) (int32, error) {
 			return n, err
 		}
 		if sock.pd.pollable() {
-			if rerr := sock.pd.waitRead(sock.isFile); rerr != nil {
-				return n, rerr
+			if werr := sock.pd.waitRead(sock.isFile); werr != nil {
+				return n, werr
 			}
 		}
 	}
@@ -123,7 +123,7 @@ func spliceDrain(pipefd int32, sock *FD, limit int32) (int32, error) {
 // splice(2), it loops over the buffered data until it has written
 // all of it to the socket. This behavior is similar to the Write
 // step of an io.Copy in userspace.
-func splicePump(sock *FD, pipefd int32, inPipe int32) (int32, error) {
+func splicePump(sock *FD, pipefd int32, inPipe int32) (rn int32, rerr error) {
 	if err := sock.writeLock(); err != nil {
 		return 0, err
 	}
@@ -152,8 +152,8 @@ func splicePump(sock *FD, pipefd int32, inPipe int32) (int32, error) {
 			return written, err
 		}
 		if sock.pd.pollable() {
-			if rerr := sock.pd.waitWrite(sock.isFile); rerr != nil {
-				return written, rerr
+			if werr := sock.pd.waitWrite(sock.isFile); werr != nil {
+				return written, werr
 			}
 		}
 	}
@@ -164,7 +164,7 @@ func splicePump(sock *FD, pipefd int32, inPipe int32) (int32, error) {
 // only uses splice on sockets and pipes, the offset arguments are unused.
 // splice returns int32 instead of int64, because callers never ask it to
 // move more data in a single call than can fit in an int32.
-func splice(out int32, in int32, limit int32, flags int32) (int32, error) {
+func splice(out int32, in int32, limit int32, flags int32) (rn int32, rerr error) {
 	n, err := syscall.Splice(in, nil, out, nil, limit, flags)
 	return int32(n), err
 }
@@ -181,7 +181,7 @@ type splicePipe struct {
 }
 
 // getPipe creates a new pipe buffer for splice operations.
-func getPipe() (*splicePipe, error) {
+func getPipe() (rp *splicePipe, rerr error) {
 	p := newPipe()
 	if p == nil {
 		return nil, syscall.EINVAL
@@ -198,7 +198,7 @@ func putPipe(p *splicePipe) {
 }
 
 // newPipe sets up a pipe for a splice operation.
-func newPipe() *splicePipe {
+func newPipe() (rp *splicePipe) {
 	var fds [2]int32
 	if err := syscall.Pipe2(fds[:], syscall.O_CLOEXEC|syscall.O_NONBLOCK); err != nil {
 		return nil

@@ -43,7 +43,7 @@ const (
 	maxRequestSize = (1 << 19) / 8
 )
 
-func NewCounter(seedMaterial *[SeedSize]byte) *Counter {
+func NewCounter(seedMaterial *[SeedSize]byte) (ret0 *Counter) {
 	// CTR_DRBG_Instantiate_algorithm, per Section 10.2.1.3.1.
 	fips140.RecordApproved()
 
@@ -75,7 +75,7 @@ func (c *Counter) update(seed *[SeedSize]byte) {
 	V := temp[keySize:]
 
 	// Again, we pre-increment V, like in NewCounter.
-	increment((*[aes.BlockSize]byte)(V))
+	increment(V)
 
 	cipher, err := aes.New(K)
 	if err != nil {
@@ -84,13 +84,27 @@ func (c *Counter) update(seed *[SeedSize]byte) {
 	c.c = *aes.NewCTR(cipher, V)
 }
 
-func increment(v *[aes.BlockSize]byte) {
+// increment adds one to the 128-bit big-endian counter in v. Writes go through
+// direct indexing because a subslice is a copy in Moxie, so byteorder.Put would
+// land in a throwaway slice.
+func increment(v []byte) {
 	hi := byteorder.BEUint64(v[:8])
 	lo := byteorder.BEUint64(v[8:])
 	lo, c := bits.Add64(lo, 1, 0)
 	hi, _ = bits.Add64(hi, 0, c)
-	byteorder.BEPutUint64(v[:8], hi)
-	byteorder.BEPutUint64(v[8:], lo)
+	putBE64(v, 0, hi)
+	putBE64(v, 8, lo)
+}
+
+func putBE64(v []byte, off int32, x uint64) {
+	v[off+0] = byte(x >> 56)
+	v[off+1] = byte(x >> 48)
+	v[off+2] = byte(x >> 40)
+	v[off+3] = byte(x >> 32)
+	v[off+4] = byte(x >> 24)
+	v[off+5] = byte(x >> 16)
+	v[off+6] = byte(x >> 8)
+	v[off+7] = byte(x)
 }
 
 func (c *Counter) Reseed(seedMaterial, additionalInput *[SeedSize]byte) {

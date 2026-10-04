@@ -15,10 +15,42 @@ import (
 
 // ErrMessageTooLarge is returned by ReadForm if the message form
 // data is too large to be processed.
-const ErrMessageTooLarge = errors.Const("multipart: message too large")
+var ErrMessageTooLarge error
 
 // TODO(adg,bradfitz): find a way to unify the DoS-prevention strategy here
 // with that of the http package's ParseForm.
+
+// formCleanup carries the state readForm must release on every exit. It is a
+// sovereign self-mutating value so the deferred release is an explicit
+// argument instead of a capturing closure.
+type formCleanup struct {
+	form         *Form
+	file         *os.File
+	combineFiles bool
+	numDiskFiles int32
+	err          *error
+}
+
+func formCleanupRun(c *formCleanup) {
+	if c.file != nil {
+		if cerr := c.file.Close(); *c.err == nil {
+			*c.err = cerr
+		}
+	}
+	if c.combineFiles && c.numDiskFiles > 1 {
+		for _, fhs := range c.form.File {
+			for _, fh := range fhs {
+				fh.tmpshared = true
+			}
+		}
+	}
+	if *c.err != nil {
+		c.form.RemoveAll()
+		if c.file != nil {
+			os.Remove(c.file.Name())
+		}
+	}
+}
 
 // ReadForm parses an entire multipart message whose parts have
 // a Content-Disposition of "form-data".
@@ -27,41 +59,18 @@ const ErrMessageTooLarge = errors.Const("multipart: message too large")
 // disk in temporary files.
 // It returns [ErrMessageTooLarge] if all non-file parts can't be stored in
 // memory.
-func (r *Reader) ReadForm(maxMemory int64) (*Form, error) {
+func (r *Reader) ReadForm(maxMemory int64) (rform *Form, rerr error) {
 	return r.readForm(maxMemory)
 }
 
-func (r *Reader) readForm(maxMemory int64) (_ *Form, err error) {
+func (r *Reader) readForm(maxMemory int64) (_ *Form, rerr error) {
 	form := &Form{map[string][][]byte{}, map[string][]*FileHeader{}}
-	var (
-		file    *os.File
-		fileOff int64
-	)
-	numDiskFiles := 0
-	combineFiles := true
+	var fileOff int64
+	cleanup := &formCleanup{form: form, combineFiles: true, err: &rerr}
 	maxParts := 1000
-	maxHeaders := maxMIMEHeaders()
+	maxHeaders := defaultMaxMIMEHeaders()
 
-	defer func() {
-		if file != nil {
-			if cerr := file.Close(); err == nil {
-				err = cerr
-			}
-		}
-		if combineFiles && numDiskFiles > 1 {
-			for _, fhs := range form.File {
-				for _, fh := range fhs {
-					fh.tmpshared = true
-				}
-			}
-		}
-		if err != nil {
-			form.RemoveAll()
-			if file != nil {
-				os.Remove(file.Name())
-			}
-		}
-	}()
+	defer formCleanupRun(cleanup)
 
 	// maxFileMemoryBytes is the maximum bytes of file data we will store in memory.
 	// Data past this limit is written to disk.
@@ -124,11 +133,11 @@ func (r *Reader) readForm(maxMemory int64) (_ *Form, err error) {
 
 		if filename == "" {
 			// value, store as string in memory
-			n, err := io.CopyN(&b, p, maxMemoryBytes+1)
-			if err != nil && err != io.EOF {
-				return nil, err
+			valN, perr := io.CopyN(&b, p, maxMemoryBytes+1)
+			if perr != nil && perr != io.EOF {
+				return nil, perr
 			}
-			maxMemoryBytes -= n
+			maxMemoryBytes -= valN
 			if maxMemoryBytes < 0 {
 				return nil, ErrMessageTooLarge
 			}
@@ -156,34 +165,34 @@ func (r *Reader) readForm(maxMemory int64) (_ *Form, err error) {
 			return nil, err
 		}
 		if n > maxFileMemoryBytes {
-			if file == nil {
-				file, err = os.CreateTemp(r.tempDir, "multipart-")
+			if cleanup.file == nil {
+				cleanup.file, err = os.CreateTemp(r.tempDir, "multipart-")
 				if err != nil {
 					return nil, err
 				}
 			}
-			numDiskFiles++
-			if _, err := file.Write(b.Bytes()); err != nil {
-				return nil, err
+			cleanup.numDiskFiles++
+			if _, qerr := cleanup.file.Write(b.Bytes()); qerr != nil {
+				return nil, qerr
 			}
 			if copyBuf == nil {
 				copyBuf = []byte{:32*1024} // same buffer size as io.Copy uses
 			}
 			// os.File.ReadFrom will allocate its own copy buffer if we let io.Copy use it.
 			type writerOnly struct{ io.Writer }
-			remainingSize, err := io.CopyBuffer(writerOnly{file}, p, copyBuf)
-			if err != nil {
-				return nil, err
+			remainingSize, serr := io.CopyBuffer(writerOnly{cleanup.file}, p, copyBuf)
+			if serr != nil {
+				return nil, serr
 			}
-			fh.tmpfile = file.Name()
+			fh.tmpfile = cleanup.file.Name()
 			fh.Size = int64(b.Len()) + remainingSize
 			fh.tmpoff = fileOff
 			fileOff += fh.Size
-			if !combineFiles {
-				if err := file.Close(); err != nil {
-					return nil, err
+			if !cleanup.combineFiles {
+				if terr := cleanup.file.Close(); terr != nil {
+					return nil, terr
 				}
-				file = nil
+				cleanup.file = nil
 			}
 		} else {
 			fh.content = b.Bytes()
@@ -220,7 +229,7 @@ type Form struct {
 }
 
 // RemoveAll removes any temporary files associated with a [Form].
-func (f *Form) RemoveAll() error {
+func (f *Form) RemoveAll() (rerr error) {
 	var err error
 	for _, fhs := range f.File {
 		for _, fh := range fhs {
@@ -248,10 +257,10 @@ type FileHeader struct {
 }
 
 // Open opens and returns the [FileHeader]'s associated File.
-func (fh *FileHeader) Open() (File, error) {
+func (fh *FileHeader) Open() (rfile File, rerr error) {
 	if b := fh.content; b != nil {
 		r := io.NewSectionReader(bytes.NewReader(b), 0, int64(len(b)))
-		return sectionReadCloser{r, nil}, nil
+		return &sectionReadCloser{r, nil}, nil
 	}
 	if fh.tmpshared {
 		f, err := os.Open(fh.tmpfile)
@@ -259,7 +268,7 @@ func (fh *FileHeader) Open() (File, error) {
 			return nil, err
 		}
 		r := io.NewSectionReader(f, fh.tmpoff, fh.Size)
-		return sectionReadCloser{r, f}, nil
+		return &sectionReadCloser{r, f}, nil
 	}
 	return os.Open(fh.tmpfile)
 }
@@ -281,9 +290,13 @@ type sectionReadCloser struct {
 	io.Closer
 }
 
-func (rc sectionReadCloser) Close() error {
+func (rc *sectionReadCloser) Close() (rerr error) {
 	if rc.Closer != nil {
 		return rc.Closer.Close()
 	}
 	return nil
+}
+
+func init() {
+	ErrMessageTooLarge = errors.New("multipart: message too large")
 }

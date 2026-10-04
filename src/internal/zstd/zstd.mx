@@ -83,7 +83,7 @@ type Reader struct {
 }
 
 // NewReader creates a new Reader that decompresses data from the given reader.
-func NewReader(input io.Reader) *Reader {
+func NewReader(input io.Reader) (out *Reader) {
 	r := &Reader{}
 	r.Reset(input)
 	return r
@@ -120,7 +120,7 @@ func (r *Reader) Reset(input io.Reader) {
 }
 
 // Read implements [io.Reader].
-func (r *Reader) Read(p []byte) (int32, error) {
+func (r *Reader) Read(p []byte) (count int32, rerr error) {
 	if err := r.refillIfNeeded(); err != nil {
 		return 0, err
 	}
@@ -130,7 +130,7 @@ func (r *Reader) Read(p []byte) (int32, error) {
 }
 
 // ReadByte implements [io.ByteReader].
-func (r *Reader) ReadByte() (byte, error) {
+func (r *Reader) ReadByte() (b byte, rerr error) {
 	if err := r.refillIfNeeded(); err != nil {
 		return 0, err
 	}
@@ -140,10 +140,11 @@ func (r *Reader) ReadByte() (byte, error) {
 }
 
 // refillIfNeeded reads the next block if necessary.
-func (r *Reader) refillIfNeeded() error {
+func (r *Reader) refillIfNeeded() (rerr error) {
 	for r.off >= len(r.buffer) {
-		if err := r.refill(); err != nil {
-			return err
+		rerr = r.refill()
+		if rerr != nil {
+			return rerr
 		}
 		r.off = 0
 	}
@@ -151,7 +152,7 @@ func (r *Reader) refillIfNeeded() error {
 }
 
 // refill reads and decompresses the next block.
-func (r *Reader) refill() error {
+func (r *Reader) refill() (rerr error) {
 	if !r.sawFrameHeader {
 		if err := r.readFrameHeader(); err != nil {
 			return err
@@ -161,7 +162,7 @@ func (r *Reader) refill() error {
 }
 
 // readFrameHeader reads the frame header and prepares to read a block.
-func (r *Reader) readFrameHeader() error {
+func (r *Reader) readFrameHeader() (rerr error) {
 retry:
 	relativeOffset := 0
 
@@ -315,7 +316,7 @@ retry:
 }
 
 // skipFrame skips a skippable frame. RFC 3.1.2.
-func (r *Reader) skipFrame() error {
+func (r *Reader) skipFrame() (rerr error) {
 	relativeOffset := 0
 
 	if _, err := io.ReadFull(r.r, r.scratch[:4]); err != nil {
@@ -366,7 +367,7 @@ func (r *Reader) skipFrame() error {
 }
 
 // readBlock reads the next block from a frame.
-func (r *Reader) readBlock() error {
+func (r *Reader) readBlock() (rerr error) {
 	relativeOffset := 0
 
 	// Read Block_Header. RFC 3.1.1.2.
@@ -472,32 +473,32 @@ type zstdError struct {
 	err    error
 }
 
-func (ze *zstdError) Error() string {
+func (ze *zstdError) Error() (s string) {
 	return fmt.Sprintf("zstd decompression error at %d: %v", ze.offset, ze.err)
 }
 
-func (ze *zstdError) String() string { return ze.Error() }
+func (ze *zstdError) String() (s string) { return ze.Error() }
 
-func (ze *zstdError) Unwrap() error {
+func (ze *zstdError) Unwrap() (rerr error) {
 	return ze.err
 }
 
-func (r *Reader) makeEOFError(off int32) error {
+func (r *Reader) makeEOFError(off int32) (rerr error) {
 	return r.wrapError(off, io.ErrUnexpectedEOF)
 }
 
-func (r *Reader) wrapNonEOFError(off int32, err error) error {
+func (r *Reader) wrapNonEOFError(off int32, err error) (rerr error) {
 	if err == io.EOF {
 		err = io.ErrUnexpectedEOF
 	}
 	return r.wrapError(off, err)
 }
 
-func (r *Reader) makeError(off int32, msg []byte) error {
+func (r *Reader) makeError(off int32, msg []byte) (rerr error) {
 	return r.wrapError(off, errors.New(msg))
 }
 
-func (r *Reader) wrapError(off int32, err error) error {
+func (r *Reader) wrapError(off int32, err error) (rerr error) {
 	if err == io.EOF {
 		return err
 	}

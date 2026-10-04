@@ -37,8 +37,6 @@ import (
 	"internal/coverage"
 	"internal/coverage/cmerge"
 	"io"
-	"maps"
-	"slices"
 	"sort"
 	"bytes"
 	"text/tabwriter"
@@ -82,7 +80,7 @@ type fnfile struct {
 	lit   bool
 }
 
-func NewFormatter(cm coverage.CounterMode) *Formatter {
+func NewFormatter(cm coverage.CounterMode) (fm *Formatter) {
 	return &Formatter{
 		pm: map[string]*pstate{},
 		cm: cm,
@@ -137,33 +135,49 @@ func (fm *Formatter) AddUnit(file []byte, fname []byte, isfnlit bool, unit cover
 	fm.p.unitTable[ukey] = result
 }
 
+// unitCompare orders two coverable units by the source position of the
+// function they belong to. It is a free function (not a closure) so it can
+// be used from sortUnits without capturing p.
+func unitCompare(p *pstate, ui, uj extcu) (r int32) {
+	ifile := p.funcs[ui.fnfid].file
+	jfile := p.funcs[uj.fnfid].file
+	r = bytes.Compare(ifile, jfile)
+	if r != 0 {
+		return r
+	}
+	// NB: not taking function literal flag into account here (no
+	// need, since other fields are guaranteed to be distinct).
+	r = cmp.Compare(ui.StLine, uj.StLine)
+	if r != 0 {
+		return r
+	}
+	r = cmp.Compare(ui.EnLine, uj.EnLine)
+	if r != 0 {
+		return r
+	}
+	r = cmp.Compare(ui.StCol, uj.StCol)
+	if r != 0 {
+		return r
+	}
+	r = cmp.Compare(ui.EnCol, uj.EnCol)
+	if r != 0 {
+		return r
+	}
+	return cmp.Compare(ui.NxStmts, uj.NxStmts)
+}
+
 // sortUnits sorts a slice of extcu objects in a package according to
 // source position information (e.g. file and line). Note that we don't
 // include function name as part of the sorting criteria, the thinking
 // being that is better to provide things in the original source order.
+// The sort is written out rather than passing a comparator closure to
+// slices.SortFunc because the comparator needs p, which would be captured.
 func (p *pstate) sortUnits(units []extcu) {
-	slices.SortFunc(units, func(ui, uj extcu) int32 {
-		ifile := p.funcs[ui.fnfid].file
-		jfile := p.funcs[uj.fnfid].file
-		if r := bytes.Compare(ifile, jfile); r != 0 {
-			return r
+	for i := 1; i < len(units); i++ {
+		for j := i; j > 0 && unitCompare(p, units[j-1], units[j]) > 0; j-- {
+			units[j-1], units[j] = units[j], units[j-1]
 		}
-		// NB: not taking function literal flag into account here (no
-		// need, since other fields are guaranteed to be distinct).
-		if r := cmp.Compare(ui.StLine, uj.StLine); r != 0 {
-			return r
-		}
-		if r := cmp.Compare(ui.EnLine, uj.EnLine); r != 0 {
-			return r
-		}
-		if r := cmp.Compare(ui.StCol, uj.StCol); r != 0 {
-			return r
-		}
-		if r := cmp.Compare(ui.EnCol, uj.EnCol); r != 0 {
-			return r
-		}
-		return cmp.Compare(ui.NxStmts, uj.NxStmts)
-	})
+	}
 }
 
 // EmitTextual writes the accumulated coverage data for 'pkgs' in the legacy
@@ -172,7 +186,7 @@ func (p *pstate) sortUnits(units []extcu) {
 // importpath, source file, and line number before emitting (this sorting
 // is not explicitly mandated by the format, but seems like a good idea
 // for repeatable/deterministic dumps).
-func (fm *Formatter) EmitTextual(pkgs [][]byte, w io.Writer) error {
+func (fm *Formatter) EmitTextual(pkgs [][]byte, w io.Writer) (derr error) {
 	if fm.cm == coverage.CtrModeInvalid {
 		panic("internal error, counter mode unset")
 	}
@@ -214,7 +228,7 @@ func (fm *Formatter) EmitTextual(pkgs [][]byte, w io.Writer) error {
 // EmitPercent writes out a "percentage covered" string to the writer
 // 'w', selecting the set of packages in 'pkgs' and suffixing the
 // printed string with 'inpkgs'.
-func (fm *Formatter) EmitPercent(w io.Writer, pkgs [][]byte, inpkgs []byte, noteEmpty bool, aggregate bool) error {
+func (fm *Formatter) EmitPercent(w io.Writer, pkgs [][]byte, inpkgs []byte, noteEmpty bool, aggregate bool) (derr error) {
 	if len(pkgs) == 0 {
 		pkgs = [][]byte{:0:len(fm.pm)}
 		for importpath := range fm.pm {
@@ -223,21 +237,7 @@ func (fm *Formatter) EmitPercent(w io.Writer, pkgs [][]byte, inpkgs []byte, note
 		}
 	}
 
-	rep := func(cov, tot uint64) error {
-		if tot != 0 {
-			if _, err := fmt.Fprintf(w, "coverage: %.1f%% of statements%s\n",
-				100.0*float64(cov)/float64(tot), inpkgs); err != nil {
-				return err
-			}
-		} else if noteEmpty {
-			if _, err := fmt.Fprintf(w, "coverage: [no statements]\n"); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	slices.Sort(pkgs)
+	sort.Strings(pkgs)
 	var totalStmts, coveredStmts uint64
 	for _, importpath := range pkgs {
 		p := fm.pm[importpath]
@@ -258,18 +258,44 @@ func (fm *Formatter) EmitPercent(w io.Writer, pkgs [][]byte, inpkgs []byte, note
 			if _, err := fmt.Fprintf(w, "\t%s\t\t", importpath); err != nil {
 				return err
 			}
-			if err := rep(coveredStmts, totalStmts); err != nil {
+			if err := emitPercentRep(w, coveredStmts, totalStmts, inpkgs, noteEmpty); err != nil {
 				return err
 			}
 		}
 	}
 	if aggregate {
-		if err := rep(coveredStmts, totalStmts); err != nil {
+		if err := emitPercentRep(w, coveredStmts, totalStmts, inpkgs, noteEmpty); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// emitPercentRep writes one "percentage covered" line to w; it is a free
+// function so the writer and suffix are explicit parameters rather than
+// captured closure state.
+func emitPercentRep(w io.Writer, cov, tot uint64, inpkgs []byte, noteEmpty bool) (derr error) {
+	if tot != 0 {
+		if _, err := fmt.Fprintf(w, "coverage: %.1f%% of statements%s\n",
+			100.0*float64(cov)/float64(tot), inpkgs); err != nil {
+			return err
+		}
+	} else if noteEmpty {
+		if _, err := fmt.Fprintf(w, "coverage: [no statements]\n"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// fnPerc converts a covered/total statement pair to a percentage.
+func fnPerc(covered, total uint64) (pct float64) {
+	d := total
+	if d == 0 {
+		d = 1
+	}
+	return 100.0 * float64(covered) / float64(d)
 }
 
 // EmitFuncs writes out a function-level summary to the writer 'w'. A
@@ -279,15 +305,9 @@ func (fm *Formatter) EmitPercent(w io.Writer, pkgs [][]byte, inpkgs []byte, note
 // to name them (this is also consistent with the legacy cmd/cover
 // implementation). We do want to include their counts in the overall
 // summary however.
-func (fm *Formatter) EmitFuncs(w io.Writer) error {
+func (fm *Formatter) EmitFuncs(w io.Writer) (derr error) {
 	if fm.cm == coverage.CtrModeInvalid {
 		panic("internal error, counter mode unset")
-	}
-	perc := func(covered, total uint64) float64 {
-		if total == 0 {
-			total = 1
-		}
-		return 100.0 * float64(covered) / float64(total)
 	}
 	tabber := tabwriter.NewWriter(w, 1, 8, 1, '\t', 0)
 	defer tabber.Flush()
@@ -295,7 +315,13 @@ func (fm *Formatter) EmitFuncs(w io.Writer) error {
 	covStmts := uint64(0)
 
 	// Emit functions for each package, sorted by import path.
-	for _, importpath := range slices.Sorted(maps.Keys(fm.pm)) {
+	pkgs := [][]byte{:0:len(fm.pm)}
+	for importpath := range fm.pm {
+		pkgs = mxutil.Ensure(pkgs, 1)
+		pkgs = push(pkgs, importpath)
+	}
+	sort.Strings(pkgs)
+	for _, importpath := range pkgs {
 		p := fm.pm[importpath]
 		if len(p.unitTable) == 0 {
 			continue
@@ -311,43 +337,34 @@ func (fm *Formatter) EmitFuncs(w io.Writer) error {
 		// summary entry for the previous function, then make one last
 		// emit call at the end of the loop.
 		p.sortUnits(units)
-		fname := ""
-		ffile := ""
+		fname := []byte{}
+		ffile := []byte{}
 		flit := false
 		var fline uint32
 		var cstmts, tstmts uint64
-		captureFuncStart := func(u extcu) {
-			fname = p.funcs[u.fnfid].fname
-			ffile = p.funcs[u.fnfid].file
-			flit = p.funcs[u.fnfid].lit
-			fline = u.StLine
-		}
-		emitFunc := func(u extcu) error {
-			// Don't emit entries for function literals (see discussion
-			// in function header comment above).
-			if !flit {
-				if _, err := fmt.Fprintf(tabber, "%s:%d:\t%s\t%.1f%%\n",
-					ffile, fline, fname, perc(cstmts, tstmts)); err != nil {
-					return err
-				}
-			}
-			captureFuncStart(u)
-			allStmts += tstmts
-			covStmts += cstmts
-			tstmts = 0
-			cstmts = 0
-			return nil
-		}
 		for k, u := range units {
 			if k == 0 {
-				captureFuncStart(u)
-			} else {
-				if fname != p.funcs[u.fnfid].fname {
-					// New function; emit entry for previous one.
-					if err := emitFunc(u); err != nil {
+				fname = p.funcs[u.fnfid].fname
+				ffile = p.funcs[u.fnfid].file
+				flit = p.funcs[u.fnfid].lit
+				fline = u.StLine
+			} else if fname != p.funcs[u.fnfid].fname {
+				// New function; emit entry for previous one. Literals
+				// are skipped (see the header comment).
+				if !flit {
+					if _, err := fmt.Fprintf(tabber, "%s:%d:\t%s\t%.1f%%\n",
+						ffile, fline, fname, fnPerc(cstmts, tstmts)); err != nil {
 						return err
 					}
 				}
+				allStmts += tstmts
+				covStmts += cstmts
+				tstmts = 0
+				cstmts = 0
+				fname = p.funcs[u.fnfid].fname
+				ffile = p.funcs[u.fnfid].file
+				flit = p.funcs[u.fnfid].lit
+				fline = u.StLine
 			}
 			tstmts += uint64(u.NxStmts)
 			count := p.unitTable[u]
@@ -355,12 +372,17 @@ func (fm *Formatter) EmitFuncs(w io.Writer) error {
 				cstmts += uint64(u.NxStmts)
 			}
 		}
-		if err := emitFunc(extcu{}); err != nil {
-			return err
+		if !flit {
+			if _, err := fmt.Fprintf(tabber, "%s:%d:\t%s\t%.1f%%\n",
+				ffile, fline, fname, fnPerc(cstmts, tstmts)); err != nil {
+				return err
+			}
 		}
+		allStmts += tstmts
+		covStmts += cstmts
 	}
 	if _, err := fmt.Fprintf(tabber, "%s\t%s\t%.1f%%\n",
-		"total", "(statements)", perc(covStmts, allStmts)); err != nil {
+		"total", "(statements)", fnPerc(covStmts, allStmts)); err != nil {
 		return err
 	}
 	return nil

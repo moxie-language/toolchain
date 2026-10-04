@@ -29,9 +29,9 @@ type CommonType struct {
 	Name     string // name that can be used to refer to type
 }
 
-func (c *CommonType) Common() *CommonType { return c }
+func (c *CommonType) Common() (_r0 *CommonType) { return c }
 
-func (c *CommonType) Size() int64 { return c.ByteSize }
+func (c *CommonType) Size() (_r0 int64) { return c.ByteSize }
 
 // Basic types
 
@@ -46,9 +46,9 @@ type BasicType struct {
 	DataBitOffset int64
 }
 
-func (b *BasicType) Basic() *BasicType { return b }
+func (b *BasicType) Basic() (_r0 *BasicType) { return b }
 
-func (t *BasicType) String() string {
+func (t *BasicType) String() (_r0 string) {
 	if t.Name != "" {
 		return t.Name
 	}
@@ -109,9 +109,9 @@ type QualType struct {
 	Type Type
 }
 
-func (t *QualType) String() string { return t.Qual + " " + t.Type.String() }
+func (t *QualType) String() (_r0 string) { return t.Qual + " " + t.Type.String() }
 
-func (t *QualType) Size() int64 { return t.Type.Size() }
+func (t *QualType) Size() (_r0 int64) { return t.Type.Size() }
 
 // An ArrayType represents a fixed size array type.
 type ArrayType struct {
@@ -121,11 +121,11 @@ type ArrayType struct {
 	Count         int64 // if == -1, an incomplete array, like char x[].
 }
 
-func (t *ArrayType) String() string {
+func (t *ArrayType) String() (_r0 string) {
 	return "[" + strconv.FormatInt(t.Count, 10) + "]" + t.Type.String()
 }
 
-func (t *ArrayType) Size() int64 {
+func (t *ArrayType) Size() (_r0 int64) {
 	if t.Count == -1 {
 		return 0
 	}
@@ -137,7 +137,7 @@ type VoidType struct {
 	CommonType
 }
 
-func (t *VoidType) String() string { return "void" }
+func (t *VoidType) String() (_r0 string) { return "void" }
 
 // A PtrType represents a pointer type.
 type PtrType struct {
@@ -145,7 +145,7 @@ type PtrType struct {
 	Type Type
 }
 
-func (t *PtrType) String() string { return "*" + t.Type.String() }
+func (t *PtrType) String() (_r0 string) { return "*" + t.Type.String() }
 
 // A StructType represents a struct, union, or C++ class type.
 type StructType struct {
@@ -239,21 +239,21 @@ type StructField struct {
 	BitSize       int64 // zero if not a bit field
 }
 
-func (t *StructType) String() string {
+func (t *StructType) String() (_r0 string) {
 	if t.StructName != "" {
 		return t.Kind + " " + t.StructName
 	}
 	return t.Defn()
 }
 
-func (f *StructField) bitOffset() int64 {
+func (f *StructField) bitOffset() (_r0 int64) {
 	if f.BitOffset != 0 {
 		return f.BitOffset
 	}
 	return f.DataBitOffset
 }
 
-func (t *StructType) Defn() string {
+func (t *StructType) Defn() (_r0 string) {
 	s := t.Kind
 	if t.StructName != "" {
 		s += " " + t.StructName
@@ -293,7 +293,7 @@ type EnumValue struct {
 	Val  int64
 }
 
-func (t *EnumType) String() string {
+func (t *EnumType) String() (_r0 string) {
 	s := "enum"
 	if t.EnumName != "" {
 		s += " " + t.EnumName
@@ -316,7 +316,7 @@ type FuncType struct {
 	ParamType  []Type
 }
 
-func (t *FuncType) String() string {
+func (t *FuncType) String() (_r0 string) {
 	s := "func("
 	for i, pt := range t.ParamType {
 		if i > 0 {
@@ -336,7 +336,7 @@ type DotDotDotType struct {
 	CommonType
 }
 
-func (t *DotDotDotType) String() string { return "..." }
+func (t *DotDotDotType) String() (_r0 string) { return "..." }
 
 // A TypedefType represents a named type.
 type TypedefType struct {
@@ -344,9 +344,9 @@ type TypedefType struct {
 	Type Type
 }
 
-func (t *TypedefType) String() string { return t.Name }
+func (t *TypedefType) String() (_r0 string) { return t.Name }
 
-func (t *TypedefType) Size() int64 { return t.Type.Size() }
+func (t *TypedefType) Size() (_r0 int64) { return t.Type.Size() }
 
 // An UnsupportedType is a placeholder returned in situations where we
 // encounter a type that isn't supported.
@@ -355,7 +355,7 @@ type UnsupportedType struct {
 	Tag Tag
 }
 
-func (t *UnsupportedType) String() string {
+func (t *UnsupportedType) String() (_r0 string) {
 	if t.Name != "" {
 		return t.Name
 	}
@@ -375,7 +375,7 @@ type typeReader interface {
 }
 
 // Type reads the type at off in the DWARF "info" section.
-func (d *Data) Type(off Offset) (Type, error) {
+func (d *Data) Type(off Offset) (_r0 Type, _r1 error) {
 	return d.readType("info", d.Reader(), off, d.typeCache, nil)
 }
 
@@ -404,11 +404,71 @@ func (tf *typeFixer) apply() {
 	}
 }
 
+// childReader walks the direct children of a composite DWARF entry,
+// skipping over composite entries nested inside it.
+type childReader struct {
+	e         *Entry
+	r         typeReader
+	name      string
+	nextDepth int32
+	err       error
+}
+
+// next returns the next direct child, or nil at the end. Errors are
+// recorded in the reader's err field.
+func (s *childReader) next() (out *Entry) {
+	if !s.e.Children {
+		return nil
+	}
+	var kid *Entry
+	var err1 error
+	for {
+		kid, err1 = s.r.Next()
+		if err1 != nil {
+			s.err = err1
+			return nil
+		}
+		if kid == nil {
+			s.err = &DecodeError{s.name, s.r.offset(), "unexpected end of DWARF entries"}
+			return nil
+		}
+		if kid.Tag == 0 {
+			if s.nextDepth > 0 {
+				s.nextDepth--
+				continue
+			}
+			return nil
+		}
+		if kid.Children {
+			s.nextDepth++
+		}
+		if s.nextDepth > 0 {
+			continue
+		}
+		return kid
+	}
+}
+
+// typeOfEntry returns the Type referred to by an Entry's AttrType field.
+// A missing type means "void".
+func (d *Data) typeOfEntry(ent *Entry, name string, r typeReader, typeCache map[Offset]Type, fixups *typeFixer) (out Type, oerr error) {
+	tval := ent.Val(AttrType)
+	switch toff := tval.(type) {
+	case *valOffset:
+		return d.readType(name, r.clone(), Offset(*toff), typeCache, fixups)
+	case *valUint64:
+		return d.sigToType(uint64(*toff))
+	default:
+		// It appears that no Type means "void".
+		return &VoidType{}, nil
+	}
+}
+
 // readType reads a type from r at off of name. It adds types to the
 // type cache, appends new typedef types to typedefs, and computes the
 // sizes of types. Callers should pass nil for typedefs; this is used
 // for internal recursion.
-func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Offset]Type, fixups *typeFixer) (Type, error) {
+func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Offset]Type, fixups *typeFixer) (_r0 Type, _r1 error) {
 	if t, ok := typeCache[off]; ok {
 		return t, nil
 	}
@@ -419,7 +479,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 	}
 	addressSize := r.AddressSize()
 	if e == nil || e.Offset != off {
-		return nil, DecodeError{name, off, "no type at offset"}
+		return nil, &DecodeError{name, off, "no type at offset"}
 	}
 
 	// If this is the root of the recursion, prepare to resolve
@@ -429,9 +489,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 	// readType encounters them.
 	if fixups == nil {
 		var fixer typeFixer
-		defer func() {
-			fixer.apply()
-		}()
+		defer fixer.apply()
 		fixups = &fixer
 	}
 
@@ -440,65 +498,8 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 	// d.readType recursively, to handle circular types correctly.
 	var typ Type
 
-	nextDepth := 0
-
-	// Get next child; set err if error happens.
-	next := func() *Entry {
-		if !e.Children {
-			return nil
-		}
-		// Only return direct children.
-		// Skip over composite entries that happen to be nested
-		// inside this one. Most DWARF generators wouldn't generate
-		// such a thing, but clang does.
-		// See golang.org/issue/6472.
-		for {
-			kid, err1 := r.Next()
-			if err1 != nil {
-				err = err1
-				return nil
-			}
-			if kid == nil {
-				err = DecodeError{name, r.offset(), "unexpected end of DWARF entries"}
-				return nil
-			}
-			if kid.Tag == 0 {
-				if nextDepth > 0 {
-					nextDepth--
-					continue
-				}
-				return nil
-			}
-			if kid.Children {
-				nextDepth++
-			}
-			if nextDepth > 0 {
-				continue
-			}
-			return kid
-		}
-	}
-
-	// Get Type referred to by Entry's AttrType field.
-	// Set err if error happens. Not having a type is an error.
-	typeOf := func(ent *Entry) Type {
-		tval := ent.Val(AttrType)
-		var t Type
-		switch toff := tval.(type) {
-		case Offset:
-			if t, err = d.readType(name, r.clone(), toff, typeCache, fixups); err != nil {
-				return nil
-			}
-		case uint64:
-			if t, err = d.sigToType(toff); err != nil {
-				return nil
-			}
-		default:
-			// It appears that no Type means "void".
-			return &VoidType{}
-		}
-		return t
-	}
+	// Get next child; set st.err if error happens.
+	st := &childReader{e: e, r: r, name: name}
 
 	switch e.Tag {
 	case TagArrayType:
@@ -513,24 +514,32 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		t := &ArrayType{}
 		typ = t
 		typeCache[off] = t
-		if t.Type = typeOf(e); err != nil {
+		if t.Type, err = d.typeOfEntry(e, name, r, typeCache, fixups); err != nil {
 			goto Error
 		}
-		if okv, okok := e.Val(AttrStrideSize).(valInt64); okok {
-			t.StrideBitSize = int64(okv)
+		if okv, okok := e.Val(AttrStrideSize).(*valInt64); okok {
+			t.StrideBitSize = int64(*okv)
 		}
 
 		// Accumulate dimensions,
 		var dims []int64
-		for kid := next(); kid != nil; kid = next() {
+		var kid *Entry
+		for kid = st.next(); ; kid = st.next() {
+			if st.err != nil {
+				err = st.err
+				goto Error
+			}
+			if kid == nil {
+				break
+			}
 			// TODO(rsc): Can also be TagEnumerationType
 			// but haven't seen that in the wild yet.
 			switch kid.Tag {
 			case TagSubrangeType:
-				count, ok := kid.Val(AttrCount).(int64)
+				count, ok := valInt(kid.Val(AttrCount))
 				if !ok {
 					// Old binaries may have an upper bound instead.
-					count, ok = kid.Val(AttrUpperBound).(int64)
+					count, ok = valInt(kid.Val(AttrUpperBound))
 					if ok {
 						count++ // Length is one more than upper bound.
 					} else if len(dims) == 0 {
@@ -540,7 +549,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 				dims = mxutil.Ensure(dims, 1)
 				dims = push(dims, count)
 			case TagEnumerationType:
-				err = DecodeError{name, kid.Offset, "cannot handle enumeration type as array bound"}
+				err = &DecodeError{name, kid.Offset, "cannot handle enumeration type as array bound"}
 				goto Error
 			}
 		}
@@ -567,17 +576,17 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		// For most languages BitOffset/DataBitOffset/BitSize will not be present
 		// for base types.
 		var tname string
-		if okv, okok := e.Val(AttrName).(string); okok {
+		if okv, okok := valString(e.Val(AttrName)); okok {
 			tname = okv
 		}
-		enc, ok := e.Val(AttrEncoding).(int64)
+		enc, ok := valInt(e.Val(AttrEncoding))
 		if !ok {
-			err = DecodeError{tname, e.Offset, "missing encoding attribute for " + tname}
+			err = &DecodeError{tname, e.Offset, "missing encoding attribute for " + tname}
 			goto Error
 		}
 		switch enc {
 		default:
-			err = DecodeError{tname, e.Offset, "unrecognized encoding attribute value"}
+			err = &DecodeError{tname, e.Offset, "unrecognized encoding attribute value"}
 			goto Error
 
 		case encAddress:
@@ -591,7 +600,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 				// clang also writes out a byte size that we can use to distinguish.
 				// See issue 8694.
 				var byteSize int64
-				if v, okb := e.Val(AttrByteSize).(int64); okb {
+				if v, okb := valInt(e.Val(AttrByteSize)); okb {
 					byteSize = v
 				}
 				switch byteSize {
@@ -617,15 +626,15 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 			Basic() *BasicType
 		}).Basic()
 		t.Name = tname
-		if okv, okok := e.Val(AttrBitSize).(int64); okok {
+		if okv, okok := valInt(e.Val(AttrBitSize)); okok {
 			t.BitSize = okv
 		}
 		haveBitOffset := false
 		haveDataBitOffset := false
-		t.BitOffset, haveBitOffset = e.Val(AttrBitOffset).(int64)
-		t.DataBitOffset, haveDataBitOffset = e.Val(AttrDataBitOffset).(int64)
+		t.BitOffset, haveBitOffset = valInt(e.Val(AttrBitOffset))
+		t.DataBitOffset, haveDataBitOffset = valInt(e.Val(AttrDataBitOffset))
 		if haveBitOffset && haveDataBitOffset {
-			err = DecodeError{tname, e.Offset, "duplicate bit offset attributes"}
+			err = &DecodeError{tname, e.Offset, "duplicate bit offset attributes"}
 			goto Error
 		}
 
@@ -656,7 +665,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		case TagUnionType:
 			t.Kind = "union"
 		}
-		if okv, okok := e.Val(AttrName).(string); okok {
+		if okv, okok := valString(e.Val(AttrName)); okok {
 			t.StructName = okv
 		}
 		t.Incomplete = e.Val(AttrDeclaration) != nil
@@ -664,21 +673,29 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		var lastFieldType *Type
 		var lastFieldBitSize int64
 		var lastFieldByteOffset int64
-		for kid := next(); kid != nil; kid = next() {
+		var kid *Entry
+		for kid = st.next(); ; kid = st.next() {
+			if st.err != nil {
+				err = st.err
+				goto Error
+			}
+			if kid == nil {
+				break
+			}
 			if kid.Tag != TagMember {
 				continue
 			}
 			f := &StructField{}
-			if f.Type = typeOf(kid); err != nil {
+			if f.Type, err = d.typeOfEntry(kid, name, r, typeCache, fixups); err != nil {
 				goto Error
 			}
 			switch loc := kid.Val(AttrDataMemberLoc).(type) {
-			case []byte:
+			case *valBytes:
 				// TODO: Should have original compilation
 				// unit here, not unknownFormat.
-				b := makeBuf(d, unknownFormat{}, "location", 0, loc)
+				b := makeBuf(d, &unknownFormat{}, "location", 0, loc.b)
 				if b.uint8() != opPlusUconst {
-					err = DecodeError{name, kid.Offset, "unexpected opcode"}
+					err = &DecodeError{name, kid.Offset, "unexpected opcode"}
 					goto Error
 				}
 				f.ByteOffset = int64(b.uint32())
@@ -686,25 +703,25 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 					err = b.err
 					goto Error
 				}
-			case int64:
-				f.ByteOffset = loc
+			case *valInt64:
+				f.ByteOffset = int64(*loc)
 			}
 
-			if okv, okok := kid.Val(AttrName).(string); okok {
+			if okv, okok := valString(kid.Val(AttrName)); okok {
 				f.Name = okv
 			}
-			if okv, okok := kid.Val(AttrByteSize).(int64); okok {
+			if okv, okok := valInt(kid.Val(AttrByteSize)); okok {
 				f.ByteSize = okv
 			}
 			haveBitOffset := false
 			haveDataBitOffset := false
-			f.BitOffset, haveBitOffset = kid.Val(AttrBitOffset).(int64)
-			f.DataBitOffset, haveDataBitOffset = kid.Val(AttrDataBitOffset).(int64)
+			f.BitOffset, haveBitOffset = valInt(kid.Val(AttrBitOffset))
+			f.DataBitOffset, haveDataBitOffset = valInt(kid.Val(AttrDataBitOffset))
 			if haveBitOffset && haveDataBitOffset {
-				err = DecodeError{name, e.Offset, "duplicate bit offset attributes"}
+				err = &DecodeError{name, e.Offset, "duplicate bit offset attributes"}
 				goto Error
 			}
-			if okv, okok := kid.Val(AttrBitSize).(int64); okok {
+			if okv, okok := valInt(kid.Val(AttrBitSize)); okok {
 				f.BitSize = okv
 			}
 			t.Field = mxutil.Ensure(t.Field, 1)
@@ -720,7 +737,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 			lastFieldBitSize = f.BitSize
 		}
 		if t.Kind != "union" {
-			b, ok := e.Val(AttrByteSize).(int64)
+			b, ok := valInt(e.Val(AttrByteSize))
 			if ok && b == lastFieldByteOffset {
 				// Final field must be zero width. Fix array length.
 				fixups.recordArrayType(lastFieldType)
@@ -734,7 +751,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		t := &QualType{}
 		typ = t
 		typeCache[off] = t
-		if t.Type = typeOf(e); err != nil {
+		if t.Type, err = d.typeOfEntry(e, name, r, typeCache, fixups); err != nil {
 			goto Error
 		}
 		switch e.Tag {
@@ -758,17 +775,25 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		t := &EnumType{}
 		typ = t
 		typeCache[off] = t
-		if okv, okok := e.Val(AttrName).(string); okok {
+		if okv, okok := valString(e.Val(AttrName)); okok {
 			t.EnumName = okv
 		}
 		t.Val = []*EnumValue{:0:8}
-		for kid := next(); kid != nil; kid = next() {
+		var kid *Entry
+		for kid = st.next(); ; kid = st.next() {
+			if st.err != nil {
+				err = st.err
+				goto Error
+			}
+			if kid == nil {
+				break
+			}
 			if kid.Tag == TagEnumerator {
 				f := &EnumValue{}
-				if okv, okok := kid.Val(AttrName).(string); okok {
+				if okv, okok := valString(kid.Val(AttrName)); okok {
 					f.Name = okv
 				}
-				if okv, okok := kid.Val(AttrConstValue).(int64); okok {
+				if okv, okok := valInt(kid.Val(AttrConstValue)); okok {
 					f.Val = okv
 				}
 				n := len(t.Val)
@@ -794,7 +819,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 			t.Type = &VoidType{}
 			break
 		}
-		t.Type = typeOf(e)
+		t.Type, err = d.typeOfEntry(e, name, r, typeCache, fixups)
 
 	case TagSubroutineType:
 		// Subroutine type.  (DWARF v2 §5.7)
@@ -809,17 +834,25 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		t := &FuncType{}
 		typ = t
 		typeCache[off] = t
-		if t.ReturnType = typeOf(e); err != nil {
+		if t.ReturnType, err = d.typeOfEntry(e, name, r, typeCache, fixups); err != nil {
 			goto Error
 		}
 		t.ParamType = []Type{:0:8}
-		for kid := next(); kid != nil; kid = next() {
+		var kid *Entry
+		for kid = st.next(); ; kid = st.next() {
+			if st.err != nil {
+				err = st.err
+				goto Error
+			}
+			if kid == nil {
+				break
+			}
 			var tkid Type
 			switch kid.Tag {
 			default:
 				continue
 			case TagFormalParameter:
-				if tkid = typeOf(kid); err != nil {
+				if tkid, err = d.typeOfEntry(kid, name, r, typeCache, fixups); err != nil {
 					goto Error
 				}
 			case TagUnspecifiedParameters:
@@ -837,10 +870,10 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		t := &TypedefType{}
 		typ = t
 		typeCache[off] = t
-		if okv, okok := e.Val(AttrName).(string); okok {
+		if okv, okok := valString(e.Val(AttrName)); okok {
 			t.Name = okv
 		}
-		t.Type = typeOf(e)
+		t.Type, err = d.typeOfEntry(e, name, r, typeCache, fixups)
 
 	case TagUnspecifiedType:
 		// Unspecified type (DWARF v3 §5.2)
@@ -849,7 +882,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		t := &UnspecifiedType{}
 		typ = t
 		typeCache[off] = t
-		if okv, okok := e.Val(AttrName).(string); okok {
+		if okv, okok := valString(e.Val(AttrName)); okok {
 			t.Name = okv
 		}
 
@@ -861,7 +894,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 		typ = t
 		typeCache[off] = t
 		t.Tag = e.Tag
-		if okv, okok := e.Val(AttrName).(string); okok {
+		if okv, okok := valString(e.Val(AttrName)); okok {
 			t.Name = okv
 		}
 	}
@@ -871,7 +904,7 @@ func (d *Data) readType(name string, r typeReader, off Offset, typeCache map[Off
 	}
 
 	{
-		b, ok := e.Val(AttrByteSize).(int64)
+		b, ok := valInt(e.Val(AttrByteSize))
 		if !ok {
 			b = -1
 			switch t := typ.(type) {

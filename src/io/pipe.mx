@@ -7,10 +7,6 @@
 
 package io
 
-import (
-	"errors"
-)
-
 // onceError is an object that will only store an error once.
 type onceError struct {
 	err        error
@@ -22,11 +18,11 @@ func (a *onceError) Store(err error) {
 	}
 	a.err = err
 }
-func (a *onceError) Load() error {
+func (a *onceError) Load() (out error) {
 	return a.err
 }
 
-const ErrClosedPipe = errors.Const("io: read/write on closed pipe")
+var ErrClosedPipe error
 
 // A pipe is the shared pipe structure underlying PipeReader and PipeWriter.
 type pipe struct {
@@ -56,7 +52,7 @@ func (p *pipe) read(b []byte) (n int32, err error) {
 	}
 }
 
-func (p *pipe) closeRead(err error) error {
+func (p *pipe) closeRead(err error) (out error) {
 	if err == nil {
 		err = ErrClosedPipe
 	}
@@ -85,7 +81,7 @@ func (p *pipe) write(b []byte) (n int32, err error) {
 	return n, nil
 }
 
-func (p *pipe) closeWrite(err error) error {
+func (p *pipe) closeWrite(err error) (out error) {
 	if err == nil {
 		err = EOF
 	}
@@ -95,7 +91,7 @@ func (p *pipe) closeWrite(err error) error {
 }
 
 // readCloseError is considered internal to the pipe type.
-func (p *pipe) readCloseError() error {
+func (p *pipe) readCloseError() (out error) {
 	rerr := p.rerr.Load()
 	if werr := p.werr.Load(); rerr == nil && werr != nil {
 		return werr
@@ -104,7 +100,7 @@ func (p *pipe) readCloseError() error {
 }
 
 // writeCloseError is considered internal to the pipe type.
-func (p *pipe) writeCloseError() error {
+func (p *pipe) writeCloseError() (out error) {
 	werr := p.werr.Load()
 	if rerr := p.rerr.Load(); werr == nil && rerr != nil {
 		return rerr
@@ -126,7 +122,7 @@ func (r *PipeReader) Read(data []byte) (n int32, err error) {
 
 // Close closes the reader; subsequent writes to the
 // write half of the pipe will return the error [ErrClosedPipe].
-func (r *PipeReader) Close() error {
+func (r *PipeReader) Close() (err error) {
 	return r.CloseWithError(nil)
 }
 
@@ -135,7 +131,7 @@ func (r *PipeReader) Close() error {
 //
 // CloseWithError never overwrites the previous error if it exists
 // and always returns nil.
-func (r *PipeReader) CloseWithError(err error) error {
+func (r *PipeReader) CloseWithError(err error) (out error) {
 	return r.pipe.closeRead(err)
 }
 
@@ -153,7 +149,7 @@ func (w *PipeWriter) Write(data []byte) (n int32, err error) {
 
 // Close closes the writer; subsequent reads from the
 // read half of the pipe will return no bytes and EOF.
-func (w *PipeWriter) Close() error {
+func (w *PipeWriter) Close() (err error) {
 	return w.CloseWithError(nil)
 }
 
@@ -163,7 +159,7 @@ func (w *PipeWriter) Close() error {
 //
 // CloseWithError never overwrites the previous error if it exists
 // and always returns nil.
-func (w *PipeWriter) CloseWithError(err error) error {
+func (w *PipeWriter) CloseWithError(err error) (out error) {
 	return w.r.pipe.closeWrite(err)
 }
 
@@ -182,7 +178,7 @@ func (w *PipeWriter) CloseWithError(err error) error {
 // It is safe to call Read and Write in parallel with each other or with Close.
 // Parallel calls to Read and parallel calls to Write are also safe:
 // the individual calls will be gated sequentially.
-func Pipe() (*PipeReader, *PipeWriter) {
+func Pipe() (rd *PipeReader, wr *PipeWriter) {
 	pw := &PipeWriter{r: PipeReader{pipe: pipe{
 		wrCh: chan []byte{},
 		rdCh: chan int32{},

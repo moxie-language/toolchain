@@ -45,7 +45,7 @@ type Dir []byte
 // mapOpenError maps the provided non-nil error from opening name
 // to a possibly better non-nil error. In particular, it turns OS-specific errors
 // about opening files in non-directories into fs.ErrNotExist. See Issues 18984 and 49552.
-func mapOpenError(originalErr error, name []byte, sep rune, stat func([]byte) (fs.FileInfo, error)) error {
+func mapOpenError(originalErr error, name []byte, sep rune, stat func([]byte) (fs.FileInfo, error)) (rerr error) {
 	if errors.Is(originalErr, fs.ErrNotExist) || errors.Is(originalErr, fs.ErrPermission) {
 		return originalErr
 	}
@@ -69,11 +69,11 @@ func mapOpenError(originalErr error, name []byte, sep rune, stat func([]byte) (f
 // errInvalidUnsafePath is returned by Dir.Open when the call to
 // filepath.Localize fails. filepath.Localize returns an error if the path
 // cannot be represented by the operating system.
-const errInvalidUnsafePath = errors.Const("http: invalid or unsafe file path")
+var errInvalidUnsafePath error
 
 // Open implements [FileSystem] using [os.Open], opening files for reading rooted
 // and relative to the directory d.
-func (d Dir) Open(name []byte) (File, error) {
+func (d Dir) Open(name []byte) (rfile File, rerr error) {
 	path := path.Clean("/" + name)[1:]
 	if path == "" {
 		path = "."
@@ -126,16 +126,16 @@ type anyDirs interface {
 
 type fileInfoDirs []fs.FileInfo
 
-func (d fileInfoDirs) len() int32            { return len(d) }
-func (d fileInfoDirs) isDir(i int32) bool    { return d[i].IsDir() }
-func (d fileInfoDirs) name(i int32) []byte   { return d[i].Name() }
+func (d fileInfoDirs) len() (rn int32) { return len(d) }
+func (d fileInfoDirs) isDir(i int32) (rok bool) { return d[i].IsDir() }
+func (d fileInfoDirs) name(i int32) (rb []byte) { return d[i].Name() }
 func (d fileInfoDirs) swap(i, j int32)       { d[i], d[j] = d[j], d[i] }
 
 type dirEntryDirs []fs.DirEntry
 
-func (d dirEntryDirs) len() int32            { return len(d) }
-func (d dirEntryDirs) isDir(i int32) bool    { return d[i].IsDir() }
-func (d dirEntryDirs) name(i int32) []byte   { return d[i].Name() }
+func (d dirEntryDirs) len() (rn int32) { return len(d) }
+func (d dirEntryDirs) isDir(i int32) (rok bool) { return d[i].IsDir() }
+func (d dirEntryDirs) name(i int32) (rb []byte) { return d[i].Name() }
 func (d dirEntryDirs) swap(i, j int32)       { d[i], d[j] = d[j], d[i] }
 
 func dirList(w ResponseWriter, r *Request, f File) {
@@ -255,11 +255,11 @@ func ServeContent(w ResponseWriter, req *Request, name []byte, modtime time.Time
 // doesn't seek properly. The underlying Seeker's error text isn't
 // included in the sizeFunc reply so it's not sent over HTTP to end
 // users.
-const errSeeker = errors.Const("seeker can't seek")
+var errSeeker error
 
 // errNoOverlap is returned by serveContent's parseRange if first-byte-pos of
 // all of the byte-range-spec values is greater than the content size.
-const errNoOverlap = errors.Const("invalid range: failed to overlap")
+var errNoOverlap error
 
 // if name is empty, filename is unknown. (used for mime type, before sniffing)
 // if modtime.IsZero(), modtime is unknown.
@@ -455,13 +455,13 @@ func scanETag(s []byte) (etag []byte, remain []byte) {
 
 // etagStrongMatch reports whether a and b match using strong ETag comparison.
 // Assumes a and b are valid ETags.
-func etagStrongMatch(a, b []byte) bool {
+func etagStrongMatch(a, b []byte) (rok bool) {
 	return a == b && a != "" && a[0] == '"'
 }
 
 // etagWeakMatch reports whether a and b match using weak ETag comparison.
 // Assumes a and b are valid ETags.
-func etagWeakMatch(a, b []byte) bool {
+func etagWeakMatch(a, b []byte) (rok bool) {
 	return bytes.TrimPrefix(a, "W/") == bytes.TrimPrefix(b, "W/")
 }
 
@@ -475,7 +475,7 @@ const (
 	condFalse
 )
 
-func checkIfMatch(w ResponseWriter, r *Request) condResult {
+func checkIfMatch(w ResponseWriter, r *Request) (rcondResult condResult) {
 	im := r.Header.Get("If-Match")
 	if im == "" {
 		return condNone
@@ -505,7 +505,7 @@ func checkIfMatch(w ResponseWriter, r *Request) condResult {
 	return condFalse
 }
 
-func checkIfUnmodifiedSince(r *Request, modtime time.Time) condResult {
+func checkIfUnmodifiedSince(r *Request, modtime time.Time) (rcondResult condResult) {
 	ius := r.Header.Get("If-Unmodified-Since")
 	if ius == "" || isZeroTime(modtime) {
 		return condNone
@@ -524,7 +524,7 @@ func checkIfUnmodifiedSince(r *Request, modtime time.Time) condResult {
 	return condFalse
 }
 
-func checkIfNoneMatch(w ResponseWriter, r *Request) condResult {
+func checkIfNoneMatch(w ResponseWriter, r *Request) (rcondResult condResult) {
 	inm := r.Header.get("If-None-Match")
 	if inm == "" {
 		return condNone
@@ -554,7 +554,7 @@ func checkIfNoneMatch(w ResponseWriter, r *Request) condResult {
 	return condTrue
 }
 
-func checkIfModifiedSince(r *Request, modtime time.Time) condResult {
+func checkIfModifiedSince(r *Request, modtime time.Time) (rcondResult condResult) {
 	if r.Method != "GET" && r.Method != "HEAD" {
 		return condNone
 	}
@@ -575,7 +575,7 @@ func checkIfModifiedSince(r *Request, modtime time.Time) condResult {
 	return condTrue
 }
 
-func checkIfRange(w ResponseWriter, r *Request, modtime time.Time) condResult {
+func checkIfRange(w ResponseWriter, r *Request, modtime time.Time) (rcondResult condResult) {
 	if r.Method != "GET" && r.Method != "HEAD" {
 		return condNone
 	}
@@ -606,10 +606,10 @@ func checkIfRange(w ResponseWriter, r *Request, modtime time.Time) condResult {
 	return condFalse
 }
 
-func _unixEpochTime() time.Time { return time.Unix(0, 0) }
+func _unixEpochTime() (rtime time.Time) { return time.Unix(0, 0) }
 
 // isZeroTime reports whether t is obviously unspecified (either zero or Unix()=0).
-func isZeroTime(t time.Time) bool {
+func isZeroTime(t time.Time) (rok bool) {
 	return t.IsZero() || t.Equal(_unixEpochTime())
 }
 
@@ -853,7 +853,7 @@ func ServeFileFS(w ResponseWriter, r *Request, fsys fs.FS, name []byte) {
 	serveFile(w, r, FS(fsys), name, false)
 }
 
-func containsDotDot(v []byte) bool {
+func containsDotDot(v []byte) (rok bool) {
 	if !bytes.Contains(v, "..") {
 		return false
 	}
@@ -865,7 +865,7 @@ func containsDotDot(v []byte) bool {
 	return false
 }
 
-func isSlashRune(r rune) bool { return r == '/' || r == '\\' }
+func isSlashRune(r rune) (rok bool) { return r == '/' || r == '\\' }
 
 type fileHandler struct {
 	root FileSystem
@@ -879,7 +879,7 @@ type ioFile struct {
 	file fs.File
 }
 
-func (f ioFS) Open(name []byte) (File, error) {
+func (f *ioFS) Open(name []byte) (rfile File, rerr error) {
 	if name == "/" {
 		name = "."
 	} else {
@@ -894,14 +894,14 @@ func (f ioFS) Open(name []byte) (File, error) {
 	return ioFile{file}, nil
 }
 
-func (f ioFile) Close() error               { return f.file.Close() }
-func (f ioFile) Read(b []byte) (int32, error) { return f.file.Read(b) }
-func (f ioFile) Stat() (fs.FileInfo, error) { return f.file.Stat() }
+func (f *ioFile) Close() (rerr error) { return f.file.Close() }
+func (f *ioFile) Read(b []byte) (rn int32, rerr error) { return f.file.Read(b) }
+func (f *ioFile) Stat() (rfileInfo fs.FileInfo, rerr error) { return f.file.Stat() }
 
-const errMissingSeek = errors.Const("io.File missing Seek method")
-const errMissingReadDir = errors.Const("io.File directory missing ReadDir method")
+var errMissingSeek error
+var errMissingReadDir error
 
-func (f ioFile) Seek(offset int64, whence int32) (int64, error) {
+func (f *ioFile) Seek(offset int64, whence int32) (rn int64, rerr error) {
 	s, ok := f.file.(io.Seeker)
 	if !ok {
 		return 0, errMissingSeek
@@ -909,7 +909,7 @@ func (f ioFile) Seek(offset int64, whence int32) (int64, error) {
 	return s.Seek(offset, whence)
 }
 
-func (f ioFile) ReadDir(count int32) ([]fs.DirEntry, error) {
+func (f *ioFile) ReadDir(count int32) (rdirEntry []fs.DirEntry, rerr error) {
 	d, ok := f.file.(fs.ReadDirFile)
 	if !ok {
 		return nil, errMissingReadDir
@@ -917,7 +917,7 @@ func (f ioFile) ReadDir(count int32) ([]fs.DirEntry, error) {
 	return d.ReadDir(count)
 }
 
-func (f ioFile) Readdir(count int32) ([]fs.FileInfo, error) {
+func (f *ioFile) Readdir(count int32) (rfileInfo []fs.FileInfo, rerr error) {
 	d, ok := f.file.(fs.ReadDirFile)
 	if !ok {
 		return nil, errMissingReadDir
@@ -947,7 +947,7 @@ func (f ioFile) Readdir(count int32) ([]fs.FileInfo, error) {
 // FS converts fsys to a [FileSystem] implementation,
 // for use with [FileServer] and [NewFileTransport].
 // The files provided by fsys must implement [io.Seeker].
-func FS(fsys fs.FS) FileSystem {
+func FS(fsys fs.FS) (rfileSystem FileSystem) {
 	return ioFS{fsys}
 }
 
@@ -964,7 +964,7 @@ func FS(fsys fs.FS) FileSystem {
 //	http.Handle("/", http.FileServer(http.Dir("/tmp")))
 //
 // To use an [fs.FS] implementation, use [http.FileServerFS] instead.
-func FileServer(root FileSystem) Handler {
+func FileServer(root FileSystem) (rhandler Handler) {
 	return &fileHandler{root}
 }
 
@@ -977,7 +977,7 @@ func FileServer(root FileSystem) Handler {
 // "index.html".
 //
 //	http.Handle("/", http.FileServerFS(fsys))
-func FileServerFS(root fs.FS) Handler {
+func FileServerFS(root fs.FS) (rhandler Handler) {
 	return FileServer(FS(root))
 }
 
@@ -995,11 +995,11 @@ type httpRange struct {
 	start, length int64
 }
 
-func (r httpRange) contentRange(size int64) []byte {
+func (r *httpRange) contentRange(size int64) (rb []byte) {
 	return fmt.Sprintf("bytes %d-%d/%d", r.start, r.start+r.length-1, size)
 }
 
-func (r httpRange) mimeHeader(contentType []byte, size int64) textproto.MIMEHeader {
+func (r *httpRange) mimeHeader(contentType []byte, size int64) (rmIMEHeader textproto.MIMEHeader) {
 	return textproto.MIMEHeader{
 		"Content-Range": {r.contentRange(size)},
 		"Content-Type":  {contentType},
@@ -1008,7 +1008,7 @@ func (r httpRange) mimeHeader(contentType []byte, size int64) textproto.MIMEHead
 
 // parseRange parses a Range header string as per RFC 7233.
 // errNoOverlap is returned if none of the ranges overlap.
-func parseRange(s []byte, size int64) ([]httpRange, error) {
+func parseRange(s []byte, size int64) (rhttpRange []httpRange, rerr error) {
 	if s == "" {
 		return nil, nil // header not present
 	}

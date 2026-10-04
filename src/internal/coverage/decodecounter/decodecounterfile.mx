@@ -37,7 +37,7 @@ type CounterDataReader struct {
 	debug    bool
 }
 
-func NewCounterDataReader(fn []byte, rs io.ReadSeeker) (*CounterDataReader, error) {
+func NewCounterDataReader(fn []byte, rs io.ReadSeeker) (rdr *CounterDataReader, derr error) {
 	cdr := &CounterDataReader{
 		mr:   rs,
 		u32b: []byte{:4},
@@ -73,12 +73,12 @@ func NewCounterDataReader(fn []byte, rs io.ReadSeeker) (*CounterDataReader, erro
 	return cdr, nil
 }
 
-func checkMagic(v [4]byte) bool {
+func checkMagic(v [4]byte) (ok bool) {
 	g := coverage.CovCounterMagic()
 	return v[0] == g[0] && v[1] == g[1] && v[2] == g[2] && v[3] == g[3]
 }
 
-func (cdr *CounterDataReader) readFooter() error {
+func (cdr *CounterDataReader) readFooter() (derr error) {
 	ftrSize := int64(unsafe.Sizeof(cdr.ftr))
 	if _, err := cdr.mr.Seek(-ftrSize, io.SeekEnd); err != nil {
 		return err
@@ -97,7 +97,7 @@ func (cdr *CounterDataReader) readFooter() error {
 
 // readSegmentPreamble reads and consumes the segment header, segment string
 // table, and segment args table.
-func (cdr *CounterDataReader) readSegmentPreamble() error {
+func (cdr *CounterDataReader) readSegmentPreamble() (derr error) {
 	// Read segment header.
 	if err := binary.Read(cdr.mr, binary.LittleEndian(), unsafe.TypeOf(cdr.shdr), unsafe.Pointer(&cdr.shdr)); err != nil {
 		return err
@@ -130,7 +130,7 @@ func (cdr *CounterDataReader) readSegmentPreamble() error {
 	return nil
 }
 
-func (cdr *CounterDataReader) readStringTable() error {
+func (cdr *CounterDataReader) readStringTable() (derr error) {
 	b := []byte{:cdr.shdr.StrTabLen}
 	nr, err := cdr.mr.Read(b)
 	if err != nil {
@@ -145,23 +145,16 @@ func (cdr *CounterDataReader) readStringTable() error {
 	return nil
 }
 
-func (cdr *CounterDataReader) readArgs() error {
+func (cdr *CounterDataReader) readArgs() (derr error) {
 	b := []byte{:cdr.shdr.ArgsLen}
-	nr, err := cdr.mr.Read(b)
-	if err != nil {
-		return err
+	nr, rerr := cdr.mr.Read(b)
+	if rerr != nil {
+		return rerr
 	}
 	if nr != int32(cdr.shdr.ArgsLen) {
 		return fmt.Errorf("error: short read on args table")
 	}
 	slr := slicereader.NewReader(b, false /* not readonly */)
-	sget := func() ([]byte, error) {
-		kidx := slr.ReadULEB128()
-		if int32(kidx) >= cdr.stab.Entries() {
-			return "", fmt.Errorf("malformed string table ref")
-		}
-		return cdr.stab.Get(uint32(kidx)), nil
-	}
 	nents := slr.ReadULEB128()
 	cdr.args = map[string][]byte{}
 	// Declared once, outside the loops: declarations in a loop in a
@@ -173,11 +166,11 @@ func (cdr *CounterDataReader) readArgs() error {
 	var errv error
 	var arg []byte
 	for i := uint64(0); i < nents; i++ {
-		k, errk = sget()
+		k, errk = stringTableRef(slr, cdr.stab)
 		if errk != nil {
 			return errk
 		}
-		v, errv = sget()
+		v, errv = stringTableRef(slr, cdr.stab)
 		if errv != nil {
 			return errv
 		}
@@ -192,8 +185,8 @@ func (cdr *CounterDataReader) readArgs() error {
 			return fmt.Errorf("malformed argc in counter data file args section")
 		}
 		cdr.osargs = [][]byte{:0:argc}
-		for i := 0; i < argc; i++ {
-			arg = cdr.args[fmt.Sprintf("argv%d", i)]
+		for j := 0; j < argc; j++ {
+			arg = cdr.args[fmt.Sprintf("argv%d", j)]
 			cdr.osargs = mxutil.Ensure(cdr.osargs, 1)
 			cdr.osargs = push(cdr.osargs, arg)
 		}
@@ -207,13 +200,24 @@ func (cdr *CounterDataReader) readArgs() error {
 	return nil
 }
 
+// stringTableRef reads one string-table reference from slr and resolves it
+// against stab. It is a free function so the reader and table are passed
+// explicitly rather than captured from an enclosing scope.
+func stringTableRef(slr *slicereader.Reader, stab *stringtab.Reader) (out []byte, rerr error) {
+	kidx := slr.ReadULEB128()
+	if int32(kidx) >= stab.Entries() {
+		return "", fmt.Errorf("malformed string table ref")
+	}
+	return stab.Get(uint32(kidx)), nil
+}
+
 // OsArgs returns the program arguments (saved from os.Args during
 // the run of the instrumented binary) read from the counter
 // data file. Not all coverage data files will have os.Args values;
 // for example, if a data file is produced by merging coverage
 // data from two distinct runs, no os args will be available (an
 // empty list is returned).
-func (cdr *CounterDataReader) OsArgs() [][]byte {
+func (cdr *CounterDataReader) OsArgs() (args [][]byte) {
 	return cdr.osargs
 }
 
@@ -221,7 +225,7 @@ func (cdr *CounterDataReader) OsArgs() [][]byte {
 // that produced this counter data file. The GOOS value may be
 // empty in the case where the counter data file was produced
 // from a merge in which more than one GOOS value was present.
-func (cdr *CounterDataReader) Goos() []byte {
+func (cdr *CounterDataReader) Goos() (goos []byte) {
 	return cdr.goos
 }
 
@@ -229,7 +233,7 @@ func (cdr *CounterDataReader) Goos() []byte {
 // that produced this counter data file. The GOARCH value may be
 // empty in the case where the counter data file was produced
 // from a merge in which more than one GOARCH value was present.
-func (cdr *CounterDataReader) Goarch() []byte {
+func (cdr *CounterDataReader) Goarch() (goarch []byte) {
 	return cdr.goarch
 }
 
@@ -242,7 +246,7 @@ type FuncPayload struct {
 }
 
 // NumSegments returns the number of execution segments in the file.
-func (cdr *CounterDataReader) NumSegments() uint32 {
+func (cdr *CounterDataReader) NumSegments() (n uint32) {
 	return cdr.ftr.NumSegments
 }
 
@@ -250,7 +254,7 @@ func (cdr *CounterDataReader) NumSegments() uint32 {
 // returning TRUE if we do have another segment to read, or FALSE
 // if we're done with all the segments (also an error if
 // something went wrong).
-func (cdr *CounterDataReader) BeginNextSegment() (bool, error) {
+func (cdr *CounterDataReader) BeginNextSegment() (ok bool, derr error) {
 	if cdr.segCount >= cdr.ftr.NumSegments {
 		return false, nil
 	}
@@ -270,7 +274,7 @@ func (cdr *CounterDataReader) BeginNextSegment() (bool, error) {
 
 // NumFunctionsInSegment returns the number of live functions
 // in the currently selected segment.
-func (cdr *CounterDataReader) NumFunctionsInSegment() uint32 {
+func (cdr *CounterDataReader) NumFunctionsInSegment() (n uint32) {
 	return uint32(cdr.shdr.FcnEntries)
 }
 
@@ -281,57 +285,11 @@ const supportDeadFunctionsInCounterData = false
 // if we've read all the functions already (also an error if
 // something went wrong with the read or we hit a premature
 // EOF).
-func (cdr *CounterDataReader) NextFunc(p *FuncPayload) (bool, error) {
+func (cdr *CounterDataReader) NextFunc(p *FuncPayload) (ok bool, derr error) {
 	if cdr.fcnCount >= uint32(cdr.shdr.FcnEntries) {
 		return false, nil
 	}
 	cdr.fcnCount++
-	var rdu32 func() (uint32, error)
-	if cdr.hdr.CFlavor == coverage.CtrULeb128 {
-		rdu32 = func() (uint32, error) {
-			var shift uint32
-			var value uint64
-			for {
-				_, rerr := cdr.mr.Read(cdr.u8b)
-				if rerr != nil {
-					return 0, rerr
-				}
-				b := cdr.u8b[0]
-				value |= (uint64(b&0x7F) << shift)
-				if b&0x80 == 0 {
-					break
-				}
-				shift += 7
-			}
-			return uint32(value), nil
-		}
-	} else if cdr.hdr.CFlavor == coverage.CtrRaw {
-		if cdr.hdr.BigEndian {
-			rdu32 = func() (uint32, error) {
-				n, rerr := cdr.mr.Read(cdr.u32b)
-				if rerr != nil {
-					return 0, rerr
-				}
-				if n != 4 {
-					return 0, io.EOF
-				}
-				return binary.BigEndian().Uint32(cdr.u32b), nil
-			}
-		} else {
-			rdu32 = func() (uint32, error) {
-				n, rerr := cdr.mr.Read(cdr.u32b)
-				if rerr != nil {
-					return 0, rerr
-				}
-				if n != 4 {
-					return 0, io.EOF
-				}
-				return binary.LittleEndian().Uint32(cdr.u32b), nil
-			}
-		}
-	} else {
-		panic("internal error: unknown counter flavor")
-	}
 
 	// Alternative/experimental path: one way we could handling writing
 	// out counter data would be to just memcpy the counter segment
@@ -342,7 +300,7 @@ func (cdr *CounterDataReader) NextFunc(p *FuncPayload) (bool, error) {
 	var err error
 	if supportDeadFunctionsInCounterData {
 		for {
-			nc, err = rdu32()
+			nc, err = cdr.readCounterValue()
 			if err == io.EOF {
 				return false, io.EOF
 			} else if err != nil {
@@ -353,18 +311,18 @@ func (cdr *CounterDataReader) NextFunc(p *FuncPayload) (bool, error) {
 			}
 		}
 	} else {
-		nc, err = rdu32()
+		nc, err = cdr.readCounterValue()
 	}
 	if err != nil {
 		return false, err
 	}
 
 	// Read package and func indices.
-	p.PkgIdx, err = rdu32()
+	p.PkgIdx, err = cdr.readCounterValue()
 	if err != nil {
 		return false, err
 	}
-	p.FuncIdx, err = rdu32()
+	p.FuncIdx, err = cdr.readCounterValue()
 	if err != nil {
 		return false, err
 	}
@@ -374,12 +332,11 @@ func (cdr *CounterDataReader) NextFunc(p *FuncPayload) (bool, error) {
 	p.Counters = p.Counters[:0]
 	// Declared once, outside the loop: a declaration in a loop in a
 	// self-mutating method is rejected, and the scratch would otherwise be
-	// allocated into the sovereign arena on every iteration. `rderr` rather
-	// than `rerr` because the closures above bind their own `rerr`.
+	// allocated into the sovereign arena on every iteration.
 	var v uint32
 	var rderr error
 	for i := uint32(0); i < nc; i++ {
-		v, rderr = rdu32()
+		v, rderr = cdr.readCounterValue()
 		if rderr != nil {
 			return false, rderr
 		}
@@ -387,4 +344,48 @@ func (cdr *CounterDataReader) NextFunc(p *FuncPayload) (bool, error) {
 		p.Counters = push(p.Counters, v)
 	}
 	return true, nil
+}
+
+// readCounterValue decodes one counter value according to the file's
+// counter flavor. It is a method rather than a closure so the reader
+// state is the receiver instead of a captured outer variable.
+func (cdr *CounterDataReader) readCounterValue() (val uint32, derr error) {
+	if cdr.hdr.CFlavor == coverage.CtrULeb128 {
+		var shift uint32
+		var value uint64
+		for {
+			_, rerr := cdr.mr.Read(cdr.u8b)
+			if rerr != nil {
+				return 0, rerr
+			}
+			b := cdr.u8b[0]
+			value |= (uint64(b&0x7F) << shift)
+			if b&0x80 == 0 {
+				break
+			}
+			shift += 7
+		}
+		return uint32(value), nil
+	} else if cdr.hdr.CFlavor == coverage.CtrRaw {
+		if cdr.hdr.BigEndian {
+			n, rerr := cdr.mr.Read(cdr.u32b)
+			if rerr != nil {
+				return 0, rerr
+			}
+			if n != 4 {
+				return 0, io.EOF
+			}
+			return binary.BigEndian().Uint32(cdr.u32b), nil
+		} else {
+			n, rerr := cdr.mr.Read(cdr.u32b)
+			if rerr != nil {
+				return 0, rerr
+			}
+			if n != 4 {
+				return 0, io.EOF
+			}
+			return binary.LittleEndian().Uint32(cdr.u32b), nil
+		}
+	}
+	panic("internal error: unknown counter flavor")
 }

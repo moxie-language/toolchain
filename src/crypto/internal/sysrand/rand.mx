@@ -21,12 +21,22 @@ func fatal(msg []byte) {
 	panic(string(msg))
 }
 
+// initFirstUse reports whether this is the first use of randomness, and marks
+// that first use as consumed.
+func initFirstUse() (first bool) {
+	if firstUse {
+		return false
+	}
+	firstUse = true
+	return true
+}
+
 // Read fills b with cryptographically secure random bytes from the operating
 // system. It always fills b entirely and crashes the program irrecoverably if
 // an error is encountered. The operating system APIs are documented to never
 // return an error on all but legacy Linux systems.
 func Read(b []byte) {
-	if !firstUse { firstUse = true
+	if initFirstUse() {
 		// First use of randomness. Start timer to warn about
 		// being blocked on entropy not being available.
 		t := time.AfterFunc(time.Minute, warnBlocked)
@@ -44,21 +54,28 @@ var urandomDone bool
 var urandomFile *os.File
 var urandomErr error
 
-func urandomRead(b []byte) error {
-	if !urandomDone {
-		urandomDone = true
-		urandomFile, urandomErr = os.Open("/dev/urandom")
-	}
-	if urandomErr != nil {
+// initUrandom opens /dev/urandom once and remembers the result.
+func initUrandom() (uerr error) {
+	if urandomDone {
 		return urandomErr
 	}
+	urandomFile, urandomErr = os.Open("/dev/urandom")
+	urandomDone = true
+	return urandomErr
+}
+
+func urandomRead(b []byte) (uerr error) {
+	err := initUrandom()
+	if err != nil {
+		return err
+	}
 	for len(b) > 0 {
-		n, err := urandomFile.Read(b)
+		n, rerr := urandomFile.Read(b)
 		// Note that we don't ignore EAGAIN because it should not be possible to
 		// hit for a blocking read from urandom, although there were
 		// unreproducible reports of it at https://go.dev/issue/9205.
-		if err != nil {
-			return err
+		if rerr != nil {
+			return rerr
 		}
 		b = b[n:]
 	}

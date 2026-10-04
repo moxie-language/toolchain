@@ -7,7 +7,7 @@ package flate
 import (
 	"math"
 	"math/bits"
-	"sort"
+	"slices"
 )
 
 // hcode is a huffman code with a bit code and bit length.
@@ -19,8 +19,6 @@ type huffmanEncoder struct {
 	codes     []hcode
 	freqcache []literalNode
 	bitCount  [17]int32
-	lns       byLiteral // stored to avoid repeated allocation in generate
-	lfs       byFreq    // stored to avoid repeated allocation in generate
 }
 
 type literalNode struct {
@@ -54,14 +52,14 @@ func (h *hcode) set(code uint16, length uint16) {
 	h.code = code
 }
 
-func maxNode() literalNode { return literalNode{math.MaxUint16, math.MaxInt32} }
+func maxNode() (n literalNode) { return literalNode{math.MaxUint16, math.MaxInt32} }
 
-func newHuffmanEncoder(size int32) *huffmanEncoder {
+func newHuffmanEncoder(size int32) (h *huffmanEncoder) {
 	return &huffmanEncoder{codes: []hcode{:size}}
 }
 
 // Generates a HuffmanCode corresponding to the fixed literal table.
-func generateFixedLiteralEncoding() *huffmanEncoder {
+func generateFixedLiteralEncoding() (enc *huffmanEncoder) {
 	h := newHuffmanEncoder(maxNumLit)
 	codes := h.codes
 	var ch uint16
@@ -91,7 +89,7 @@ func generateFixedLiteralEncoding() *huffmanEncoder {
 	return h
 }
 
-func generateFixedOffsetEncoding() *huffmanEncoder {
+func generateFixedOffsetEncoding() (enc *huffmanEncoder) {
 	h := newHuffmanEncoder(30)
 	codes := h.codes
 	for ch := range codes {
@@ -100,7 +98,7 @@ func generateFixedOffsetEncoding() *huffmanEncoder {
 	return h
 }
 
-func (h *huffmanEncoder) bitLength(freq []int32) int32 {
+func (h *huffmanEncoder) bitLength(freq []int32) (totalBits int32) {
 	var total int32
 	for i, f := range freq {
 		if f != 0 {
@@ -126,7 +124,7 @@ const maxBitsLimit = 16
 //
 // bitCounts returns an integer slice in which slice[i] indicates the number of literals
 // that should be encoded in i bits.
-func (h *huffmanEncoder) bitCounts(list []literalNode, maxBits int32) []int32 {
+func (h *huffmanEncoder) bitCounts(list []literalNode, maxBits int32) (out []int32) {
 	if maxBits >= maxBitsLimit {
 		panic("flate: maxBits too large")
 	}
@@ -263,7 +261,7 @@ func (h *huffmanEncoder) assignEncodingAndSize(bitCount []int32, list []literalN
 		// assigned in literal order (not frequency order).
 		chunk = list[len(list)-int32(nb):]
 
-		h.lns.sort(chunk)
+		h.sortByLiteral(chunk)
 		for _, node := range chunk {
 			h.codes[node.literal] = hcode{code: reverseBits(code, uint8(n)), len: uint16(n)}
 			code++
@@ -306,7 +304,7 @@ func (h *huffmanEncoder) generate(freq []int32, maxBits int32) {
 		}
 		return
 	}
-	h.lfs.sort(list)
+	h.sortByFreq(list)
 
 	// Get the number of literals for each bit count
 	bitCount := h.bitCounts(list, maxBits)
@@ -314,39 +312,38 @@ func (h *huffmanEncoder) generate(freq []int32, maxBits int32) {
 	h.assignEncodingAndSize(bitCount, list)
 }
 
-type byLiteral []literalNode
-
-func (s *byLiteral) sort(a []literalNode) {
-	*s = byLiteral(a)
-	sort.Sort(s)
+// sortByLiteral orders nodes by literal value; the Go byLiteral sort.Interface
+// type is gone because a named slice type is not allowed.
+func (h *huffmanEncoder) sortByLiteral(a []literalNode) {
+	slices.SortFunc(a, cmpLiteralNode)
 }
 
-func (s byLiteral) Len() int32 { return len(s) }
-
-func (s byLiteral) Less(i, j int32) bool {
-	return s[i].literal < s[j].literal
+// sortByFreq orders nodes by frequency, ties broken by literal value; the Go
+// byFreq sort.Interface type is gone because a named slice type is not allowed.
+func (h *huffmanEncoder) sortByFreq(a []literalNode) {
+	slices.SortFunc(a, cmpLiteralNodeFreq)
 }
 
-func (s byLiteral) Swap(i, j int32) { s[i], s[j] = s[j], s[i] }
-
-type byFreq []literalNode
-
-func (s *byFreq) sort(a []literalNode) {
-	*s = byFreq(a)
-	sort.Sort(s)
-}
-
-func (s byFreq) Len() int32 { return len(s) }
-
-func (s byFreq) Less(i, j int32) bool {
-	if s[i].freq == s[j].freq {
-		return s[i].literal < s[j].literal
+func cmpLiteralNode(a, b literalNode) (r int32) {
+	if a.literal < b.literal {
+		return -1
 	}
-	return s[i].freq < s[j].freq
+	if a.literal > b.literal {
+		return 1
+	}
+	return 0
 }
 
-func (s byFreq) Swap(i, j int32) { s[i], s[j] = s[j], s[i] }
+func cmpLiteralNodeFreq(a, b literalNode) (r int32) {
+	if a.freq == b.freq {
+		return cmpLiteralNode(a, b)
+	}
+	if a.freq < b.freq {
+		return -1
+	}
+	return 1
+}
 
-func reverseBits(number uint16, bitLength byte) uint16 {
+func reverseBits(number uint16, bitLength byte) (n uint16) {
 	return bits.Reverse16(number << (16 - bitLength))
 }

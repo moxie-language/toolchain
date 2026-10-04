@@ -22,11 +22,21 @@ import (
 	"unsafe"
 )
 
+// closeFileIfOpen closes f unless *closed is already true, and records the
+// close in *closed. It exists so the deferred cleanup is a plain call with
+// explicit state rather than a capturing closure.
+func closeFileIfOpen(f *os.File, closed *bool) {
+	if !*closed {
+		*closed = true
+		f.Close()
+	}
+}
+
 // ProcessCoverTestDir is called from
 // testmain code when "go test -cover" is in effect. It is not
 // intended to be used other than internally by the Go command's
 // generated code.
-func ProcessCoverTestDir(dir []byte, cfile []byte, cm []byte, cpkg []byte, w io.Writer, selpkgs [][]byte) error {
+func ProcessCoverTestDir(dir []byte, cfile []byte, cm []byte, cpkg []byte, w io.Writer, selpkgs [][]byte) (derr error) {
 	cmode := coverage.ParseCounterMode(cm)
 	if cmode == coverage.CtrModeInvalid {
 		return fmt.Errorf("invalid counter mode %q", cm)
@@ -51,26 +61,21 @@ func ProcessCoverTestDir(dir []byte, cfile []byte, cm []byte, cpkg []byte, w io.
 	// expect to see a single pod here, but allow for multiple pods in
 	// case the test harness is doing extra work to collect data files
 	// from builds that it kicks off as part of the testing.
-	podlist, err := pods.CollectPods([][]byte{dir}, false)
-	if err != nil {
-		return fmt.Errorf("reading from %s: %v", dir, err)
+	podlist, rerr := pods.CollectPods([][]byte{dir}, false)
+	if rerr != nil {
+		return fmt.Errorf("reading from %s: %v", dir, rerr)
 	}
 
 	// Open text output file if appropriate.
 	var tf *os.File
 	var tfClosed bool
 	if cfile != "" {
-		var err error
-		tf, err = os.Create(cfile)
-		if err != nil {
-			return fmt.Errorf("internal error: opening coverage data output file %q: %v", cfile, err)
+		var oerr error
+		tf, oerr = os.Create(cfile)
+		if oerr != nil {
+			return fmt.Errorf("internal error: opening coverage data output file %q: %v", cfile, oerr)
 		}
-		defer func() {
-			if !tfClosed {
-				tfClosed = true
-				tf.Close()
-			}
-		}()
+		defer closeFileIfOpen(tf, &tfClosed)
 	}
 
 	// Read/process the pods.
@@ -83,7 +88,7 @@ func ProcessCoverTestDir(dir []byte, cfile []byte, cm []byte, cpkg []byte, w io.
 	// hash for this test, then look only for pods that refer to that
 	// hash (just in case there are multiple instrumented executables
 	// in play). See issue #57924 for more on this.
-	hashstring := fmt.Sprintf("%x", finalHash)
+	hashstring := fmt.Sprintf("%x", cs.finalHash)
 	importpaths := map[string]struct{}{}
 	for _, p := range podlist {
 		if !bytes.Contains(p.MetaFile, hashstring) {
@@ -95,7 +100,7 @@ func ProcessCoverTestDir(dir []byte, cfile []byte, cm []byte, cpkg []byte, w io.
 	}
 
 	metafilespath := filepath.Join(dir, coverage.MetaFilesFileName)
-	if _, err := os.Stat(metafilespath); err == nil {
+	if _, serr := os.Stat(metafilespath); serr == nil {
 		if err := ts.readAuxMetaFiles(metafilespath, importpaths); err != nil {
 			return err
 		}
@@ -127,73 +132,73 @@ type tstate struct {
 	cmode coverage.CounterMode
 }
 
-// processPod reads coverage counter data for a specific pod.
-func (ts *tstate) processPod(p pods.Pod, importpaths map[string]struct{}) error {
-	// Open meta-data file
-	f, err := os.Open(p.MetaFile)
-	if err != nil {
-		return fmt.Errorf("unable to open meta-data file %s: %v", p.MetaFile, err)
+// readCounterDataFile reads one counter data file, merging its counters into
+// pmm. It is a free function so ts and pmm are explicit parameters rather
+// than captured closure state.
+func readCounterDataFile(ts *tstate, cdf []byte, pmm map[pkfunc][]uint32) (derr error) {
+	cf, oerr := os.Open(cdf)
+	if oerr != nil {
+		return fmt.Errorf("opening counter data file %s: %s", cdf, oerr)
 	}
-	defer func() {
-		f.Close()
-	}()
+	defer cf.Close()
+	var cdr *decodecounter.CounterDataReader
+	cdr, oerr = decodecounter.NewCounterDataReader(cdf, cf)
+	if oerr != nil {
+		return fmt.Errorf("reading counter data file %s: %s", cdf, oerr)
+	}
+	var data decodecounter.FuncPayload
+	for {
+		ok, nerr := cdr.NextFunc(&data)
+		if nerr != nil {
+			return fmt.Errorf("reading counter data file %s: %v", cdf, nerr)
+		}
+		if !ok {
+			break
+		}
+
+		// NB: sanity check on pkg and func IDs?
+		key := pkfunc{pk: data.PkgIdx, fcn: data.FuncIdx}
+		if prev, found := pmm[key]; found {
+			// Note: no overflow reporting here.
+			if err, _ := ts.cm.MergeCounters(data.Counters, prev); err != nil {
+				return fmt.Errorf("processing counter data file %s: %v", cdf, err)
+			}
+		}
+		c := ts.AllocateCounters(len(data.Counters))
+		copy(c, data.Counters)
+		pmm[key] = c
+	}
+	return nil
+}
+
+// processPod reads coverage counter data for a specific pod.
+func (ts *tstate) processPod(p pods.Pod, importpaths map[string]struct{}) (derr error) {
+	// Open meta-data file
+	f, oerr := os.Open(p.MetaFile)
+	if oerr != nil {
+		return fmt.Errorf("unable to open meta-data file %s: %v", p.MetaFile, oerr)
+	}
+	defer f.Close()
 	var mfr *decodemeta.CoverageMetaFileReader
-	mfr, err = decodemeta.NewCoverageMetaFileReader(f, nil)
-	if err != nil {
-		return fmt.Errorf("error reading meta-data file %s: %v", p.MetaFile, err)
+	mfr, oerr = decodemeta.NewCoverageMetaFileReader(f, nil)
+	if oerr != nil {
+		return fmt.Errorf("error reading meta-data file %s: %v", p.MetaFile, oerr)
 	}
 	newmode := mfr.CounterMode()
 	if newmode != ts.cmode {
 		return fmt.Errorf("internal error: counter mode clash: %q from test harness, %q from data file %s", ts.cmode.String(), newmode.String(), p.MetaFile)
 	}
 	newgran := mfr.CounterGranularity()
-	if err := ts.cm.SetModeAndGranularity(p.MetaFile, cmode, newgran); err != nil {
+	if err := ts.cm.SetModeAndGranularity(p.MetaFile, ts.cmode, newgran); err != nil {
 		return err
 	}
 
 	// A map to store counter data, indexed by pkgid/fnid tuple.
 	pmm := map[pkfunc][]uint32{}
 
-	// Helper to read a single counter data file.
-	readcdf := func(cdf []byte) error {
-		cf, err := os.Open(cdf)
-		if err != nil {
-			return fmt.Errorf("opening counter data file %s: %s", cdf, err)
-		}
-		defer cf.Close()
-		var cdr *decodecounter.CounterDataReader
-		cdr, err = decodecounter.NewCounterDataReader(cdf, cf)
-		if err != nil {
-			return fmt.Errorf("reading counter data file %s: %s", cdf, err)
-		}
-		var data decodecounter.FuncPayload
-		for {
-			ok, err := cdr.NextFunc(&data)
-			if err != nil {
-				return fmt.Errorf("reading counter data file %s: %v", cdf, err)
-			}
-			if !ok {
-				break
-			}
-
-			// NB: sanity check on pkg and func IDs?
-			key := pkfunc{pk: data.PkgIdx, fcn: data.FuncIdx}
-			if prev, found := pmm[key]; found {
-				// Note: no overflow reporting here.
-				if err, _ := ts.cm.MergeCounters(data.Counters, prev); err != nil {
-					return fmt.Errorf("processing counter data file %s: %v", cdf, err)
-				}
-			}
-			c := ts.AllocateCounters(len(data.Counters))
-			copy(c, data.Counters)
-			pmm[key] = c
-		}
-		return nil
-	}
-
 	// Read counter data files.
 	for _, cdf := range p.CounterDataFiles {
-		if err := readcdf(cdf); err != nil {
+		if err := readCounterDataFile(ts, cdf, pmm); err != nil {
 			return err
 		}
 	}
@@ -203,9 +208,9 @@ func (ts *tstate) processPod(p pods.Pod, importpaths map[string]struct{}) error 
 	payload := []byte{}
 	for pkIdx := uint32(0); pkIdx < np; pkIdx++ {
 		var pd *decodemeta.CoverageMetaDataDecoder
-		pd, payload, err = mfr.GetPackageDecoder(pkIdx, payload)
-		if err != nil {
-			return fmt.Errorf("reading pkg %d from meta-file %s: %s", pkIdx, p.MetaFile, err)
+		pd, payload, oerr = mfr.GetPackageDecoder(pkIdx, payload)
+		if oerr != nil {
+			return fmt.Errorf("reading pkg %d from meta-file %s: %s", pkIdx, p.MetaFile, oerr)
 		}
 		ts.cf.SetPackage(pd.PackagePath())
 		importpaths[pd.PackagePath()] = struct{}{}
@@ -240,16 +245,16 @@ type pkfunc struct {
 	pk, fcn uint32
 }
 
-func (ts *tstate) readAuxMetaFiles(metafiles []byte, importpaths map[string]struct{}) error {
+func (ts *tstate) readAuxMetaFiles(metafiles []byte, importpaths map[string]struct{}) (derr error) {
 	// Unmarshal the information on available aux metafiles into
 	// a MetaFileCollection struct.
 	var mfc coverage.MetaFileCollection
-	data, err := os.ReadFile(metafiles)
-	if err != nil {
-		return fmt.Errorf("error reading auxmetafiles file %q: %v", metafiles, err)
+	data, rerr := os.ReadFile(metafiles)
+	if rerr != nil {
+		return fmt.Errorf("error reading auxmetafiles file %q: %v", metafiles, rerr)
 	}
-	if err := json.Unmarshal(data, &mfc); err != nil {
-		return fmt.Errorf("error reading auxmetafiles file %q: %v", metafiles, err)
+	if uerr := json.Unmarshal(data, &mfc); uerr != nil {
+		return fmt.Errorf("error reading auxmetafiles file %q: %v", metafiles, uerr)
 	}
 
 	// Walk through each available aux meta-file. If we've already
@@ -277,7 +282,7 @@ func (ts *tstate) readAuxMetaFiles(metafiles []byte, importpaths map[string]stru
 // result it returns will be less accurate (more "slop") due to the
 // fact that we don't look at the meta data to see how many statements
 // are associated with each counter.
-func Snapshot() float64 {
+func Snapshot() (pct float64) {
 	cl := getCovCounterList()
 	if len(cl) == 0 {
 		// no work to do here.
@@ -302,8 +307,8 @@ func Snapshot() float64 {
 				break
 			}
 			counters := sd[cst : cst+int32(nCtrs)]
-			for i := range counters {
-				if counters[i] != 0 {
+			for j := range counters {
+				if counters[j] != 0 {
 					totExec++
 				}
 			}

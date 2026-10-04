@@ -15,12 +15,12 @@ import (
 const intGobVersion byte = 1
 
 // GobEncode implements the [encoding/gob.GobEncoder] interface.
-func (x *Int) GobEncode() ([]byte, error) {
+func (x *Int) GobEncode() (rb []byte, rerr error) {
 	if x == nil {
 		return nil, nil
 	}
 	buf := []byte{:1+len(x.abs)*_S} // extra byte for version and sign bit
-	i := x.abs.bytes(buf) - 1            // i >= 0
+	i := natBytes(x.abs, buf) - 1            // i >= 0
 	b := intGobVersion << 1              // make space for sign bit
 	if x.neg {
 		b |= 1
@@ -30,7 +30,7 @@ func (x *Int) GobEncode() ([]byte, error) {
 }
 
 // GobDecode implements the [encoding/gob.GobDecoder] interface.
-func (z *Int) GobDecode(buf []byte) error {
+func (z *Int) GobDecode(buf []byte) (rerr error) {
 	if len(buf) == 0 {
 		// Other side sent a nil or default value.
 		*z = Int{}
@@ -41,7 +41,7 @@ func (z *Int) GobDecode(buf []byte) error {
 		return fmt.Errorf("Int.GobDecode: encoding version %d not supported", b>>1)
 	}
 	z.neg = b&1 != 0
-	z.abs = z.abs.setBytes(buf[1:])
+	z.abs = natSetBytes(z.abs, buf[1:])
 	return nil
 }
 
@@ -56,7 +56,7 @@ func (x *Int) MarshalText() (text []byte, err error) {
 }
 
 // UnmarshalText implements the [encoding.TextUnmarshaler] interface.
-func (z *Int) UnmarshalText(text []byte) error {
+func (z *Int) UnmarshalText(text []byte) (rerr error) {
 	if _, ok := z.setFromScanner(bytes.NewReader(text), 0); !ok {
 		return fmt.Errorf("math/big: cannot unmarshal %q into a *big.Int", text)
 	}
@@ -68,15 +68,15 @@ func (z *Int) UnmarshalText(text []byte) error {
 // fine with the TextMarshaler only.
 
 // MarshalJSON implements the [encoding/json.Marshaler] interface.
-func (x *Int) MarshalJSON() ([]byte, error) {
+func (x *Int) MarshalJSON() (rb []byte, rerr error) {
 	if x == nil {
 		return []byte("null"), nil
 	}
-	return x.abs.itoa(x.neg, 10), nil
+	return natItoa(x.abs, x.neg, 10), nil
 }
 
 // UnmarshalJSON implements the [encoding/json.Unmarshaler] interface.
-func (z *Int) UnmarshalJSON(text []byte) error {
+func (z *Int) UnmarshalJSON(text []byte) (rerr error) {
 	// Ignore null, like in the main JSON package.
 	if []byte(text) == "null" {
 		return nil

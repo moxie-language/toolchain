@@ -10,19 +10,24 @@ package syscall
 
 import "git.smesh.lol/moxie/pkg/mxutil"
 
-var (
+// envStore holds the mutable environment table. It is a self-mutating type so
+// that Setenv/Unsetenv/Clearenv write through its methods instead of storing
+// into package globals after init.
+type envStore struct {
 	env  map[string]int32
 	envs []string
-)
+}
 
-func runtime_envs() []string // in package runtime
+var envsHolder *envStore
+
+func runtime_envs() (rss []string) // in package runtime
 
 var envsLoaded bool
 
 func initEnvs() {
 	if !envsLoaded {
 		envsLoaded = true
-		envs = runtime_envs()
+		envsHolder.envs = runtime_envs()
 	}
 }
 
@@ -34,19 +39,19 @@ func initCopyenv() {
 	}
 	copyenvDone = true
 	initEnvs()
-	env = map[string]int32{}
-	for i, s := range envs {
+	envsHolder.env = map[string]int32{}
+	for i, s := range envsHolder.envs {
 		for j := 0; j < len(s); j++ {
 			if s[j] == '=' {
 				key := s[:j]
-				if _, ok := env[key]; !ok {
-					env[key] = i // first mention of key
+				if _, ok := envsHolder.env[key]; !ok {
+					envsHolder.env[key] = i // first mention of key
 				} else {
 					// Clear duplicate keys. This permits Unsetenv to
 					// safely delete only the first item without
 					// worrying about unshadowing a later one,
 					// which might be a security problem.
-					envs[i] = ""
+					envsHolder.envs[i] = ""
 				}
 				break
 			}
@@ -54,12 +59,12 @@ func initCopyenv() {
 	}
 }
 
-func Unsetenv(key string) error {
+func Unsetenv(key string) (rerr error) {
 	initCopyenv()
 
-	if i, ok := env[key]; ok {
-		envs[i] = ""
-		delete(env, key)
+	if i, ok := envsHolder.env[key]; ok {
+		envsHolder.envs[i] = ""
+		delete(envsHolder.env, key)
 	}
 	runtimeUnsetenv(key)
 	return nil
@@ -71,11 +76,11 @@ func Getenv(key string) (value string, found bool) {
 		return "", false
 	}
 
-	i, ok := env[key]
+	i, ok := envsHolder.env[key]
 	if !ok {
 		return "", false
 	}
-	s := envs[i]
+	s := envsHolder.envs[i]
 	for j := 0; j < len(s); j++ {
 		if s[j] == '=' {
 			return s[j+1:], true
@@ -84,7 +89,7 @@ func Getenv(key string) (value string, found bool) {
 	return "", false
 }
 
-func Setenv(key, value string) error {
+func Setenv(key, value string) (rerr error) {
 	initCopyenv()
 	if len(key) == 0 {
 		return EINVAL
@@ -100,16 +105,16 @@ func Setenv(key, value string) error {
 		}
 	}
 
-	i, ok := env[key]
+	i, ok := envsHolder.env[key]
 	kv := key | "=" | value
 	if ok {
-		envs[i] = kv
+		envsHolder.envs[i] = kv
 	} else {
-		i = len(envs)
-		envs = mxutil.Ensure(envs, 1)
-		envs = push(envs, kv)
+		i = len(envsHolder.envs)
+		envsHolder.envs = mxutil.Ensure(envsHolder.envs, 1)
+		envsHolder.envs = push(envsHolder.envs, kv)
 	}
-	env[key] = i
+	envsHolder.env[key] = i
 	runtimeSetenv(key, value)
 	return nil
 }
@@ -117,17 +122,17 @@ func Setenv(key, value string) error {
 func Clearenv() {
 	initCopyenv()
 
-	for k := range env {
+	for k := range envsHolder.env {
 		runtimeUnsetenv(k)
 	}
-	env = map[string]int32{}
-	envs = []string{}
+	envsHolder.env = map[string]int32{}
+	envsHolder.envs = []string{}
 }
 
-func Environ() []string {
+func Environ() (rss []string) {
 	initCopyenv()
-	a := []string{:0:len(envs)}
-	for _, e := range envs {
+	a := []string{:0:len(envsHolder.envs)}
+	for _, e := range envsHolder.envs {
 		if e != "" {
 			a = mxutil.Ensure(a, 1)
 			a = push(a, e)

@@ -16,8 +16,8 @@ import (
 	"unsafe"
 )
 
-func _byte00Encoder() encoder { return byteEncoder(0x00) }
-func _byteFFEncoder() encoder { return byteEncoder(0xff) }
+func _byte00Encoder() (e encoder) { return &byteEncoder{v: 0x00} }
+func _byteFFEncoder() (e encoder) { return &byteEncoder{v: 0xff} }
 
 // encoder represents an ASN.1 element that is waiting to be marshaled.
 type encoder interface {
@@ -27,69 +27,67 @@ type encoder interface {
 	Encode(dst []byte)
 }
 
-type byteEncoder byte
+type byteEncoder struct{ v byte }
 
-func (c byteEncoder) Len() int32 {
+func (c *byteEncoder) Len() (n int32) {
 	return 1
 }
 
-func (c byteEncoder) Encode(dst []byte) {
-	dst[0] = byte(c)
+func (c *byteEncoder) Encode(dst []byte) {
+	dst[0] = c.v
 }
 
-type bytesEncoder []byte
+type bytesEncoder struct{ b []byte }
 
-func (b bytesEncoder) Len() int32 {
-	return len(b)
+func (e *bytesEncoder) Len() (n int32) {
+	return len(e.b)
 }
 
-func (b bytesEncoder) Encode(dst []byte) {
-	if copy(dst, b) != len(b) {
+func (e *bytesEncoder) Encode(dst []byte) {
+	if copy(dst, e.b) != len(e.b) {
 		panic("internal error")
 	}
 }
 
-type stringEncoder []byte
+type stringEncoder struct{ s []byte }
 
-func (s stringEncoder) Len() int32 {
-	return len(s)
+func (e *stringEncoder) Len() (n int32) {
+	return len(e.s)
 }
 
-func (s stringEncoder) Encode(dst []byte) {
-	if copy(dst, s) != len(s) {
+func (e *stringEncoder) Encode(dst []byte) {
+	if copy(dst, e.s) != len(e.s) {
 		panic("internal error")
 	}
 }
 
-type multiEncoder []encoder
+type multiEncoder struct{ m []encoder }
 
-func (m multiEncoder) Len() int32 {
-	var size int32
-	for _, e := range m {
-		size += e.Len()
+func (e *multiEncoder) Len() (size int32) {
+	for _, x := range e.m {
+		size += x.Len()
 	}
 	return size
 }
 
-func (m multiEncoder) Encode(dst []byte) {
+func (e *multiEncoder) Encode(dst []byte) {
 	var off int32
-	for _, e := range m {
-		e.Encode(dst[off:])
-		off += e.Len()
+	for _, x := range e.m {
+		x.Encode(dst[off:])
+		off += x.Len()
 	}
 }
 
-type setEncoder []encoder
+type setEncoder struct{ s []encoder }
 
-func (s setEncoder) Len() int32 {
-	var size int32
-	for _, e := range s {
-		size += e.Len()
+func (e *setEncoder) Len() (size int32) {
+	for _, x := range e.s {
+		size += x.Len()
 	}
 	return size
 }
 
-func (s setEncoder) Encode(dst []byte) {
+func (e *setEncoder) Encode(dst []byte) {
 	// Per X690 Section 11.6: The encodings of the component values of a
 	// set-of value shall appear in ascending order, the encodings being
 	// compared as octet strings with the shorter components being padded
@@ -98,10 +96,10 @@ func (s setEncoder) Encode(dst []byte) {
 	// First we encode each element to its TLV encoding and then use
 	// octetSort to get the ordering expected by X690 DER rules before
 	// writing the sorted encodings out to dst.
-	l := [][]byte{:len(s)}
-	for i, e := range s {
-		l[i] = []byte{:e.Len()}
-		e.Encode(l[i])
+	l := [][]byte{:len(e.s)}
+	for i, x := range e.s {
+		l[i] = []byte{:x.Len()}
+		x.Encode(l[i])
 	}
 
 	// Since we are using bytes.Compare to compare TLV encodings we
@@ -119,6 +117,11 @@ func (s setEncoder) Encode(dst []byte) {
 	}
 }
 
+func newBytesEncoder(b []byte) (e *bytesEncoder)  { return &bytesEncoder{b: b} }
+func newStringEncoder(s []byte) (e *stringEncoder) { return &stringEncoder{s: s} }
+func newMultiEncoder(m []encoder) (e *multiEncoder) { return &multiEncoder{m: m} }
+func newSetEncoder(m []encoder) (e *setEncoder)    { return &setEncoder{s: m} }
+
 type taggedEncoder struct {
 	// scratch contains temporary space for encoding the tag and length of
 	// an element in order to avoid extra allocations.
@@ -127,7 +130,7 @@ type taggedEncoder struct {
 	body    encoder
 }
 
-func (t *taggedEncoder) Len() int32 {
+func (t *taggedEncoder) Len() (n int32) {
 	return t.tag.Len() + t.body.Len()
 }
 
@@ -136,33 +139,36 @@ func (t *taggedEncoder) Encode(dst []byte) {
 	t.body.Encode(dst[t.tag.Len():])
 }
 
-type int64Encoder int64
+type int64Encoder struct{ v int64 }
 
-func (i int64Encoder) Len() int32 {
-	n := 1
+func (e *int64Encoder) Len() (n int32) {
+	v := e.v
+	n = 1
 
-	for i > 127 {
+	for v > 127 {
 		n++
-		i >>= 8
+		v >>= 8
 	}
 
-	for i < -128 {
+	for v < -128 {
 		n++
-		i >>= 8
+		v >>= 8
 	}
 
 	return n
 }
 
-func (i int64Encoder) Encode(dst []byte) {
-	n := i.Len()
+func (e *int64Encoder) Encode(dst []byte) {
+	n := e.Len()
 
 	for j := 0; j < n; j++ {
-		dst[j] = byte(i >> uint32((n-1-j)*8))
+		dst[j] = byte(e.v >> uint32((n-1-j)*8))
 	}
 }
 
-func base128IntLength(n int64) int32 {
+func newInt64Encoder(v int64) (e *int64Encoder) { return &int64Encoder{v: v} }
+
+func base128IntLength(n int64) (out int32) {
 	if n == 0 {
 		return 1
 	}
@@ -175,7 +181,7 @@ func base128IntLength(n int64) int32 {
 	return l
 }
 
-func appendBase128Int(dst []byte, n int64) []byte {
+func appendBase128Int(dst []byte, n int64) (out []byte) {
 	l := base128IntLength(n)
 
 	for i := l - 1; i >= 0; i-- {
@@ -192,9 +198,9 @@ func appendBase128Int(dst []byte, n int64) []byte {
 	return dst
 }
 
-func makeBigInt(n *big.Int) (encoder, error) {
+func makeBigInt(n *big.Int) (e encoder, derr error) {
 	if n == nil {
-		return nil, StructuralError{"empty integer"}
+		return nil, &StructuralError{"empty integer"}
 	}
 
 	if n.Sign() < 0 {
@@ -209,9 +215,9 @@ func makeBigInt(n *big.Int) (encoder, error) {
 			der[i] ^= 0xff
 		}
 		if len(der) == 0 || der[0]&0x80 == 0 {
-			return multiEncoder([]encoder{_byteFFEncoder(), bytesEncoder(der)}), nil
+			return newMultiEncoder([]encoder{_byteFFEncoder(), newBytesEncoder(der)}), nil
 		}
-		return bytesEncoder(der), nil
+		return newBytesEncoder(der), nil
 	} else if n.Sign() == 0 {
 		// Zero is written as a single 0 zero rather than no bytes.
 		return _byte00Encoder(), nil
@@ -220,13 +226,13 @@ func makeBigInt(n *big.Int) (encoder, error) {
 		if len(der) > 0 && der[0]&0x80 != 0 {
 			// We'll have to pad this with 0x00 in order to stop it
 			// looking like a negative number.
-			return multiEncoder([]encoder{_byte00Encoder(), bytesEncoder(der)}), nil
+			return newMultiEncoder([]encoder{_byte00Encoder(), newBytesEncoder(der)}), nil
 		}
-		return bytesEncoder(der), nil
+		return newBytesEncoder(der), nil
 	}
 }
 
-func appendLength(dst []byte, i int32) []byte {
+func appendLength(dst []byte, i int32) (out []byte) {
 	n := lengthLength(i)
 
 	for ; n > 0; n-- {
@@ -246,7 +252,7 @@ func lengthLength(i int32) (numBytes int32) {
 	return
 }
 
-func appendTagAndLength(dst []byte, t tagAndLength) []byte {
+func appendTagAndLength(dst []byte, t tagAndLength) (out []byte) {
 	b := uint8(t.class) << 6
 	if t.isCompound {
 		b |= 0x20
@@ -275,42 +281,46 @@ func appendTagAndLength(dst []byte, t tagAndLength) []byte {
 	return dst
 }
 
-type bitStringEncoder BitString
+type bitStringEncoder struct{ b BitString }
 
-func (b bitStringEncoder) Len() int32 {
-	return len(b.Bytes) + 1
+func (e *bitStringEncoder) Len() (n int32) {
+	return len(e.b.Bytes) + 1
 }
 
-func (b bitStringEncoder) Encode(dst []byte) {
-	dst[0] = byte((8 - b.BitLength%8) % 8)
-	if copy(dst[1:], b.Bytes) != len(b.Bytes) {
+func (e *bitStringEncoder) Encode(dst []byte) {
+	dst[0] = byte((8 - e.b.BitLength%8) % 8)
+	if copy(dst[1:], e.b.Bytes) != len(e.b.Bytes) {
 		panic("internal error")
 	}
 }
 
-type oidEncoder []int32
+func newBitStringEncoder(b BitString) (e *bitStringEncoder) { return &bitStringEncoder{b: b} }
 
-func (oid oidEncoder) Len() int32 {
-	l := base128IntLength(int64(oid[0]*40 + oid[1]))
-	for i := 2; i < len(oid); i++ {
-		l += base128IntLength(int64(oid[i]))
+type oidEncoder struct{ oid []int32 }
+
+func (e *oidEncoder) Len() (l int32) {
+	l = base128IntLength(int64(e.oid[0]*40 + e.oid[1]))
+	for i := 2; i < len(e.oid); i++ {
+		l += base128IntLength(int64(e.oid[i]))
 	}
 	return l
 }
 
-func (oid oidEncoder) Encode(dst []byte) {
-	dst = appendBase128Int(dst[:0], int64(oid[0]*40+oid[1]))
-	for i := 2; i < len(oid); i++ {
-		dst = appendBase128Int(dst, int64(oid[i]))
+func (e *oidEncoder) Encode(dst []byte) {
+	dst = appendBase128Int(dst[:0], int64(e.oid[0]*40+e.oid[1]))
+	for i := 2; i < len(e.oid); i++ {
+		dst = appendBase128Int(dst, int64(e.oid[i]))
 	}
 }
 
-func makeObjectIdentifier(oid []int32) (e encoder, err error) {
-	if len(oid) < 2 || oid[0] > 2 || (oid[0] < 2 && oid[1] >= 40) {
-		return nil, StructuralError{"invalid object identifier"}
+func newOidEncoder(oid []int32) (e *oidEncoder) { return &oidEncoder{oid: oid} }
+
+func makeObjectIdentifier(oid ObjectIdentifier) (e encoder, err error) {
+	if len(oid.OID) < 2 || oid.OID[0] > 2 || (oid.OID[0] < 2 && oid.OID[1] >= 40) {
+		return nil, &StructuralError{"invalid object identifier"}
 	}
 
-	return oidEncoder(oid), nil
+	return newOidEncoder(oid.OID), nil
 }
 
 func makePrintableString(s []byte) (e encoder, err error) {
@@ -322,42 +332,42 @@ func makePrintableString(s []byte) (e encoder, err error) {
 		// certificates, however when making new certificates
 		// it is rejected.
 		if !isPrintable(s[i], allowAsterisk, rejectAmpersand) {
-			return nil, StructuralError{"PrintableString contains invalid character"}
+			return nil, &StructuralError{"PrintableString contains invalid character"}
 		}
 	}
 
-	return stringEncoder(s), nil
+	return newStringEncoder(s), nil
 }
 
 func makeIA5String(s []byte) (e encoder, err error) {
 	for i := 0; i < len(s); i++ {
 		if s[i] > 127 {
-			return nil, StructuralError{"IA5String contains invalid character"}
+			return nil, &StructuralError{"IA5String contains invalid character"}
 		}
 	}
 
-	return stringEncoder(s), nil
+	return newStringEncoder(s), nil
 }
 
 func makeNumericString(s []byte) (e encoder, err error) {
 	for i := 0; i < len(s); i++ {
 		if !isNumeric(s[i]) {
-			return nil, StructuralError{"NumericString contains invalid character"}
+			return nil, &StructuralError{"NumericString contains invalid character"}
 		}
 	}
 
-	return stringEncoder(s), nil
+	return newStringEncoder(s), nil
 }
 
-func makeUTF8String(s []byte) encoder {
-	return stringEncoder(s)
+func makeUTF8String(s []byte) (e encoder) {
+	return newStringEncoder(s)
 }
 
-func appendTwoDigits(dst []byte, v int32) []byte {
+func appendTwoDigits(dst []byte, v int32) (out []byte) {
 	return push(dst, byte('0'+(v/10)%10), byte('0'+v%10))
 }
 
-func appendFourDigits(dst []byte, v int32) []byte {
+func appendFourDigits(dst []byte, v int32) (out []byte) {
 	return push(dst,
 		byte('0'+(v/1000)%10),
 		byte('0'+(v/100)%10),
@@ -365,7 +375,7 @@ func appendFourDigits(dst []byte, v int32) []byte {
 		byte('0'+v%10))
 }
 
-func outsideUTCRange(t time.Time) bool {
+func outsideUTCRange(t time.Time) (ok bool) {
 	year := t.Year()
 	return year < 1950 || year >= 2050
 }
@@ -378,7 +388,7 @@ func makeUTCTime(t time.Time) (e encoder, err error) {
 		return nil, err
 	}
 
-	return bytesEncoder(dst), nil
+	return newBytesEncoder(dst), nil
 }
 
 func makeGeneralizedTime(t time.Time) (e encoder, err error) {
@@ -389,7 +399,7 @@ func makeGeneralizedTime(t time.Time) (e encoder, err error) {
 		return nil, err
 	}
 
-	return bytesEncoder(dst), nil
+	return newBytesEncoder(dst), nil
 }
 
 func appendUTCTime(dst []byte, t time.Time) (ret []byte, err error) {
@@ -401,7 +411,7 @@ func appendUTCTime(dst []byte, t time.Time) (ret []byte, err error) {
 	case 2000 <= year && year < 2050:
 		dst = appendTwoDigits(dst, year-2000)
 	default:
-		return nil, StructuralError{"cannot represent time as UTCTime"}
+		return nil, &StructuralError{"cannot represent time as UTCTime"}
 	}
 
 	return appendTimeCommon(dst, t), nil
@@ -410,7 +420,7 @@ func appendUTCTime(dst []byte, t time.Time) (ret []byte, err error) {
 func appendGeneralizedTime(dst []byte, t time.Time) (ret []byte, err error) {
 	year := t.Year()
 	if year < 0 || year > 9999 {
-		return nil, StructuralError{"cannot represent time as GeneralizedTime"}
+		return nil, &StructuralError{"cannot represent time as GeneralizedTime"}
 	}
 
 	dst = appendFourDigits(dst, year)
@@ -418,7 +428,7 @@ func appendGeneralizedTime(dst []byte, t time.Time) (ret []byte, err error) {
 	return appendTimeCommon(dst, t), nil
 }
 
-func appendTimeCommon(dst []byte, t time.Time) []byte {
+func appendTimeCommon(dst []byte, t time.Time) (out []byte) {
 	_, month, day := t.Date()
 
 	dst = appendTwoDigits(dst, int32(month))
@@ -454,7 +464,7 @@ func appendTimeCommon(dst []byte, t time.Time) []byte {
 	return dst
 }
 
-func stripTagAndLength(in []byte) []byte {
+func stripTagAndLength(in []byte) (out []byte) {
 	_, offset, err := parseTagAndLength(in, 0)
 	if err != nil {
 		return in
@@ -466,7 +476,7 @@ func stripTagAndLength(in []byte) []byte {
 func makeBody(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e encoder, err error) {
 	// Known concrete types by type code pointer comparison.
 	if typ == _flagTC() {
-		return bytesEncoder(nil), nil
+		return newBytesEncoder(nil), nil
 	}
 	if typ == _timeTC() {
 		t := *(*time.Time)(ptr)
@@ -476,7 +486,7 @@ func makeBody(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enco
 		return makeUTCTime(t)
 	}
 	if typ == _bitStringTC() {
-		return bitStringEncoder(*(*BitString)(ptr)), nil
+		return newBitStringEncoder(*(*BitString)(ptr)), nil
 	}
 	if typ == _objectIdentifierTC() {
 		return makeObjectIdentifier(*(*ObjectIdentifier)(ptr))
@@ -504,31 +514,31 @@ func makeBody(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enco
 		default:
 			intVal = *(*int64)(ptr)
 		}
-		return int64Encoder(intVal), nil
+		return newInt64Encoder(intVal), nil
 	case akStruct:
 		for i := 0; i < typ.numField(); i++ {
 			if !typ.fieldExported(i) {
-				return nil, StructuralError{"struct contains unexported fields"}
+				return nil, &StructuralError{"struct contains unexported fields"}
 			}
 		}
 
 		startingField := 0
 		n := typ.numField()
 		if n == 0 {
-			return bytesEncoder(nil), nil
+			return newBytesEncoder(nil), nil
 		}
 
 		if typ.fieldType(0) == _rawContentsTC() {
 			rc := *(*RawContent)(unsafe.Add(ptr, typ.fieldOffset(0)))
-			if len(rc) > 0 {
-				return bytesEncoder(stripTagAndLength([]byte(rc))), nil
+			if len(rc.Bytes) > 0 {
+				return newBytesEncoder(stripTagAndLength(rc.Bytes)), nil
 			}
 			startingField = 1
 		}
 
 		switch n1 := n - startingField; n1 {
 		case 0:
-			return bytesEncoder(nil), nil
+			return newBytesEncoder(nil), nil
 		case 1:
 			ft := typ.fieldType(startingField)
 			fp := unsafe.Add(ptr, typ.fieldOffset(startingField))
@@ -546,11 +556,11 @@ func makeBody(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enco
 					return nil, err
 				}
 			}
-			return multiEncoder(m), nil
+			return newMultiEncoder(m), nil
 		}
 	case akSlice:
 		if typ.elem().kind() == akUint8 {
-			return bytesEncoder(*(*[]byte)(ptr)), nil
+			return newBytesEncoder(*(*[]byte)(ptr)), nil
 		}
 		hdr := (*_sliceHeader)(ptr)
 		l := hdr.len
@@ -558,7 +568,7 @@ func makeBody(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enco
 		var fp fieldParameters
 		switch l {
 		case 0:
-			return bytesEncoder(nil), nil
+			return newBytesEncoder(nil), nil
 		case 1:
 			return makeField(elemType, sliceIndex(ptr, elemType, 0), fp)
 		default:
@@ -570,9 +580,9 @@ func makeBody(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enco
 				}
 			}
 			if params.set {
-				return setEncoder(m), nil
+				return newSetEncoder(m), nil
 			}
-			return multiEncoder(m), nil
+			return newMultiEncoder(m), nil
 		}
 	case akBytes:
 		s := *(*[]byte)(ptr)
@@ -588,11 +598,11 @@ func makeBody(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enco
 		}
 	}
 
-	return nil, StructuralError{"unknown Go type"}
+	return nil, &StructuralError{"unknown Go type"}
 }
 
 // isZeroValue reports whether the value at ptr is all zero bytes.
-func isZeroValue(typ *_rawType, ptr unsafe.Pointer) bool {
+func isZeroValue(typ *_rawType, ptr unsafe.Pointer) (ok bool) {
 	sz := typ.size()
 	for i := uintptr(0); i < sz; i++ {
 		if *(*byte)(unsafe.Add(ptr, i)) != 0 {
@@ -613,7 +623,7 @@ func makeField(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enc
 	}
 
 	if typ.kind() == akSlice && (*_sliceHeader)(ptr).len == 0 && params.omitEmpty {
-		return bytesEncoder(nil), nil
+		return newBytesEncoder(nil), nil
 	}
 
 	if params.optional && params.defaultValue != nil {
@@ -631,39 +641,39 @@ func makeField(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enc
 				current = *(*int64)(ptr)
 			}
 			if current == *params.defaultValue {
-				return bytesEncoder(nil), nil
+				return newBytesEncoder(nil), nil
 			}
 		}
 	}
 
 	if params.optional && params.defaultValue == nil {
 		if isZeroValue(typ, ptr) {
-			return bytesEncoder(nil), nil
+			return newBytesEncoder(nil), nil
 		}
 	}
 
 	if typ == _rawValueTC() {
 		rv := *(*RawValue)(ptr)
 		if len(rv.FullBytes) != 0 {
-			return bytesEncoder(rv.FullBytes), nil
+			return newBytesEncoder(rv.FullBytes), nil
 		}
 		rt := &taggedEncoder{}
-		rt.tag = bytesEncoder(appendTagAndLength(rt.scratch[:0], tagAndLength{rv.Class, rv.Tag, len(rv.Bytes), rv.IsCompound}))
-		rt.body = bytesEncoder(rv.Bytes)
+		rt.tag = newBytesEncoder(appendTagAndLength(rt.scratch[:0], tagAndLength{rv.Class, rv.Tag, len(rv.Bytes), rv.IsCompound}))
+		rt.body = newBytesEncoder(rv.Bytes)
 		return rt, nil
 	}
 
 	matchAny, tag, isCompound, ok := getUniversalType(typ)
 	if !ok || matchAny {
-		return nil, StructuralError{fmt.Sprintf("unknown Go type (kind %d)", typ.kind())}
+		return nil, &StructuralError{fmt.Sprintf("unknown Go type (kind %d)", typ.kind())}
 	}
 
 	if params.timeType != 0 && tag != TagUTCTime {
-		return nil, StructuralError{"explicit time type given to non-time member"}
+		return nil, &StructuralError{"explicit time type given to non-time member"}
 	}
 
 	if params.stringType != 0 && tag != TagPrintableString {
-		return nil, StructuralError{"explicit string type given to non-string member"}
+		return nil, &StructuralError{"explicit string type given to non-string member"}
 	}
 
 	switch tag {
@@ -690,7 +700,7 @@ func makeField(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enc
 
 	if params.set {
 		if tag != TagSequence {
-			return nil, StructuralError{"non sequence tagged as set"}
+			return nil, &StructuralError{"non sequence tagged as set"}
 		}
 		tag = TagSet
 	}
@@ -719,11 +729,11 @@ func makeField(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enc
 		}
 
 		if params.explicit {
-			t.tag = bytesEncoder(appendTagAndLength(t.scratch[:0], tagAndLength{ClassUniversal, tag, bodyLen, isCompound}))
+			t.tag = newBytesEncoder(appendTagAndLength(t.scratch[:0], tagAndLength{ClassUniversal, tag, bodyLen, isCompound}))
 
 			tt := &taggedEncoder{}
 			tt.body = t
-			tt.tag = bytesEncoder(appendTagAndLength(tt.scratch[:0], tagAndLength{
+			tt.tag = newBytesEncoder(appendTagAndLength(tt.scratch[:0], tagAndLength{
 				class:      class,
 				tag:        *params.tag,
 				length:     bodyLen + t.tag.Len(),
@@ -737,20 +747,20 @@ func makeField(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enc
 		tag = *params.tag
 	}
 
-	t.tag = bytesEncoder(appendTagAndLength(t.scratch[:0], tagAndLength{class, tag, bodyLen, isCompound}))
+	t.tag = newBytesEncoder(appendTagAndLength(t.scratch[:0], tagAndLength{class, tag, bodyLen, isCompound}))
 
 	return t, nil
 }
 
 // Marshal returns the ASN.1 encoding of the value at data, whose static type
 // is described by typ (the descriptor returned by unsafe.TypeOf of the value).
-func Marshal(typ, data unsafe.Pointer) ([]byte, error) {
+func Marshal(typ, data unsafe.Pointer) (out []byte, derr error) {
 	return MarshalWithParams(typ, data, "")
 }
 
 // MarshalWithParams allows field parameters to be specified for the
 // top-level element. The form of the params is the same as the field tags.
-func MarshalWithParams(typ, data unsafe.Pointer, params []byte) ([]byte, error) {
+func MarshalWithParams(typ, data unsafe.Pointer, params []byte) (out []byte, derr error) {
 	tc := (*_rawType)(typ)
 	if tc == nil || data == nil {
 		return nil, fmt.Errorf("asn1: cannot marshal nil value")

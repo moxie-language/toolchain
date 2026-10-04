@@ -41,11 +41,11 @@ type PSSOptions struct {
 }
 
 // HashFunc returns opts.Hash so that [PSSOptions] implements [crypto.SignerOpts].
-func (opts *PSSOptions) HashFunc() crypto.Hash {
+func (opts *PSSOptions) HashFunc() (out crypto.Hash) {
 	return opts.Hash
 }
 
-func (opts *PSSOptions) saltLength() int32 {
+func (opts *PSSOptions) saltLength() (n int32) {
 	if opts == nil {
 		return PSSSaltLengthAuto
 	}
@@ -61,7 +61,7 @@ func (opts *PSSOptions) saltLength() int32 {
 // The signature is randomized depending on the message, key, and salt size,
 // using bytes from rand. Most applications should use [crypto/rand.Reader] as
 // rand.
-func SignPSS(random io.Reader, priv *PrivateKey, h crypto.Hash, digest []byte, opts *PSSOptions) ([]byte, error) {
+func SignPSS(random io.Reader, priv *PrivateKey, h crypto.Hash, digest []byte, opts *PSSOptions) (b []byte, derr error) {
 	if err4 := checkPublicKeySize(&priv.PublicKey); err4 != nil {
 		return nil, err4
 	}
@@ -79,12 +79,12 @@ func SignPSS(random io.Reader, priv *PrivateKey, h crypto.Hash, digest []byte, o
 	}
 	boring.UnreachableExceptTests()
 
-	h := fips140hash.Unwrap(h.New())
+	dh := fips140hash.Unwrap(crypto.HashNew(h))
 
 	if err3 := checkFIPS140OnlyPrivateKey(priv); err3 != nil {
 		return nil, err3
 	}
-	if fips140only.Enabled && !fips140only.ApprovedHash(h) {
+	if fips140only.Enabled && !fips140only.ApprovedHash(dh) {
 		return nil, errors.New("crypto/rsa: use of h functions other than SHA-2 or SHA-3 is not allowed in FIPS 140-only mode")
 	}
 	if fips140only.Enabled && !fips140only.ApprovedRandomReader(random) {
@@ -97,17 +97,17 @@ func SignPSS(random io.Reader, priv *PrivateKey, h crypto.Hash, digest []byte, o
 	}
 
 	saltLength := opts.saltLength()
-	if fips140only.Enabled && saltLength > h.Size() {
+	if fips140only.Enabled && saltLength > dh.Size() {
 		return nil, errors.New("crypto/rsa: use of PSS salt longer than the h is not allowed in FIPS 140-only mode")
 	}
 	switch saltLength {
 	case PSSSaltLengthAuto:
-		saltLength, err2 = rsa.PSSMaxSaltLength(k.PublicKey(), h)
+		saltLength, err2 = rsa.PSSMaxSaltLength(k.PublicKey(), dh)
 		if err2 != nil {
 			return nil, fipsError(err2)
 		}
 	case PSSSaltLengthEqualsHash:
-		saltLength = h.Size()
+		saltLength = dh.Size()
 	default:
 		// If we get here saltLength is either > 0 or < -1, in the
 		// latter case we fail out.
@@ -116,7 +116,7 @@ func SignPSS(random io.Reader, priv *PrivateKey, h crypto.Hash, digest []byte, o
 		}
 	}
 
-	return fipsError2(rsa.SignPSS(random, k, h, digest, saltLength))
+	return fipsError2(rsa.SignPSS(random, k, dh, digest, saltLength))
 }
 
 // VerifyPSS verifies a PSS signature.
@@ -128,7 +128,7 @@ func SignPSS(random io.Reader, priv *PrivateKey, h crypto.Hash, digest []byte, o
 //
 // The inputs are not considered confidential, and may leak through timing side
 // channels, or if an attacker has control of part of the inputs.
-func VerifyPSS(pub *PublicKey, h crypto.Hash, digest []byte, sig []byte, opts *PSSOptions) error {
+func VerifyPSS(pub *PublicKey, h crypto.Hash, digest []byte, sig []byte, opts *PSSOptions) (derr error) {
 	if err5 := checkPublicKeySize(pub); err5 != nil {
 		return err5
 	}
@@ -144,12 +144,12 @@ func VerifyPSS(pub *PublicKey, h crypto.Hash, digest []byte, sig []byte, opts *P
 		return nil
 	}
 
-	h := fips140hash.Unwrap(h.New())
+	dh := fips140hash.Unwrap(crypto.HashNew(h))
 
 	if err4 := checkFIPS140OnlyPublicKey(pub); err4 != nil {
 		return err4
 	}
-	if fips140only.Enabled && !fips140only.ApprovedHash(h) {
+	if fips140only.Enabled && !fips140only.ApprovedHash(dh) {
 		return errors.New("crypto/rsa: use of h functions other than SHA-2 or SHA-3 is not allowed in FIPS 140-only mode")
 	}
 
@@ -159,16 +159,16 @@ func VerifyPSS(pub *PublicKey, h crypto.Hash, digest []byte, sig []byte, opts *P
 	}
 
 	saltLength := opts.saltLength()
-	if fips140only.Enabled && saltLength > h.Size() {
+	if fips140only.Enabled && saltLength > dh.Size() {
 		return errors.New("crypto/rsa: use of PSS salt longer than the h is not allowed in FIPS 140-only mode")
 	}
 	switch saltLength {
 	case PSSSaltLengthAuto:
-		return fipsError(rsa.VerifyPSS(k, h, digest, sig))
+		return fipsError(rsa.VerifyPSS(k, dh, digest, sig))
 	case PSSSaltLengthEqualsHash:
-		return fipsError(rsa.VerifyPSSWithSaltLength(k, h, digest, sig, h.Size()))
+		return fipsError(rsa.VerifyPSSWithSaltLength(k, dh, digest, sig, dh.Size()))
 	default:
-		return fipsError(rsa.VerifyPSSWithSaltLength(k, h, digest, sig, saltLength))
+		return fipsError(rsa.VerifyPSSWithSaltLength(k, dh, digest, sig, saltLength))
 	}
 }
 
@@ -190,7 +190,7 @@ func VerifyPSS(pub *PublicKey, h crypto.Hash, digest []byte, sig []byte, opts *P
 //
 // The message must be no longer than the length of the public modulus minus
 // twice the hash length, minus a further 2.
-func EncryptOAEP(h hash.Hash, random io.Reader, pub *PublicKey, msg []byte, label []byte) ([]byte, error) {
+func EncryptOAEP(h hash.Hash, random io.Reader, pub *PublicKey, msg []byte, label []byte) (b []byte, derr error) {
 	if err4 := checkPublicKeySize(pub); err4 != nil {
 		return nil, err4
 	}
@@ -240,12 +240,12 @@ func EncryptOAEP(h hash.Hash, random io.Reader, pub *PublicKey, msg []byte, labe
 //
 // The label parameter must match the value given when encrypting. See
 // [EncryptOAEP] for details.
-func DecryptOAEP(h hash.Hash, random io.Reader, priv *PrivateKey, ciphertext []byte, label []byte) ([]byte, error) {
+func DecryptOAEP(h hash.Hash, random io.Reader, priv *PrivateKey, ciphertext []byte, label []byte) (b []byte, derr error) {
 	defer h.Reset()
 	return decryptOAEP(h, h, priv, ciphertext, label)
 }
 
-func decryptOAEP(h, mgfHash hash.Hash, priv *PrivateKey, ciphertext []byte, label []byte) ([]byte, error) {
+func decryptOAEP(h, mgfHash hash.Hash, priv *PrivateKey, ciphertext []byte, label []byte) (b []byte, derr error) {
 	if err5 := checkPublicKeySize(&priv.PublicKey); err5 != nil {
 		return nil, err5
 	}
@@ -299,13 +299,13 @@ func decryptOAEP(h, mgfHash hash.Hash, priv *PrivateKey, ciphertext []byte, labe
 // messages is small, an attacker may be able to build a map from
 // messages to signatures and identify the signed messages. As ever,
 // signatures provide authenticity, not confidentiality.
-func SignPKCS1v15(random io.Reader, priv *PrivateKey, h crypto.Hash, hashed []byte) ([]byte, error) {
+func SignPKCS1v15(random io.Reader, priv *PrivateKey, h crypto.Hash, hashed []byte) (b []byte, derr error) {
 	var hashName []byte
 	if h != crypto.Hash(0) {
-		if len(hashed) != h.Size() {
+		if len(hashed) != crypto.HashSize(h) {
 			return nil, errors.New("crypto/rsa: input must be hashed message")
 		}
-		hashName = h.String()
+		hashName = crypto.HashString(h)
 	}
 
 	if err4 := checkPublicKeySize(&priv.PublicKey); err4 != nil {
@@ -323,7 +323,7 @@ func SignPKCS1v15(random io.Reader, priv *PrivateKey, h crypto.Hash, hashed []by
 	if err3 := checkFIPS140OnlyPrivateKey(priv); err3 != nil {
 		return nil, err3
 	}
-	if fips140only.Enabled && !fips140only.ApprovedHash(fips140hash.Unwrap(h.New())) {
+	if fips140only.Enabled && !fips140only.ApprovedHash(fips140hash.Unwrap(crypto.HashNew(h))) {
 		return nil, errors.New("crypto/rsa: use of h functions other than SHA-2 or SHA-3 is not allowed in FIPS 140-only mode")
 	}
 
@@ -342,13 +342,13 @@ func SignPKCS1v15(random io.Reader, priv *PrivateKey, h crypto.Hash, hashed []by
 //
 // The inputs are not considered confidential, and may leak through timing side
 // channels, or if an attacker has control of part of the inputs.
-func VerifyPKCS1v15(pub *PublicKey, h crypto.Hash, hashed []byte, sig []byte) error {
+func VerifyPKCS1v15(pub *PublicKey, h crypto.Hash, hashed []byte, sig []byte) (derr error) {
 	var hashName []byte
 	if h != crypto.Hash(0) {
-		if len(hashed) != h.Size() {
+		if len(hashed) != crypto.HashSize(h) {
 			return errors.New("crypto/rsa: input must be hashed message")
 		}
-		hashName = h.String()
+		hashName = crypto.HashString(h)
 	}
 
 	if err5 := checkPublicKeySize(pub); err5 != nil {
@@ -369,7 +369,7 @@ func VerifyPKCS1v15(pub *PublicKey, h crypto.Hash, hashed []byte, sig []byte) er
 	if err4 := checkFIPS140OnlyPublicKey(pub); err4 != nil {
 		return err4
 	}
-	if fips140only.Enabled && !fips140only.ApprovedHash(fips140hash.Unwrap(h.New())) {
+	if fips140only.Enabled && !fips140only.ApprovedHash(fips140hash.Unwrap(crypto.HashNew(h))) {
 		return errors.New("crypto/rsa: use of h functions other than SHA-2 or SHA-3 is not allowed in FIPS 140-only mode")
 	}
 
@@ -380,7 +380,7 @@ func VerifyPKCS1v15(pub *PublicKey, h crypto.Hash, hashed []byte, sig []byte) er
 	return fipsError(rsa.VerifyPKCS1v15(k, hashName, hashed, sig))
 }
 
-func fipsError(err error) error {
+func fipsError(err error) (derr error) {
 	switch err {
 	case rsa.ErrDecryption:
 		return ErrDecryption
@@ -392,11 +392,11 @@ func fipsError(err error) error {
 	return err
 }
 
-func fipsError2[T comparable](x T, err error) (T, error) {
+func fipsError2[T comparable](x T, err error) (out T, derr error) {
 	return x, fipsError(err)
 }
 
-func checkFIPS140OnlyPublicKey(pub *PublicKey) error {
+func checkFIPS140OnlyPublicKey(pub *PublicKey) (derr error) {
 	if !fips140only.Enabled {
 		return nil
 	}
@@ -418,7 +418,7 @@ func checkFIPS140OnlyPublicKey(pub *PublicKey) error {
 	return nil
 }
 
-func checkFIPS140OnlyPrivateKey(priv *PrivateKey) error {
+func checkFIPS140OnlyPrivateKey(priv *PrivateKey) (derr error) {
 	if !fips140only.Enabled {
 		return nil
 	}

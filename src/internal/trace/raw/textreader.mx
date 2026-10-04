@@ -27,9 +27,9 @@ type TextReader struct {
 }
 
 // NewTextReader creates a new reader for the trace text format.
-func NewTextReader(r io.Reader) (*TextReader, error) {
+func NewTextReader(r io.Reader) (tr *TextReader, rerr error) {
 	t := unicode.NewTables()
-	tr := &TextReader{s: bufio.NewScanner(r)}
+	tr = &TextReader{s: bufio.NewScanner(r)}
 	line, err := tr.nextLine()
 	if err != nil {
 		return nil, err
@@ -47,14 +47,14 @@ func NewTextReader(r io.Reader) (*TextReader, error) {
 		return nil, fmt.Errorf("failed to parse header Go version: %v", err)
 	}
 	v := version.Version(rawv)
-	if !v.Valid() {
+	if !(&v).Valid() {
 		return nil, fmt.Errorf("unknown or unsupported Go version 1.%d", v)
 	}
 	tr.v = v
-	tr.specs = v.Specs()
+	tr.specs = (&v).Specs()
 	tr.names = tracev2.EventNames(tr.specs)
-	for _, r := range line {
-		if !t.IsSpace(r) {
+	for _, ch := range line {
+		if !t.IsSpace(rune(ch)) {
 			return nil, fmt.Errorf("encountered unexpected non-space at the end of the header: %q", line)
 		}
 	}
@@ -62,22 +62,22 @@ func NewTextReader(r io.Reader) (*TextReader, error) {
 }
 
 // Version returns the version of the trace that we're reading.
-func (r *TextReader) Version() version.Version {
+func (r *TextReader) Version() (v version.Version) {
 	return r.v
 }
 
 // ReadEvent reads and returns the next trace event in the text stream.
-func (r *TextReader) ReadEvent() (Event, error) {
+func (r *TextReader) ReadEvent() (ev Event, rerr error) {
 	line, err := r.nextLine()
 	if err != nil {
 		return Event{}, err
 	}
 	evStr, line := readToken(line)
-	ev, ok := r.names[evStr]
+	typ, ok := r.names[evStr]
 	if !ok {
 		return Event{}, fmt.Errorf("unidentified event: %s", evStr)
 	}
-	spec := r.specs[ev]
+	spec := r.specs[typ]
 	args, err := readArgs(line, spec.Args)
 	if err != nil {
 		return Event{}, fmt.Errorf("reading args for %s: %v", evStr, err)
@@ -85,17 +85,17 @@ func (r *TextReader) ReadEvent() (Event, error) {
 	if spec.IsStack {
 		n := int32(args[1])
 		for i := 0; i < n; i++ {
-			line, err := r.nextLine()
-			if err == io.EOF {
+			sline, serr := r.nextLine()
+			if serr == io.EOF {
 				return Event{}, fmt.Errorf("unexpected EOF while reading stack: args=%v", args)
 			}
-			if err != nil {
-				return Event{}, err
+			if serr != nil {
+				return Event{}, serr
 			}
 			ff := _frameFields()
-			frame, err := readArgs(line, ff[:])
-			if err != nil {
-				return Event{}, err
+			frame, ferr := readArgs(sline, ff[:])
+			if ferr != nil {
+				return Event{}, ferr
 			}
 			args = mxutil.Ensure(args, len(frame))
 			args = push(args, frame...)
@@ -103,27 +103,27 @@ func (r *TextReader) ReadEvent() (Event, error) {
 	}
 	var data []byte
 	if spec.HasData {
-		line, err := r.nextLine()
-		if err == io.EOF {
+		dline, derr := r.nextLine()
+		if derr == io.EOF {
 			return Event{}, fmt.Errorf("unexpected EOF while reading data for %s: args=%v", evStr, args)
 		}
-		if err != nil {
-			return Event{}, err
+		if derr != nil {
+			return Event{}, derr
 		}
-		data, err = readData(line)
-		if err != nil {
-			return Event{}, err
+		data, derr = readData(dline)
+		if derr != nil {
+			return Event{}, derr
 		}
 	}
 	return Event{
 		Version: r.v,
-		Ev:      ev,
+		Ev:      typ,
 		Args:    args,
 		Data:    data,
 	}, nil
 }
 
-func (r *TextReader) nextLine() ([]byte, error) {
+func (r *TextReader) nextLine() (line []byte, rerr error) {
 	for {
 		if !r.s.Scan() {
 			if err := r.s.Err(); err != nil {
@@ -140,11 +140,10 @@ func (r *TextReader) nextLine() ([]byte, error) {
 	}
 }
 
-func _frameFields() [4][]byte { return [4][]byte{"pc", "func", "file", "line"} }
+func _frameFields() (fields [4][]byte) { return [4][]byte{"pc", "func", "file", "line"} }
 
-func readArgs(s []byte, names [][]byte) ([]uint64, error) {
+func readArgs(s []byte, names [][]byte) (args []uint64, rerr error) {
 	t := unicode.NewTables()
-	var args []uint64
 	for _, name := range names {
 		arg, value, rest, err := readArg(s)
 		if err != nil {
@@ -158,7 +157,7 @@ func readArgs(s []byte, names [][]byte) ([]uint64, error) {
 		s = rest
 	}
 	for _, r := range s {
-		if !t.IsSpace(r) {
+		if !t.IsSpace(rune(r)) {
 			return nil, fmt.Errorf("encountered unexpected non-space at the end of an event: %q", s)
 		}
 	}
@@ -183,14 +182,14 @@ func readArg(s []byte) (arg []byte, value uint64, rest []byte, err error) {
 	return
 }
 
-func readToken(s []byte) (token, rest []byte) {
+func readToken(s []byte) (token []byte, rest []byte) {
 	t := unicode.NewTables()
 	tkStart := -1
 	for i, r := range s {
 		if r == '#' {
 			return "", ""
 		}
-		if !t.IsSpace(r) {
+		if !t.IsSpace(rune(r)) {
 			tkStart = i
 			break
 		}
@@ -200,7 +199,7 @@ func readToken(s []byte) (token, rest []byte) {
 	}
 	tkEnd := -1
 	for i, r := range s[tkStart:] {
-		if t.IsSpace(r) || r == '#' {
+		if t.IsSpace(rune(r)) || r == '#' {
 			tkEnd = i + tkStart
 			break
 		}
@@ -211,14 +210,14 @@ func readToken(s []byte) (token, rest []byte) {
 	return s[tkStart:tkEnd], s[tkEnd:]
 }
 
-func readData(line []byte) ([]byte, error) {
+func readData(line []byte) (data []byte, rerr error) {
 	parts := bytes.SplitN(line, "=", 2)
 	if len(parts) < 2 || bytes.TrimSpace(parts[0]) != "data" {
 		return nil, fmt.Errorf("malformed data: %q", line)
 	}
-	data, err := strconv.Unquote(bytes.TrimSpace(parts[1]))
+	dec, err := strconv.Unquote(bytes.TrimSpace(parts[1]))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse data: %q: %v", line, err)
 	}
-	return []byte(data), nil
+	return []byte(dec), nil
 }

@@ -6,18 +6,25 @@
 
 package syscall
 
-// origRlimitNofile, if non-nil, is the original soft RLIMIT_NOFILE.
-var origRlimitNofile *Rlimit
-var rlimitInited bool
+// rlimitState holds the original soft RLIMIT_NOFILE across calls. It is a
+// self-mutating type so that Setrlimit and prlimit clear the cache through
+// its methods rather than storing into a package global after init.
+type rlimitState struct {
+	// origNofile, if non-nil, is the original soft RLIMIT_NOFILE.
+	origNofile *Rlimit
+	inited     bool
+}
 
-func ensureRlimit() {
-	if rlimitInited {
+var rlimitHolder *rlimitState
+
+func (rs *rlimitState) ensure() {
+	if rs.inited {
 		return
 	}
-	rlimitInited = true
+	rs.inited = true
 	var lim Rlimit
 	if err := Getrlimit(RLIMIT_NOFILE, &lim); err == nil && lim.Max > 0 && lim.Cur < lim.Max-1 {
-		origRlimitNofile = &lim
+		rs.origNofile = &lim
 		nlim := lim
 		nlim.Cur = nlim.Max - 1
 		adjustFileLimit(&nlim)
@@ -25,9 +32,17 @@ func ensureRlimit() {
 	}
 }
 
-func Setrlimit(resource int32, rlim *Rlimit) error {
+func (rs *rlimitState) clear() {
+	rs.origNofile = nil
+}
+
+func ensureRlimit() {
+	rlimitHolder.ensure()
+}
+
+func Setrlimit(resource int32, rlim *Rlimit) (rerr error) {
 	if resource == RLIMIT_NOFILE {
-		origRlimitNofile = nil
+		rlimitHolder.clear()
 	}
 	return setrlimit(resource, rlim)
 }

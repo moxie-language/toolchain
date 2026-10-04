@@ -197,10 +197,10 @@ type caps struct {
 }
 
 // See CAP_TO_INDEX in linux/capability.h:
-func capToIndex(bit uintptr) uintptr { return bit >> 5 }
+func capToIndex(bit uintptr) (rn uintptr) { return bit >> 5 }
 
 // See CAP_TO_MASK in linux/capability.h:
-func capToMask(bit uintptr) uint32 { return 1 << uint32(bit&31) }
+func capToMask(bit uintptr) (rn uint32) { return 1 << uint32(bit&31) }
 
 // cloneArgs holds arguments for clone3 Linux syscall.
 type cloneArgs struct {
@@ -269,7 +269,7 @@ func forkAndExecInChild1(argv0 *byte, argv, envv []*byte, chroot, dir *byte, att
 	pidfd = -1
 
 	ensureRlimit()
-	rlim = origRlimitNofile
+	rlim = rlimitHolder.origNofile
 
 	if sys.UidMappings != nil {
 		puid = []byte("/proc/self/uid_map\000")
@@ -687,7 +687,7 @@ childerror:
 	}
 }
 
-func formatIDMappings(idMap []SysProcIDMap) []byte {
+func formatIDMappings(idMap []SysProcIDMap) (rb []byte) {
 	var data []byte
 	for _, im := range idMap {
 		data = mxutil.Ensure(data, 1)
@@ -697,7 +697,7 @@ func formatIDMappings(idMap []SysProcIDMap) []byte {
 }
 
 // writeIDMappings writes the user namespace User ID or Group ID mappings to the specified path.
-func writeIDMappings(path string, idMap []SysProcIDMap) error {
+func writeIDMappings(path string, idMap []SysProcIDMap) (rerr error) {
 	fd, err := Open(path, O_RDWR, 0)
 	if err != nil {
 		return err
@@ -719,8 +719,8 @@ func writeIDMappings(path string, idMap []SysProcIDMap) error {
 // and "allow" if enable is true.
 // This is needed since kernel 3.19, because you can't write gid_map without
 // disabling setgroups() system call.
-func writeSetgroups(pid int32, enable bool) error {
-	sgf := "/proc/" + itoa.Itoa(pid) + "/setgroups"
+func writeSetgroups(pid int32, enable bool) (rerr error) {
+	sgf := "/proc/" | itoa.Itoa(pid) | "/setgroups"
 	fd, err := Open(sgf, O_RDWR, 0)
 	if err != nil {
 		return err
@@ -743,9 +743,9 @@ func writeSetgroups(pid int32, enable bool) error {
 
 // writeUidGidMappings writes User ID and Group ID mappings for user namespaces
 // for a process and it is called from the parent process.
-func writeUidGidMappings(pid int32, sys *SysProcAttr) error {
+func writeUidGidMappings(pid int32, sys *SysProcAttr) (rerr error) {
 	if sys.UidMappings != nil {
-		uidf := "/proc/" + itoa.Itoa(pid) + "/uid_map"
+		uidf := "/proc/" | itoa.Itoa(pid) | "/uid_map"
 		if err := writeIDMappings(uidf, sys.UidMappings); err != nil {
 			return err
 		}
@@ -756,7 +756,7 @@ func writeUidGidMappings(pid int32, sys *SysProcAttr) error {
 		if err := writeSetgroups(pid, sys.GidMappingsEnableSetgroups); err != nil && err != ENOENT {
 			return err
 		}
-		gidf := "/proc/" + itoa.Itoa(pid) + "/gid_map"
+		gidf := "/proc/" | itoa.Itoa(pid) | "/gid_map"
 		if err := writeIDMappings(gidf, sys.GidMappings); err != nil {
 			return err
 		}
@@ -777,7 +777,7 @@ func forkAndExecFailureCleanup(attr *ProcAttr, sys *SysProcAttr) {
 // clone.
 //
 //:linkname os_checkClonePidfd os.checkClonePidfd
-func os_checkClonePidfd() error {
+func os_checkClonePidfd() (rerr error) {
 	pidfd := int32(-1)
 	pid, errno := doCheckClonePidfd(&pidfd)
 	if errno != 0 {
@@ -882,7 +882,7 @@ func doCheckClonePidfd(pidfd *int32) (pid uintptr, errno Errno) {
 	}
 }
 
-func _execve(argv0p *byte, argvp []*byte, envvp []*byte) error {
+func _execve(argv0p *byte, argvp []*byte, envvp []*byte) (rerr error) {
 	_, _, err := RawSyscall(SYS_EXECVE,
 		uintptr(unsafe.Pointer(argv0p)),
 		uintptr(unsafe.Pointer(&argvp[0])),

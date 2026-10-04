@@ -48,8 +48,8 @@ const (
 )
 
 // ErrTooLarge is passed to panic if memory cannot be allocated to store data in a buffer.
-const ErrTooLarge = errors.Const("bytes.Buffer: too large")
-const errNegativeRead = errors.Const("bytes.Buffer: reader returned negative count from Read")
+var ErrTooLarge error
+var errNegativeRead error
 
 const maxInt = int32(2147483647)
 
@@ -58,19 +58,19 @@ const maxInt = int32(2147483647)
 // only until the next call to a method like [Buffer.Read], [Buffer.Write], [Buffer.Reset], or [Buffer.Truncate]).
 // The slice aliases the buffer content at least until the next buffer modification,
 // so immediate changes to the slice will affect the result of future reads.
-func (b *Buffer) Bytes() []byte { return b.buf[b.off:] }
+func (b *Buffer) Bytes() (ret []byte) { return b.buf[b.off:] }
 
 // AvailableBuffer returns an empty buffer with b.Available() capacity.
 // This buffer is intended to be appended to and
 // passed to an immediately succeeding [Buffer.Write] call.
 // The buffer is only valid until the next write operation on b.
-func (b *Buffer) AvailableBuffer() []byte { return b.buf[len(b.buf):] }
+func (b *Buffer) AvailableBuffer() (ret []byte) { return b.buf[len(b.buf):] }
 
 // String returns the contents of the unread portion of the buffer
 // as a string. If the [Buffer] is a nil pointer, it returns "<nil>".
 //
 // To build strings more efficiently, see the [strings.Builder] type.
-func (b *Buffer) String() string {
+func (b *Buffer) String() (ret string) {
 	if b == nil {
 		// Special case, useful in debugging.
 		return "<nil>"
@@ -79,18 +79,18 @@ func (b *Buffer) String() string {
 }
 
 // empty reports whether the unread portion of the buffer is empty.
-func (b *Buffer) empty() bool { return len(b.buf) <= b.off }
+func (b *Buffer) empty() (okay bool) { return len(b.buf) <= b.off }
 
 // Len returns the number of bytes of the unread portion of the buffer;
 // b.Len() == len(b.Bytes()).
-func (b *Buffer) Len() int32 { return len(b.buf) - b.off }
+func (b *Buffer) Len() (ret int32) { return len(b.buf) - b.off }
 
 // Cap returns the capacity of the buffer's underlying byte slice, that is, the
 // total space allocated for the buffer's data.
-func (b *Buffer) Cap() int32 { return cap(b.buf) }
+func (b *Buffer) Cap() (ret int32) { return cap(b.buf) }
 
 // Available returns how many bytes are unused in the buffer.
-func (b *Buffer) Available() int32 { return cap(b.buf) - len(b.buf) }
+func (b *Buffer) Available() (ret int32) { return cap(b.buf) - len(b.buf) }
 
 // Truncate discards all but the first n unread bytes from the buffer
 // but continues to use the same allocated storage.
@@ -246,7 +246,7 @@ func (b *Buffer) WriteTo(w io.Writer) (n int64, err error) {
 // The returned error is always nil, but is included to match [bufio.Writer]'s
 // WriteByte. If the buffer becomes too large, WriteByte will panic with
 // [ErrTooLarge].
-func (b *Buffer) WriteByte(c byte) error {
+func (b *Buffer) WriteByte(c byte) (rerr error) {
 	b.lastRead = opInvalid
 	m := b.grow(1)
 	b.buf[m] = c
@@ -295,7 +295,7 @@ func (b *Buffer) Read(p []byte) (n int32, err error) {
 // advancing the buffer as if the bytes had been returned by [Buffer.Read].
 // If there are fewer than n bytes in the buffer, Next returns the entire buffer.
 // The slice is only valid until the next call to a read or write method.
-func (b *Buffer) Next(n int32) []byte {
+func (b *Buffer) Next(n int32) (ret []byte) {
 	b.lastRead = opInvalid
 	m := b.Len()
 	if n > m {
@@ -311,7 +311,7 @@ func (b *Buffer) Next(n int32) []byte {
 
 // ReadByte reads and returns the next byte from the buffer.
 // If no byte is available, it returns error [io.EOF].
-func (b *Buffer) ReadByte() (byte, error) {
+func (b *Buffer) ReadByte() (ret byte, rerr error) {
 	if b.empty() {
 		// Buffer is empty, reset to recover space.
 		b.Reset()
@@ -351,7 +351,7 @@ func (b *Buffer) ReadRune() (r rune, size int32, err error) {
 // not a successful [Buffer.ReadRune], UnreadRune returns an error.  (In this regard
 // it is stricter than [Buffer.UnreadByte], which will unread the last byte
 // from any read operation.)
-func (b *Buffer) UnreadRune() error {
+func (b *Buffer) UnreadRune() (rerr error) {
 	if b.lastRead <= opInvalid {
 		return errors.New("bytes.Buffer: UnreadRune: previous operation was not a successful ReadRune")
 	}
@@ -362,13 +362,13 @@ func (b *Buffer) UnreadRune() error {
 	return nil
 }
 
-const errUnreadByte = errors.Const("bytes.Buffer: UnreadByte: previous operation was not a successful read")
+var errUnreadByte error
 
 // UnreadByte unreads the last byte returned by the most recent successful
 // read operation that read at least one byte. If a write has happened since
 // the last read, if the last read returned an error, or if the read read zero
 // bytes, UnreadByte returns an error.
-func (b *Buffer) UnreadByte() error {
+func (b *Buffer) UnreadByte() (rerr error) {
 	if b.lastRead == opInvalid {
 		return errUnreadByte
 	}
@@ -428,7 +428,7 @@ func (b *Buffer) ReadString(delim byte) (line []byte, err error) {
 //
 // In most cases, new([Buffer]) (or just declaring a [Buffer] variable) is
 // sufficient to initialize a [Buffer].
-func NewBuffer(buf []byte) *Buffer { return &Buffer{buf: buf} }
+func NewBuffer(buf []byte) (ret *Buffer) { return &Buffer{buf: buf} }
 
 // NewBufferString creates and initializes a new [Buffer] using string s as its
 // initial contents. It is intended to prepare a buffer to read an existing
@@ -436,6 +436,12 @@ func NewBuffer(buf []byte) *Buffer { return &Buffer{buf: buf} }
 //
 // In most cases, new([Buffer]) (or just declaring a [Buffer] variable) is
 // sufficient to initialize a [Buffer].
-func NewBufferString(s []byte) *Buffer {
+func NewBufferString(s []byte) (ret *Buffer) {
 	return &Buffer{buf: []byte(s)}
+}
+
+func init() {
+	ErrTooLarge = errors.New("bytes.Buffer: too large")
+	errNegativeRead = errors.New("bytes.Buffer: reader returned negative count from Read")
+	errUnreadByte = errors.New("bytes.Buffer: UnreadByte: previous operation was not a successful read")
 }

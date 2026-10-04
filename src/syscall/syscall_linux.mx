@@ -134,7 +134,7 @@ func EpollCreate(size int32) (fd int32, err error) {
 	return EpollCreate1(0)
 }
 
-func isGroupMember(gid int32) bool {
+func isGroupMember(gid int32) (rok bool) {
 	groups, err := Getgroups()
 	if err != nil {
 		return false
@@ -173,9 +173,9 @@ type caps struct {
 }
 
 // See CAP_TO_MASK in linux/capability.h:
-func capToMask(capv uintptr) uint32 { return 1 << uint32(capv&31) }
+func capToMask(capv uintptr) (rn uint32) { return 1 << uint32(capv&31) }
 
-func isCapDacOverrideSet() bool {
+func isCapDacOverrideSet() (rok bool) {
 	const _CAP_DAC_OVERRIDE = 1
 	var c caps
 	c.hdr.version = _LINUX_CAPABILITY_VERSION_3
@@ -273,7 +273,7 @@ func Faccessat(dirfd int32, path string, mode uint32, flags int32) (err error) {
 //sys	fchmodat(dirfd int32, path string, mode uint32) (err error)
 //sys	fchmodat2(dirfd int32, path string, mode uint32, flags int32) (err error) = _SYS_fchmodat2
 
-func Fchmodat(dirfd int32, path string, mode uint32, flags int32) error {
+func Fchmodat(dirfd int32, path string, mode uint32, flags int32) (rerr error) {
 	// Linux fchmodat doesn't support the flags parameter, but fchmodat2 does.
 	// Try fchmodat2 if flags are specified.
 	if flags != 0 {
@@ -316,13 +316,13 @@ func Openat(dirfd int32, path string, flags int32, mode uint32) (fd int32, err e
 	return openat(dirfd, path, flags|O_LARGEFILE, mode)
 }
 
-func Pipe(p []int32) error {
+func Pipe(p []int32) (rerr error) {
 	return Pipe2(p, 0)
 }
 
 //sysnb pipe2(p *[2]_C_int, flags int32) (err error)
 
-func Pipe2(p []int32, flags int32) error {
+func Pipe2(p []int32, flags int32) (rerr error) {
 	if len(p) != 2 {
 		return EINVAL
 	}
@@ -345,7 +345,7 @@ func Rename(oldpath string, newpath string) (err error) {
 	return Renameat(_AT_FDCWD, oldpath, _AT_FDCWD, newpath)
 }
 
-func Rmdir(path string) error {
+func Rmdir(path string) (rerr error) {
 	return unlinkat(_AT_FDCWD, path, _AT_REMOVEDIR)
 }
 
@@ -355,13 +355,13 @@ func Symlink(oldpath string, newpath string) (err error) {
 	return symlinkat(oldpath, _AT_FDCWD, newpath)
 }
 
-func Unlink(path string) error {
+func Unlink(path string) (rerr error) {
 	return unlinkat(_AT_FDCWD, path, 0)
 }
 
 //sys	unlinkat(dirfd int32, path string, flags int32) (err error)
 
-func Unlinkat(dirfd int32, path string) error {
+func Unlinkat(dirfd int32, path string) (rerr error) {
 	return unlinkat(dirfd, path, 0)
 }
 
@@ -482,42 +482,42 @@ const (
 	shift   = 8
 )
 
-func (w WaitStatus) Exited() bool { return w&mask == exited }
+func (w *WaitStatus) Exited() (rok bool) { return *w&mask == exited }
 
-func (w WaitStatus) Signaled() bool { return w&mask != stopped && w&mask != exited }
+func (w *WaitStatus) Signaled() (rok bool) { return *w&mask != stopped && *w&mask != exited }
 
-func (w WaitStatus) Stopped() bool { return w&0xFF == stopped }
+func (w *WaitStatus) Stopped() (rok bool) { return *w&0xFF == stopped }
 
-func (w WaitStatus) Continued() bool { return w == 0xFFFF }
+func (w *WaitStatus) Continued() (rok bool) { return *w == 0xFFFF }
 
-func (w WaitStatus) CoreDump() bool { return w.Signaled() && w&core != 0 }
+func (w *WaitStatus) CoreDump() (rok bool) { return w.Signaled() && *w&core != 0 }
 
-func (w WaitStatus) ExitStatus() int32 {
+func (w *WaitStatus) ExitStatus() (rn int32) {
 	if !w.Exited() {
 		return -1
 	}
-	return int32(w>>shift) & 0xFF
+	return int32(*w>>shift) & 0xFF
 }
 
-func (w WaitStatus) Signal() Signal {
+func (w *WaitStatus) Signal() (rsignal Signal) {
 	if !w.Signaled() {
 		return -1
 	}
-	return Signal(w & mask)
+	return Signal(*w & mask)
 }
 
-func (w WaitStatus) StopSignal() Signal {
+func (w *WaitStatus) StopSignal() (rsignal Signal) {
 	if !w.Stopped() {
 		return -1
 	}
-	return Signal(w>>shift) & 0xFF
+	return Signal(*w>>shift) & 0xFF
 }
 
-func (w WaitStatus) TrapCause() int32 {
+func (w *WaitStatus) TrapCause() (rn int32) {
 	if w.StopSignal() != SIGTRAP {
 		return -1
 	}
-	return int32(w>>shift) >> 8
+	return int32(*w>>shift) >> 8
 }
 
 //sys	wait4(pid int32, wstatus *_C_int, options int32, rusage *Rusage) (wpid int32, err error)
@@ -535,7 +535,7 @@ func Mkfifo(path string, mode uint32) (err error) {
 	return Mknod(path, mode|S_IFIFO, 0)
 }
 
-func (sa *SockaddrInet4) sockaddr() (unsafe.Pointer, _Socklen, error) {
+func (sa *SockaddrInet4) sockaddr() (rpointer unsafe.Pointer, r_Socklen _Socklen, rerr error) {
 	if sa.Port < 0 || sa.Port > 0xFFFF {
 		return nil, 0, EINVAL
 	}
@@ -547,7 +547,7 @@ func (sa *SockaddrInet4) sockaddr() (unsafe.Pointer, _Socklen, error) {
 	return unsafe.Pointer(&sa.raw), SizeofSockaddrInet4, nil
 }
 
-func (sa *SockaddrInet6) sockaddr() (unsafe.Pointer, _Socklen, error) {
+func (sa *SockaddrInet6) sockaddr() (rpointer unsafe.Pointer, r_Socklen _Socklen, rerr error) {
 	if sa.Port < 0 || sa.Port > 0xFFFF {
 		return nil, 0, EINVAL
 	}
@@ -560,7 +560,7 @@ func (sa *SockaddrInet6) sockaddr() (unsafe.Pointer, _Socklen, error) {
 	return unsafe.Pointer(&sa.raw), SizeofSockaddrInet6, nil
 }
 
-func (sa *SockaddrUnix) sockaddr() (unsafe.Pointer, _Socklen, error) {
+func (sa *SockaddrUnix) sockaddr() (rpointer unsafe.Pointer, r_Socklen _Socklen, rerr error) {
 	name := sa.Name
 	n := len(name)
 	if n > len(sa.raw.Path) {
@@ -604,7 +604,7 @@ type SockaddrLinklayer struct {
 	raw      RawSockaddrLinklayer
 }
 
-func (sa *SockaddrLinklayer) sockaddr() (unsafe.Pointer, _Socklen, error) {
+func (sa *SockaddrLinklayer) sockaddr() (rpointer unsafe.Pointer, r_Socklen _Socklen, rerr error) {
 	if sa.Ifindex < 0 || sa.Ifindex > 0x7fffffff {
 		return nil, 0, EINVAL
 	}
@@ -626,7 +626,7 @@ type SockaddrNetlink struct {
 	raw    RawSockaddrNetlink
 }
 
-func (sa *SockaddrNetlink) sockaddr() (unsafe.Pointer, _Socklen, error) {
+func (sa *SockaddrNetlink) sockaddr() (rpointer unsafe.Pointer, r_Socklen _Socklen, rerr error) {
 	sa.raw.Family = AF_NETLINK
 	sa.raw.Pad = sa.Pad
 	sa.raw.Pid = sa.Pid
@@ -634,7 +634,7 @@ func (sa *SockaddrNetlink) sockaddr() (unsafe.Pointer, _Socklen, error) {
 	return unsafe.Pointer(&sa.raw), SizeofSockaddrNetlink, nil
 }
 
-func anyToSockaddr(rsa *RawSockaddrAny) (Sockaddr, error) {
+func anyToSockaddr(rsa *RawSockaddrAny) (rsockaddr Sockaddr, rerr error) {
 	switch rsa.Addr.Family {
 	case AF_NETLINK:
 		pp := (*RawSockaddrNetlink)(unsafe.Pointer(rsa))
@@ -737,42 +737,42 @@ func GetsockoptInet4Addr(fd, level, opt int32) (value [4]byte, err error) {
 	return value, err
 }
 
-func GetsockoptIPMreq(fd, level, opt int32) (*IPMreq, error) {
+func GetsockoptIPMreq(fd, level, opt int32) (riPMreq *IPMreq, rerr error) {
 	var value IPMreq
 	vallen := _Socklen(SizeofIPMreq)
 	err := getsockopt(fd, level, opt, unsafe.Pointer(&value), &vallen)
 	return &value, err
 }
 
-func GetsockoptIPMreqn(fd, level, opt int32) (*IPMreqn, error) {
+func GetsockoptIPMreqn(fd, level, opt int32) (riPMreqn *IPMreqn, rerr error) {
 	var value IPMreqn
 	vallen := _Socklen(SizeofIPMreqn)
 	err := getsockopt(fd, level, opt, unsafe.Pointer(&value), &vallen)
 	return &value, err
 }
 
-func GetsockoptIPv6Mreq(fd, level, opt int32) (*IPv6Mreq, error) {
+func GetsockoptIPv6Mreq(fd, level, opt int32) (riPv6Mreq *IPv6Mreq, rerr error) {
 	var value IPv6Mreq
 	vallen := _Socklen(SizeofIPv6Mreq)
 	err := getsockopt(fd, level, opt, unsafe.Pointer(&value), &vallen)
 	return &value, err
 }
 
-func GetsockoptIPv6MTUInfo(fd, level, opt int32) (*IPv6MTUInfo, error) {
+func GetsockoptIPv6MTUInfo(fd, level, opt int32) (riPv6MTUInfo *IPv6MTUInfo, rerr error) {
 	var value IPv6MTUInfo
 	vallen := _Socklen(SizeofIPv6MTUInfo)
 	err := getsockopt(fd, level, opt, unsafe.Pointer(&value), &vallen)
 	return &value, err
 }
 
-func GetsockoptICMPv6Filter(fd, level, opt int32) (*ICMPv6Filter, error) {
+func GetsockoptICMPv6Filter(fd, level, opt int32) (riCMPv6Filter *ICMPv6Filter, rerr error) {
 	var value ICMPv6Filter
 	vallen := _Socklen(SizeofICMPv6Filter)
 	err := getsockopt(fd, level, opt, unsafe.Pointer(&value), &vallen)
 	return &value, err
 }
 
-func GetsockoptUcred(fd, level, opt int32) (*Ucred, error) {
+func GetsockoptUcred(fd, level, opt int32) (rucred *Ucred, rerr error) {
 	var value Ucred
 	vallen := _Socklen(SizeofUcred)
 	err := getsockopt(fd, level, opt, unsafe.Pointer(&value), &vallen)
@@ -1024,15 +1024,15 @@ func ReadDirent(fd int32, buf []byte) (n int32, err error) {
 	return Getdents(fd, buf)
 }
 
-func direntIno(buf []byte) (uint64, bool) {
+func direntIno(buf []byte) (rn uint64, rok bool) {
 	return readInt(buf, unsafe.Offsetof(Dirent{}.Ino), unsafe.Sizeof(Dirent{}.Ino))
 }
 
-func direntReclen(buf []byte) (uint64, bool) {
+func direntReclen(buf []byte) (rn uint64, rok bool) {
 	return readInt(buf, unsafe.Offsetof(Dirent{}.Reclen), unsafe.Sizeof(Dirent{}.Reclen))
 }
 
-func direntNamlen(buf []byte) (uint64, bool) {
+func direntNamlen(buf []byte) (rn uint64, rok bool) {
 	reclen, ok := direntReclen(buf)
 	if !ok {
 		return 0, false
@@ -1230,19 +1230,36 @@ func Setuid(uid int32) (err error) {
 // mmap varies by architecture; see syscall_linux_*.go.
 //sys	munmap(addr uintptr, length uintptr) (err error)
 
-var _mapper mmapper
-var _mapperDone bool
+// mapperState holds the lazily-created mmap manager. It is a self-mutating
+// type so _getMapper writes through its method instead of storing into
+// package globals after init.
+type mapperState struct {
+	mapper mmapper
+	done   bool
+}
 
-func _getMapper() *mmapper {
-	if !_mapperDone {
-		_mapperDone = true
-		_mapper = mmapper{
+var mapperHolder *mapperState
+
+func init() {
+	envsHolder = &envStore{}
+	rlimitHolder = &rlimitState{}
+	mapperHolder = &mapperState{}
+}
+
+func (ms *mapperState) get() (rmapper *mmapper) {
+	if !ms.done {
+		ms.done = true
+		ms.mapper = mmapper{
 			active: map[*byte][]byte{},
 			mmap:   mmap,
 			munmap: munmap,
 		}
 	}
-	return &_mapper
+	return &ms.mapper
+}
+
+func _getMapper() (rmmapper *mmapper) {
+	return mapperHolder.get()
 }
 
 func Mmap(fd int32, offset int64, length int32, prot int32, flags int32) (data []byte, err error) {
@@ -1281,7 +1298,7 @@ func setrlimit(resource int32, rlim *Rlimit) (err error) {
 func prlimit(pid int32, resource int32, newlimit *Rlimit, old *Rlimit) (err error) {
 	err = prlimit1(pid, resource, newlimit, old)
 	if err == nil && newlimit != nil && resource == RLIMIT_NOFILE && (pid == 0 || pid == Getpid()) {
-		origRlimitNofile = nil
+		rlimitHolder.clear()
 	}
 	return err
 }

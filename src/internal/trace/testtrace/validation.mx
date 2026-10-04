@@ -46,7 +46,7 @@ type procState struct {
 }
 
 // NewValidator creates a new Validator.
-func NewValidator() *Validator {
+func NewValidator() (v *Validator) {
 	return &Validator{
 		gs:        map[trace.GoID]*goState{},
 		ps:        map[trace.ProcID]*procState{},
@@ -68,7 +68,7 @@ func (v *Validator) SkipClockSnapshotChecks() {
 // Event validates ev as the next event in a stream of trace.Events.
 //
 // Returns an error if validation fails.
-func (v *Validator) Event(ev trace.Event) error {
+func (v *Validator) Event(ev trace.Event) (rerr error) {
 	e := &errAccumulator{}
 
 	// Validate timestamp order.
@@ -337,7 +337,7 @@ func (v *Validator) Event(ev trace.Event) error {
 	return e.Errors()
 }
 
-func (v *Validator) hasRange(r trace.ResourceID, name []byte) bool {
+func (v *Validator) hasRange(r trace.ResourceID, name []byte) (found bool) {
 	ranges, ok := v.ranges[r]
 	return ok && slices.Contains(ranges, name)
 }
@@ -349,7 +349,7 @@ func (v *Validator) addRange(r trace.ResourceID, name []byte) {
 	v.ranges[r] = ranges
 }
 
-func (v *Validator) hasAnyRange(r trace.ResourceID) bool {
+func (v *Validator) hasAnyRange(r trace.ResourceID) (found bool) {
 	ranges, ok := v.ranges[r]
 	return ok && len(ranges) != 0
 }
@@ -366,25 +366,26 @@ func (v *Validator) deleteRange(r trace.ResourceID, name []byte) {
 	v.ranges[r] = slices.Delete(ranges, i, i+1)
 }
 
-func (v *Validator) getOrCreateThread(e *errAccumulator, ev trace.Event, m trace.ThreadID) *schedContext {
-	lenient := func() bool {
-		// Be lenient about GoUndetermined -> GoSyscall transitions if they
-		// originate from an old trace. These transitions lack thread
-		// information in trace formats older than 1.22.
-		if v.GoVersion >= version.Go122 {
-			return false
-		}
-		if ev.Kind() != trace.EventStateTransition {
-			return false
-		}
-		tr := ev.StateTransition()
-		if tr.Resource.Kind != trace.ResourceGoroutine {
-			return false
-		}
-		from, to := tr.Goroutine()
-		return from == trace.GoUndetermined && to == trace.GoSyscall
+func lenientThread(v *Validator, ev trace.Event) (okay bool) {
+	// Be lenient about GoUndetermined -> GoSyscall transitions if they
+	// originate from an old trace. These transitions lack thread
+	// information in trace formats older than 1.22.
+	if v.GoVersion >= version.Go122 {
+		return false
 	}
-	if m == trace.NoThread && !lenient() {
+	if ev.Kind() != trace.EventStateTransition {
+		return false
+	}
+	tr := ev.StateTransition()
+	if tr.Resource.Kind != trace.ResourceGoroutine {
+		return false
+	}
+	from, to := tr.Goroutine()
+	return from == trace.GoUndetermined && to == trace.GoSyscall
+}
+
+func (v *Validator) getOrCreateThread(e *errAccumulator, ev trace.Event, m trace.ThreadID) (ctx *schedContext) {
+	if m == trace.NoThread && !lenientThread(v, ev) {
 		e.Errorf("must have thread, but thread ID is none")
 		return nil
 	}
@@ -399,7 +400,7 @@ func (v *Validator) getOrCreateThread(e *errAccumulator, ev trace.Event, m trace
 
 func checkStack(e *errAccumulator, stk trace.Stack) {
 	// Check for non-empty values, but we also check for crashes due to incorrect validation.
-	for i, f := range slices.Collect(stk.Frames()) {
+	for i, f := range (&stk).Frames() {
 		if i == 0 {
 			// Allow for one fully zero stack.
 			//
@@ -421,6 +422,6 @@ func (e *errAccumulator) Errorf(f []byte, args ...fmt.Stringer) {
 	e.errs = push(e.errs, fmt.Errorf(f, args...))
 }
 
-func (e *errAccumulator) Errors() error {
+func (e *errAccumulator) Errors() (rerr error) {
 	return errors.Join(e.errs...)
 }

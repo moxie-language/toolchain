@@ -22,7 +22,7 @@ import (
 //   [SEC1]: Elliptic Curve Cryptography (May 31, 2009, Version 2.0)
 //     https://www.secg.org/sec1-v2.pdf
 
-func _orderAsFieldVal() secp256k1.FieldVal {
+func _orderAsFieldVal() (out secp256k1.FieldVal) {
 	var f secp256k1.FieldVal
 	f.SetByteSlice(secp256k1.Params().N.Bytes())
 	return f
@@ -46,7 +46,7 @@ type Signature struct {
 }
 
 // NewSignature instantiates a new signature given some r and s values.
-func NewSignature(r, s *secp256k1.ModNScalar) *Signature {
+func NewSignature(r, s *secp256k1.ModNScalar) (out *Signature) {
 	return &Signature{*r, *s}
 }
 
@@ -56,7 +56,7 @@ func NewSignature(r, s *secp256k1.ModNScalar) *Signature {
 //
 // Note that the serialized bytes returned do not include the appended hash type
 // used in Decred signature scripts.
-func (sig *Signature) Serialize() []byte {
+func (sig *Signature) Serialize() (buf []byte) {
 	// The format of a DER encoded signature is as follows:
 	//
 	// 0x30 <total length> 0x02 <length of R> <R> 0x02 <length of S> <S>
@@ -135,7 +135,7 @@ func zeroArray32(b *[32]byte) { *b = [32]byte{} }
 // Note that a bool is not used here because it is not possible in Go to convert
 // from a bool to numeric value in constant time and many constant-time
 // operations require a numeric value.
-func fieldToModNScalar(v *secp256k1.FieldVal) (secp256k1.ModNScalar, uint32) {
+func fieldToModNScalar(v *secp256k1.FieldVal) (out secp256k1.ModNScalar, n uint32) {
 	var buf [32]byte
 	v.PutBytes(&buf)
 	var s secp256k1.ModNScalar
@@ -145,7 +145,7 @@ func fieldToModNScalar(v *secp256k1.FieldVal) (secp256k1.ModNScalar, uint32) {
 }
 
 // modNScalarToField converts a scalar modulo the group order to a field value.
-func modNScalarToField(v *secp256k1.ModNScalar) secp256k1.FieldVal {
+func modNScalarToField(v *secp256k1.ModNScalar) (out secp256k1.FieldVal) {
 	var buf [32]byte
 	v.PutBytes(&buf)
 	var fv secp256k1.FieldVal
@@ -155,7 +155,7 @@ func modNScalarToField(v *secp256k1.ModNScalar) secp256k1.FieldVal {
 
 // Verify returns whether the signature is valid for the provided hash
 // and secp256k1 public key.
-func (sig *Signature) Verify(hash []byte, pubKey *secp256k1.PublicKey) bool {
+func (sig *Signature) Verify(hash []byte, pubKey *secp256k1.PublicKey) (ok bool) {
 	// The algorithm for verifying an ECDSA signature is given as algorithm 4.30
 	// in [GECC].
 	//
@@ -277,7 +277,7 @@ func (sig *Signature) Verify(hash []byte, pubKey *secp256k1.PublicKey) bool {
 // IsEqual compares this Signature instance to the one passed, returning true if
 // both Signatures are equivalent.  A signature is equivalent to another, if
 // they both have the same scalar value for R and S.
-func (sig *Signature) IsEqual(otherSig *Signature) bool {
+func (sig *Signature) IsEqual(otherSig *Signature) (ok bool) {
 	return sig.r.Equals(&otherSig.r) && sig.s.Equals(&otherSig.s)
 }
 
@@ -289,7 +289,7 @@ func (sig *Signature) IsEqual(otherSig *Signature) bool {
 //   - Negative values are rejected
 //   - Zero is rejected
 //   - Values greater than or equal to the secp256k1 group order are rejected
-func ParseDERSignature(sig []byte) (*Signature, error) {
+func ParseDERSignature(sig []byte) (out *Signature, derr error) {
 	// The format of a DER encoded signature for secp256k1 is as follows:
 	//
 	// 0x30 <total length> 0x02 <length of R> <R> 0x02 <length of S> <S>
@@ -520,10 +520,7 @@ func ParseDERSignature(sig []byte) (*Signature, error) {
 // signing logic.  It differs in that it accepts a nonce to use when signing and
 // may not successfully produce a valid signature for the given nonce.  It is
 // primarily separated for testing purposes.
-func sign(secKey, nonce *secp256k1.ModNScalar, hash []byte) (
-	*Signature, byte,
-	bool,
-) {
+func sign(secKey, nonce *secp256k1.ModNScalar, hash []byte) (out *Signature, b byte, ok bool) {
 	// The algorithm for producing an ECDSA signature is given as algorithm 4.29
 	// in [GECC].
 	//
@@ -631,10 +628,7 @@ func sign(secKey, nonce *secp256k1.ModNScalar, hash []byte) (
 // signRFC6979 generates a deterministic ECDSA signature according to RFC 6979
 // and BIP0062 and returns it along with an additional public key recovery code
 // for efficiently recovering the public key from the signature.
-func signRFC6979(secKey *secp256k1.SecretKey, hash []byte) (
-	*Signature,
-	byte,
-) {
+func signRFC6979(secKey *secp256k1.SecretKey, hash []byte) (out *Signature, b byte) {
 	// The algorithm for producing an ECDSA signature is given as algorithm 4.29
 	// in [GECC].
 	//
@@ -690,7 +684,7 @@ func signRFC6979(secKey *secp256k1.SecretKey, hash []byte) (
 // secret key.  The produced signature is deterministic (same message and same
 // key yield the same signature) and canonical in accordance with RFC6979 and
 // BIP0062.
-func Sign(key *secp256k1.SecretKey, hash []byte) *Signature {
+func Sign(key *secp256k1.SecretKey, hash []byte) (out *Signature) {
 	signature, _ := signRFC6979(key, hash)
 	return signature
 }
@@ -733,7 +727,7 @@ const (
 func SignCompact(
 	key *secp256k1.SecretKey, hash []byte,
 	isCompressedKey bool,
-) []byte {
+) (buf []byte) {
 	// Create the signature and associated pubkey recovery code and calculate
 	// the compact signature recovery code.
 	sig, pubKeyRecoveryCode := signRFC6979(key, hash)
@@ -753,9 +747,7 @@ func SignCompact(
 // compact signature and message hash.  It first verifies the signature, and, if
 // the signature matches then the recovered public key will be returned as well
 // as a boolean indicating whether or not the original key was compressed.
-func RecoverCompact(signature, hash []byte) (
-	*secp256k1.PublicKey, bool, error,
-) {
+func RecoverCompact(signature, hash []byte) (out *secp256k1.PublicKey, ok bool, derr error) {
 	// The following is very loosely based on the information and algorithm that
 	// describes recovering a public key from and ECDSA signature in section
 	// 4.1.6 of [SEC1].

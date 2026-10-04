@@ -98,12 +98,13 @@ type Writer struct {
 	flags    uint32
 
 	// current state
-	buf     []byte   // collected text excluding tabs or line breaks
-	pos     int32      // buffer position up to which cell.width of incomplete cell has been computed
-	cell    cell     // current incomplete cell; cell.width is up to buf[pos] excluding ignored sections
-	endChar byte     // terminating char of escaped sequence (Escape for escapes, '>', ';' for HTML tags/entities, or 0)
-	lines   [][]cell // list of lines; each line is a list of cells
-	widths  []int32    // list of column widths in runes - re-used during formatting
+	buf      []byte // collected text excluding tabs or line breaks
+	pos      int32  // buffer position up to which cell.width of incomplete cell has been computed
+	cell     cell   // current incomplete cell; cell.width is up to buf[pos] excluding ignored sections
+	endChar  byte   // terminating char of escaped sequence (Escape for escapes, '>', ';' for HTML tags/entities, or 0)
+	lines    [][]cell // list of lines; each line is a list of cells
+	widths   []int32  // list of column widths in runes - re-used during formatting
+	panicErr error  // output error carried across a panic (panic/recover only carries strings)
 }
 
 // addLine adds a new line.
@@ -208,7 +209,7 @@ const (
 //			(for correct-looking results, tabwidth must correspond
 //			to the tab width in the viewer displaying the result)
 //	flags		formatting control
-func (b *Writer) Init(output io.Writer, minwidth, tabwidth, padding int32, padchar byte, flags uint32) *Writer {
+func (b *Writer) Init(output io.Writer, minwidth, tabwidth, padding int32, padchar byte, flags uint32) (out *Writer) {
 	if minwidth < 0 || tabwidth < 0 || padding < 0 {
 		panic("negative minwidth, tabwidth, or padding")
 	}
@@ -244,19 +245,14 @@ func (b *Writer) dump() {
 	print("\n")
 }
 
-// local error wrapper so we can distinguish errors we want to return
-// as errors from genuine panics (which we don't want to return as errors)
-type osError struct {
-	err error
-}
-
 func (b *Writer) write0(buf []byte) {
 	n, err := b.output.Write(buf)
 	if n != len(buf) && err == nil {
 		err = io.ErrShortWrite
 	}
 	if err != nil {
-		panic(osError{err}.Error())
+		b.panicErr = err
+		panic(err.Error())
 	}
 }
 
@@ -268,8 +264,8 @@ func (b *Writer) writeN(src []byte, n int32) {
 	b.write0(src[0:n])
 }
 
-func _newline() []byte { return []byte{'\n'} }
-func _tabs() []byte    { return []byte("\t\t\t\t\t\t\t\t") }
+func _newline() (out []byte) { return []byte{'\n'} }
+func _tabs() (out []byte)    { return []byte("\t\t\t\t\t\t\t\t") }
 
 func (b *Writer) writePadding(textw, cellw int32, useTabs bool) {
 	if b.padbytes[0] == '\t' || useTabs {
@@ -468,7 +464,7 @@ func (b *Writer) endEscape() {
 
 // Terminate the current cell by adding it to the list of cells of the
 // current line. Returns the number of cells in that line.
-func (b *Writer) terminateCell(htab bool) int32 {
+func (b *Writer) terminateCell(htab bool) (n int32) {
 	b.cell.htab = htab
 	line := &b.lines[len(b.lines)-1]
 	*line = push(*line, b.cell)
@@ -482,8 +478,9 @@ func (b *Writer) handlePanic(err *error, op string) {
 			// If Flush ran into a panic, we still need to reset.
 			b.reset()
 		}
-		if nerr, ok := e.(osError); ok {
-			*err = nerr.err
+		if b.panicErr != nil {
+			*err = b.panicErr
+			b.panicErr = nil
 			return
 		}
 		panic(fmt.Sprintf("tabwriter: panic during %s (%v)", op, e))
@@ -494,7 +491,7 @@ func (b *Writer) handlePanic(err *error, op string) {
 // that any data buffered in the [Writer] is written to output. Any
 // incomplete escape sequence at the end is considered
 // complete for formatting purposes.
-func (b *Writer) Flush() error {
+func (b *Writer) Flush() (err error) {
 	return b.flush()
 }
 
@@ -605,6 +602,6 @@ func (b *Writer) Write(buf []byte) (n int32, err error) {
 
 // NewWriter allocates and initializes a new [Writer].
 // The parameters are the same as for the Init function.
-func NewWriter(output io.Writer, minwidth, tabwidth, padding int32, padchar byte, flags uint32) *Writer {
+func NewWriter(output io.Writer, minwidth, tabwidth, padding int32, padchar byte, flags uint32) (w *Writer) {
 	return (&Writer{}).Init(output, minwidth, tabwidth, padding, padchar, flags)
 }

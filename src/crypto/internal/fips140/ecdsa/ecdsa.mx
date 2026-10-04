@@ -24,11 +24,11 @@ type PrivateKey struct {
 	d   []byte // bigmod.(*Nat).Bytes output (same length as the curve order)
 }
 
-func (priv *PrivateKey) Bytes() []byte {
+func (priv *PrivateKey) Bytes() (ret0 []byte) {
 	return priv.d
 }
 
-func (priv *PrivateKey) PublicKey() *PublicKey {
+func (priv *PrivateKey) PublicKey() (ret0 *PublicKey) {
 	return &priv.pub
 }
 
@@ -37,7 +37,7 @@ type PublicKey struct {
 	q     []byte // uncompressed nistec Point.Bytes output
 }
 
-func (pub *PublicKey) Bytes() []byte {
+func (pub *PublicKey) Bytes() (ret0 []byte) {
 	return pub.q
 }
 
@@ -79,21 +79,32 @@ func precomputeParams[P Point[P]](c *Curve[P], order []byte) {
 	c.nMinus2 = bigmod.NewNat().ExpandFor(c.N).Sub(two, c.N).Bytes(c.N)
 }
 
+// newCurve builds a Curve. The struct literal stays generic here because a
+// literal instantiated directly with a concrete Point type does not substitute
+// P in the newPoint field.
+func newCurve[P Point[P]](id curveID, np func() P) (ret0 *Curve[P]) {
+	return &Curve[P]{
+		curve:    id,
+		newPoint: np,
+	}
+}
+
 var _p224Cached *Curve[*nistec.P224Point]
 
-func P224() *Curve[*nistec.P224Point] {
+func initP224() {
 	if _p224Cached == nil {
-		_p224Cached = &Curve[*nistec.P224Point]{
-			curve:    p224,
-			newPoint: nistec.NewP224Point,
-		}
+		_p224Cached = newCurve(p224, nistec.NewP224Point)
 		o := _p224Order()
 		precomputeParams(_p224Cached, o[:])
 	}
+}
+
+func P224() (ret0 *Curve[*nistec.P224Point]) {
+	initP224()
 	return _p224Cached
 }
 
-func _p224Order() [28]byte {
+func _p224Order() (ret0 [28]byte) {
 	return [28]byte{
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x16, 0xa2,
@@ -104,20 +115,21 @@ func _p224Order() [28]byte {
 
 var _p256Cached *Curve[*nistec.P256Point]
 
-func P256() *Curve[*nistec.P256Point] {
+func initP256() {
 	if _p256Cached == nil {
-		_p256Cached = &Curve[*nistec.P256Point]{
-			curve:      p256,
-			newPoint:   nistec.NewP256Point,
-			ordInverse: nistec.P256OrdInverse,
-		}
+		_p256Cached = newCurve(p256, nistec.NewP256Point)
+		_p256Cached.ordInverse = nistec.P256OrdInverse
 		o := _p256Order()
 		precomputeParams(_p256Cached, o[:])
 	}
+}
+
+func P256() (ret0 *Curve[*nistec.P256Point]) {
+	initP256()
 	return _p256Cached
 }
 
-func _p256Order() [32]byte {
+func _p256Order() (ret0 [32]byte) {
 	return [32]byte{
 		0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -127,19 +139,20 @@ func _p256Order() [32]byte {
 
 var _p384Cached *Curve[*nistec.P384Point]
 
-func P384() *Curve[*nistec.P384Point] {
+func initP384() {
 	if _p384Cached == nil {
-		_p384Cached = &Curve[*nistec.P384Point]{
-			curve:    p384,
-			newPoint: nistec.NewP384Point,
-		}
+		_p384Cached = newCurve(p384, nistec.NewP384Point)
 		o := _p384Order()
 		precomputeParams(_p384Cached, o[:])
 	}
+}
+
+func P384() (ret0 *Curve[*nistec.P384Point]) {
+	initP384()
 	return _p384Cached
 }
 
-func _p384Order() [48]byte {
+func _p384Order() (ret0 [48]byte) {
 	return [48]byte{
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -151,19 +164,20 @@ func _p384Order() [48]byte {
 
 var _p521Cached *Curve[*nistec.P521Point]
 
-func P521() *Curve[*nistec.P521Point] {
+func initP521() {
 	if _p521Cached == nil {
-		_p521Cached = &Curve[*nistec.P521Point]{
-			curve:    p521,
-			newPoint: nistec.NewP521Point,
-		}
+		_p521Cached = newCurve(p521, nistec.NewP521Point)
 		o := _p521Order()
 		precomputeParams(_p521Cached, o[:])
 	}
+}
+
+func P521() (ret0 *Curve[*nistec.P521Point]) {
+	initP521()
 	return _p521Cached
 }
 
-func _p521Order() [66]byte {
+func _p521Order() (ret0 [66]byte) {
 	return [66]byte{0x01, 0xff,
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -175,7 +189,7 @@ func _p521Order() [66]byte {
 		0xbb, 0x6f, 0xb7, 0x1e, 0x91, 0x38, 0x64, 0x09}
 }
 
-func NewPrivateKey[P Point[P]](c *Curve[P], D, Q []byte) (*PrivateKey, error) {
+func NewPrivateKey[P Point[P]](c *Curve[P], D, Q []byte) (ret0 *PrivateKey, ret1 error) {
 	fips140.RecordApproved()
 	pub, err := NewPublicKey(c, Q)
 	if err != nil {
@@ -189,7 +203,7 @@ func NewPrivateKey[P Point[P]](c *Curve[P], D, Q []byte) (*PrivateKey, error) {
 	return priv, nil
 }
 
-func NewPublicKey[P Point[P]](c *Curve[P], Q []byte) (*PublicKey, error) {
+func NewPublicKey[P Point[P]](c *Curve[P], Q []byte) (ret0 *PublicKey, ret1 error) {
 	// SetBytes checks that Q is a valid point on the curve, and that its
 	// coordinates are reduced modulo p, fulfilling the requirements of SP
 	// 800-89, Section 5.3.2.
@@ -201,7 +215,7 @@ func NewPublicKey[P Point[P]](c *Curve[P], Q []byte) (*PublicKey, error) {
 }
 
 // GenerateKey generates a new ECDSA private key pair for the specified curve.
-func GenerateKey[P Point[P]](c *Curve[P], rand io.Reader) (*PrivateKey, error) {
+func GenerateKey[P Point[P]](c *Curve[P], rand io.Reader) (ret0 *PrivateKey, ret1 error) {
 	fips140.RecordApproved()
 
 	k, Q, err := randomPoint(c, rand, nil)
@@ -229,7 +243,7 @@ func GenerateKey[P Point[P]](c *Curve[P], rand io.Reader) (*PrivateKey, error) {
 // Moxie closures do not capture outer scope, so the randomness source is
 // passed explicitly: d != nil uses the deterministic DRBG, otherwise rand
 // feeds drbg.ReadWithReader.
-func randomPoint[P Point[P]](c *Curve[P], rand io.Reader, d *hmacDRBG) (k *bigmod.Nat, p P, err error) {
+func randomPoint[P Point[P]](c *Curve[P], rand io.Reader, d nonceSource) (k *bigmod.Nat, p P, err error) {
 	for {
 		b := []byte{:c.N.Size()}
 		if d != nil {
@@ -279,7 +293,7 @@ type Signature struct {
 // the hash function H) using the private key, priv. If the hash is longer than
 // the bit-length of the private key's curve order, the hash will be truncated
 // to that length.
-func Sign[P Point[P], H hash.Hash](c *Curve[P], h func() H, priv *PrivateKey, rand io.Reader, digest []byte) (*Signature, error) {
+func Sign[P Point[P], H hash.Hash](c *Curve[P], h func() H, priv *PrivateKey, rand io.Reader, digest []byte) (ret0 *Signature, ret1 error) {
 	if priv.pub.curve != c.curve {
 		return nil, errors.New("ecdsa: private key does not match curve")
 	}
@@ -302,7 +316,7 @@ func Sign[P Point[P], H hash.Hash](c *Curve[P], h func() H, priv *PrivateKey, ra
 	// per SP 800-90Ar1, Section 8.6.7, and the rest is a personalization
 	// string, which per SP 800-90Ar1, Section 8.7.1 may contain secret
 	// information.
-	gen := newDRBG(h, Z, nil, blockAlignedPersonalizationString{priv.d, bits2octets(c, digest)})
+	gen := newDRBG(h, Z, nil, nil, [][]byte{priv.d, bits2octets(c, digest)})
 
 	return sign(c, priv, gen, digest)
 }
@@ -312,25 +326,25 @@ func Sign[P Point[P], H hash.Hash](c *Curve[P], h func() H, priv *PrivateKey, ra
 // hash is longer than the bit-length of the private key's curve order, the hash
 // will be truncated to that length. This applies Deterministic ECDSA as
 // specified in FIPS 186-5 and RFC 6979.
-func SignDeterministic[P Point[P], H hash.Hash](c *Curve[P], h func() H, priv *PrivateKey, digest []byte) (*Signature, error) {
+func SignDeterministic[P Point[P], H hash.Hash](c *Curve[P], h func() H, priv *PrivateKey, digest []byte) (ret0 *Signature, ret1 error) {
 	if priv.pub.curve != c.curve {
 		return nil, errors.New("ecdsa: private key does not match curve")
 	}
 	fips140.RecordApproved()
 	fipsSelfTestDeterministic()
-	gen := newDRBG(h, priv.d, bits2octets(c, digest), nil) // RFC 6979, Section 3.3
+	gen := newDRBG(h, priv.d, bits2octets(c, digest), nil, nil) // RFC 6979, Section 3.3
 	return sign(c, priv, gen, digest)
 }
 
 // bits2octets as specified in FIPS 186-5, Appendix B.2.4 or RFC 6979,
 // Section 2.3.4. See RFC 6979, Section 3.5 for the rationale.
-func bits2octets[P Point[P]](c *Curve[P], digest []byte) []byte {
+func bits2octets[P Point[P]](c *Curve[P], digest []byte) (ret0 []byte) {
 	e := bigmod.NewNat()
 	hashToNat(c, e, digest)
 	return e.Bytes(c.N)
 }
 
-func signGeneric[P Point[P]](c *Curve[P], priv *PrivateKey, gen *hmacDRBG, digest []byte) (*Signature, error) {
+func signGeneric[P Point[P]](c *Curve[P], priv *PrivateKey, gen nonceSource, digest []byte) (ret0 *Signature, ret1 error) {
 	// FIPS 186-5, Section 6.4.1
 
 	k, R, err := randomPoint(c, nil, gen)
@@ -420,7 +434,7 @@ func hashToNat[P Point[P]](c *Curve[P], e *bigmod.Nat, digest []byte) {
 //
 // Note how taking the rightmost bits would have been as easy as masking the
 // first byte, but we can't have nice things.
-func rightShift(b []byte, shift int32) []byte {
+func rightShift(b []byte, shift int32) (ret0 []byte) {
 	if shift <= 0 || shift >= 8 {
 		panic("ecdsa: internal error: shift can only be by 1 to 7 bits")
 	}
@@ -441,7 +455,7 @@ func rightShift(b []byte, shift int32) []byte {
 //
 // The inputs are not considered confidential, and may leak through timing side
 // channels, or if an attacker has control of part of the inputs.
-func Verify[P Point[P]](c *Curve[P], pub *PublicKey, digest []byte, sig *Signature) error {
+func Verify[P Point[P]](c *Curve[P], pub *PublicKey, digest []byte, sig *Signature) (ret0 error) {
 	if pub.curve != c.curve {
 		return errors.New("ecdsa: public key does not match curve")
 	}
@@ -450,7 +464,7 @@ func Verify[P Point[P]](c *Curve[P], pub *PublicKey, digest []byte, sig *Signatu
 	return verify(c, pub, digest, sig)
 }
 
-func verifyGeneric[P Point[P]](c *Curve[P], pub *PublicKey, digest []byte, sig *Signature) error {
+func verifyGeneric[P Point[P]](c *Curve[P], pub *PublicKey, digest []byte, sig *Signature) (ret0 error) {
 	// FIPS 186-5, Section 6.4.2
 
 	Q, err := c.newPoint().SetBytes(pub.q)

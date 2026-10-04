@@ -19,7 +19,7 @@ import (
 // and period types or the merge will fail. profile.Period of the
 // resulting profile will be the maximum of all profiles, and
 // profile.TimeNanos will be the earliest nonzero one.
-func Merge(srcs []*Profile) (*Profile, error) {
+func Merge(srcs []*Profile) (out *Profile, rerr error) {
 	if len(srcs) == 0 {
 		return nil, fmt.Errorf("no profiles to merge")
 	}
@@ -71,7 +71,7 @@ func Merge(srcs []*Profile) (*Profile, error) {
 // Normalize normalizes the source profile by multiplying each value in profile by the
 // ratio of the sum of the base profile's values of that sample type to the sum of the
 // source profile's value of that sample type.
-func (p *Profile) Normalize(pb *Profile) error {
+func (p *Profile) Normalize(pb *Profile) (rerr error) {
 
 	if err := p.compatible(pb); err != nil {
 		return err
@@ -103,7 +103,7 @@ func (p *Profile) Normalize(pb *Profile) error {
 	return nil
 }
 
-func isZeroSample(s *Sample) bool {
+func isZeroSample(s *Sample) (zero bool) {
 	for _, v := range s.Value {
 		if v != 0 {
 			return false
@@ -132,7 +132,7 @@ type mapInfo struct {
 	offset int64
 }
 
-func (pm *profileMerger) mapSample(src *Sample) *Sample {
+func (pm *profileMerger) mapSample(src *Sample) (out *Sample) {
 	s := &Sample{
 		Location: []*Location{:len(src.Location)},
 		Value:    []int64{:len(src.Value)},
@@ -143,19 +143,23 @@ func (pm *profileMerger) mapSample(src *Sample) *Sample {
 	for i, l := range src.Location {
 		s.Location[i] = pm.mapLocation(l)
 	}
-	for k, v := range src.Label {
-		vv := [][]byte{:len(v)}
-		copy(vv, v)
-		s.Label[k] = vv
+	var lvs [][]byte
+	for lk, lv := range src.Label {
+		lvs = [][]byte{:len(lv)}
+		copy(lvs, lv)
+		s.Label[lk] = lvs
 	}
-	for k, v := range src.NumLabel {
-		u := src.NumUnit[k]
-		vv := []int64{:len(v)}
-		uu := [][]byte{:len(u)}
-		copy(vv, v)
-		copy(uu, u)
-		s.NumLabel[k] = vv
-		s.NumUnit[k] = uu
+	var u [][]byte
+	var nvs []int64
+	var uvs [][]byte
+	for nk, nv := range src.NumLabel {
+		u = src.NumUnit[nk]
+		nvs = []int64{:len(nv)}
+		uvs = [][]byte{:len(u)}
+		copy(nvs, nv)
+		copy(uvs, u)
+		s.NumLabel[nk] = nvs
+		s.NumUnit[nk] = uvs
 	}
 	// Check memoization table. Must be done on the remapped location to
 	// account for the remapped mapping. Add current values to the
@@ -175,7 +179,7 @@ func (pm *profileMerger) mapSample(src *Sample) *Sample {
 }
 
 // key generates sampleKey to be used as a key for maps.
-func (sample *Sample) key() sampleKey {
+func (sample *Sample) key() (out sampleKey) {
 	ids := [][]byte{:len(sample.Location)}
 	for i, l := range sample.Location {
 		ids[i] = strconv.FormatUint(l.ID, 16)
@@ -208,14 +212,14 @@ type sampleKey struct {
 	numlabels []byte
 }
 
-func (pm *profileMerger) mapLocation(src *Location) *Location {
+func (pm *profileMerger) mapLocation(src *Location) (out *Location) {
 	if src == nil {
 		return nil
 	}
 
-	if l, ok := pm.locationsByID[src.ID]; ok {
-		pm.locationsByID[src.ID] = l
-		return l
+	if lc, ok := pm.locationsByID[src.ID]; ok {
+		pm.locationsByID[src.ID] = lc
+		return lc
 	}
 
 	mi := pm.mapMapping(src.Mapping)
@@ -244,7 +248,7 @@ func (pm *profileMerger) mapLocation(src *Location) *Location {
 }
 
 // key generates locationKey to be used as a key for maps.
-func (l *Location) key() locationKey {
+func (l *Location) key() (out locationKey) {
 	key := locationKey{
 		addr:     l.Address,
 		isFolded: l.IsFolded,
@@ -271,21 +275,21 @@ type locationKey struct {
 	isFolded        bool
 }
 
-func (pm *profileMerger) mapMapping(src *Mapping) mapInfo {
+func (pm *profileMerger) mapMapping(src *Mapping) (out mapInfo) {
 	if src == nil {
 		return mapInfo{}
 	}
 
-	if mi, ok := pm.mappingsByID[src.ID]; ok {
-		return mi
+	if cached, ok := pm.mappingsByID[src.ID]; ok {
+		return cached
 	}
 
 	// Check memoization tables.
 	mk := src.key()
-	if m, ok := pm.mappings[mk]; ok {
-		mi := mapInfo{m, int64(m.Start) - int64(src.Start)}
-		pm.mappingsByID[src.ID] = mi
-		return mi
+	if known, ok := pm.mappings[mk]; ok {
+		res := mapInfo{known, int64(known.Start) - int64(src.Start)}
+		pm.mappingsByID[src.ID] = res
+		return res
 	}
 	m := &Mapping{
 		ID:              uint64(len(pm.p.Mapping) + 1),
@@ -304,14 +308,14 @@ func (pm *profileMerger) mapMapping(src *Mapping) mapInfo {
 
 	// Update memoization tables.
 	pm.mappings[mk] = m
-	mi := mapInfo{m, 0}
-	pm.mappingsByID[src.ID] = mi
-	return mi
+	info := mapInfo{m, 0}
+	pm.mappingsByID[src.ID] = info
+	return info
 }
 
 // key generates encoded strings of Mapping to be used as a key for
 // maps.
-func (m *Mapping) key() mappingKey {
+func (m *Mapping) key() (out mappingKey) {
 	// Normalize addresses to handle address space randomization.
 	// Round up to next 4K boundary to avoid minor discrepancies.
 	const mapsizeRounding = 0x1000
@@ -342,7 +346,7 @@ type mappingKey struct {
 	buildIDOrFile []byte
 }
 
-func (pm *profileMerger) mapLine(src Line) Line {
+func (pm *profileMerger) mapLine(src Line) (out Line) {
 	ln := Line{
 		Function: pm.mapFunction(src.Function),
 		Line:     src.Line,
@@ -350,17 +354,17 @@ func (pm *profileMerger) mapLine(src Line) Line {
 	return ln
 }
 
-func (pm *profileMerger) mapFunction(src *Function) *Function {
+func (pm *profileMerger) mapFunction(src *Function) (out *Function) {
 	if src == nil {
 		return nil
 	}
-	if f, ok := pm.functionsByID[src.ID]; ok {
-		return f
+	if cached, ok := pm.functionsByID[src.ID]; ok {
+		return cached
 	}
 	k := src.key()
-	if f, ok := pm.functions[k]; ok {
-		pm.functionsByID[src.ID] = f
-		return f
+	if known, ok := pm.functions[k]; ok {
+		pm.functionsByID[src.ID] = known
+		return known
 	}
 	f := &Function{
 		ID:         uint64(len(pm.p.Function) + 1),
@@ -377,7 +381,7 @@ func (pm *profileMerger) mapFunction(src *Function) *Function {
 }
 
 // key generates a struct to be used as a key for maps.
-func (f *Function) key() functionKey {
+func (f *Function) key() (out functionKey) {
 	return functionKey{
 		f.StartLine,
 		f.Name,
@@ -393,7 +397,7 @@ type functionKey struct {
 
 // combineHeaders checks that all profiles can be merged and returns
 // their combined profile.
-func combineHeaders(srcs []*Profile) (*Profile, error) {
+func combineHeaders(srcs []*Profile) (out *Profile, rerr error) {
 	for _, s := range srcs[1:] {
 		if err := srcs[0].compatible(s); err != nil {
 			return nil, err
@@ -445,7 +449,7 @@ func combineHeaders(srcs []*Profile) (*Profile, error) {
 // compatible determines if two profiles can be compared/merged.
 // returns nil if the profiles are compatible; otherwise an error with
 // details on the incompatibility.
-func (p *Profile) compatible(pb *Profile) error {
+func (p *Profile) compatible(pb *Profile) (rerr error) {
 	if !equalValueType(p.PeriodType, pb.PeriodType) {
 		return fmt.Errorf("incompatible period types %v and %v", p.PeriodType, pb.PeriodType)
 	}
@@ -464,6 +468,6 @@ func (p *Profile) compatible(pb *Profile) error {
 
 // equalValueType returns true if the two value types are semantically
 // equal. It ignores the internal fields used during encode/decode.
-func equalValueType(st1, st2 *ValueType) bool {
+func equalValueType(st1, st2 *ValueType) (eq bool) {
 	return st1.Type == st2.Type && st1.Unit == st2.Unit
 }

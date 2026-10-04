@@ -24,9 +24,8 @@ type AlgorithmIdentifier struct {
 	Parameters asn1.RawValue `asn1:"optional"`
 }
 
-type RDNSequence []RelativeDistinguishedNameSET
 
-func _attributeTypeNames() map[string]string {
+func _attributeTypeNames() (rm map[string]string) {
 	return map[string]string{
 		"2.5.4.6":  "C",
 		"2.5.4.10": "O",
@@ -40,9 +39,9 @@ func _attributeTypeNames() map[string]string {
 	}
 }
 
-// String returns a string representation of the sequence r,
+// rdnSequenceString returns a string representation of the sequence r,
 // roughly following the RFC 2253 Distinguished Names syntax.
-func (r RDNSequence) String() string {
+func rdnSequenceString(r [][]AttributeTypeAndValue) (rs string) {
 	s := ""
 	for i := 0; i < len(r); i++ {
 		rdn := r[len(r)-1-i]
@@ -100,7 +99,6 @@ func (r RDNSequence) String() string {
 	return s
 }
 
-type RelativeDistinguishedNameSET []AttributeTypeAndValue
 
 // AttributeTypeAndValue mirrors the ASN.1 structure of the same name in
 // RFC 5280, Section 4.1.2.4.
@@ -127,7 +125,7 @@ type Extension struct {
 // Name represents an X.509 distinguished name. This only includes the common
 // elements of a DN. Note that Name is only an approximation of the X.509
 // structure. If an accurate representation is needed, asn1.Unmarshal the raw
-// subject or issuer as an [RDNSequence].
+// subject or issuer as an [[][]AttributeTypeAndValue].
 type Name struct {
 	Country, Organization, OrganizationalUnit [][]byte
 	Locality, Province                        [][]byte
@@ -146,10 +144,10 @@ type Name struct {
 	ExtraNames []AttributeTypeAndValue
 }
 
-// FillFromRDNSequence populates n from the provided [RDNSequence].
+// FillFromRDNSequence populates n from the provided [[][]AttributeTypeAndValue].
 // Multi-entry RDNs are flattened, all entries are added to the
 // relevant n fields, and the grouping is not preserved.
-func (n *Name) FillFromRDNSequence(rdns *RDNSequence) {
+func (n *Name) FillFromRDNSequence(rdns *[][]AttributeTypeAndValue) {
 	// Declared outside the loops: a declaration in the body of a self-mutating
 	// method allocates in the sovereign arena on every iteration.
 	var value []byte
@@ -165,8 +163,8 @@ func (n *Name) FillFromRDNSequence(rdns *RDNSequence) {
 			value = atv.Value
 
 			t = atv.Type
-			if len(t) == 4 && t[0] == 2 && t[1] == 5 && t[2] == 4 {
-				switch t[3] {
+			if len(t.OID) == 4 && t.OID[0] == 2 && t.OID[1] == 5 && t.OID[2] == 4 {
+				switch t.OID[3] {
 				case 3:
 					n.CommonName = value
 				case 5:
@@ -198,21 +196,21 @@ func (n *Name) FillFromRDNSequence(rdns *RDNSequence) {
 	}
 }
 
-func _oidCountry() asn1.ObjectIdentifier            { return []int32{2, 5, 4, 6} }
-func _oidOrganization() asn1.ObjectIdentifier       { return []int32{2, 5, 4, 10} }
-func _oidOrganizationalUnit() asn1.ObjectIdentifier { return []int32{2, 5, 4, 11} }
-func _oidCommonName() asn1.ObjectIdentifier         { return []int32{2, 5, 4, 3} }
-func _oidSerialNumber() asn1.ObjectIdentifier       { return []int32{2, 5, 4, 5} }
-func _oidLocality() asn1.ObjectIdentifier           { return []int32{2, 5, 4, 7} }
-func _oidProvince() asn1.ObjectIdentifier           { return []int32{2, 5, 4, 8} }
-func _oidStreetAddress() asn1.ObjectIdentifier      { return []int32{2, 5, 4, 9} }
-func _oidPostalCode() asn1.ObjectIdentifier         { return []int32{2, 5, 4, 17} }
+func _oidCountry() (robjectIdentifier asn1.ObjectIdentifier) { return asn1.ObjectIdentifier{OID: []int32{2, 5, 4, 6}} }
+func _oidOrganization() (robjectIdentifier asn1.ObjectIdentifier) { return asn1.ObjectIdentifier{OID: []int32{2, 5, 4, 10}} }
+func _oidOrganizationalUnit() (robjectIdentifier asn1.ObjectIdentifier) { return asn1.ObjectIdentifier{OID: []int32{2, 5, 4, 11}} }
+func _oidCommonName() (robjectIdentifier asn1.ObjectIdentifier) { return asn1.ObjectIdentifier{OID: []int32{2, 5, 4, 3}} }
+func _oidSerialNumber() (robjectIdentifier asn1.ObjectIdentifier) { return asn1.ObjectIdentifier{OID: []int32{2, 5, 4, 5}} }
+func _oidLocality() (robjectIdentifier asn1.ObjectIdentifier) { return asn1.ObjectIdentifier{OID: []int32{2, 5, 4, 7}} }
+func _oidProvince() (robjectIdentifier asn1.ObjectIdentifier) { return asn1.ObjectIdentifier{OID: []int32{2, 5, 4, 8}} }
+func _oidStreetAddress() (robjectIdentifier asn1.ObjectIdentifier) { return asn1.ObjectIdentifier{OID: []int32{2, 5, 4, 9}} }
+func _oidPostalCode() (robjectIdentifier asn1.ObjectIdentifier) { return asn1.ObjectIdentifier{OID: []int32{2, 5, 4, 17}} }
 
-// appendRDNs appends a relativeDistinguishedNameSET to the given RDNSequence
+// appendRDNs appends a relativeDistinguishedNameSET to the given [][]AttributeTypeAndValue
 // and returns the new value. The relativeDistinguishedNameSET contains an
 // attributeTypeAndValue for each of the given values. See RFC 5280, A.1, and
 // search for AttributeTypeAndValue.
-func (n Name) appendRDNs(in RDNSequence, values [][]byte, oid asn1.ObjectIdentifier) RDNSequence {
+func (n *Name) appendRDNs(in [][]AttributeTypeAndValue, values [][]byte, oid asn1.ObjectIdentifier) (rrDNSequence [][]AttributeTypeAndValue) {
 	if len(values) == 0 || oidInAttributeTypeAndValue(oid, n.ExtraNames) {
 		return in
 	}
@@ -226,7 +224,7 @@ func (n Name) appendRDNs(in RDNSequence, values [][]byte, oid asn1.ObjectIdentif
 	return push(in, s)
 }
 
-// ToRDNSequence converts n into a single [RDNSequence]. The following
+// ToRDNSequence converts n into a single [[][]AttributeTypeAndValue]. The following
 // attributes are encoded as multi-value RDNs:
 //
 //   - Country
@@ -238,7 +236,7 @@ func (n Name) appendRDNs(in RDNSequence, values [][]byte, oid asn1.ObjectIdentif
 //   - PostalCode
 //
 // Each ExtraNames entry is encoded as an individual RDN.
-func (n Name) ToRDNSequence() (ret RDNSequence) {
+func (n *Name) ToRDNSequence() (ret [][]AttributeTypeAndValue) {
 	ret = n.appendRDNs(ret, n.Country, _oidCountry())
 	ret = n.appendRDNs(ret, n.Province, _oidProvince())
 	ret = n.appendRDNs(ret, n.Locality, _oidLocality())
@@ -262,15 +260,15 @@ func (n Name) ToRDNSequence() (ret RDNSequence) {
 
 // String returns the string form of n, roughly following
 // the RFC 2253 Distinguished Names syntax.
-func (n Name) String() string {
-	var rdns RDNSequence
+func (n *Name) String() (rs string) {
+	var rdns [][]AttributeTypeAndValue
 	// If there are no ExtraNames, surface the parsed value (all entries in
 	// Names) instead.
 	if n.ExtraNames == nil {
 		for _, atv := range n.Names {
 			t := atv.Type
-			if len(t) == 4 && t[0] == 2 && t[1] == 5 && t[2] == 4 {
-				switch t[3] {
+			if len(t.OID) == 4 && t.OID[0] == 2 && t.OID[1] == 5 && t.OID[2] == 4 {
+				switch t.OID[3] {
 				case 3, 5, 6, 7, 8, 9, 10, 11, 17:
 					// These attributes were already parsed into named fields.
 					continue
@@ -284,12 +282,12 @@ func (n Name) String() string {
 	}
 	rdns = mxutil.Ensure(rdns, 1)
 	rdns = push(rdns, n.ToRDNSequence()...)
-	return rdns.String()
+	return rdnSequenceString(rdns)
 }
 
 // oidInAttributeTypeAndValue reports whether a type with the given OID exists
 // in atv.
-func oidInAttributeTypeAndValue(oid asn1.ObjectIdentifier, atv []AttributeTypeAndValue) bool {
+func oidInAttributeTypeAndValue(oid asn1.ObjectIdentifier, atv []AttributeTypeAndValue) (rok bool) {
 	for _, a := range atv {
 		if a.Type.Equal(oid) {
 			return true
@@ -310,7 +308,7 @@ type CertificateList struct {
 }
 
 // HasExpired reports whether certList should have been updated by now.
-func (certList *CertificateList) HasExpired(now time.Time) bool {
+func (certList *CertificateList) HasExpired(now time.Time) (rok bool) {
 	return !now.Before(certList.TBSCertList.NextUpdate)
 }
 
@@ -322,7 +320,7 @@ type TBSCertificateList struct {
 	Raw                 asn1.RawContent
 	Version             int32 `asn1:"optional,default:0"`
 	Signature           AlgorithmIdentifier
-	Issuer              RDNSequence
+	Issuer              [][]AttributeTypeAndValue
 	ThisUpdate          time.Time
 	NextUpdate          time.Time            `asn1:"optional"`
 	RevokedCertificates []RevokedCertificate `asn1:"optional"`

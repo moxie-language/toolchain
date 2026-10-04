@@ -2,14 +2,26 @@ package os
 
 import "git.smesh.lol/moxie/pkg/mxutil"
 
-func hasPrefix(s, prefix string) bool {
+func hasPrefix(s, prefix string) (rok bool) {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
 
-// mounts lists the mount points currently mounted in the filesystem provided by
-// the os package. To resolve a path to a mount point, it is scanned from top to
-// bottom looking for the first prefix match.
-var mounts []mountPoint
+// mountTable lists the mount points currently mounted in the filesystem
+// provided by the os package. To resolve a path to a mount point, it is
+// scanned from top to bottom looking for the first prefix match. It is a
+// self-mutating type because Mount is public API and may be called long after
+// init, and its arena lives as long as the table so the mount points survive
+// the frame that added them.
+type mountTable struct {
+	mounts []mountPoint
+}
+
+var mountsHolder *mountTable
+
+func (m *mountTable) add(prefix string, filesystem Filesystem) {
+	m.mounts = mxutil.Ensure(m.mounts, 1)
+	m.mounts = push(m.mounts, mountPoint{prefix, filesystem})
+}
 
 type mountPoint struct {
 	// prefix is a filesystem prefix, that always starts and ends with a forward
@@ -69,8 +81,9 @@ type FileHandle interface {
 
 // findMount returns the appropriate (mounted) filesystem to use for a given
 // filename plus the path relative to that filesystem.
-func findMount(path string) (Filesystem, string) {
+func findMount(path string) (rfilesystem Filesystem, rs string) {
 	initFS()
+	mounts := mountsHolder.mounts
 	for i := len(mounts) - 1; i >= 0; i-- {
 		mount := mounts[i]
 		if hasPrefix(path, mount.prefix) {
@@ -96,6 +109,5 @@ func Mount(prefix string, filesystem Filesystem) {
 	if prefix[0] != '/' || prefix[len(prefix)-1] != '/' {
 		panic("os.Mount: invalid prefix")
 	}
-	mounts = mxutil.Ensure(mounts, 1)
-	mounts = push(mounts, mountPoint{prefix, filesystem})
+	mountsHolder.add(prefix, filesystem)
 }

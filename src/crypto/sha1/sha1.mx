@@ -44,11 +44,11 @@ const (
 	marshaledSize = len(magic) + 5*4 + chunk + 8
 )
 
-func (d *digest) MarshalBinary() ([]byte, error) {
+func (d *digest) MarshalBinary() (out []byte, err error) {
 	return d.AppendBinary([]byte{:0:marshaledSize})
 }
 
-func (d *digest) AppendBinary(b []byte) ([]byte, error) {
+func (d *digest) AppendBinary(b []byte) (out []byte, err error) {
 	b = mxutil.Ensure(b, len(magic))
 	b = push(b, magic...)
 	b = byteorder.BEAppendUint32(b, d.h[0])
@@ -64,7 +64,7 @@ func (d *digest) AppendBinary(b []byte) ([]byte, error) {
 	return b, nil
 }
 
-func (d *digest) UnmarshalBinary(b []byte) error {
+func (d *digest) UnmarshalBinary(b []byte) (err error) {
 	if len(b) < len(magic) || b[:len(magic)] != magic {
 		return errors.New("crypto/sha1: invalid hash state identifier")
 	}
@@ -83,15 +83,15 @@ func (d *digest) UnmarshalBinary(b []byte) error {
 	return nil
 }
 
-func consumeUint64(b []byte) ([]byte, uint64) {
+func consumeUint64(b []byte) (rest []byte, v uint64) {
 	return b[8:], byteorder.BEUint64(b)
 }
 
-func consumeUint32(b []byte) ([]byte, uint32) {
+func consumeUint32(b []byte) (rest []byte, v uint32) {
 	return b[4:], byteorder.BEUint32(b)
 }
 
-func (d *digest) Clone() (hash.Cloner, error) {
+func (d *digest) Clone() (c hash.Cloner, err error) {
 	r := *d
 	return &r, nil
 }
@@ -110,15 +110,15 @@ func (d *digest) Reset() {
 // also implements [encoding.BinaryMarshaler], [encoding.BinaryAppender] and
 // [encoding.BinaryUnmarshaler] to marshal and unmarshal the internal
 // state of the hash.
-func New() hash.Hash {
+func New() (h hash.Hash) {
 	d := &digest{}
 	d.Reset()
 	return d
 }
 
-func (d *digest) Size() int32 { return Size }
+func (d *digest) Size() (n int32) { return Size }
 
-func (d *digest) BlockSize() int32 { return BlockSize }
+func (d *digest) BlockSize() (n int32) { return BlockSize }
 
 func (d *digest) Write(p []byte) (nn int32, err error) {
 	if fips140only.Enabled {
@@ -146,14 +146,14 @@ func (d *digest) Write(p []byte) (nn int32, err error) {
 	return
 }
 
-func (d *digest) Sum(in []byte) []byte {
+func (d *digest) Sum(in []byte) (out []byte) {
 	// Make a copy of d so that caller can keep writing and summing.
 	d0 := *d
 	sum := d0.checkSum()
 	return push(in, sum[:]...)
 }
 
-func (d *digest) checkSum() [Size]byte {
+func (d *digest) checkSum() (sum [Size]byte) {
 	if fips140only.Enabled {
 		panic("crypto/sha1: use of SHA-1 is not allowed in FIPS 140-only mode")
 	}
@@ -191,13 +191,13 @@ func (d *digest) checkSum() [Size]byte {
 }
 
 // ConstantTimeSum computes the same result of [Sum] but in constant time
-func (d *digest) ConstantTimeSum(in []byte) []byte {
+func (d *digest) ConstantTimeSum(in []byte) (out []byte) {
 	d0 := *d
 	sum := d0.constSum()
 	return push(in, sum[:]...)
 }
 
-func (d *digest) constSum() [Size]byte {
+func (d *digest) constSum() (sum [Size]byte) {
 	if fips140only.Enabled {
 		panic("crypto/sha1: use of SHA-1 is not allowed in FIPS 140-only mode")
 	}
@@ -263,7 +263,7 @@ func (d *digest) constSum() [Size]byte {
 }
 
 // Sum returns the SHA-1 checksum of the data.
-func Sum(data []byte) [Size]byte {
+func Sum(data []byte) (sum [Size]byte) {
 	if fips140only.Enabled {
 		panic("crypto/sha1: use of SHA-1 is not allowed in FIPS 140-only mode")
 	}

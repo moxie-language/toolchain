@@ -19,8 +19,8 @@ import (
 //
 // Per Table 2, it has a reseed interval of 2^48 requests, and a maximum request
 // size of 2^19 bits (2^16 bytes, 64 KiB).
-type hmacDRBG struct {
-	newHMAC func(key []byte) *hmac.HMAC
+type hmacDRBG[H hash.Hash] struct {
+	hfunc func() H
 
 	hK *hmac.HMAC
 	V  []byte
@@ -33,30 +33,26 @@ const (
 	maxRequestSize = (1 << 19) / 8
 )
 
-// plainPersonalizationString is used by HMAC_DRBG as-is.
-type plainPersonalizationString []byte
-
-func (plainPersonalizationString) isPersonalizationString() {}
-
-// Each entry in blockAlignedPersonalizationString is written to the HMAC at a
-// block boundary, as specified in draft-irtf-cfrg-det-sigs-with-noise-04,
-// Section 4.
-type blockAlignedPersonalizationString [][]byte
-
-func (blockAlignedPersonalizationString) isPersonalizationString() {}
-
-type personalizationString interface {
-	isPersonalizationString()
+// nonceSource is the randomness source randomPoint draws nonces from. Keeping
+// it an interface stops the generic hash type from leaking into the signing
+// functions.
+type nonceSource interface {
+	Generate(out []byte)
 }
 
-func newDRBG[H hash.Hash](hfunc func() H, entropy, nonce []byte, s personalizationString) *hmacDRBG {
+func (d *hmacDRBG[H]) newHMAC(key []byte) (ret0 *hmac.HMAC) {
+	return hmac.New(d.hfunc, key)
+}
+
+// newDRBG instantiates an HMAC_DRBG. plain, when non-nil, is a personalization
+// string written as-is; blocks, when non-nil, is written at HMAC block
+// boundaries as specified in draft-irtf-cfrg-det-sigs-with-noise-04, Section 4.
+func newDRBG[H hash.Hash](hfunc func() H, entropy, nonce, plain []byte, blocks [][]byte) (ret0 *hmacDRBG[H]) {
 	// HMAC_DRBG_Instantiate_algorithm, per Section 10.1.2.3.
 	fips140.RecordApproved()
 
-	d := &hmacDRBG{
-		newHMAC: func(key []byte) *hmac.HMAC {
-			return hmac.New(hfunc, key)
-		},
+	d := &hmacDRBG[H]{
+		hfunc: hfunc,
 	}
 	size := hfunc().Size()
 
@@ -73,16 +69,15 @@ func newDRBG[H hash.Hash](hfunc func() H, entropy, nonce []byte, s personalizati
 	h.Write([]byte{0x00})
 	h.Write(entropy)
 	h.Write(nonce)
-	switch ps := s.(type) {
-	case plainPersonalizationString:
-		h.Write(ps)
-	case blockAlignedPersonalizationString:
+	if blocks != nil {
 		l := len(d.V) + 1 + len(entropy) + len(nonce)
-		for _, b := range ps {
+		for _, b := range blocks {
 			pad000(h, l)
 			h.Write(b)
 			l = len(b)
 		}
+	} else {
+		h.Write(plain)
 	}
 	K = h.Sum(K[:0])
 	// V = HMAC (K, V)
@@ -95,16 +90,15 @@ func newDRBG[H hash.Hash](hfunc func() H, entropy, nonce []byte, s personalizati
 	h.Write([]byte{0x01})
 	h.Write(entropy)
 	h.Write(nonce)
-	switch ps := s.(type) {
-	case plainPersonalizationString:
-		h.Write(ps)
-	case blockAlignedPersonalizationString:
+	if blocks != nil {
 		l := len(d.V) + 1 + len(entropy) + len(nonce)
-		for _, b := range ps {
+		for _, b := range blocks {
 			pad000(h, l)
 			h.Write(b)
 			l = len(b)
 		}
+	} else {
+		h.Write(plain)
 	}
 	K = h.Sum(K[:0])
 	// V = HMAC (K, V)
@@ -122,8 +116,8 @@ func newDRBG[H hash.Hash](hfunc func() H, entropy, nonce []byte, s personalizati
 //
 // This should only be used for ACVP testing. hmacDRBG is not intended to be
 // used directly.
-func TestingOnlyNewDRBG[H hash.Hash](hfunc func() H, entropy, nonce []byte, s []byte) *hmacDRBG {
-	return newDRBG(hfunc, entropy, nonce, plainPersonalizationString(s))
+func TestingOnlyNewDRBG[H hash.Hash](hfunc func() H, entropy, nonce []byte, s []byte) (ret0 *hmacDRBG[H]) {
+	return newDRBG(hfunc, entropy, nonce, s, nil)
 }
 
 func pad000(h *hmac.HMAC, writtenSoFar int32) {
@@ -134,7 +128,7 @@ func pad000(h *hmac.HMAC, writtenSoFar int32) {
 }
 
 // Generate produces at most maxRequestSize bytes of random data in out.
-func (d *hmacDRBG) Generate(out []byte) {
+func (d *hmacDRBG[H]) Generate(out []byte) {
 	// HMAC_DRBG_Generate_algorithm, per Section 10.1.2.5.
 	fips140.RecordApproved()
 

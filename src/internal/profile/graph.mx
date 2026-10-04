@@ -20,7 +20,7 @@ package profile
 import (
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"fmt"
-	"sort"
+	"slices"
 	"bytes"
 )
 
@@ -31,11 +31,8 @@ type Options struct {
 
 	DropNegative bool // Drop nodes with overall negative values
 
-	KeptNodes NodeSet // If non-nil, only use nodes in this set
+	KeptNodes map[NodeInfo]bool // If non-nil, only use nodes in this set
 }
-
-// Nodes is an ordered collection of graph nodes.
-type Nodes []*Node
 
 // Node is an entry on a profiling report. It represents a unique
 // program location.
@@ -56,18 +53,18 @@ type Node struct {
 
 	// In and out Contains the nodes immediately reaching or reached by
 	// this node.
-	In, Out EdgeMap
+	In, Out []*Edge
 }
 
 // Graph summarizes a performance profile into a format that is
 // suitable for visualization.
 type Graph struct {
-	Nodes Nodes
+	Nodes []*Node
 }
 
 // FlatValue returns the exclusive value for this node, computing the
 // mean if a divisor is available.
-func (n *Node) FlatValue() int64 {
+func (n *Node) FlatValue() (v int64) {
 	if n.FlatDiv == 0 {
 		return n.Flat
 	}
@@ -76,7 +73,7 @@ func (n *Node) FlatValue() int64 {
 
 // CumValue returns the inclusive value for this node, computing the
 // mean if a divisor is available.
-func (n *Node) CumValue() int64 {
+func (n *Node) CumValue() (v int64) {
 	if n.CumDiv == 0 {
 		return n.Cum
 	}
@@ -92,7 +89,7 @@ func (n *Node) AddToEdge(to *Node, v int64, residual, inline bool) {
 // AddToEdgeDiv increases the weight of an edge between two nodes. If
 // there isn't such an edge one is created.
 func (n *Node) AddToEdgeDiv(to *Node, dv, v int64, residual, inline bool) {
-	if e := n.Out.FindTo(to); e != nil {
+	if e := edgeMapFindTo(n.Out, to); e != nil {
 		e.WeightDiv += dv
 		e.Weight += v
 		if residual {
@@ -105,8 +102,8 @@ func (n *Node) AddToEdgeDiv(to *Node, dv, v int64, residual, inline bool) {
 	}
 
 	info := &Edge{Src: n, Dest: to, WeightDiv: dv, Weight: v, Residual: residual, Inline: inline}
-	n.Out.Add(info)
-	to.In.Add(info)
+	n.Out = edgeMapAdd(n.Out, info)
+	to.In = edgeMapAdd(to.In, info)
 }
 
 // NodeInfo contains the attributes for a node.
@@ -117,12 +114,12 @@ type NodeInfo struct {
 }
 
 // PrintableName calls the Node's Formatter function with a single space separator.
-func (i *NodeInfo) PrintableName() []byte {
+func (i *NodeInfo) PrintableName() (out []byte) {
 	return bytes.Join(i.NameComponents(), " ")
 }
 
 // NameComponents returns the components of the printable name to be used for a node.
-func (i *NodeInfo) NameComponents() [][]byte {
+func (i *NodeInfo) NameComponents() (out [][]byte) {
 	var name [][]byte
 	if i.Address != 0 {
 		name = mxutil.Ensure(name, 1)
@@ -148,35 +145,18 @@ func (i *NodeInfo) NameComponents() [][]byte {
 	return name
 }
 
-// NodeMap maps from a node info struct to a node. It is used to merge
-// report entries with the same info.
-type NodeMap map[NodeInfo]*Node
-
-// NodeSet is a collection of node info structs.
-type NodeSet map[NodeInfo]bool
-
-// NodePtrSet is a collection of nodes. Trimming a graph or tree requires a set
-// of objects which uniquely identify the nodes to keep. In a graph, NodeInfo
-// works as a unique identifier; however, in a tree multiple nodes may share
-// identical NodeInfos. A *Node does uniquely identify a node so we can use that
-// instead. Though a *Node also uniquely identifies a node in a graph,
-// currently, during trimming, graphs are rebuilt from scratch using only the
-// NodeSet, so there would not be the required context of the initial graph to
-// allow for the use of *Node.
-type NodePtrSet map[*Node]bool
-
-// FindOrInsertNode takes the info for a node and either returns a matching node
-// from the node map if one exists, or adds one to the map if one does not.
+// nodeMapFindOrInsertNode takes the info for a node and either returns a matching
+// node from the node map if one exists, or adds one to the map if one does not.
 // If kept is non-nil, nodes are only added if they can be located on it.
-func (nm NodeMap) FindOrInsertNode(info NodeInfo, kept NodeSet) *Node {
+func nodeMapFindOrInsertNode(nm map[NodeInfo]*Node, info NodeInfo, kept map[NodeInfo]bool) (node *Node) {
 	if kept != nil {
 		if _, ok := kept[info]; !ok {
 			return nil
 		}
 	}
 
-	if n, ok := nm[info]; ok {
-		return n
+	if existing, ok := nm[info]; ok {
+		return existing
 	}
 
 	n := &Node{
@@ -192,14 +172,11 @@ func (nm NodeMap) FindOrInsertNode(info NodeInfo, kept NodeSet) *Node {
 	// Find a node that represents the whole function.
 	info.Address = 0
 	info.Lineno = 0
-	n.Function = nm.FindOrInsertNode(info, nil)
+	n.Function = nodeMapFindOrInsertNode(nm, info, nil)
 	return n
 }
 
-// EdgeMap is used to represent the incoming/outgoing edges from a node.
-type EdgeMap []*Edge
-
-func (em EdgeMap) FindTo(n *Node) *Edge {
+func edgeMapFindTo(em []*Edge, n *Node) (found *Edge) {
 	for _, e := range em {
 		if e.Dest == n {
 			return e
@@ -208,18 +185,19 @@ func (em EdgeMap) FindTo(n *Node) *Edge {
 	return nil
 }
 
-func (em *EdgeMap) Add(e *Edge) {
-	*em = push(*em, e)
+func edgeMapAdd(em []*Edge, e *Edge) (out []*Edge) {
+	out = push(em, e)
+	return
 }
 
-func (em *EdgeMap) Delete(e *Edge) {
-	for i, edge := range *em {
+func edgeMapDelete(em []*Edge, e *Edge) (out []*Edge) {
+	for i, edge := range em {
 		if edge == e {
-			(*em)[i] = (*em)[len(*em)-1]
-			*em = (*em)[:len(*em)-1]
-			return
+			em[i] = em[len(em)-1]
+			return em[:len(em)-1]
 		}
 	}
+	return em
 }
 
 // Edge contains any attributes to be represented about edges in a graph.
@@ -237,7 +215,7 @@ type Edge struct {
 
 // WeightValue returns the weight value for this edge, normalizing if a
 // divisor is available.
-func (e *Edge) WeightValue() int64 {
+func (e *Edge) WeightValue() (v int64) {
 	if e.WeightDiv == 0 {
 		return e.Weight
 	}
@@ -245,8 +223,8 @@ func (e *Edge) WeightValue() int64 {
 }
 
 // NewGraph computes a graph from a profile.
-func NewGraph(prof *Profile, o *Options) *Graph {
-	nodes, locationMap := CreateNodes(prof, o)
+func NewGraph(prof *Profile, o *Options) (g *Graph) {
+	nodes, locMap := CreateNodes(prof, o)
 	seenNode := map[*Node]bool{}
 	seenEdge := map[nodePair]bool{}
 	for _, sample := range prof.Sample {
@@ -277,7 +255,7 @@ func NewGraph(prof *Profile, o *Options) *Graph {
 		}
 		for ; i >= 0; i-- {
 			l := sample.Location[i]
-			locNodes := locationMap.get(l.ID)
+			locNodes := locMap.get(l.ID)
 			for ni := len(locNodes) - 1; ni >= 0; ni-- {
 				n := locNodes[ni]
 				if n == nil {
@@ -309,9 +287,9 @@ func NewGraph(prof *Profile, o *Options) *Graph {
 	return selectNodesForGraph(nodes, o.DropNegative)
 }
 
-func selectNodesForGraph(nodes Nodes, dropNegative bool) *Graph {
+func selectNodesForGraph(nodes []*Node, dropNegative bool) (g *Graph) {
 	// Collect nodes into a graph.
-	gNodes := Nodes{:0:len(nodes})
+	gNodes := []*Node{:0:len(nodes)}
 	for _, n := range nodes {
 		if n == nil {
 			continue
@@ -334,7 +312,7 @@ type nodePair struct {
 
 // isNegative returns true if the node is considered as "negative" for the
 // purposes of drop_negative.
-func isNegative(n *Node) bool {
+func isNegative(n *Node) (neg bool) {
 	switch {
 	case n.Flat < 0:
 		return true
@@ -346,11 +324,11 @@ func isNegative(n *Node) bool {
 }
 
 type locationMap struct {
-	s []Nodes          // a slice for small sequential IDs
-	m map[uint64]Nodes // fallback for large IDs (unlikely)
+	s [][]*Node          // a slice for small sequential IDs
+	m map[uint64][]*Node // fallback for large IDs (unlikely)
 }
 
-func (l *locationMap) add(id uint64, n Nodes) {
+func (l *locationMap) add(id uint64, n []*Node) {
 	if id < uint64(len(l.s)) {
 		l.s[id] = n
 	} else {
@@ -358,7 +336,7 @@ func (l *locationMap) add(id uint64, n Nodes) {
 	}
 }
 
-func (l locationMap) get(id uint64) Nodes {
+func (l *locationMap) get(id uint64) (nodes []*Node) {
 	if id < uint64(len(l.s)) {
 		return l.s[id]
 	} else {
@@ -369,25 +347,25 @@ func (l locationMap) get(id uint64) Nodes {
 // CreateNodes creates graph nodes for all locations in a profile. It
 // returns set of all nodes, plus a mapping of each location to the
 // set of corresponding nodes (one per location.Line).
-func CreateNodes(prof *Profile, o *Options) (Nodes, locationMap) {
-	locations := locationMap{[]Nodes{:len(prof.Location)+1}, map[uint64]Nodes{}}
-	nm := NodeMap{}
+func CreateNodes(prof *Profile, o *Options) (nodes []*Node, lm locationMap) {
+	locations := locationMap{[][]*Node{:len(prof.Location) + 1}, map[uint64][]*Node{}}
+	nm := map[NodeInfo]*Node{}
 	for _, l := range prof.Location {
 		lines := l.Line
 		if len(lines) == 0 {
 			lines = []Line{{}} // Create empty line to include location info.
 		}
-		nodes := Nodes{:len(lines})
+		ns := []*Node{:len(lines)}
 		for ln := range lines {
-			nodes[ln] = nm.findOrInsertLine(l, lines[ln], o)
+			ns[ln] = nodeMapFindOrInsertLine(nm, l, lines[ln], o)
 		}
-		locations.add(l.ID, nodes)
+		locations.add(l.ID, ns)
 	}
-	return nm.nodes(), locations
+	return nodeMapNodes(nm), locations
 }
 
-func (nm NodeMap) nodes() Nodes {
-	nodes := Nodes{:0:len(nm})
+func nodeMapNodes(nm map[NodeInfo]*Node) (nodes []*Node) {
+	nodes = []*Node{:0:len(nm)}
 	for _, n := range nm {
 		nodes = mxutil.Ensure(nodes, 1)
 		nodes = push(nodes, n)
@@ -395,23 +373,23 @@ func (nm NodeMap) nodes() Nodes {
 	return nodes
 }
 
-func (nm NodeMap) findOrInsertLine(l *Location, li Line, o *Options) *Node {
+func nodeMapFindOrInsertLine(nm map[NodeInfo]*Node, l *Location, li Line, o *Options) (node *Node) {
 	var objfile []byte
 	if m := l.Mapping; m != nil && m.File != "" {
 		objfile = m.File
 	}
 
 	if ni := nodeInfo(l, li, objfile, o); ni != nil {
-		return nm.FindOrInsertNode(*ni, o.KeptNodes)
+		return nodeMapFindOrInsertNode(nm, *ni, o.KeptNodes)
 	}
 	return nil
 }
 
-func nodeInfo(l *Location, line Line, objfile []byte, o *Options) *NodeInfo {
+func nodeInfo(l *Location, line Line, objfile []byte, o *Options) (ni *NodeInfo) {
 	if line.Function == nil {
 		return &NodeInfo{Address: l.Address}
 	}
-	ni := &NodeInfo{
+	ni = &NodeInfo{
 		Address: l.Address,
 		Lineno:  int32(line.Line),
 		Name:    line.Function.Name,
@@ -420,8 +398,8 @@ func nodeInfo(l *Location, line Line, objfile []byte, o *Options) *NodeInfo {
 	return ni
 }
 
-// Sum adds the flat and cum values of a set of nodes.
-func (ns Nodes) Sum() (flat int64, cum int64) {
+// nodesSum adds the flat and cum values of a set of nodes.
+func nodesSum(ns []*Node) (flat int64, cum int64) {
 	for _, n := range ns {
 		flat += n.Flat
 		cum += n.Cum
@@ -441,7 +419,7 @@ func (n *Node) addSample(dw, w int64, flat bool) {
 }
 
 // String returns a text representation of a graph, for debugging purposes.
-func (g *Graph) String() string {
+func (g *Graph) String() (str string) {
 	var s [][]byte
 
 	nodeIndex := map[*Node]int32{}
@@ -468,57 +446,63 @@ func (g *Graph) String() string {
 	return bytes.Join(s, "\n")
 }
 
-// Sort returns a slice of the edges in the map, in a consistent
+// edgeMapSort returns a slice of the edges in the map, in a consistent
 // order. The sort order is first based on the edge weight
 // (higher-to-lower) and then by the node names to avoid flakiness.
-func (em EdgeMap) Sort() []*Edge {
-	el := edgeList{:0:len(em})
+func edgeMapSort(em []*Edge) (out []*Edge) {
+	out = []*Edge{:0:len(em)}
 	for _, w := range em {
-		el = mxutil.Ensure(el, 1)
-		el = push(el, w)
+		out = mxutil.Ensure(out, 1)
+		out = push(out, w)
 	}
 
-	sort.Sort(el)
-	return el
+	slices.SortFunc(out, edgeCompare)
+	return out
 }
 
-// Sum returns the total weight for a set of nodes.
-func (em EdgeMap) Sum() int64 {
-	var ret int64
+// edgeMapSum returns the total weight for a set of nodes.
+func edgeMapSum(em []*Edge) (sum int64) {
 	for _, edge := range em {
-		ret += edge.Weight
+		sum += edge.Weight
 	}
-	return ret
+	return sum
 }
 
-type edgeList []*Edge
-
-func (el edgeList) Len() int32 {
-	return len(el)
-}
-
-func (el edgeList) Less(i, j int32) bool {
-	if el[i].Weight != el[j].Weight {
-		return abs64(el[i].Weight) > abs64(el[j].Weight)
+// edgeCompare orders edges for edgeMapSort.
+func edgeCompare(a, b *Edge) (ord int32) {
+	if a.Weight != b.Weight {
+		aw := abs64(a.Weight)
+		bw := abs64(b.Weight)
+		if aw > bw {
+			return -1
+		}
+		if aw < bw {
+			return 1
+		}
+		return 0
 	}
 
-	from1 := el[i].Src.Info.PrintableName()
-	from2 := el[j].Src.Info.PrintableName()
+	from1 := a.Src.Info.PrintableName()
+	from2 := b.Src.Info.PrintableName()
 	if from1 != from2 {
-		return from1 < from2
+		if from1 < from2 {
+			return -1
+		}
+		return 1
 	}
 
-	to1 := el[i].Dest.Info.PrintableName()
-	to2 := el[j].Dest.Info.PrintableName()
-
-	return to1 < to2
+	to1 := a.Dest.Info.PrintableName()
+	to2 := b.Dest.Info.PrintableName()
+	if to1 < to2 {
+		return -1
+	}
+	if to1 > to2 {
+		return 1
+	}
+	return 0
 }
 
-func (el edgeList) Swap(i, j int32) {
-	el[i], el[j] = el[j], el[i]
-}
-
-func abs64(i int64) int64 {
+func abs64(i int64) (v int64) {
 	if i < 0 {
 		return -i
 	}

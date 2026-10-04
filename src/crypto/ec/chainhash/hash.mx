@@ -31,7 +31,7 @@ const (
 	TagTapTweak         = "TapTweak"
 )
 
-func _precomputedTags() map[string]Hash {
+func _precomputedTags() (m map[string]Hash) {
 	return map[string]Hash{
 		TagBIP0340Challenge: sha256.Sum256(TagBIP0340Challenge),
 		TagBIP0340Aux:       sha256.Sum256(TagBIP0340Aux),
@@ -45,7 +45,7 @@ func _precomputedTags() map[string]Hash {
 
 // ErrHashStrSize describes an error that indicates the caller specified a hash
 // string that has too many characters.
-const ErrHashStrSize = errors.Const("max hash string length is 64 bytes")
+var ErrHashStrSize error
 
 // Hash is used in several of the bitcoin messages and common structures.  It
 // typically represents the double sha256 of data.
@@ -53,11 +53,12 @@ type Hash [HashSize]byte
 
 // String returns the Hash as the hexadecimal string of the byte-reversed
 // hash.
-func (hash Hash) String() string {
+func (hash *Hash) String() (s string) {
+	rev := *hash
 	for i := 0; i < HashSize/2; i++ {
-		hash[i], hash[HashSize-1-i] = hash[HashSize-1-i], hash[i]
+		rev[i], rev[HashSize-1-i] = rev[HashSize-1-i], rev[i]
 	}
-	return string(hex.EncodeToString(hash[:]))
+	return string(hex.EncodeToString(rev[:]))
 }
 
 // CloneBytes returns a copy of the bytes which represent the hash as a byte
@@ -65,7 +66,7 @@ func (hash Hash) String() string {
 //
 // NOTE: It is generally cheaper to just slice the hash directly thereby reusing
 // the same bytes rather than calling this method.
-func (hash *Hash) CloneBytes() []byte {
+func (hash *Hash) CloneBytes() (b []byte) {
 	newHash := []byte{:HashSize}
 	copy(newHash, hash[:])
 	return newHash
@@ -73,7 +74,7 @@ func (hash *Hash) CloneBytes() []byte {
 
 // SetBytes sets the bytes which represent the hash.  An error is returned if
 // the number of bytes passed in is not HashSize.
-func (hash *Hash) SetBytes(newHash []byte) error {
+func (hash *Hash) SetBytes(newHash []byte) (derr error) {
 	nhlen := len(newHash)
 	if nhlen != HashSize {
 		return fmt.Errorf(
@@ -86,7 +87,7 @@ func (hash *Hash) SetBytes(newHash []byte) error {
 }
 
 // IsEqual returns true if target is the same as hash.
-func (hash *Hash) IsEqual(target *Hash) bool {
+func (hash *Hash) IsEqual(target *Hash) (ok bool) {
 	if hash == nil && target == nil {
 		return true
 	}
@@ -97,7 +98,7 @@ func (hash *Hash) IsEqual(target *Hash) bool {
 }
 
 // MarshalJSON serialises the hash as a JSON appropriate string value.
-func (hash Hash) MarshalJSON() ([]byte, error) {
+func (hash *Hash) MarshalJSON() (buf []byte, derr error) {
 	s := hash.String()
 	b := []byte{:0:len(s) + 2}
 	b = mxutil.Ensure(b, 1)
@@ -110,7 +111,7 @@ func (hash Hash) MarshalJSON() ([]byte, error) {
 }
 
 // UnmarshalJSON parses the hash with JSON appropriate string value.
-func (hash *Hash) UnmarshalJSON(input []byte) error {
+func (hash *Hash) UnmarshalJSON(input []byte) (derr error) {
 	if len(input) > 0 && input[0] == '[' {
 		return decodeLegacy(hash, input)
 	}
@@ -127,7 +128,7 @@ func (hash *Hash) UnmarshalJSON(input []byte) error {
 
 // NewHash returns a new Hash from a byte slice.  An error is returned if
 // the number of bytes passed in is not HashSize.
-func NewHash(newHash []byte) (*Hash, error) {
+func NewHash(newHash []byte) (out *Hash, derr error) {
 	var sh Hash
 	err := sh.SetBytes(newHash)
 	if err != nil {
@@ -139,7 +140,7 @@ func NewHash(newHash []byte) (*Hash, error) {
 // TaggedHash implements the tagged hash scheme described in BIP-340. We use
 // sha-256 to bind a message hash to a specific context using a tag:
 // sha256(sha256(tag) || sha256(tag) || msg).
-func TaggedHash(tag []byte, msgs ...[]byte) *Hash {
+func TaggedHash(tag []byte, msgs ...[]byte) (out *Hash) {
 	// Check to see if we've already pre-computed the hash of the tag. If
 	// so then this'll save us an extra sha256 hash.
 	shaTag, ok := _precomputedTags()[string(tag)]
@@ -163,7 +164,7 @@ func TaggedHash(tag []byte, msgs ...[]byte) *Hash {
 // NewHashFromStr creates a Hash from a hash string.  The string should be
 // the hexadecimal string of a byte-reversed hash, but any missing characters
 // result in zero padding at the end of the Hash.
-func NewHashFromStr(hash string) (*Hash, error) {
+func NewHashFromStr(hash string) (out *Hash, derr error) {
 	var h Hash
 	ret := &h
 	err := Decode(ret, hash)
@@ -175,7 +176,7 @@ func NewHashFromStr(hash string) (*Hash, error) {
 
 // Decode decodes the byte-reversed hexadecimal string encoding of a Hash to a
 // destination.
-func Decode(dst *Hash, src string) error {
+func Decode(dst *Hash, src string) (derr error) {
 	// Return error if hash string is too long.
 	if len(src) > MaxHashStringSize {
 		return ErrHashStrSize
@@ -206,7 +207,7 @@ func Decode(dst *Hash, src string) error {
 }
 
 // decodeLegacy decodes a Hash encoded as a JSON byte array [n,n,...].
-func decodeLegacy(dst *Hash, src []byte) error {
+func decodeLegacy(dst *Hash, src []byte) (derr error) {
 	// Strip brackets.
 	if len(src) < 2 || src[0] != '[' || src[len(src)-1] != ']' {
 		return fmt.Errorf("invalid legacy hash encoding")
@@ -235,4 +236,8 @@ func decodeLegacy(dst *Hash, src []byte) error {
 		return ErrHashStrSize
 	}
 	return dst.SetBytes(hashBytes[:])
+}
+
+func init() {
+	ErrHashStrSize = errors.New("max hash string length is 64 bytes")
 }

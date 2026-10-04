@@ -23,13 +23,36 @@ type handleMap[T comparable] struct {
 	m map[T]Handle[T]
 }
 
-func (handleMap[T]) handleMapIface() {}
+func (h *handleMap[T]) handleMapIface() {}
+
+// globalMapStore is the per-type handle-map registry. It is a sovereign
+// self-mutating holder: the package-level value itself is only read, and every
+// write goes through a pointer-receiver method, so it is never stored to
+// outside init.
+type globalMapStore struct {
+	m map[unsafe.Pointer]handleMapIface
+}
 
 var (
 	// We use a two-level map because that way it's easier to store and retrieve
 	// values.
-	globalMap map[unsafe.Pointer]handleMapIface
+	globalMaps globalMapStore
 )
+
+func (g *globalMapStore) ensure() {
+	if g.m == nil {
+		g.m = map[unsafe.Pointer]handleMapIface{}
+	}
+}
+
+func (g *globalMapStore) get(typeptr unsafe.Pointer) (hm handleMapIface, ok bool) {
+	hm, ok = g.m[typeptr]
+	return
+}
+
+func (g *globalMapStore) set(typeptr unsafe.Pointer, hm handleMapIface) {
+	g.m[typeptr] = hm
+}
 
 // Unique handle for the given value. Comparing two handles is cheap.
 type Handle[T comparable] struct {
@@ -37,12 +60,12 @@ type Handle[T comparable] struct {
 }
 
 // Value returns a shallow copy of the T value that produced the Handle.
-func (h Handle[T]) Value() T {
+func (h *Handle[T]) Value() (out T) {
 	return *h.value
 }
 
 // Make a new unqique handle for the given value.
-func Make[T comparable](value T) Handle[T] {
+func Make[T comparable](value T) (out Handle[T]) {
 	// Very simple implementation of the unique package. This is much, *much*
 	// simpler than the upstream implementation. Sadly it's not possible to
 	// reuse the upstream version because it relies on implementation details of
@@ -53,18 +76,16 @@ func Make[T comparable](value T) Handle[T] {
 
 	// The map isn't initialized at program startup (and after a test run), so
 	// create it.
-	if globalMap == nil {
-		globalMap = map[unsafe.Pointer]handleMapIface{}
-	}
+	globalMaps.ensure()
 
 	// Find or create the per-type map, keyed by the type descriptor.
 	typeptr := unsafe.TypeOf(value)
 	var hm handleMap[T]
-	if typeSpecificMapValue, ok := globalMap[typeptr]; ok {
+	if typeSpecificMapValue, ok := globalMaps.get(typeptr); ok {
 		hm = typeSpecificMapValue.(handleMap[T])
 	} else {
-		hm = handleMap[T]{m: map[T]Handle[T]{}}
-		globalMap[typeptr] = hm
+		hm.m = map[T]Handle[T]{}
+		globalMaps.set(typeptr, hm)
 	}
 
 	// Retrieve the handle for the value, creating it if it isn't created yet.
@@ -77,5 +98,6 @@ func Make[T comparable](value T) Handle[T] {
 		handle = h
 	}
 
-	return handle
+	out = handle
+	return
 }

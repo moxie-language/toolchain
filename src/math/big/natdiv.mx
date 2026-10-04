@@ -502,20 +502,20 @@ import "math/bits"
 
 // rem returns r such that r = u%v.
 // It uses z as the storage for r.
-func (z nat) rem(stk *stack, u, v nat) (r nat) {
+func natRem(z []Word, stk *stack, u, v []Word) (r []Word) {
 	if alias(z, u) {
 		z = nil
 	}
 	defer stk.restore(stk.save())
 	q := stk.nat(max(1, len(u)-(len(v)-1)))
-	_, r = q.div(stk, z, u, v)
+	_, r = natDiv(q, stk, z, u, v)
 	return r
 }
 
 // div returns q, r such that q = ⌊u/v⌋ and r = u%v = u - q·v.
 // It uses z and z2 as the storage for q and r.
 // The caller may pass stk == nil to request that div obtain and release one itself.
-func (z nat) div(stk *stack, z2, u, v nat) (q, r nat) {
+func natDiv(z []Word, stk *stack, z2, u, v []Word) (q, r []Word) {
 	if len(v) == 0 {
 		panic("division by zero")
 	}
@@ -524,14 +524,14 @@ func (z nat) div(stk *stack, z2, u, v nat) (q, r nat) {
 		// Short division: long optimized for a single-word divisor.
 		// In that case, the 2-by-1 guess is all we need at each step.
 		var r2 Word
-		q, r2 = z.divW(u, v[0])
-		r = z2.setWord(r2)
+		q, r2 = natDivW(z, u, v[0])
+		r = natSetWord(z2, r2)
 		return
 	}
 
-	if u.cmp(v) < 0 {
+	if natCmp(u, v) < 0 {
 		q = z[:0]
-		r = z2.set(u)
+		r = natSet(z2, u)
 		return
 	}
 
@@ -540,37 +540,37 @@ func (z nat) div(stk *stack, z2, u, v nat) (q, r nat) {
 		defer stk.free()
 	}
 
-	q, r = z.divLarge(stk, z2, u, v)
+	q, r = natDivLarge(z, stk, z2, u, v)
 	return
 }
 
 // divW returns q, r such that q = ⌊x/y⌋ and r = x%y = x - q·y.
 // It uses z as the storage for q.
 // Note that y is a single digit (Word), not a big number.
-func (z nat) divW(x nat, y Word) (q nat, r Word) {
+func natDivW(z []Word, x []Word, y Word) (q []Word, r Word) {
 	m := len(x)
 	switch {
 	case y == 0:
 		panic("division by zero")
 	case y == 1:
-		q = z.set(x) // result is x
+		q = natSet(z, x) // result is x
 		return
 	case m == 0:
 		q = z[:0] // result is 0
 		return
 	}
 	// m > 0
-	z = z.alloc(m)
+	z = natAlloc(z, m)
 	r = divWVW(z, 0, x, y)
-	q = z.norm()
+	q = natNorm(z)
 	return
 }
 
 // modW returns x % d.
-func (x nat) modW(d Word) (r Word) {
+func natModW(x []Word, d Word) (r Word) {
 	// TODO(agl): we don't actually need to store the q value.
-	var q nat
-	q = q.alloc(len(x))
+	var q []Word
+	q = natAlloc(q, len(x))
 	return divWVW(q, 0, x, d)
 }
 
@@ -594,7 +594,7 @@ func divWVW(z []Word, xn Word, x []Word, y Word) (r Word) {
 // It uses z and u as the storage for q and r.
 // The caller must ensure that len(vIn) ≥ 2 (use divW otherwise)
 // and that len(uIn) ≥ len(vIn) (the answer is 0, uIn otherwise).
-func (z nat) divLarge(stk *stack, u, uIn, vIn nat) (q, r nat) {
+func natDivLarge(z []Word, stk *stack, u, uIn, vIn []Word) (q, r []Word) {
 	n := len(vIn)
 	m := len(uIn) - n
 
@@ -605,7 +605,7 @@ func (z nat) divLarge(stk *stack, u, uIn, vIn nat) (q, r nat) {
 	defer stk.restore(stk.save())
 	shift := nlz(vIn[n-1])
 	v := stk.nat(n)
-	u = u.alloc(len(uIn) + 1)
+	u = natAlloc(u, len(uIn) + 1)
 	if shift == 0 {
 		copy(v, vIn)
 		copy(u[:len(uIn)], uIn)
@@ -620,22 +620,22 @@ func (z nat) divLarge(stk *stack, u, uIn, vIn nat) (q, r nat) {
 	if alias(z, u) {
 		z = nil
 	}
-	q = z.alloc(m + 1)
+	q = natAlloc(z, m + 1)
 
 	// Use basic or recursive long division depending on size.
 	if n < divRecursiveThreshold {
-		q.divBasic(stk, u, v)
+		natDivBasic(q, stk, u, v)
 	} else {
-		q.divRecursive(stk, u, v)
+		natDivRecursive(q, stk, u, v)
 	}
 
-	q = q.norm()
+	q = natNorm(q)
 
 	// Undo scaling of remainder.
 	if shift != 0 {
 		rshVU(u, u, shift)
 	}
-	r = u.norm()
+	r = natNorm(u)
 
 	return q, r
 }
@@ -643,7 +643,7 @@ func (z nat) divLarge(stk *stack, u, uIn, vIn nat) (q, r nat) {
 // divBasic implements long division as described above.
 // It overwrites q with ⌊u/v⌋ and overwrites u with the remainder r.
 // q must be large enough to hold ⌊u/v⌋.
-func (q nat) divBasic(stk *stack, u, v nat) {
+func natDivBasic(q []Word, stk *stack, u, v []Word) {
 	n := len(v)
 	m := len(u) - n
 
@@ -732,7 +732,7 @@ func (q nat) divBasic(stk *stack, u, v nat) {
 // greaterThan reports whether the two digit numbers x1 x2 > y1 y2.
 // TODO(rsc): In contradiction to most of this file, x1 is the high
 // digit and x2 is the low digit. This should be fixed.
-func greaterThan(x1, x2, y1, y2 Word) bool {
+func greaterThan(x1, x2, y1, y2 Word) (rok bool) {
 	return x1 > y1 || x1 == y1 && x2 > y2
 }
 
@@ -745,9 +745,9 @@ const divRecursiveThreshold = 40 // see calibrate_test.go
 // z must be large enough to hold ⌊u/v⌋.
 // This function is just for allocating and freeing temporaries
 // around divRecursiveStep, the real implementation.
-func (z nat) divRecursive(stk *stack, u, v nat) {
+func natDivRecursive(z []Word, stk *stack, u, v []Word) {
 	clear(z)
-	z.divRecursiveStep(stk, u, v, 0)
+	natDivRecursiveStep(z, stk, u, v, 0)
 }
 
 // divRecursiveStep is the actual implementation of recursive division.
@@ -755,12 +755,12 @@ func (z nat) divRecursive(stk *stack, u, v nat) {
 // z must be large enough to hold ⌊u/v⌋.
 // It uses temps[depth] (allocating if needed) as a temporary live across
 // the recursive call. It also uses tmp, but not live across the recursion.
-func (z nat) divRecursiveStep(stk *stack, u, v nat, depth int32) {
+func natDivRecursiveStep(z []Word, stk *stack, u, v []Word, depth int32) {
 	// u is a subsection of the original and may have leading zeros.
 	// TODO(rsc): The v = v.norm() is useless and should be removed.
 	// We know (and require) that v's top digit is ≥ B/2.
-	u = u.norm()
-	v = v.norm()
+	u = natNorm(u)
+	v = natNorm(v)
 	if len(u) == 0 {
 		clear(z)
 		return
@@ -769,7 +769,7 @@ func (z nat) divRecursiveStep(stk *stack, u, v nat, depth int32) {
 	// Fall back to basic division if the problem is now small enough.
 	n := len(v)
 	if n < divRecursiveThreshold {
-		z.divBasic(stk, u, v)
+		natDivBasic(z, stk, u, v)
 		return
 	}
 
@@ -818,8 +818,8 @@ func (z nat) divRecursiveStep(stk *stack, u, v nat, depth int32) {
 		// Compute the 2-by-1 guess q̂, leaving r̂ in uu[s:B+n].
 		qhat := qhat0
 		clear(qhat)
-		qhat.divRecursiveStep(stk, uu[s:B+n], v[s:], depth+1)
-		qhat = qhat.norm()
+		natDivRecursiveStep(qhat, stk, uu[s:B+n], v[s:], depth+1)
+		qhat = natNorm(qhat)
 
 		// Extend to a 3-by-2 quotient and remainder.
 		// Because divRecursiveStep overwrote the top part of uu with
@@ -836,9 +836,9 @@ func (z nat) divRecursiveStep(stk *stack, u, v nat, depth int32) {
 		mark := stk.save()
 		qhatv := stk.nat(3 * n)
 		clear(qhatv)
-		qhatv = qhatv.mul(stk, qhat, v[:s])
+		qhatv = natMul(qhatv, stk, qhat, v[:s])
 		for i := 0; i < 2; i++ {
-			e := qhatv.cmp(uu.norm())
+			e := natCmp(qhatv, natNorm(uu))
 			if e <= 0 {
 				break
 			}
@@ -849,7 +849,7 @@ func (z nat) divRecursiveStep(stk *stack, u, v nat, depth int32) {
 			}
 			addTo(uu[s:], v[s:])
 		}
-		if qhatv.cmp(uu.norm()) > 0 {
+		if natCmp(qhatv, natNorm(uu)) > 0 {
 			panic("impossible")
 		}
 		c := subVV(uu[:len(qhatv)], uu[:len(qhatv)], qhatv)
@@ -868,14 +868,14 @@ func (z nat) divRecursiveStep(stk *stack, u, v nat, depth int32) {
 	sh := B - 1
 	qh := qhat0
 	clear(qh)
-	qh.divRecursiveStep(stk, u[sh:].norm(), v[sh:], depth+1)
-	qh = qh.norm()
+	natDivRecursiveStep(qh, stk, natNorm(u[sh:]), v[sh:], depth+1)
+	qh = natNorm(qh)
 	qhv := stk.nat(3 * n)
 	clear(qhv)
-	qhv = qhv.mul(stk, qh, v[:sh])
+	qhv = natMul(qhv, stk, qh, v[:sh])
 	// Set the correct remainder as before.
 	for i := 0; i < 2; i++ {
-		if e := qhv.cmp(u.norm()); e > 0 {
+		if e := natCmp(qhv, natNorm(u)); e > 0 {
 			subVW(qh, qh, 1)
 			c := subVV(qhv[:sh], qhv[:sh], v[:sh])
 			if len(qhv) > sh {
@@ -884,7 +884,7 @@ func (z nat) divRecursiveStep(stk *stack, u, v nat, depth int32) {
 			addTo(u[sh:], v[sh:])
 		}
 	}
-	if qhv.cmp(u.norm()) > 0 {
+	if natCmp(qhv, natNorm(u)) > 0 {
 		panic("impossible")
 	}
 	cw := subVV(u[:len(qhv)], u[:len(qhv)], qhv)
@@ -896,5 +896,5 @@ func (z nat) divRecursiveStep(stk *stack, u, v nat, depth int32) {
 	}
 
 	// Done!
-	addTo(z, qh.norm())
+	addTo(z, natNorm(qh))
 }

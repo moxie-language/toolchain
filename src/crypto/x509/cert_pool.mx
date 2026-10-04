@@ -35,6 +35,13 @@ type CertPool struct {
 	systemPool bool
 }
 
+// certGetter returns the certificate for a pool entry. It replaces the
+// func() value the pool used to hold: a closure there would capture the
+// enclosing frame, which Moxie does not allow.
+type certGetter interface {
+	get() (*Certificate, error)
+}
+
 // lazyCert is minimal metadata about a Cert and a func to retrieve it
 // in its normal expanded *Certificate form.
 type lazyCert struct {
@@ -57,11 +64,37 @@ type lazyCert struct {
 	// error in the signature primarily is meant for use in the
 	// case where a cert file existed on local disk when the program
 	// started up is deleted later before it's read.
-	getCert func() (*Certificate, error)
+	getCert certGetter
+}
+
+// certGetterDirect returns a certificate that is already parsed.
+type certGetterDirect struct {
+	cert *Certificate
+}
+
+func (g *certGetterDirect) get() (rcertificate *Certificate, rerr error) {
+	return g.cert, nil
+}
+
+// certGetterLazy parses a certificate the first time it is asked for.
+type certGetterLazy struct {
+	done bool
+	cert *Certificate
+	der  []byte
+}
+
+func (g *certGetterLazy) get() (rcertificate *Certificate, rerr error) {
+	if !g.done {
+		g.done = true
+		// This can't fail, as the same bytes already parsed above.
+		g.cert, _ = ParseCertificate(g.der)
+		g.der = nil
+	}
+	return g.cert, nil
 }
 
 // NewCertPool returns a new, empty CertPool.
-func NewCertPool() *CertPool {
+func NewCertPool() (rcertPool *CertPool) {
 	return &CertPool{
 		byName:  map[string][]int32{},
 		haveSum: map[sum224]bool{},
@@ -70,7 +103,7 @@ func NewCertPool() *CertPool {
 
 // len returns the number of certs in the set.
 // A nil set is a valid empty set.
-func (s *CertPool) len() int32 {
+func (s *CertPool) len() (rn int32) {
 	if s == nil {
 		return 0
 	}
@@ -78,13 +111,13 @@ func (s *CertPool) len() int32 {
 }
 
 // cert returns cert index n in s.
-func (s *CertPool) cert(n int32) (*Certificate, func([]*Certificate) error, error) {
-	cert, err := s.lazyCerts[n].getCert()
+func (s *CertPool) cert(n int32) (rcertificate *Certificate, rerror func([]*Certificate) error, rerr error) {
+	cert, err := s.lazyCerts[n].getCert.get()
 	return cert, s.lazyCerts[n].constraint, err
 }
 
 // Clone returns a copy of s.
-func (s *CertPool) Clone() *CertPool {
+func (s *CertPool) Clone() (rcertPool *CertPool) {
 	p := &CertPool{
 		byName:     map[string][]int32{},
 		lazyCerts:  []lazyCert{:len(s.lazyCerts)},
@@ -114,7 +147,7 @@ func (s *CertPool) Clone() *CertPool {
 // any other pool returned by SystemCertPool.
 //
 // New changes in the system cert pool might not be reflected in subsequent calls.
-func SystemCertPool() (*CertPool, error) {
+func SystemCertPool() (rcertPool *CertPool, rerr error) {
 	if sysRoots := systemRootsPool(); sysRoots != nil {
 		return sysRoots.Clone(), nil
 	}
@@ -129,7 +162,7 @@ type potentialParent struct {
 
 // findPotentialParents returns the certificates in s which might have signed
 // cert.
-func (s *CertPool) findPotentialParents(cert *Certificate) []potentialParent {
+func (s *CertPool) findPotentialParents(cert *Certificate) (rpotentialParent []potentialParent) {
 	if s == nil {
 		return nil
 	}
@@ -175,7 +208,7 @@ func (s *CertPool) findPotentialParents(cert *Certificate) []potentialParent {
 	return candidates
 }
 
-func (s *CertPool) contains(cert *Certificate) bool {
+func (s *CertPool) contains(cert *Certificate) (rok bool) {
 	if s == nil {
 		return false
 	}
@@ -187,9 +220,7 @@ func (s *CertPool) AddCert(cert *Certificate) {
 	if cert == nil {
 		panic("adding nil Certificate to CertPool")
 	}
-	s.addCertFunc(sha256.Sum224(cert.Raw), string(cert.RawSubject), func() (*Certificate, error) {
-		return cert, nil
-	}, nil)
+	s.addCertFunc(sha256.Sum224(cert.Raw), string(cert.RawSubject), &certGetterDirect{cert: cert}, nil)
 }
 
 // addCertFunc adds metadata about a certificate to a pool, along with
@@ -197,7 +228,7 @@ func (s *CertPool) AddCert(cert *Certificate) {
 //
 // The rawSubject is Certificate.RawSubject and must be non-empty.
 // The getCert func may be called 0 or more times.
-func (s *CertPool) addCertFunc(rawSum224 sum224, rawSubject string, getCert func() (*Certificate, error), constraint func([]*Certificate) error) {
+func (s *CertPool) addCertFunc(rawSum224 sum224, rawSubject string, getCert certGetter, constraint func([]*Certificate) error) {
 	if getCert == nil {
 		panic("getCert can't be nil")
 	}
@@ -239,19 +270,7 @@ func (s *CertPool) AppendCertsFromPEM(pemCerts []byte) (ok bool) {
 		if err != nil {
 			continue
 		}
-		var lazyCert1 struct {
-			done bool
-			v    *Certificate
-		}
-		s.addCertFunc(sha256.Sum224(cert.Raw), string(cert.RawSubject), func() (*Certificate, error) {
-			if !lazyCert1.done {
-				lazyCert1.done = true
-				// This can't fail, as the same bytes already parsed above.
-				lazyCert1.v, _ = ParseCertificate(certBytes)
-				certBytes = nil
-			}
-			return lazyCert1.v, nil
-		}, nil)
+		s.addCertFunc(sha256.Sum224(cert.Raw), string(cert.RawSubject), &certGetterLazy{der: certBytes}, nil)
 		ok = true
 	}
 
@@ -263,7 +282,7 @@ func (s *CertPool) AppendCertsFromPEM(pemCerts []byte) (ok bool) {
 //
 // Deprecated: if s was returned by [SystemCertPool], Subjects
 // will not include the system roots.
-func (s *CertPool) Subjects() [][]byte {
+func (s *CertPool) Subjects() (rbyte [][]byte) {
 	res := [][]byte{:s.len()}
 	for i, lc := range s.lazyCerts {
 		res[i] = lc.rawSubject
@@ -272,7 +291,7 @@ func (s *CertPool) Subjects() [][]byte {
 }
 
 // Equal reports whether s and other are equal.
-func (s *CertPool) Equal(other *CertPool) bool {
+func (s *CertPool) Equal(other *CertPool) (rok bool) {
 	if s == nil || other == nil {
 		return s == other
 	}
@@ -296,7 +315,5 @@ func (s *CertPool) AddCertWithConstraint(cert *Certificate, constraint func([]*C
 	if cert == nil {
 		panic("adding nil Certificate to CertPool")
 	}
-	s.addCertFunc(sha256.Sum224(cert.Raw), string(cert.RawSubject), func() (*Certificate, error) {
-		return cert, nil
-	}, constraint)
+	s.addCertFunc(sha256.Sum224(cert.Raw), string(cert.RawSubject), &certGetterDirect{cert: cert}, constraint)
 }

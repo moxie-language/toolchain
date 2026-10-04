@@ -27,18 +27,32 @@ const (
 // A CorruptInputError reports the presence of corrupt input at a given offset.
 type CorruptInputError int64
 
-func (e CorruptInputError) Error() string {
-	return "flate: corrupt input before offset " + strconv.FormatInt(int64(e), 10)
+func (e *CorruptInputError) Error() (msg string) {
+	return "flate: corrupt input before offset " | strconv.FormatInt(int64(*e), 10)
 }
 
-func (e CorruptInputError) String() string { return e.Error() }
+func (e *CorruptInputError) String() (msg string) { return e.Error() }
+
+// corruptInputError makes an addressable CorruptInputError so its
+// pointer-receiver Error method can satisfy the error interface.
+func corruptInputError(off int64) (err error) {
+	e := CorruptInputError(off)
+	return &e
+}
 
 // An InternalError reports an error in the flate code itself.
 type InternalError string
 
-func (e InternalError) Error() string { return "flate: internal error: " + string(e) }
+func (e *InternalError) Error() (msg string) { return "flate: internal error: " | string(*e) }
 
-func (e InternalError) String() string { return e.Error() }
+func (e *InternalError) String() (msg string) { return e.Error() }
+
+// internalError makes an addressable InternalError so its pointer-receiver
+// Error method can satisfy the error interface.
+func internalError(text string) (err error) {
+	e := InternalError(text)
+	return &e
+}
 
 // A ReadError reports an error encountered while reading input.
 //
@@ -48,11 +62,11 @@ type ReadError struct {
 	Err    error // error returned by underlying Read
 }
 
-func (e *ReadError) Error() string {
-	return "flate: read error at offset " + strconv.FormatInt(e.Offset, 10) + ": " + e.Err.String()
+func (e *ReadError) Error() (msg string) {
+	return "flate: read error at offset " | strconv.FormatInt(e.Offset, 10) | ": " | e.Err.String()
 }
 
-func (e *ReadError) String() string { return e.Error() }
+func (e *ReadError) String() (msg string) { return e.Error() }
 
 // A WriteError reports an error encountered while writing output.
 //
@@ -62,11 +76,11 @@ type WriteError struct {
 	Err    error // error returned by underlying Write
 }
 
-func (e *WriteError) Error() string {
-	return "flate: write error at offset " + strconv.FormatInt(e.Offset, 10) + ": " + e.Err.String()
+func (e *WriteError) Error() (msg string) {
+	return "flate: write error at offset " | strconv.FormatInt(e.Offset, 10) | ": " | e.Err.String()
 }
 
-func (e *WriteError) String() string { return e.Error() }
+func (e *WriteError) String() (msg string) { return e.Error() }
 
 // Resetter resets a ReadCloser returned by [NewReader] or [NewReaderDict]
 // to switch to a new underlying [Reader]. This permits reusing a ReadCloser
@@ -116,7 +130,7 @@ type huffmanDecoder struct {
 // tree (i.e., neither over-subscribed nor under-subscribed). The exception is a
 // degenerate case where the tree has only a single symbol with length 1. Empty
 // trees are permitted.
-func (h *huffmanDecoder) init(lengths []int32) bool {
+func (h *huffmanDecoder) init(lengths []int32) (ok bool) {
 	// Sanity enables additional runtime tests during Huffman
 	// table construction. It's intended to be used during
 	// development to supplement the currently ad-hoc unit tests.
@@ -345,15 +359,14 @@ func (f *decompressor) nextBlock() {
 		f.huffmanBlock()
 	default:
 		// 3 is reserved.
-		f.err = CorruptInputError(f.roffset)
+		f.err = corruptInputError(f.roffset)
 	}
 }
 
-func (f *decompressor) Read(b []byte) (int32, error) {
+func (f *decompressor) Read(b []byte) (n int32, err error) {
 	// Declared once, outside the loop: a declaration in a loop in a
 	// self-mutating method is rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
-	var n int32
 	for {
 		if len(f.toRead) > 0 {
 			n = copy(b, f.toRead)
@@ -373,7 +386,7 @@ func (f *decompressor) Read(b []byte) (int32, error) {
 	}
 }
 
-func (f *decompressor) Close() error {
+func (f *decompressor) Close() (err error) {
 	if f.err == io.EOF {
 		return nil
 	}
@@ -383,7 +396,7 @@ func (f *decompressor) Close() error {
 // RFC 1951 section 3.2.7.
 // Compression with dynamic Huffman codes
 
-func (f *decompressor) readHuffman() error {
+func (f *decompressor) readHuffman() (rerr error) {
 	// RFC 1951 section 3.2.7.
 	codeOrder := [19]int32{16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15}
 
@@ -395,12 +408,12 @@ func (f *decompressor) readHuffman() error {
 	}
 	nlit := int32(f.b&0x1F) + 257
 	if nlit > maxNumLit {
-		return CorruptInputError(f.roffset)
+		return corruptInputError(f.roffset)
 	}
 	f.b >>= 5
 	ndist := int32(f.b&0x1F) + 1
 	if ndist > maxNumDist {
-		return CorruptInputError(f.roffset)
+		return corruptInputError(f.roffset)
 	}
 	f.b >>= 5
 	nclen := int32(f.b&0xF) + 4
@@ -423,7 +436,7 @@ func (f *decompressor) readHuffman() error {
 		f.codebits[codeOrder[i]] = 0
 	}
 	if !f.h1.init(f.codebits[0:]) {
-		return CorruptInputError(f.roffset)
+		return corruptInputError(f.roffset)
 	}
 
 	// HLIT + 257 code lengths, HDIST + 1 code lengths,
@@ -451,12 +464,12 @@ func (f *decompressor) readHuffman() error {
 		// Repeat previous length or zero.
 		switch x {
 		default:
-			return InternalError("unexpected length code")
+			return internalError("unexpected length code")
 		case 16:
 			rep = 3
 			nb = 2
 			if i == 0 {
-				return CorruptInputError(f.roffset)
+				return corruptInputError(f.roffset)
 			}
 			b = f.bits[i-1]
 		case 17:
@@ -477,7 +490,7 @@ func (f *decompressor) readHuffman() error {
 		f.b >>= nb
 		f.nb -= nb
 		if i+rep > n {
-			return CorruptInputError(f.roffset)
+			return corruptInputError(f.roffset)
 		}
 		for j := 0; j < rep; j++ {
 			f.bits[i] = b
@@ -486,7 +499,7 @@ func (f *decompressor) readHuffman() error {
 	}
 
 	if !f.h1.init(f.bits[0:nlit]) || !f.h2.init(f.bits[nlit:nlit+ndist]) {
-		return CorruptInputError(f.roffset)
+		return corruptInputError(f.roffset)
 	}
 
 	// As an optimization, we can initialize the min bits to read at a time
@@ -563,7 +576,7 @@ readLiteral:
 			length = 258
 			n = 0
 		default:
-			f.err = CorruptInputError(f.roffset)
+			f.err = corruptInputError(f.roffset)
 			return
 		}
 		if n > 0 {
@@ -614,13 +627,13 @@ readLiteral:
 			f.nb -= nb
 			dist = 1<<(nb+1) + 1 + extra
 		default:
-			f.err = CorruptInputError(f.roffset)
+			f.err = corruptInputError(f.roffset)
 			return
 		}
 
 		// No check on length; encoding can be prescient.
 		if dist > f.dict.histSize() {
-			f.err = CorruptInputError(f.roffset)
+			f.err = corruptInputError(f.roffset)
 			return
 		}
 
@@ -664,7 +677,7 @@ func (f *decompressor) dataBlock() {
 	n := int32(f.buf[0]) | int32(f.buf[1])<<8
 	nn := int32(f.buf[2]) | int32(f.buf[3])<<8
 	if uint16(nn) != uint16(^n) {
-		f.err = CorruptInputError(f.roffset)
+		f.err = corruptInputError(f.roffset)
 		return
 	}
 
@@ -714,14 +727,14 @@ func (f *decompressor) finishBlock() {
 }
 
 // noEOF returns err, unless err == io.EOF, in which case it returns io.ErrUnexpectedEOF.
-func noEOF(e error) error {
+func noEOF(e error) (rerr error) {
 	if e == io.EOF {
 		return io.ErrUnexpectedEOF
 	}
 	return e
 }
 
-func (f *decompressor) moreBits() error {
+func (f *decompressor) moreBits() (merr error) {
 	c, err := f.r.ReadByte()
 	if err != nil {
 		return noEOF(err)
@@ -733,7 +746,7 @@ func (f *decompressor) moreBits() error {
 }
 
 // Read the next Huffman-encoded symbol from f according to h.
-func (f *decompressor) huffSym(h *huffmanDecoder) (int32, error) {
+func (f *decompressor) huffSym(h *huffmanDecoder) (v int32, err error) {
 	// Since a huffmanDecoder can be empty or be composed of a degenerate tree
 	// with single element, huffSym must error on these two edge cases. In both
 	// cases, the chunks slice will be 0 for the invalid sequence, leading it
@@ -747,7 +760,6 @@ func (f *decompressor) huffSym(h *huffmanDecoder) (int32, error) {
 	// self-mutating method are rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
 	var c byte
-	var err error
 	var chunk uint32
 	for {
 		for nb < n {
@@ -771,7 +783,7 @@ func (f *decompressor) huffSym(h *huffmanDecoder) (int32, error) {
 			if n == 0 {
 				f.b = b
 				f.nb = nb
-				f.err = CorruptInputError(f.roffset)
+				f.err = corruptInputError(f.roffset)
 				return 0, f.err
 			}
 			f.b = b >> (n & 31)
@@ -815,7 +827,7 @@ func (f *decompressor) initFixedHuffmanDecoder() {
 	f.fixedHuffmanDecoder.init(lens[:])
 }
 
-func (f *decompressor) Reset(r io.Reader, dict []byte) error {
+func (f *decompressor) Reset(r io.Reader, dict []byte) (err error) {
 	*f = decompressor{
 		rBuf:     f.rBuf,
 		bits:     f.bits,
@@ -837,7 +849,7 @@ func (f *decompressor) Reset(r io.Reader, dict []byte) error {
 // been encountered. Any trailing data after the final block is ignored.
 //
 // The [io.ReadCloser] returned by NewReader also implements [Resetter].
-func NewReader(r io.Reader) io.ReadCloser {
+func NewReader(r io.Reader) (rc io.ReadCloser) {
 	var f decompressor
 	f.initFixedHuffmanDecoder()
 	f.makeReader(r)
@@ -855,7 +867,7 @@ func NewReader(r io.Reader) io.ReadCloser {
 // to read data compressed by [NewWriterDict].
 //
 // The ReadCloser returned by NewReaderDict also implements [Resetter].
-func NewReaderDict(r io.Reader, dict []byte) io.ReadCloser {
+func NewReaderDict(r io.Reader, dict []byte) (rc io.ReadCloser) {
 	var f decompressor
 	f.initFixedHuffmanDecoder()
 	f.makeReader(r)

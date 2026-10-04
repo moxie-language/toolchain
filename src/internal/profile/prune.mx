@@ -17,12 +17,16 @@ import (
 func (p *Profile) Prune(dropRx, keepRx *regexp.Regexp) {
 	prune := map[uint64]bool{}
 	pruneBeneath := map[uint64]bool{}
+	var i int32
+	var j int32
+	var funcName []byte
+	var id uint64
+	var foundUser bool
 
 	for _, loc := range p.Location {
-		var i int32
 		for i = len(loc.Line) - 1; i >= 0; i-- {
 			if fn := loc.Line[i].Function; fn != nil && fn.Name != "" {
-				funcName := fn.Name
+				funcName = fn.Name
 				// Account for leading '.' on the PPC ELF v1 ABI.
 				if funcName[0] == '.' {
 					funcName = funcName[1:]
@@ -54,9 +58,9 @@ func (p *Profile) Prune(dropRx, keepRx *regexp.Regexp) {
 		// Scan from the root to the leaves to find the prune location.
 		// Do not prune frames before the first user frame, to avoid
 		// pruning everything.
-		foundUser := false
-		for i := len(sample.Location) - 1; i >= 0; i-- {
-			id := sample.Location[i].ID
+		foundUser = false
+		for j = len(sample.Location) - 1; j >= 0; j-- {
+			id = sample.Location[j].ID
 			if !prune[id] && !pruneBeneath[id] {
 				foundUser = true
 				continue
@@ -65,11 +69,11 @@ func (p *Profile) Prune(dropRx, keepRx *regexp.Regexp) {
 				continue
 			}
 			if prune[id] {
-				sample.Location = sample.Location[i+1:]
+				sample.Location = sample.Location[j+1:]
 				break
 			}
 			if pruneBeneath[id] {
-				sample.Location = sample.Location[i:]
+				sample.Location = sample.Location[j:]
 				break
 			}
 		}
@@ -78,7 +82,7 @@ func (p *Profile) Prune(dropRx, keepRx *regexp.Regexp) {
 
 // RemoveUninteresting prunes and elides profiles using built-in
 // tables of uninteresting function names.
-func (p *Profile) RemoveUninteresting() error {
+func (p *Profile) RemoveUninteresting() (rerr error) {
 	var keep, drop *regexp.Regexp
 	var err error
 

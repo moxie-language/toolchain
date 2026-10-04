@@ -5,7 +5,6 @@
 package os
 
 import (
-	"errors"
 	"io/fs"
 	"syscall"
 )
@@ -13,26 +12,27 @@ import (
 // Portable analogs of some common system call errors.
 //
 // Errors returned from this package may be tested against these errors
-// with errors.Is.
-const (
-	ErrInvalid    = fs.ErrInvalid
-	ErrPermission = fs.ErrPermission
-	ErrExist      = fs.ErrExist
-	ErrNotExist   = fs.ErrNotExist
-	ErrClosed     = fs.ErrClosed
+// with errors.Is. They are assigned from the io/fs sentinels in init() so the
+// identity comparison in errors.Is keeps working.
+var (
+	ErrInvalid    error
+	ErrPermission error
+	ErrExist      error
+	ErrNotExist   error
+	ErrClosed     error
 )
 
-const ErrUnsupported = errors.Const("operation not supported")
-const ErrNotImplemented = errors.Const("operation not implemented")
+var ErrUnsupported error
+var ErrNotImplemented error
 
 // The following code is copied from the official implementation.
 // src/internal/poll/fd.go
 
 // ErrNoDeadline is returned when a request is made to set a deadline
 // on a file type that does not use the poller.
-const ErrNoDeadline = errors.Const("file type does not support deadline")
+var ErrNoDeadline error
 
-func ErrDeadlineExceeded() error { return &DeadlineExceededError{} }
+func ErrDeadlineExceeded() (rerr error) { return &DeadlineExceededError{} }
 
 // DeadlineExceededError is returned for an expired deadline.
 type DeadlineExceededError struct{}
@@ -41,15 +41,15 @@ type DeadlineExceededError struct{}
 // The string is "i/o timeout" because that is what was returned
 // by earlier Go versions. Changing it may break programs that
 // match on error strings.
-func (e *DeadlineExceededError) Error() string   { return "i/o timeout" }
-func (e *DeadlineExceededError) String() string  { return e.Error() }
-func (e *DeadlineExceededError) Timeout() bool   { return true }
-func (e *DeadlineExceededError) Temporary() bool { return true }
+func (e *DeadlineExceededError) Error() (rs string) { return "i/o timeout" }
+func (e *DeadlineExceededError) String() (rs string) { return e.Error() }
+func (e *DeadlineExceededError) Timeout() (rok bool) { return true }
+func (e *DeadlineExceededError) Temporary() (rok bool) { return true }
 
 // The following code is copied from the official implementation.
 // https://github.com/golang/go/blob/4ce6a8e89668b87dce67e2f55802903d6eb9110a/src/os/error.go#L65-L104
 
-func NewSyscallError(call string, err error) error {
+func NewSyscallError(call string, err error) (rerr error) {
 	if err == nil {
 		return nil
 	}
@@ -65,39 +65,39 @@ type SyscallError struct {
 	Err     error
 }
 
-func (e *SyscallError) Error() string  { return e.Syscall | ": " | e.Err.Error() }
-func (e *SyscallError) String() string { return e.Error() }
+func (e *SyscallError) Error() (rs string) { return e.Syscall | ": " | e.Err.Error() }
+func (e *SyscallError) String() (rs string) { return e.Error() }
 
-func (e *SyscallError) Unwrap() error { return e.Err }
+func (e *SyscallError) Unwrap() (rerr error) { return e.Err }
 
 type timeout interface {
 	Timeout() bool
 }
 
 // Timeout reports whether this error represents a timeout.
-func (e *SyscallError) Timeout() bool {
+func (e *SyscallError) Timeout() (rok bool) {
 	t, ok := e.Err.(timeout)
 	return ok && t.Timeout()
 }
 
-func IsExist(err error) bool {
+func IsExist(err error) (rok bool) {
 	return underlyingErrorIs(err, ErrExist)
 }
 
-func IsNotExist(err error) bool {
+func IsNotExist(err error) (rok bool) {
 	return underlyingErrorIs(err, ErrNotExist)
 }
 
-func IsPermission(err error) bool {
+func IsPermission(err error) (rok bool) {
 	return underlyingErrorIs(err, ErrPermission)
 }
 
-func IsTimeout(err error) bool {
+func IsTimeout(err error) (rok bool) {
 	terr, ok := underlyingError(err).(timeout)
 	return ok && terr.Timeout()
 }
 
-func underlyingErrorIs(err, target error) bool {
+func underlyingErrorIs(err, target error) (rok bool) {
 	// Note that this function is not errors.Is:
 	// underlyingError only unwraps the specific error-wrapping types
 	// that it historically did, not all errors implementing Unwrap().
@@ -111,7 +111,7 @@ func underlyingErrorIs(err, target error) bool {
 }
 
 // underlyingError returns the underlying error for known os error types.
-func underlyingError(err error) error {
+func underlyingError(err error) (rerr error) {
 	switch e := err.(type) {
 	case *PathError:
 		return e.Err

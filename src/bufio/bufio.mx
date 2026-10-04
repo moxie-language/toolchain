@@ -19,11 +19,11 @@ const (
 	defaultBufSize = 4096
 )
 
-const (
-	ErrInvalidUnreadByte = errors.Const("bufio: invalid use of UnreadByte")
-	ErrInvalidUnreadRune = errors.Const("bufio: invalid use of UnreadRune")
-	ErrBufferFull        = errors.Const("bufio: buffer full")
-	ErrNegativeCount     = errors.Const("bufio: negative count")
+var (
+	ErrInvalidUnreadByte error
+	ErrInvalidUnreadRune error
+	ErrBufferFull        error
+	ErrNegativeCount     error
 )
 
 // Buffered input.
@@ -47,7 +47,7 @@ const maxConsecutiveEmptyReads = 100
 // NewReaderSize returns a new [Reader] whose buffer has at least the specified
 // size. If the argument io.Reader is already a [Reader] with large enough
 // size, it returns the underlying [Reader].
-func NewReaderSize(rd io.Reader, size int32) *Reader {
+func NewReaderSize(rd io.Reader, size int32) (out *Reader) {
 	// Is it already a Reader?
 	b, ok := rd.(*Reader)
 	if ok && len(b.buf) >= size {
@@ -59,12 +59,12 @@ func NewReaderSize(rd io.Reader, size int32) *Reader {
 }
 
 // NewReader returns a new [Reader] whose buffer has the default size.
-func NewReader(rd io.Reader) *Reader {
+func NewReader(rd io.Reader) (out *Reader) {
 	return NewReaderSize(rd, defaultBufSize)
 }
 
 // Size returns the size of the underlying buffer in bytes.
-func (b *Reader) Size() int32 { return len(b.buf) }
+func (b *Reader) Size() (size int32) { return len(b.buf) }
 
 // Reset discards any buffered data, resets all state, and switches
 // the buffered reader to read from r.
@@ -93,7 +93,7 @@ func (b *Reader) reset(buf []byte, r io.Reader) {
 	}
 }
 
-const errNegativeRead = errors.Const("bufio: reader returned negative count from Read")
+var errNegativeRead error
 
 // fill reads a new chunk into the buffer.
 func (b *Reader) fill() {
@@ -130,7 +130,7 @@ func (b *Reader) fill() {
 	b.err = io.ErrNoProgress
 }
 
-func (b *Reader) readErr() error {
+func (b *Reader) readErr() (rerr error) {
 	err := b.err
 	b.err = nil
 	return err
@@ -144,7 +144,7 @@ func (b *Reader) readErr() error {
 //
 // Calling Peek prevents a [Reader.UnreadByte] or [Reader.UnreadRune] call from succeeding
 // until the next read operation.
-func (b *Reader) Peek(n int32) ([]byte, error) {
+func (b *Reader) Peek(n int32) (data []byte, perr error) {
 	if n < 0 {
 		return nil, ErrNegativeCount
 	}
@@ -269,7 +269,7 @@ func (b *Reader) Read(p []byte) (n int32, err error) {
 
 // ReadByte reads and returns a single byte.
 // If no byte is available, returns an error.
-func (b *Reader) ReadByte() (byte, error) {
+func (b *Reader) ReadByte() (val byte, rerr error) {
 	b.lastRuneSize = -1
 	for b.r == b.w {
 		if b.err != nil {
@@ -288,7 +288,7 @@ func (b *Reader) ReadByte() (byte, error) {
 // UnreadByte returns an error if the most recent method called on the
 // [Reader] was not a read operation. Notably, [Reader.Peek], [Reader.Discard], and [Reader.WriteTo] are not
 // considered read operations.
-func (b *Reader) UnreadByte() error {
+func (b *Reader) UnreadByte() (rerr error) {
 	if b.lastByte < 0 || b.r == 0 && b.w > 0 {
 		return ErrInvalidUnreadByte
 	}
@@ -330,7 +330,7 @@ func (b *Reader) ReadRune() (r rune, size int32, err error) {
 // the [Reader] was not a [Reader.ReadRune], [Reader.UnreadRune] returns an error. (In this
 // regard it is stricter than [Reader.UnreadByte], which will unread the last byte
 // from any read operation.)
-func (b *Reader) UnreadRune() error {
+func (b *Reader) UnreadRune() (rerr error) {
 	if b.lastRuneSize < 0 || b.r < b.lastRuneSize {
 		return ErrInvalidUnreadRune
 	}
@@ -341,7 +341,7 @@ func (b *Reader) UnreadRune() error {
 }
 
 // Buffered returns the number of bytes that can be read from the current buffer.
-func (b *Reader) Buffered() int32 { return b.w - b.r }
+func (b *Reader) Buffered() (n int32) { return b.w - b.r }
 
 // ReadSlice reads until the first occurrence of delim in the input,
 // returning a slice pointing at the bytes in the buffer.
@@ -484,7 +484,7 @@ func (b *Reader) collectFragments(delim byte) (fullBuffers [][]byte, finalFragme
 // ReadBytes returns err != nil if and only if the returned data does not end in
 // delim.
 // For simple uses, a Scanner may be more convenient.
-func (b *Reader) ReadBytes(delim byte) ([]byte, error) {
+func (b *Reader) ReadBytes(delim byte) (data []byte, rerr error) {
 	full, frag, n, err := b.collectFragments(delim)
 	// Allocate new buffer to hold the full pieces and the fragment.
 	buf := []byte{:n}
@@ -504,7 +504,7 @@ func (b *Reader) ReadBytes(delim byte) ([]byte, error) {
 // ReadString returns err != nil if and only if the returned data does not end in
 // delim.
 // For simple uses, a Scanner may be more convenient.
-func (b *Reader) ReadString(delim byte) (string, error) {
+func (b *Reader) ReadString(delim byte) (str string, rerr error) {
 	full, frag, n, err := b.collectFragments(delim)
 	// Allocate new buffer to hold the full pieces and the fragment.
 	var buf bytes.Buffer
@@ -568,10 +568,10 @@ func (b *Reader) WriteTo(w io.Writer) (n int64, err error) {
 	return n, b.readErr()
 }
 
-const errNegativeWrite = errors.Const("bufio: writer returned negative count from Write")
+var errNegativeWrite error
 
 // writeBuf writes the [Reader]'s buffer to the writer.
-func (b *Reader) writeBuf(w io.Writer) (int64, error) {
+func (b *Reader) writeBuf(w io.Writer) (written int64, rerr error) {
 	n, err := w.Write(b.buf[b.r:b.w])
 	if n < 0 {
 		panic(errNegativeWrite.Error())
@@ -598,7 +598,7 @@ type Writer struct {
 // NewWriterSize returns a new [Writer] whose buffer has at least the specified
 // size. If the argument io.Writer is already a [Writer] with large enough
 // size, it returns the underlying [Writer].
-func NewWriterSize(w io.Writer, size int32) *Writer {
+func NewWriterSize(w io.Writer, size int32) (out *Writer) {
 	// Is it already a Writer?
 	b, ok := w.(*Writer)
 	if ok && len(b.buf) >= size {
@@ -616,12 +616,12 @@ func NewWriterSize(w io.Writer, size int32) *Writer {
 // NewWriter returns a new [Writer] whose buffer has the default size.
 // If the argument io.Writer is already a [Writer] with large enough buffer size,
 // it returns the underlying [Writer].
-func NewWriter(w io.Writer) *Writer {
+func NewWriter(w io.Writer) (out *Writer) {
 	return NewWriterSize(w, defaultBufSize)
 }
 
 // Size returns the size of the underlying buffer in bytes.
-func (b *Writer) Size() int32 { return len(b.buf) }
+func (b *Writer) Size() (size int32) { return len(b.buf) }
 
 // Reset discards any unflushed buffered data, clears any error, and
 // resets b to write its output to w.
@@ -644,7 +644,7 @@ func (b *Writer) Reset(w io.Writer) {
 }
 
 // Flush writes any buffered data to the underlying [io.Writer].
-func (b *Writer) Flush() error {
+func (b *Writer) Flush() (rerr error) {
 	if b.err != nil {
 		return b.err
 	}
@@ -668,18 +668,18 @@ func (b *Writer) Flush() error {
 }
 
 // Available returns how many bytes are unused in the buffer.
-func (b *Writer) Available() int32 { return len(b.buf) - b.n }
+func (b *Writer) Available() (n int32) { return len(b.buf) - b.n }
 
 // AvailableBuffer returns an empty buffer with b.Available() capacity.
 // This buffer is intended to be appended to and
 // passed to an immediately succeeding [Writer.Write] call.
 // The buffer is only valid until the next write operation on b.
-func (b *Writer) AvailableBuffer() []byte {
+func (b *Writer) AvailableBuffer() (buf []byte) {
 	return b.buf[b.n:][:0]
 }
 
 // Buffered returns the number of bytes that have been written into the current buffer.
-func (b *Writer) Buffered() int32 { return b.n }
+func (b *Writer) Buffered() (n int32) { return b.n }
 
 // Write writes the contents of p into the buffer.
 // It returns the number of bytes written.
@@ -710,7 +710,7 @@ func (b *Writer) Write(p []byte) (nn int32, err error) {
 }
 
 // WriteByte writes a single byte.
-func (b *Writer) WriteByte(c byte) error {
+func (b *Writer) WriteByte(c byte) (rerr error) {
 	if b.err != nil {
 		return b.err
 	}
@@ -756,7 +756,7 @@ func (b *Writer) WriteRune(r rune) (size int32, err error) {
 // It returns the number of bytes written.
 // If the count is less than len(s), it also returns an error explaining
 // why the write is short.
-func (b *Writer) WriteString(s []byte) (int32, error) {
+func (b *Writer) WriteString(s []byte) (written int32, rerr error) {
 	var sw io.StringWriter
 	tryStringWriter := true
 
@@ -850,7 +850,21 @@ type ReadWriter struct {
 	*Writer
 }
 
+func init() {
+	ErrInvalidUnreadByte = errors.New("bufio: invalid use of UnreadByte")
+	ErrInvalidUnreadRune = errors.New("bufio: invalid use of UnreadRune")
+	ErrBufferFull = errors.New("bufio: buffer full")
+	ErrNegativeCount = errors.New("bufio: negative count")
+	errNegativeRead = errors.New("bufio: reader returned negative count from Read")
+	errNegativeWrite = errors.New("bufio: writer returned negative count from Write")
+	ErrTooLong = errors.New("bufio.Scanner: token too long")
+	ErrNegativeAdvance = errors.New("bufio.Scanner: SplitFunc returns negative advance count")
+	ErrAdvanceTooFar = errors.New("bufio.Scanner: SplitFunc returns advance count beyond input")
+	ErrBadReadCount = errors.New("bufio.Scanner: Read returned impossible count")
+	ErrFinalToken = errors.New("final token")
+}
+
 // NewReadWriter allocates a new [ReadWriter] that dispatches to r and w.
-func NewReadWriter(r *Reader, w *Writer) *ReadWriter {
+func NewReadWriter(r *Reader, w *Writer) (out *ReadWriter) {
 	return &ReadWriter{r, w}
 }

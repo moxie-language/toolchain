@@ -58,7 +58,7 @@ const (
 // without any special treatment for multi-byte UTF-8.
 // The resulting Encoding uses the default padding character ('='),
 // which may be changed or disabled via [Encoding.WithPadding].
-func NewEncoding(alphabet []byte) *Encoding {
+func NewEncoding(alphabet []byte) (enc *Encoding) {
 	if len(alphabet) != 32 {
 		panic("encoding alphabet is not 32-bytes long")
 	}
@@ -83,11 +83,11 @@ func NewEncoding(alphabet []byte) *Encoding {
 	return e
 }
 
-func StdEncoding() *Encoding {
+func StdEncoding() (enc *Encoding) {
 	return NewEncoding("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
 }
 
-func HexEncoding() *Encoding {
+func HexEncoding() (enc *Encoding) {
 	return NewEncoding("0123456789ABCDEFGHIJKLMNOPQRSTUV")
 }
 
@@ -98,15 +98,16 @@ func HexEncoding() *Encoding {
 // must not be negative, and must be a rune equal or below '\xff'.
 // Padding characters above '\x7f' are encoded as their exact byte value
 // rather than using the UTF-8 representation of the codepoint.
-func (enc Encoding) WithPadding(padding rune) *Encoding {
+func (enc *Encoding) WithPadding(padding rune) (out *Encoding) {
 	switch {
 	case padding < NoPadding || padding == '\r' || padding == '\n' || padding > 0xff:
 		panic("invalid padding")
 	case padding != NoPadding && enc.decodeMap[byte(padding)] != invalidIndex:
 		panic("padding contained in alphabet")
 	}
-	enc.padChar = padding
-	return &enc
+	e := *enc
+	e.padChar = padding
+	return &e
 }
 
 /*
@@ -203,7 +204,7 @@ func (enc *Encoding) Encode(dst, src []byte) {
 
 // AppendEncode appends the base32 encoded src to dst
 // and returns the extended buffer.
-func (enc *Encoding) AppendEncode(dst, src []byte) []byte {
+func (enc *Encoding) AppendEncode(dst, src []byte) (out []byte) {
 	n := enc.EncodedLen(len(src))
 	dst = slices.Grow(dst, n)
 	enc.Encode(dst[len(dst):][:n], src)
@@ -211,7 +212,7 @@ func (enc *Encoding) AppendEncode(dst, src []byte) []byte {
 }
 
 // EncodeToString returns the base32 encoding of src.
-func (enc *Encoding) EncodeToString(src []byte) []byte {
+func (enc *Encoding) EncodeToString(src []byte) (out []byte) {
 	buf := []byte{:enc.EncodedLen(len(src))}
 	enc.Encode(buf, src)
 	return []byte(buf)
@@ -278,7 +279,7 @@ func (e *encoder) Write(p []byte) (n int32, err error) {
 
 // Close flushes any pending output from the encoder.
 // It is an error to call Write after calling Close.
-func (e *encoder) Close() error {
+func (e *encoder) Close() (err error) {
 	// If there's anything left in the buffer, flush it out
 	if e.err == nil && e.nbuf > 0 {
 		e.enc.Encode(e.out[0:], e.buf[0:e.nbuf])
@@ -294,13 +295,13 @@ func (e *encoder) Close() error {
 // Base32 encodings operate in 5-byte blocks; when finished
 // writing, the caller must Close the returned encoder to flush any
 // partially written blocks.
-func NewEncoder(enc *Encoding, w io.Writer) io.WriteCloser {
+func NewEncoder(enc *Encoding, w io.Writer) (out io.WriteCloser) {
 	return &encoder{enc: enc, w: w}
 }
 
 // EncodedLen returns the length in bytes of the base32 encoding
 // of an input buffer of length n.
-func (enc *Encoding) EncodedLen(n int32) int32 {
+func (enc *Encoding) EncodedLen(n int32) (out int32) {
 	if enc.padChar == NoPadding {
 		return n/5*8 + (n%5*8+4)/5
 	}
@@ -313,11 +314,18 @@ func (enc *Encoding) EncodedLen(n int32) int32 {
 
 type CorruptInputError int64
 
-func (e CorruptInputError) Error() string {
-	return "illegal base32 data at input byte " + strconv.FormatInt(int64(e), 10)
+func (e *CorruptInputError) Error() (msg string) {
+	return "illegal base32 data at input byte " + strconv.FormatInt(int64(*e), 10)
 }
 
-func (e CorruptInputError) String() string { return e.Error() }
+func (e *CorruptInputError) String() (s string) { return e.Error() }
+
+// corruptInputError returns a CorruptInputError as an error.
+func corruptInputError(n int32) (cerr error) {
+	ce := CorruptInputError(n)
+	cerr = &ce
+	return
+}
 
 // decode is like Decode but returns an additional 'end' value, which
 // indicates if end-of-message padding was encountered and thus any
@@ -340,7 +348,7 @@ func (enc *Encoding) decode(dst, src []byte) (n int32, end bool, err error) {
 			if len(src) == 0 {
 				if enc.padChar != NoPadding {
 					// We have reached the end and are missing padding
-					return n, false, CorruptInputError(olen - len(src) - j)
+					return n, false, corruptInputError(olen - len(src) - j)
 				}
 				// We have reached the end and are not expecting any padding
 				dlen, end = j, true
@@ -352,12 +360,12 @@ func (enc *Encoding) decode(dst, src []byte) (n int32, end bool, err error) {
 				// We've reached the end and there's padding
 				if len(src)+j < 8-1 {
 					// not enough padding
-					return n, false, CorruptInputError(olen)
+					return n, false, corruptInputError(olen)
 				}
 				for k := 0; k < 8-1-j; k++ {
 					if len(src) > k && src[k] != byte(enc.padChar) {
 						// incorrect padding
-						return n, false, CorruptInputError(olen - len(src) + k - 1)
+						return n, false, corruptInputError(olen - len(src) + k - 1)
 					}
 				}
 				dlen, end = j, true
@@ -367,13 +375,13 @@ func (enc *Encoding) decode(dst, src []byte) (n int32, end bool, err error) {
 				// Examples" for an illustration for how the 1st, 3rd and 6th base32
 				// src bytes do not yield enough information to decode a dst byte.
 				if dlen == 1 || dlen == 3 || dlen == 6 {
-					return n, false, CorruptInputError(olen - len(src) - 1)
+					return n, false, corruptInputError(olen - len(src) - 1)
 				}
 				break
 			}
 			dbuf[j] = enc.decodeMap[in]
 			if dbuf[j] == 0xFF {
-				return n, false, CorruptInputError(olen - len(src) - 1)
+				return n, false, corruptInputError(olen - len(src) - 1)
 			}
 			j++
 		}
@@ -439,7 +447,7 @@ func (enc *Encoding) Decode(dst, src []byte) (n int32, err error) {
 // and returns the extended buffer.
 // If the input is malformed, it returns the partially decoded src and an error.
 // New line characters (\r and \n) are ignored.
-func (enc *Encoding) AppendDecode(dst, src []byte) ([]byte, error) {
+func (enc *Encoding) AppendDecode(dst, src []byte) (out []byte, derr error) {
 	// Compute the output size without padding to avoid over allocating.
 	n := len(src)
 	for n > 0 && rune(src[n-1]) == enc.padChar {
@@ -448,14 +456,14 @@ func (enc *Encoding) AppendDecode(dst, src []byte) ([]byte, error) {
 	n = decodedLen(n, NoPadding)
 
 	dst = slices.Grow(dst, n)
-	n, err := enc.Decode(dst[len(dst):][:n], src)
-	return dst[:len(dst)+n], err
+	n, derr = enc.Decode(dst[len(dst):][:n], src)
+	return dst[:len(dst)+n], derr
 }
 
 // DecodeString returns the bytes represented by the base32 string s.
 // If the input is malformed, it returns the partially decoded data and
 // [CorruptInputError]. New line characters (\r and \n) are ignored.
-func (enc *Encoding) DecodeString(s []byte) ([]byte, error) {
+func (enc *Encoding) DecodeString(s []byte) (out []byte, derr error) {
 	buf := []byte(s)
 	l := stripNewlines(buf, buf)
 	n, _, err := enc.decode(buf, buf[:l])
@@ -533,7 +541,7 @@ func (d *decoder) Read(p []byte) (n int32, err error) {
 		return 0, d.err
 	}
 	if nn > 0 && d.end {
-		return 0, CorruptInputError(0)
+		return 0, corruptInputError(0)
 	}
 
 	// Decode chunk into p, or d.out and then p if p is too small.
@@ -579,7 +587,7 @@ type newlineFilteringReader struct {
 
 // stripNewlines removes newline characters and returns the number
 // of non-newline characters copied to dst.
-func stripNewlines(dst, src []byte) int32 {
+func stripNewlines(dst, src []byte) (n int32) {
 	offset := 0
 	for _, b := range src {
 		if b == '\r' || b == '\n' {
@@ -591,8 +599,9 @@ func stripNewlines(dst, src []byte) int32 {
 	return offset
 }
 
-func (r *newlineFilteringReader) Read(p []byte) (int32, error) {
-	n, err := r.wrapped.Read(p)
+func (r *newlineFilteringReader) Read(p []byte) (n int32, rerr error) {
+	var err error
+	n, err = r.wrapped.Read(p)
 	for n > 0 {
 		s := p[0:n]
 		offset := stripNewlines(s, s)
@@ -606,17 +615,17 @@ func (r *newlineFilteringReader) Read(p []byte) (int32, error) {
 }
 
 // NewDecoder constructs a new base32 stream decoder.
-func NewDecoder(enc *Encoding, r io.Reader) io.Reader {
+func NewDecoder(enc *Encoding, r io.Reader) (dec io.Reader) {
 	return &decoder{enc: enc, r: &newlineFilteringReader{r}}
 }
 
 // DecodedLen returns the maximum length in bytes of the decoded data
 // corresponding to n bytes of base32-encoded data.
-func (enc *Encoding) DecodedLen(n int32) int32 {
+func (enc *Encoding) DecodedLen(n int32) (out int32) {
 	return decodedLen(n, enc.padChar)
 }
 
-func decodedLen(n int32, padChar rune) int32 {
+func decodedLen(n int32, padChar rune) (out int32) {
 	if padChar == NoPadding {
 		return n/8*5 + n%8*5/8
 	}

@@ -18,7 +18,7 @@ const floatGobVersion byte = 1
 // GobEncode implements the [encoding/gob.GobEncoder] interface.
 // The [Float] value and all its attributes (precision,
 // rounding mode, accuracy) are marshaled.
-func (x *Float) GobEncode() ([]byte, error) {
+func (x *Float) GobEncode() (rb []byte, rerr error) {
 	if x == nil {
 		return nil, nil
 	}
@@ -52,7 +52,7 @@ func (x *Float) GobEncode() ([]byte, error) {
 
 	if x.form == finite {
 		byteorder.BEPutUint32(buf[6:], uint32(x.exp))
-		x.mant[len(x.mant)-n:].bytes(buf[10:]) // cut off unused trailing words
+		natBytes(x.mant[len(x.mant)-n:], buf[10:]) // cut off unused trailing words
 	}
 
 	return buf, nil
@@ -62,7 +62,7 @@ func (x *Float) GobEncode() ([]byte, error) {
 // The result is rounded per the precision and rounding mode of
 // z unless z's precision is 0, in which case z is set exactly
 // to the decoded value.
-func (z *Float) GobDecode(buf []byte) error {
+func (z *Float) GobDecode(buf []byte) (rerr error) {
 	if len(buf) == 0 {
 		// Other side sent a nil or default value.
 		*z = Float{}
@@ -91,7 +91,7 @@ func (z *Float) GobDecode(buf []byte) error {
 			return errors.New("Float.GobDecode: buffer too small for finite form float")
 		}
 		z.exp = int32(byteorder.BEUint32(buf[6:]))
-		z.mant = z.mant.setBytes(buf[10:])
+		z.mant = natSetBytes(z.mant, buf[10:])
 	}
 
 	if oldPrec != 0 {
@@ -109,7 +109,7 @@ func (z *Float) GobDecode(buf []byte) error {
 // AppendText implements the [encoding.TextAppender] interface.
 // Only the [Float] value is marshaled (in full precision), other
 // attributes such as precision or accuracy are ignored.
-func (x *Float) AppendText(b []byte) ([]byte, error) {
+func (x *Float) AppendText(b []byte) (rb []byte, rerr error) {
 	if x == nil {
 		return push(b, "<nil>"...), nil
 	}
@@ -127,7 +127,7 @@ func (x *Float) MarshalText() (text []byte, err error) {
 // The result is rounded per the precision and rounding mode of z.
 // If z's precision is 0, it is changed to 64 before rounding takes
 // effect.
-func (z *Float) UnmarshalText(text []byte) error {
+func (z *Float) UnmarshalText(text []byte) (rerr error) {
 	// TODO(gri): get rid of the []byte/string conversion
 	_, _, err := z.Parse([]byte(text), 0)
 	if err != nil {

@@ -15,19 +15,29 @@ import (
 )
 
 // A FormatError reports that the input is not a valid JPEG.
-type FormatError []byte
+type FormatError string
 
-func (e FormatError) Error() string  { return "invalid JPEG format: " + string(e) }
-func (e FormatError) String() string { return e.Error() }
+func (e *FormatError) Error() (out string) { return "invalid JPEG format: " + string(*e) }
+func (e *FormatError) String() (out string) { return e.Error() }
+
+func newFormatError(msg string) (out *FormatError) {
+	e := FormatError(msg)
+	return &e
+}
 
 // An UnsupportedError reports that the input uses a valid but unimplemented JPEG feature.
-type UnsupportedError []byte
+type UnsupportedError string
 
-func (e UnsupportedError) Error() string  { return "unsupported JPEG feature: " + string(e) }
-func (e UnsupportedError) String() string { return e.Error() }
+func (e *UnsupportedError) Error() (out string) { return "unsupported JPEG feature: " + string(*e) }
+func (e *UnsupportedError) String() (out string) { return e.Error() }
 
-func errUnsupportedSubsamplingRatio() UnsupportedError {
-	return UnsupportedError("luma/chroma subsampling ratio")
+func newUnsupportedError(msg string) (out *UnsupportedError) {
+	e := UnsupportedError(msg)
+	return &e
+}
+
+func errUnsupportedSubsamplingRatio() (out *UnsupportedError) {
+	return newUnsupportedError("luma/chroma subsampling ratio")
 }
 
 // Component specification, specified in section B.2.2.
@@ -79,7 +89,7 @@ const (
 // unzig maps from the zig-zag ordering to the natural ordering. For example,
 // unzig[3] is the column and row of the fourth element in zig-zag order. The
 // value is 16, which means first column (16%8 == 0) and third row (16/8 == 2).
-func _unzig() [blockSize]int32 {
+func _unzig() (out [blockSize]int32) {
 	return [blockSize]int32{
 		0, 1, 8, 16, 9, 2, 3, 10,
 		17, 24, 32, 25, 18, 11, 4, 5,
@@ -155,7 +165,7 @@ type decoder struct {
 
 // fill fills up the d.bytes.buf buffer from the underlying io.Reader. It
 // should only be called when there are no unread bytes in d.bytes.
-func (d *decoder) fill() error {
+func (d *decoder) fill() (out error) {
 	if d.bytes.i != d.bytes.j {
 		panic("jpeg: fill called when unread bytes exist")
 	}
@@ -209,7 +219,7 @@ func (d *decoder) readByte() (x byte, err error) {
 
 // errMissingFF00 means that readByteStuffedByte encountered an 0xff byte (a
 // marker byte) that wasn't the expected byte-stuffed sequence 0xff, 0x00.
-func errMissingFF00() FormatError { return FormatError("missing 0xff00 sequence") }
+func errMissingFF00() (out *FormatError) { return newFormatError("missing 0xff00 sequence") }
 
 // readByteStuffedByte is like readByte but is for byte-stuffed Huffman data.
 func (d *decoder) readByteStuffedByte() (x byte, err error) {
@@ -253,7 +263,7 @@ func (d *decoder) readByteStuffedByte() (x byte, err error) {
 
 // readFull reads exactly len(p) bytes into p. It does not care about byte
 // stuffing.
-func (d *decoder) readFull(p []byte) error {
+func (d *decoder) readFull(p []byte) (out error) {
 	// Unread the overshot bytes, if any.
 	if d.bytes.nUnreadable != 0 {
 		if d.bits.n >= 8 {
@@ -281,7 +291,7 @@ func (d *decoder) readFull(p []byte) error {
 }
 
 // ignore ignores the next n bytes.
-func (d *decoder) ignore(n int32) error {
+func (d *decoder) ignore(n int32) (out error) {
 	// Unread the overshot bytes, if any.
 	if d.bytes.nUnreadable != 0 {
 		if d.bits.n >= 8 {
@@ -312,9 +322,9 @@ func (d *decoder) ignore(n int32) error {
 }
 
 // Specified in section B.2.2.
-func (d *decoder) processSOF(n int32) error {
+func (d *decoder) processSOF(n int32) (out error) {
 	if d.nComp != 0 {
-		return FormatError("multiple SOF markers")
+		return newFormatError("multiple SOF markers")
 	}
 	switch n {
 	case 6 + 3*1: // Grayscale image.
@@ -324,19 +334,19 @@ func (d *decoder) processSOF(n int32) error {
 	case 6 + 3*4: // YCbCrK or CMYK image.
 		d.nComp = 4
 	default:
-		return UnsupportedError("number of components")
+		return newUnsupportedError("number of components")
 	}
 	if err := d.readFull(d.tmp[:n]); err != nil {
 		return err
 	}
 	// We only support 8-bit precision.
 	if d.tmp[0] != 8 {
-		return UnsupportedError("precision")
+		return newUnsupportedError("precision")
 	}
 	d.height = int32(d.tmp[1])<<8 + int32(d.tmp[2])
 	d.width = int32(d.tmp[3])<<8 + int32(d.tmp[4])
 	if int32(d.tmp[5]) != d.nComp {
-		return FormatError("SOF has wrong length")
+		return newFormatError("SOF has wrong length")
 	}
 
 	// Loop scratch is declared once, outside the loop: a declaration in a loop
@@ -350,19 +360,19 @@ func (d *decoder) processSOF(n int32) error {
 		// the values of C_1 through C_(i-1)".
 		for j := 0; j < i; j++ {
 			if d.comp[i].c == d.comp[j].c {
-				return FormatError("repeated component identifier")
+				return newFormatError("repeated component identifier")
 			}
 		}
 
 		d.comp[i].tq = d.tmp[8+3*i]
 		if d.comp[i].tq > maxTq {
-			return FormatError("bad Tq value")
+			return newFormatError("bad Tq value")
 		}
 
 		hv = d.tmp[7+3*i]
 		h, v = int32(hv>>4), int32(hv&0x0f)
 		if h < 1 || 4 < h || v < 1 || 4 < v {
-			return FormatError("luma/chroma subsampling ratio")
+			return newFormatError("luma/chroma subsampling ratio")
 		}
 		if h == 3 || v == 3 {
 			return errUnsupportedSubsamplingRatio()
@@ -441,7 +451,7 @@ func (d *decoder) processSOF(n int32) error {
 }
 
 // Specified in section B.2.4.1.
-func (d *decoder) processDQT(n int32) error {
+func (d *decoder) processDQT(n int32) (out error) {
 	// Loop scratch is declared once, outside the loop: a declaration in a loop
 	// in a self-mutating method is rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
@@ -457,18 +467,18 @@ loop:
 		}
 		tq = x & 0x0f
 		if tq > maxTq {
-			return FormatError("bad Tq value")
+			return newFormatError("bad Tq value")
 		}
 		switch x >> 4 {
 		default:
-			return FormatError("bad Pq value")
+			return newFormatError("bad Pq value")
 		case 0:
 			if n < blockSize {
 				break loop
 			}
 			n -= blockSize
-			if err := d.readFull(d.tmp[:blockSize]); err != nil {
-				return err
+			if rerr := d.readFull(d.tmp[:blockSize]); rerr != nil {
+				return rerr
 			}
 			for i := range d.quant[tq] {
 				d.quant[tq][i] = int32(d.tmp[i])
@@ -478,8 +488,8 @@ loop:
 				break loop
 			}
 			n -= 2 * blockSize
-			if err := d.readFull(d.tmp[:2*blockSize]); err != nil {
-				return err
+			if rerr := d.readFull(d.tmp[:2*blockSize]); rerr != nil {
+				return rerr
 			}
 			for i := range d.quant[tq] {
 				d.quant[tq][i] = int32(d.tmp[2*i])<<8 | int32(d.tmp[2*i+1])
@@ -487,15 +497,15 @@ loop:
 		}
 	}
 	if n != 0 {
-		return FormatError("DQT has wrong length")
+		return newFormatError("DQT has wrong length")
 	}
 	return nil
 }
 
 // Specified in section B.2.4.4.
-func (d *decoder) processDRI(n int32) error {
+func (d *decoder) processDRI(n int32) (out error) {
 	if n != 2 {
-		return FormatError("DRI has wrong length")
+		return newFormatError("DRI has wrong length")
 	}
 	if err := d.readFull(d.tmp[:2]); err != nil {
 		return err
@@ -504,7 +514,7 @@ func (d *decoder) processDRI(n int32) error {
 	return nil
 }
 
-func (d *decoder) processApp0Marker(n int32) error {
+func (d *decoder) processApp0Marker(n int32) (out error) {
 	if n < 5 {
 		return d.ignore(n)
 	}
@@ -521,7 +531,7 @@ func (d *decoder) processApp0Marker(n int32) error {
 	return nil
 }
 
-func (d *decoder) processApp14Marker(n int32) error {
+func (d *decoder) processApp14Marker(n int32) (out error) {
 	if n < 12 {
 		return d.ignore(n)
 	}
@@ -542,7 +552,7 @@ func (d *decoder) processApp14Marker(n int32) error {
 }
 
 // decode reads a JPEG image from r and returns it as an image.Image.
-func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
+func (d *decoder) decode(r io.Reader, configOnly bool) (img image.Image, derr error) {
 	d.r = r
 
 	// Loop scratch is declared once, outside the loop: a declaration in a loop
@@ -557,7 +567,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 		return nil, err
 	}
 	if d.tmp[0] != 0xff || d.tmp[1] != soiMarker {
-		return nil, FormatError("missing SOI marker")
+		return nil, newFormatError("missing SOI marker")
 	}
 
 	// Process the remaining segments until the End Of Image marker.
@@ -626,7 +636,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 		}
 		n = int32(d.tmp[0])<<8 + int32(d.tmp[1]) - 2
 		if n < 0 {
-			return nil, FormatError("short segment length")
+			return nil, newFormatError("short segment length")
 		}
 
 		switch marker {
@@ -668,9 +678,9 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 			if app0Marker <= marker && marker <= app15Marker || marker == comMarker {
 				err = d.ignore(n)
 			} else if marker < 0xc0 { // See Table B.1 "Marker code assignments".
-				err = FormatError("unknown marker")
+				err = newFormatError("unknown marker")
 			} else {
-				err = UnsupportedError("unknown marker")
+				err = newUnsupportedError("unknown marker")
 			}
 		}
 		if err != nil {
@@ -694,7 +704,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 		}
 		return d.img3, nil
 	}
-	return nil, FormatError("missing SOS marker")
+	return nil, newFormatError("missing SOS marker")
 }
 
 // applyBlack combines d.img3 and d.blackPix into a CMYK image. The formula
@@ -704,9 +714,9 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 // Adobe CMYK JPEG images are inverted, where 255 means no ink instead of full
 // ink, so we apply "v = 255 - v" at various points. Note that a double
 // inversion is a no-op, so inversions might be implicit in the code below.
-func (d *decoder) applyBlack() (image.Image, error) {
+func (d *decoder) applyBlack() (out image.Image, derr error) {
 	if !d.adobeTransformValid {
-		return nil, UnsupportedError("unknown color model: 4-component JPEG doesn't have Adobe APP14 metadata")
+		return nil, newUnsupportedError("unknown color model: 4-component JPEG doesn't have Adobe APP14 metadata")
 	}
 
 	// If the 4-component JPEG image isn't explicitly marked as "Unknown (RGB
@@ -718,18 +728,18 @@ func (d *decoder) applyBlack() (image.Image, error) {
 		// CMY, and patch in the original K. The RGB to CMY inversion cancels
 		// out the 'Adobe inversion' described in the applyBlack doc comment
 		// above, so in practice, only the fourth channel (black) is inverted.
-		bounds := d.img3.Bounds()
-		img := image.NewRGBA(bounds)
-		imageutil.DrawYCbCr(img, bounds, d.img3, bounds.Min)
-		for iBase, y := 0, bounds.Min.Y; y < bounds.Max.Y; iBase, y = iBase+img.Stride, y+1 {
-			for i, x := iBase+3, bounds.Min.X; x < bounds.Max.X; i, x = i+4, x+1 {
-				img.Pix[i] = 255 - d.blackPix[(y-bounds.Min.Y)*d.blackStride+(x-bounds.Min.X)]
+		rbounds := d.img3.Bounds()
+		rimg := image.NewRGBA(rbounds)
+		imageutil.DrawYCbCr(rimg, rbounds, d.img3, rbounds.Min)
+		for iBase, y := 0, rbounds.Min.Y; y < rbounds.Max.Y; iBase, y = iBase+rimg.Stride, y+1 {
+			for i, x := iBase+3, rbounds.Min.X; x < rbounds.Max.X; i, x = i+4, x+1 {
+				rimg.Pix[i] = 255 - d.blackPix[(y-rbounds.Min.Y)*d.blackStride+(x-rbounds.Min.X)]
 			}
 		}
 		return &image.CMYK{
-			Pix:    img.Pix,
-			Stride: img.Stride,
-			Rect:   img.Rect,
+			Pix:    rimg.Pix,
+			Stride: rimg.Stride,
+			Rect:   rimg.Rect,
 		}, nil
 	}
 
@@ -769,7 +779,7 @@ func (d *decoder) applyBlack() (image.Image, error) {
 	return img, nil
 }
 
-func (d *decoder) isRGB() bool {
+func (d *decoder) isRGB() (out bool) {
 	if d.jfif {
 		return false
 	}
@@ -781,7 +791,7 @@ func (d *decoder) isRGB() bool {
 	return d.comp[0].c == 'R' && d.comp[1].c == 'G' && d.comp[2].c == 'B'
 }
 
-func (d *decoder) convertToRGB() (image.Image, error) {
+func (d *decoder) convertToRGB() (out image.Image, derr error) {
 	cScale := d.comp[0].h / d.comp[1].h
 	bounds := d.img3.Bounds()
 	img := image.NewRGBA(bounds)
@@ -800,14 +810,14 @@ func (d *decoder) convertToRGB() (image.Image, error) {
 }
 
 // Decode reads a JPEG image from r and returns it as an [image.Image].
-func Decode(r io.Reader) (image.Image, error) {
+func Decode(r io.Reader) (img image.Image, derr error) {
 	var d decoder
 	return d.decode(r, false)
 }
 
 // DecodeConfig returns the color model and dimensions of a JPEG image without
 // decoding the entire image.
-func DecodeConfig(r io.Reader) (image.Config, error) {
+func DecodeConfig(r io.Reader) (cfg image.Config, derr error) {
 	var d decoder
 	if _, err := d.decode(r, true); err != nil {
 		return image.Config{}, err
@@ -836,7 +846,7 @@ func DecodeConfig(r io.Reader) (image.Config, error) {
 			Height:     d.height,
 		}, nil
 	}
-	return image.Config{}, FormatError("missing SOF marker")
+	return image.Config{}, newFormatError("missing SOF marker")
 }
 
 // Magic is the magic byte prefix for JPEG format detection.

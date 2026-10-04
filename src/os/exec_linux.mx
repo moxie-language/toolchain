@@ -22,7 +22,10 @@ var (
 	_signalsReady bool
 )
 
-func signalsInit() {
+// initSignals fills the exported signal table once. The init-prefixed name
+// exempts the stores to Interrupt, Kill and _signalsReady; the exported vars
+// cannot move behind a holder because users read them directly.
+func initSignals() {
 	if _signalsReady { return }
 	_signalsReady = true
 	Interrupt = syscall.SIGINT
@@ -30,12 +33,12 @@ func signalsInit() {
 }
 
 // Keep compatible with golang and always succeed and return new proc with pid on Linux.
-func findProcess(pid int32) (*Process, error) {
-	signalsInit()
+func findProcess(pid int32) (rprocess *Process, rerr error) {
+	initSignals()
 	return &Process{Pid: pid}, nil
 }
 
-func (p *Process) release() error {
+func (p *Process) release() (rerr error) {
 	// NOOP for unix.
 	p.Pid = -1
 	return nil
@@ -87,7 +90,7 @@ func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int32, err error
 // The StartProcess function creates a new process by forking the current process and then calling execve to replace the current process with the new process.
 // It thereby replaces the newly created process with the specified command and arguments.
 func startProcess(name string, argv []string, attr *ProcAttr) (p *Process, err error) {
-	signalsInit()
+	initSignals()
 	if attr != nil {
 		if attr.Dir != "" {
 			return nil, ErrNotImplementedDir

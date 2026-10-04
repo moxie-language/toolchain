@@ -45,7 +45,7 @@ type CoverageMetaFileReader struct {
 // the file read-only; 'fileView' may be nil, in which case the helper
 // will read the contents of the file using regular file Read
 // operations.
-func NewCoverageMetaFileReader(f *os.File, fileView []byte) (*CoverageMetaFileReader, error) {
+func NewCoverageMetaFileReader(f *os.File, fileView []byte) (rdr *CoverageMetaFileReader, derr error) {
 	r := &CoverageMetaFileReader{
 		f:        f,
 		fileView: fileView,
@@ -58,8 +58,8 @@ func NewCoverageMetaFileReader(f *os.File, fileView []byte) (*CoverageMetaFileRe
 	return r, nil
 }
 
-func (r *CoverageMetaFileReader) readFileHeader() error {
-	var err error
+func (r *CoverageMetaFileReader) readFileHeader() (derr error) {
+	var oerr error
 
 	r.fileRdr = bufio.NewReader(r.f)
 
@@ -84,8 +84,8 @@ func (r *CoverageMetaFileReader) readFileHeader() error {
 	// Read package offsets for good measure
 	r.pkgOffsets = []uint64{:r.hdr.Entries}
 	for i := uint64(0); i < r.hdr.Entries; i++ {
-		if r.pkgOffsets[i], err = r.rdUint64(); err != nil {
-			return err
+		if r.pkgOffsets[i], oerr = r.rdUint64(); oerr != nil {
+			return oerr
 		}
 		if r.pkgOffsets[i] > r.hdr.TotalLength {
 			return fmt.Errorf("insane pkg offset %d: %d > totlen %d",
@@ -94,8 +94,8 @@ func (r *CoverageMetaFileReader) readFileHeader() error {
 	}
 	r.pkgLengths = []uint64{:r.hdr.Entries}
 	for i := uint64(0); i < r.hdr.Entries; i++ {
-		if r.pkgLengths[i], err = r.rdUint64(); err != nil {
-			return err
+		if r.pkgLengths[i], oerr = r.rdUint64(); oerr != nil {
+			return oerr
 		}
 		if r.pkgLengths[i] > r.hdr.TotalLength {
 			return fmt.Errorf("insane pkg length %d: %d > totlen %d",
@@ -105,9 +105,9 @@ func (r *CoverageMetaFileReader) readFileHeader() error {
 
 	// Read string table.
 	b := []byte{:r.hdr.StrTabLength}
-	nr, err := r.fileRdr.Read(b)
-	if err != nil {
-		return err
+	nr, rerr := r.fileRdr.Read(b)
+	if rerr != nil {
+		return rerr
 	}
 	if nr != int32(r.hdr.StrTabLength) {
 		return fmt.Errorf("error: short read on string table")
@@ -123,7 +123,7 @@ func (r *CoverageMetaFileReader) readFileHeader() error {
 	return nil
 }
 
-func (r *CoverageMetaFileReader) rdUint64() (uint64, error) {
+func (r *CoverageMetaFileReader) rdUint64() (out uint64, derr error) {
 	r.tmp = r.tmp[:0]
 	r.tmp = mxutil.Ensure(r.tmp, len([]byte{:8}))
 	r.tmp = push(r.tmp, []byte{:8}...)
@@ -140,28 +140,28 @@ func (r *CoverageMetaFileReader) rdUint64() (uint64, error) {
 
 // NumPackages returns the number of packages for which this file
 // contains meta-data.
-func (r *CoverageMetaFileReader) NumPackages() uint64 {
+func (r *CoverageMetaFileReader) NumPackages() (n uint64) {
 	return r.hdr.Entries
 }
 
 // CounterMode returns the counter mode (set, count, atomic) used
 // when building for coverage for the program that produce this
 // meta-data file.
-func (r *CoverageMetaFileReader) CounterMode() coverage.CounterMode {
+func (r *CoverageMetaFileReader) CounterMode() (mode coverage.CounterMode) {
 	return r.hdr.CMode
 }
 
 // CounterGranularity returns the counter granularity (single counter per
 // function, or counter per block) selected when building for coverage
 // for the program that produce this meta-data file.
-func (r *CoverageMetaFileReader) CounterGranularity() coverage.CounterGranularity {
+func (r *CoverageMetaFileReader) CounterGranularity() (gran coverage.CounterGranularity) {
 	return r.hdr.CGranularity
 }
 
 // FileHash returns the hash computed for all of the package meta-data
 // blobs. Coverage counter data files refer to this hash, and the
 // hash will be encoded into the meta-data file name.
-func (r *CoverageMetaFileReader) FileHash() [16]byte {
+func (r *CoverageMetaFileReader) FileHash() (hash [16]byte) {
 	return r.hdr.MetaFileHash
 }
 
@@ -172,7 +172,7 @@ func (r *CoverageMetaFileReader) FileHash() [16]byte {
 // 'payloadbuf' will be written to (or if it is not of sufficient
 // size, a new buffer will be allocated). Return value is the decoder,
 // a byte slice with the encoded meta-data, and an error.
-func (r *CoverageMetaFileReader) GetPackageDecoder(pkIdx uint32, payloadbuf []byte) (*CoverageMetaDataDecoder, []byte, error) {
+func (r *CoverageMetaFileReader) GetPackageDecoder(pkIdx uint32, payloadbuf []byte) (dec *CoverageMetaDataDecoder, payload []byte, derr error) {
 	pp, err := r.GetPackagePayload(pkIdx, payloadbuf)
 	if r.debug {
 		h := fnv.New128a()
@@ -197,29 +197,29 @@ func (r *CoverageMetaFileReader) GetPackageDecoder(pkIdx uint32, payloadbuf []by
 // 'payloadbuf' will be written to (or if it is not of sufficient
 // size, a new buffer will be allocated). Return value is the decoder,
 // a byte slice with the encoded meta-data, and an error.
-func (r *CoverageMetaFileReader) GetPackagePayload(pkIdx uint32, payloadbuf []byte) ([]byte, error) {
+func (r *CoverageMetaFileReader) GetPackagePayload(pkIdx uint32, payloadbuf []byte) (out []byte, derr error) {
 
 	// Determine correct offset/length.
 	if uint64(pkIdx) >= r.hdr.Entries {
 		return nil, fmt.Errorf("GetPackagePayload: illegal pkg index %d", pkIdx)
 	}
 	off := r.pkgOffsets[pkIdx]
-	len := r.pkgLengths[pkIdx]
+	plen := r.pkgLengths[pkIdx]
 
 	if r.debug {
-		fmt.Fprintf(os.Stderr, "=-= for pk %d, off=%d len=%d\n", pkIdx, off, len)
+		fmt.Fprintf(os.Stderr, "=-= for pk %d, off=%d len=%d\n", pkIdx, off, plen)
 	}
 
 	if r.fileView != nil {
-		return r.fileView[off : off+len], nil
+		return r.fileView[off : off+plen], nil
 	}
 
 	payload := payloadbuf[:0]
-	if cap(payload) < int32(len) {
-		payload = []byte{:0:len}
+	if cap(payload) < int32(plen) {
+		payload = []byte{:0:plen}
 	}
-	payload = mxutil.Ensure(payload, len([]byte{:len}))
-	payload = push(payload, []byte{:len}...)
+	payload = mxutil.Ensure(payload, len([]byte{:plen}))
+	payload = push(payload, []byte{:plen}...)
 	if _, err := r.f.Seek(int64(off), io.SeekStart); err != nil {
 		return nil, err
 	}

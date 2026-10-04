@@ -21,7 +21,7 @@ type batchCursor struct {
 	ev      baseEvent // last read event
 }
 
-func (b *batchCursor) nextEvent(batches []batch, freq frequency) (ok bool, err error) {
+func (b *batchCursor) nextEvent(batches []batch, freq frequency) (ok bool, rerr error) {
 	// Batches should generally always have at least one event,
 	// but let's be defensive about that and accept empty batches.
 	for b.idx < len(batches) && len(batches[b.idx].data) == b.dataOff {
@@ -53,7 +53,7 @@ func (b *batchCursor) nextEvent(batches []batch, freq frequency) (ok bool, err e
 	return true, nil
 }
 
-func (b *batchCursor) compare(a *batchCursor) int32 {
+func (b *batchCursor) compare(a *batchCursor) (out int32) {
 	return cmp.Compare(b.ev.time, a.ev.time)
 }
 
@@ -64,7 +64,7 @@ func (b *batchCursor) compare(a *batchCursor) int32 {
 //
 // It requires that the event its reading be timed, which must
 // be the case for every event in a plain EventBatch.
-func readTimedBaseEvent(b []byte, e *baseEvent) (int32, timestamp, error) {
+func readTimedBaseEvent(b []byte, e *baseEvent) (out int32, tstamp timestamp, rerr error) {
 	// Get the event type.
 	typ := tracev2.EventType(b[0])
 	specs := tracev2.Specs()
@@ -81,25 +81,25 @@ func readTimedBaseEvent(b []byte, e *baseEvent) (int32, timestamp, error) {
 	n := 1
 
 	// Read timestamp diff.
-	ts, nb := binary.Uvarint(b[n:])
-	if nb <= 0 {
+	tsv, nread := binary.Uvarint(b[n:])
+	if nread <= 0 {
 		return 0, 0, fmt.Errorf("found invalid uvarint for timestamp")
 	}
-	n += nb
+	n += nread
 
 	// Read the rest of the arguments.
 	for i := 0; i < len(spec.Args)-1; i++ {
-		arg, nb := binary.Uvarint(b[n:])
-		if nb <= 0 {
+		arg, nread2 := binary.Uvarint(b[n:])
+		if nread2 <= 0 {
 			return 0, 0, fmt.Errorf("found invalid uvarint")
 		}
 		e.args[i] = arg
-		n += nb
+		n += nread2
 	}
-	return n, timestamp(ts), nil
+	return n, timestamp(tsv), nil
 }
 
-func heapInsert(heap []*batchCursor, bc *batchCursor) []*batchCursor {
+func heapInsert(heap []*batchCursor, bc *batchCursor) (out []*batchCursor) {
 	// Add the cursor to the end of the heap.
 	heap = mxutil.Ensure(heap, 1)
 	heap = push(heap, bc)
@@ -118,7 +118,7 @@ func heapUpdate(heap []*batchCursor, i int32) {
 	heapSiftDown(heap, i)
 }
 
-func heapRemove(heap []*batchCursor, i int32) []*batchCursor {
+func heapRemove(heap []*batchCursor, i int32) (out []*batchCursor) {
 	// Sift index i up to the root, ignoring actual values.
 	for i > 0 {
 		heap[(i-1)/2], heap[i] = heap[i], heap[(i-1)/2]
@@ -132,7 +132,7 @@ func heapRemove(heap []*batchCursor, i int32) []*batchCursor {
 	return heap
 }
 
-func heapSiftUp(heap []*batchCursor, i int32) int32 {
+func heapSiftUp(heap []*batchCursor, i int32) (out int32) {
 	for i > 0 && heap[(i-1)/2].ev.time > heap[i].ev.time {
 		heap[(i-1)/2], heap[i] = heap[i], heap[(i-1)/2]
 		i = (i - 1) / 2
@@ -140,7 +140,7 @@ func heapSiftUp(heap []*batchCursor, i int32) int32 {
 	return i
 }
 
-func heapSiftDown(heap []*batchCursor, i int32) int32 {
+func heapSiftDown(heap []*batchCursor, i int32) (out int32) {
 	for {
 		m := min3(heap, i, 2*i+1, 2*i+2)
 		if m == i {
@@ -153,7 +153,7 @@ func heapSiftDown(heap []*batchCursor, i int32) int32 {
 	return i
 }
 
-func min3(b []*batchCursor, i0, i1, i2 int32) int32 {
+func min3(b []*batchCursor, i0, i1, i2 int32) (out int32) {
 	minIdx := i0
 	minT := maxTime
 	if i0 < len(b) {

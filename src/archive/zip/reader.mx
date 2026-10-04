@@ -22,12 +22,6 @@ import (
 	"unsafe"
 )
 
-const (
-	ErrFormat       = errors.Const("zip: not a valid zip file")
-	ErrAlgorithm    = errors.Const("zip: unsupported compression algorithm")
-	ErrChecksum     = errors.Const("zip: checksum error")
-	ErrInsecurePath = errors.Const("zip: insecure file path")
-)
 
 // A Reader serves content from a ZIP archive.
 type Reader struct {
@@ -73,7 +67,7 @@ type File struct {
 // A future version of Go may introduce this behavior by default.
 // Programs that want to accept non-local names can ignore
 // the ErrInsecurePath error and use the returned reader.
-func OpenReader(name string) (*ReadCloser, error) {
+func OpenReader(name string) (rc *ReadCloser, oerr error) {
 	f, err := os.Open(name)
 	if err != nil {
 		return nil, err
@@ -102,7 +96,7 @@ func OpenReader(name string) (*ReadCloser, error) {
 // A future version of Go may introduce this behavior by default.
 // Programs that want to accept non-local names can ignore
 // the [ErrInsecurePath] error and use the returned reader.
-func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
+func NewReader(r io.ReaderAt, size int64) (out *Reader, oerr error) {
 	if size < 0 {
 		return nil, errors.New("zip: size cannot be negative")
 	}
@@ -114,7 +108,7 @@ func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
 	return zr, err
 }
 
-func (r *Reader) init(rdr io.ReaderAt, size int64) error {
+func (r *Reader) init(rdr io.ReaderAt, size int64) (ierr error) {
 	end, baseOffset, err := readDirectoryEnd(rdr, size)
 	if err != nil {
 		return err
@@ -176,8 +170,8 @@ func (r *Reader) RegisterDecompressor(method uint16, dcomp Decompressor) {
 	r.decompressors[method] = dcomp
 }
 
-func (r *Reader) decompressor(method uint16) Decompressor {
-	dcomp := r.decompressors[method]
+func (r *Reader) decompressor(method uint16) (dcomp Decompressor) {
+	dcomp = r.decompressors[method]
 	if dcomp == nil {
 		dcomp = decompressor(method)
 	}
@@ -185,7 +179,7 @@ func (r *Reader) decompressor(method uint16) Decompressor {
 }
 
 // Close closes the Zip file, rendering it unusable for I/O.
-func (rc *ReadCloser) Close() error {
+func (rc *ReadCloser) Close() (err error) {
 	return rc.f.Close()
 }
 
@@ -204,7 +198,7 @@ func (f *File) DataOffset() (offset int64, err error) {
 
 // Open returns a [ReadCloser] that provides access to the [File]'s contents.
 // Multiple files may be read concurrently.
-func (f *File) Open() (io.ReadCloser, error) {
+func (f *File) Open() (out io.ReadCloser, oerr error) {
 	bodyOffset, err := f.findBodyOffset()
 	if err != nil {
 		return nil, err
@@ -247,7 +241,7 @@ func (f *File) Open() (io.ReadCloser, error) {
 
 // OpenRaw returns a [Reader] that provides access to the [File]'s contents without
 // decompression.
-func (f *File) OpenRaw() (io.Reader, error) {
+func (f *File) OpenRaw() (out io.Reader, oerr error) {
 	bodyOffset, err := f.findBodyOffset()
 	if err != nil {
 		return nil, err
@@ -260,11 +254,11 @@ type dirReader struct {
 	err error
 }
 
-func (r *dirReader) Read([]byte) (int32, error) {
+func (r *dirReader) Read(p []byte) (n int32, err error) {
 	return 0, r.err
 }
 
-func (r *dirReader) Close() error {
+func (r *dirReader) Close() (err error) {
 	return nil
 }
 
@@ -277,8 +271,8 @@ type checksumReader struct {
 	err   error     // sticky error
 }
 
-func (r *checksumReader) Stat() (fs.FileInfo, error) {
-	return headerFileInfo{&r.f.FileHeader}, nil
+func (r *checksumReader) Stat() (out fs.FileInfo, oerr error) {
+	return &headerFileInfo{&r.f.FileHeader}, nil
 }
 
 func (r *checksumReader) Read(b []byte) (n int32, err error) {
@@ -321,54 +315,65 @@ func (r *checksumReader) Read(b []byte) (n int32, err error) {
 	return
 }
 
-func (r *checksumReader) Close() error { return r.rc.Close() }
+func (r *checksumReader) Close() (err error) { return r.rc.Close() }
 
 // findBodyOffset does the minimum work to verify the file has a header
 // and returns the file body offset.
-func (f *File) findBodyOffset() (int64, error) {
+func (f *File) findBodyOffset() (off int64, oerr error) {
 	var buf [fileHeaderLen]byte
 	if _, err := f.zipr.ReadAt(buf[:], f.headerOffset); err != nil {
 		return 0, err
 	}
-	b := readBuf(buf[:])
-	if sig := b.uint32(); sig != fileHeaderSignature {
+	b := buf[:]
+	var sig uint32
+	b, sig = readBufUint32(b)
+	if sig != fileHeaderSignature {
 		return 0, ErrFormat
 	}
 	b = b[22:] // skip over most of the header
-	filenameLen := int32(b.uint16())
-	extraLen := int32(b.uint16())
-	return int64(fileHeaderLen + filenameLen + extraLen), nil
+	var fnLen, exLen uint16
+	b, fnLen = readBufUint16(b)
+	b, exLen = readBufUint16(b)
+	return int64(fileHeaderLen + int32(fnLen) + int32(exLen)), nil
 }
 
 // readDirectoryHeader attempts to read a directory header from r.
 // It returns io.ErrUnexpectedEOF if it cannot read a complete header,
 // and ErrFormat if it doesn't find a valid header signature.
-func readDirectoryHeader(f *File, r io.Reader) error {
+func readDirectoryHeader(f *File, r io.Reader) (oerr error) {
 	var buf [directoryHeaderLen]byte
 	if _, err := io.ReadFull(r, buf[:]); err != nil {
 		return err
 	}
-	b := readBuf(buf[:])
-	if sig := b.uint32(); sig != directoryHeaderSignature {
+	b := buf[:]
+	var sig uint32
+	b, sig = readBufUint32(b)
+	if sig != directoryHeaderSignature {
 		return ErrFormat
 	}
-	f.CreatorVersion = b.uint16()
-	f.ReaderVersion = b.uint16()
-	f.Flags = b.uint16()
-	f.Method = b.uint16()
-	f.ModifiedTime = b.uint16()
-	f.ModifiedDate = b.uint16()
-	f.CRC32 = b.uint32()
-	f.CompressedSize = b.uint32()
-	f.UncompressedSize = b.uint32()
+	b, f.CreatorVersion = readBufUint16(b)
+	b, f.ReaderVersion = readBufUint16(b)
+	b, f.Flags = readBufUint16(b)
+	b, f.Method = readBufUint16(b)
+	b, f.ModifiedTime = readBufUint16(b)
+	b, f.ModifiedDate = readBufUint16(b)
+	b, f.CRC32 = readBufUint32(b)
+	b, f.CompressedSize = readBufUint32(b)
+	b, f.UncompressedSize = readBufUint32(b)
 	f.CompressedSize64 = uint64(f.CompressedSize)
 	f.UncompressedSize64 = uint64(f.UncompressedSize)
-	filenameLen := int32(b.uint16())
-	extraLen := int32(b.uint16())
-	commentLen := int32(b.uint16())
+	var fnLen, exLen, cmLen uint16
+	b, fnLen = readBufUint16(b)
+	b, exLen = readBufUint16(b)
+	b, cmLen = readBufUint16(b)
+	filenameLen := int32(fnLen)
+	extraLen := int32(exLen)
+	commentLen := int32(cmLen)
 	b = b[4:] // skipped start disk number and internal attributes (2x uint16)
-	f.ExternalAttrs = b.uint32()
-	f.headerOffset = int64(b.uint32())
+	b, f.ExternalAttrs = readBufUint32(b)
+	var hdrOff uint32
+	b, hdrOff = readBufUint32(b)
+	f.headerOffset = int64(hdrOff)
 	d := []byte{:filenameLen+extraLen+commentLen}
 	if _, err := io.ReadFull(r, d); err != nil {
 		return err
@@ -404,13 +409,16 @@ func readDirectoryHeader(f *File, r io.Reader) error {
 	// and we'll just ignore the Extra content in that case.
 	var modified time.Time
 parseExtras:
-	for extra := readBuf(f.Extra); len(extra) >= 4; { // need at least tag and size
-		fieldTag := extra.uint16()
-		fieldSize := int32(extra.uint16())
+	for extra := f.Extra; len(extra) >= 4; { // need at least tag and size
+		var fieldTag, fieldSizeU uint16
+		extra, fieldTag = readBufUint16(extra)
+		extra, fieldSizeU = readBufUint16(extra)
+		fieldSize := int32(fieldSizeU)
 		if len(extra) < fieldSize {
 			break
 		}
-		fieldBuf := extra.sub(fieldSize)
+		var fieldBuf []byte
+		fieldBuf, extra = readBufSub(extra, fieldSize)
 
 		switch fieldTag {
 		case zip64ExtraID:
@@ -425,40 +433,47 @@ parseExtras:
 				if len(fieldBuf) < 8 {
 					return ErrFormat
 				}
-				f.UncompressedSize64 = fieldBuf.uint64()
+				fieldBuf, f.UncompressedSize64 = readBufUint64(fieldBuf)
 			}
 			if needCSize {
 				needCSize = false
 				if len(fieldBuf) < 8 {
 					return ErrFormat
 				}
-				f.CompressedSize64 = fieldBuf.uint64()
+				fieldBuf, f.CompressedSize64 = readBufUint64(fieldBuf)
 			}
 			if needHeaderOffset {
 				needHeaderOffset = false
 				if len(fieldBuf) < 8 {
 					return ErrFormat
 				}
-				f.headerOffset = int64(fieldBuf.uint64())
+				var zoff uint64
+				fieldBuf, zoff = readBufUint64(fieldBuf)
+				f.headerOffset = int64(zoff)
 			}
 		case ntfsExtraID:
 			if len(fieldBuf) < 4 {
 				continue parseExtras
 			}
-			fieldBuf.uint32()        // reserved (ignored)
-			for len(fieldBuf) >= 4 { // need at least tag and size
-				attrTag := fieldBuf.uint16()
-				attrSize := int32(fieldBuf.uint16())
+			fieldBuf, _ = readBufUint32(fieldBuf) // reserved (ignored)
+			for len(fieldBuf) >= 4 {              // need at least tag and size
+				var attrTag, attrSizeU uint16
+				fieldBuf, attrTag = readBufUint16(fieldBuf)
+				fieldBuf, attrSizeU = readBufUint16(fieldBuf)
+				attrSize := int32(attrSizeU)
 				if len(fieldBuf) < attrSize {
 					continue parseExtras
 				}
-				attrBuf := fieldBuf.sub(attrSize)
+				var attrBuf []byte
+				attrBuf, fieldBuf = readBufSub(fieldBuf, attrSize)
 				if attrTag != 1 || attrSize != 24 {
 					continue // Ignore irrelevant attributes
 				}
 
-				const ticksPerSecond = 1e7    // Windows timestamp resolution
-				ts := int64(attrBuf.uint64()) // ModTime since Windows epoch
+				const ticksPerSecond = 1e7 // Windows timestamp resolution
+				var tsU uint64
+				attrBuf, tsU = readBufUint64(attrBuf)
+				ts := int64(tsU) // ModTime since Windows epoch
 				secs := ts / ticksPerSecond
 				nsecs := (1e9 / ticksPerSecond) * (ts % ticksPerSecond)
 				epoch := time.Date(1601, time.January, 1, 0, 0, 0, 0, time.UTC())
@@ -468,15 +483,24 @@ parseExtras:
 			if len(fieldBuf) < 8 {
 				continue parseExtras
 			}
-			fieldBuf.uint32()              // AcTime (ignored)
-			ts := int64(fieldBuf.uint32()) // ModTime since Unix epoch
-			modified = time.Unix(ts, 0)
+			fieldBuf, _ = readBufUint32(fieldBuf) // AcTime (ignored)
+			var unixTS uint32
+			fieldBuf, unixTS = readBufUint32(fieldBuf)
+			uts := int64(unixTS) // ModTime since Unix epoch
+			modified = time.Unix(uts, 0)
 		case extTimeExtraID:
-			if len(fieldBuf) < 5 || fieldBuf.uint8()&1 == 0 {
+			if len(fieldBuf) < 5 {
 				continue parseExtras
 			}
-			ts := int64(fieldBuf.uint32()) // ModTime since Unix epoch
-			modified = time.Unix(ts, 0)
+			var tflags uint8
+			fieldBuf, tflags = readBufUint8(fieldBuf)
+			if tflags&1 == 0 {
+				continue parseExtras
+			}
+			var extTS uint32
+			fieldBuf, extTS = readBufUint32(fieldBuf)
+			ets := int64(extTS) // ModTime since Unix epoch
+			modified = time.Unix(ets, 0)
 		}
 	}
 
@@ -515,7 +539,7 @@ parseExtras:
 	return nil
 }
 
-func readDataDescriptor(r io.Reader, f *File) error {
+func readDataDescriptor(r io.Reader, f *File) (oerr error) {
 	var buf [dataDescriptorLen]byte
 	// The spec says: "Although not originally assigned a
 	// signature, the value 0x08074b50 has commonly been adopted
@@ -531,8 +555,9 @@ func readDataDescriptor(r io.Reader, f *File) error {
 		return err
 	}
 	off := 0
-	maybeSig := readBuf(buf[:4])
-	if maybeSig.uint32() != dataDescriptorSignature {
+	var maybeSig uint32
+	_, maybeSig = readBufUint32(buf[:4])
+	if maybeSig != dataDescriptorSignature {
 		// No data descriptor signature. Keep these four
 		// bytes.
 		off += 4
@@ -540,8 +565,10 @@ func readDataDescriptor(r io.Reader, f *File) error {
 	if _, err := io.ReadFull(r, buf[off:12]); err != nil {
 		return err
 	}
-	b := readBuf(buf[:12])
-	if b.uint32() != f.CRC32 {
+	b := buf[:12]
+	var crc uint32
+	b, crc = readBufUint32(b)
+	if crc != f.CRC32 {
 		return ErrChecksum
 	}
 
@@ -563,8 +590,8 @@ func readDirectoryEnd(r io.ReaderAt, size int64) (dir *directoryEnd, baseOffset 
 			bLen = size
 		}
 		buf = []byte{:int32(bLen)}
-		if _, err := r.ReadAt(buf, size-bLen); err != nil && err != io.EOF {
-			return nil, 0, err
+		if _, rerr := r.ReadAt(buf, size-bLen); rerr != nil && rerr != io.EOF {
+			return nil, 0, rerr
 		}
 		if p := findSignatureInBlock(buf); p >= 0 {
 			buf = buf[p:]
@@ -577,15 +604,25 @@ func readDirectoryEnd(r io.ReaderAt, size int64) (dir *directoryEnd, baseOffset 
 	}
 
 	// read header into struct
-	b := readBuf(buf[4:]) // skip signature
+	b := buf[4:] // skip signature
+	var du16a, du16b, du16c, du16d uint16
+	b, du16a = readBufUint16(b)
+	b, du16b = readBufUint16(b)
+	b, du16c = readBufUint16(b)
+	b, du16d = readBufUint16(b)
+	var du32a, du32b uint32
+	b, du32a = readBufUint32(b)
+	b, du32b = readBufUint32(b)
+	var dcmLen uint16
+	b, dcmLen = readBufUint16(b)
 	d := &directoryEnd{
-		diskNbr:            uint32(b.uint16()),
-		dirDiskNbr:         uint32(b.uint16()),
-		dirRecordsThisDisk: uint64(b.uint16()),
-		directoryRecords:   uint64(b.uint16()),
-		directorySize:      uint64(b.uint32()),
-		directoryOffset:    uint64(b.uint32()),
-		commentLen:         b.uint16(),
+		diskNbr:            uint32(du16a),
+		dirDiskNbr:         uint32(du16b),
+		dirRecordsThisDisk: uint64(du16c),
+		directoryRecords:   uint64(du16d),
+		directorySize:      uint64(du32a),
+		directoryOffset:    uint64(du32b),
+		commentLen:         dcmLen,
 	}
 	l := int32(d.commentLen)
 	if l > len(b) {
@@ -595,13 +632,13 @@ func readDirectoryEnd(r io.ReaderAt, size int64) (dir *directoryEnd, baseOffset 
 
 	// These values mean that the file can be a zip64 file
 	if d.directoryRecords == 0xffff || d.directorySize == 0xffff || d.directoryOffset == 0xffffffff {
-		p, err := findDirectory64End(r, directoryEndOffset)
-		if err == nil && p >= 0 {
-			directoryEndOffset = p
-			err = readDirectory64End(r, p, d)
+		p64, zerr := findDirectory64End(r, directoryEndOffset)
+		if zerr == nil && p64 >= 0 {
+			directoryEndOffset = p64
+			zerr = readDirectory64End(r, p64, d)
 		}
-		if err != nil {
-			return nil, 0, err
+		if zerr != nil {
+			return nil, 0, zerr
 		}
 	}
 
@@ -636,7 +673,7 @@ func readDirectoryEnd(r io.ReaderAt, size int64) (dir *directoryEnd, baseOffset 
 // findDirectory64End tries to read the zip64 locator just before the
 // directory end and returns the offset of the zip64 directory end if
 // found.
-func findDirectory64End(r io.ReaderAt, directoryEndOffset int64) (int64, error) {
+func findDirectory64End(r io.ReaderAt, directoryEndOffset int64) (off int64, oerr error) {
 	locOffset := directoryEndOffset - directory64LocLen
 	if locOffset < 0 {
 		return -1, nil // no need to look for a header outside the file
@@ -645,15 +682,22 @@ func findDirectory64End(r io.ReaderAt, directoryEndOffset int64) (int64, error) 
 	if _, err := r.ReadAt(buf, locOffset); err != nil {
 		return -1, err
 	}
-	b := readBuf(buf)
-	if sig := b.uint32(); sig != directory64LocSignature {
+	b := buf
+	var sig uint32
+	b, sig = readBufUint32(b)
+	if sig != directory64LocSignature {
 		return -1, nil
 	}
-	if b.uint32() != 0 { // number of the disk with the start of the zip64 end of central directory
+	var diskNo uint32
+	b, diskNo = readBufUint32(b)
+	if diskNo != 0 { // number of the disk with the start of the zip64 end of central directory
 		return -1, nil // the file is not a valid zip64-file
 	}
-	p := b.uint64()      // relative offset of the zip64 end of central directory record
-	if b.uint32() != 1 { // total number of disks
+	var p uint64
+	b, p = readBufUint64(b) // relative offset of the zip64 end of central directory record
+	var totalDisks uint32
+	b, totalDisks = readBufUint32(b)
+	if totalDisks != 1 { // total number of disks
 		return -1, nil // the file is not a valid zip64-file
 	}
 	return int64(p), nil
@@ -663,27 +707,29 @@ func findDirectory64End(r io.ReaderAt, directoryEndOffset int64) (int64, error) 
 // directory end with the zip64 directory end values.
 func readDirectory64End(r io.ReaderAt, offset int64, d *directoryEnd) (err error) {
 	buf := []byte{:directory64EndLen}
-	if _, err := r.ReadAt(buf, offset); err != nil {
-		return err
+	if _, rerr := r.ReadAt(buf, offset); rerr != nil {
+		return rerr
 	}
 
-	b := readBuf(buf)
-	if sig := b.uint32(); sig != directory64EndSignature {
+	b := buf
+	var sig uint32
+	b, sig = readBufUint32(b)
+	if sig != directory64EndSignature {
 		return ErrFormat
 	}
 
-	b = b[12:]                        // skip dir size, version and version needed (uint64 + 2x uint16)
-	d.diskNbr = b.uint32()            // number of this disk
-	d.dirDiskNbr = b.uint32()         // number of the disk with the start of the central directory
-	d.dirRecordsThisDisk = b.uint64() // total number of entries in the central directory on this disk
-	d.directoryRecords = b.uint64()   // total number of entries in the central directory
-	d.directorySize = b.uint64()      // size of the central directory
-	d.directoryOffset = b.uint64()    // offset of start of central directory with respect to the starting disk number
+	b = b[12:] // skip dir size, version and version needed (uint64 + 2x uint16)
+	b, d.diskNbr = readBufUint32(b)
+	b, d.dirDiskNbr = readBufUint32(b)
+	b, d.dirRecordsThisDisk = readBufUint64(b)
+	b, d.directoryRecords = readBufUint64(b)
+	b, d.directorySize = readBufUint64(b)
+	b, d.directoryOffset = readBufUint64(b)
 
 	return nil
 }
 
-func findSignatureInBlock(b []byte) int32 {
+func findSignatureInBlock(b []byte) (pos int32) {
 	for i := len(b) - directoryEndLen; i >= 0; i-- {
 		// defined from directoryEndSignature in struct.go
 		if b[i] == 'P' && b[i+1] == 'K' && b[i+2] == 0x05 && b[i+3] == 0x06 {
@@ -701,36 +747,37 @@ func findSignatureInBlock(b []byte) int32 {
 	return -1
 }
 
-type readBuf []byte
-
-func (b *readBuf) uint8() uint8 {
-	v := (*b)[0]
-	*b = (*b)[1:]
-	return v
+// readBufUint8/Uint16/Uint32/Uint64 and readBufSub are the former cursor
+// methods of a named []byte type, written out as free functions that return the
+// advanced remainder alongside the decoded value.
+func readBufUint8(b []byte) (rest []byte, v uint8) {
+	v = b[0]
+	rest = b[1:]
+	return
 }
 
-func (b *readBuf) uint16() uint16 {
-	v := binary.LittleEndian().Uint16(*b)
-	*b = (*b)[2:]
-	return v
+func readBufUint16(b []byte) (rest []byte, v uint16) {
+	v = binary.LittleEndian().Uint16(b)
+	rest = b[2:]
+	return
 }
 
-func (b *readBuf) uint32() uint32 {
-	v := binary.LittleEndian().Uint32(*b)
-	*b = (*b)[4:]
-	return v
+func readBufUint32(b []byte) (rest []byte, v uint32) {
+	v = binary.LittleEndian().Uint32(b)
+	rest = b[4:]
+	return
 }
 
-func (b *readBuf) uint64() uint64 {
-	v := binary.LittleEndian().Uint64(*b)
-	*b = (*b)[8:]
-	return v
+func readBufUint64(b []byte) (rest []byte, v uint64) {
+	v = binary.LittleEndian().Uint64(b)
+	rest = b[8:]
+	return
 }
 
-func (b *readBuf) sub(n int32) readBuf {
-	b2 := (*b)[:n]
-	*b = (*b)[n:]
-	return b2
+func readBufSub(b []byte, n int32) (sub []byte, rest []byte) {
+	sub = b[:n]
+	rest = b[n:]
+	return
 }
 
 // A fileListEntry is a File and its ename.
@@ -747,39 +794,39 @@ type fileInfoDirEntry interface {
 	fs.DirEntry
 }
 
-func (f *fileListEntry) stat() (fileInfoDirEntry, error) {
+func (f *fileListEntry) stat() (fde fileInfoDirEntry, oerr error) {
 	if f.isDup {
 		return nil, errors.New(f.name + ": duplicate entries in zip file")
 	}
 	if !f.isDir {
-		return headerFileInfo{&f.file.FileHeader}, nil
+		return &headerFileInfo{&f.file.FileHeader}, nil
 	}
 	return f, nil
 }
 
 // Only used for directories.
-func (f *fileListEntry) Name() string      { _, elem, _ := split(f.name); return elem }
-func (f *fileListEntry) Size() int64       { return 0 }
-func (f *fileListEntry) Mode() fs.FileMode { return fs.ModeDir | 0555 }
-func (f *fileListEntry) Type() fs.FileMode { return fs.ModeDir }
-func (f *fileListEntry) IsDir() bool       { return true }
-func (f *fileListEntry) Sys() unsafe.Pointer { return nil }
+func (f *fileListEntry) Name() (name []byte)      { _, elem, _ := split(f.name); return elem }
+func (f *fileListEntry) Size() (n int64)          { return 0 }
+func (f *fileListEntry) Mode() (mode fs.FileMode) { return fs.ModeDir | 0555 }
+func (f *fileListEntry) Type() (mode fs.FileMode) { return fs.ModeDir }
+func (f *fileListEntry) IsDir() (ok bool)         { return true }
+func (f *fileListEntry) Sys() (p unsafe.Pointer)  { return nil }
 
-func (f *fileListEntry) ModTime() time.Time {
+func (f *fileListEntry) ModTime() (t time.Time) {
 	if f.file == nil {
 		return time.Time{}
 	}
 	return f.file.FileHeader.Modified.UTC()
 }
 
-func (f *fileListEntry) Info() (fs.FileInfo, error) { return f, nil }
+func (f *fileListEntry) Info() (out fs.FileInfo, oerr error) { return f, nil }
 
-func (f *fileListEntry) String() string {
+func (f *fileListEntry) String() (s string) {
 	return fs.FormatDirEntry(f)
 }
 
 // toValidName coerces name to be a valid name for fs.FS.Open.
-func toValidName(name string) string {
+func toValidName(name string) (out string) {
 	name = bytes.ReplaceAll(name, `\`, `/`)
 	p := path.Clean(name)
 
@@ -854,7 +901,7 @@ func (r *Reader) initFileList() {
 		}
 		for dir := range dirs {
 			if _, ok := knownDirs[dir]; !ok {
-				if idx, ok := files[dir]; ok {
+				if idx, okay := files[dir]; okay {
 					r.fileList[idx].isDup = true
 				} else {
 					entry = fileListEntry{
@@ -874,7 +921,7 @@ func (r *Reader) initFileList() {
 	}
 }
 
-func fileEntryCompare(x, y string) int32 {
+func fileEntryCompare(x, y string) (r int32) {
 	xdir, xelem, _ := split(x)
 	ydir, yelem, _ := split(y)
 	if xdir != ydir {
@@ -887,7 +934,7 @@ func fileEntryCompare(x, y string) int32 {
 // using the semantics of fs.FS.Open:
 // paths are always slash separated, with no
 // leading / or ../ elements.
-func (r *Reader) Open(name string) (fs.File, error) {
+func (r *Reader) Open(name string) (out fs.File, oerr error) {
 	r.initFileList()
 
 	if !fs.ValidPath(name) {
@@ -916,22 +963,31 @@ func split(name string) (dir, elem string, isDir bool) {
 	return name[:i], name[i+1:], isDir
 }
 
-func _dotFile() *fileListEntry { return &fileListEntry{name: "./", isDir: true} }
+func _dotFile() (fle *fileListEntry) { return &fileListEntry{name: "./", isDir: true} }
 
-func (r *Reader) openLookup(name string) *fileListEntry {
+func (r *Reader) openLookup(name string) (out *fileListEntry) {
 	if name == "." {
 		return _dotFile()
 	}
 
 	dir, elem, _ := split(name)
 	files := r.fileList
-	i, _ := slices.BinarySearchFunc(files, dir, func(a fileListEntry, dir string) (ret int32) {
-		idir, ielem, _ := split(a.name)
-		if dir != idir {
-			return bytes.Compare(idir, dir)
+	lo := int32(0)
+	hi := len(files)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		idir, ielem, _ := split(files[mid].name)
+		c := bytes.Compare(idir, dir)
+		if c == 0 {
+			c = bytes.Compare(ielem, elem)
 		}
-		return bytes.Compare(ielem, elem)
-	})
+		if c < 0 {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	i := lo
 	if i < len(files) {
 		fname := files[i].name
 		if fname == name || len(fname) == len(name)+1 && fname[len(name)] == '/' && fname[:len(name)] == name {
@@ -941,7 +997,7 @@ func (r *Reader) openLookup(name string) *fileListEntry {
 	return nil
 }
 
-func (r *Reader) openReadDir(dir string) []fileListEntry {
+func (r *Reader) openReadDir(dir string) (out []fileListEntry) {
 	files := r.fileList
 	i, _ := slices.BinarySearchFunc(files, dir, func(a fileListEntry, dir string) int32 {
 		idir, _, _ := split(a.name)
@@ -968,14 +1024,14 @@ type openDir struct {
 	offset int32
 }
 
-func (d *openDir) Close() error               { return nil }
-func (d *openDir) Stat() (fs.FileInfo, error) { return d.e.stat() }
+func (d *openDir) Close() (err error)                  { return nil }
+func (d *openDir) Stat() (out fs.FileInfo, oerr error) { return d.e.stat() }
 
-func (d *openDir) Read([]byte) (int32, error) {
+func (d *openDir) Read(p []byte) (n int32, err error) {
 	return 0, &fs.PathError{Op: "read", Path: d.e.name, Err: errors.New("is a directory")}
 }
 
-func (d *openDir) ReadDir(count int32) ([]fs.DirEntry, error) {
+func (d *openDir) ReadDir(count int32) (out []fs.DirEntry, oerr error) {
 	n := len(d.files) - d.offset
 	if count > 0 && n > count {
 		n = count
@@ -1007,4 +1063,19 @@ func (d *openDir) ReadDir(count int32) ([]fs.DirEntry, error) {
 	}
 	d.offset += n
 	return list, nil
+}
+
+var ErrAlgorithm error
+var ErrChecksum error
+var ErrFormat error
+var ErrInsecurePath error
+var errLongExtra error
+var errLongName error
+func init() {
+	ErrFormat = errors.New("zip: not a valid zip file")
+	ErrAlgorithm = errors.New("zip: unsupported compression algorithm")
+	ErrChecksum = errors.New("zip: checksum error")
+	ErrInsecurePath = errors.New("zip: insecure file path")
+	errLongName = errors.New("zip: FileHeader.Name too long")
+	errLongExtra = errors.New("zip: FileHeader.Extra too long")
 }

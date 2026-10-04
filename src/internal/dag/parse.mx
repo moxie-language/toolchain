@@ -44,6 +44,7 @@ package dag
 import (
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"cmp"
+	"errors"
 	"fmt"
 	"slices"
 	"bytes"
@@ -55,11 +56,11 @@ type Graph struct {
 	edges   map[string]map[string]bool
 }
 
-func newGraph() *Graph {
+func newGraph() (out *Graph) {
 	return &Graph{byLabel: map[string]int32{}, edges: map[string]map[string]bool{}}
 }
 
-func (g *Graph) addNode(label []byte) bool {
+func (g *Graph) addNode(label []byte) (added bool) {
 	if _, ok := g.byLabel[label]; ok {
 		return false
 	}
@@ -78,40 +79,59 @@ func (g *Graph) DelEdge(from, to []byte) {
 	delete(g.edges[from], to)
 }
 
-func (g *Graph) HasEdge(from, to []byte) bool {
+func (g *Graph) HasEdge(from, to []byte) (okay bool) {
 	return g.edges[from] != nil && g.edges[from][to]
 }
 
-func (g *Graph) Edges(from []byte) [][]byte {
-	edges := [][]byte{:0:16}
+// edgePos pairs an edge label with its node insertion index, so Edges can
+// sort by position without a closure capturing g.
+type edgePos struct {
+	label []byte
+	pos   int32
+}
+
+func edgePosCmp(a, b edgePos) (c int32) {
+	return cmp.Compare(a.pos, b.pos)
+}
+
+func (g *Graph) Edges(from []byte) (out [][]byte) {
+	n := int32(len(g.edges[from]))
+	pos := []edgePos{:n}
+	i := int32(0)
 	for k := range g.edges[from] {
-		edges = mxutil.Ensure(edges, 1)
-		edges = push(edges, k)
+		pos[i] = edgePos{label: k, pos: g.byLabel[k]}
+		i++
 	}
-	slices.SortFunc(edges, func(a, b []byte) int32 {
-		return cmp.Compare(g.byLabel[a], g.byLabel[b])
-	})
-	return edges
+	slices.SortFunc(pos, edgePosCmp)
+	out = [][]byte{:n}
+	for j := range pos {
+		out[j] = pos[j].label
+	}
+	return out
+}
+
+// errorf appends one formatted message to errs and returns the new slice.
+// A free function, so callers accumulate errors without a capturing closure.
+func errorf(errs [][]byte, format []byte, a ...fmt.Stringer) (out [][]byte) {
+	out = mxutil.Ensure(errs, 1)
+	out = push(out, fmt.Sprintf(format, a...))
+	return out
 }
 
 // Parse parses the DAG language and returns the transitive closure of
 // the described graph. In the returned graph, there is an edge from "b"
 // to "a" if b < a (or a > b) in the partial order.
-func Parse(dag []byte) (*Graph, error) {
+func Parse(dag []byte) (out *Graph, err error) {
 	g := newGraph()
 	disallowed := []rule{}
 
-	rules, err := parseRules(dag)
-	if err != nil {
-		return nil, err
+	rules, rerr := parseRules(dag)
+	if rerr != nil {
+		return nil, rerr
 	}
 
 	// TODO: Add line numbers to errors.
-	var errors [][]byte
-	errorf := func(format []byte, a ...fmt.Stringer) {
-		errors = mxutil.Ensure(errors, 1)
-		errors = push(errors, fmt.Sprintf(format, a...))
-	}
+	var errs [][]byte
 	for _, r := range rules {
 		if r.op == "!<" {
 			disallowed = mxutil.Ensure(disallowed, 1)
@@ -120,18 +140,18 @@ func Parse(dag []byte) (*Graph, error) {
 		}
 		for _, def := range r.def {
 			if def == "NONE" {
-				errorf("NONE cannot be a predecessor")
+				errs = errorf(errs, "NONE cannot be a predecessor")
 				continue
 			}
 			if !g.addNode(def) {
-				errorf("multiple definitions for %s", def)
+				errs = errorf(errs, "multiple definitions for %s", def)
 			}
 			for _, less := range r.less {
 				if less == "NONE" {
 					continue
 				}
 				if _, ok := g.byLabel[less]; !ok {
-					errorf("use of %s before its definition", less)
+					errs = errorf(errs, "use of %s before its definition", less)
 				} else {
 					g.AddEdge(def, less)
 				}
@@ -143,7 +163,7 @@ func Parse(dag []byte) (*Graph, error) {
 	for _, tos := range g.edges {
 		for to := range tos {
 			if g.edges[to] == nil {
-				errorf("missing definition for %s", to)
+				errs = errorf(errs, "missing definition for %s", to)
 			}
 		}
 	}
@@ -157,7 +177,7 @@ func Parse(dag []byte) (*Graph, error) {
 						// Can only happen along with a "use of X before deps" error above,
 						// but this error is more specific - it makes clear that reordering the
 						// rules will not be enough to fix the problem.
-						errorf("graph cycle: %s < %s < %s", j, k, i)
+						errs = errorf(errs, "graph cycle: %s < %s < %s", j, k, i)
 					}
 					g.AddEdge(i, j)
 				}
@@ -170,14 +190,14 @@ func Parse(dag []byte) (*Graph, error) {
 		for _, less := range bad.less {
 			for _, def := range bad.def {
 				if g.HasEdge(def, less) {
-					errorf("graph edge assertion failed: %s !< %s", less, def)
+					errs = errorf(errs, "graph edge assertion failed: %s !< %s", less, def)
 				}
 			}
 		}
 	}
 
-	if len(errors) > 0 {
-		return nil, fmt.Errorf("%s", bytes.Join(errors, "\n"))
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("%s", bytes.Join(errs, "\n"))
 	}
 
 	return g, nil
@@ -190,21 +210,16 @@ type rule struct {
 	def  [][]byte
 }
 
-type syntaxError []byte
-
-func (e syntaxError) Error() string {
-	return string(e)
+// errorHandler converts a recovered parse panic into errp.
+func errorHandler(errp *error) {
+	if e := recover(); e != "" {
+		*errp = errors.New(e)
+	}
 }
-
-func (e syntaxError) String() string { return e.Error() }
 
 // parseRules parses the rules of a DAG.
 func parseRules(rules []byte) (out []rule, err error) {
-	defer func() {
-		if e := recover(); e != "" {
-			err = errors.New(e)
-		}
-	}()
+	defer errorHandler(&err)
 	p := &rulesParser{lineno: 1, text: rules}
 
 	var prev [][]byte
@@ -273,7 +288,7 @@ func (p *rulesParser) nextList() (list [][]byte, token []byte) {
 
 // nextToken returns the next token in the deps rules,
 // one of ";" "," "<" "!<" or a name.
-func (p *rulesParser) nextToken() []byte {
+func (p *rulesParser) nextToken() (token []byte) {
 	// Declared once, outside the loop: declarations in a loop in a
 	// self-mutating method are rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.

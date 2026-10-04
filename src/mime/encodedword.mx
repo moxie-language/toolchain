@@ -7,7 +7,6 @@ package mime
 import (
 	"bytes"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io"
 	"unicode"
@@ -17,28 +16,24 @@ import (
 // A WordEncoder is an RFC 2047 encoded-word encoder.
 type WordEncoder byte
 
-const (
-	// BEncoding represents Base64 encoding scheme as defined by RFC 2045.
-	BEncoding = WordEncoder('b')
-	// QEncoding represents the Q-encoding scheme as defined by RFC 2047.
-	QEncoding = WordEncoder('q')
-)
+// BEncoding represents Base64 encoding scheme as defined by RFC 2045.
+var BEncoding WordEncoder
 
-const (
-	errInvalidWord = errors.Const("mime: invalid RFC 2047 encoded-word")
-)
+// QEncoding represents the Q-encoding scheme as defined by RFC 2047.
+var QEncoding WordEncoder
+
 
 // Encode returns the encoded-word form of s. If s is ASCII without special
 // characters, it is returned unchanged. The provided charset is the IANA
 // charset name of s. It is case insensitive.
-func (e WordEncoder) Encode(charset, s string) string {
+func (e *WordEncoder) Encode(charset, s string) (rs string) {
 	if !needsEncoding(s) {
 		return s
 	}
 	return e.encodeWord(charset, s)
 }
 
-func needsEncoding(s string) bool {
+func needsEncoding(s string) (rok bool) {
 	for _, b := range s {
 		if (b < ' ' || b > '~') && b != '\t' {
 			return true
@@ -48,7 +43,7 @@ func needsEncoding(s string) bool {
 }
 
 // encodeWord encodes a string into an encoded-word.
-func (e WordEncoder) encodeWord(charset, s string) string {
+func (e *WordEncoder) encodeWord(charset, s string) (rs string) {
 	var buf bytes.Buffer
 	// Could use a hint like len(s)*3, but that's not enough for cases
 	// with word splits and too much for simpler inputs.
@@ -56,7 +51,7 @@ func (e WordEncoder) encodeWord(charset, s string) string {
 	buf.Grow(48)
 
 	e.openWord(&buf, charset)
-	if e == BEncoding {
+	if *e == BEncoding {
 		e.bEncode(&buf, charset, s)
 	} else {
 		e.qEncode(&buf, charset, s)
@@ -75,10 +70,10 @@ const (
 	maxContentLen = maxEncodedWordLen - len("=?UTF-8?q?") - len("?=")
 )
 
-func _maxBase64Len() int32 { return base64.StdEncoding().DecodedLen(maxContentLen) }
+func _maxBase64Len() (rn int32) { return base64.StdEncoding().DecodedLen(maxContentLen) }
 
 // bEncode encodes s using base64 encoding and writes it to buf.
-func (e WordEncoder) bEncode(buf *bytes.Buffer, charset, s string) {
+func (e *WordEncoder) bEncode(buf *bytes.Buffer, charset, s string) {
 	w := base64.NewEncoder(base64.StdEncoding(), buf)
 	// If the charset is not UTF-8 or if the content is short, do not bother
 	// splitting the encoded-word.
@@ -110,7 +105,7 @@ func (e WordEncoder) bEncode(buf *bytes.Buffer, charset, s string) {
 
 // qEncode encodes s using Q encoding and writes it to buf. It splits the
 // encoded-words when necessary.
-func (e WordEncoder) qEncode(buf *bytes.Buffer, charset, s string) {
+func (e *WordEncoder) qEncode(buf *bytes.Buffer, charset, s string) {
 	// We only split encoded-words when the charset is UTF-8.
 	if !isUTF8(charset) {
 		writeQString(buf, s)
@@ -156,7 +151,7 @@ func writeQString(buf *bytes.Buffer, s string) {
 }
 
 // openWord writes the beginning of an encoded-word into buf.
-func (e WordEncoder) openWord(buf *bytes.Buffer, charset string) {
+func (e *WordEncoder) openWord(buf *bytes.Buffer, charset string) {
 	buf.WriteString("=?")
 	buf.WriteString(charset)
 	buf.WriteByte('?')
@@ -170,13 +165,13 @@ func closeWord(buf *bytes.Buffer) {
 }
 
 // splitWord closes the current encoded-word and opens a new one.
-func (e WordEncoder) splitWord(buf *bytes.Buffer, charset string) {
+func (e *WordEncoder) splitWord(buf *bytes.Buffer, charset string) {
 	closeWord(buf)
 	buf.WriteByte(' ')
 	e.openWord(buf, charset)
 }
 
-func isUTF8(charset string) bool {
+func isUTF8(charset string) (rok bool) {
 	return bytes.EqualFold(charset, "UTF-8")
 }
 
@@ -194,7 +189,7 @@ type WordDecoder struct {
 }
 
 // Decode decodes an RFC 2047 encoded-word.
-func (d *WordDecoder) Decode(word string) (string, error) {
+func (d *WordDecoder) Decode(word string) (rs string, rerr error) {
 	// See https://tools.ietf.org/html/rfc2047#section-2 for details.
 	// Our decoder is permissive, we accept empty encoded-text.
 	if len(word) < 8 || !bytes.HasPrefix(word, "=?") || !bytes.HasSuffix(word, "?=") || bytes.Count(word, "?") != 4 {
@@ -226,7 +221,7 @@ func (d *WordDecoder) Decode(word string) (string, error) {
 
 // DecodeHeader decodes all encoded-words of the given string. It returns an
 // error if and only if [WordDecoder.CharsetReader] of d returns an error.
-func (d *WordDecoder) DecodeHeader(header string) (string, error) {
+func (d *WordDecoder) DecodeHeader(header string) (rs string, rerr error) {
 	// If there is no encoded-word, returns before creating a buffer.
 	i := bytes.Index(header, "=?")
 	if i == -1 {
@@ -300,7 +295,7 @@ func (d *WordDecoder) DecodeHeader(header string) (string, error) {
 	return buf.String(), nil
 }
 
-func decode(encoding byte, text string) ([]byte, error) {
+func decode(encoding byte, text string) (rb []byte, rerr error) {
 	switch encoding {
 	case 'B', 'b':
 		return base64.StdEncoding().DecodeString(text)
@@ -311,7 +306,7 @@ func decode(encoding byte, text string) ([]byte, error) {
 	}
 }
 
-func (d *WordDecoder) convert(buf *bytes.Buffer, charset string, content []byte) error {
+func (d *WordDecoder) convert(buf *bytes.Buffer, charset string, content []byte) (rerr error) {
 	switch {
 	case bytes.EqualFold("utf-8", charset):
 		buf.Write(content)
@@ -344,7 +339,7 @@ func (d *WordDecoder) convert(buf *bytes.Buffer, charset string, content []byte)
 
 // hasNonWhitespace reports whether s (assumed to be ASCII) contains at least
 // one byte of non-whitespace.
-func hasNonWhitespace(s string) bool {
+func hasNonWhitespace(s string) (rok bool) {
 	for _, b := range s {
 		switch b {
 		// Encoded-words can only be separated by linear white spaces which does
@@ -358,7 +353,7 @@ func hasNonWhitespace(s string) bool {
 }
 
 // qDecode decodes a Q encoded string.
-func qDecode(s string) ([]byte, error) {
+func qDecode(s string) (rb []byte, rerr error) {
 	dec := []byte{:len(s)}
 	n := 0
 	for i := 0; i < len(s); i++ {
@@ -387,7 +382,7 @@ func qDecode(s string) ([]byte, error) {
 }
 
 // readHexByte returns the byte from its quoted-printable representation.
-func readHexByte(a, b byte) (byte, error) {
+func readHexByte(a, b byte) (rn byte, rerr error) {
 	var hb, lb byte
 	var err error
 	if hb, err = fromHex(a); err != nil {
@@ -399,7 +394,7 @@ func readHexByte(a, b byte) (byte, error) {
 	return hb<<4 | lb, nil
 }
 
-func fromHex(b byte) (byte, error) {
+func fromHex(b byte) (rn byte, rerr error) {
 	switch {
 	case b >= '0' && b <= '9':
 		return b - '0', nil
