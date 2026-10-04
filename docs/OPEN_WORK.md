@@ -1384,3 +1384,15 @@ resolves `recv.M(...)` directly. Instrumenting that branch (or teaching
 `buildDeferStmt` about a CallExpr fun) is the next step; with the wrappers gone,
 nine real source closures in `pkg/syntax` are all that stands between the
 compiler tree and the `/pkg/` carve-out.
+
+**Stage 1's app-repo half landed** (nostr `0ece20e`, morly `5fa4e19`, musiquay
+`a22b643`). All 16 named slice/map types are gone from the three app repos, so
+`grep -rE '^type [A-Za-z_]+ (\[\]|map\[)'` now returns nothing there. Each type
+became free functions whose first parameter is the value: the nostr tag API is
+`TagKey`/`TagValue`/`TagRelay`/`TagMarker`/`TagsGetFirst`/`TagsGetAll`/`TagsGetD`/
+`TagsContainsValue` over `[]string` and `[][]string` (68 references updated),
+`normalize.Reason` is `[]byte`, morly's seven `...List` channel slices are their
+underlying `[]chan T`, and the mls types - including `ratchetTree` with its 25
+methods - are free functions. Verified with the compiler that enforces the rule
+(`3b13de5e`, installed as `./moxie`): nostr 194 tests, musiquay 89 tests,
+`make build-app-wasm` links, 0 failures; morly's 370 are running.
