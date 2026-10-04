@@ -429,18 +429,25 @@ func (p *Parser) advance(followlist ...token.Token) {
 	}
 }
 
-// usage: defer p.trace(msg)()
-func (p *Parser) trace(msg string) (fn func()) {
+// usage: defer p.traceEnd(p.trace(msg))
+//
+// trace used to return a func() that captured the parser and the message;
+// Moxie closures capture nothing, so the state travels as a value instead.
+func (p *Parser) trace(msg string) (prev int32) {
 	p.print(msg | " (")
+	prev = int32(len(p.Indent))
 	const tab = ". "
 	p.Indent = p.Indent | tab
-	return func() {
-		p.Indent = p.Indent[:len(p.Indent)-len(tab)]
-		if x := recover(); x != "" {
-			panic(x) // skip print_trace
-		}
-		p.print(")")
+	return
+}
+
+// traceEnd closes what trace opened, restoring the indent trace replaced.
+func (p *Parser) traceEnd(prev int32) {
+	p.Indent = p.Indent[:prev]
+	if x := recover(); x != "" {
+		panic(x) // skip print_trace
 	}
+	p.print(")")
 }
 
 func (p *Parser) print(msg string) {
