@@ -2517,3 +2517,52 @@ slice types vs value `crypto.Signer` (the struct-wrapper design), `net/http`'s
 that `isUserPackagePath` is still the predicate for both roles; when the style
 migration finishes, the soundness checks are already unconditional and need no
 further change.
+
+# Queue item 2: methods on generic types
+
+`resolveMethodCallWithRecv` resolved a method on a generic type through the
+generic declaration's own member. The declaration emits no symbol - only the
+instantiation does - so the call went to the unmangled name and the link failed
+with `undefined symbol: main.(*Box).get`; `tryGenericMethodCall`, which
+substitutes the type arguments, was never reached because the plain path
+returned first. It now returns nil for a receiver whose type is a generic
+`Named`. `tryGenericMethodCall` also had no `handled` flag, so a VOID generic
+method returned nil and the caller reported `Set undefined (type main.Box has no
+field or method Set)`; it reports handled like `tryGenericLocalCall` and
+`buildFuncFieldCall` now.
+
+**Nothing in the suite covered a generic TYPE with methods** - generic
+*function* coverage existed (`generic_pkg_type`), which is why the whole feature
+could be broken silently. `tests/regressions/should_compile/generic_type_method.mx`
+now covers a method returning `T`, a void method and a method that does not
+mention `T`, through value and pointer receivers, for two instantiations, and
+passes natively and on wasm. Full suite: 177 passed / 0 failed, fixpoint holds.
+
+## Still broken, with minimal reproducers
+
+1. **A field element of an instantiated generic, in non-generic code, is typed
+   `T` rather than the substituted type.** `resolveTypeExprWithSubst` says fields
+   typed by the type param are substituted "at use sites via `fb.typeSubst`",
+   but that only happens inside monomorphized bodies. Outside one, `s.v[2]` is a
+   `T`: passing it to an `int32` parameter carries the wrong value (a checked
+   `s.v[2] == 99` came back `0`) and `println(s.v[2])` prints nothing. Repro:
+   `type Box[T comparable] struct{ v []T }` then `var s Box[int32];
+   s.v = []int32{:3}; s.Set(2, 99); chk(s.v[2], 99)` - `s.At(2)` (a method, so
+   the signature is substituted) returns 99 while `s.v[2]` is 0.
+   **This is what still blocks `src/internal/trace`**: `ordering.queue` is a
+   `queue[Event]` field and `o.queue.pop()` in `(*ordering).Next` reaches
+   `resolveMethodCallWithRecv` with a receiver type that has no `TParams`, so the
+   guard does not fire, the unmangled `trace.(*queue).pop` is called, and clang
+   reports `%tN defined with type 'ptr' but expected
+   '{ptr, {i64,i64,i64}, {i8,i64,[4 x i64]}}'`.
+2. **A method on a generic type declared in ANOTHER package is not found at
+   all**: `Get undefined (type git.smesh.lol/genL2/lib.Box has no field or
+   method Get)`. `mxhWriteTypeName` deliberately writes no methods for a generic
+   type (`len(named.TParams) == 0`), so the imported `Named` has an empty method
+   set, and the generic-decl table the importer builds from the dependency's
+   source does not cover the lookup.
+3. **A monomorphized method returning `T`, called in a non-main package, panics
+   `codec default bad size` at runtime.** Only non-main packages relocate
+   returns, so the codec runs and the monomorphized result's type metadata is
+   wrong. Repro: `/tmp/genL2` - `lib.Use()` returns `b.Get().tag` where
+   `Get() (out T)` and `b` is a `Box[E]`; it links and then panics.
