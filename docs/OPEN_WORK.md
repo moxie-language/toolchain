@@ -2540,8 +2540,11 @@ passes natively and on wasm. Full suite: 177 passed / 0 failed, fixpoint holds.
 
 ## Still broken, with minimal reproducers
 
-1. **A field element of an instantiated generic, in non-generic code, is typed
-   `T` rather than the substituted type.** `resolveTypeExprWithSubst` says fields
+1. **[FIXED]** **A field element of an instantiated generic, in non-generic code,
+   was typed `T` rather than the substituted type.** `fieldType` now merges the
+   instantiated Named's `TParams`->`TArgs` over the body's `fb.typeSubst`, so
+   `s.v[2]` is an `int32`; the minimal case prints `direct: 99` and
+   `int64: 1234 1234` where it printed nothing and lost the value. History: `resolveTypeExprWithSubst` says fields
    typed by the type param are substituted "at use sites via `fb.typeSubst`",
    but that only happens inside monomorphized bodies. Outside one, `s.v[2]` is a
    `T`: passing it to an `int32` parameter carries the wrong value (a checked
@@ -2549,12 +2552,16 @@ passes natively and on wasm. Full suite: 177 passed / 0 failed, fixpoint holds.
    `type Box[T comparable] struct{ v []T }` then `var s Box[int32];
    s.v = []int32{:3}; s.Set(2, 99); chk(s.v[2], 99)` - `s.At(2)` (a method, so
    the signature is substituted) returns 99 while `s.v[2]` is 0.
-   **This is what still blocks `src/internal/trace`**: `ordering.queue` is a
-   `queue[Event]` field and `o.queue.pop()` in `(*ordering).Next` reaches
-   `resolveMethodCallWithRecv` with a receiver type that has no `TParams`, so the
-   guard does not fire, the unmangled `trace.(*queue).pop` is called, and clang
-   reports `%tN defined with type 'ptr' but expected
-   '{ptr, {i64,i64,i64}, {i8,i64,[4 x i64]}}'`.
+   `src/internal/trace` is STILL blocked, by a different step: `ordering.queue`
+   is a `queue[Event]` field, and `o.queue.pop()` in `(*ordering).Next` still
+   reaches `resolveMethodCallWithRecv` with a receiver type that has no
+   `TParams`, so the guard does not fire, the unmangled `trace.(*queue).pop` is
+   called, and clang reports `%tN defined with type 'ptr' but expected
+   '{ptr, {i64,i64,i64}, {i8,i64,[4 x i64]}}'`. The next step is to print what
+   `o.queue`'s SSA type actually is at that point - the field resolves
+   correctly for a `Box[E]` field in a main-package struct (the fixture's
+   `h.b`), so the suspicion is the mxh round-trip losing `TArgs` for a field of
+   an instantiated generic in a DEPENDENCY package.
 2. **A method on a generic type declared in ANOTHER package is not found at
    all**: `Get undefined (type git.smesh.lol/genL2/lib.Box has no field or
    method Get)`. `mxhWriteTypeName` deliberately writes no methods for a generic
