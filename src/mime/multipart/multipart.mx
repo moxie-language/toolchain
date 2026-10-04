@@ -375,8 +375,14 @@ func (r *Reader) nextPart(rawPart bool, maxMIMEHeaderSize, maxMIMEHeaders int64)
 		return nil, fmt.Errorf("multipart: boundary is empty")
 	}
 	expectNewPart := false
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var line []byte
+	var err error
+	var bp *Part
 	for {
-		line, err := r.bufReader.ReadSlice('\n')
+		line, err = r.bufReader.ReadSlice('\n')
 		if err != nil {
 			if err == io.EOF && r.isFinalBoundary(line) {
 				return nil, io.EOF
@@ -386,7 +392,7 @@ func (r *Reader) nextPart(rawPart bool, maxMIMEHeaderSize, maxMIMEHeaders int64)
 
 		if r.isBoundaryDelimiterLine(line) {
 			r.partsRead++
-			bp, err := newPart(r, rawPart, maxMIMEHeaderSize, maxMIMEHeaders)
+			bp, err = newPart(r, rawPart, maxMIMEHeaderSize, maxMIMEHeaders)
 			if err != nil {
 				return nil, err
 			}

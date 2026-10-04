@@ -429,9 +429,16 @@ func (rb *reorderBuffer) decomposeHangul(r rune) {
 func (rb *reorderBuffer) combineHangul(s, i, k int32) {
 	b := rb.rune[:]
 	bn := rb.nrune
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var cccB uint8
+	var cccC uint8
+	var l rune
+	var v rune
 	for ; i < bn; i++ {
-		cccB := b[k-1].ccc
-		cccC := b[i].ccc
+		cccB = b[k-1].ccc
+		cccC = b[i].ccc
 		if cccB == 0 {
 			s = k - 1
 		}
@@ -440,8 +447,8 @@ func (rb *reorderBuffer) combineHangul(s, i, k int32) {
 			b[k] = b[i]
 			k++
 		} else {
-			l := rb.runeAt(s) // also used to compare to hangulBase
-			v := rb.runeAt(i) // also used to compare to jamoT
+			l = rb.runeAt(s) // also used to compare to hangulBase
+			v = rb.runeAt(i) // also used to compare to jamoT
 			switch {
 			case jamoLBase <= l && l < jamoLEnd &&
 				jamoVBase <= v && v < jamoVEnd:
@@ -484,6 +491,14 @@ func (rb *reorderBuffer) compose() {
 	}
 	k := 1
 	b := rb.rune[:]
+	// Declared once, outside the loop: declarations in a loop in a
+	// self-mutating method are rejected, and the scratch would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var ii Properties
+	var cccB uint8
+	var cccC uint8
+	var blocked bool
+	var combined rune
 	for s, i := 0, 1; i < bn; i++ {
 		if isJamoVT(rb.bytesAt(i)) {
 			// Redo from start in Hangul mode. Necessary to support
@@ -491,22 +506,22 @@ func (rb *reorderBuffer) compose() {
 			rb.combineHangul(s, i, k)
 			return
 		}
-		ii := b[i]
+		ii = b[i]
 		// We can only use combineForward as a filter if we later
 		// get the info for the combined character. This is more
 		// expensive than using the filter. Using combinesBackward()
 		// is safe.
 		if ii.combinesBackward() {
-			cccB := b[k-1].ccc
-			cccC := ii.ccc
-			blocked := false // b[i] blocked by starter or greater or equal CCC?
+			cccB = b[k-1].ccc
+			cccC = ii.ccc
+			blocked = false // b[i] blocked by starter or greater or equal CCC?
 			if cccB == 0 {
 				s = k - 1
 			} else {
 				blocked = s != k-1 && cccB >= cccC
 			}
 			if !blocked {
-				combined := combine(rb.runeAt(s), rb.runeAt(i))
+				combined = combine(rb.runeAt(s), rb.runeAt(i))
 				if combined != 0 {
 					rb.assignRune(s, combined)
 					continue
