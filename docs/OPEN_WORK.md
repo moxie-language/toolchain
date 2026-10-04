@@ -1489,3 +1489,24 @@ treated as user code (the message is built where the lookup fails). `pkg/types`
 does not reference the user-path predicate, so the gate itself is not there.
 The second error, `not enough arguments in call`, is likely a cascade of the
 first: a call whose callee expression failed to resolve.
+
+**The carve-out now waits only on `pkg/types`, and its globals are already
+marked deprecated.** The two-stage build reports nine stores, all in
+`pkg/types/registry.mx` and `pkg/types/tc_universe.mx`:
+`SetUniverseGlobals` (6), `LookupImportByName` (2), `DirectImportPaths` (1).
+The file's own comment says what they are: "Global bridge variables -
+DEPRECATED. These exist only for the legacy compiler's codegen which reads them
+directly. Stage4 code accesses these through cctx.universe.Registry /
+cctx.universe.DirectImports", and it names the replacements
+(`UniverseState.LookupByName`, `UniverseState.DirectImportPaths`, which already
+exists and is the twin of the global). So this is a deletion plus routing job,
+not a sovereign-holder migration: the callers are `_mxc_stage4/main.mx`
+(`SetUniverseGlobals`), `_mxc_stage4/ir_descriptors.mx` and
+`pkg/types/tc_types.mx` (`ImportRegistry`), and `pkg/rewrite/resolve.mx` has its
+own separate `ImportRegistry` global that the same sweep should cover.
+
+Also this round: `(*Parser).header` read `a.Pos()` on an asserted `*AssignStmt`
+where stage4 resolved the selector against the value type; it reads `a.pos`
+directly now (`fecf1c12`). Suite **171/171, 0 failures** after clearing
+`~/.cache/moxie`, whose object files had been reaped and left 213 stale
+`.c.lock` files that failed `aeaddep:legacy` with `cannot open ... .bc`.
