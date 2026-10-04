@@ -1291,3 +1291,36 @@ of the 75 and 8 of the 16 declare methods, which `[]T directly` cannot carry:
 `mls.ratchetTree` (25 methods), `mls.secretTree`, `math/big.BigInt` and the
 rest all dissolve into free functions. The app-repo half is in flight; stage4's
 implementation of both rules and the stdlib's 75 are the stages after it.
+
+**Stage 1's compiler half landed (`3b13de5e`).** Stage4 had no implementation of
+either declaration rule, so `main` with `type Tags []string` and
+`var counter = 5` built under stage4 and was rejected by legacy, dependencies
+included. `checkPackageDecls` now mirrors legacy behind the same gate as the
+other restriction checks, with legacy's two refinements kept so the compilers
+agree on every input: an alias introduces no new named type (`type X = []T` is
+exempt in both), and a var whose value is a `[]byte(...)` conversion of a
+string literal is the form the loader demotes to a constant and legacy allows.
+
+**One gate bug fixed on the legacy side while doing it.** Its package-decl rules
+read the *directory* path, so the same user program was checked from
+`/tmp/moxie-tests.123` and exempted from `/tmp/moxie-tests-123` - the rule
+depended on whether the temp directory had a dot in it. A `main` package is now
+user code whatever directory it sits in, which is what stage4 already means by
+the package path. That is also why the suite could not pin these rules before:
+every fixture is copied into a dot-free temp directory.
+
+**Fixtures.** `declvar` and `namedslice` pin both rejections in both compilers
+(phase6 6x.1/6x.2); `globalinit` and `shiftconst` lost their package-level
+initializers - a main package cannot declare `init()` and a global may not be
+assigned in `main()`, so the values are assigned in an init-named helper called
+first, which is exactly when the old initializer ran; `multi_value_var` keeps
+the demoted-string form at package scope and moves the numeric pairs into
+`main`; `named_slice_method.mx` is deleted because its subject, a named slice
+type with a method, is now illegal in user code (the stdlib still exercises the
+same slice-typing path, and the bootstrap covers it).
+
+**Suite 171/171, 0 failures**, including both new checks in both compilers and
+`selfhost:stage2`. Still open in this stage: the app repos' 16 named slice/map
+types are being dissolved into free functions (in flight), then the `/pkg/`
+carve-out can go for the app repos, and the stdlib's 75 plus the global-stores
+scope expansion (107 sites above the runtime) are the stages after that.
