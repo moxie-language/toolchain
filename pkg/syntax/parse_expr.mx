@@ -444,7 +444,8 @@ func (p *Parser) complitexpr() (c *CompositeLit) {
 
 	p.Xnest++
 	p.want(token.Lbrace)
-	x.Rbrace = p.list("composite literal", token.Comma, token.Rbrace, func() bool {
+	// Inlined for the same reason as argList: the loop reads `x`.
+	for p.Tok != token.EOF && p.Tok != token.Rbrace {
 		// value
 		e := p.bare_complitexpr()
 		if p.Tok == token.Colon {
@@ -459,8 +460,18 @@ func (p *Parser) complitexpr() (c *CompositeLit) {
 		}
 		x.ElemList = mxutil.Ensure(x.ElemList, 1)
 		push(x.ElemList, e)
-		return false
-	})
+		more, ok := p.listSep("composite literal", token.Comma, token.Rbrace)
+		if !ok {
+			break
+		}
+		if !more {
+			break
+		}
+	}
+	if p.Tok != token.EOF {
+		x.Rbrace = p.pos()
+		p.want(token.Rbrace)
+	}
 	p.Xnest--
 
 	return x
@@ -480,13 +491,22 @@ func (p *Parser) argList() (list []Expr, hasDots bool) {
 	}
 
 	p.Xnest++
-	p.list("argument list", token.Comma, token.Rparen, func() bool {
+	// p.list's callback would have to read `list` and `hasDots` from this
+	// frame, and a Moxie closure captures nothing, so the loop is inlined.
+	for p.Tok != token.EOF && p.Tok != token.Rparen && !hasDots {
 		list = mxutil.Ensure(list, 1)
 		push(list, p.expr())
 		hasDots = p.got(token.DotDotDot)
-		return hasDots
-	})
+		more, ok := p.listSep("argument list", token.Comma, token.Rparen)
+		if !ok {
+			return
+		}
+		if !more {
+			break
+		}
+	}
 	p.Xnest--
+	p.want(token.Rparen)
 
 	return
 }
