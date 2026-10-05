@@ -3201,3 +3201,34 @@ fix restores parity.
 Once it works, the reproducer above belongs in
 `tests/regressions/should_compile/` with the printed values asserted - it is a
 silent-zero bug today, so an assertion is the whole test.
+
+## Item 10, mechanism pinned down further
+
+The emitted symbols for the reproducer are `main.(*CurveImpl).Params` and
+`main.(*CurveImpl).IsOnCurve` - **there is no type-argument mangling at all**
+(`strings` on the cached `.bc`; the mxh carries only the bare `CurveImpl`).
+So `mangleGenericName` is NOT involved on this path: one shared body serves every
+instantiation, and `findIfaceImpls` strips the pointer from `(*CurveImpl)`, does
+`Scope.Lookup("CurveImpl")`, finds the GENERIC Named, and skips it at
+`ir_iface.mx:401`. Nothing ever registers a concrete receiver type for the
+instantiation, so the invoke has no arm.
+
+**Where the instantiated Named IS known**: at the BOXING site. In
+`c := &CurveImpl[P256Point]{}` / `var i Curve = c` the SSA value's type is the
+instantiated Named with `TArgs` populated (`pkg/types/tc_types.mx:521`). That is
+the natural place to record `(methodName, instantiated recvType)` for the impl
+table, rather than trying to reconstruct it later from a mangled symbol that does
+not exist. The existing iface-arm machinery (`emitIfaceAssertOK` dedupes per
+`(base, form)`, and main.mx around 5406 writes missing arms) is the neighbouring
+code to extend; the earlier cross-package fix in this same area is
+`f7a746d4`.
+
+So the fix is: **register an impl per instantiated type at the boxing site**,
+keyed on the instantiated Named, in addition to the existing per-declaration
+scan. It must not regress the value-form vs pointer-form split that
+`f7a746d4` and `emitIfaceAssertOK` already handle (`(*CurveImpl).Params` is the
+pointer form here).
+
+Not attempted: it needs a compiler change plus the legacy cross-check plus a
+verifying build, and doing it half-way would leave the tree worse than the
+documented bug.
