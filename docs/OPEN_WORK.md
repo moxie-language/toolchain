@@ -2727,8 +2727,11 @@ restore parity. Verified by running legacy on the same two files:
 - `/tmp/asn1probe` the OID + `[]byte`-field + string-field marshal check
 
 Build any probe with:
-`MOXIEROOT=$PWD /tmp/mxc-h1b build -o <out> <dir>` - and note the compiler
-binary must be rebuilt from the tree with `-a` when the compiler changes.
+`MOXIEROOT=$PWD ./moxie build -o <out> <dir>`. `./moxie` has been refreshed from
+this tree (it was STALE and still compiled the soundness-hole programs; a quick
+check on `/tmp/vfp3` proves the binary is current: it must exit 1). The compiler
+binary must be rebuilt with `-a` from the tree whenever the compiler changes -
+the build cache key does not distinguish compiler binaries.
 
 ## THE TODO LIST
 
