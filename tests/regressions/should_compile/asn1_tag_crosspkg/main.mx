@@ -1,0 +1,46 @@
+// Cross-package struct tags: asn1 must see lib.Tagged's field tags from the
+// IMPORTING package.
+//
+// WHAT THIS PROVES: the tag reaches asn1 across a package boundary in a normal
+// build. WHAT IT DOES NOT PROVE: that the tag survives the .mxh. A consumer in
+// the same module re-type-checks its dependency from source, so this fixture
+// passes with or without the mxh carrying tags - verified by stripping the tag
+// suffixes out of the cached mxh and rebuilding: still green. The mxh path is
+// only taken for a dependency whose source the build does not re-check, so a
+// faithful reproduction needs a package built into the cache and then its
+// source made unavailable.
+//
+// The mxh itself is verified directly: the compiler now writes
+//   type Tagged struct{Name:string#61736e313a22737472696e6722,...}
+// where legacy's own type writer already carried the tag, so this also closes a
+// stage4/legacy divergence. Without it an mxh-only importer rebuilds the struct
+// with empty tags, and struct field descriptors are linkonce_odr constants
+// named after the TYPE - so the importer's tagless blob competes with the
+// defining package's tagged one under the same symbol and the linker keeps
+// whichever it sees.
+
+package main
+
+import (
+	"encoding/asn1"
+	"encoding/hex"
+	"fmt"
+	"tests/regressions/should_compile/asn1_tag_crosspkg/lib"
+	"unsafe"
+)
+
+func main() {
+	t := lib.New()
+	b, err := asn1.Marshal(unsafe.TypeOf(t), unsafe.Pointer(&t))
+	if err != nil {
+		println("FAIL: marshal: " | err.String())
+		panic("marshal")
+	}
+	got := string(hex.EncodeToString(b))
+	// 30 08 | 13 01 78 (PrintableString "x") | 04 03 61 62 63 (OCTET STRING "abc")
+	if got != "30081301780403616263" {
+		println("FAIL: got " | got | " want 30081301780403616263")
+		panic("tag lost across the mxh")
+	}
+	fmt.Println("asn1 tag crosspkg ok")
+}

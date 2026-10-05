@@ -246,6 +246,75 @@ func moxie_clear_imports() {
 }
 
 
+// mxhHexEncode renders s as lowercase hex. Struct field tags cross the mxh in
+// this form because a tag is arbitrary text (spaces, quotes, braces, commas and
+// colons all occur) while a `type X <desc>` line is whitespace-delimited and
+// its field list is comma- and colon-delimited.
+func mxhHexEncode(s string) (out string) {
+	digits := "0123456789abcdef"
+	b := []byte{:0:len(s) * 2}
+	for i := int32(0); i < int32(len(s)); i++ {
+		c := s[i]
+		b = push(b, digits[c>>4])
+		b = push(b, digits[c&15])
+	}
+	return string(b)
+}
+
+func mxhHexVal(c byte) (v byte, ok bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	}
+	return 0, false
+}
+
+func mxhHexDecode(s string) (out string, ok bool) {
+	if len(s)%2 != 0 {
+		return "", false
+	}
+	b := []byte{:0:len(s) / 2}
+	for i := int32(0); i < int32(len(s)); i += 2 {
+		hi, ok1 := mxhHexVal(s[i])
+		lo, ok2 := mxhHexVal(s[i+1])
+		if !ok1 || !ok2 {
+			return "", false
+		}
+		b = push(b, hi<<4|lo)
+	}
+	return string(b), true
+}
+
+// mxhSplitFieldTag splits one mxh struct field "[@]name:typedesc#hextag" into
+// the part before the tag and the decoded tag. Only a '#' at bracket depth 0
+// counts, so a nested struct's own tagged fields stay inside the body and are
+// handled by the recursion that parses the field's type.
+func mxhSplitFieldTag(f string) (body string, tag string) {
+	depth := int32(0)
+	mark := int32(-1)
+	for i := int32(0); i < int32(len(f)); i++ {
+		switch f[i] {
+		case '{', '[', '(':
+			depth++
+		case '}', ']', ')':
+			if depth > 0 {
+				depth--
+			}
+		case '#':
+			if depth == 0 {
+				mark = i
+			}
+		}
+	}
+	if mark < 0 {
+		return f, ""
+	}
+	dec, _ := mxhHexDecode(f[mark+1:])
+	return f[:mark], dec
+}
+
 func parseTypeDesc(desc string) (t Type) {
 	switch desc {
 	case "bool":
@@ -313,7 +382,8 @@ func parseTypeDesc(desc string) (t Type) {
 		fields := splitCommaBalanced(inner)
 		vars := []*TCVar{:0:len(fields)}
 		tags := []string{:0:len(fields)}
-		for _, f := range fields {
+		for _, f0 := range fields {
+			f, ftag := mxhSplitFieldTag(f0)
 			ci := -1
 			for k := 0; k < len(f); k++ {
 				if f[k] == ':' {
@@ -336,7 +406,7 @@ func parseTypeDesc(desc string) (t Type) {
 			vars = mxutil.Ensure(vars, 1)
 			push(vars, v)
 			tags = mxutil.Ensure(tags, 1)
-			push(tags, "")
+			push(tags, ftag)
 		}
 		return NewTCStruct(vars, tags)
 	}

@@ -3351,6 +3351,22 @@ func typeDescWrite(b *mxhBuf, t Type) {
 			b.w(f.Name)
 			b.w(":")
 			typeDescWrite(b, f.Typ)
+			// The field TAG travels with the field. Without it an importing
+			// package rebuilds the struct with NO tags, and struct field
+			// descriptors are linkonce_odr constants named after the TYPE, so
+			// the importer's tagless descriptor blob competes with the
+			// defining package's tagged one under the same symbol and the
+			// linker keeps whichever it sees - the tag survives or vanishes
+			// arbitrarily. encoding/asn1 reads the tag from that blob, which
+			// is how pkix.AttributeTypeAndValue.Value's asn1:"string" reached
+			// an importer as an untagged []byte and marshalled as an OCTET
+			// STRING. Hex, because a tag may contain any byte except a
+			// backquote (including spaces, quotes and braces) and the mxh is
+			// whitespace-delimited text.
+			if tg := v.Tag(i); tg != "" {
+				b.w("#")
+				b.w(mxhHexEncode(tg))
+			}
 		}
 		b.w("}")
 	case *TCInterface:
