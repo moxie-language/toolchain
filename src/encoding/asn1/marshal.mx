@@ -613,8 +613,11 @@ func makeBody(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enco
 			return makePrintableString(s)
 		case TagNumericString:
 			return makeNumericString(s)
-		default:
+		case TagUTF8String:
 			return makeUTF8String(s), nil
+		default:
+			// No string parameter: the value is a byte string.
+			return newBytesEncoder(s), nil
 		}
 	}
 
@@ -690,6 +693,15 @@ func makeField(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enc
 
 	if params.timeType != 0 && tag != TagUTCTime {
 		return nil, &StructuralError{"explicit time type given to non-time member"}
+	}
+
+	// akBytes is the unified string=[]byte type: getUniversalType makes it an
+	// OCTET STRING, and a string parameter promotes it to a character string.
+	// The tag is set to PrintableString so the block below applies the
+	// printable-or-UTF8 choice for "string" or the explicit type for
+	// "printable"/"utf8"/"ia5"/"numeric".
+	if typ.kind() == akBytes && (params.stringLike || params.stringType != 0) {
+		tag = TagPrintableString
 	}
 
 	if params.stringType != 0 && tag != TagPrintableString {

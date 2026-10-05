@@ -666,8 +666,14 @@ func parseSequenceOfUnsafe(data []byte, elemType *_rawType) (slicePtr unsafe.Poi
 			return
 		}
 		switch t.tag {
-		case TagIA5String, TagGeneralString, TagT61String, TagUTF8String, TagNumericString, TagBMPString:
-			t.tag = TagPrintableString
+		case TagIA5String, TagGeneralString, TagT61String, TagUTF8String, TagNumericString, TagBMPString, TagPrintableString:
+			// akBytes elements (string or []byte) accept the OCTET STRING
+			// encoding and every character string encoding.
+			if elemType.kind() == akBytes {
+				t.tag = TagOctetString
+			} else {
+				t.tag = TagPrintableString
+			}
 		case TagGeneralizedTime, TagUTCTime:
 			t.tag = TagUTCTime
 		}
@@ -802,14 +808,14 @@ func parseFieldUnsafe(typ *_rawType, ptr unsafe.Pointer, data []byte, initOffset
 		return
 	}
 
-	// Special case for strings: all the ASN.1 string types map to the Go
-	// type string. getUniversalType returns the tag for PrintableString
-	// when it sees a string, so if we see a different string type on the
-	// wire, we change the universal type to match.
-	if universalTag == TagPrintableString {
+	// Special case for strings: akBytes is the unified string=[]byte type, so
+	// an OCTET STRING or any ASN.1 character string on the wire fills the same
+	// Go value. getUniversalType returns OCTET STRING for akBytes; accept the
+	// character string tags too and parse them with the matching parser.
+	if universalTag == TagOctetString && typ.kind() == akBytes {
 		if t.class == ClassUniversal {
 			switch t.tag {
-			case TagIA5String, TagGeneralString, TagT61String, TagUTF8String, TagNumericString, TagBMPString:
+			case TagIA5String, TagGeneralString, TagT61String, TagUTF8String, TagNumericString, TagBMPString, TagPrintableString:
 				universalTag = t.tag
 			}
 		} else if params.stringType != 0 {
@@ -1001,6 +1007,9 @@ func parseFieldUnsafe(typ *_rawType, ptr unsafe.Pointer, data []byte, initOffset
 	case akBytes:
 		var sv []byte
 		switch universalTag {
+		case TagOctetString:
+			sv = []byte{:len(innerBytes)}
+			copy(sv, innerBytes)
 		case TagPrintableString:
 			sv, err = parsePrintableString(innerBytes)
 		case TagNumericString:

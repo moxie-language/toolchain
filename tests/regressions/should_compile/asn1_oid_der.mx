@@ -27,7 +27,15 @@ import (
 )
 
 type strWrap struct {
-	Name string
+	Name string `asn1:"string"`
+}
+
+// Without the tag a plain []byte field is an OCTET STRING. Moxie unifies string
+// and []byte into ONE type descriptor (akBytes), so asn1 cannot tell the
+// spellings apart; the byte meaning is the default because PKCS#8 and x509
+// SubjectPublicKey need it, and a character string is requested explicitly.
+type bytesWrap struct {
+	Key []byte
 }
 
 func chk(what string, got, want string) {
@@ -65,7 +73,8 @@ func main() {
 	}
 	chk("oid3", string(hex.EncodeToString(b3)), "06072b060104018237")
 
-	// A printable string field marshals as PrintableString(13): 30 03 13 01 78.
+	// An asn1:"string" field is a PrintableString(13) when its content is
+	// printable: 30 03 13 01 78.
 	sw := strWrap{Name: "x"}
 	sb, serr := asn1.Marshal(unsafe.TypeOf(sw), unsafe.Pointer(&sw))
 	if serr != nil {
@@ -73,6 +82,26 @@ func main() {
 		panic("marshal")
 	}
 	chk("string", string(hex.EncodeToString(sb)), "3003130178")
+
+	// A plain []byte field is an OCTET STRING(04): 30 05 04 03 61 62 63.
+	bw := bytesWrap{Key: []byte("abc")}
+	bb, berr := asn1.Marshal(unsafe.TypeOf(bw), unsafe.Pointer(&bw))
+	if berr != nil {
+		println("FAIL: []byte marshal: " | berr.String())
+		panic("marshal")
+	}
+	chk("[]byte", string(hex.EncodeToString(bb)), "30050403616263")
+
+	// Non-UTF-8 bytes must marshal too. Before the flip this failed outright
+	// with "asn1: string not valid UTF-8", which is what blocked every DER
+	// structure carrying a raw key: 30 06 04 04 01 ff 80 00.
+	nb := bytesWrap{Key: []byte{0x01, 0xff, 0x80, 0x00}}
+	nbb, nberr := asn1.Marshal(unsafe.TypeOf(nb), unsafe.Pointer(&nb))
+	if nberr != nil {
+		println("FAIL: raw []byte marshal: " | nberr.String())
+		panic("marshal")
+	}
+	chk("raw []byte", string(hex.EncodeToString(nbb)), "3006040401ff8000")
 
 	fmt.Println("asn1 oid der ok")
 }

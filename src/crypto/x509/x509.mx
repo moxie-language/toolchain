@@ -1597,13 +1597,66 @@ func buildCSRExtensions(template *CertificateRequest) (rextension []pkix.Extensi
 	return push(ret, template.ExtraExtensions...), nil
 }
 
+// marshalRDNSequence encodes [][]pkix.AttributeTypeAndValue as an X.509
+// RDNSequence: SEQUENCE OF RelativeDistinguishedName, where each
+// RelativeDistinguishedName is a SET OF AttributeTypeAndValue.
+//
+// Two facts force this to be built by hand rather than by marshalling the
+// slice directly:
+//
+//   - Go gets the inner SET from the named slice type
+//     pkix.RelativeDistinguishedNameSET, because encoding/asn1 emits TagSet for
+//     a slice whose type name ends in "SET". Moxie forbids named slice types,
+//     so a plain [][]pkix.AttributeTypeAndValue would encode both levels as
+//     SEQUENCE.
+//   - struct tags are not carried into the .mxh export header that consumers of
+//     a package read, so pkix.AttributeTypeAndValue's `asn1:"string"` tag is
+//     invisible here and its Value would fall back to the byte-string default
+//     (OCTET STRING), which is not a DirectoryString.
+//
+// Each AttributeTypeAndValue is therefore assembled from its two encoded
+// fields, each RDN is tagged with "set", and the SETs are wrapped in a
+// SEQUENCE - the same shape Go produces.
+func marshalRDNSequence(rdn [][]pkix.AttributeTypeAndValue) (rb []byte, rerr error) {
+	var err error
+	var oidBytes, valueBytes, atvBytes, setBytes []byte
+	sets := []asn1.RawValue{:len(rdn)}
+	for i, rdnSet := range rdn {
+		atvs := []asn1.RawValue{:len(rdnSet)}
+		for j, atv := range rdnSet {
+			oidBytes, err = asn1.Marshal(unsafe.TypeOf(atv.Type), unsafe.Pointer(&atv.Type))
+			if err != nil {
+				return nil, err
+			}
+			valueBytes, err = asn1.MarshalWithParams(unsafe.TypeOf(atv.Value), unsafe.Pointer(&atv.Value), "string")
+			if err != nil {
+				return nil, err
+			}
+			fields := []asn1.RawValue{:2}
+			fields[0] = asn1.RawValue{FullBytes: oidBytes}
+			fields[1] = asn1.RawValue{FullBytes: valueBytes}
+			atvBytes, err = asn1.Marshal(unsafe.TypeOf(fields), unsafe.Pointer(&fields))
+			if err != nil {
+				return nil, err
+			}
+			atvs[j] = asn1.RawValue{FullBytes: atvBytes}
+		}
+		setBytes, err = asn1.MarshalWithParams(unsafe.TypeOf(atvs), unsafe.Pointer(&atvs), "set")
+		if err != nil {
+			return nil, err
+		}
+		sets[i] = asn1.RawValue{FullBytes: setBytes}
+	}
+	return asn1.Marshal(unsafe.TypeOf(sets), unsafe.Pointer(&sets))
+}
+
 func subjectBytes(cert *Certificate) (rb []byte, rerr error) {
 	if len(cert.RawSubject) > 0 {
 		return cert.RawSubject, nil
 	}
 
 	rdn := cert.Subject.ToRDNSequence()
-	return asn1.Marshal(unsafe.TypeOf(rdn), unsafe.Pointer(&rdn))
+	return marshalRDNSequence(rdn)
 }
 
 // signingParamsForKey returns the signature algorithm and its Algorithm
@@ -2248,7 +2301,7 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 	asn1Subject := template.RawSubject
 	if len(asn1Subject) == 0 {
 		rdn := template.Subject.ToRDNSequence()
-		asn1Subject, err5 = asn1.Marshal(unsafe.TypeOf(rdn), unsafe.Pointer(&rdn))
+		asn1Subject, err5 = marshalRDNSequence(rdn)
 		if err5 != nil {
 			return nil, err5
 		}

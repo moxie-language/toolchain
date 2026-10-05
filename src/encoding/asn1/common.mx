@@ -79,6 +79,7 @@ type fieldParameters struct {
 	defaultValue *int64 // a default value for INTEGER typed fields (maybe nil).
 	tag          *int32   // the EXPLICIT or IMPLICIT tag (maybe nil).
 	stringType   int32    // the string tag to use when marshaling.
+	stringLike   bool   // true iff an akBytes value is a character string (printable or UTF-8).
 	timeType     int32    // the time tag to use when marshaling.
 	set          bool   // true iff this should be encoded as a SET
 	omitEmpty    bool   // true iff this should be omitted if empty when marshaling.
@@ -115,6 +116,13 @@ func parseFieldParameters(str []byte) (ret fieldParameters) {
 			ret.stringType = TagNumericString
 		case part == "utf8":
 			ret.stringType = TagUTF8String
+		case part == "string":
+			// string and []byte are one type in Moxie (akBytes), so the
+			// by-value spelling no longer says which ASN.1 type is meant.
+			// "string" asks for a character string, choosing PrintableString
+			// when the value is printable and UTF8String otherwise - the
+			// default Go gave an interface{} holding a string.
+			ret.stringLike = true
 		case bytes.HasPrefix(part, "default:"):
 			i, err := strconv.ParseInt(part[8:], 10, 64)
 			if err == nil {
@@ -181,7 +189,13 @@ func getUniversalType(t *_rawType) (matchAny bool, tagNumber int32, isCompound, 
 		}
 		return false, TagSequence, true, true
 	case akBytes:
-		return false, TagPrintableString, false, true
+		// akBytes is the unified string=[]byte type. The Go spelling that
+		// carried the meaning (string -> PrintableString, []byte -> OCTET
+		// STRING) is erased before the descriptor exists, so the byte-string
+		// meaning is the default. A field that means a character string says
+		// so with an asn1 parameter: "string" (printable or UTF-8), "printable",
+		// "utf8", "ia5" or "numeric".
+		return false, TagOctetString, false, true
 	}
 	return false, 0, false, false
 }
