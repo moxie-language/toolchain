@@ -3538,3 +3538,70 @@ type passed is wrong), and MUST verify with `-a`.
 LESSON, again: a passing probe is only evidence if the build was forced. Every
 compiler verification in this session used `-a` except this one, and it cost a
 revert.
+
+# ============ UPDATE: the net/http codegen chain, and the blank-result fix ============
+
+`6a356673` (compiler) and `4cde9fdf` (source). Full suite rc=0, **185 PASS**,
+`selfhost:fixpoint` PASS. Tree clean.
+
+## FIXED: the implicit-return result loss (this was the getConn blocker)
+
+The builder synthesises a return when a body falls off the end, and it pushed
+ONLY the named results. `getConn`'s signature is `(_ *persistConn, err error)` -
+ONE named result, TWO results - so the synthetic `SSAReturn` had one element,
+the exit serialiser took its single-value shortcut, and the codec decomposed that
+one interface across both results, feeding the error's type word to the codec as
+the `*persistConn`. The value list is now built positionally: `vals[i]` belongs to
+`Signature.Results.At(i)`, a blank result occupies its position as the zero of its
+type, and named results fill the rest in order.
+
+Verified at the IR level (a body that falls off the end cannot be written
+deliberately - Moxie rejects a missing return - so this path is reached only when
+the checker misses a terminating shape):
+
+    %rv98 = insertvalue {ptr, {i64, ptr}} undef, ptr null, 0           ; blank = null
+    %rv99 = insertvalue {ptr, {i64, ptr}} %rv98, {i64, ptr} %t168, 1   ; err
+
+and by the build advancing two functions: 53560 (getConn) -> 132232
+((*http2PriorityParam).IsZero) -> 171708 ((*http2responseWriter).Push).
+
+An earlier attempt appended the zeros after the named results and INVERTED the
+aggregate; it was reverted, and the lesson (a probe only counts with `-a`) is in
+the previous section.
+
+## FIXED: (*http2PriorityParam).IsZero compared a pointer with a struct
+
+`return p == http2PriorityParam{}` with a pointer receiver. Go has a value
+receiver, so it must dereference: `*p == http2PriorityParam{}`. Same class as
+`(*ConnState).String` (454e78e1). A pointer/struct comparison is a Go type error
+that stage4 accepted - worth a check, like the map-index key check that would
+also have caught ConnState earlier.
+
+## The pattern in net/http, and what it means
+
+Every remaining net/http failure so far has been the SAME porting class: Go's
+VALUE receiver became a POINTER receiver (Moxie bans value receivers), and the
+body still uses the receiver where Go's value was already the value. Instances so
+far: `ConnState.String` (map index), `http2PriorityParam.IsZero` (comparison),
+`http2FrameHeader.Header` and `http2FrameWriteRequest.Consume` (returns), and the
+`sc.handler.ServeHTTP` method values (5cf911b8). EXPECT MORE OF THESE - the cheap
+way to find them all at once is to add the two missing checks (map-index key
+assignability, pointer/struct comparison) and let the compiler list every site
+instead of discovering them one clang error at a time.
+
+## NEXT BLOCKER: select-send codegen in (*http2responseWriter).Push
+
+    '%t193' defined with type 'ptr' but expected '{ i64, ptr }'
+      %t193 = load ptr, ptr %t183
+      store {i64, ptr} %t193, ptr %selsv289
+      store ptr %selsv289, ptr %selval288
+      ... [3 x {ptr, ptr, i32, ptr}] zeroinitializer   ; the select case table
+
+`{i64, ptr}` is what an INTERFACE looks like in this IR (an i64 typeID plus a
+data pointer), so the select's send-value slot expects an interface while the
+value is a plain pointer. The source at h2_bundle.mx ~6988 is
+`case sc.serveMsgCh <- msg:` (a 3-case select with one send). NEXT STEP: decide
+whether the port sends a pointer where an interface is wanted (source fix) or the
+select-send path fails to box the value (compiler fix) by looking at
+`serveMsgCh`'s element type, and check `%t183`'s definition in the captured IR.
+The IR capture recipe (find + copy while clang runs) is in the section above.
