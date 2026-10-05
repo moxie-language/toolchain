@@ -2610,3 +2610,40 @@ on `%tN defined with type 'i64' but expected 'i8'` - the same class as the
 wide type). So TParams is unreliable and TArgs is the signal; anything else
 testing `len(TParams) > 0` to mean "this is a generic instantiation" should be
 audited the same way.
+
+# Queue item 3: exact typed constants (time.Date/time.Parse), and the idna parse bug
+
+**Fixed and verified** in `0c958eea` (four defects; see the commit message for
+which file each lives in): a float constant converted to an integer truncated
+through float64 instead of the exact rational; a declared type was applied late,
+so a typed constant kept its untyped value and later folds promoted to float; a
+unary operator on a constant materialized at int32 before a widen could happen;
+and `stripUnusedConsts` deleted one LINE per unreferenced const, leaving a
+multi-line value behind for the parser to trip over. `time.Date(2023,3,14,...)`.
+`Unix()` is `1678806566` and its Format is `2023-03-14 15:09:26` now, and the new
+`const_exact_fold` fixture pins the exact values plus the >int32 literal through
+a parameter. The full suite is green with `selfhost:fixpoint` holding.
+
+## STILL OPEN: x/net/idna's generated tables do not parse
+
+`src/vendor/golang.org/x/net/idna/tables15.0.0.mx` fails to parse, so `net/http`
+(which reaches idna for `ToASCII`/`ToUnicode`) cannot build. Narrowed as far as
+this: the first 55 lines (`UnicodeVersion` plus the 46-line `const mappings`)
+parse fine; the whole `func _mappingIndex() []uint16 { return []uint16{ ...244
+lines... } }` parses fine in a fresh probe; the two TOGETHER fail, with the
+parser left inside a parameter list at the following `func`. Each bisection step
+is a build, and the recipe is: take the file's lines 1..N minus the `package
+idna` line, prepend `package main`, append `func main() {}`, and build;
+`N=55` gives 0 parse errors, `N=304` gives 3. So it is size/shape dependent, not
+a single construct - a fixed buffer, a segment boundary, or an offset that only
+overflows when both the big string const and the big slice literal are present.
+Next step: `-work`-style dump of the *rewritten* source at that point and a diff
+against the original, which separates a rewriter's output from the parser's
+input in one build. BOTH of the earlier candidates were red herrings and are
+disproven: `\x22` in a string literal decodes correctly (9 bytes for that line,
+which is right - it is 7 escapes plus the literal `0`), and `{:` does not occur
+in the file at all.
+
+The net agent is unblocked meanwhile by an authorised vendored split of that
+generated file (move `_mappingIndex` or `xorData` into its own `.mx`), with the
+decoded bytes unchanged.
