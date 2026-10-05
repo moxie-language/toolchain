@@ -2065,6 +2065,24 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 			return
 		}
 	} else if !ConcreteAssignTypes(V, T) {
+		// ConcreteAssignTypes skips an interface on EITHER side because a
+		// destination interface's method set may not be resolved yet, and a
+		// false error is worse than a missing one. That reason does not reach
+		// an interface SOURCE: a value of interface type is a dynamic
+		// container, and getting the concrete value out of it needs a type
+		// assertion, so Assignable's false is final. Without this arm
+		// takeBox(i) with i of interface type compiled and handed the
+		// interface payload to a Box parameter - silent garbage (1132487840)
+		// where legacy/go/types reports "cannot use i ... as Box value".
+		if _, vIface := SafeUnderlying(V).(*TCInterface); vIface {
+			if _, vTP := V.(*TypeParam); !vTP {
+				if _, tIface := SafeUnderlying(T).(*TCInterface); !tIface {
+					cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+					push(cctx.compileErrors, fb.errPos() | "cannot use value of type " | V.String() | " as " | T.String() | " in " | what | " (an interface value needs a type assertion)")
+					return
+				}
+			}
+		}
 		return
 	}
 	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
@@ -4996,7 +5014,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 				}
 				return call2
 			}
-			if inv := fb.buildIfaceMethodCall(sel, recv, e.ArgList); inv != nil {
+			if inv, handled := fb.buildIfaceMethodCall(sel, recv, e.ArgList); handled {
 				return inv
 			}
 			if inv := fb.buildEmbeddedIfaceMethodCall(sel, recv, e.ArgList); inv != nil {
@@ -5463,24 +5481,36 @@ func (fb *ssaFuncBuilder) reportUndefinedField(sel *syntax.SelectorExpr, t Type)
 		return
 	}
 	// Operand kinds whose method set stage4 cannot resolve completely are
-	// skipped: interfaces and type parameters (the methods live in the
-	// constraint), function signatures and tuples, and a pointer that the
-	// single unwrap above did not reach. Named types are judged by their
-	// underlying kind, which became safe once a function-typed field call
-	// reported itself handled even when it returns nothing: the misses that
-	// looked like unknown fields on captured or cross-package receivers were
-	// really dropped void func-field calls.
+	// skipped: type parameters (the methods live in the constraint), function
+	// signatures and tuples, and a pointer that the single unwrap above did not
+	// reach. Named types are judged by their underlying kind, which became safe
+	// once a function-typed field call reported itself handled even when it
+	// returns nothing: the misses that looked like unknown fields on captured or
+	// cross-package receivers were really dropped void func-field calls.
+	//
+	// An interface IS judged, but only a non-empty one. Its method set is
+	// written down in the interface itself, so a name that is not in it is
+	// always an error - go/types agrees. An EMPTY interface is also how the
+	// compiler spells an interface it has not resolved yet (NewTCInterface(nil,
+	// nil) is used as a placeholder in the guard paths), and reporting on a
+	// placeholder would be the false error the skip was protecting against.
 	u := SafeUnderlying(t)
-	switch u.(type) {
-	case *TCInterface, *TypeParam, *Signature, *Tuple, *Pointer:
-		return
+	if ifc, isIface := u.(*TCInterface); isIface {
+		if ifc.IsEmpty() {
+			return
+		}
+	} else {
+		switch u.(type) {
+		case *TypeParam, *Signature, *Tuple, *Pointer:
+			return
+		}
 	}
 	name := ""
 	if t != nil {
 		name = t.String()
 	}
 	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-	push(cctx.compileErrors, sel.Sel.Value | " undefined (type " | name | " has no field or method " | sel.Sel.Value | ")")
+	push(cctx.compileErrors, fb.errPos() | sel.Sel.Value | " undefined (type " | name | " has no field or method " | sel.Sel.Value | ")")
 }
 
 func (fb *ssaFuncBuilder) buildSelector(e *syntax.SelectorExpr) (s SSAValue) {
@@ -7828,14 +7858,27 @@ func (fb *ssaFuncBuilder) buildEmbeddedIfaceMethodCall(sel *syntax.SelectorExpr,
 	return nil
 }
 
-func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *syntax.SelectorExpr, recv SSAValue, argExprs []syntax.Expr) (s SSAValue) {
+// buildIfaceMethodCall lowers `recv.M(args)` where recv is an interface value
+// into an SSAInvoke. handled distinguishes the three outcomes the caller must
+// not confuse: false means recv is not an interface, so another path owns the
+// call; true with a nil value means M IS in the interface and returns nothing;
+// true with a value is the invoke itself.
+//
+// The method is looked up BEFORE anything is emitted. The previous shape built
+// the arguments and emitted the invoke first and then used `retType == nil` as
+// a proxy for "this was not a method call", which is also how a VOID method
+// reports itself - so a name the interface does not have still produced an
+// invoke, the caller saw nil and fell through as if nothing had been emitted,
+// and `i.Bytes()` on an interface without Bytes evaluated to nil, silently
+// printing 0. go/types rejects that call.
+func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *syntax.SelectorExpr, recv SSAValue, argExprs []syntax.Expr) (s SSAValue, handled bool) {
 	typ := recv.SSAType()
 	if p6, ok43 := SafeUnderlying(typ).(*Pointer); ok43 {
 		typ = p6.Base
 	}
 	iface, ok := SafeUnderlying(typ).(*TCInterface)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	var methodSig *Signature
 	for i := 0; i < iface.NumMethods(); i++ {
@@ -7848,8 +7891,11 @@ func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *syntax.SelectorExpr, recv SS
 			break
 		}
 	}
+	if methodSig == nil {
+		return nil, false
+	}
 	var retType Type
-	if methodSig != nil && methodSig.Results != nil {
+	if methodSig.Results != nil {
 		if methodSig.Results.Len() == 1 {
 			retType = methodSig.Results.At(0).Typ
 		} else if methodSig.Results.Len() > 1 {
@@ -7867,9 +7913,9 @@ func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *syntax.SelectorExpr, recv SS
 	inv.name = fb.nextName()
 	fb.emit(inv)
 	if retType == nil {
-		return nil
+		return nil, true
 	}
-	return inv
+	return inv, true
 }
 
 func (fb *ssaFuncBuilder) resolveType(e syntax.Expr) (t Type) {
