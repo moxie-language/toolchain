@@ -3343,3 +3343,109 @@ that risks the bootstrap again without the bisect above.
 **gone**. `grep -rn 'makeStrongFromWeak|strongFromWeak' src/ _mxc_stage4/
 legacy/` returns nothing, so the `weak` removal (`6cd8a7ca`) already closed that
 objective item - there is no dead reference left to remove.
+
+# ============ UPDATE: generic instantiation root cause, typed constants, net/http ============
+
+Commits this stretch: `f73b4670` (descriptors), `ab055a7b` (constants),
+`5cf911b8` + `49f2c482` (net/http). Full suite green at 185 PASS with
+`selfhost:fixpoint` PASS after each compiler change. Tree clean.
+
+## THE ROOT CAUSE OF THE WHOLE GENERIC-INSTANTIATION FAMILY
+
+`typeDescName` returned `named:pkg.Name` for a Named and **dropped TArgs**, so
+two instantiations of one generic type shared ONE descriptor symbol and ONE
+descriptor name. Verified before the change: the object contained a single
+`named:main.CurveImpl` and a single `struct:{Name:basic:bytes}` for
+`CurveImpl[P256Point]` and `CurveImpl[P384Point]`, while the monomorphizer had
+correctly emitted `(*CurveImpl).TagOf__main.P256Point` and
+`...__main.P384Point`. Two bugs at once: `linkonce_odr` descriptors for two
+different layouts collide, and interface dispatch cannot tell the instantiations
+apart, so an arm for one answers for the other.
+
+After the fix: `named:main.CurveImpl[named:main.P256Point]` and
+`named:main.CurveImpl[named:main.P384Point]`.
+
+The name is also a ROUND TRIP - `emitTypeDesc` re-derives the Type from the tail
+via `typeFromTail` - so `tailStripTArgs` (bracket-depth-0 split) and
+`instantiateTail` were added; without them the field re-derived as
+`basic:invalid` and the struct descriptor was emitted under a name that was
+never defined:
+
+  error: use of undefined value
+  '@reflect/types.type:struct:{b:named:main.Box[basic:int32]}'
+
+Caught by `tests/regressions/should_compile/generic_type_method.mx`.
+
+This is a stage4-only divergence: legacy's writer returns `t.String()` for a
+`*types.Named`, and Go's `Named.String()` already prints an instantiation's
+arguments.
+
+## Constants: a TYPED constant now keeps its type
+
+Two defects behind net/http's `time.Duration` cluster:
+1. `checkAssignable` judged a typed constant by the untyped kind-class rule
+   (`constClass` lumps every integer kind together), so
+   `const Nano int64 = 1; var y int32 = Nano` was ACCEPTED. Now only genuine
+   untypedness takes that leniency.
+2. `tcInferConstTypeFromExpr` did not resolve a reference to another constant, so
+   every spec after the first in a const group fell through to
+   `UntypedTypeOfCV`: `Microsecond = 1000 * Nanosecond` lost `Duration`, so
+   `time.Second` was untyped and `5 * time.Second` defaulted to int32 and
+   overflowed. It now reads the referenced constant's recorded type (plain name
+   and `pkg.Const`).
+
+Verified with minimal probes at 1/2/3/4 chain depths plus the minimal
+`const Nano int64 = 1` / `var y int32 = Nano` case.
+
+## net/http: type-checks completely now
+
+Order of the blockers, each one exposed by fixing the previous:
+1. 229 `; ` rule violations -> 0 (37 sovereign-loop + 192 shadowing; they were
+   TWO classes, not one).
+2. 12 positioned type errors -> 0: six were the `time.Duration` cluster (fixed by
+   the constant work), three were a pointer where a value is wanted
+   (`Header()`, and both `Consume` returns), one was `uint8 as rune` (Moxie's
+   range-over-string yields bytes), three were the `handler` method value.
+3. `cannot resolve type of short var handler ... (rhs=nil)` -> gone, same cause
+   as the method value.
+4. **WHAT REMAINS: one clang failure.**
+
+     ./tmp/mxc-build-*/._src_net_http.ll:7338:13: error:
+     '%t4' defined with type 'ptr' but expected 'i32'
+       store i32 %t4, ptr %ml4
+
+   `-a` reproduces it, so it is not a stale descriptor cache. It became
+   reachable only because the fixes let codegen run at all (before, the type
+   errors stopped the build), so there is no baseline to diff against. The
+   immediate suspect is the field whose type changed from a one-word func to a
+   two-word interface (`http2unstartedHandler.handler`), but `llvmNamedType`
+   DOES unwrap a Named-over-interface to `ifaceType()`, so the `i32` comes from
+   somewhere else. NEXT STEP: keep the IR. It is streamed to
+   `./tmp/mxc-build-<pid>/<safeName>.ll` and deleted at exit, so run the build in
+   the background and copy the file while clang runs, or find the flag that sets
+   `printIR` (main.mx:6178/6197) and capture stdout. Then read the store's
+   destination GEP and the value chain around line 7338.
+
+## fmt: a Named type over a basic prints "?"
+
+FOUND, NOT FIXED (two attempts reverted rather than left unverified):
+
+    type Dur int64
+    var d Dur = 68
+    fmt.Println(d)        -> ?        (must print 68)
+    fmt.Println(int64(d)) -> 68
+    type WithString int64; func (w *WithString) String() string {...}
+    fmt.Println(w)        -> custom   (a Named type WITH its own String works)
+    fmt.Println(byte(65)) -> 65       (a universe named basic works)
+    fmt.Println(int32(66))-> 66
+
+`?` is `fmt`'s `unknownType` (print.mx:359): `printArg`'s default arm calls
+`handleMethods`, and when it returns false `unknownType` writes a bare `?`.
+`handleMethods` decides by an interface assertion, so the missing piece is an
+assert/dispatch entry for the Named type. Adding an arm to `findIfaceImpls`'
+`moxie.stringer` block that borrows `runtime.(*int64).String` for the Named and
+`*Named` receiver types did NOT change the output, so the assertion path is not
+reading that table the way assumed. NEXT STEP: instrument `findIfaceImpls` to
+report whether it registers an arm for the named type at all, then find which
+table `emitIfaceAssertOK` consults for a Stringer assertion. This is broad - it
+makes `fmt` useless for `time.Duration` and every named basic type.
