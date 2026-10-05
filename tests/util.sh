@@ -65,12 +65,11 @@ compile_and_run() {
 		if grep -qE "error:.*defined with type.*but expected" "$log" 2>/dev/null; then
 			return 1
 		fi
-		if grep -qE "undefined symbol: main\." "$log" 2>/dev/null; then
-			return 0
-		fi
-		if grep -q "linker failed" "$log" 2>/dev/null; then
-			return 0
-		fi
+		# A fixture whose link fails must FAIL. These two guards returned 0 for
+		# "undefined symbol: main." and for any linker failure, so a fixture
+		# that never linked was reported as a PASS - which is how a broken
+		# entry point stayed invisible. The root cause was fixed; a guard that
+		# turns a non-linking binary into a pass is a smell, not a tolerance.
 		return 1
 	fi
 	"$out/$name" >"$out/run.log" 2>&1 || return 1

@@ -2683,12 +2683,24 @@ cause, verified by running, committed, with the full suite green (179 now) and
 | `a3aa971f`, `af460679`, `10f28a45` | generic methods: routed through the monomorphizing path, void methods report handled, field types substitute through the instantiated Named's `TArgs` (not just a body's `subst`), and an instantiated generic is identified by `TArgs` because `TParams` can be empty |
 | `0435870d`-range | soundness checks ungated (assignment, arity, const representability, default repr) with `errPos` naming `file:line`, plus the wave: the constant-typing bug above, 20 `unsafe.Pointer` conversions in `src/net`, and `pkg/rewrite`'s `[]typeapi.Type` vs `[]types.Type` |
 
-Uncommitted in the tree at handover: `tests/util.sh` (the masking guards are
-removed; verified 179/0 in the run that removed them) and
-`_mxc_stage4/ir_typecheck.mx` (the stripper now blanks instead of deleting, is
-comment- and balance-aware; phase 0/1 and the fixpoint passed with it, the
-final phase-5 pass was cut off by the context refresh), plus the ed25519 agent's
-`src/crypto/ed25519/ed25519.mx`, `src/crypto/x509/{x509,parser}.mx`.
+VERIFIED TOGETHER, rc=0, 179 PASS, `selfhost:fixpoint` PASS (`stage2 ==
+stage3`): `tests/util.sh` with the masking guards removed AND
+`_mxc_stage4/ir_typecheck.mx` with the blanking, comment-aware, balance-aware
+`stripUnusedConsts`. The stripping pass now writes `//` over a stripped line
+and keeps its `\n`, so the concatenated line count - and therefore every
+diagnostic line number after the const block - stays correct.
+
+Still uncommitted at handover: the ed25519 agent's
+`src/crypto/ed25519/ed25519.mx`, `src/crypto/x509/{x509,parser}.mx`
+(struct-wrapping `PublicKey`/`PrivateKey`; not yet through a suite or a
+tls+x509+ed25519 probe).
+
+WOOD LAW DEBT found while landing the above: `stripUnusedConsts` was added in
+`21a09393` ("dead constant elimination pass") in `_mxc_stage4` only.
+`legacy/` has no such pass, so the two compilers do not accept the same input:
+stage4 drops an unused const declaration before parsing, legacy parses it. It
+is latent today (legacy builds stage4 fine and the fixpoint holds), but it is a
+bilateral violation and belongs on the list.
 
 ## THE TODO LIST
 
@@ -2721,9 +2733,15 @@ final phase-5 pass was cut off by the context refresh), plus the ed25519 agent's
    `internal/trace/internal/tracev1`** codegen bugs: `unsafe.TypeOf(*x)` +
    `binary.Write` struct loads, a `text/tabwriter` null-pointer, and a clang
    `-c` failure. Not source-attributable so far.
-7. **`tests/util.sh`** masking guards REMOVED (uncommitted). The relative-path
-   entry point turned out to be Go's own rule (a bare path is an import path),
-   so correct this file's earlier "entry point" note if you touch it.
+7. **`tests/util.sh`** masking guards REMOVED and VERIFIED (179 PASS, rc=0).
+   The relative-path entry point turned out to be Go's own rule (a bare path is
+   an import path), so correct this file's earlier "entry point" note if you
+   touch it. A fixture that does not link now FAILS, which is what exposed the
+   whole `undefined symbol: main.` family in the first place.
+7b. **WOOD LAW: mirror `stripUnusedConsts` into `legacy/`** (see the note
+   above). Legacy must drop an unused const declaration before parsing exactly
+   as stage4 does, and the mirror must also blank-not-delete so line numbers
+   agree across the two compilers.
 8. **`crypto/ed25519`** struct wrapper DONE in the working tree, uncommitted, by
    the agent: `PublicKey`/`PrivateKey` are structs with pointer receivers, the
    probe passes, `tls` needs no change. It also found THREE pre-existing

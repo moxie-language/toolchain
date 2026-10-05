@@ -201,14 +201,26 @@ func stripUnusedConsts(src []byte) (out []byte) {
 				cname := string(src[ns:ne])
 				exported := cname[0] >= 'A' && cname[0] <= 'Z'
 				if !refs[cname] && !exported && constLineIsComplete(src, ls, ne) {
-					// Skip this line - const not referenced in any function
-					// body. Exported consts are kept: importers may use them
-					// (e.g. sha256.BlockSize as an array length).
+					// Blank the line rather than deleting it. The declaration
+					// is provably contained in this one line, and the
+					// diagnostic remapper maps concatenated line numbers back
+					// to file:line - so dropping a line moved every LATER
+					// position and a parse error was reported against the wrong
+					// file entirely (net/http's blocker was blamed on clone.mx
+					// and was really elsewhere). Exported consts are kept:
+					// importers may use them (sha256.BlockSize as an array
+					// length).
+					out = mxutil.Ensure(out, 1)
+					push(out, '/')
+					out = mxutil.Ensure(out, 1)
+					push(out, '/')
 					for i < len(src) && src[i] != '\n' {
 						i++
 					}
 					if i < len(src) {
-						i++ // skip newline
+						out = mxutil.Ensure(out, 1)
+						push(out, '\n')
+						i++
 					}
 					continue
 				}
@@ -249,6 +261,7 @@ func constLineIsComplete(src []byte, lineStart, nameEnd int32) (ok bool) {
 	end := le
 	inStr := false
 	var quote byte = 0
+	depth := int32(0)
 	for k := lineStart; k+1 < le; k++ {
 		c := src[k]
 		if inStr {
@@ -270,6 +283,19 @@ func constLineIsComplete(src []byte, lineStart, nameEnd int32) (ok bool) {
 			end = k
 			break
 		}
+		if c == '(' || c == '[' || c == '{' {
+			depth++
+		} else if c == ')' || c == ']' || c == '}' {
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	// A bracketed value left open at end of line continues on the next line
+	// (const x = []T{ / ( / foo( ...); stripping its first line left the rest
+	// behind for the parser. Same for an unterminated string.
+	if depth != 0 || inStr {
+		return false
 	}
 	last := end
 	for last > nameEnd && (src[last-1] == ' ' || src[last-1] == '\t' || src[last-1] == '\r') {
