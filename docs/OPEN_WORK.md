@@ -3449,3 +3449,92 @@ reading that table the way assumed. NEXT STEP: instrument `findIfaceImpls` to
 report whether it registers an arm for the named type at all, then find which
 table `emitIfaceAssertOK` consults for a Stringer assertion. This is broad - it
 makes `fmt` useless for `time.Duration` and every named basic type.
+
+# ============ UPDATE: the net/http codegen error is a BLANK RESULT bug ============
+
+Tree clean at `454e78e1`. The gated state is unchanged (suite was green at 185
+PASS with the compiler as committed; the only change since is `454e78e1`, which
+is stdlib source and not in the compiler's closure).
+
+## Fixed this round
+
+`454e78e1`: `(*ConnState).String` indexed `map[ConnState]string` with `c`, a
+`*ConnState` (the port's pointer receiver where Go has a value), so codegen
+passed the receiver POINTER as the key and stored it into the key's i32 slot:
+
+    '%t4' defined with type 'ptr' but expected 'i32'
+      store i32 %t4, ptr %ml4
+      %t4 = load ptr, ptr %t1        ; %t1 holds the receiver pointer
+
+Now `_stateName()[*c]`. The build advances to the next error, so this site is
+fixed; the package still does not build.
+
+## The remaining error, and what it actually is
+
+    (*Transport).getConn  ->  '%cext100' defined with type 'i64' but expected 'ptr'
+      %cext100 = extractvalue {i64, ptr} %t168, 0
+      store ptr %cext100, ptr %cet101
+      ; then encoded as reflect/types.type:pointer:named:http.persistConn
+      %cext102 = extractvalue {i64, ptr} %t168, 1
+      ; then encoded as the error interface
+
+The exit serialiser took ONE interface value (the error) and decomposed its two
+words as the two return values, feeding the interface's TYPE word to the codec as
+the `*persistConn`. **The cause is a blank result**: getConn's signature is
+
+    func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (_ *persistConn, err error)
+
+so `NamedResults` holds ONE entry (`err`) while the signature has TWO results. A
+temporary print in emitReturn, gated on `sig.Results.Len() > 1`, produced:
+
+    DBGRET (*Transport).getConn ssaResults=1 sigResults=2 named=1 atline=0
+
+`atline=0` means the offending `SSAReturn` carries no source position - it is
+synthetic or position-less, NOT one of getConn's three explicit two-value
+returns (`return nil, er6`, `return r.pc, r.err`, `return nil, er7`). Finding
+which synthetic return loses a result is the next step; candidates are
+`buildReturn`'s self-tail-call path (`isSelfTailCall` -> jump to `tailBlock`) and
+the synthetic return builders at ssa_builder.mx 1154/1238/4385/5659 (4385 and
+5659 build a SEPARATE wrapper/thunk function, so they would print a different
+function name, which is why the tail-call path is the prime suspect).
+
+## Two more real defects found on the way, ATTEMPTED AND REVERTED
+
+1. **The bare-return value list mis-aligns named results with result
+   POSITIONS.** In `buildReturn`'s `len(fb.namedResults) > 0` branch the named
+   results are pushed in order and then paired with `Signature.Results.At(i)`.
+   For `(_ *Inner, err error)` that compares `err` against `_`'s type:
+       main.mx:22: cannot use value of type interface{Error() string; String()
+       string} as *main.Inner in return statement (an interface value needs a
+       type assertion)
+   A bare return in such a function is legal Go and must yield BOTH results with
+   the blank one zero. Nothing in the tree hits it yet except net/http's shape,
+   so it is invisible today.
+2. **The exit serialiser's single-value shortcut keys on the wrong count.** In
+   `emitReturn`, `if len(e.curFunc.NamedResults) == 1` takes the "this value is
+   the whole result" path. It must require `Signature.Results.Len() == 1` too:
+   NamedResults is the NAMED results, which is not the result set once a result
+   is blank. This is what turns one interface value into a two-result payload
+   for the codec.
+
+I implemented both (aligning named results to positions, zeroing the blank one
+with `NewSSAConst(&ConstNil{}, res.Typ)`, and widening the shortcut's guard), and
+a focused probe - `func (h *Holder) Get(bad bool) (_ *Inner, err error)` with a
+bare `return` - PASSED against it. That pass was a CACHE ARTIFACT: the probe build
+did not use `-a`. Made into a fixture
+(`tests/regressions/should_compile/blank_result_bare_return.mx`) and run by the
+suite with a clean build, it FAILED with a different codegen error:
+
+    '%t10' defined with type 'i32' but expected '{ ptr, i64, i64 }'
+      %cc29 = extractvalue {ptr, i64, i64} %t10, 0
+
+so the `ConstNil` zero I synthesised for the blank result is not a valid value
+for the codec path. **Both changes and the fixture are reverted**, and the suite
+is back to its gated state. The next attempt should build the blank result's
+zero the way the rest of the compiler does (find how `nil` reaches an SSA value
+for a pointer result - `NewSSAConst(&ConstNil{}, t)` is evidently not it, or the
+type passed is wrong), and MUST verify with `-a`.
+
+LESSON, again: a passing probe is only evidence if the build was forced. Every
+compiler verification in this session used `-a` except this one, and it cost a
+revert.
