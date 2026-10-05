@@ -2574,7 +2574,23 @@ passes natively and on wasm. Full suite: 177 passed / 0 failed, fixpoint holds.
    wrong. Repro: `/tmp/genL2` - `lib.Use()` returns `b.Get().tag` where
    `Get() (out T)` and `b` is a `Box[E]`; it links and then panics.
 
-## A multi-value return from a generic method loses its values (new, reproduced)
+## [FIXED, and the earlier diagnosis was WRONG] a generic method's receiver was copied
+
+The "two-result return from a generic method loses its values" recorded below was
+not a tuple/codec bug at all. `tryGenericMethodCall` built a temporary alloca,
+stored a VALUE copy of the receiver into it and passed that, so every receiver
+write went into the temporary: `o.queue.push`'s `q.end++` vanished, the next
+`o.queue.pop()` saw `start == end` and returned the zero value and false. A
+single-result method lost its write identically, and the two-result shape only
+made it look like decoding. Local variables were unaffected because the code
+looked up `fb.vars` for a NAMED LOCAL and used its alloca - which is exactly why
+the fixture passed while `o.queue` and `h.b` did not. Fixed in 9cfaafb2: the
+receiver's address is taken whenever it is addressable (`buildOperandAddr`), and
+only a genuinely non-addressable receiver is copied. The fixture now mutates
+through a Holder's Box field and reads the state back across calls; the suite is
+179/179 with the fixpoint holding.
+
+## [SUPERSEDED] A multi-value return from a generic method loses its values
 
 While narrowing `src/internal/trace` I found a second, sharper defect in the same
 area, and it is **silent data loss**, not a link error:
