@@ -363,9 +363,9 @@ func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTi
 			return nop, alwaysFalse
 		}
 
-		var cancelCtx context.CancelFunc
-		req.ctx, cancelCtx = context.WithDeadline(oldCtx, deadline)
-		return cancelCtx.Cancel, func() bool { return time.Now().After(deadline) }
+		var cancelCtxDeadline context.CancelFunc
+		req.ctx, cancelCtxDeadline = context.WithDeadline(oldCtx, deadline)
+		return cancelCtxDeadline.Cancel, func() bool { return time.Now().After(deadline) }
 	}
 	initialReqCancel := req.Cancel // the user's original Request.Cancel, if any
 
@@ -457,8 +457,8 @@ func basicAuth(username, password string) (rs string) {
 //
 // To make a request with a specified context.Context, use [NewRequestWithContext]
 // and DefaultClient.Do.
-func Get(url string) (resp *Response, err error) {
-	return DefaultClient().Get(url)
+func Get(urlStr string) (resp *Response, err error) {
+	return DefaultClient().Get(urlStr)
 }
 
 // Get issues a GET to the specified URL. If the response is one of the
@@ -484,8 +484,8 @@ func Get(url string) (resp *Response, err error) {
 //
 // To make a request with a specified context.Context, use [NewRequestWithContext]
 // and Client.Do.
-func (c *Client) Get(url string) (resp *Response, err error) {
-	req, err := NewRequest("GET", url, nil)
+func (c *Client) Get(urlStr string) (resp *Response, err error) {
+	req, err := NewRequest("GET", urlStr, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -650,17 +650,17 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 				// observed in the wild. See issues #17773 and #49281.
 				return resp, nil
 			}
-			u, err := req.URL.Parse(loc)
-			if err != nil {
+			u, er2 := req.URL.Parse(loc)
+			if er2 != nil {
 				resp.closeBody()
-				return nil, uerr(fmt.Errorf("failed to parse Location header %q: %v", loc, err))
+				return nil, uerr(fmt.Errorf("failed to parse Location header %q: %v", loc, er2))
 			}
 			host := ""
 			if req.Host != "" && req.Host != req.URL.Host {
 				// If the caller specified a custom Host header and the
 				// redirect location is relative, preserve the Host header
 				// through the redirect. See issue #22233.
-				if u, _ := url.Parse(loc); u != nil && !u.IsAbs() {
+				if absU, _ := url.Parse(loc); absU != nil && !absU.IsAbs() {
 					host = req.Host
 				}
 			}
@@ -675,10 +675,10 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 				ctx:      ireq.ctx,
 			}
 			if includeBody && ireq.GetBody != nil {
-				req.Body, err = ireq.GetBody()
-				if err != nil {
+				req.Body, er2 = ireq.GetBody()
+				if er2 != nil {
 					resp.closeBody()
-					return nil, uerr(err)
+					return nil, uerr(er2)
 				}
 				req.GetBody = ireq.GetBody
 				req.ContentLength = ireq.ContentLength
@@ -700,12 +700,12 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 			if ref := refererForURL(reqs[len(reqs)-1].URL, req.URL, req.Header.Get("Referer")); ref != "" {
 				req.Header.Set("Referer", ref)
 			}
-			err = c.checkRedirect(req, reqs)
+			er2 = c.checkRedirect(req, reqs)
 
 			// Sentinel error to let users select the
 			// previous response, without closing its
 			// body. See Issue 10069.
-			if err == ErrUseLastResponse {
+			if er2 == ErrUseLastResponse {
 				return resp, nil
 			}
 
@@ -720,12 +720,12 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 			}
 			resp.Body.Close()
 
-			if err != nil {
+			if er2 != nil {
 				// Special case for Go 1 compatibility: return both the response
 				// and an error if the CheckRedirect function failed.
 				// See https://golang.org/issue/3795
 				// The resp.Body has already been closed.
-				ue := uerr(err)
+				ue := uerr(er2)
 				ue.(*url.Error).URL = loc
 				return resp, ue
 			}
@@ -771,8 +771,8 @@ func (c *Client) makeHeadersCopier(ireq *Request) (rbool func(req *Request, stri
 	)
 	if c.Jar != nil && ireq.Header.Get("Cookie") != "" {
 		icookies = map[string][]*Cookie{}
-		for _, c := range ireq.Cookies() {
-			icookies[c.Name] = push(icookies[c.Name], c)
+		for _, ck := range ireq.Cookies() {
+			icookies[ck.Name] = push(icookies[ck.Name], ck)
 		}
 	}
 
@@ -850,8 +850,8 @@ func defaultCheckRedirect(req *Request, via []*Request) (rerr error) {
 //
 // To make a request with a specified context.Context, use [NewRequestWithContext]
 // and DefaultClient.Do.
-func Post(url, contentType string, body io.Reader) (resp *Response, err error) {
-	return DefaultClient().Post(url, contentType, body)
+func Post(urlStr, contentType string, bodyReader io.Reader) (resp *Response, err error) {
+	return DefaultClient().Post(urlStr, contentType, bodyReader)
 }
 
 // Post issues a POST to the specified URL.
@@ -868,8 +868,8 @@ func Post(url, contentType string, body io.Reader) (resp *Response, err error) {
 //
 // See the [Client.Do] method documentation for details on how redirects
 // are handled.
-func (c *Client) Post(url, contentType string, body io.Reader) (resp *Response, err error) {
-	req, err := NewRequest("POST", url, body)
+func (c *Client) Post(urlStr, contentType string, bodyReader io.Reader) (resp *Response, err error) {
+	req, err := NewRequest("POST", urlStr, bodyReader)
 	if err != nil {
 		return nil, err
 	}
@@ -893,8 +893,8 @@ func (c *Client) Post(url, contentType string, body io.Reader) (resp *Response, 
 //
 // To make a request with a specified [context.Context], use [NewRequestWithContext]
 // and DefaultClient.Do.
-func PostForm(url string, data url.Values) (resp *Response, err error) {
-	return DefaultClient().PostForm(url, data)
+func PostForm(urlStr string, data url.Values) (resp *Response, err error) {
+	return DefaultClient().PostForm(urlStr, data)
 }
 
 // PostForm issues a POST to the specified URL,
@@ -911,8 +911,8 @@ func PostForm(url string, data url.Values) (resp *Response, err error) {
 //
 // To make a request with a specified context.Context, use [NewRequestWithContext]
 // and Client.Do.
-func (c *Client) PostForm(url string, data url.Values) (resp *Response, err error) {
-	return c.Post(url, "application/x-www-form-urlencoded", bytes.NewReader(data.Encode()))
+func (c *Client) PostForm(urlStr string, data url.Values) (resp *Response, err error) {
+	return c.Post(urlStr, "application/x-www-form-urlencoded", bytes.NewReader(data.Encode()))
 }
 
 // Head issues a HEAD to the specified URL. If the response is one of
@@ -929,8 +929,8 @@ func (c *Client) PostForm(url string, data url.Values) (resp *Response, err erro
 //
 // To make a request with a specified [context.Context], use [NewRequestWithContext]
 // and DefaultClient.Do.
-func Head(url string) (resp *Response, err error) {
-	return DefaultClient().Head(url)
+func Head(urlStr string) (resp *Response, err error) {
+	return DefaultClient().Head(urlStr)
 }
 
 // Head issues a HEAD to the specified URL. If the response is one of the
@@ -945,8 +945,8 @@ func Head(url string) (resp *Response, err error) {
 //
 // To make a request with a specified [context.Context], use [NewRequestWithContext]
 // and [Client.Do].
-func (c *Client) Head(url string) (resp *Response, err error) {
-	req, err := NewRequest("HEAD", url, nil)
+func (c *Client) Head(urlStr string) (resp *Response, err error) {
+	req, err := NewRequest("HEAD", urlStr, nil)
 	if err != nil {
 		return nil, err
 	}

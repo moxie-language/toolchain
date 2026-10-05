@@ -93,8 +93,8 @@ func (n *routingNode) addChild(key []byte) (rroutingNode *routingNode) {
 		}
 		return n.emptyChild
 	}
-	if c := n.findChild(key); c != nil {
-		return c
+	if a := n.findChild(key); a != nil {
+		return a
 	}
 	c := &routingNode{}
 	n.children.add(key, c)
@@ -115,44 +115,44 @@ func (n *routingNode) findChild(key []byte) (rroutingNode *routingNode) {
 // of values for pattern wildcards in the order that the wildcards appear.
 // For example, if the request path is "/a/b/c" and the pattern is "/{x}/b/{y}",
 // then the second return value will be [][]byte{"a", "c"}.
-func (root *routingNode) match(host, method, path []byte) (rroutingNode *routingNode, rbyte [][]byte) {
+func (root *routingNode) match(host, method, pat2 []byte) (rroutingNode *routingNode, rbyte [][]byte) {
 	if host != "" {
 		// There is a host. If there is a pattern that specifies that host and it
 		// matches, we are done. If the pattern doesn't match, fall through to
 		// try patterns with no host.
-		if l, m := root.findChild(host).matchMethodAndPath(method, path); l != nil {
+		if l, m := root.findChild(host).matchMethodAndPath(method, pat2); l != nil {
 			return l, m
 		}
 	}
-	return root.emptyChild.matchMethodAndPath(method, path)
+	return root.emptyChild.matchMethodAndPath(method, pat2)
 }
 
 // matchMethodAndPath matches the method and path.
 // Its return values are the same as [routingNode.match].
 // The receiver should be a child of the root.
-func (n *routingNode) matchMethodAndPath(method, path []byte) (rroutingNode *routingNode, rbyte [][]byte) {
+func (n *routingNode) matchMethodAndPath(method, pat3 []byte) (rroutingNode *routingNode, rbyte [][]byte) {
 	if n == nil {
 		return nil, nil
 	}
-	if l, m := n.findChild(method).matchPath(path, nil); l != nil {
+	if l, m := n.findChild(method).matchPath(pat3, nil); l != nil {
 		// Exact match of method name.
 		return l, m
 	}
 	if method == "HEAD" {
 		// GET matches HEAD too.
-		if l, m := n.findChild("GET").matchPath(path, nil); l != nil {
+		if l, m := n.findChild("GET").matchPath(pat3, nil); l != nil {
 			return l, m
 		}
 	}
 	// No exact match; try patterns with no method.
-	return n.emptyChild.matchPath(path, nil)
+	return n.emptyChild.matchPath(pat3, nil)
 }
 
 // matchPath matches a path.
 // Its return values are the same as [routingNode.match].
 // matchPath calls itself recursively. The matches argument holds the wildcard matches
 // found so far.
-func (n *routingNode) matchPath(path []byte, matches [][]byte) (rroutingNode *routingNode, rbyte [][]byte) {
+func (n *routingNode) matchPath(pat4 []byte, matches [][]byte) (rroutingNode *routingNode, rbyte [][]byte) {
 	if n == nil {
 		return nil, nil
 	}
@@ -160,20 +160,20 @@ func (n *routingNode) matchPath(path []byte, matches [][]byte) (rroutingNode *ro
 	// If n is a leaf node, we found a match; return it.
 	// If n is an interior node (which means it has a nil pattern),
 	// then we failed to match.
-	if path == "" {
+	if pat4 == "" {
 		if n.pattern == nil {
 			return nil, nil
 		}
 		return n, matches
 	}
 	// Get the first segment of path.
-	seg, rest := firstSegment(path)
+	seg, rest := firstSegment(pat4)
 	// First try matching against patterns that have a literal for this position.
 	// We know by construction that such patterns are more specific than those
 	// with a wildcard at this position (they are either more specific, equivalent,
 	// or overlap, and we ruled out the first two when the patterns were registered).
-	if n, m := n.findChild(seg).matchPath(rest, matches); n != nil {
-		return n, m
+	if b, m := n.findChild(seg).matchPath(rest, matches); b != nil {
+		return b, m
 	}
 	// If matching a literal fails, try again with patterns that have a single
 	// wildcard (represented by an empty string in the child mapping).
@@ -182,8 +182,8 @@ func (n *routingNode) matchPath(path []byte, matches [][]byte) (rroutingNode *ro
 	// We skip this step if the segment is a trailing slash, because single wildcards
 	// don't match trailing slashes.
 	if seg != "/" {
-		if n, m := n.emptyChild.matchPath(rest, push(matches, seg)); n != nil {
-			return n, m
+		if d, m := n.emptyChild.matchPath(rest, push(matches, seg)); d != nil {
+			return d, m
 		}
 	}
 	// Lastly, match the pattern (there can be at most one) that has a multi
@@ -193,7 +193,7 @@ func (n *routingNode) matchPath(path []byte, matches [][]byte) (rroutingNode *ro
 		// trailing slash in the pattern).
 		if c.pattern.lastSegment().s != "" {
 			matches = mxutil.Ensure(matches, 1)
-			matches = push(matches, pathUnescape(path[1:])) // remove initial slash
+			matches = push(matches, pathUnescape(pat4[1:])) // remove initial slash
 		}
 		return c, matches
 	}
@@ -204,36 +204,36 @@ func (n *routingNode) matchPath(path []byte, matches [][]byte) (rroutingNode *ro
 // The path must begin with "/".
 // If path consists of only a slash, firstSegment returns ("/", "").
 // The segment is returned unescaped, if possible.
-func firstSegment(path []byte) (seg, rest []byte) {
-	if path == "/" {
+func firstSegment(pat5 []byte) (seg, rest []byte) {
+	if pat5 == "/" {
 		return "/", ""
 	}
-	path = path[1:] // drop initial slash
-	i := bytes.IndexByte(path, '/')
+	pat5 = pat5[1:] // drop initial slash
+	i := bytes.IndexByte(pat5, '/')
 	if i < 0 {
-		i = len(path)
+		i = len(pat5)
 	}
-	return pathUnescape(path[:i]), path[i:]
+	return pathUnescape(pat5[:i]), pat5[i:]
 }
 
 // matchingMethods adds to methodSet all the methods that would result in a
 // match if passed to routingNode.match with the given host and path.
-func (root *routingNode) matchingMethods(host, path []byte, methodSet map[string]bool) {
+func (root *routingNode) matchingMethods(host, pat6 []byte, methodSet map[string]bool) {
 	if host != "" {
-		root.findChild(host).matchingMethodsPath(path, methodSet)
+		root.findChild(host).matchingMethodsPath(pat6, methodSet)
 	}
-	root.emptyChild.matchingMethodsPath(path, methodSet)
+	root.emptyChild.matchingMethodsPath(pat6, methodSet)
 	if methodSet["GET"] {
 		methodSet["HEAD"] = true
 	}
 }
 
-func (n *routingNode) matchingMethodsPath(path []byte, set map[string]bool) {
+func (n *routingNode) matchingMethodsPath(pat7 []byte, set map[string]bool) {
 	if n == nil {
 		return
 	}
 	n.children.eachPair(func(method string, c *routingNode) bool {
-		if p, _ := c.matchPath(path, nil); p != nil {
+		if p, _ := c.matchPath(pat7, nil); p != nil {
 			set[method] = true
 		}
 		return true

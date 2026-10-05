@@ -287,8 +287,8 @@ func (c *conn) hijackLocked() (rwc net.Conn, buf *bufio.ReadWriter, err error) {
 	rwc.SetDeadline(time.Time{})
 
 	if c.r.hasByte {
-		if _, err := c.bufr.Peek(c.bufr.Buffered() + 1); err != nil {
-			return nil, nil, fmt.Errorf("unexpected Peek failure reading buffered byte: %v", err)
+		if _, er2 := c.bufr.Peek(c.bufr.Buffered() + 1); er2 != nil {
+			return nil, nil, fmt.Errorf("unexpected Peek failure reading buffered byte: %v", er2)
 		}
 	}
 	c.bufw.Reset(rwc)
@@ -556,10 +556,10 @@ func (w *response) ReadFrom(src io.Reader) (n int64, err error) {
 	// source is available (see golang.org/issue/5660) and provides
 	// enough bytes to perform Content-Type sniffing when required.
 	if !w.cw.wroteHeader {
-		n0, err := io.CopyBuffer(writerOnly{w}, io.LimitReader(src, sniffLen), buf)
-		n += n0
-		if err != nil || n0 < sniffLen {
-			return n, err
+		n3, er3 := io.CopyBuffer(writerOnly{w}, io.LimitReader(src, sniffLen), buf)
+		n += n3
+		if er3 != nil || n3 < sniffLen {
+			return n, er3
 		}
 	}
 
@@ -568,10 +568,10 @@ func (w *response) ReadFrom(src io.Reader) (n int64, err error) {
 
 	// Now that cw has been flushed, its chunking field is guaranteed initialized.
 	if !w.cw.chunking && w.bodyAllowed() && w.req.Method != "HEAD" {
-		n0, err := rf.ReadFrom(src)
-		n += n0
-		w.written += n0
-		return n, err
+		n4, er4 := rf.ReadFrom(src)
+		n += n4
+		w.written += n4
+		return n, er4
 	}
 
 	n0, err := io.CopyBuffer(writerOnly{w}, src, buf)
@@ -962,8 +962,8 @@ func (c *conn) readRequest(ctx context.Context) (w *response, err error) {
 	req.localAddr = c.rwc.LocalAddr()
 	req.RemoteAddr = c.remoteAddr
 	req.TLS = c.tlsState
-	if body, ok := req.Body.(*body); ok {
-		body.doEarlyClose = true
+	if bod2, ok := req.Body.(*body); ok {
+		bod2.doEarlyClose = true
 	}
 
 	// Adjust the read deadline if necessary.
@@ -1056,9 +1056,9 @@ func relevantCaller() (rframe runtime.Frame) {
 	frames := runtime.CallersFrames(pc[:n])
 	var frame runtime.Frame
 	for {
-		frame, more := frames.Next()
-		if !bytes.HasPrefix(frame.Function, "net/http.") {
-			return frame
+		fram2, more := frames.Next()
+		if !bytes.HasPrefix(fram2.Function, "net/http.") {
+			return fram2
 		}
 		if !more {
 			break
@@ -1635,8 +1635,8 @@ func (w *response) shouldReuseConnection() (rok bool) {
 }
 
 func (w *response) closedRequestBodyEarly() (rok bool) {
-	body, ok := w.req.Body.(*body)
-	return ok && body.didEarlyClose()
+	bod3, ok := w.req.Body.(*body)
+	return ok && bod3.didEarlyClose()
 }
 
 func (w *response) Flush() {
@@ -1854,7 +1854,7 @@ func (c *conn) serve(ctx context.Context) {
 			// TLS, assume they're speaking plaintext HTTP and write a
 			// 400 response on the TLS conn's underlying net.Conn.
 			var reason string
-			if re, ok := err.(tls.RecordHeaderError); ok && re.Conn != nil && tlsRecordHeaderLooksLikeHTTP(re.RecordHeader) {
+			if re, o2 := err.(tls.RecordHeaderError); o2 && re.Conn != nil && tlsRecordHeaderLooksLikeHTTP(re.RecordHeader) {
 				io.WriteString(re.Conn, "HTTP/1.0 400 Bad Request\r\n\r\nClient sent an HTTP request to an HTTPS server.\n")
 				re.Conn.Close()
 				reason = "client sent an HTTP request to an HTTPS server"
@@ -1912,8 +1912,12 @@ func (c *conn) serve(ctx context.Context) {
 		return
 	}
 
+	var w *response
+	var lerr error
+	var req *Request
+	var code int32
 	for {
-		w, err := c.readRequest(ctx)
+		w, lerr = c.readRequest(ctx)
 		if c.r.remain != c.server.initialReadLimitSize() {
 			// If we read any bytes off the wire, we're active.
 			c.setState(c.rwc, StateActive, runHooks)
@@ -1921,11 +1925,11 @@ func (c *conn) serve(ctx context.Context) {
 		if c.server.shuttingDown() {
 			return
 		}
-		if err != nil {
+		if lerr != nil {
 			const errorHeaders = "\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"
 
 			switch {
-			case err == errTooLarge:
+			case lerr == errTooLarge:
 				// Their HTTP client may or may not be
 				// able to read this if we're
 				// responding to them and hanging up
@@ -1936,23 +1940,23 @@ func (c *conn) serve(ctx context.Context) {
 				c.closeWriteAndWait()
 				return
 
-			case isUnsupportedTEError(err):
+			case isUnsupportedTEError(lerr):
 				// Respond as per RFC 7230 Section 3.3.1 which says,
 				//      A server that receives a request message with a
 				//      transfer coding it does not understand SHOULD
 				//      respond with 501 (Unimplemented).
-				code := StatusNotImplemented
+				code = StatusNotImplemented
 
 				// We purposefully aren't echoing back the transfer-encoding's value,
 				// so as to mitigate the risk of cross side scripting by an attacker.
 				fmt.Fprintf(c.rwc, "HTTP/1.1 %d %s%sUnsupported transfer encoding", code, StatusText(code), errorHeaders)
 				return
 
-			case isCommonNetReadError(err):
+			case isCommonNetReadError(lerr):
 				return // don't reply
 
 			default:
-				if v, ok := err.(statusError); ok {
+				if v, ok := lerr.(statusError); ok {
 					fmt.Fprintf(c.rwc, "HTTP/1.1 %d %s: %s%s%d %s: %s", v.code, StatusText(v.code), v.text, errorHeaders, v.code, StatusText(v.code), v.text)
 					return
 				}
@@ -1963,7 +1967,7 @@ func (c *conn) serve(ctx context.Context) {
 		}
 
 		// Expect 100 Continue support
-		req := w.req
+		req = w.req
 		if req.expectsContinue() {
 			if req.ProtoAtLeast(1, 1) && req.ContentLength != 0 {
 				// Wrap the Body reader with one that replies on the connection
@@ -2213,7 +2217,7 @@ func (f *HandlerFunc) ServeHTTP(w ResponseWriter, r *Request) {
 // and sets X-Content-Type-Options to "nosniff".
 // This configures the header properly for the error message,
 // in case the caller had set it up expecting a successful output.
-func Error(w ResponseWriter, error string, code int32) {
+func Error(w ResponseWriter, errMsg string, code int32) {
 	h := w.Header()
 
 	// Delete the Content-Length header, which might be for some other content.
@@ -2230,7 +2234,7 @@ func Error(w ResponseWriter, error string, code int32) {
 	h.Set("Content-Type", "text/plain; charset=utf-8")
 	h.Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(code)
-	fmt.Fprintln(w, error)
+	fmt.Fprintln(w, errMsg)
 }
 
 // NotFound replies to the request with an HTTP 404 not found error.
@@ -2300,8 +2304,8 @@ func (x *methodNotAllowedHandler) ServeHTTP(w ResponseWriter, r *Request) {
 // to "text/html; charset=utf-8" and writes a small HTML body.
 // Setting the Content-Type header to any value, including nil,
 // disables that behavior.
-func Redirect(w ResponseWriter, r *Request, url string, code int32) {
-	if u, err := urlpkg.Parse(url); err == nil {
+func Redirect(w ResponseWriter, r *Request, ur2 string, code int32) {
+	if u, err := urlpkg.Parse(ur2); err == nil {
 		// If url was relative, make its path absolute by
 		// combining with request path.
 		// The client would probably do this for us,
@@ -2314,24 +2318,24 @@ func Redirect(w ResponseWriter, r *Request, url string, code int32) {
 			}
 
 			// no leading http://server
-			if url == "" || url[0] != '/' {
+			if ur2 == "" || ur2[0] != '/' {
 				// make relative path absolute
 				olddir, _ := path.Split(oldpath)
-				url = olddir + url
+				ur2 = olddir + ur2
 			}
 
 			var query string
-			if i := bytes.Index(url, "?"); i != -1 {
-				url, query = url[:i], url[i:]
+			if i := bytes.Index(ur2, "?"); i != -1 {
+				ur2, query = ur2[:i], ur2[i:]
 			}
 
 			// clean up but preserve trailing slash
-			trailing := bytes.HasSuffix(url, "/")
-			url = path.Clean(url)
-			if trailing && !bytes.HasSuffix(url, "/") {
-				url += "/"
+			trailing := bytes.HasSuffix(ur2, "/")
+			ur2 = path.Clean(ur2)
+			if trailing && !bytes.HasSuffix(ur2, "/") {
+				ur2 += "/"
 			}
-			url += query
+			ur2 += query
 		}
 	}
 
@@ -2342,7 +2346,7 @@ func Redirect(w ResponseWriter, r *Request, url string, code int32) {
 	// Do it only if the request didn't already have a Content-Type header.
 	_, hadCT := h["Content-Type"]
 
-	h.Set("Location", hexEscapeNonASCII(url))
+	h.Set("Location", hexEscapeNonASCII(ur2))
 	if !hadCT && (r.Method == "GET" || r.Method == "HEAD") {
 		h.Set("Content-Type", "text/html; charset=utf-8")
 	}
@@ -2350,8 +2354,8 @@ func Redirect(w ResponseWriter, r *Request, url string, code int32) {
 
 	// Shouldn't send the body for POST or HEAD; that leaves GET.
 	if !hadCT && r.Method == "GET" {
-		body := "<a href=\"" + htmlEscape(url) + "\">" + StatusText(code) + "</a>.\n"
-		fmt.Fprintln(w, body)
+		bod4 := "<a href=\"" + htmlEscape(ur2) + "\">" + StatusText(code) + "</a>.\n"
+		fmt.Fprintln(w, bod4)
 	}
 }
 
@@ -2387,8 +2391,8 @@ func (rh *redirectHandler) ServeHTTP(w ResponseWriter, r *Request) {
 //
 // The provided code should be in the 3xx range and is usually
 // [StatusMovedPermanently], [StatusFound] or [StatusSeeOther].
-func RedirectHandler(url string, code int32) (rhandler Handler) {
-	return &redirectHandler{url, code}
+func RedirectHandler(ur3 string, code int32) (rhandler Handler) {
+	return &redirectHandler{ur3, code}
 }
 
 // ServeMux is an HTTP request multiplexer.
@@ -2581,7 +2585,7 @@ func stripHostPort(h string) (rs string) {
 // Handler does not modify its argument. In particular, it does not
 // populate named path wildcards, so r.PathValue will always return
 // the empty string.
-func (mux *ServeMux) Handler(r *Request) (h Handler, pattern string) {
+func (mux *ServeMux) Handler(r *Request) (h Handler, patter2 string) {
 	if _use121() {
 		return mux.mux121.findHandler(r)
 	}
@@ -2597,47 +2601,47 @@ func (mux *ServeMux) findHandler(r *Request) (h Handler, patStr string, _ *patte
 	var n *routingNode
 	host := r.URL.Host
 	escapedPath := r.URL.EscapedPath()
-	path := escapedPath
+	pat3 := escapedPath
 	// CONNECT requests are not canonicalized.
 	if r.Method == "CONNECT" {
 		// If r.URL.Path is /tree and its handler is not registered,
 		// the /tree -> /tree/ redirect applies to CONNECT requests
 		// but the path canonicalization does not.
-		_, _, u := mux.matchOrRedirect(host, r.Method, path, r.URL)
+		_, _, u := mux.matchOrRedirect(host, r.Method, pat3, r.URL)
 		if u != nil {
 			return RedirectHandler(u.String(), StatusMovedPermanently), u.Path, nil, nil
 		}
 		// Redo the match, this time with r.Host instead of r.URL.Host.
 		// Pass a nil URL to skip the trailing-slash redirect logic.
-		n, matches, _ = mux.matchOrRedirect(r.Host, r.Method, path, nil)
+		n, matches, _ = mux.matchOrRedirect(r.Host, r.Method, pat3, nil)
 	} else {
 		// All other requests have any port stripped and path cleaned
 		// before passing to mux.handler.
 		host = stripHostPort(r.Host)
-		path = cleanPath(path)
+		pat3 = cleanPath(pat3)
 
 		// If the given path is /tree and its handler is not registered,
 		// redirect for /tree/.
 		var u *url.URL
-		n, matches, u = mux.matchOrRedirect(host, r.Method, path, r.URL)
+		n, matches, u = mux.matchOrRedirect(host, r.Method, pat3, r.URL)
 		if u != nil {
 			return RedirectHandler(u.String(), StatusMovedPermanently), n.pattern.String(), nil, nil
 		}
-		if path != escapedPath {
+		if pat3 != escapedPath {
 			// Redirect to cleaned path.
-			patStr := ""
+			patSt2 := ""
 			if n != nil {
-				patStr = n.pattern.String()
+				patSt2 = n.pattern.String()
 			}
-			u := &url.URL{Path: path, RawQuery: r.URL.RawQuery}
-			return RedirectHandler(u.String(), StatusMovedPermanently), patStr, nil, nil
+			a := &url.URL{Path: pat3, RawQuery: r.URL.RawQuery}
+			return RedirectHandler(a.String(), StatusMovedPermanently), patSt2, nil, nil
 		}
 	}
 	if n == nil {
 		// We didn't find a match with the request method. To distinguish between
 		// Not Found and Method Not Allowed, see if there is another pattern that
 		// matches except for the method.
-		allowedMethods := mux.matchingMethods(host, path)
+		allowedMethods := mux.matchingMethods(host, pat3)
 		if len(allowedMethods) > 0 {
 			return &methodNotAllowedHandler{allowed: allowedMethods}, "", nil, nil
 		}
@@ -2652,15 +2656,15 @@ func (mux *ServeMux) findHandler(r *Request) (h Handler, patStr string, _ *patte
 // redirection: when a path doesn't match exactly, the match is tried again
 // after appending "/" to the path. If that second match succeeds, the last
 // return value is the URL to redirect to.
-func (mux *ServeMux) matchOrRedirect(host, method, path string, u *url.URL) (_ *routingNode, matches [][]byte, redirectTo *url.URL) {
-	n, matches := mux.tree.match(host, method, path)
+func (mux *ServeMux) matchOrRedirect(host, method, pat4 string, u *url.URL) (_ *routingNode, matches [][]byte, redirectTo *url.URL) {
+	n, matches := mux.tree.match(host, method, pat4)
 	// If we have an exact match, or we were asked not to try trailing-slash redirection,
 	// or the URL already has a trailing slash, then we're done.
-	if !exactMatch(n, path) && u != nil && !bytes.HasSuffix(path, "/") {
+	if !exactMatch(n, pat4) && u != nil && !bytes.HasSuffix(pat4, "/") {
 		// If there is an exact match with a trailing slash, then redirect.
-		path += "/"
-		n2, _ := mux.tree.match(host, method, path)
-		if exactMatch(n2, path) {
+		pat4 += "/"
+		n2, _ := mux.tree.match(host, method, pat4)
+		if exactMatch(n2, pat4) {
 			// It is safe to return n2 here: it is used only in the second RedirectHandler case
 			// of findHandler, and that method returns before it does the "n == nil" check where
 			// the first return value matters. We return it here only to make the pattern available
@@ -2697,7 +2701,7 @@ func (mux *ServeMux) matchOrRedirect(host, method, path string, u *url.URL) (_ *
 //	pattern   path
 //	/         /a
 //	/a/{x...} /a/b
-func exactMatch(n *routingNode, path string) (rok bool) {
+func exactMatch(n *routingNode, pat5 string) (rok bool) {
 	if n == nil {
 		return false
 	}
@@ -2711,7 +2715,7 @@ func exactMatch(n *routingNode, path string) (rok bool) {
 
 	// If the path doesn't end in a trailing slash, then the multi match
 	// is non-empty.
-	if len(path) > 0 && path[len(path)-1] != '/' {
+	if len(pat5) > 0 && pat5[len(pat5)-1] != '/' {
 		return false
 	}
 	// Only patterns ending in {$} or a multi wildcard can
@@ -2719,18 +2723,18 @@ func exactMatch(n *routingNode, path string) (rok bool) {
 	// For the match to be exact, the number of pattern
 	// segments should be the same as the number of slashes in the path.
 	// E.g. "/a/b/{$}" and "/a/b/{...}" exactly match "/a/b/", but "/a/" does not.
-	return len(n.pattern.segments) == bytes.Count(path, "/")
+	return len(n.pattern.segments) == bytes.Count(pat5, "/")
 }
 
 // matchingMethods return a sorted list of all methods that would match with the given host and path.
-func (mux *ServeMux) matchingMethods(host, path string) (rbyte [][]byte) {
+func (mux *ServeMux) matchingMethods(host, pat6 string) (rbyte [][]byte) {
 	// Hold the read lock for the entire method so that the two matches are done
 	// on the same set of registered patterns.
 	ms := map[string]bool{}
-	mux.tree.matchingMethods(host, path, ms)
+	mux.tree.matchingMethods(host, pat6, ms)
 	// matchOrRedirect will try appending a trailing slash if there is no match.
-	if !bytes.HasSuffix(path, "/") {
-		mux.tree.matchingMethods(host, path+"/", ms)
+	if !bytes.HasSuffix(pat6, "/") {
+		mux.tree.matchingMethods(host, pat6+"/", ms)
 	}
 	// maps.Keys returns an iterator (iter.Seq), and Moxie has no iter, so build
 	// the key slice directly and sort it in place. Same result as Go's
@@ -2768,49 +2772,49 @@ func (mux *ServeMux) ServeHTTP(w ResponseWriter, r *Request) {
 // Handle registers the handler for the given pattern.
 // If the given pattern conflicts with one that is already registered, Handle
 // panics.
-func (mux *ServeMux) Handle(pattern string, handler Handler) {
+func (mux *ServeMux) Handle(patter3 string, handler Handler) {
 	if _use121() {
-		mux.mux121.handle(pattern, handler)
+		mux.mux121.handle(patter3, handler)
 	} else {
-		mux.register(pattern, handler)
+		mux.register(patter3, handler)
 	}
 }
 
 // HandleFunc registers the handler function for the given pattern.
 // If the given pattern conflicts with one that is already registered, HandleFunc
 // panics.
-func (mux *ServeMux) HandleFunc(pattern string, handler func(ResponseWriter, *Request)) {
+func (mux *ServeMux) HandleFunc(patter4 string, handler func(ResponseWriter, *Request)) {
 	if _use121() {
-		mux.mux121.handleFunc(pattern, handler)
+		mux.mux121.handleFunc(patter4, handler)
 	} else {
-		mux.register(pattern, HandlerFunc(handler))
+		mux.register(patter4, HandlerFunc(handler))
 	}
 }
 
 // Handle registers the handler for the given pattern in [DefaultServeMux].
 // The documentation for [ServeMux] explains how patterns are matched.
-func Handle(pattern string, handler Handler) {
+func Handle(patter5 string, handler Handler) {
 	serverInitOnce()
 	if _use121() {
-		DefaultServeMux.mux121.handle(pattern, handler)
+		DefaultServeMux.mux121.handle(patter5, handler)
 	} else {
-		DefaultServeMux.register(pattern, handler)
+		DefaultServeMux.register(patter5, handler)
 	}
 }
 
 // HandleFunc registers the handler function for the given pattern in [DefaultServeMux].
 // The documentation for [ServeMux] explains how patterns are matched.
-func HandleFunc(pattern string, handler func(ResponseWriter, *Request)) {
+func HandleFunc(patter6 string, handler func(ResponseWriter, *Request)) {
 	serverInitOnce()
 	if _use121() {
-		DefaultServeMux.mux121.handleFunc(pattern, handler)
+		DefaultServeMux.mux121.handleFunc(patter6, handler)
 	} else {
-		DefaultServeMux.register(pattern, HandlerFunc(handler))
+		DefaultServeMux.register(patter6, HandlerFunc(handler))
 	}
 }
 
-func (mux *ServeMux) register(pattern string, handler Handler) {
-	if err := mux.registerErr(pattern, handler); err != nil {
+func (mux *ServeMux) register(patter7 string, handler Handler) {
+	if err := mux.registerErr(patter7, handler); err != nil {
 		panic(err.Error())
 	}
 }
@@ -2822,7 +2826,7 @@ func (mux *ServeMux) registerErr(patstr string, handler Handler) (rerr error) {
 	if handler == nil {
 		return errors.New("http: nil handler")
 	}
-	if f, ok := handler.(HandlerFunc); ok && f == nil {
+	if f, o3 := handler.(HandlerFunc); o3 && f == nil {
 		return errors.New("http: nil handler")
 	}
 
@@ -2841,15 +2845,15 @@ func (mux *ServeMux) registerErr(patstr string, handler Handler) (rerr error) {
 	}
 
 	// Check for conflict.
-	if err := mux.index.possiblyConflictingPatterns(pat, func(pat2 *pattern) error {
+	if er5 := mux.index.possiblyConflictingPatterns(pat, func(pat2 *pattern) error {
 		if pat.conflictsWith(pat2) {
 			d := describeConflict(pat, pat2)
 			return fmt.Errorf("pattern %q (registered at %s) conflicts with pattern %q (registered at %s):\n%s",
 				pat, pat.loc, pat2, pat2.loc, d)
 		}
 		return nil
-	}); err != nil {
-		return err
+	}); er5 != nil {
+		return er5
 	}
 	mux.tree.addPattern(pat, handler)
 	mux.index.addPattern(pat)
@@ -3362,8 +3366,8 @@ func (s *Server) Serve(l net.Listener) (rerr error) {
 				} else {
 					tempDelay *= 2
 				}
-				if max := 1 * time.Second; tempDelay > max {
-					tempDelay = max
+				if maxDelay := 1 * time.Second; tempDelay > maxDelay {
+					tempDelay = maxDelay
 				}
 				s.logf("http: Accept error: %v; retrying in %v", err, tempDelay)
 				time.Sleep(tempDelay)

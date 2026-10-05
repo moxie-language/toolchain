@@ -585,15 +585,15 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 	isHTTP := scheme == "http" || scheme == "https"
 	if isHTTP {
 		// Validate the outgoing headers.
-		if err := validateHeaders(req.Header); err != "" {
+		if er2 := validateHeaders(req.Header); er2 != "" {
 			req.closeBody()
-			return nil, fmt.Errorf("net/http: invalid header %s", err)
+			return nil, fmt.Errorf("net/http: invalid header %s", er2)
 		}
 
 		// Validate the outgoing trailers too.
-		if err := validateHeaders(req.Trailer); err != "" {
+		if er3 := validateHeaders(req.Trailer); er3 != "" {
 			req.closeBody()
-			return nil, fmt.Errorf("net/http: invalid trailer %s", err)
+			return nil, fmt.Errorf("net/http: invalid trailer %s", er3)
 		}
 	}
 
@@ -601,13 +601,13 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 	req = setupRewindBody(req)
 
 	if altRT := t.alternateRoundTripper(req); altRT != nil {
-		if resp, err := altRT.RoundTrip(req); err != ErrSkipAltProtocol {
-			return resp, err
+		if resp, er5 := altRT.RoundTrip(req); er5 != ErrSkipAltProtocol {
+			return resp, er5
 		}
-		var err error
-		req, err = rewindBody(req)
-		if err != nil {
-			return nil, err
+		var er4 error
+		req, er4 = rewindBody(req)
+		if er4 != nil {
+			return nil, er4
 		}
 	}
 	if !isHTTP {
@@ -651,6 +651,10 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 		}
 	}()
 
+	var treq *transportRequest
+	var cm connectMethod
+	var pconn *persistConn
+	var lresp *Response
 	for {
 		select {
 		case <-ctx.Done():
@@ -660,8 +664,8 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 		}
 
 		// treq gets modified by roundTrip, so we need to recreate for each retry.
-		treq := &transportRequest{Request: req, trace: trace, ctx: ctx, cancel: cancel}
-		cm, err := t.connectMethodForRequest(treq)
+		treq = &transportRequest{Request: req, trace: trace, ctx: ctx, cancel: cancel}
+		cm, err = t.connectMethodForRequest(treq)
 		if err != nil {
 			req.closeBody()
 			return nil, err
@@ -671,18 +675,18 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 		// host (for http or https), the http proxy, or the http proxy
 		// pre-CONNECTed to https server. In any case, we'll be ready
 		// to send it requests.
-		pconn, err := t.getConn(treq, cm)
+		pconn, err = t.getConn(treq, cm)
 		if err != nil {
 			req.closeBody()
 			return nil, err
 		}
 
-		var resp *Response
+		lresp = nil
 		if pconn.alt != nil {
 			// HTTP/2 path.
-			resp, err = pconn.alt.RoundTrip(req)
+			lresp, err = pconn.alt.RoundTrip(req)
 		} else {
-			resp, err = pconn.roundTrip(treq)
+			lresp, err = pconn.roundTrip(treq)
 		}
 		if err == nil {
 			if pconn.alt != nil {
@@ -693,8 +697,8 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 				// canceling the context after the response body is read.
 				cancel.Cancel(errRequestDone)
 			}
-			resp.Request = origReq
-			return resp, nil
+			lresp.Request = origReq
+			return lresp, nil
 		}
 
 		// Failed. Clean up and determine whether to retry.
@@ -781,12 +785,12 @@ func rewindBody(req *Request) (rewound *Request, err error) {
 	if req.GetBody == nil {
 		return nil, errCannotRewind
 	}
-	body, err := req.GetBody()
+	bod2, err := req.GetBody()
 	if err != nil {
 		return nil, err
 	}
 	newReq := *req
-	newReq.Body = &readTrackingBody{ReadCloser: body}
+	newReq.Body = &readTrackingBody{ReadCloser: bod2}
 	return &newReq, nil
 }
 
@@ -1030,11 +1034,12 @@ func (t *Transport) tryPutIdleConn(pconn *persistConn) (rerr error) {
 	key := pconn.cacheKey
 	if q, ok := t.idleConnWait[key]; ok {
 		done := false
+		var w *wantConn
 		if pconn.alt == nil {
 			// HTTP/1.
 			// Loop over the waiting list until we find a w that isn't done already, and hand it pconn.
 			for q.len() > 0 {
-				w := q.popFront()
+				w = q.popFront()
 				if w.tryDeliver(pconn, nil, time.Time{}) {
 					done = true
 					break
@@ -1046,7 +1051,7 @@ func (t *Transport) tryPutIdleConn(pconn *persistConn) (rerr error) {
 			// and we still won't be done: we want to put it in the idle
 			// list unconditionally, for any future clients too.
 			for q.len() > 0 {
-				w := q.popFront()
+				w = q.popFront()
 				w.tryDeliver(pconn, nil, time.Time{})
 			}
 		}
@@ -1125,14 +1130,16 @@ func (t *Transport) queueForIdleConn(w *wantConn) (delivered bool) {
 	// Look for most recently-used idle connection.
 	if list, ok := t.idleConn[w.key]; ok {
 		stop := false
-		delivered := false
+		delivere2 := false
+		var pconn *persistConn
+		var tooOld bool
 		for len(list) > 0 && !stop {
-			pconn := list[len(list)-1]
+			pconn = list[len(list)-1]
 
 			// See whether this connection has been idle too long, considering
 			// only the wall time (the Round(0)), in case this is a laptop or VM
 			// coming out of suspend with previously cached idle connections.
-			tooOld := !oldTime.IsZero() && pconn.idleAt.Round(0).Before(oldTime)
+			tooOld = !oldTime.IsZero() && pconn.idleAt.Round(0).Before(oldTime)
 			if tooOld {
 				// Async cleanup. Launch in its own goroutine (as if a
 				// time.AfterFunc called it); it acquires idleMu, which we're
@@ -1148,8 +1155,8 @@ func (t *Transport) queueForIdleConn(w *wantConn) (delivered bool) {
 				list = list[:len(list)-1]
 				continue
 			}
-			delivered = w.tryDeliver(pconn, nil, pconn.idleAt)
-			if delivered {
+			delivere2 = w.tryDeliver(pconn, nil, pconn.idleAt)
+			if delivere2 {
 				if pconn.alt != nil {
 					// HTTP/2: multiple clients can share pconn.
 					// Leave it in the list.
@@ -1168,7 +1175,7 @@ func (t *Transport) queueForIdleConn(w *wantConn) (delivered bool) {
 			delete(t.idleConn, w.key)
 		}
 		if stop {
-			return delivered
+			return delivere2
 		}
 	}
 
@@ -1402,13 +1409,13 @@ func (q *wantConnQueue) all(f func(*wantConn)) {
 	}
 }
 
-func (t *Transport) customDialTLS(ctx context.Context, network, addr string) (conn net.Conn, err error) {
+func (t *Transport) customDialTLS(ctx context.Context, network, addr string) (con2 net.Conn, err error) {
 	if t.DialTLSContext != nil {
-		conn, err = t.DialTLSContext(ctx, network, addr)
+		con2, err = t.DialTLSContext(ctx, network, addr)
 	} else {
-		conn, err = t.DialTLS(network, addr)
+		con2, err = t.DialTLS(network, addr)
 	}
-	if conn == nil && err == nil {
+	if con2 == nil && err == nil {
 		err = errors.New("net/http: Transport.DialTLS or DialTLSContext returned (nil, nil)")
 	}
 	return
@@ -1475,22 +1482,22 @@ func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (_ *persis
 			// cancellation error (see golang.org/issue/16049).
 			select {
 			case <-treq.ctx.Done():
-				err := context.Cause(treq.ctx)
-				if err == errRequestCanceled {
-					err = errRequestCanceledConn
+				er6 := context.Cause(treq.ctx)
+				if er6 == errRequestCanceled {
+					er6 = errRequestCanceledConn
 				}
-				return nil, err
+				return nil, er6
 			default:
 				// return below
 			}
 		}
 		return r.pc, r.err
 	case <-treq.ctx.Done():
-		err := context.Cause(treq.ctx)
-		if err == errRequestCanceled {
-			err = errRequestCanceledConn
+		er7 := context.Cause(treq.ctx)
+		if er7 == errRequestCanceled {
+			er7 = errRequestCanceledConn
 		}
-		return nil, err
+		return nil, er7
 	}
 }
 
@@ -1677,10 +1684,10 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 		return err
 	}
 	if cm.scheme() == "https" && t.hasCustomTLSDialer() {
-		var err error
-		pconn.conn, err = t.customDialTLS(ctx, "tcp", cm.addr())
-		if err != nil {
-			return nil, wrapErr(err)
+		var er8 error
+		pconn.conn, er8 = t.customDialTLS(ctx, "tcp", cm.addr())
+		if er8 != nil {
+			return nil, wrapErr(er8)
 		}
 		if tc, ok := pconn.conn.(*tls.Conn); ok {
 			// Handshake here, in case DialTLS didn't. TLSNextProto below
@@ -1688,12 +1695,12 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 			if trace != nil && trace.TLSHandshakeStart != nil {
 				trace.TLSHandshakeStart()
 			}
-			if err := tc.HandshakeContext(ctx); err != nil {
+			if er9 := tc.HandshakeContext(ctx); er9 != nil {
 				pconn.conn.Close()
 				if trace != nil && trace.TLSHandshakeDone != nil {
-					trace.TLSHandshakeDone(tls.ConnectionState{}, err)
+					trace.TLSHandshakeDone(tls.ConnectionState{}, er9)
 				}
-				return nil, err
+				return nil, er9
 			}
 			cs := tc.ConnectionState()
 			if trace != nil && trace.TLSHandshakeDone != nil {
@@ -1702,18 +1709,18 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 			pconn.tlsState = &cs
 		}
 	} else {
-		conn, err := t.dial(ctx, "tcp", cm.addr())
-		if err != nil {
-			return nil, wrapErr(err)
+		con3, erA := t.dial(ctx, "tcp", cm.addr())
+		if erA != nil {
+			return nil, wrapErr(erA)
 		}
-		pconn.conn = conn
+		pconn.conn = con3
 		if cm.scheme() == "https" {
 			var firstTLSHost string
-			if firstTLSHost, _, err = net.SplitHostPort(cm.addr()); err != nil {
-				return nil, wrapErr(err)
+			if firstTLSHost, _, erA = net.SplitHostPort(cm.addr()); erA != nil {
+				return nil, wrapErr(erA)
 			}
-			if err = pconn.addTLS(ctx, firstTLSHost, trace); err != nil {
-				return nil, wrapErr(err)
+			if erA = pconn.addTLS(ctx, firstTLSHost, trace); erA != nil {
+				return nil, wrapErr(erA)
 			}
 		}
 	}
@@ -1723,8 +1730,8 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 	case cm.proxyURL == nil:
 		// Do nothing. Not using a proxy.
 	case cm.proxyURL.Scheme == "socks5" || cm.proxyURL.Scheme == "socks5h":
-		conn := pconn.conn
-		d := socksNewDialer("tcp", conn.RemoteAddr().String())
+		con4 := pconn.conn
+		d := socksNewDialer("tcp", con4.RemoteAddr().String())
 		if u := cm.proxyURL.User; u != nil {
 			auth := &socksUsernamePassword{
 				Username: u.Username(),
@@ -1736,9 +1743,9 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 			}
 			d.Authenticate = auth.Authenticate
 		}
-		if _, err := d.DialWithConn(ctx, conn, "tcp", cm.targetAddr); err != nil {
-			conn.Close()
-			return nil, err
+		if _, erB := d.DialWithConn(ctx, con4, "tcp", cm.targetAddr); erB != nil {
+			con4.Close()
+			return nil, erB
 		}
 	case cm.targetScheme == "http":
 		pconn.isProxy = true
@@ -1748,14 +1755,14 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 			}
 		}
 	case cm.targetScheme == "https":
-		conn := pconn.conn
+		con5 := pconn.conn
 		var hdr Header
 		if t.GetProxyConnectHeader != nil {
-			var err error
-			hdr, err = t.GetProxyConnectHeader(ctx, cm.proxyURL, cm.targetAddr)
-			if err != nil {
-				conn.Close()
-				return nil, err
+			var erD error
+			hdr, erD = t.GetProxyConnectHeader(ctx, cm.proxyURL, cm.targetAddr)
+			if erD != nil {
+				con5.Close()
+				return nil, erD
 			}
 		} else {
 			hdr = t.ProxyConnectHeader
@@ -1783,44 +1790,44 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 		didReadResponse := chan struct{}{} // closed after CONNECT write+read is done or fails
 		var (
 			resp *Response
-			err  error // write or read error
+			erC  error // write or read error
 		)
 		// Write the CONNECT request & read the response.
 		func() {
 			defer close(didReadResponse)
-			err = connectReq.Write(conn)
-			if err != nil {
+			erC = connectReq.Write(con5)
+			if erC != nil {
 				return
 			}
 			// Okay to use and discard buffered reader here, because
 			// TLS server will not speak until spoken to.
-			br := bufio.NewReader(conn)
-			resp, err = ReadResponse(br, connectReq)
+			br := bufio.NewReader(con5)
+			resp, erC = ReadResponse(br, connectReq)
 		}()
 		select {
 		case <-connectCtx.Done():
-			conn.Close()
+			con5.Close()
 			<-didReadResponse
 			return nil, connectCtx.Err()
 		case <-didReadResponse:
 			// resp or err now set
 		}
-		if err != nil {
-			conn.Close()
-			return nil, err
+		if erC != nil {
+			con5.Close()
+			return nil, erC
 		}
 
 		if t.OnProxyConnectResponse != nil {
-			err = t.OnProxyConnectResponse(ctx, cm.proxyURL, connectReq, resp)
-			if err != nil {
-				conn.Close()
-				return nil, err
+			erC = t.OnProxyConnectResponse(ctx, cm.proxyURL, connectReq, resp)
+			if erC != nil {
+				con5.Close()
+				return nil, erC
 			}
 		}
 
 		if resp.StatusCode != 200 {
 			_, text, ok := bytes.Cut(resp.Status, " ")
-			conn.Close()
+			con5.Close()
 			if !ok {
 				return nil, errors.New("unknown status code")
 			}
@@ -1829,8 +1836,8 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 	}
 
 	if cm.proxyURL != nil && cm.targetScheme == "https" {
-		if err := pconn.addTLS(ctx, cm.tlsHost(), trace); err != nil {
-			return nil, err
+		if erE := pconn.addTLS(ctx, cm.tlsHost(), trace); erE != nil {
+			return nil, erE
 		}
 	}
 
@@ -1845,7 +1852,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 			return nil, errors.New("http: Transport does not support unencrypted HTTP/2")
 		}
 		alt := next(cm.targetAddr, unencryptedTLSConn(pconn.conn))
-		if e, ok := alt.(erringRoundTripper); ok {
+		if e, o2 := alt.(erringRoundTripper); o2 {
 			// pconn.conn was closed by next (http2configureTransports.upgradeFn).
 			return nil, e.RoundTripErr()
 		}
@@ -1855,7 +1862,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 	if s := pconn.tlsState; s != nil && s.NegotiatedProtocolIsMutual && s.NegotiatedProtocol != "" {
 		if next, ok := t.TLSNextProto[s.NegotiatedProtocol]; ok {
 			alt := next(cm.targetAddr, pconn.conn.(*tls.Conn))
-			if e, ok := alt.(erringRoundTripper); ok {
+			if e, o3 := alt.(erringRoundTripper); o3 {
 				// pconn.conn was closed by next (http2configureTransports.upgradeFn).
 				return nil, e.RoundTripErr()
 			}
@@ -2173,19 +2180,27 @@ func (pc *persistConn) readLoop() {
 	defer close(eofc) // unblock reader on errors
 
 	alive := true
+	var err error
+	var rc requestAndChan
+	var trace *httptrace.ClientTrace
+	var resp *Response
+	var bodyWritable bool
+	var hasBody bool
+	var waitForBodyRead chan bool
+	var bod3 *bodyEOFSignal
 	for alive {
 		pc.readLimit = pc.maxHeaderResponseSize()
-		_, err := pc.br.Peek(1)
+		_, err = pc.br.Peek(1)
 
 		if pc.numExpectedResponses == 0 {
 			pc.readLoopPeekFailLocked(err)
 			return
 		}
 
-		rc := <-pc.reqch
-		trace := rc.treq.trace
+		rc = <-pc.reqch
+		trace = rc.treq.trace
 
-		var resp *Response
+		resp = nil
 		if err == nil {
 			resp, err = pc.readResponse(rc, trace)
 		} else {
@@ -2209,8 +2224,8 @@ func (pc *persistConn) readLoop() {
 
 		pc.numExpectedResponses--
 
-		bodyWritable := resp.bodyIsWritable()
-		hasBody := rc.treq.Request.Method != "HEAD" && resp.ContentLength != 0
+		bodyWritable = resp.bodyIsWritable()
+		hasBody = rc.treq.Request.Method != "HEAD" && resp.ContentLength != 0
 
 		if resp.Close || rc.treq.Request.Close || resp.StatusCode <= 199 || bodyWritable {
 			// Don't do keep-alive on error if either party requested a close
@@ -2248,8 +2263,8 @@ func (pc *persistConn) readLoop() {
 			continue
 		}
 
-		waitForBodyRead := chan bool{2}
-		body := &bodyEOFSignal{
+		waitForBodyRead = chan bool{2}
+		bod3 = &bodyEOFSignal{
 			body: resp.Body,
 			earlyCloseFn: func() error {
 				waitForBodyRead <- false
@@ -2271,9 +2286,9 @@ func (pc *persistConn) readLoop() {
 			},
 		}
 
-		resp.Body = body
+		resp.Body = bod3
 		if rc.addedGzip && ascii.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
-			resp.Body = &gzipReader{body: body}
+			resp.Body = &gzipReader{body: bod3}
 			resp.Header.Del("Content-Encoding")
 			resp.Header.Del("Content-Length")
 			resp.ContentLength = -1
@@ -2349,18 +2364,21 @@ func is408Message(buf []byte) (rok bool) {
 // trace is optional.
 func (pc *persistConn) readResponse(rc requestAndChan, trace *httptrace.ClientTrace) (resp *Response, err error) {
 	if trace != nil && trace.GotFirstResponseByte != nil {
-		if peek, err := pc.br.Peek(1); err == nil && len(peek) == 1 {
+		if peek, erF := pc.br.Peek(1); erF == nil && len(peek) == 1 {
 			trace.GotFirstResponseByte()
 		}
 	}
 
 	continueCh := rc.continueCh
+	var resCode int32
+	var is1xx bool
+	var is1xxNonTerminal bool
 	for {
 		resp, err = ReadResponse(pc.br, rc.treq.Request)
 		if err != nil {
 			return
 		}
-		resCode := resp.StatusCode
+		resCode = resp.StatusCode
 		if continueCh != nil && resCode == StatusContinue {
 			if trace != nil && trace.Got100Continue != nil {
 				trace.Got100Continue()
@@ -2368,13 +2386,13 @@ func (pc *persistConn) readResponse(rc requestAndChan, trace *httptrace.ClientTr
 			continueCh <- struct{}{}
 			continueCh = nil
 		}
-		is1xx := 100 <= resCode && resCode <= 199
+		is1xx = 100 <= resCode && resCode <= 199
 		// treat 101 as a terminal status, see issue 26161
-		is1xxNonTerminal := is1xx && resCode != StatusSwitchingProtocols
+		is1xxNonTerminal = is1xx && resCode != StatusSwitchingProtocols
 		if is1xxNonTerminal {
 			if trace != nil && trace.Got1xxResponse != nil {
-				if err := trace.Got1xxResponse(resCode, textproto.MIMEHeader(resp.Header)); err != nil {
-					return nil, err
+				if erG := trace.Got1xxResponse(resCode, textproto.MIMEHeader(resp.Header)); erG != nil {
+					return nil, erG
 				}
 				// If the 1xx response was delivered to the user,
 				// then they're responsible for limiting the number of
@@ -2439,11 +2457,11 @@ func (pc *persistConn) waitForContinue(continueCh <-chan struct{}) (rbool func()
 }
 
 func newReadWriteCloserBody(br *bufio.Reader, rwc io.ReadWriteCloser) (rreadWriteCloser io.ReadWriteCloser) {
-	body := &readWriteCloserBody{ReadWriteCloser: rwc}
+	bod4 := &readWriteCloserBody{ReadWriteCloser: rwc}
 	if br.Buffered() != 0 {
-		body.br = br
+		bod4.br = br
 	}
-	return body
+	return bod4
 }
 
 // readWriteCloserBody is the Response.Body type used when we want to
@@ -2459,8 +2477,8 @@ type readWriteCloserBody struct {
 
 func (b *readWriteCloserBody) Read(p []byte) (n int32, err error) {
 	if b.br != nil {
-		if n := b.br.Buffered(); len(p) > n {
-			p = p[:n]
+		if a := b.br.Buffered(); len(p) > a {
+			p = p[:a]
 		}
 		n, err = b.br.Read(p)
 		if b.br.Buffered() == 0 {
@@ -2707,21 +2725,22 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 	var respHeaderTimer <-chan time.Time
 	ctxDoneChan := req.ctx.Done()
 	pcClosed := pc.closech
+	var timer *time.Timer
 	for {
 		select {
-		case err := <-writeErrCh:
+		case erH := <-writeErrCh:
 			if debugRoundTrip {
-				req.logf("writeErrCh recv: %T/%#v", err, err)
+				req.logf("writeErrCh recv: %T/%#v", erH, erH)
 			}
-			if err != nil {
-				pc.close(fmt.Errorf("write error: %w", err))
-				return nil, pc.mapRoundTripError(req, startBytesWritten, err)
+			if erH != nil {
+				pc.close(fmt.Errorf("write error: %w", erH))
+				return nil, pc.mapRoundTripError(req, startBytesWritten, erH)
 			}
 			if d := pc.t.ResponseHeaderTimeout; d > 0 {
 				if debugRoundTrip {
 					req.logf("starting timer for %v", d)
 				}
-				timer := time.NewTimer(d)
+				timer = time.NewTimer(d)
 				defer timer.Stop() // prevent leaks
 				respHeaderTimer = timer.C
 			}
@@ -2816,8 +2835,8 @@ func schemePort(scheme string) (rs string) {
 	}
 }
 
-func idnaASCIIFromURL(url *url.URL) (rs string) {
-	addr := url.Hostname()
+func idnaASCIIFromURL(ur2 *url.URL) (rs string) {
+	addr := ur2.Hostname()
 	if v, err := idnaASCII(addr); err == nil {
 		addr = v
 	}
@@ -2825,12 +2844,12 @@ func idnaASCIIFromURL(url *url.URL) (rs string) {
 }
 
 // canonicalAddr returns url.Host but always with a ":port" suffix.
-func canonicalAddr(url *url.URL) (rs string) {
-	port := url.Port()
+func canonicalAddr(ur3 *url.URL) (rs string) {
+	port := ur3.Port()
 	if port == "" {
-		port = schemePort(url.Scheme)
+		port = schemePort(ur3.Scheme)
 	}
-	return net.JoinHostPort(idnaASCIIFromURL(url), port)
+	return net.JoinHostPort(idnaASCIIFromURL(ur3), port)
 }
 
 // bodyEOFSignal is used by the HTTP/1 transport when reading response

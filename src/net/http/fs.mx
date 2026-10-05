@@ -77,11 +77,11 @@ var errInvalidUnsafePath error
 // Open implements [FileSystem] using [os.Open], opening files for reading rooted
 // and relative to the directory d.
 func (d *Dir) Open(name []byte) (rfile File, rerr error) {
-	path := path.Clean("/" + name)[1:]
-	if path == "" {
-		path = "."
+	pat2 := path.Clean("/" + name)[1:]
+	if pat2 == "" {
+		pat2 = "."
 	}
-	path, err := filepath.Localize(path)
+	pat3, err := filepath.Localize(pat2)
 	if err != nil {
 		return nil, errInvalidUnsafePath
 	}
@@ -89,7 +89,7 @@ func (d *Dir) Open(name []byte) (rfile File, rerr error) {
 	if dir == "" {
 		dir = "."
 	}
-	fullName := filepath.Join(dir, path)
+	fullName := filepath.Join(dir, pat3)
 	f, err := os.Open(fullName)
 	if err != nil {
 		return nil, mapOpenError(err, fullName, filepath.Separator, func(n []byte) (fs.FileInfo, error) { return os.Stat(n) })
@@ -199,8 +199,8 @@ func dirList(w ResponseWriter, r *Request, f File) {
 		// name may contain '?' or '#', which must be escaped to remain
 		// part of the URL path, and not indicate the start of a query
 		// string or fragment.
-		url := url.URL{Path: name}
-		fmt.Fprintf(w, "<a href=\"%s\">%s</a>\n", url.String(), htmlEscapeReplacer().Replace(name))
+		ur2 := url.URL{Path: name}
+		fmt.Fprintf(w, "<a href=\"%s\">%s</a>\n", ur2.String(), htmlEscapeReplacer().Replace(name))
 	}
 	fmt.Fprintf(w, "</pre>\n")
 }
@@ -306,8 +306,8 @@ func serveContent(w ResponseWriter, r *Request, name []byte, modtime time.Time, 
 			var buf [sniffLen]byte
 			n, _ := io.ReadFull(content, buf[:])
 			ctype = DetectContentType(buf[:n])
-			_, err := content.Seek(0, io.SeekStart) // rewind to output whole file
-			if err != nil {
+			_, er2 := content.Seek(0, io.SeekStart) // rewind to output whole file
+			if er2 != nil {
 				serveError(w, "seeker can't seek", StatusInternalServerError)
 				return
 			}
@@ -372,8 +372,8 @@ func serveContent(w ResponseWriter, r *Request, name []byte, modtime time.Time, 
 		// does not request multiple parts might not support
 		// multipart responses."
 		ra := ranges[0]
-		if _, err := content.Seek(ra.start, io.SeekStart); err != nil {
-			serveError(w, err.String(), StatusRequestedRangeNotSatisfiable)
+		if _, er3 := content.Seek(ra.start, io.SeekStart); er3 != nil {
+			serveError(w, er3.String(), StatusRequestedRangeNotSatisfiable)
 			return
 		}
 		sendSize = ra.length
@@ -695,7 +695,7 @@ func checkPreconditions(w ResponseWriter, r *Request, modtime time.Time) (done b
 }
 
 // name is '/'-separated, not filepath.Separator.
-func serveFile(w ResponseWriter, r *Request, fs FileSystem, name []byte, redirect bool) {
+func serveFile(w ResponseWriter, r *Request, f2 FileSystem, name []byte, redirect bool) {
 	const indexPage = "/index.html"
 
 	// redirect .../index.html to .../
@@ -706,7 +706,7 @@ func serveFile(w ResponseWriter, r *Request, fs FileSystem, name []byte, redirec
 		return
 	}
 
-	f, err := fs.Open(name)
+	f, err := f2.Open(name)
 	if err != nil {
 		msg, code := toHTTPError(err)
 		serveError(w, msg, code)
@@ -724,14 +724,14 @@ func serveFile(w ResponseWriter, r *Request, fs FileSystem, name []byte, redirec
 	if redirect {
 		// redirect to canonical path: / at end of directory url
 		// r.URL.Path always begins with /
-		url := r.URL.Path
+		ur3 := r.URL.Path
 		if d.IsDir() {
-			if url[len(url)-1] != '/' {
-				localRedirect(w, r, path.Base(url)+"/")
+			if ur3[len(ur3)-1] != '/' {
+				localRedirect(w, r, path.Base(ur3)+"/")
 				return
 			}
-		} else if url[len(url)-1] == '/' {
-			base := path.Base(url)
+		} else if ur3[len(ur3)-1] == '/' {
+			base := path.Base(ur3)
 			if base == "/" || base == "." {
 				// The FileSystem maps a path like "/" or "/./" to a file instead of a directory.
 				msg := "http: attempting to traverse a non-directory"
@@ -744,20 +744,20 @@ func serveFile(w ResponseWriter, r *Request, fs FileSystem, name []byte, redirec
 	}
 
 	if d.IsDir() {
-		url := r.URL.Path
+		ur4 := r.URL.Path
 		// redirect if the directory name doesn't end in a slash
-		if url == "" || url[len(url)-1] != '/' {
-			localRedirect(w, r, path.Base(url)+"/")
+		if ur4 == "" || ur4[len(ur4)-1] != '/' {
+			localRedirect(w, r, path.Base(ur4)+"/")
 			return
 		}
 
 		// use contents of index.html for directory, if present
 		index := bytes.TrimSuffix(name, "/") + indexPage
-		ff, err := fs.Open(index)
-		if err == nil {
+		ff, er4 := f2.Open(index)
+		if er4 == nil {
 			defer ff.Close()
-			dd, err := ff.Stat()
-			if err == nil {
+			dd, er5 := ff.Stat()
+			if er5 == nil {
 				d = dd
 				f = ff
 			}
@@ -950,8 +950,8 @@ func (f *ioFile) Readdir(count int32) (rfileInfo []fs.FileInfo, rerr error) {
 	for {
 		dirs, err := d.ReadDir(count - len(list))
 		for _, dir := range dirs {
-			info, err := dir.Info()
-			if err != nil {
+			info, er6 := dir.Info()
+			if er6 != nil {
 				// Pretend it doesn't exist, like (*os.File).Readdir does.
 				continue
 			}
@@ -1087,14 +1087,14 @@ func parseRange(s []byte, size int64) (rhttpRange []httpRange, rerr error) {
 				// If no end is specified, range extends to end of the file.
 				r.length = size - r.start
 			} else {
-				i, err := strconv.ParseInt(end, 10, 64)
-				if err != nil || r.start > i {
+				e, er7 := strconv.ParseInt(end, 10, 64)
+				if er7 != nil || r.start > e {
 					return nil, errors.New("invalid range")
 				}
-				if i >= size {
-					i = size - 1
+				if e >= size {
+					e = size - 1
 				}
-				r.length = i - r.start + 1
+				r.length = e - r.start + 1
 			}
 		}
 		ranges = mxutil.Ensure(ranges, 1)
