@@ -1926,6 +1926,51 @@ func coverReportFile(pkgPath, modPath, file string) (s string) {
 	return pkgPath | "/" | baseName(file)
 }
 
+// firstCodeOnLine returns the offset of the first byte of real code on
+// [start,end), skipping spaces, tabs and carriage returns, line comments and
+// block comments, and reports the block-comment state at the end of the line.
+// A line with no code at all returns end.
+//
+// Comments have to be tracked from the FIRST line of the file, not from the
+// package clause. net/http's doc.mx is a doc comment ABOVE its package clause
+// whose prose includes the line
+//   package takes precedence over the net/http package's built-in HTTP/2
+// and a lexical "package " test with no comment awareness took that for the
+// package clause, then took the next line ("support.") for the first body line.
+// The concatenated body therefore began in the middle of a comment and the
+// parser reported "non-declaration statement outside function body" at
+// doc.mx:108. This is the same defect extractPkgName already guards against
+// (see its Block comment arm, which names fmt/doc.mx).
+func firstCodeOnLine(data []byte, start, end int32, inBlock bool) (codeStart int32, inBlockOut bool) {
+	i := start
+	for i < end {
+		if inBlock {
+			if i+1 < end && data[i] == '*' && data[i+1] == '/' {
+				inBlock = false
+				i += 2
+				continue
+			}
+			i++
+			continue
+		}
+		c := data[i]
+		if c == ' ' || c == '\t' || c == '\r' {
+			i++
+			continue
+		}
+		if c == '/' && i+1 < end && data[i+1] == '/' {
+			return end, false // line comment to the end of the line
+		}
+		if c == '/' && i+1 < end && data[i+1] == '*' {
+			inBlock = true
+			i += 2
+			continue
+		}
+		return i, false
+	}
+	return end, inBlock
+}
+
 // scanFileRegions scans file bytes to find the body start offset and
 // extract import specs. No SplitLines, no per-line copies. Returns
 // bodyStart (byte offset of first non-package/import line) and the
@@ -1947,16 +1992,33 @@ func scanFileRegions(data []byte, imports map[string]bool) (bodyStart int32, bod
 		if off < int32(len(data)) {
 			off++ // skip \n
 		}
-		// Trim whitespace for classification
-		ls := lineStart
-		for ls < lineEnd && (data[ls] == ' ' || data[ls] == '\t') {
-			ls++
-		}
+		// Classify the line's CODE, never its comments: the package clause and
+		// imports are matched against the first non-comment byte.
+		cs, inComment := firstCodeOnLine(data, lineStart, lineEnd, inBlockComment)
+		inBlockComment = inComment
 		le := lineEnd
-		for le > ls && (data[le-1] == ' ' || data[le-1] == '\t' || data[le-1] == '\r') {
+		for le > cs && (data[le-1] == ' ' || data[le-1] == '\t' || data[le-1] == '\r') {
 			le--
 		}
-		trimmed := data[ls:le]
+		trimmed := data[cs:le]
+		// A directive comment is code that must be kept: `//:linkname` opens
+		// runtime/time.mx and `//export setenv` sits above runtime's
+		// libc_setenv declaration, so dropping one loses it. A plain
+		// `// text` comment is not a directive. This only matters before the
+		// body starts, because the caller copies the whole tail of the file
+		// from bodyStart on.
+		if len(trimmed) == 0 {
+			rt := lineStart
+			for rt < lineEnd && (data[rt] == ' ' || data[rt] == '\t') {
+				rt++
+			}
+			if seenPkg && bodyStart < 0 && !inBlockComment && rt+2 < lineEnd && data[rt] == '/' && data[rt+1] == '/' && data[rt+2] != ' ' && data[rt+2] != '\t' {
+				bodyStart = lineStart
+				bodyLine = lineNum
+			}
+			lineNum++
+			continue
+		}
 		if len(trimmed) >= 8 && string(trimmed[:8]) == "package " {
 			seenPkg = true
 			lineNum++
@@ -2005,42 +2067,26 @@ func scanFileRegions(data []byte, imports map[string]bool) (bodyStart int32, bod
 			importsDone = true
 			continue
 		}
-		// The body starts at the first line that is not the package clause,
-		// not an import, not a blank, and not a plain comment. A *directive*
-		// comment is never skipped, because dropping one loses the directive:
+		// The body starts at the first line that is not the package clause and
+		// not an import. Blank lines, line comments and block comments were
+		// already dropped above, and a *directive* comment (a `//` whose first
+		// character is not a space: `//:linkname`, `//export`, `//go:...`) was
+		// taken as the body start there, because dropping one loses it:
 		//   - `//:linkname time_runtimeNano time.runtimeNano` opens
 		//     runtime/time.mx, which has no imports, and
 		//   - `//export setenv` sits above runtime's libc_setenv declaration.
 		// Skipping either produced `undefined symbol: time.runtimeNano` and
 		// `undefined symbol: runtime.libc_setenv`.
-		// A directive is a `//` comment whose first character is not a space,
-		// so `//:build`, `//export` and `//go:...` are kept while `// text`
-		// is a plain comment; a `//word` comment is kept too, which only means
-		// it stays in the body. No file has a directive-looking comment before
-		// its imports (the one `//:generate` that did was moved below them),
-		// so a directive never leaves an import line behind.
-		// Plain header comments are dropped, otherwise the usual package
-		// clause, blank line, doc comment, import sequence leaves the import
-		// line in the body - hoisted and in place at once - and the parser
-		// reports "imports must appear before other declarations".
+		// So anything reaching here is neither package, import, blank nor
+		// comment, and is by definition the body start. Plain header comments
+		// must not count, otherwise the usual package clause, blank line, doc
+		// comment, import sequence leaves an import line in the body - hoisted
+		// and in place at once - and the parser reports "imports must appear
+		// before other declarations".
 		if seenPkg && bodyStart < 0 {
-			start := false
+			start := true
 			if importsDone {
 				start = len(trimmed) > 0
-			} else if len(trimmed) > 0 {
-				if inBlockComment {
-					if len(trimmed) >= 2 && trimmed[0] == '*' && trimmed[1] == '/' {
-						inBlockComment = false
-					}
-				} else if len(trimmed) >= 2 && trimmed[0] == '/' && trimmed[1] == '*' {
-					if !mxutil.HasSuffix(string(trimmed), "*/") {
-						inBlockComment = true
-					}
-				} else if len(trimmed) >= 2 && trimmed[0] == '/' && trimmed[1] == '/' && (len(trimmed) == 2 || trimmed[2] == ' ' || trimmed[2] == '\t') {
-					// plain header comment, skipped
-				} else {
-					start = true
-				}
 			}
 			if start {
 				bodyStart = lineStart

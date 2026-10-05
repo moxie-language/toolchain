@@ -503,9 +503,9 @@ func (pb *ssaPkgBuilder) declScope(d syntax.Decl) (sc *Scope) {
 		dp := dd.Pos()
 		line = int32(dp.Line())
 	}
-	// Parser positions are 0-based (p.pos subtracts Linebase); seg outStart
-	// is a 1-based concat line. Convert at this boundary.
-	line++
+	// The declaration's line and a segment's outStart are both 1-based
+	// concatenated-source lines, so they compare directly. (This used to add 1
+	// to undo Parser.pos's 0-based line.)
 	var best *Scope
 	for i := 0; i < len(pb.segScopes); i++ {
 		if pb.segScopes[i].outStart <= line {
@@ -1430,7 +1430,7 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 	// The entry block is created before any statement, so seed the line with the
 	// declaration's own line.
 	dp := d.Pos()
-	fb.curLine = int32(dp.Line()) + 1
+	fb.curLine = int32(dp.Line())
 	entry := fb.newBlock("entry")
 	fb.currentBlock = entry
 
@@ -1655,11 +1655,11 @@ func (fb *ssaFuncBuilder) buildStmt(s syntax.Stmt) {
 	if s == nil {
 		return
 	}
-	// Parser lines are 0-based; the concatenated-source lines the coverage and
-	// error maps use are 1-based. Blocks created while this statement compiles
+	// Positions are 1-based concatenated-source lines, the same lines the
+	// coverage and error maps use. Blocks created while this statement compiles
 	// carry its line.
 	sp := s.Pos()
-	fb.curLine = int32(sp.Line()) + 1
+	fb.curLine = int32(sp.Line())
 	if ls, ok := s.(*syntax.LabeledStmt); ok {
 		if ls.Label != nil {
 			fb.pendingLabel = ls.Label.Value
@@ -6659,10 +6659,32 @@ func (fb *ssaFuncBuilder) buildCompositeLitInto(dst SSAValue, e *syntax.Composit
 		}
 		return
 	}
-	// Not an aggregate: fall back to a value store.
-	if v := fb.buildExpr(e); v != nil {
-		fb.emitStore(dst, v)
+	// A pointer-to-aggregate target is the `&T{...}` shorthand an untyped
+	// literal carries in tables like
+	//   formTable = []*formInfo{{ form: NFC, ... }}
+	//   return []*cipherSuite{{ ID: TLS_RSA_..., ... }}
+	// The element `{...}` has no type of its own: it means &formInfo{...}. The
+	// pointee has to be allocated, filled, and its ADDRESS stored in dst.
+	if p, isPtr := SafeUnderlying(typ).(*Pointer); isPtr {
+		if _, isStruct := SafeUnderlying(p.Base).(*TCStruct); isStruct {
+			alloc := fb.emitAlloc(p.Base, 0)
+			if litFullyCovers(e, p.Base) {
+				alloc.NoZero = true
+			}
+			fb.buildCompositeLitInto(alloc, e, p.Base)
+			fb.emitStore(dst, alloc)
+			return
+		}
 	}
+	// Not an aggregate. Calling buildExpr(e) here re-entered buildCompositeLit
+	// with the SAME node, and because the literal still carries its type that
+	// path allocated and called straight back into this function - infinite
+	// recursion, which stack-overflowed while compiling net/http (gdb:
+	// resolveTypeAST <- resolveType <- buildCompositeLit <- buildExpr <-
+	// buildCompositeLitInto, repeating). Fail loud with the type and position
+	// instead of crashing.
+	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+	push(cctx.compileErrors, fb.errPos() | "composite literal of non-aggregate type " | typ.String())
 }
 
 // storeLitElem stores one composite-literal element at dst. An untyped nested
