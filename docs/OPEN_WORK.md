@@ -3232,3 +3232,68 @@ pointer form here).
 Not attempted: it needs a compiler change plus the legacy cross-check plus a
 verifying build, and doing it half-way would leave the tree worse than the
 documented bug.
+
+# ============ UPDATE: net/http is down to ONE diagnostic class ============
+
+`4b40204f`. Full suite rc=0, **185 PASS**, `selfhost:fixpoint` PASS. Tree clean.
+
+## The composite-literal arm was the net/http segfault's real root
+
+`buildCompositeLitInto`'s non-aggregate arm is reached by the port's spelling of
+Go's `new(T)` for a **scalar Named type**:
+
+    http2settingsTimerMsg = &http2serverMessage{}   // Go: new(serverMessage)
+    type http2serverMessage int32
+
+`dst` is already an allocation of exactly that type and the allocator zeroes it,
+so there is nothing to store - **the address is the whole result**. The old
+fallback called `buildExpr(e)` on the same node and re-entered itself (the gdb
+cycle). Only a non-empty element list is an error now. Note this means the
+earlier `[]*T{{...}}` pointer-shorthand fix was a *second, unrelated* instance of
+the same re-entry, not the cause of the net/http crash.
+
+## net/http source fixes (each replaces the errors it named)
+
+- `client.mx`: **`nop` was never declared**, though both `setRequestCancel` call
+  sites use it (Go declares it in client.go) -> two `undefined: nop`.
+- `fs.mx` `serveContent`: the inline multipart-writer closure shadowed the outer
+  `err`. Moxie rejects shadowing *including an if-scoped redeclaration*, so the
+  three sites are now `werr`/`serr`/`cerr`.
+- `fs.mx`/`server.mx`: `bytes.FieldsFuncSeq`, `bytes.SplitSeq` x2 and
+  `slices.Sorted(maps.Keys(ms))` are the **iterator APIs**, which live in
+  `bytes/iter_wasm.mx` and `maps/iter.mx` and are skipped because they import
+  `iter` (banned as an `any`-style constraint). Rewritten to the slice-returning
+  equivalents that DO exist: `bytes.FieldsFunc`, `bytes.Split`, and a hand-built
+  key slice + `slices.Sort`.
+
+## What is left for net/http
+
+**Exactly one class, 229 diagnostics**: the sovereign-loop scratch rule,
+`"':=' declaration inside a loop in a self-mutating method is not allowed: move
+the loop scratch into a helper function"`. That is a real source refactor, not a
+compiler defect, and it is delegated (agent `f5ead72f`): for each self-mutating
+method with a `:=`/`var` inside a loop, move the loop's scratch into a free
+function with its own freed-at-return arena and keep only the receiver write in
+the method. Rationale in CLAUDE.md's Sovereign Arena section - a mutating
+method's allocations persist for the life of the receiver, so loop scratch in
+such a method leaks one allocation per iteration.
+
+Sites named in the diagnostics: `(*routingIndex).addPattern`, `(*conn).serve`
+x3, `(*Transport).roundTrip` x3 (+1 plain `var`), `(*Transport).tryPutIdleConn`
+x2, `(*Transport).queueForIdleConn` x2, and more.
+
+## Item 10 (elliptic / generic iface dispatch) - the other layer found
+
+`dispMethodsByPkg` is documented as "the mxh-derived dispatch index: package key
+-> the **non-generic** method names its mxh declares", and `findIfaceImpls` uses
+it to SKIP packages that cannot contribute an impl. So there are **two** skips
+stacked on this bug:
+
+1. the tier filter skips a package whose index lacks the method name (the index
+   deliberately records only non-generic names), and
+2. `ir_iface.mx:401` skips the generic `*Named` itself.
+
+Fixing it needs both: the mxh index must record generic method names, and the
+instantiated `*Named` (whose `TArgs` is set) must be available to key the impl -
+which it is only at the boxing site. Both are compiler changes plus a legacy
+cross-check, so it stays open and is not started half-way.
