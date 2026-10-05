@@ -6,7 +6,6 @@ package bidi
 
 import (
 	"git.smesh.lol/moxie/pkg/mxutil"
-	"container/list"
 	"fmt"
 	"sort"
 )
@@ -76,7 +75,7 @@ func (b bracketPairs) Less(i, j int32) bool { return b[i].opener < b[j].opener }
 func resolvePairedBrackets(s *isolatingRunSequence) {
 	p := bracketPairer{
 		sos:              s.sos,
-		openers:          list.New(),
+		openers:          nil,
 		codesIsolatedRun: s.types,
 		indexes:          s.indexes,
 	}
@@ -110,7 +109,10 @@ type bracketPairer struct {
 	// slices contain the rune of the opening bracket after normalization for
 	// any opening or closing bracket.
 
-	openers *list.List // list of positions for opening brackets
+	// openers holds the positions of the currently open brackets, most
+	// recent at the end. Go used container/list; a slice stack is the same
+	// structure with concrete int32 elements.
+	openers []int32
 
 	// bracket pair positions sorted by location of opening bracket
 	pairPositions bracketPairs
@@ -151,27 +153,26 @@ func (p *bracketPairer) locateBrackets(pairTypes []bracketType, pairValues []run
 		switch pairTypes[index] {
 		case bpOpen:
 			// check if maximum pairing depth reached
-			if p.openers.Len() == maxPairingDepth {
-				p.openers.Init()
+			if len(p.openers) == maxPairingDepth {
+				p.openers = nil
 				return
 			}
 			// remember opener location, most recent first
-			p.openers.PushFront(i)
+			p.openers = mxutil.Ensure(p.openers, 1)
+			p.openers = push(p.openers, i)
 
 		case bpClose:
 			// see if there is a match
 			count = 0
-			for elem := p.openers.Front(); elem != nil; elem = elem.Next() {
+			for j := len(p.openers) - 1; j >= 0; j-- {
 				count++
-				opener = elem.Value.(int32)
+				opener = p.openers[j]
 				if p.matchOpener(pairValues, opener, i) {
 					// if the opener matches, add nested pair to the ordered list
 					p.pairPositions = mxutil.Ensure(p.pairPositions, 1)
 					p.pairPositions = push(p.pairPositions, bracketPair{opener, i})
 					// remove up to and including matched opener
-					for ; count > 0; count-- {
-						p.openers.Remove(p.openers.Front())
-					}
+					p.openers = p.openers[:len(p.openers)-count]
 					break
 				}
 			}

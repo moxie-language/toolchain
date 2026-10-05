@@ -10,29 +10,11 @@ import (
 	"io"
 )
 
-var bufPoolItems []*bytes.Buffer
-
-func bufPoolGet() *bytes.Buffer {
-	if len(bufPoolItems) > 0 {
-		b := bufPoolItems[len(bufPoolItems)-1]
-		bufPoolItems = bufPoolItems[:len(bufPoolItems)-1]
-		return b
-	}
-	return &bytes.Buffer{}
-}
-
-func bufPoolPut(b *bytes.Buffer) {
-	bufPoolItems = mxutil.Ensure(bufPoolItems, 1)
-	bufPoolItems = push(bufPoolItems, b)
-}
-
 // HuffmanDecode decodes the string in v and writes the expanded
 // result to w, returning the number of bytes written to w and the
 // Write call's return value. At most one Write call is made.
 func HuffmanDecode(w io.Writer, v []byte) (int32, error) {
-	buf := bufPoolGet()
-	buf.Reset()
-	defer bufPoolPut(buf)
+	buf := &bytes.Buffer{}
 	if err := huffmanDecode(buf, 0, v); err != nil {
 		return 0, err
 	}
@@ -41,9 +23,7 @@ func HuffmanDecode(w io.Writer, v []byte) (int32, error) {
 
 // HuffmanDecodeToString decodes the string in v.
 func HuffmanDecodeToString(v []byte) ([]byte, error) {
-	buf := bufPoolGet()
-	buf.Reset()
-	defer bufPoolPut(buf)
+	buf := &bytes.Buffer{}
 	if err := huffmanDecode(buf, 0, v); err != nil {
 		return "", err
 	}
@@ -192,9 +172,9 @@ func AppendHuffmanString(dst []byte, s []byte) []byte {
 		x |= uint64(_huffmanCodes()[c])
 		if n >= 32 {
 			n %= 32             // Normally would be -= 32 but %= 32 informs compiler 0 <= n <= 31 for upcoming shift
-			y := uint32(x >> n) // Compiler doesn't combine memory writes if y isn't uint32
+			yBits := uint32(x >> n) // Compiler doesn't combine memory writes if y isn't uint32
 			dst = mxutil.Ensure(dst, 1)
-			dst = push(dst, byte(y>>24), byte(y>>16), byte(y>>8), byte(y))
+			dst = push(dst, byte(yBits>>24), byte(yBits>>16), byte(yBits>>8), byte(yBits))
 		}
 	}
 	// Add padding bits if necessary
@@ -215,15 +195,15 @@ func AppendHuffmanString(dst []byte, s []byte) []byte {
 	case 1:
 		return push(dst, byte(x))
 	case 2:
-		y := uint16(x)
-		return push(dst, byte(y>>8), byte(y))
+		y16 := uint16(x)
+		return push(dst, byte(y16>>8), byte(y16))
 	case 3:
-		y := uint16(x >> 8)
-		return push(dst, byte(y>>8), byte(y), byte(x))
+		y16b := uint16(x >> 8)
+		return push(dst, byte(y16b>>8), byte(y16b), byte(x))
 	}
 	//	case 4:
-	y := uint32(x)
-	return push(dst, byte(y>>24), byte(y>>16), byte(y>>8), byte(y))
+	y32 := uint32(x)
+	return push(dst, byte(y32>>24), byte(y32>>16), byte(y32>>8), byte(y32))
 }
 
 // HuffmanEncodeLength returns the number of bytes required to encode

@@ -47,7 +47,7 @@ func decode(encoded string) (string, error) {
 	if pos != 0 {
 		for _, r := range encoded[:pos-1] {
 			output = mxutil.Ensure(output, 1)
-			output = push(output, r)
+			output = push(output, rune(r))
 		}
 	}
 	i, n, bias := int32(0), initialN, initialBias
@@ -108,9 +108,12 @@ func decode(encoded string) (string, error) {
 func encode(prefix, s string) (string, error) {
 	output := []byte{:len(prefix):len(prefix)+1+2*len(s)}
 	copy(output, prefix)
+	// Moxie's string is []byte, so `range s` yields bytes, not runes. Decode
+	// once so the three passes below all see the same code points.
+	runes := punycodeRunes(s)
 	delta, n, bias := int32(0), initialN, initialBias
 	b, remaining := int32(0), int32(0)
-	for _, r := range s {
+	for _, r := range runes {
 		if r < 0x80 {
 			b++
 			output = mxutil.Ensure(output, 1)
@@ -127,7 +130,7 @@ func encode(prefix, s string) (string, error) {
 	overflow := false
 	for remaining != 0 {
 		m := int32(0x7fffffff)
-		for _, r := range s {
+		for _, r := range runes {
 			if m > r && r >= n {
 				m = r
 			}
@@ -137,7 +140,7 @@ func encode(prefix, s string) (string, error) {
 			return "", punyError(s)
 		}
 		n = m
-		for _, r := range s {
+		for _, r := range runes {
 			if r < n {
 				delta++
 				if delta < 0 {
@@ -174,6 +177,20 @@ func encode(prefix, s string) (string, error) {
 		n++
 	}
 	return string(output), nil
+}
+
+// punycodeRunes decodes the UTF-8 code points of s. Moxie's range over a
+// string yields bytes, so the Punycode passes that need code points decode
+// explicitly.
+func punycodeRunes(s string) (rs []rune) {
+	i := int32(0)
+	for i < len(s) {
+		r, size := utf8.DecodeRune(s[i:])
+		rs = mxutil.Ensure(rs, 1)
+		rs = push(rs, r)
+		i += size
+	}
+	return rs
 }
 
 // madd computes a + (b * c), detecting overflow.
