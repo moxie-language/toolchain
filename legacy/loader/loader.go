@@ -309,14 +309,9 @@ func (p *Package) TypeInfo() *types.Info {
 // parseFile parses a source file using the bootstrap parser (syntax package)
 // and converts the result to go/ast.File for downstream compatibility.
 // The *syntax.File is stored in p.SyntaxFiles for the native type checker (B1).
-func (p *Package) parseFile(path string, mode parser.Mode) (*ast.File, error) {
+// data is the raw file contents, already read and hashed by parseFiles.
+func (p *Package) parseFile(path string, data []byte, mode parser.Mode) (*ast.File, error) {
 	originalPath := p.program.getOriginalPath(path)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	sum := sha512.Sum512_224(data)
-	p.FileHashes[originalPath] = sum[:]
 
 	// Rewrite Moxie pragmas (//:linkname, //:inline, etc) to //go: form
 	// so the Go parser associates them correctly with function declarations.
@@ -527,22 +522,43 @@ func (p *Package) Check() error {
 
 // parseFiles parses the loaded list of files and returns this list.
 func (p *Package) parseFiles() ([]*ast.File, error) {
-	var files []*ast.File
+	// Read every file before parsing any of them: a const declared in one
+	// file is routinely referenced in another, so the dead-const scan is
+	// package-wide, exactly as stage4 scans its concatenated package source.
+	paths := make([]string, 0, len(p.GoFiles))
+	datas := make([][]byte, 0, len(p.GoFiles))
 	var fileErrs []error
-
-	parseFile := func(file string) {
+	for _, file := range p.GoFiles {
 		if !filepath.IsAbs(file) {
 			file = filepath.Join(p.Dir, file)
 		}
-		f, err := p.parseFile(file, parser.ParseComments)
+		data, err := os.ReadFile(file)
 		if err != nil {
 			fileErrs = append(fileErrs, err)
-			return
+			continue
+		}
+		paths = append(paths, file)
+		datas = append(datas, data)
+	}
+
+	refs := make(map[string]bool)
+	for _, data := range datas {
+		collectConstRefs(data, refs)
+	}
+
+	var files []*ast.File
+	for i, file := range paths {
+		// Hash the raw bytes, not the stripped source: the action ID must
+		// change whenever the file on disk changes.
+		sum := sha512.Sum512_224(datas[i])
+		p.FileHashes[p.program.getOriginalPath(file)] = sum[:]
+
+		f, err := p.parseFile(file, stripUnusedConsts(datas[i], refs), parser.ParseComments)
+		if err != nil {
+			fileErrs = append(fileErrs, err)
+			continue
 		}
 		files = append(files, f)
-	}
-	for _, file := range p.GoFiles {
-		parseFile(file)
 	}
 
 	if len(fileErrs) != 0 {
