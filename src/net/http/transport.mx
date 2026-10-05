@@ -13,7 +13,6 @@ import (
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"bufio"
 	"compress/gzip"
-	"container/list"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -572,7 +571,7 @@ func validateHeaders(hdrs Header) (rs string) {
 func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 	if !t.nextProtoDone { t.nextProtoDone = true; t.onceSetNextProtoDefaults() }
 	ctx := req.Context()
-	trace := httptrace.ContextClientTrace(ctx)
+	trace := req.ClientTrace()
 
 	if req.URL == nil {
 		req.closeBody()
@@ -1020,7 +1019,7 @@ func (t *Transport) tryPutIdleConn(pconn *persistConn) (rerr error) {
 	// HTTP/2 (pconn.alt != nil) connections do not come out of the idle list,
 	// because multiple goroutines can use them simultaneously.
 	// If this is an HTTP/2 connection being "returned," we're done.
-	if pconn.alt != nil && t.idleLRU.m[pconn] != nil {
+	if pconn.alt != nil && t.idleLRU.m[pconn] != 0 {
 		return nil
 	}
 
@@ -1254,6 +1253,7 @@ type wantConn struct {
 	ctx       context.Context // context for dial, cleared after delivered or canceled
 	cancelCtx context.CancelFunc
 	cancelSet bool // whether cancelCtx is set (CancelFunc is a struct, not a func)
+	trace     *httptrace.ClientTrace // per-request client trace, or nil
 	done      bool             // true after delivered or canceled
 	result    chan connOrError // channel to deliver connection or error
 }
@@ -1439,6 +1439,7 @@ func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (_ *persis
 		ctx:        dialCtx,
 		cancelCtx:  dialCancel,
 		cancelSet:  true,
+		trace:      trace,
 		result:     chan connOrError{1},
 	}
 	defer func() {
@@ -1541,7 +1542,7 @@ func (t *Transport) dialConnFor(w *wantConn) {
 		return
 	}
 
-	pc, err := t.dialConn(ctx, w.cm)
+	pc, err := t.dialConn(ctx, w.cm, w.trace)
 	delivered := w.tryDeliver(pc, err, time.Time{})
 	if err == nil && (!delivered || pc.alt != nil) {
 		// pconn was not passed to w,
@@ -1658,7 +1659,7 @@ type erringRoundTripper interface {
 	RoundTripErr() error
 }
 
-func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *persistConn, err error) {
+func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httptrace.ClientTrace) (pconn *persistConn, err error) {
 	pconn = &persistConn{
 		t:             t,
 		cacheKey:      cm.key(),
@@ -1668,7 +1669,6 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 		writeErrCh:    chan error{1},
 		writeLoopDone: chan struct{}{},
 	}
-	trace := httptrace.ContextClientTrace(ctx)
 	wrapErr := func(err error) error {
 		if cm.proxyURL != nil {
 			// Return a typed error, per Issue 16997
@@ -2760,14 +2760,12 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 	}
 }
 
-// tLogKey is a context WithValue key for test debugging contexts containing
-// a t.Logf func. See export_test.go's Request.WithT method.
-type tLogKey struct{}
-
+// logf logs a debug trace of a round trip. It is reached only when the
+// debugRoundTrip constant is set. Go routed this through a context value set
+// by a test helper; Moxie has no dynamic context values, so it goes straight
+// to the standard logger.
 func (tr *transportRequest) logf(format string, args ...fmt.Stringer) {
-	if logf, ok := tr.Request.Context().Value(tLogKey{}).(func(string, ...fmt.Stringer)); ok {
-		logf(time.Now().Format(time.RFC3339Nano)+": "+format, args...)
-	}
+	log.Printf(format, args...)
 }
 
 // markReused marks this connection as having been successfully used for a
@@ -2957,36 +2955,47 @@ func cloneTLSConfig(cfg *tls.Config) (rconfig *tls.Config) {
 	return cfg.Clone()
 }
 
+// connLRU is the idle-connection LRU. Go used container/list, a linked list
+// of interface{} elements; Moxie has no interfaces here, so the list is a
+// slice of the concrete element type ordered oldest-first, with a head cursor.
+// Removed elements become nil holes and are skipped by removeOldest, which
+// keeps every operation O(1) without shifting (Moxie sub-slicing copies).
 type connLRU struct {
-	ll *list.List // list.Element.Value type is of *persistConn
-	m  map[*persistConn]*list.Element
+	ll   []*persistConn
+	head int32
+	// m maps a live conn to its index in ll, plus one (0 means absent, so a
+	// bare map lookup can be used as a boolean where Go wrote != nil).
+	m map[*persistConn]int32
 }
 
 // add adds pc to the head of the linked list.
 func (cl *connLRU) add(pc *persistConn) {
-	if cl.ll == nil {
-		cl.ll = list.New()
-		cl.m = map[*persistConn]*list.Element{}
+	if cl.m == nil {
+		cl.m = map[*persistConn]int32{}
 	}
-	ele := cl.ll.PushFront(pc)
-	if _, ok := cl.m[pc]; ok {
+	if cl.m[pc] != 0 {
 		panic("persistConn was already in LRU")
 	}
-	cl.m[pc] = ele
+	cl.ll = mxutil.Ensure(cl.ll, 1)
+	cl.ll = push(cl.ll, pc)
+	cl.m[pc] = int32(len(cl.ll))
 }
 
 func (cl *connLRU) removeOldest() (rpersistConn *persistConn) {
-	ele := cl.ll.Back()
-	pc := ele.Value.(*persistConn)
-	cl.ll.Remove(ele)
+	for cl.head < int32(len(cl.ll)) && cl.ll[cl.head] == nil {
+		cl.head++
+	}
+	pc := cl.ll[cl.head]
+	cl.ll[cl.head] = nil
+	cl.head++
 	delete(cl.m, pc)
 	return pc
 }
 
 // remove removes pc from cl.
 func (cl *connLRU) remove(pc *persistConn) {
-	if ele, ok := cl.m[pc]; ok {
-		cl.ll.Remove(ele)
+	if i := cl.m[pc]; i != 0 {
+		cl.ll[i-1] = nil
 		delete(cl.m, pc)
 	}
 }

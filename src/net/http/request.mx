@@ -18,6 +18,7 @@ import (
 	"maps"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http/httptrace"
 	"net/http/internal/ascii"
 	"net/textproto"
@@ -356,6 +357,18 @@ type Request struct {
 	// and mutating the contexts held by callers of the same request.
 	ctx context.Context
 
+	// trace is the optional client trace attached with WithClientTrace.
+	// Moxie has no dynamic context attribute bag, so the request carries
+	// it as a concrete typed field rather than inside ctx.
+	trace *httptrace.ClientTrace
+
+	// server and localAddr are the server-side values Go reads back from
+	// a request context (ServerContextKey and LocalAddrContextKey). They
+	// are concrete fields because context.Context carries no arbitrary
+	// keys in Moxie.
+	server    *Server
+	localAddr net.Addr
+
 	// The following fields are for requests matched by ServeMux.
 	pat         *pattern          // the pattern that matched
 	matches     [][]byte          // values for the matching wildcards in pat
@@ -378,6 +391,40 @@ func (r *Request) Context() (rcontext context.Context) {
 		return r.ctx
 	}
 	return context.Background()
+}
+
+// ClientTrace returns the [httptrace.ClientTrace] attached to the request with
+// [Request.WithClientTrace], or nil if there is none.
+func (r *Request) ClientTrace() (rtrace *httptrace.ClientTrace) {
+	return r.trace
+}
+
+// WithClientTrace returns a shallow copy of r with the provided trace hooks
+// attached. HTTP client requests made with the returned request will use the
+// provided hooks in addition to any already attached: hooks defined in trace
+// are called first. This replaces httptrace.WithClientTrace, which needed a
+// dynamic context value that Moxie does not have.
+func (r *Request) WithClientTrace(trace *httptrace.ClientTrace) (rrequest *Request) {
+	if trace == nil {
+		panic("nil trace")
+	}
+	r2 := &Request{}
+	*r2 = *r
+	trace.Compose(r2.trace)
+	r2.trace = trace
+	return r2
+}
+
+// Server returns the [Server] that is handling the request, or nil. It is the
+// concrete replacement for the ServerContextKey context lookup.
+func (r *Request) Server() (rserver *Server) {
+	return r.server
+}
+
+// LocalAddr returns the local address the connection arrived on, or nil. It is
+// the concrete replacement for the LocalAddrContextKey context lookup.
+func (r *Request) LocalAddr() (raddr net.Addr) {
+	return r.localAddr
 }
 
 // WithContext returns a shallow copy of r with its context changed
@@ -602,7 +649,7 @@ var errMissingHost error
 // waitForContinue may be nil
 // always closes body
 func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitForContinue func() bool) (err error) {
-	trace := httptrace.ContextClientTrace(r.Context())
+	trace := r.ClientTrace()
 	if trace != nil && trace.WroteRequest != nil {
 		defer func() {
 			trace.WroteRequest(httptrace.WroteRequestInfo{

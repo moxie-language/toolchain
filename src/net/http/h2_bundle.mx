@@ -4406,10 +4406,6 @@ func (s *http2Server) serveConn(c net.Conn, opts *http2ServeConnOpts, newf func(
 func http2serverConnBaseContext(c net.Conn, opts *http2ServeConnOpts) (ctx context.Context, cancel context.CancelFunc) {
 	serverInitOnce()
 	ctx, cancel = context.WithCancel(opts.context())
-	ctx = context.WithValue(ctx, LocalAddrContextKey, c.LocalAddr())
-	if hs := opts.baseConfig(); hs != nil {
-		ctx = context.WithValue(ctx, ServerContextKey, hs)
-	}
 	return
 }
 
@@ -4744,19 +4740,19 @@ func (sc *http2serverConn) serve(conf http2http2Config) {
 		sc.vlogf("http2: server connection from %v", sc.conn.RemoteAddr())
 	}
 
-	settings := http2writeSettings{
+	settings := http2writeSettings{settings: []http2Setting{
 		{http2SettingMaxFrameSize, conf.MaxReadFrameSize},
 		{http2SettingMaxConcurrentStreams, sc.advMaxStreams},
 		{http2SettingMaxHeaderListSize, sc.maxHeaderListSize()},
 		{http2SettingHeaderTableSize, conf.MaxDecoderHeaderTableSize},
 		{http2SettingInitialWindowSize, uint32(sc.initialStreamRecvWindowSize)},
-	}
+	}}
 	if !http2disableExtendedConnectProtocol {
-		settings = mxutil.Ensure(settings, 1)
-		settings = push(settings, http2Setting{http2SettingEnableConnectProtocol, 1})
+		settings.settings = mxutil.Ensure(settings.settings, 1)
+		settings.settings = push(settings.settings, http2Setting{http2SettingEnableConnectProtocol, 1})
 	}
 	sc.writeFrame(http2FrameWriteRequest{
-		write: settings,
+		write: &settings,
 	})
 	sc.unackedSettings++
 
@@ -6160,6 +6156,8 @@ func (sc *http2serverConn) newWriterAndRequestNoBody(st *http2stream, rp httpcom
 		Body:       body,
 		Trailer:    res.Trailer,
 	}).WithContext(st.ctx)
+	req.server = sc.hs
+	req.localAddr = sc.conn.LocalAddr()
 	rw := sc.newResponseWriter(st, req)
 	return rw, req, nil
 }
@@ -8395,7 +8393,7 @@ func (cc *http2ClientConn) roundTrip(req *Request, streamf func(*http2clientStre
 		isHead:               req.Method == "HEAD",
 		reqBody:              req.Body,
 		reqBodyContentLength: http2actualContentLength(req),
-		trace:                httptrace.ContextClientTrace(ctx),
+		trace:                req.ClientTrace(),
 		peerClosed:           chan struct{}{},
 		abort:                chan struct{}{},
 		respHeaderRecv:       chan struct{}{},
@@ -8690,7 +8688,7 @@ func (cs *http2clientStream) encodeAndWriteHeaders(req *Request) (rerr error) {
 }
 
 func http2encodeRequestHeaders(req *Request, addGzipHeader bool, peerMaxHeaderListSize uint64, headerf func(name, value string)) (rencodeHeadersResult httpcommon.EncodeHeadersResult, rerr error) {
-	return httpcommon.EncodeHeaders(req.Context(), httpcommon.EncodeHeadersParam{
+	return httpcommon.EncodeHeaders(req.ClientTrace(), httpcommon.EncodeHeadersParam{
 		Request: httpcommon.Request{
 			Header:              req.Header,
 			Trailer:             req.Trailer,
@@ -10162,7 +10160,7 @@ func (t *http2Transport) idleConnTimeout() (rduration time.Duration) {
 }
 
 func http2traceGetConn(req *Request, hostPort string) {
-	trace := httptrace.ContextClientTrace(req.Context())
+	trace := req.ClientTrace()
 	if trace == nil || trace.GetConn == nil {
 		return
 	}
@@ -10170,7 +10168,7 @@ func http2traceGetConn(req *Request, hostPort string) {
 }
 
 func http2traceGotConn(req *Request, cc *http2ClientConn, reused bool) {
-	trace := httptrace.ContextClientTrace(req.Context())
+	trace := req.ClientTrace()
 	if trace == nil || trace.GotConn == nil {
 		return
 	}
@@ -10311,16 +10309,21 @@ func (http2flushFrameWriter) writeFrame(ctx http2writeContext) (rerr error) {
 
 func (http2flushFrameWriter) staysWithinBuffer(max int32) (rok bool) { return false }
 
-type http2writeSettings []http2Setting
+// http2writeSettings writes a SETTINGS frame. Go used a named []http2Setting;
+// Moxie bans that, and the type must satisfy http2writeFramer, so it is a
+// struct holding the slice with pointer-receiver methods.
+type http2writeSettings struct {
+	settings []http2Setting
+}
 
-func (s http2writeSettings) staysWithinBuffer(max int32) (rok bool) {
+func (s *http2writeSettings) staysWithinBuffer(max int32) (rok bool) {
 	const settingSize = 6 // uint16 + uint32
-	return http2frameHeaderLen+settingSize*len(s) <= max
+	return http2frameHeaderLen+settingSize*len(s.settings) <= max
 
 }
 
-func (s http2writeSettings) writeFrame(ctx http2writeContext) (rerr error) {
-	return ctx.Framer().WriteSettings([]http2Setting(s)...)
+func (s *http2writeSettings) writeFrame(ctx http2writeContext) (rerr error) {
+	return ctx.Framer().WriteSettings(s.settings...)
 }
 
 type http2writeGoAway struct {
@@ -10841,9 +10844,12 @@ func (q *http2writeQueue) consume(n int32) (rhttp2FrameWriteRequest http2FrameWr
 	return consumed, true
 }
 
-type http2writeQueuePool []*http2writeQueue
-
-// put inserts an unused writeQueue into the pool.
+// http2writeQueuePool recycles writeQueues. Go used a named []*http2writeQueue
+// with pointer methods; Moxie bans the named slice, so the pool is a struct
+// holding the slice.
+type http2writeQueuePool struct {
+	q []*http2writeQueue
+}
 
 // put inserts an unused writeQueue into the pool.
 func (p *http2writeQueuePool) put(q *http2writeQueue) {
@@ -10851,19 +10857,20 @@ func (p *http2writeQueuePool) put(q *http2writeQueue) {
 		q.s[i] = http2FrameWriteRequest{}
 	}
 	q.s = q.s[:0]
-	*p = push(*p, q)
+	p.q = mxutil.Ensure(p.q, 1)
+	p.q = push(p.q, q)
 }
 
 // get returns an empty writeQueue.
 func (p *http2writeQueuePool) get() (rhttp2writeQueue *http2writeQueue) {
-	ln := len(*p)
+	ln := len(p.q)
 	if ln == 0 {
 		return &http2writeQueue{}
 	}
 	x := ln - 1
-	q := (*p)[x]
-	(*p)[x] = nil
-	*p = (*p)[:x]
+	q := p.q[x]
+	p.q[x] = nil
+	p.q = p.q[:x]
 	return q
 }
 
@@ -11052,7 +11059,8 @@ func (n *http2priorityNode) walkReadyInOrder(openParent bool, tmp *[]*http2prior
 		*tmp = push(*tmp, n.kids)
 		n.kids.setParent(nil)
 	}
-	sort.Sort(http2sortPriorityNodeSiblings(*tmp))
+	z := http2sortPriorityNodeSiblings{z: *tmp}
+	sort.Sort(&z)
 	for i := len(*tmp) - 1; i >= 0; i-- {
 		(*tmp)[i].setParent(n) // setParent inserts at the head of n.kids
 	}
@@ -11064,17 +11072,22 @@ func (n *http2priorityNode) walkReadyInOrder(openParent bool, tmp *[]*http2prior
 	return false
 }
 
-type http2sortPriorityNodeSiblings []*http2priorityNode
+// http2sortPriorityNodeSiblings sorts priority nodes for sort.Sort. Go used a
+// named []*http2priorityNode; Moxie bans that, so the nodes live in a struct
+// with the sort.Interface methods.
+type http2sortPriorityNodeSiblings struct {
+	z []*http2priorityNode
+}
 
-func (z http2sortPriorityNodeSiblings) Len() (rn int32) { return len(z) }
+func (s *http2sortPriorityNodeSiblings) Len() (rn int32) { return len(s.z) }
 
-func (z http2sortPriorityNodeSiblings) Swap(i, k int32) { z[i], z[k] = z[k], z[i] }
+func (s *http2sortPriorityNodeSiblings) Swap(i, k int32) { s.z[i], s.z[k] = s.z[k], s.z[i] }
 
-func (z http2sortPriorityNodeSiblings) Less(i, k int32) (rok bool) {
+func (s *http2sortPriorityNodeSiblings) Less(i, k int32) (rok bool) {
 	// Prefer the subtree that has sent fewer bytes relative to its weight.
 	// See sections 5.3.2 and 5.3.4.
-	wi, bi := float64(z[i].weight+1), float64(z[i].subtreeBytes)
-	wk, bk := float64(z[k].weight+1), float64(z[k].subtreeBytes)
+	wi, bi := float64(s.z[i].weight+1), float64(s.z[i].subtreeBytes)
+	wk, bk := float64(s.z[k].weight+1), float64(s.z[k].subtreeBytes)
 	if bi == 0 && bk == 0 {
 		return wi >= wk
 	}

@@ -208,20 +208,6 @@ type CloseNotifier interface {
 	CloseNotify() <-chan bool
 }
 
-var (
-	// ServerContextKey is a context key. It can be used in HTTP
-	// handlers with Context.Value to access the server that
-	// started the handler. The associated value will be of
-	// type *Server.
-	ServerContextKey *contextKey
-
-	// LocalAddrContextKey is a context key. It can be used in
-	// HTTP handlers with Context.Value to access the local
-	// address the connection arrived on.
-	// The associated value will be of type net.Addr.
-	LocalAddrContextKey *contextKey
-)
-
 var _serverInitDone bool
 
 func serverInitOnce() {
@@ -229,8 +215,6 @@ func serverInitOnce() {
 		return
 	}
 	_serverInitDone = true
-	ServerContextKey = &contextKey{"http-server"}
-	LocalAddrContextKey = &contextKey{"local-addr"}
 	DefaultServeMux = &defaultServeMux
 }
 
@@ -974,6 +958,8 @@ func (c *conn) readRequest(ctx context.Context) (w *response, err error) {
 
 	ctx, cancelCtx := context.WithCancel(ctx)
 	req.ctx = ctx
+	req.server = c.server
+	req.localAddr = c.rwc.LocalAddr()
 	req.RemoteAddr = c.remoteAddr
 	req.TLS = c.tlsState
 	if body, ok := req.Body.(*body); ok {
@@ -1834,7 +1820,6 @@ func (c *conn) serve(ctx context.Context) {
 	if ra := c.rwc.RemoteAddr(); ra != nil {
 		c.remoteAddr = ra.String()
 	}
-	ctx = context.WithValue(ctx, LocalAddrContextKey, c.rwc.LocalAddr())
 	var inFlightResponse *response
 	defer func() {
 		if err := recover(); err != "" && err != ErrAbortHandler.Error() {
@@ -2261,25 +2246,46 @@ func NotFoundHandler() (rhandler Handler) { return HandlerFunc(NotFound) }
 // with prefix by replying with an HTTP 404 not found error. The prefix must
 // match exactly: if the prefix in the request contains escaped characters
 // the reply is also an HTTP 404 not found error.
+type stripPrefixHandler struct {
+	prefix string
+	h      Handler
+}
+
+func (x *stripPrefixHandler) ServeHTTP(w ResponseWriter, r *Request) {
+	p := bytes.TrimPrefix(r.URL.Path, x.prefix)
+	rp := bytes.TrimPrefix(r.URL.RawPath, x.prefix)
+	if len(p) < len(r.URL.Path) && (r.URL.RawPath == "" || len(rp) < len(r.URL.RawPath)) {
+		r2 := &Request{}
+		*r2 = *r
+		r2.URL = &url.URL{}
+		*r2.URL = *r.URL
+		r2.URL.Path = p
+		r2.URL.RawPath = rp
+		x.h.ServeHTTP(w, r2)
+	} else {
+		NotFound(w, r)
+	}
+}
+
+// StripPrefix returns a handler that serves HTTP requests by removing the
+// given prefix from the request URL's Path (and RawPath if set) and invoking
+// the handler h. StripPrefix handles a request for a path that doesn't begin
+// with prefix by replying with an HTTP 404 not found error.
 func StripPrefix(prefix string, h Handler) (rhandler Handler) {
 	if prefix == "" {
 		return h
 	}
-	return HandlerFunc(func(w ResponseWriter, r *Request) {
-		p := bytes.TrimPrefix(r.URL.Path, prefix)
-		rp := bytes.TrimPrefix(r.URL.RawPath, prefix)
-		if len(p) < len(r.URL.Path) && (r.URL.RawPath == "" || len(rp) < len(r.URL.RawPath)) {
-			r2 := &Request{}
-			*r2 = *r
-			r2.URL = &url.URL{}
-			*r2.URL = *r.URL
-			r2.URL.Path = p
-			r2.URL.RawPath = rp
-			h.ServeHTTP(w, r2)
-		} else {
-			NotFound(w, r)
-		}
-	})
+	return &stripPrefixHandler{prefix: prefix, h: h}
+}
+
+// methodNotAllowedHandler answers with 405 and the allowed methods.
+type methodNotAllowedHandler struct {
+	allowed [][]byte
+}
+
+func (x *methodNotAllowedHandler) ServeHTTP(w ResponseWriter, r *Request) {
+	w.Header().Set("Allow", bytes.Join(x.allowed, ", "))
+	Error(w, StatusText(StatusMethodNotAllowed), StatusMethodNotAllowed)
 }
 
 // Redirect replies to the request with a redirect to url,
@@ -2633,10 +2639,7 @@ func (mux *ServeMux) findHandler(r *Request) (h Handler, patStr string, _ *patte
 		// matches except for the method.
 		allowedMethods := mux.matchingMethods(host, path)
 		if len(allowedMethods) > 0 {
-			return HandlerFunc(func(w ResponseWriter, r *Request) {
-				w.Header().Set("Allow", bytes.Join(allowedMethods, ", "))
-				Error(w, StatusText(StatusMethodNotAllowed), StatusMethodNotAllowed)
-			}), "", nil, nil
+			return &methodNotAllowedHandler{allowed: allowedMethods}, "", nil, nil
 		}
 		return NotFoundHandler(), "", nil, nil
 	}
@@ -3225,19 +3228,25 @@ func badServeHTTP(serverHandler, ResponseWriter, *Request)
 // security issues.
 //
 // AllowQuerySemicolons should be invoked before [Request.ParseForm] is called.
+type allowQuerySemicolonsHandler struct {
+	h Handler
+}
+
+func (x *allowQuerySemicolonsHandler) ServeHTTP(w ResponseWriter, r *Request) {
+	if bytes.Contains(r.URL.RawQuery, ";") {
+		r2 := &Request{}
+		*r2 = *r
+		r2.URL = &url.URL{}
+		*r2.URL = *r.URL
+		r2.URL.RawQuery = bytes.ReplaceAll(r.URL.RawQuery, ";", "&")
+		x.h.ServeHTTP(w, r2)
+	} else {
+		x.h.ServeHTTP(w, r)
+	}
+}
+
 func AllowQuerySemicolons(h Handler) (rhandler Handler) {
-	return HandlerFunc(func(w ResponseWriter, r *Request) {
-		if bytes.Contains(r.URL.RawQuery, ";") {
-			r2 := &Request{}
-			*r2 = *r
-			r2.URL = &url.URL{}
-			*r2.URL = *r.URL
-			r2.URL.RawQuery = bytes.ReplaceAll(r.URL.RawQuery, ";", "&")
-			h.ServeHTTP(w, r2)
-		} else {
-			h.ServeHTTP(w, r)
-		}
-	})
+	return &allowQuerySemicolonsHandler{h: h}
 }
 
 // ListenAndServe listens on the TCP network address s.Addr and then
@@ -3332,7 +3341,7 @@ func (s *Server) Serve(l net.Listener) (rerr error) {
 
 	var tempDelay time.Duration // how long to sleep on accept failure
 
-	ctx := context.WithValue(baseCtx, ServerContextKey, s)
+	ctx := baseCtx
 	for {
 		rw, err := l.Accept()
 		if err != nil {
@@ -3543,15 +3552,12 @@ func (s *Server) logf(format string, args ...fmt.Stringer) {
 	}
 }
 
-// logf prints to the ErrorLog of the *Server associated with request r
-// via ServerContextKey. If there's no associated server, or if ErrorLog
-// is nil, logging is done via the log package's standard logger.
+// logf prints to the ErrorLog of the *Server associated with request r.
+// If there's no associated server, or if ErrorLog is nil, logging is done via
+// the log package's standard logger.
 func logf(r *Request, format string, args ...fmt.Stringer) {
 	serverInitOnce()
-	var s *Server
-	if okv, okok := r.Context().Value(ServerContextKey).(*Server); okok {
-		s = okv
-	}
+	s := r.server
 	if s != nil && s.ErrorLog != nil {
 		s.ErrorLog.Printf(format, args...)
 	} else {
@@ -3902,10 +3908,17 @@ func tlsRecordHeaderLooksLikeHTTP(hdr [5]byte) (rok bool) {
 }
 
 // MaxBytesHandler returns a [Handler] that runs h with its [ResponseWriter] and [Request.Body] wrapped by a MaxBytesReader.
+type maxBytesHandler struct {
+	h Handler
+	n int64
+}
+
+func (x *maxBytesHandler) ServeHTTP(w ResponseWriter, r *Request) {
+	r2 := *r
+	r2.Body = MaxBytesReader(w, r.Body, x.n)
+	x.h.ServeHTTP(w, &r2)
+}
+
 func MaxBytesHandler(h Handler, n int64) (rhandler Handler) {
-	return HandlerFunc(func(w ResponseWriter, r *Request) {
-		r2 := *r
-		r2.Body = MaxBytesReader(w, r.Body, n)
-		h.ServeHTTP(w, &r2)
-	})
+	return &maxBytesHandler{h: h, n: n}
 }
