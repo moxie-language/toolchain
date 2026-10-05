@@ -753,7 +753,26 @@ func ConvertConstLocal(v ConstVal, target Type) (c ConstVal) {
 	switch {
 	case b.Info&IsInteger != 0:
 		iv := cvInt(v)
-		return MaskConstToBasic(&ConstInt{V:iv}, b)
+		// The unsigned mark means "the exact value is non-negative but does not
+		// fit the signed slot", and it must survive the conversion: dropping it
+		// made math.MaxUint64 (1<<64-1) read as signed and its shifts and
+		// divisions come out negative.
+		unsigned := false
+		if ci, isInt := v.(*ConstInt); isInt {
+			unsigned = ci.Unsigned
+		}
+		// A float constant converted to an integer truncates its EXACT value
+		// toward zero, as Go does. cvInt goes through cf.V, and float64 cannot
+		// hold a value near 2^63: time's absoluteToInternal is exactly
+		// -9223371966606163200 while float64 rounds it to ...942944, which is
+		// why time.Date and time.Parse were wrong on stage4 and right on legacy.
+		if cf, isFloat := v.(*ConstFloat); isFloat {
+			if r := floatExact(cf); r != nil {
+				iv = ratTruncInt64(r)
+				unsigned = iv < 0 && r.Sign() > 0
+			}
+		}
+		return MaskConstToBasic(&ConstInt{V:iv, Unsigned:unsigned}, b)
 	case b.Info&IsFloat != 0:
 		// An untyped target keeps the exact value; a sized one rounds to it
 		// (float32(0.1) is the float32 value, not the decimal literal).
@@ -853,6 +872,17 @@ func cvKind(val ConstVal) (n int32) {
 
 
 
+
+// ratTruncInt64 truncates an exact rational toward zero, which is what a Go
+// constant conversion to an integer type does.
+func ratTruncInt64(r *big.Rat) (n int64) {
+	if r == nil {
+		return 0
+	}
+	q := big.NewInt(0)
+	q.Quo(r.Num(), r.Denom())
+	return q.Int64()
+}
 
 func cvInt(v ConstVal) (n int64) {
 	if ci, ok := v.(*ConstInt); ok {

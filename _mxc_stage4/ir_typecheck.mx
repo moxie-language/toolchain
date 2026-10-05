@@ -200,7 +200,7 @@ func stripUnusedConsts(src []byte) (out []byte) {
 			if ne > ns {
 				cname := string(src[ns:ne])
 				exported := cname[0] >= 'A' && cname[0] <= 'Z'
-				if !refs[cname] && !exported {
+				if !refs[cname] && !exported && constLineIsComplete(src, ls, ne) {
 					// Skip this line - const not referenced in any function
 					// body. Exported consts are kept: importers may use them
 					// (e.g. sha256.BlockSize as an array length).
@@ -227,6 +227,72 @@ func stripUnusedConsts(src []byte) (out []byte) {
 		}
 	}
 	return out
+}
+
+// constLineIsComplete reports whether a single-line "const NAME = value"
+// declaration is wholly contained in its line. The stripper removes one LINE
+// per unreferenced constant, so a declaration whose value continues on the next
+// line must be left alone: removing "const c =" left the value behind and the
+// parser then reported "non-declaration statement outside function body" (the
+// generator tables in x/net/idna are 525 such lines, and it blocked net/http).
+// A line is complete when it has seen an '=' after the name and ends in
+// something that can end an expression rather than a continuation operator.
+func constLineIsComplete(src []byte, lineStart, nameEnd int32) (ok bool) {
+	le := lineStart
+	for le < len(src) && src[le] != '\n' {
+		le++
+	}
+	// A trailing line comment is not part of the declaration: x/net/idna's
+	// 'const mappings = "" + // Size: 6704 bytes' ends its LINE with the word
+	// "bytes", and a last-character test that saw that would call a 525-line
+	// declaration complete and strip its first line.
+	end := le
+	inStr := false
+	var quote byte = 0
+	for k := lineStart; k+1 < le; k++ {
+		c := src[k]
+		if inStr {
+			if c == '\\' {
+				k++
+				continue
+			}
+			if c == quote {
+				inStr = false
+			}
+			continue
+		}
+		if c == '"' || c == '\'' || c == '`' {
+			inStr = true
+			quote = c
+			continue
+		}
+		if c == '/' && src[k+1] == '/' {
+			end = k
+			break
+		}
+	}
+	last := end
+	for last > nameEnd && (src[last-1] == ' ' || src[last-1] == '\t' || src[last-1] == '\r') {
+		last--
+	}
+	if last <= nameEnd {
+		return false
+	}
+	sawAssign := false
+	for k := nameEnd; k < last; k++ {
+		if src[k] == '=' {
+			sawAssign = true
+			break
+		}
+	}
+	if !sawAssign {
+		return false
+	}
+	switch src[last-1] {
+	case '=', '+', '-', '*', '/', '%', '|', '&', '^', '<', '>', '(', '[', '{', ',', '.', ':', '!':
+		return false
+	}
+	return true
 }
 
 func isIdentStart(c byte) (ok bool) {
@@ -457,6 +523,15 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 					if obj != nil {
 						if c, ok3 := obj.(*TCConst); ok3 {
 							if constPass == 0 || c.Val == nil {
+								// Apply the declared type NOW, not when the SSA member is built.
+								// Keeping the untyped value made every later constant expression
+								// that used this name promote to float (EvalBinaryLocal promotes
+								// when either operand is a ConstFloat), so `absoluteToUnix =
+								// absoluteToInternal + internalToUnix` folded in float64 and
+								// time.Date/time.Parse were wrong by 2^8 at ~9.2e18.
+								if typ != nil && val != nil {
+									val = ConvertConstLocal(val, typ)
+								}
 								c.Typ = typ
 								c.Val = val
 							}

@@ -4635,6 +4635,17 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 		if xv3 == nil {
 			return nil
 		}
+		// Fold a unary operator applied to a CONSTANT in constant space. An
+		// untyped value is otherwise materialized at its default
+		// representation (int32), so -9223371966606163200 lost its high bits
+		// before the convert to int64 could widen it. EvalUnaryLocal keeps the
+		// untyped type and the exact value, and returns nil for the operators it
+		// does not fold (receive among them), which fall through below.
+		if kc, isConst := xv3.(*SSAConst); isConst && kc.val != nil {
+			if folded := EvalUnaryLocal(e.Op, kc.val); folded != nil {
+				return &SSAConst{typ: kc.typ, val: folded}
+			}
+		}
 		if op2 == OpArrow {
 			u2 := &SSAUnOp{Op: OpArrow, X: xv3}
 			u2.typ = ssaChanElemType(xv3.SSAType())
@@ -8302,6 +8313,13 @@ func ssaExprNames(e syntax.Expr) (ns []*syntax.Name) {
 func localizeConstVal(val ConstVal, typ Type) (c ConstVal) {
 	if val == nil {
 		return nil
+	}
+	// A declared type is applied AT THE DECLARATION, as Go does. Deferring it
+	// to the use site left a typed constant holding its untyped value, and the
+	// conversion there went through float64 - time's absoluteToInternal, an
+	// int64 constant built from a float literal expression, came out 256 off.
+	if typ != nil {
+		return ConvertConstLocal(val, typ)
 	}
 	return val
 }

@@ -1,0 +1,60 @@
+// Regression: a typed constant built from a float-literal expression must fold
+// EXACTLY, as Go's arbitrary-precision constant arithmetic does.
+//
+// Two losses made it wrong. ConvertConstLocal converted a float constant to an
+// integer through cf.V (float64), and the declared type was applied late - when
+// the SSA member was built, or at the use site - so the constant kept its
+// untyped value and every later expression that used it was promoted to float by
+// EvalBinaryLocal. src/time's
+//   absoluteToInternal int64 = -(absoluteYears*365.2425 + marchThruDecember) * secondsPerDay
+// is exactly -9223371966606163200 and float64 rounds it to ...942944, so
+// absoluteToUnix folded 256 too high and time.Date/time.Parse produced
+// 4744828235076861952 and "33767811-02-01 18:05:52" instead of 1678806566 and
+// "2023-03-14 15:09:26". Legacy (go/types) was always right, so this was a
+// stage4-only wood-law divergence.
+//
+// Fixed in: pkg/types/tc_const.mx (ConvertConstLocal truncates the exact
+// rational; ratTruncInt64), _mxc_stage4/ssa_builder.mx (localizeConstVal applies
+// the declared type) and _mxc_stage4/ir_typecheck.mx (the declared type is
+// applied when the constant is recorded, so later folds see a typed value).
+
+package main
+
+import "time"
+
+// 2^53+1 is not representable in float64, so a float64 fold gives ...993 while
+// the exact value is ...994.
+const nearFloatEdge int64 = 9007199254740993 + 0.5*2
+
+const absoluteYears = 292277022400
+const marchThruDecember = 306
+const secondsPerDay = 86400
+
+const absoluteToInternal int64 = -(absoluteYears*365.2425 + marchThruDecember) * secondsPerDay
+
+func chk(name string, got, want int64) {
+	if got != want {
+		println("FAIL: " | name | " got " | got.String() | " want " | want.String())
+		panic("mismatch")
+	}
+}
+
+func main() {
+	chk("nearFloatEdge", nearFloatEdge, 9007199254740994)
+	chk("absoluteToInternal", absoluteToInternal, -9223371966606163200)
+
+	t := time.Date(2023, 3, 14, 15, 9, 26, 0, time.UTC())
+	chk("date-unix", t.Unix(), 1678806566)
+	if t.Format("2006-01-02 15:04:05") != "2023-03-14 15:09:26" {
+		println("FAIL: date format " | t.Format("2006-01-02 15:04:05"))
+		panic("mismatch")
+	}
+
+	p, err := time.Parse("2006-01-02 15:04:05", "2023-03-14 15:09:26")
+	if err != nil {
+		panic("parse failed")
+	}
+	chk("parse-unix", p.Unix(), 1678806566)
+
+	println("ok")
+}
