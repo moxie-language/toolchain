@@ -2663,3 +2663,109 @@ in the file at all.
 The net agent is unblocked meanwhile by an authorised vendored split of that
 generated file (move `_mappingIndex` or `xorData` into its own `.mx`), with the
 decoded bytes unchanged.
+
+# ============ CURRENT STATE AND TODO LIST (context refresh) ============
+
+Objective in force: address every open issue in this file, each at its root
+cause, verified by running, committed, with the full suite green (179 now) and
+`selfhost:fixpoint` holding.
+
+## Landed in this stretch (all verified, all committed)
+
+| commit | what |
+| --- | --- |
+| `6cd8a7ca` | `weak` removed: no GC means a weak pointer cannot mean anything; `fips140cache` keys on `*K` |
+| `0c958eea` | exact typed constants: float->int truncates the EXACT rational, the declared type is applied at the declaration, a unary op on a constant folds in constant space, and `stripUnusedConsts` no longer deletes a multi-line declaration's first line. Fixes `time.Date`/`time.Parse` and `-9223371966606163200` through an `int64` parameter. New fixture `const_exact_fold` |
+| `9cfaafb2` | a generic method's receiver is ADDRESSED, not copied: receiver writes were lost (`o.queue.push`'s `q.end++`), which made the next `pop()` return zero and looked like a tuple-decoding bug. Fixture `generic_type_method` now mutates through a `Holder`'s `Box` field |
+| `66df51d3` | vendor unblock: `bidi` `container/list` -> a slice stack, shadow renames in `bidi`/`norm`, and the **idna `tables15.0.0.mx` missing brace** (see below) |
+| `cbfbe313` | net/http carries per-request state concretely; `context.Value`/`WithValue`, `ServerContextKey`, `LocalAddrContextKey`, `httptrace`'s context API and `internal/nettrace` are gone |
+| `4f89c565` | `net`: `textproto.ProtocolError` (struct), `htmlSig` (struct), `IPMask`/`HardwareAddr` (aliases + free functions), `http.Dir` (struct), fs `anyDirs`, the three h2 structures, `byPriorityWeight`/`byPref` (free functions; also fixed a sub-slice-is-a-copy shuffle) |
+| `a3aa971f`, `af460679`, `10f28a45` | generic methods: routed through the monomorphizing path, void methods report handled, field types substitute through the instantiated Named's `TArgs` (not just a body's `subst`), and an instantiated generic is identified by `TArgs` because `TParams` can be empty |
+| `0435870d`-range | soundness checks ungated (assignment, arity, const representability, default repr) with `errPos` naming `file:line`, plus the wave: the constant-typing bug above, 20 `unsafe.Pointer` conversions in `src/net`, and `pkg/rewrite`'s `[]typeapi.Type` vs `[]types.Type` |
+
+Uncommitted in the tree at handover: `tests/util.sh` (the masking guards are
+removed; verified 179/0 in the run that removed them) and
+`_mxc_stage4/ir_typecheck.mx` (the stripper now blanks instead of deleting, is
+comment- and balance-aware; phase 0/1 and the fixpoint passed with it, the
+final phase-5 pass was cut off by the context refresh), plus the ed25519 agent's
+`src/crypto/ed25519/ed25519.mx`, `src/crypto/x509/{x509,parser}.mx`.
+
+## THE TODO LIST
+
+1. **`./src/net/http` still does not parse.** A REAL parse error whose reported
+   position is WRONG. This is the last thing between the tree and a compiling
+   net/http.
+2. **Diagnostic positions are unreliable - fix the remapper.** `concatSources`
+   merges every file's imports into one block at the top, so the concatenated
+   line count differs from the sum of the files, and `concatLineToFile`
+   (`_mxc_stage4/main.mx`, fed by `cctx.concatSourceMap`) maps a concatenated
+   line to `file:line` with that offset. Proof: a parse error in `src/net/http`
+   is reported as `clone.mx:121`, and `clone.mx` has only 120 lines. This has
+   already sent me and the net agent to the wrong file twice. Fix the map (or
+   stop reordering) and every future diagnosis gets cheaper.
+3. **generic: an imported generic type carries no methods.** `mxhWriteTypeName`
+   writes no methods for a type with `TParams` (deliberate: only instantiations
+   emit symbols), so `Get undefined (type lib.Box has no field or method Get)`
+   across a package boundary. The importer must resolve the method through the
+   dependency's generic decls (which `ScanGenericDecls` builds from source).
+4. **generic: `i64` stored where `i8` is expected** for a narrow field of a
+   generic struct - `src/internal/trace` is blocked by
+   `%tN defined with type 'i64' but expected 'i8'`. Same family as the `unique`
+   report. Use `-work` to keep the IR and read the store's GEP type against the
+   value's type.
+5. **generic: `map[T]H[T]` composite literal** fails substitution inside a
+   generic function (`cannot use map[int32]unique.Handle as map[T]unique.Handle
+   in struct literal`); `var x hm[T]; x.m = map[T]H[T]{}` compiles, so it is the
+   literal form.
+6. **`internal/coverage/{encodecounter,encodemeta,cformat}` and
+   `internal/trace/internal/tracev1`** codegen bugs: `unsafe.TypeOf(*x)` +
+   `binary.Write` struct loads, a `text/tabwriter` null-pointer, and a clang
+   `-c` failure. Not source-attributable so far.
+7. **`tests/util.sh`** masking guards REMOVED (uncommitted). The relative-path
+   entry point turned out to be Go's own rule (a bare path is an import path),
+   so correct this file's earlier "entry point" note if you touch it.
+8. **`crypto/ed25519`** struct wrapper DONE in the working tree, uncommitted, by
+   the agent: `PublicKey`/`PrivateKey` are structs with pointer receivers, the
+   probe passes, `tls` needs no change. It also found THREE pre-existing
+   `encoding/asn1`/`x509` defects worth their own items:
+   a. `asn1.Marshal` writes every `ObjectIdentifier` as `00 00 00`
+      (`marshal.mx:309` `dst = appendBase128Int(dst[:0], ...)` discards the
+      result - a subslice/write-back mistake), so all x509 DER is corrupt;
+   b. `asn1` cannot tell a `[]byte` struct field from `string`, so PKCS#8 emits
+      UTF8String instead of OCTET STRING;
+   c. `x509.ParseCertificate` fails on standard UTCTime/GeneralizedTime DER.
+9. **`crypto/tls` + `crypto/x509`** await 8 (and are otherwise wide-clean).
+10. **The named public API types still to dissolve:** `net.IP` (18 methods, ~90
+    refs), `net/http.Header` (13, ~227), `net/textproto.MIMEHeader` (5, ~77),
+    `net/url.Values` (6, ~20), `net.Buffers` (3, mutating + `io` interfaces, so
+    it needs the struct-wrapper route rather than an alias). Downstream app repos
+    have ZERO refs to `url.Values`/`net.IP`/`MIMEHeader` and 3 `.Header` refs, so
+    the blast radius is small.
+11. **`syscall/js`** (js && wasm only): value receivers, `any`, globals mutated
+    outside init, `FuncOf` captures. Bounded debt; the native wide predicate does
+    not need it.
+12. **`compress/flate`**: rule-clean, but clang-22 crashes in the backend
+    (`Cannot select ... load`); `compress/gzip` links through it.
+13. **`regexp` and `text/template` do not exist**: five importers of `regexp`
+    (`internal/lazyregexp`, `internal/coverage/pods`, `internal/profile/prune`,
+    `internal/trace/testtrace/expectation`, `index/suffixarray`) and one of
+    `text/template` (`internal/lazytemplate`). Decision: implement the minimum,
+    or remove the importers (all are trace/coverage/profiling corners with no
+    app path).
+14. **`debug/gosym`** 13 value receivers, **`os.Pipe`'s `[2]int32`** and
+    syscall's `[2]Timeval`/`[2]Timespec` casts, **cgo-gated
+    `os/user/cgo_lookup_unix.mx`**, and the **embedded tzdata registration that
+    never runs** - all with the gosym agent (c96552b0); check its report.
+15. **The widened predicate** still waits on items 1, 3, 10, 11, 13 and 14.
+
+## Did not survive scrutiny (do not chase)
+
+- "`\x22` in a string mis-scans": false, the scanner decodes it correctly (the
+  line is 9 bytes because it is 7 escapes plus a literal `0`).
+- "idna fails because of a size/shape-dependent parser bug": false. The
+  vendored `tables15.0.0.mx` was missing a closing brace (`_mappingIndex` needs
+  `}}`); the agent fixed it in `66df51d3`. My probes looked like they passed
+  because I appended the brace myself.
+- "`{:` in the idna tables": it does not occur there at all.
+- "A two-result generic method loses its values": it was the copied receiver
+  (item above), not tuple decoding.
