@@ -3297,3 +3297,49 @@ Fixing it needs both: the mxh index must record generic method names, and the
 instantiated `*Named` (whose `TArgs` is set) must be available to key the impl -
 which it is only at the boxing site. Both are compiler changes plus a legacy
 cross-check, so it stays open and is not started half-way.
+
+# ============ UPDATE: extractImports fix ATTEMPTED AND REVERTED ============
+
+Attempted: give `extractImports` (`_mxc_stage4/main.mx`) the same comment
+awareness `scanFileRegions` now has, by calling `firstCodeOnLine(data, ls, le,
+inBlock)` and tracking the block-comment state across lines, so a doc comment
+containing the text `import (` cannot contribute a bogus import spec.
+
+Result: **it broke `selfhost:stage1`.** The suite went from rc=0 / 185 PASS to
+rc=1 with only 72 PASS and
+
+    selfhost:stage1  FAIL
+      legacy compiler failed: [mem] after LowerInterfaces ...
+      error: unknown special variable with appending linkage: @0
+
+The change is reverted (tree back to only the net/http workstream's files). Not
+diagnosed, and the clue is worth keeping:
+
+- `src/net/http` is NOT in the compiler's closure (only comments in
+  `_mxc_stage4` mention it), so the concurrent net/http refactor could not have
+  caused this - the `extractImports` change did.
+- The failure is in the LEGACY compiler compiling the stage4 source, after
+  LowerInterfaces, and it is an LLVM linkage error: an appending-linkage global
+  (`@llvm.used` / `@llvm.compiler.used` / `@llvm.global_ctors`) referenced as
+  `@0`, i.e. a global whose emitted NAME is the literal "0".
+- So this is a legacy-side IR-emission bug triggered by a construct in the new
+  code, not a semantic problem with the fix. The next attempt should bisect: add
+  only the `firstCodeOnLine` call (keeping the old whitespace trim), build
+  `_mxc_stage4` with legacy directly (`legacy/moxie build -a -o /tmp/s1
+  ./_mxc_stage4`), and see whether it is the multi-value call, the extra
+  parameter, or the loop-carried `inBlock` that legacy cannot lower. If legacy
+  cannot express it, the fix has to be written in a shape legacy already
+  handles - wood law says the legacy side is the one that must be satisfied
+  first, since it is the bootstrap.
+
+Priority: lower than item 10 and net/http. The bug it closes is small (a comment
+line inside an import block is already collected as a bogus spec, and only the
+dependency-scan path uses `extractImports`), so it must not be retried in a way
+that risks the bootstrap again without the bisect above.
+
+## Also closed with no code change
+
+`runtime_makeStrongFromWeak` and any surviving `strongFromWeak` reference:
+**gone**. `grep -rn 'makeStrongFromWeak|strongFromWeak' src/ _mxc_stage4/
+legacy/` returns nothing, so the `weak` removal (`6cd8a7ca`) already closed that
+objective item - there is no dead reference left to remove.
