@@ -2879,3 +2879,99 @@ the build cache key does not distinguish compiler binaries.
   and hit every key type; ecdsa never even reaches them because `elliptic`
   panics first (item 10).
 
+
+# ============ UPDATE: the position/net-http/const-strip run ============
+
+Green: `3ea479e4` (three compiler fixes), plus the legacy mirror in the commit
+before it. Tree dirty ONLY with the asn1/x509 workstream's in-flight edits.
+
+## Closed
+
+**Item 2, the diagnostic remapper - ROOT CAUSE FOUND AND FIXED.** It was never
+the concat map. `Parser.pos()` (`pkg/syntax/parse_init.mx`) did
+`p.posAt(p.Line-Linebase, p.Col-Colbase)`, so EVERY `token.Pos` was 0-based
+while `token.Pos`, that same file's `scanError`/`updateBase`/`NewLineBase`, and
+`go/parser` are all 1-based. Consequences: every parse-error message was one
+line and one column short; three call sites compensated with `+1`
+(`ssa_builder.curLine` twice, `declScope`'s seg lookup); and three more trusted
+the 1-based convention and were just wrong - `pkg/rewrite`'s
+`ResolveArrayLenFromSrc` and `ResolveArrayLenFromConstMap`, and
+`ir_typecheck`'s duplicate `resolveArrayLenFromSrc`. Fixed at the source, all
+three compensations deleted. Positions are now exact and verified on seven
+single-file cases, one with dropped header lines, and a two-file package with
+imports (rm1 13:5, rm2 12:5, t1 3:5, t2 6:5, t3 6:5, t4 4, t5 3, t6 5,
+multi-file b.mx:12:5). **Trust a reported position now** - but keep testing it:
+this is the first run where it is right.
+
+**Item 1, net/http - IT PARSES.** With positions trustworthy the error was
+`doc.mx:108:1`, and it was a REAL position in a body that should never have
+been built: `scanFileRegions` classified "package "/"import " lines with no
+comment awareness, while `extractPkgName` right beside it already skipped
+`/*...*/` (its comment even names fmt/doc.mx). net/http's doc.mx is a doc
+comment ABOVE its package clause whose prose contains the line
+`package takes precedence over the net/http package's built-in HTTP/2`, so that
+became the package clause and the next line (`support.`) the first body line.
+`firstCodeOnLine` now skips comments and carries block-comment state from the
+top of the file; the directive-comment carve-out (`//:linkname`, `//export`) is
+preserved. net/http now parses AND type-checks, and stops on ordinary source
+diagnostics - the next work item, not a compiler crash:
+- `undefined: nop` (x2)
+- `serveContent__anon2: 'err' shadows declaration in enclosing scope` (x3)
+- `cannot resolve type of short var handler in (*http2serverConn).processHeaders
+  (rhs=nil)`
+
+**NEW BUG, found by that: a compiler SEGFAULT on net/http, fixed.** `gdb`:
+`resolveTypeAST <- resolveType <- buildCompositeLit <- buildExpr <-
+buildCompositeLitInto`, repeating - infinite mutual recursion, stack overflow.
+`buildCompositeLitInto`'s non-aggregate fallback called `buildExpr(e)` on the
+SAME literal, and because the literal still carried its type, that path
+allocated and came straight back. The reachable construct is the `&T{...}`
+shorthand of a pointer-element table:
+`formTable = []*formInfo{{...}}`, `return []*cipherSuite{{...}}`. A
+pointer-to-struct target now allocates the pointee, fills it, and stores its
+ADDRESS; anything else fails loud with the type and position instead of
+recursing.
+
+**Item 7b, the wood-law mirror - DONE** (`legacy/loader/conststrip.go` +
+`loader.go`). `stripUnusedConsts` existed only in `_mxc_stage4` since
+`21a09393`. The mirror hooks `Package.parseFiles`, builds ONE shared reference
+map across all of a package's files (stage4's pass sees the concatenated body),
+strips per file, and blanks rather than deletes. Verified: the agent's e2e
+package, exact-line negative contrasts, and the self-host fixpoint (`s1 != s2`,
+`s2 == s3`).
+
+## Open, with the next action
+
+1. **net/http's remaining source diagnostics** (listed above). Now ordinary
+   work: `nop` is presumably a missing/dropped helper, the shadowed `err` is a
+   real shadowing violation in a closure, and `rhs=nil` is a short var whose
+   right-hand side failed to build - start with the `nop` and `rhs=nil` ones
+   because both smell like a dropped or unresolvable callee, i.e. the same
+   family as the `buildFuncFieldCall`/void-call bugs already fixed.
+2. **asn1 `[]byte` (item 9b) - the approach is chosen and in flight, UNCOMMITTED
+   and currently red.** The workstream chose to flip the default: `akBytes`
+   becomes an OCTET STRING, and a string parameter (`stringLike`) promotes it to
+   a character string; `pkix.mx`, `x509.mx`, `asn1.mx`, `common.mx` and
+   `marshal.mx` are all being edited. **As it stands the tree breaks the
+   committed `regression:asn1_oid_der` fixture at RUNTIME** (it builds and links,
+   then the binary exits non-zero), so the full suite cannot go green until that
+   workstream finishes or is reverted. Whoever picks this up: run
+   `regression:asn1_oid_der` first, then the ed25519 round trip.
+3. **`extractImports` (`_mxc_stage4/main.mx`) has the SAME lexical weakness**
+   as `scanFileRegions` did - `line == "import ("` with no comment awareness.
+   Only import specs are at stake (a comment line inside an import block is
+   already collected as a bogus spec), so it is a smaller bug, but it is the
+   same class and now has an obvious model to copy (`firstCodeOnLine`).
+4. **Item 10, `elliptic.Curve` -> `interface dispatch: no impl for Params`**
+   still blocks ecdsa P-256 - unchanged, and a probe exists at `/tmp/ecprobe`.
+5. **Items 3, 4, 5 (generic family), 6 (coverage/tracev1), 11 (the named public
+   API types), 12, 13, 14, 15** are unchanged from the list above.
+
+## Method note that paid off
+
+The first two fixes were found by refusing to accept a plausible story. "The
+reported line is past the end of the file, so the remapper is broken" was wrong:
+the arithmetic was fine and the *positions feeding it* were wrong one layer
+down, in the parser. And the net/http parse error was not a malformed file at
+all - it was the compiler building a body out of a doc comment. Both times the
+symptom pointed at the wrong component, and the fix was one layer upstream.
