@@ -3065,3 +3065,53 @@ verification habit that produced the answer each time was the same: build the
 SMALLEST case that isolates the claim - `unsafe.TypeOf([]byte("abc")) ==
 unsafe.TypeOf("abc")`, `[]byte("abc")` vs `"abc"` through Marshal, a hand-built
 DER time - rather than reasoning from the symptom.
+
+# ============ UPDATE: mxh struct tags ============
+
+`a9a3f35a`. Tree clean.
+
+## Done, with a hard caveat about what is proven
+
+The **mxh now carries struct field tags**: the compiler writes
+`type Tagged struct{Name:string#61736e313a22737472696e6722,Raw:[]byte,...}`
+(the `#hex` is the field's tag) and `parseTypeDesc`/`mxhSplitFieldTag` decodes
+it back, taking `#` only at bracket depth 0 so a nested struct's tagged fields
+stay inside the field body and are handled by the recursion. Hex because a Go
+tag is arbitrary text (spaces, quotes, braces, commas, colons) while a type line
+is whitespace-delimited. **Verified directly on the cached artifact**: the same
+line had no suffixes before the change. This also closed a real
+stage4/legacy divergence - legacy's type writer already appended
+`strconv.Quote(tag)`; only stage4 dropped it.
+
+**WHY IT MATTERS**: struct field descriptors are `linkonce_odr` constants named
+after the TYPE, so an importer that rebuilds the struct with empty tags emits a
+competing blob under the same symbol as the defining package's tagged one and
+the linker keeps whichever it sees. asn1 reads a field's tag from that blob, so
+a tagged `[]byte` field (`pkix.AttributeTypeAndValue.Value` is
+`asn1:"string"`) can reach an importer untagged and marshal as an OCTET STRING.
+
+**WHAT IS *NOT* PROVEN, and must not be claimed**: that a same-module consumer
+ever takes the mxh path. It does not - it re-type-checks the dependency from
+source. Tested: strip the `#hex` suffixes out of the cached mxh, delete the
+consumer's cached artifacts, rebuild -> still green. So the fixture
+`asn1_tag_crosspkg` passes with AND without the fix, and its header says so; it
+is coverage of cross-package tagging, not a regression test for the mxh round
+trip. **A faithful end-to-end reproduction needs a dependency built into the
+cache and then its source made unavailable** (the installed/cached-package
+path). That is the next experiment for this item, and until it is run the
+user-visible consequence of the tag loss is unconfirmed.
+
+This also retroactively weakens the asn1 conclusion in the previous section:
+`pkix.AttributeTypeAndValue` is compiled in the same invocation as `crypto/x509`
+and the cert round trip passes, so the "importer saw an untagged []byte" report
+was most likely an artifact of the workstream's own in-flight flip rather than a
+demonstrated mxh loss. The asn1 flip itself is still correct and verified; what
+is unproven is that the mxh was ever the cause of a failure.
+
+## Next action for this item
+
+Build a package into the cache, remove/hide its source, build a consumer that
+uses it, and check whether the tag survives. If it does not, the round trip
+above is the fix and the fixture should become a real two-stage test (build the
+dependency, hide the source, build the consumer) rather than a single-invocation
+one.
