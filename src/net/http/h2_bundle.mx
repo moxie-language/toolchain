@@ -1726,7 +1726,9 @@ type http2FrameHeader struct {
 
 // Header returns h. It exists so FrameHeaders can be embedded in other
 // specific frame types and implement the Frame interface.
-func (h *http2FrameHeader) Header() (rhttp2FrameHeader http2FrameHeader) { return h }
+// Moxie bans value receivers, so the receiver is a pointer where Go has a
+// value; the result is still a VALUE, so it must be dereferenced.
+func (h *http2FrameHeader) Header() (rhttp2FrameHeader http2FrameHeader) { return *h }
 
 func (h *http2FrameHeader) String() (rs string) {
 	var buf bytes.Buffer
@@ -3564,7 +3566,11 @@ func http2validWireHeaderFieldName(v string) (rok bool) {
 		return false
 	}
 	for _, r := range v {
-		if !httpguts.IsTokenRune(r) {
+		// Moxie's range over a string yields BYTES, not runes, so the
+		// conversion is explicit where a rune is wanted. For ASCII header
+		// names this is exact, and for a byte >= 0x80 both forms are rejected
+		// by IsTokenRune, so the answer is unchanged.
+		if !httpguts.IsTokenRune(rune(r)) {
 			return false
 		}
 		if 'A' <= r && r <= 'Z' {
@@ -5932,12 +5938,15 @@ func (sc *http2serverConn) processHeaders(f *http2MetaHeadersFrame) (rerr error)
 	st.body = req.Body.(*http2requestBody).pipe // may be nil
 	st.declBodyBytes = req.ContentLength
 
-	handler := sc.handler.ServeHTTP
+	// Moxie has no method values, so sc.handler.ServeHTTP cannot be taken as
+	// a func. Carry the Handler interface instead and let HandlerFunc adapt
+	// the two function-valued cases (it already implements Handler).
+	handler := sc.handler
 	if f.Truncated {
 		// Their header list was too long. Send a 431 error.
-		handler = http2handleHeaderListTooLong
+		handler = HandlerFunc(http2handleHeaderListTooLong)
 	} else if er4 := http2checkValidHTTP2RequestHeaders(req.Header); er4 != nil {
-		handler = http2new400Handler(er4)
+		handler = HandlerFunc(http2new400Handler(er4))
 	}
 
 	// The net/http package sets the read deadline from the
@@ -5976,7 +5985,7 @@ func (sc *http2serverConn) upgradeRequest(req *Request) {
 	// so start the handler directly rather than going
 	// through scheduleHandler.
 	sc.curHandlers++
-	sc.runHandler(rw, req, sc.handler.ServeHTTP)
+	sc.runHandler(rw, req, sc.handler)
 }
 
 func (st *http2stream) processTrailerHeaders(f *http2MetaHeadersFrame) (rerr error) {
@@ -6185,12 +6194,12 @@ type http2unstartedHandler struct {
 	streamID uint32
 	rw       *http2responseWriter
 	req      *Request
-	handler  func(ResponseWriter, *Request)
+	handler  Handler
 }
 
 // scheduleHandler starts a handler goroutine,
 // or schedules one to start as soon as an existing handler finishes.
-func (sc *http2serverConn) scheduleHandler(streamID uint32, rw *http2responseWriter, req *Request, handler func(ResponseWriter, *Request)) (rerr error) {
+func (sc *http2serverConn) scheduleHandler(streamID uint32, rw *http2responseWriter, req *Request, handler Handler) (rerr error) {
 	sc.serveG.check()
 	maxHandlers := sc.advMaxStreams
 	if sc.curHandlers < maxHandlers {
@@ -6237,7 +6246,7 @@ func (sc *http2serverConn) handlerDone() {
 }
 
 // Run on its own goroutine.
-func (sc *http2serverConn) runHandler(rw *http2responseWriter, req *Request, handler func(ResponseWriter, *Request)) {
+func (sc *http2serverConn) runHandler(rw *http2responseWriter, req *Request, handler Handler) {
 	sc.srv.markNewGoroutine()
 	defer sc.sendServeMsg(http2handlerDoneMsg)
 	didPanic := true
@@ -6263,7 +6272,7 @@ func (sc *http2serverConn) runHandler(rw *http2responseWriter, req *Request, han
 		}
 		rw.handlerDone()
 	}()
-	handler(rw, req)
+	handler.ServeHTTP(rw, req)
 	didPanic = false
 }
 
@@ -7058,7 +7067,7 @@ func (sc *http2serverConn) startPush(msg *http2startPushRequest) {
 		}
 
 		sc.curHandlers++
-		sc.runHandler(rw, req, sc.handler.ServeHTTP)
+		sc.runHandler(rw, req, sc.handler)
 		return promisedID, nil
 	}
 
@@ -10738,7 +10747,7 @@ func (wr *http2FrameWriteRequest) Consume(n int32) (rhttp2FrameWriteRequest http
 	// Non-DATA frames are always consumed whole.
 	wd, ok := wr.write.(*http2writeData)
 	if !ok || len(wd.p) == 0 {
-		return wr, empty, 1
+		return *wr, empty, 1
 	}
 
 	// Might need to split after applying limits.
@@ -10783,7 +10792,7 @@ func (wr *http2FrameWriteRequest) Consume(n int32) (rhttp2FrameWriteRequest http
 	// The frame is consumed whole.
 	// NB: This cast cannot overflow because allowed is <= math.MaxInt32.
 	wr.stream.flow.take(int32(len(wd.p)))
-	return wr, empty, 1
+	return *wr, empty, 1
 }
 
 // String is for debugging only.
