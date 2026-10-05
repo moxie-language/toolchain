@@ -2667,13 +2667,18 @@ decoded bytes unchanged.
 # ============ CURRENT STATE AND TODO LIST (context refresh) ============
 
 Objective in force: address every open issue in this file, each at its root
-cause, verified by running, committed, with the full suite green (179 now) and
+cause, verified by running, committed, with the full suite green (181 now) and
 `selfhost:fixpoint` holding.
 
 ## Landed in this stretch (all verified, all committed)
 
 | commit | what |
 | --- | --- |
+| `c8a23e81` | this handover section (the todo list and the disproven hypotheses), committed so a context refresh does not lose them |
+| `c22099ba` | `tests/util.sh`: a fixture whose LINK fails now FAILS (the `undefined symbol: main.` and `linker failed` guards returned 0, so a non-linking fixture was reported as a PASS - that guard is why the broken entry point stayed invisible). `stripUnusedConsts` blanks a stripped line instead of deleting it and is comment-, string- and balance-aware, so diagnostic line numbers stay correct |
+| `bc4a9067` | `crypto/ed25519`: `PublicKey`/`PrivateKey` become structs with `PublicKeyOf`/`PrivateKeyOf`/`Bytes()`, pointer receivers; `x509` updated. VERIFIED by running: sign/verify, `crypto.Signer` through the interface, the `crypto.PublicKey` type assertion, and `crypto/tls` compiling against the new shapes |
+| `a364d951` | **two silent-wrong-answer soundness holes closed** (`ssa_builder.mx`): an unknown method on an interface value, and an interface value passed where a concrete type is wanted. Fixtures `reject_unknown_iface_method`, `reject_iface_to_concrete` |
+| `1f416420` | `encoding/asn1`: `oidEncoder.Encode` wrote every ObjectIdentifier as `00 00 00` (the `dst[:0]` no-aliasing trap). Fixture `asn1_oid_der` |
 | `6cd8a7ca` | `weak` removed: no GC means a weak pointer cannot mean anything; `fips140cache` keys on `*K` |
 | `0c958eea` | exact typed constants: float->int truncates the EXACT rational, the declared type is applied at the declaration, a unary op on a constant folds in constant space, and `stripUnusedConsts` no longer deletes a multi-line declaration's first line. Fixes `time.Date`/`time.Parse` and `-9223371966606163200` through an `int64` parameter. New fixture `const_exact_fold` |
 | `9cfaafb2` | a generic method's receiver is ADDRESSED, not copied: receiver writes were lost (`o.queue.push`'s `q.end++`), which made the next `pop()` return zero and looked like a tuple-decoding bug. Fixture `generic_type_method` now mutates through a `Holder`'s `Box` field |
@@ -2683,6 +2688,7 @@ cause, verified by running, committed, with the full suite green (179 now) and
 | `a3aa971f`, `af460679`, `10f28a45` | generic methods: routed through the monomorphizing path, void methods report handled, field types substitute through the instantiated Named's `TArgs` (not just a body's `subst`), and an instantiated generic is identified by `TArgs` because `TParams` can be empty |
 | `0435870d`-range | soundness checks ungated (assignment, arity, const representability, default repr) with `errPos` naming `file:line`, plus the wave: the constant-typing bug above, 20 `unsafe.Pointer` conversions in `src/net`, and `pkg/rewrite`'s `[]typeapi.Type` vs `[]types.Type` |
 
+
 VERIFIED TOGETHER, rc=0, 179 PASS, `selfhost:fixpoint` PASS (`stage2 ==
 stage3`): `tests/util.sh` with the masking guards removed AND
 `_mxc_stage4/ir_typecheck.mx` with the blanking, comment-aware, balance-aware
@@ -2690,10 +2696,12 @@ stage3`): `tests/util.sh` with the masking guards removed AND
 and keeps its `\n`, so the concatenated line count - and therefore every
 diagnostic line number after the const block - stays correct.
 
-Still uncommitted at handover: the ed25519 agent's
-`src/crypto/ed25519/ed25519.mx`, `src/crypto/x509/{x509,parser}.mx`
-(struct-wrapping `PublicKey`/`PrivateKey`; not yet through a suite or a
-tls+x509+ed25519 probe).
+VERIFIED AFTER THE SOUNDNESS FIXES, rc=0, **181 PASS** (`selfhost:fixpoint`
+PASS): the full suite with `a364d951` in the tree, which is 179 plus the two new
+restriction fixtures. `--phase 0` was then re-run with the `asn1_oid_der`
+fixture added and passed (rc=0, 66 checks in that phase, which includes the new
+fixture) - the full-suite total with it is 182 by arithmetic, NOT yet measured
+in one run. THE TREE IS CLEAN - nothing is uncommitted.
 
 WOOD LAW DEBT found while landing the above: `stripUnusedConsts` was added in
 `21a09393` ("dead constant elimination pass") in `_mxc_stage4` only.
@@ -2702,19 +2710,44 @@ stage4 drops an unused const declaration before parsing, legacy parses it. It
 is latent today (legacy builds stage4 fine and the fixpoint holds), but it is a
 bilateral violation and belongs on the list.
 
+The two `ssa_builder.mx` soundness fixes are NOT wood-law debt: legacy rejects
+both programs through `go/types`, so stage4 was the diverging side and the fixes
+restore parity. Verified by running legacy on the same two files:
+- `i.Bytes undefined (type I2 has no field or method Bytes)`
+- `cannot use i (variable of interface type I2) as Box value in argument to
+  takeBox: need type assertion`
+
+### Repro probes that live in /tmp (rebuild them; they are not committed)
+
+- `/tmp/vfp2` valid interface boxing (must compile and print 4/4/4/4/3)
+- `/tmp/vfp3` unknown method on an interface (must now FAIL)
+- `/tmp/vfp6` interface value into a concrete parameter (must now FAIL)
+- `/tmp/edprobe` ed25519 end to end; `/tmp/tlsprobe` crypto/tls compile gate
+- `/tmp/ecprobe` ecdsa P-256 (fails at `elliptic`)
+- `/tmp/asn1probe` the OID + `[]byte`-field + string-field marshal check
+
+Build any probe with:
+`MOXIEROOT=$PWD /tmp/mxc-h1b build -o <out> <dir>` - and note the compiler
+binary must be rebuilt from the tree with `-a` when the compiler changes.
+
 ## THE TODO LIST
 
 1. **`./src/net/http` still does not parse.** A REAL parse error whose reported
    position is WRONG. This is the last thing between the tree and a compiling
-   net/http.
+   net/http. A single-package build needs a generous timeout (the earlier probe
+   was killed at 60s while the package graph was still being built).
 2. **Diagnostic positions are unreliable - fix the remapper.** `concatSources`
    merges every file's imports into one block at the top, so the concatenated
    line count differs from the sum of the files, and `concatLineToFile`
-   (`_mxc_stage4/main.mx`, fed by `cctx.concatSourceMap`) maps a concatenated
-   line to `file:line` with that offset. Proof: a parse error in `src/net/http`
-   is reported as `clone.mx:121`, and `clone.mx` has only 120 lines. This has
-   already sent me and the net agent to the wrong file twice. Fix the map (or
-   stop reordering) and every future diagnosis gets cheaper.
+   (`_mxc_stage4/main.mx` ~line 1895, fed by `cctx.concatSourceMap`) maps a
+   concatenated line to `file:line` with that offset. Proof: a parse error in
+   `src/net/http` is reported as `clone.mx:121`, and `clone.mx` has exactly 120
+   lines. This sent me and the net agent to the wrong file twice, and it is the
+   single highest-value fix for future debugging: until it is right, every
+   `file:line` in a *parse* diagnostic is a guess. Note the map's arithmetic is
+   correct for the lines it is given, so the bug is in what `outStart`/`srcLine`
+   are recorded as, or in a consumer that remaps a position that is not a
+   concatenated line at all.
 3. **generic: an imported generic type carries no methods.** `mxhWriteTypeName`
    writes no methods for a type with `TParams` (deliberate: only instantiations
    emit symbols), so `Get undefined (type lib.Box has no field or method Get)`
@@ -2742,39 +2775,76 @@ bilateral violation and belongs on the list.
    above). Legacy must drop an unused const declaration before parsing exactly
    as stage4 does, and the mirror must also blank-not-delete so line numbers
    agree across the two compilers.
-8. **`crypto/ed25519`** struct wrapper DONE in the working tree, uncommitted, by
-   the agent: `PublicKey`/`PrivateKey` are structs with pointer receivers, the
-   probe passes, `tls` needs no change. It also found THREE pre-existing
-   `encoding/asn1`/`x509` defects worth their own items:
-   a. `asn1.Marshal` writes every `ObjectIdentifier` as `00 00 00`
-      (`marshal.mx:309` `dst = appendBase128Int(dst[:0], ...)` discards the
-      result - a subslice/write-back mistake), so all x509 DER is corrupt;
-   b. `asn1` cannot tell a `[]byte` struct field from `string`, so PKCS#8 emits
-      UTF8String instead of OCTET STRING;
-   c. `x509.ParseCertificate` fails on standard UTCTime/GeneralizedTime DER.
-9. **`crypto/tls` + `crypto/x509`** await 8 (and are otherwise wide-clean).
-10. **The named public API types still to dissolve:** `net.IP` (18 methods, ~90
+8. **`crypto/ed25519` DONE and COMMITTED** (`bc4a9067`). Verified by running,
+   not by inspection: sign/verify, tamper rejection, `crypto.Signer` through the
+   interface, `crypto.PublicKey` -> `ed25519.PublicKey` assertion, `Seed`,
+   `Equal`, and `crypto/tls` compiling against the new shapes and its type
+   switches resolving.
+9. **`encoding/asn1` and `x509` - the DER stack.**
+   a. **DONE** (`1f416420`): the OID encoder wrote `00 00 00` for every
+      ObjectIdentifier. Fixture `asn1_oid_der`.
+   b. **OPEN - `[]byte` is marshalled as a string.** A plain `[]byte` field with
+      no string tag falls into `case akBytes:` in `makeField`
+      (`src/encoding/asn1/marshal.mx` ~line 607) and defaults to
+      `makeUTF8String`, so it should be an OCTET STRING (`makeBytesEncoder`).
+      Minimal reproducer (`/tmp/asn1probe`): a struct `{Key []byte}` holding
+      `ff 01 02` fails with `asn1: string not valid UTF-8` instead of emitting
+      `04 03 ff 01 02`; a `string` field is correct (`30 03 13 01 78`,
+      PrintableString). The ROOT CAUSE is the unified `string = []byte`: the
+      runtime type descriptor has one kind for both (`akBytes`, value 17 - see
+      the comment in `src/encoding/asn1/typeinfo.mx`), so asn1 cannot recover
+      the spelling. THE FIX IS IN THE DESCRIPTOR, not in asn1:
+      `_rawType.meta` is a `uint8` with `_kindMask = 31` and `_flagNamed = 32`,
+      so bits 6 and 7 are free - either mark a descriptor built from the
+      `string` spelling with a new flag and let `akBytes` WITHOUT it mean a byte
+      slice (asn1 then uses `makeBytesEncoder`), or give `string` its own kind
+      value. BILATERAL: `_mxc_stage4/ir_descriptors.mx`, the legacy descriptor
+      emitter, and `src/runtime/codec.mx` (which also switches on these kinds)
+      must all agree. This is what blocks `x509.CreateCertificate` and the whole
+      PKCS#8/`MarshalPKCS8PrivateKey` path.
+   c. **OPEN - `x509.ParseCertificate`** fails on standard UTCTime/
+      GeneralizedTime DER. `parseTime` (`src/crypto/x509/parser.mx:204`) reads
+      through `cryptobyte`'s `ReadASN1UTCTime`/`ReadASN1GeneralizedTime`, so the
+      defect is likely in `src/encoding/asn1`'s time decoding
+      (`ReadASN1UTCTime`/`ReadASN1GeneralizedTime` in `asn1.mx`) or in how
+      `cryptobyte`'s `PeekASN1Tag` reports the tag - check those before touching
+      the x509 side.
+   d. `x509.CreateCertificate` is blocked on (b). A minimal reproducer for
+      (b) is the fastest way back in.
+10. **`crypto/ecdsa` + `elliptic` - NEW, found by `/tmp/ecprobe`.** `ecdsa.
+      GenerateKey(elliptic.P256(), rand.Reader)` panics
+      `interface dispatch: no impl for Params`: a `elliptic.Curve` value boxed
+      into the interface is missing the `Params` wrapper. Same family as the
+      `f7a746d4` fixes (value-form interface dispatch for pointer-receiver
+      methods, `emitIfaceAssertOK` per `(base, form)`). `/tmp/vfp2` shows the
+      simple shape works, so this is a *specific* boxing site (a canned/global
+      curve value, or a curve returned from a function that is not a plain
+      local). Read the `elliptic` curve constructors first.
+11. **The named public API types still to dissolve:** `net.IP` (18 methods, ~90
     refs), `net/http.Header` (13, ~227), `net/textproto.MIMEHeader` (5, ~77),
     `net/url.Values` (6, ~20), `net.Buffers` (3, mutating + `io` interfaces, so
     it needs the struct-wrapper route rather than an alias). Downstream app repos
     have ZERO refs to `url.Values`/`net.IP`/`MIMEHeader` and 3 `.Header` refs, so
-    the blast radius is small.
-11. **`syscall/js`** (js && wasm only): value receivers, `any`, globals mutated
+    the blast radius is small. `crypto/ed25519` (`bc4a9067`) is the worked
+    example of the struct-wrapper route.
+12. **`syscall/js`** (js && wasm only): value receivers, `any`, globals mutated
     outside init, `FuncOf` captures. Bounded debt; the native wide predicate does
     not need it.
-12. **`compress/flate`**: rule-clean, but clang-22 crashes in the backend
+13. **`compress/flate`**: rule-clean, but clang-22 crashes in the backend
     (`Cannot select ... load`); `compress/gzip` links through it.
-13. **`regexp` and `text/template` do not exist**: five importers of `regexp`
+14. **`regexp` and `text/template` do not exist**: five importers of `regexp`
     (`internal/lazyregexp`, `internal/coverage/pods`, `internal/profile/prune`,
     `internal/trace/testtrace/expectation`, `index/suffixarray`) and one of
     `text/template` (`internal/lazytemplate`). Decision: implement the minimum,
     or remove the importers (all are trace/coverage/profiling corners with no
     app path).
-14. **`debug/gosym`** 13 value receivers, **`os.Pipe`'s `[2]int32`** and
+15. **`debug/gosym`** 13 value receivers, **`os.Pipe`'s `[2]int32`** and
     syscall's `[2]Timeval`/`[2]Timespec` casts, **cgo-gated
     `os/user/cgo_lookup_unix.mx`**, and the **embedded tzdata registration that
     never runs** - all with the gosym agent (c96552b0); check its report.
-15. **The widened predicate** still waits on items 1, 3, 10, 11, 13 and 14.
+16. **The widened predicate** still waits on items 1, 3, 11, 12, 14 and 15. The
+    wide predicate binary `/tmp/mxc-wide-a` is GONE from /tmp; it must be
+    rebuilt from the sweep before any package can be re-verified against it.
 
 ## Did not survive scrutiny (do not chase)
 
@@ -2787,3 +2857,22 @@ bilateral violation and belongs on the list.
 - "`{:` in the idna tables": it does not occur there at all.
 - "A two-result generic method loses its values": it was the copied receiver
   (item above), not tuple decoding.
+- "The ed25519 struct wrapper is broken because `pub len: 0`": FALSE, and it is
+  the reason two real compiler bugs were found. My probe wrote `pub :=
+  priv.Public()` (type `crypto.PublicKey`, which has only `Equal`) and then
+  called `pub.Bytes()` and `ed25519.Verify(pub, ...)`. Both were silently
+  accepted: the unknown method evaluated to nil (so `len` was 0) and the
+  interface was passed where the concrete struct was wanted (so the length was
+  garbage). The wrapper itself is correct. LESSON: when a probe returns a
+  suspiciously zero or garbage value, suspect the probe's TYPES first, and treat
+  a silently-accepted type error as a compiler finding - not as an explanation.
+- "`asn1` marshals a `string` field as UTF8String, so the string side is also
+  broken": false. A printable ASCII string is a PrintableString (`30 03 13 01
+  78`), which is correct; I misread `13` as `0c` and wrote the wrong
+  expectation into the new fixture twice. Only the `[]byte` side is wrong
+  (item 9b).
+- "`x509.CreateCertificate` fails because of the ed25519 change": false. The
+  OID defect (fixed) and the `[]byte`-as-string defect (open) are pre-existing
+  and hit every key type; ecdsa never even reaches them because `elliptic`
+  panics first (item 10).
+
