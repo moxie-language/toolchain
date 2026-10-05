@@ -3115,3 +3115,89 @@ uses it, and check whether the tag survives. If it does not, the round trip
 above is the fix and the fixture should become a real two-stage test (build the
 dependency, hide the source, build the consumer) rather than a single-invocation
 one.
+
+# ============ UPDATE: item 10 (elliptic) minimized ============
+
+NOT fixed. Minimized, with the mechanism identified. This is a **silent wrong
+answer**, not just elliptic's panic.
+
+## The reproducer (5 minutes to rebuild, keep it)
+
+```moxie
+package main
+
+import "fmt"
+
+type Point interface{ Set(x int32) (p Point) }
+
+type P256Point struct{ x int32 }
+func (p *P256Point) Set(x int32) (out Point) { p.x = x; return p }
+
+// A NON-generic interface, like crypto/elliptic.Curve.
+type Curve interface {
+	Params() (n int32)
+	IsOnCurve(p Point) (ok bool)
+}
+
+// A GENERIC type with POINTER receivers, like elliptic's nistCurve[Point].
+type CurveImpl[Pt Point] struct{ name string }
+
+func (c *CurveImpl[Pt]) Params() (n int32)        { return 7 }
+func (c *CurveImpl[Pt]) IsOnCurve(p Pt) (ok bool) { return true }
+
+func main() {
+	c := &CurveImpl[P256Point]{name: "p256"}
+	var i Curve = c
+	fmt.Println("params:", i.Params())          // prints 0, must print 7
+	fmt.Println("oncurve:", i.IsOnCurve(&P256Point{})) // prints false, must print true
+}
+```
+
+`MOXIEROOT=$PWD ./moxie build -o /tmp/geniface/out /tmp/geniface` then run: it
+prints `params: 0` / `oncurve: false` and exits 0. In elliptic the same defect
+surfaces as `interface dispatch: no impl for Params` (a panic) instead - the two
+failure modes differ only in whether a zero-returning arm matches first.
+
+## Mechanism
+
+`findIfaceImpls` (`_mxc_stage4/ir_iface.mx:349`) builds the dispatch table by
+walking `e.pkg.Members` and splitting each method symbol at its LAST dot:
+
+    mname = "CurveImpl.Params"  ->  tname = "CurveImpl"
+    looked := e.pkg.Pkg.Scope.Lookup(tname)      // finds the GENERIC Named
+    if gn, okg := tn.Typ.(*Named); okg && len(gn.TParams) > 0 { continue }   // line 401
+
+and line 401 **skips it on purpose** (only instantiations are meant to emit
+symbols). So no impl is registered for `*CurveImpl[P256Point]` at all.
+
+Evidence: the compiler's own cached artifact for the probe contains the symbols
+`CurveImpl.Params` and `CurveImpl.IsOnCurve` and nothing carrying the type
+arguments - so the instantiation has no distinct method symbol for
+`findIfaceImpls` to key a concrete receiver type on. There is no
+`CurveImpl[main.P256Point].Params` to find.
+
+## The fix to write
+
+Something must register the impl with the CONCRETE receiver type
+`*CurveImpl[P256Point]` while the body stays the shared `CurveImpl.Params`
+symbol. The registration already knows how to build `NewPointer(recvT)`
+(line 407); what is missing is the mapping from the generic decl to each
+instantiated Named in the package. Candidates, in order of preference:
+1. If the instantiation machinery (`tryGenericMethodCall` /
+   `resolveMethodCallWithRecv`, which already return nil for `len(TArgs) > 0`)
+   records each instantiated Named somewhere, `findIfaceImpls` should consult
+   that list and register `(generic method symbol, instantiated recvType)` per
+   instantiation instead of skipping.
+2. Otherwise the emitter must give instantiated methods distinct symbols
+   (mangled with the type arguments) so the existing name-splitting resolves
+   them. That is the larger change and is what the earlier `undefined symbol:
+   main.(*Box).get` fix was inching toward.
+
+Wood law: whatever lands must be mirrored in `legacy/` - go/ssa + the patched
+GOtypes already build a proper method set for an instantiation (that is why the
+legacy bootstrap does not hit this), so the divergence is stage4-only and the
+fix restores parity.
+
+Once it works, the reproducer above belongs in
+`tests/regressions/should_compile/` with the printed values asserted - it is a
+silent-zero bug today, so an assertion is the whole test.
