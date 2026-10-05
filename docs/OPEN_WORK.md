@@ -2975,3 +2975,93 @@ the arithmetic was fine and the *positions feeding it* were wrong one layer
 down, in the parser. And the net/http parse error was not a malformed file at
 all - it was the compiler building a body out of a doc comment. Both times the
 symptom pointed at the wrong component, and the fix was one layer upstream.
+
+# ============ UPDATE: asn1/x509 DER stack closed ============
+
+`08018874` (+ the fixture). Full suite rc=0, **183 PASS**,
+`selfhost:fixpoint` PASS. Tree clean.
+
+## Closed: items 9b and 9c
+
+**9b, `[]byte` marshalled as a string - FIXED.** Moxie unifies string and
+`[]byte` into ONE runtime type descriptor (`akBytes`), verified directly:
+`unsafe.TypeOf([]byte("abc")) == unsafe.TypeOf("abc")` and `[]uint8` too, so
+asn1 cannot recover the spelling (approach (b), a compiler-side split, was out
+of scope). The default is now the BYTE meaning - `TagOctetString` - which is
+what DER needs, and a character string is requested with a new explicit
+`asn1:"string"` field parameter that keeps Go's
+PrintableString-when-printable-else-UTF8 choice. A plain `[]byte` field now
+marshals `30 05 04 03 61 62 63`; raw non-UTF-8 key bytes marshal
+`30 06 04 04 01 ff 80 00` where they previously failed outright with
+`asn1: string not valid UTF-8`. Unmarshal accepts an OCTET STRING or any
+character string into `akBytes`, and `[][]byte` sequences still parse.
+
+**9c, "x509.ParseCertificate fails on standard DER times" - THE PREMISE WAS
+FALSE, and the real defect was elsewhere.** Standard DER times always parsed:
+`src/crypto/x509/test-file.crt` gives the correct 2017/2027 times, and
+hand-built UTCTime and GeneralizedTime both read back correctly through
+cryptobyte. The real blocker was on the **marshal** side:
+`[][]pkix.AttributeTypeAndValue` encoded BOTH levels as SEQUENCE. Go decides the
+inner level is a SET from the type NAME (`pkix.RelativeDistinguishedNameSET`),
+and Moxie **forbids named slice types**, so asn1's "type name ends in SET" rule
+can never fire - `t.typeName()` is empty for any slice. `parseName` then read an
+ATV SEQUENCE as a SET and returned `x509: invalid RDNSequence`.
+`crypto/x509.marshalRDNSequence` now builds SEQUENCE OF SET OF ATV explicitly
+for a certificate subject and a CSR subject.
+
+**Verified end to end by running** (ed25519 `CreateCertificate` ->
+`ParseCertificate`, every field asserted): serial 4242; Subject/Issuer
+CommonName; exact NotBefore/NotAfter; `cert.PublicKey` type-asserts to
+`ed25519.PublicKey`; a multi-RDN subject (C=UK plus a non-ASCII CN) whose DER
+shows `SEQUENCE{ SET{ SEQ{ OID, PrintableString "UK" } }, SET{ SEQ{ OID,
+UTF8String "moxie ee test" } } }`; a CA cert with KeyUsage/BasicConstraints/SKI
+parsed (`IsKeyUsage==CertSign|CRLSign`, MaxPathLen, SKI as OCTET STRING-wrapped
+DER); and a post-2050 cert using GeneralizedTime parsed to
+2055-06-01T12:30:45Z.
+
+## NEW OPEN ITEMS from this work
+
+1. **Struct tags do NOT cross the `.mxh` export boundary.** The writer
+   (`_mxc_stage4/main.mx`, the `TCStruct` branch of `mxhWriteTypeName`) emits
+   `struct{` then each field's NAME and TYPE and no tag. `pkix.
+   AttributeTypeAndValue.Value` is tagged `asn1:"string"`, so an importer sees
+   no tag and marshals it as an OCTET STRING - which is exactly why
+   `marshalRDNSequence` had to build the value explicitly rather than trust the
+   tag. This is a COMPILER defect with a wide blast radius: it silently changes
+   the wire format, JSON/ASN.1/struct-tag behaviour, of every tagged struct
+   field used across a package boundary. Fix: write the tag into the mxh and
+   parse it back in `mxhParseStruct`/`typeFromTail`. Verify with a probe that
+   marshals a tagged struct from an IMPORTING package.
+2. **`x509.ParseCertificateRequest` fails** with `asn1: structure error:
+   sequence tag mismatch`: it unmarshals `[][]pkix.AttributeTypeAndValue`
+   directly, which has neither a tag nor a named SET type. A structural
+   "slice-of-slices-of-structs => SET" convention on both parse and marshal got
+   past the mismatch but then hit a **SIGSEGV in the slice-of-slice parse
+   path** - that crash is its own bug and is the thing to fix first, since the
+   convention is needed for gap 1's sibling reason (no named slice types).
+3. **`CreateRevocationList` and `pkix.RelativeName`** still marshal their RDN
+   without SET, now also with OCTET STRING values. A CRL was already
+   non-conformant before this change; same root cause as item 1's sibling.
+
+## Corrected list state
+
+Items 1, 2, 7b, 9b, 9c are closed. Still open: 3, 4, 5 (generic family), 6
+(coverage/tracev1), 10 (`elliptic.Curve` -> `no impl for Params`, blocks ecdsa
+P-256), 11 (the named public API types), 12 (`syscall/js`), 13 (`flate`), 14
+(`regexp`/`text/template`), 15 (gosym/os-user/tzdata), 16 (the widened
+predicate), the new mxh-tag gap above, and two smaller recorded items:
+`extractImports` shares `scanFileRegions`' old comment-blindness, and
+net/http now has ordinary source diagnostics left (`nop` undefined, a shadowed
+`err`, a short var with `rhs=nil`).
+
+## Method note, second instalment
+
+Two of my own stated premises were wrong this stretch and both are recorded in
+the disproven list: `x509` time PARSING was never broken (the defect was the
+missing SET on the marshal side), and the asn1 `[]byte` problem was not the OID
+encoder (that was real but separate). In both cases the agent verified the
+premise before implementing, which is why the fix landed on the real cause. The
+verification habit that produced the answer each time was the same: build the
+SMALLEST case that isolates the claim - `unsafe.TypeOf([]byte("abc")) ==
+unsafe.TypeOf("abc")`, `[]byte("abc")` vs `"abc"` through Marshal, a hand-built
+DER time - rather than reasoning from the symptom.
