@@ -306,10 +306,30 @@ func (e *oidEncoder) Len() (l int32) {
 	return l
 }
 
+// writeBase128Int writes n into dst starting at off and returns the next free
+// offset. It writes IN PLACE because Moxie has no aliasing: a subslice is a
+// copy, so the Go idiom `dst = appendBase128Int(dst[:0], n)` mutates a fresh
+// buffer and throws it away, leaving the real dst untouched - every
+// ObjectIdentifier marshalled as 00 00 00. The encoder contract gives dst
+// exactly Len() bytes, so the cursor is what bounds the writes.
+func writeBase128Int(dst []byte, off int32, n int64) (next int32) {
+	l := base128IntLength(n)
+	for i := l - 1; i >= 0; i-- {
+		o := byte(n >> uint32(i*7))
+		o &= 0x7f
+		if i != 0 {
+			o |= 0x80
+		}
+		dst[off] = o
+		off++
+	}
+	return off
+}
+
 func (e *oidEncoder) Encode(dst []byte) {
-	dst = appendBase128Int(dst[:0], int64(e.oid[0]*40+e.oid[1]))
+	off := writeBase128Int(dst, 0, int64(e.oid[0]*40+e.oid[1]))
 	for i := 2; i < len(e.oid); i++ {
-		dst = appendBase128Int(dst, int64(e.oid[i]))
+		off = writeBase128Int(dst, off, int64(e.oid[i]))
 	}
 }
 

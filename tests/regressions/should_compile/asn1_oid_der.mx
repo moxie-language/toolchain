@@ -1,0 +1,78 @@
+// Regression: an ObjectIdentifier must marshal to the real base-128 DER, and a
+// string field must marshal as a string.
+//
+// oidEncoder.Encode used the Go idiom
+//   dst = appendBase128Int(dst[:0], int64(...))
+// Moxie has no aliasing - a subslice is a COPY - so dst[:0] was a fresh buffer.
+// appendBase128Int appended into that fresh buffer and reassigned the local
+// dst, which Encode then discarded (it has no result). The caller's dst kept
+// whatever it had, so every ObjectIdentifier in every marshalled structure
+// came out 00 00 00 and all x509 DER was corrupt.
+//
+// Fixed in: src/encoding/asn1/marshal.mx (writeBase128Int writes in place
+// through a cursor; the encoder contract gives dst exactly Len() bytes).
+//
+// Still open in the same package: a plain []byte field marshals as a
+// UTF8String (0c) instead of an OCTET STRING (04), because the unified
+// string=[]byte type reaches asn1 as one descriptor kind (akBytes) and cannot
+// tell the two spellings apart. See docs/OPEN_WORK.md; that one is asserted
+// only for the string side here.
+package main
+
+import (
+	"encoding/asn1"
+	"encoding/hex"
+	"fmt"
+	"unsafe"
+)
+
+type strWrap struct {
+	Name string
+}
+
+func chk(what string, got, want string) {
+	if got != want {
+		println("FAIL: " | what | " got " | got | " want " | want)
+		panic("mismatch")
+	}
+}
+
+func main() {
+	// 1.2.840.113549.1.1.1 (rsaEncryption).
+	oid := asn1.ObjectIdentifier{OID: []int32{1, 2, 840, 113549, 1, 1, 1}}
+	b, err := asn1.Marshal(unsafe.TypeOf(oid), unsafe.Pointer(&oid))
+	if err != nil {
+		println("FAIL: oid marshal: " | err.String())
+		panic("marshal")
+	}
+	chk("oid", string(hex.EncodeToString(b)), "06092a864886f70d010101")
+
+	// A small OID whose first two arcs and one long arc exercise the cursor:
+	// 2.5.4.3 (commonName) -> 06 03 55 04 03, and 1.3.6.1.4.1.311 (a long arc).
+	oid2 := asn1.ObjectIdentifier{OID: []int32{2, 5, 4, 3}}
+	b2, err2 := asn1.Marshal(unsafe.TypeOf(oid2), unsafe.Pointer(&oid2))
+	if err2 != nil {
+		println("FAIL: oid2 marshal: " | err2.String())
+		panic("marshal")
+	}
+	chk("oid2", string(hex.EncodeToString(b2)), "0603550403")
+
+	oid3 := asn1.ObjectIdentifier{OID: []int32{1, 3, 6, 1, 4, 1, 311}}
+	b3, err3 := asn1.Marshal(unsafe.TypeOf(oid3), unsafe.Pointer(&oid3))
+	if err3 != nil {
+		println("FAIL: oid3 marshal: " | err3.String())
+		panic("marshal")
+	}
+	chk("oid3", string(hex.EncodeToString(b3)), "06072b060104018237")
+
+	// A printable string field marshals as PrintableString(13): 30 03 13 01 78.
+	sw := strWrap{Name: "x"}
+	sb, serr := asn1.Marshal(unsafe.TypeOf(sw), unsafe.Pointer(&sw))
+	if serr != nil {
+		println("FAIL: string marshal: " | serr.String())
+		panic("marshal")
+	}
+	chk("string", string(hex.EncodeToString(sb)), "3003130178")
+
+	fmt.Println("asn1 oid der ok")
+}
