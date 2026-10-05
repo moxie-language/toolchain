@@ -1206,6 +1206,29 @@ func tcInferConstTypeFromExpr(e syntax.Expr, scope *Scope) (t Type) {
 	if n, ok := e.(*syntax.Name); ok && (n.Value == "true" || n.Value == "false") {
 		return Typ[UntypedBool]
 	}
+	// A reference to another constant takes THAT constant's recorded type. The
+	// declared type is applied when the declaration is processed (see c.Typ =
+	// typ below), so a chain keeps it only if a reference reads it back:
+	//   Nanosecond  Duration = 1
+	//   Microsecond          = 1000 * Nanosecond
+	//   Second               = 1000 * Millisecond
+	// Without this arm every spec after the first fell through to
+	// UntypedTypeOfCV, so time.Second was untyped, `5 * time.Second` defaulted
+	// to int32, and net/http failed with "cannot use 5000000000 as int32 value
+	// ... (overflows int32)". Verified: with the fix a depth-1 expression is
+	// typed and rejected against int32, and before it even depth 1 was lost.
+	if n, ok2 := e.(*syntax.Name); ok2 && scope != nil {
+		if _, obj := scope.LookupParent(n.Value); obj != nil {
+			if c, isC := obj.(*TCConst); isC && c.Typ != nil {
+				return c.Typ
+			}
+		}
+	}
+	if _, ok3 := e.(*syntax.SelectorExpr); ok3 {
+		if c := tcSelectorConst(e, scope); c != nil && c.Typ != nil {
+			return c.Typ
+		}
+	}
 	// A binary constant expression takes the type of its TYPED operand: Go's
 	// rule is that an untyped constant combines with a typed one and the
 	// result keeps the typed operand's type. Without this the expression had

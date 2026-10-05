@@ -2055,6 +2055,19 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 	if bt, isB := SafeUnderlying(T).(*Basic); isB && bt.Info&IsUntyped != 0 {
 		untypedInvolved = true
 	}
+	// A TYPED constant must be judged like a value of its type, not by the
+	// untyped kind-class rule below. `const Nano int64 = 1` then
+	// `var y int32 = Nano` is a TYPE error in Go ("cannot use Nano (constant 1
+	// of type int64) as int32 value"), but isConst was true and constClass
+	// lumps every integer kind into one class, so it was accepted. Downstream
+	// that typedness has to survive too: `5 * time.Second` is a Duration
+	// (int64) precisely because Nanosecond is `Duration = 1`, and losing it
+	// made the product untyped, default to int32, and surface as
+	// "cannot use 5000000000 as int32 value ... (overflows int32)" - the whole
+	// time.Duration cluster in net/http.
+	if isConst && !untypedInvolved {
+		isConst = false
+	}
 	if isConst || untypedInvolved {
 		// Only a mismatch between two KNOWN classes is reported: an interface
 		// target (fmt.Stringer) or a container has no class here, and
