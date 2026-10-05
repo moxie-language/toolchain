@@ -38,44 +38,78 @@ const (
 )
 
 // PublicKey is the type of Ed25519 public keys.
-type PublicKey []byte
+//
+// This is a struct wrapping the raw key bytes rather than a named slice:
+// Moxie forbids named slice types, and this package must still assert on the
+// key's value type from crypto/tls and crypto/x509. The constructor is
+// [PublicKeyOf] and the raw bytes are read back with [PublicKey.Bytes].
+type PublicKey struct {
+	b []byte
+}
 
-// Any methods implemented on PublicKey might need to also be implemented on
-// PrivateKey, as the latter embeds the former and will expose its methods.
+// PublicKeyOf returns a PublicKey holding b. It replaces the conversion
+// ed25519.PublicKey(b), which a struct type cannot carry.
+func PublicKeyOf(b []byte) (k PublicKey) {
+	k.b = b
+	return
+}
+
+// Bytes returns the raw key bytes.
+func (k *PublicKey) Bytes() (b []byte) {
+	return k.b
+}
 
 // Equal reports whether pub and x have the same value.
-func (pub PublicKey) Equal(x crypto.PublicKey) (okay bool) {
+func (pub *PublicKey) Equal(x crypto.PublicKey) (okay bool) {
 	xx, ok := x.(PublicKey)
 	if !ok {
 		return false
 	}
-	return subtle.ConstantTimeCompare(pub, xx) == 1
+	return subtle.ConstantTimeCompare(pub.b, xx.b) == 1
 }
 
 // PrivateKey is the type of Ed25519 private keys. It implements [crypto.Signer].
-type PrivateKey []byte
+//
+// Like [PublicKey] it is a struct wrapping the raw bytes, with a free
+// constructor ([PrivateKeyOf]) and a value that satisfies crypto.Signer via a
+// value box.
+type PrivateKey struct {
+	b []byte
+}
+
+// PrivateKeyOf returns a PrivateKey holding b. It replaces the conversion
+// ed25519.PrivateKey(b), which a struct type cannot carry.
+func PrivateKeyOf(b []byte) (k PrivateKey) {
+	k.b = b
+	return
+}
+
+// Bytes returns the raw key bytes.
+func (k *PrivateKey) Bytes() (b []byte) {
+	return k.b
+}
 
 // Public returns the [PublicKey] corresponding to priv.
-func (priv PrivateKey) Public() (out crypto.PublicKey) {
+func (priv *PrivateKey) Public() (out crypto.PublicKey) {
 	publicKey := []byte{:PublicKeySize}
-	copy(publicKey, priv[32:])
-	return PublicKey(publicKey)
+	copy(publicKey, priv.b[32:])
+	return PublicKeyOf(publicKey)
 }
 
 // Equal reports whether priv and x have the same value.
-func (priv PrivateKey) Equal(x crypto.PrivateKey) (okay bool) {
+func (priv *PrivateKey) Equal(x crypto.PrivateKey) (okay bool) {
 	xx, ok := x.(PrivateKey)
 	if !ok {
 		return false
 	}
-	return subtle.ConstantTimeCompare(priv, xx) == 1
+	return subtle.ConstantTimeCompare(priv.b, xx.b) == 1
 }
 
 // Seed returns the private key seed corresponding to priv. It is provided for
 // interoperability with RFC 8032. RFC 8032's private keys correspond to seeds
 // in this package.
-func (priv PrivateKey) Seed() (b []byte) {
-	return push([]byte{:0:SeedSize}, priv[:SeedSize]...)
+func (priv *PrivateKey) Seed() (b []byte) {
+	return push([]byte{:0:SeedSize}, priv.b[:SeedSize]...)
 }
 
 
@@ -88,8 +122,8 @@ func (priv PrivateKey) Seed() (b []byte) {
 //
 // A value of type [Options] can be used as opts, or crypto.Hash(0) or
 // crypto.SHA512 directly to select plain Ed25519 or Ed25519ph, respectively.
-func (priv PrivateKey) Sign(rand io.Reader, message []byte, opts crypto.SignerOpts) (signature []byte, err error) {
-	k, err := ed25519.NewPrivateKey(priv)
+func (priv *PrivateKey) Sign(rand io.Reader, message []byte, opts crypto.SignerOpts) (signature []byte, err error) {
+	k, err := ed25519.NewPrivateKey(priv.b)
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +173,7 @@ func GenerateKey(rand io.Reader) (out PublicKey, res PrivateKey, derr error) {
 
 	seed := []byte{:SeedSize}
 	if _, err := io.ReadFull(rand, seed); err != nil {
-		return nil, nil, err
+		return PublicKey{}, PrivateKey{}, err
 	}
 
 	privateKey := NewKeyFromSeed(seed)
@@ -155,7 +189,7 @@ func NewKeyFromSeed(seed []byte) (out PrivateKey) {
 	// Outline the function body so that the returned key can be stack-allocated.
 	privateKey := []byte{:PrivateKeySize}
 	newKeyFromSeed(privateKey, seed)
-	return privateKey
+	return PrivateKeyOf(privateKey)
 }
 
 func newKeyFromSeed(privateKey, seed []byte) {
@@ -178,7 +212,7 @@ func Sign(privateKey PrivateKey, message []byte) (b []byte) {
 }
 
 func sign(signature []byte, privateKey PrivateKey, message []byte) {
-	k, err := ed25519.NewPrivateKey(privateKey)
+	k, err := ed25519.NewPrivateKey(privateKey.b)
 	if err != nil {
 		panic("ed25519: bad private key: " | err.String())
 	}
@@ -207,10 +241,10 @@ func Verify(publicKey PublicKey, message, sig []byte) (ok bool) {
 // The inputs are not considered confidential, and may leak through timing side
 // channels, or if an attacker has control of part of the inputs.
 func VerifyWithOptions(publicKey PublicKey, message, sig []byte, opts *Options) (derr error) {
-	if l := len(publicKey); l != PublicKeySize {
+	if l := len(publicKey.b); l != PublicKeySize {
 		panic("ed25519: bad public key length: " | strconv.Itoa(l))
 	}
-	k, err := ed25519.NewPublicKey(publicKey)
+	k, err := ed25519.NewPublicKey(publicKey.b)
 	if err != nil {
 		return err
 	}
