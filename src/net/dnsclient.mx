@@ -170,49 +170,48 @@ type SRV struct {
 	Weight   uint16
 }
 
-// byPriorityWeight sorts SRV records by ascending priority and weight.
-type byPriorityWeight []*SRV
-
-// shuffleByWeight shuffles SRV records by weight using the algorithm
-// described in RFC 2782.
-func (addrs byPriorityWeight) shuffleByWeight() {
+// byPriorityWeightShuffleByWeight shuffles the SRV records in addrs[start:end]
+// by weight using the algorithm described in RFC 2782. The range is explicit
+// because a Moxie subslice is a copy, so shuffling addrs[start:end] would
+// shuffle a copy and leave the caller's records untouched.
+func byPriorityWeightShuffleByWeight(addrs []*SRV, start, end int32) {
 	sum := 0
-	for _, addr := range addrs {
-		sum += int32(addr.Weight)
+	for i := start; i < end; i++ {
+		sum += int32(addrs[i].Weight)
 	}
-	for sum > 0 && len(addrs) > 1 {
+	for sum > 0 && end-start > 1 {
 		s := 0
 		n := randIntn(sum)
-		for i := range addrs {
+		for i := start; i < end; i++ {
 			s += int32(addrs[i].Weight)
 			if s > n {
-				if i > 0 {
-					addrs[0], addrs[i] = addrs[i], addrs[0]
+				if i > start {
+					addrs[start], addrs[i] = addrs[i], addrs[start]
 				}
 				break
 			}
 		}
-		sum -= int32(addrs[0].Weight)
-		addrs = addrs[1:]
+		sum -= int32(addrs[start].Weight)
+		start++
 	}
 }
 
-// sort reorders SRV records as specified in RFC 2782.
-func (addrs byPriorityWeight) sort() {
+// byPriorityWeightSort reorders SRV records as specified in RFC 2782.
+func byPriorityWeightSort(addrs []*SRV) {
 	slices.SortFunc(addrs, func(a, b *SRV) int32 {
 		if r := cmp.Compare(a.Priority, b.Priority); r != 0 {
 			return r
 		}
 		return cmp.Compare(a.Weight, b.Weight)
 	})
-	i := 0
-	for j := 1; j < len(addrs); j++ {
+	i := int32(0)
+	for j := int32(1); j < len(addrs); j++ {
 		if addrs[i].Priority != addrs[j].Priority {
-			addrs[i:j].shuffleByWeight()
+			byPriorityWeightShuffleByWeight(addrs, i, j)
 			i = j
 		}
 	}
-	addrs[i:].shuffleByWeight()
+	byPriorityWeightShuffleByWeight(addrs, i, int32(len(addrs)))
 }
 
 // An MX represents a single DNS MX record.
@@ -221,11 +220,8 @@ type MX struct {
 	Pref uint16
 }
 
-// byPref sorts MX records by preference
-type byPref []*MX
-
-// sort reorders MX records as specified in RFC 5321.
-func (s byPref) sort() {
+// byPrefSort reorders MX records as specified in RFC 5321.
+func byPrefSort(s []*MX) {
 	for i := range s {
 		j := randIntn(i + 1)
 		s[i], s[j] = s[j], s[i]

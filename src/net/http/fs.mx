@@ -39,8 +39,11 @@ import (
 // .htpasswd. To exclude files with a leading period, remove the files/directories
 // from the server or create a custom FileSystem implementation.
 //
-// An empty Dir is treated as ".".
-type Dir []byte
+// An empty Dir is treated as ".". Dir is a struct rather than a named []byte
+// so it can keep the Open method that makes it a FileSystem.
+type Dir struct {
+	Root []byte
+}
 
 // mapOpenError maps the provided non-nil error from opening name
 // to a possibly better non-nil error. In particular, it turns OS-specific errors
@@ -73,7 +76,7 @@ var errInvalidUnsafePath error
 
 // Open implements [FileSystem] using [os.Open], opening files for reading rooted
 // and relative to the directory d.
-func (d Dir) Open(name []byte) (rfile File, rerr error) {
+func (d *Dir) Open(name []byte) (rfile File, rerr error) {
 	path := path.Clean("/" + name)[1:]
 	if path == "" {
 		path = "."
@@ -82,7 +85,7 @@ func (d Dir) Open(name []byte) (rfile File, rerr error) {
 	if err != nil {
 		return nil, errInvalidUnsafePath
 	}
-	dir := []byte(d)
+	dir := d.Root
 	if dir == "" {
 		dir = "."
 	}
@@ -117,26 +120,44 @@ type File interface {
 	Stat() (fs.FileInfo, error)
 }
 
-type anyDirs interface {
-	len() int32
-	name(i int32) []byte
-	isDir(i int32) bool
-	swap(i, j int32)
+// anyDirs holds a directory listing, either as fs.DirEntry (preferred, from
+// ReadDir) or as fs.FileInfo (from Readdir). Go used an interface over two
+// named []T types; Moxie has neither, so the two containers are concrete
+// fields of one struct and the operations are its methods.
+type anyDirs struct {
+	entries    []fs.DirEntry
+	infos      []fs.FileInfo
+	useEntries bool
 }
 
-type fileInfoDirs []fs.FileInfo
+func (d *anyDirs) len() (rn int32) {
+	if d.useEntries {
+		return len(d.entries)
+	}
+	return len(d.infos)
+}
 
-func (d fileInfoDirs) len() (rn int32) { return len(d) }
-func (d fileInfoDirs) isDir(i int32) (rok bool) { return d[i].IsDir() }
-func (d fileInfoDirs) name(i int32) (rb []byte) { return d[i].Name() }
-func (d fileInfoDirs) swap(i, j int32)       { d[i], d[j] = d[j], d[i] }
+func (d *anyDirs) isDir(i int32) (rok bool) {
+	if d.useEntries {
+		return d.entries[i].IsDir()
+	}
+	return d.infos[i].IsDir()
+}
 
-type dirEntryDirs []fs.DirEntry
+func (d *anyDirs) name(i int32) (rb []byte) {
+	if d.useEntries {
+		return d.entries[i].Name()
+	}
+	return d.infos[i].Name()
+}
 
-func (d dirEntryDirs) len() (rn int32) { return len(d) }
-func (d dirEntryDirs) isDir(i int32) (rok bool) { return d[i].IsDir() }
-func (d dirEntryDirs) name(i int32) (rb []byte) { return d[i].Name() }
-func (d dirEntryDirs) swap(i, j int32)       { d[i], d[j] = d[j], d[i] }
+func (d *anyDirs) swap(i, j int32) {
+	if d.useEntries {
+		d.entries[i], d.entries[j] = d.entries[j], d.entries[i]
+		return
+	}
+	d.infos[i], d.infos[j] = d.infos[j], d.infos[i]
+}
 
 func dirList(w ResponseWriter, r *Request, f File) {
 	// Prefer to use ReadDir instead of Readdir,
@@ -145,13 +166,13 @@ func dirList(w ResponseWriter, r *Request, f File) {
 	var dirs anyDirs
 	var err error
 	if d, ok := f.(fs.ReadDirFile); ok {
-		var list dirEntryDirs
+		var list []fs.DirEntry
 		list, err = d.ReadDir(-1)
-		dirs = list
+		dirs = anyDirs{entries: list, useEntries: true}
 	} else {
-		var list fileInfoDirs
+		var list []fs.FileInfo
 		list, err = f.Readdir(-1)
-		dirs = list
+		dirs = anyDirs{infos: list}
 	}
 
 	if err != nil {
@@ -817,7 +838,7 @@ func ServeFile(w ResponseWriter, r *Request, name []byte) {
 		return
 	}
 	dir, file := filepath.Split(name)
-	serveFile(w, r, Dir(dir), file, false)
+	serveFile(w, r, &Dir{Root: dir}, file, false)
 }
 
 // ServeFileFS replies to the request with the contents
