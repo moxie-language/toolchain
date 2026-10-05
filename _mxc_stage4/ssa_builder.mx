@@ -5755,17 +5755,16 @@ func (fb *ssaFuncBuilder) tryGenericMethodCall(sel *syntax.SelectorExpr, recv SS
 	}
 	fixed := recv
 	if !isPtr {
-		fixed2 := false
-		if nameExpr, ok3 := sel.X.(*syntax.Name); ok3 {
-			obj := fb.lookupObject(nameExpr.Value)
-			if obj != nil {
-				if alloc, ok4 := fb.vars[obj]; ok4 {
-					fixed = alloc
-					fixed2 = true
-				}
-			}
-		}
-		if !fixed2 {
+		// Pass the receiver's ADDRESS whenever it is addressable. Handing the
+		// callee a copy loses every receiver write: o.queue.push's q.end++ went
+		// into a temporary, the following o.queue.pop() then saw start == end
+		// and returned the zero value and false. The plain method path rebuilds
+		// the operand as an address for exactly this reason (methodNeedsAddr).
+		// Only a genuinely non-addressable receiver (a call result) falls back
+		// to a copy, which is the one case Go's rule rejects anyway.
+		if addr := fb.buildOperandAddr(sel.X); addr != nil {
+			fixed = addr
+		} else {
 			alloc := &SSAAlloc{Comment: "gmethod.tmp"}
 			alloc.typ = NewPointer(recv.SSAType())
 			alloc.name = fb.nextName()

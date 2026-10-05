@@ -52,10 +52,27 @@ func (b *Box[T]) Len() (n int32) {
 	return int32(len(b.v))
 }
 
-// At reads an element through the substituted signature; the field form
-// `s.v[2]` is still typed T and is the gap noted above.
+// At reads an element through the substituted signature.
 func (b *Box[T]) At(i int32) (out T) {
 	return b.v[i]
+}
+
+// Holders wrap a Box so the receiver is a FIELD of a pointer receiver, which is
+// the shape that used to receive a COPY: every receiver write went into a
+// temporary, so h.b.Set's q-style state change vanished and the next call saw
+// the initial state.
+type Holder struct {
+	b Box[int32]
+}
+
+func (h *Holder) Fill(v int32) {
+	h.b.v = []int32{:2}
+	h.b.Set(0, v)
+	h.b.Set(1, v + 1)
+}
+
+func (h *Holder) Second() (n int32) {
+	return h.b.At(1)
 }
 
 func chk(name string, got, want int32) {
@@ -89,6 +106,12 @@ func main() {
 	// A field element of an instantiated generic is typed by the SUBSTITUTED
 	// argument now, not by T (which made this read 0 and print nothing).
 	chk("int32-field", s.v[2], 99)
+
+	// receiver write through a field must persist across calls
+	h := Holder{}
+	h.Fill(20)
+	chk("holder-second", h.Second(), 21)
+	chk("holder-len", h.b.Len(), 2)
 
 	println("ok")
 }
