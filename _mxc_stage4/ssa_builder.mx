@@ -1535,14 +1535,60 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 
 	if fb.currentBlock != nil && !fb.blockTerminated(fb.currentBlock) {
 		if len(fb.namedResults) > 0 {
+			// This is the implicit return at the end of a body that falls off
+			// the end, so it carries no source position (pos 0). It must align
+			// the named results with their POSITIONS in the result list and
+			// give a BLANK result its zero value, exactly like a bare `return`:
+			//   func (t *Transport) getConn(...) (_ *persistConn, err error)
+			// has ONE named result and TWO results, so pushing only the named
+			// ones produced a one-element SSAReturn for a two-result function.
+			// The exit serialiser then took its single-value shortcut and
+			// decomposed that one interface value across both results, feeding
+			// the error's TYPE word to the codec as the *persistConn:
+			//   '%cext100' defined with type 'i64' but expected 'ptr'
+			//   %cext100 = extractvalue {i64, ptr} %t168, 0
+			// which is what blocked src/net/http.
+			// Build the value list POSITIONALLY: vals[i] belongs to
+			// Signature.Results.At(i). A blank (`_`) result occupies its
+			// position as the zero of its type, and the named results fill the
+			// other positions in order. Appending the zeros afterwards instead
+			// put the error at the blank's position and a zero at the named
+			// result's - the aggregate came out inverted
+			// (%rv98 = the error inserted at field 0, the zero at field 1).
 			var vals []SSAValue
-			for _, nr := range fb.namedResults {
-				elemType := nr.SSAType()
-				if p, ok := elemType.(*Pointer); ok {
-					elemType = p.Base
+			nj := 0
+			if fb.fn.Signature != nil && fb.fn.Signature.Results != nil {
+				for i := int32(0); i < fb.fn.Signature.Results.Len(); i++ {
+					res := fb.fn.Signature.Results.At(i)
+					if res == nil {
+						continue
+					}
+					if res.Name == "" || res.Name == "_" {
+						vals = mxutil.Ensure(vals, 1)
+						push(vals, &SSAConst{typ: res.Typ, val: nil})
+						continue
+					}
+					if nj >= len(fb.namedResults) {
+						break
+					}
+					nr := fb.namedResults[nj]
+					nj++
+					elemType := nr.SSAType()
+					if p, ok := elemType.(*Pointer); ok {
+						elemType = p.Base
+					}
+					vals = mxutil.Ensure(vals, 1)
+					push(vals, fb.emitLoad(nr, elemType))
 				}
-				vals = mxutil.Ensure(vals, 1)
-				push(vals, fb.emitLoad(nr, elemType))
+			} else {
+				for _, nr := range fb.namedResults {
+					elemType := nr.SSAType()
+					if p, ok := elemType.(*Pointer); ok {
+						elemType = p.Base
+					}
+					vals = mxutil.Ensure(vals, 1)
+					push(vals, fb.emitLoad(nr, elemType))
+				}
 			}
 			fb.emitReturn(vals, 0)
 		} else {
