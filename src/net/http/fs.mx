@@ -390,17 +390,20 @@ func serveContent(w ResponseWriter, r *Request, name []byte, modtime time.Time, 
 		defer pr.Close() // cause writing goroutine to fail and exit if CopyN doesn't finish.
 		func() {
 			for _, ra := range ranges {
-				part, err := mw.CreatePart(ra.mimeHeader(ctype, size))
-				if err != nil {
-					pw.CloseWithError(err)
+				// werr, not err: Moxie makes shadowing a compile error, and
+				// serveContent already has an err in scope. Go allows the
+				// shadow, so the port was silent about it.
+				part, werr := mw.CreatePart(ra.mimeHeader(ctype, size))
+				if werr != nil {
+					pw.CloseWithError(werr)
 					return
 				}
-				if _, err := content.Seek(ra.start, io.SeekStart); err != nil {
-					pw.CloseWithError(err)
+				if _, serr := content.Seek(ra.start, io.SeekStart); serr != nil {
+					pw.CloseWithError(serr)
 					return
 				}
-				if _, err := io.CopyN(part, content, ra.length); err != nil {
-					pw.CloseWithError(err)
+				if _, cerr := io.CopyN(part, content, ra.length); cerr != nil {
+					pw.CloseWithError(cerr)
 					return
 				}
 			}
@@ -878,7 +881,7 @@ func containsDotDot(v []byte) (rok bool) {
 	if !bytes.Contains(v, "..") {
 		return false
 	}
-	for ent := range bytes.FieldsFuncSeq(v, isSlashRune) {
+	for _, ent := range bytes.FieldsFunc(v, isSlashRune) {
 		if ent == ".." {
 			return true
 		}
@@ -1039,7 +1042,7 @@ func parseRange(s []byte, size int64) (rhttpRange []httpRange, rerr error) {
 	}
 	var ranges []httpRange
 	noOverlap := false
-	for ra := range bytes.SplitSeq(s[len(b):], ",") {
+	for _, ra := range bytes.Split(s[len(b):], ",") {
 		ra = textproto.TrimString(ra)
 		if ra == "" {
 			continue

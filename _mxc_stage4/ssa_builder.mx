@@ -6676,13 +6676,20 @@ func (fb *ssaFuncBuilder) buildCompositeLitInto(dst SSAValue, e *syntax.Composit
 			return
 		}
 	}
-	// Not an aggregate. Calling buildExpr(e) here re-entered buildCompositeLit
-	// with the SAME node, and because the literal still carries its type that
-	// path allocated and called straight back into this function - infinite
-	// recursion, which stack-overflowed while compiling net/http (gdb:
-	// resolveTypeAST <- resolveType <- buildCompositeLit <- buildExpr <-
-	// buildCompositeLitInto, repeating). Fail loud with the type and position
-	// instead of crashing.
+	// A non-aggregate target with NO elements is the port's spelling of Go's
+	// new(T) for a scalar Named type:
+	//   http2settingsTimerMsg = &http2serverMessage{}   // Go: new(serverMessage)
+	// dst is already an allocation of exactly typ and the allocator zeroes it,
+	// so there is nothing to store: the address is the whole result. This is
+	// also the true root of the net/http segfault - the old fallback called
+	// buildExpr(e) on this same node, and because the literal still carried its
+	// type that path allocated and came straight back here (gdb: resolveTypeAST
+	// <- resolveType <- buildCompositeLit <- buildExpr <- buildCompositeLitInto,
+	// repeating), overflowing the stack. Elements cannot be stored into a scalar
+	// at all, so only that case is an error.
+	if len(e.ElemList) == 0 {
+		return
+	}
 	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 	push(cctx.compileErrors, fb.errPos() | "composite literal of non-aggregate type " | typ.String())
 }
