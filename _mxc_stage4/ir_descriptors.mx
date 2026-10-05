@@ -107,11 +107,37 @@ func (e *irEmitter) typeDescNameInner(t Type) (s string) {
 		if named.Obj == nil {
 			return "named:unknown"
 		}
+		// An INSTANTIATED generic type must carry its type arguments in the
+		// name: CurveImpl[P256Point] and CurveImpl[P384Point] are different
+		// types with different method bodies (the object shows
+		// (*CurveImpl).TagOf__main.P256Point and ...__main.P384Point), and
+		// dropping the arguments gave them ONE descriptor symbol and ONE
+		// descriptor name. That is two bugs at once: linkonce_odr descriptors
+		// for the two layouts collide, and interface dispatch cannot tell the
+		// instantiations apart, so an arm for one answers for the other.
+		// Verified before the change: the object contained a single
+		// "named:main.CurveImpl" and a single "struct:{Name:basic:bytes}"
+		// for both. This is the root of the generic-instantiation family
+		// (imported generic types carrying no methods, the i64-vs-i8 narrow
+		// field store, and the map[T]H[T] literal), as well as of interface
+		// dispatch returning a silent zero for a boxed instantiation.
+		nm := "named:"
 		if named.Obj.Pkg == nil {
-			return "named:" | named.Obj.Name
+			nm = nm | named.Obj.Name
+		} else {
+			nm = nm | normalizePkgPath(named.Obj.Pkg.Path) | "." | named.Obj.Name
 		}
-		pkgPath := normalizePkgPath(named.Obj.Pkg.Path)
-		return "named:" | pkgPath | "." | named.Obj.Name
+		if len(named.TArgs) > 0 {
+			nm = nm | "["
+			for i, ta := range named.TArgs {
+				if i > 0 {
+					nm = nm | ","
+				}
+				nm = nm | e.typeDescName(ta)
+			}
+			nm = nm | "]"
+		}
+		return nm
 	}
 	if p, ok := t.(*Pointer); ok {
 		if p == nil {
@@ -702,6 +728,49 @@ func basicFromTail(bn string) (t Type) {
 	return Typ[Invalid]
 }
 
+// instantiateTail attaches type arguments to a generic declaration's Named, so
+// typeFromTail returns the instantiated type that typeDescName named. Without
+// it the round trip dropped the arguments, the field re-derived as
+// basic:invalid, and the struct descriptor was emitted under a DIFFERENT name
+// than the one referenced ("use of undefined value
+// @reflect/types.type:struct:{b:named:main.Box[basic:int32]}").
+func (e *irEmitter) instantiateTail(t Type, targs []Type) (out Type) {
+	if len(targs) == 0 || t == nil {
+		return t
+	}
+	gn, ok := t.(*Named)
+	if !ok || gn == nil {
+		return t
+	}
+	return &Named{Obj: gn.Obj, Under: gn.Under, Methods: gn.Methods, TParams: gn.TParams, TArgs: targs}
+}
+
+// tailStripTArgs splits "pkg.Name[a,b]" into "pkg.Name" and the argument tails
+// at bracket depth 0, so the dot that separates the package path is never taken
+// from inside an argument.
+func tailStripTArgs(rest string) (base string, targs []string) {
+	if len(rest) == 0 || rest[len(rest)-1] != ']' {
+		return rest, nil
+	}
+	depth := int32(0)
+	open := int32(-1)
+	for i := int32(0); i < int32(len(rest)); i++ {
+		switch rest[i] {
+		case '[':
+			if depth == 0 {
+				open = i
+			}
+			depth++
+		case ']':
+			depth--
+		}
+	}
+	if open < 0 || depth != 0 {
+		return rest, nil
+	}
+	return rest[:open], tailSplitTop(rest[open+1 : len(rest)-1])
+}
+
 var fromTailDepth int32
 
 // typeFromTail reconstructs a Type from its descriptor name tail.
@@ -893,6 +962,12 @@ func (e *irEmitter) typeFromTailInner(tail string) (t Type) {
 	}
 	if mxutil.HasPrefix(tail, "named:") {
 		rest := tail[len("named:"):]
+		var targs []Type
+		rest, argTails := tailStripTArgs(rest)
+		for _, a := range argTails {
+			targs = mxutil.Ensure(targs, 1)
+			push(targs, e.typeFromTail(a))
+		}
 		pkgPath := ""
 		name := rest
 		dot := -1
@@ -915,7 +990,7 @@ func (e *irEmitter) typeFromTailInner(tail string) (t Type) {
 			if pkgPath == "" || normalizePkgPath(e.pkg.Pkg.Path) == pkgPath {
 				if obj := lookupScopeParent(e.pkg.Pkg.Scope, name); obj != nil {
 					if tn, ok := obj.(*TypeName); ok && tn.Typ != nil {
-						return tn.Typ
+						return e.instantiateTail(tn.Typ, targs)
 					}
 				}
 			}
@@ -926,7 +1001,7 @@ func (e *irEmitter) typeFromTailInner(tail string) (t Type) {
 					if pkgPath == "" || normalizePkgPath(p.Path) == pkgPath {
 						if obj := lookupScopeParent(p.Scope, name); obj != nil {
 							if tn, ok := obj.(*TypeName); ok && tn.Typ != nil {
-								return tn.Typ
+								return e.instantiateTail(tn.Typ, targs)
 							}
 						}
 					}
@@ -936,7 +1011,7 @@ func (e *irEmitter) typeFromTailInner(tail string) (t Type) {
 		if pkgPath == "" && Universe != nil {
 			if obj := lookupScopeParent(Universe, name); obj != nil {
 				if tn, ok := obj.(*TypeName); ok && tn.Typ != nil {
-					return tn.Typ
+					return e.instantiateTail(tn.Typ, targs)
 				}
 			}
 		}
