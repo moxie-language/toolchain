@@ -1989,13 +1989,22 @@ func (fb *ssaFuncBuilder) foldConstConvert(val SSAValue, target Type) (s SSAValu
 	if !isConst || sc == nil || sc.val == nil || target == nil {
 		return nil, false
 	}
+	// ConvertConstLocal returns the value UNCHANGED for a non-basic target
+	// (`[]byte(x)`, `*T(x)`, a named struct). Folding there labelled the original
+	// value with the new type - asn1_oid_der, crc32_hw_kernels,
+	// generic_pkg_type, multi_value_var and asn1_tag_crosspkg compiled and then
+	// aborted at run time. Only a basic target is a real constant conversion.
+	if _, isBasic := SafeUnderlying(target).(*Basic); !isBasic {
+		return nil, false
+	}
 	folded := ConvertConstLocal(sc.val, target)
 	if folded == nil {
 		return nil, false
 	}
-	out := &SSAConst{typ: target, val: folded}
-	out.name = fb.nextName()
-	return out, true
+	// SSAConst is just {typ, val}: the emitter turns a constant into a literal on
+	// demand (see the emitter's operand path), so there is no name to set and it
+	// must NOT be emitted as an instruction.
+	return &SSAConst{typ: target, val: folded}, true
 }
 
 func (fb *ssaFuncBuilder) coerceToInterface(val SSAValue, targetType Type) (s SSAValue) {
