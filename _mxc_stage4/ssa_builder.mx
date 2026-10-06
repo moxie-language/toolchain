@@ -7584,7 +7584,15 @@ func (fb *ssaFuncBuilder) resolveBuiltinMethod(t Type, typeName string, sel *syn
 	}
 	target := recv
 	if _, isP := SafeUnderlying(recv.SSAType()).(*Pointer); !isP {
-		alloc := fb.emitAlloc(recv.SSAType(), 0)
+		// Allocate the RESOLVED type, not the operand's. The method was chosen
+		// on the default type (UntypedToTyped maps an untyped int to int64) and
+		// the runtime body reads at that width, while an untyped constant
+		// operand is materialised at the width it was folded to - i32 for
+		// `(42)`. Allocating the operand's width made `(*int64).String` read 8
+		// bytes out of a 4-byte alloca and report 42<<32|42; `(1<<26).String()`
+		// reported 67108864<<32|67108864. emitStore widens the operand to the
+		// alloca's type, so the constant arrives sign-correct.
+		alloc := fb.emitAlloc(t, 0)
 		fb.emitStore(alloc, recv)
 		target = alloc
 	}

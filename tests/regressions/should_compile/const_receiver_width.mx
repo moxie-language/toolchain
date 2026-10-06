@@ -1,0 +1,75 @@
+// Regression: a parenthesised CONSTANT used as a method receiver must be
+// materialised at the type the method was resolved on.
+//
+// resolveMethodCallWithRecv picks the builtin Stringer from the operand's
+// DEFAULT type (UntypedToTyped maps an untyped int to int64), but
+// resolveBuiltinMethod allocated its receiver temporary at the OPERAND's type -
+// i32 for a folded constant. The runtime body then read 8 bytes out of a 4-byte
+// alloca and reported the low half twice:
+//
+//	(42).String()       -> 180388626474          want 42
+//	(40+2).String()     -> 180388626474          want 42
+//	(1<<26).String()    -> 180455735296          want 67108864
+//	(1<<26-1).String()  -> 288230376218820607    want 67108863
+//
+// 180388626474 is exactly 42<<32|42, and the others follow the same shape, so
+// the bug is silent and its signature is unmistakable. A typed variable was
+// always correct (`a := 42; a.String()` printed 42), which is why nothing in the
+// suite caught it: every fixture stored the constant in a variable first.
+//
+// The temporary is now allocated at the RESOLVED type and emitStore widens the
+// operand into it.
+package main
+
+import "git.smesh.lol/moxie/pkg/mxutil"
+
+type small int32
+
+func (s *small) String() (out string) { return "small" }
+
+func main() {
+	// a typed variable is the reference the inline forms must match
+	a := 42
+	if a.String() != "42" {
+		panic("typed variable: " | a.String())
+	}
+
+	if (42).String() != "42" {
+		panic("(42).String() = " | (42).String())
+	}
+	if (40 + 2).String() != "42" {
+		panic("(40+2).String() = " | (40 + 2).String())
+	}
+	if (1 << 26).String() != "67108864" {
+		panic("(1<<26).String() = " | (1 << 26).String())
+	}
+	if (1<<26 - 1).String() != "67108863" {
+		panic("(1<<26-1).String() = " | (1<<26 - 1).String())
+	}
+	if (1<<26 + 1).String() != "67108865" {
+		panic("(1<<26+1).String() = " | (1<<26 + 1).String())
+	}
+	if (-7).String() != "-7" {
+		panic("(-7).String() = " | (-7).String())
+	}
+
+	// A constant receiver of a string and a bool take the same path.
+	if ("hi").String() != "hi" {
+		panic("(hi).String()")
+	}
+	if (true).String() != "true" {
+		panic("(true).String()")
+	}
+
+	// A named type with its own Stringer must still win over the builtin.
+	if (small(5)).String() != "small" {
+		panic("(small(5)).String()")
+	}
+
+	// And the value must still be usable as its default type.
+	n := (1 << 26)
+	if n != 67108864 {
+		panic("default type value")
+	}
+	mxutil.WriteStr(1, "ok\n")
+}
