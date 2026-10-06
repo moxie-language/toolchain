@@ -3995,8 +3995,11 @@ reported:
 `crc32_amd64.mx` declared those three as bodiless functions "defined in
 crc32_amd64.s"; the file does not exist anywhere in the tree and the `//:noescape`
 assembler marker has no pass behind it. `crc32_arm64.mx` did the same for
-`castagnoliUpdate`/`ieeeUpdate`. 443 bodiless declarations exist across `src/`;
-these are the ones a real link reached.
+`castagnoliUpdate`/`ieeeUpdate`. A `grep -E "^func [^{}]*$"` over `src/` reports 443 bodiless
+declarations, but that number overstates the risk: it counts files behind build
+tags that are never compiled (e.g. `internal/race/race.mx` is `//:build race`
+while its no-op twin `norace.mx` carries `//:build !race` and has every body).
+The ones that matter are the ones a real link reaches; crc32's were the first.
 
 A CRC is a function of its input, not of the instruction that computed it, so the
 same update is now written in Moxie: `crcRawUpdate`, the reflected register
