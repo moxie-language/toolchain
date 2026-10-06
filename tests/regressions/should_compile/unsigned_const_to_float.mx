@@ -1,0 +1,56 @@
+// Regression: an unsigned integer converts to float UNSIGNED.
+//
+// conversionOp already returns uitofp for a genuinely unsigned TYPE, but an
+// integer constant that does not fit the signed slot carries the Unsigned marker
+// on its VALUE while its type says nothing - an untyped integer constant is not
+// an unsigned type. The emitter therefore chose sitofp and sign-extended a bit
+// pattern that was never negative:
+//
+//	float64(1<<63)   -> sitofp i64 -9223372036854775808 -> -9.22337203685478e+18
+//	float64(1<<64-1) -> sitofp i64 -1                  -> -1.0
+//
+// `1<<64-1` is math.MaxUint64, which appears in math/const.mx, math/bits (three
+// sites), internal/runtime/math, internal/runtime/sys/intrinsics, saferio/io.mx,
+// debug/elf/file.mx and net/http/h2_bundle.mx - every one of them got -1 when it
+// reached a float.
+//
+// Negative signed values must stay negative, so the fix is keyed on the marker,
+// not on the width.
+package main
+
+func main() {
+	if float64(1<<62) != 4611686018427387904.0 {
+		panic("1<<62")
+	}
+	if float64(1<<63) != 9223372036854775808.0 {
+		panic("1<<63")
+	}
+	if float64(1<<63+1) != 9223372036854775808.0 {
+		panic("1<<63+1")
+	}
+	if float64(1<<64-1) != 18446744073709551616.0 {
+		panic("1<<64-1 (MaxUint64)")
+	}
+
+	// genuinely signed values keep their sign
+	if float64(-1) != -1.0 {
+		panic("-1")
+	}
+	if float64(-(1 << 62)) != -4611686018427387904.0 {
+		panic("-(1<<62)")
+	}
+
+	// a typed uint64 takes the same path
+	u := uint64(1) << 63
+	if float64(u) != 9223372036854775808.0 {
+		panic("typed uint64")
+	}
+
+	// and so does a typed uint32 above 2^31, where sitofp also disagreed
+	var w uint32 = 3000000000
+	if float64(w) != 3000000000.0 {
+		panic("typed uint32")
+	}
+
+	println("ok")
+}

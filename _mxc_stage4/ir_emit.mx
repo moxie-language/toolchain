@@ -2702,6 +2702,18 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 	}
 
 	op := e.conversionOp(c.X.SSAType(), c.SSAType())
+	// An integer constant that does not fit the signed slot carries the Unsigned
+	// marker on its VALUE, while its TYPE says nothing about it - an untyped
+	// integer constant is not an unsigned type. conversionOp therefore answered
+	// sitofp and the backend sign-extended a bit pattern that was never
+	// negative:
+	//   float64(1<<63)   -> sitofp i64 -9223372036854775808 -> -9.22337203685478e+18
+	//   float64(1<<64-1) -> sitofp i64 -1                  -> -1.0  (math.MaxUint64)
+	// conversionOp already returns uitofp for a genuinely unsigned TYPE, so the
+	// only gap is this marker.
+	if op == "sitofp" && constIntUnsigned(c.X) {
+		op = "uitofp"
+	}
 	srcBitsLLVM := e.intBits(srcType)
 	dstBitsLLVM := e.intBits(dstType)
 	if (op == "sext" || op == "zext") && srcBitsLLVM > 0 && dstBitsLLVM > 0 && srcBitsLLVM > dstBitsLLVM {
