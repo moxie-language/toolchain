@@ -5975,7 +5975,12 @@ func (fb *ssaFuncBuilder) tryGenericMethodCall(sel *syntax.SelectorExpr, recv SS
 	if cctx.genericPkgScopes != nil {
 		srcScope = cctx.genericPkgScopes[pkgPath]
 	}
+	savedImports := cctx.sigDeclPkgImports
+	if fb.fn != nil && fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil && fb.fn.Pkg.Pkg.Path == pkgPath {
+		cctx.sigDeclPkgImports = fb.fn.Pkg.Pkg.Imports
+	}
 	sig := resolveMethodSigWithSubst(fd, typeSubst, srcScope)
+	cctx.sigDeclPkgImports = savedImports
 	if sig == nil || sig.Recv == nil {
 		return nil, false
 	}
@@ -8901,6 +8906,13 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope
 		return base
 	case *syntax.SelectorExpr:
 		if pkgName, ok := ev.X.(*syntax.Name); ok {
+			for _, im := range cctx.sigDeclPkgImports {
+				if im != nil && im.Name == pkgName.Value && im.Scope != nil {
+					if tn, ok3 := im.Scope.Lookup(ev.Sel.Value).(*TypeName); ok3 {
+						return tn.Typ
+					}
+				}
+			}
 			if imp := cctx.universe.LookupByName(pkgName.Value); imp != nil {
 				typeObj := imp.Scope.Lookup(ev.Sel.Value)
 				if typeObj != nil {
@@ -9346,7 +9358,12 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, plainName str
 			srcScope = sc
 		}
 	}
+	savedImports2 := cctx.sigDeclPkgImports
+	if fb.fn != nil && fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil && fb.fn.Pkg.Pkg.Path == srcPkgPath {
+		cctx.sigDeclPkgImports = fb.fn.Pkg.Pkg.Imports
+	}
 	sig := resolveSignatureWithSubst(fd.Type, typeSubst, srcScope)
+	cctx.sigDeclPkgImports = savedImports2
 	if sig == nil {
 		return nil, false
 	}
