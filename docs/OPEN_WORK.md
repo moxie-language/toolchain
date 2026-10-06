@@ -11,7 +11,7 @@ Four repositories, all on branch `dev`, all level with their remotes
 
 | repo | what it is | last known state |
 |------|------------|------------------|
-| `moxie` | the compiler, runtime and stdlib | `9d9eb412`; phases 0-5: 181 PASS / 0 FAIL, fixpoint PASS; phase 6: 63 PASS / 0 FAIL; round-49 generic-aggregate + dead-aggregate-load fixes (see the last section) |
+| `moxie` | the compiler, runtime and stdlib | `6250a720`; `tests/run.sh --full`: 193 PASS / 0 FAIL / 0 SKIP, fixpoint PASS; round-50 flate + crc32 fixes, net/http compiles and reaches the link (see the last sections) |
 | `nostr` | shared nostr primitives and codecs | `98c7069` (musiquay vocabulary moved out) |
 | `morly` | the relay (`pkg/relay`, `pkg/store`, ...) | `b7dba37` |
 | `musiquay` | the web app, docs corpus, protocol vocabulary | `8dd6f59` (vocabulary at `pkg/protocol`) |
@@ -3888,3 +3888,110 @@ Phase 5's `wasm:push_index_nested_slice` failed once with
 codegen; it passed on the next run. Note that a single FAIL in phase 5 ends
 `run.sh` early (`set -e`), so phase 6 does not run at all in that case - that is
 why phase 6 needs its own invocation to be seen.
+
+# ============ UPDATE: round 50 — compress/flate's backend crash is fixed ============
+
+## The two LLVM backend crashes in `compress/flate`
+
+Round 49 removed the dead aggregate load from `flate.(*Writer).Close` and the
+crash moved to `@flate.NewWriter` (`SelectionDAG::ReplaceAllUsesWith`
+segfault). Both remaining causes were in the same family — a huge aggregate
+operation that never needed to exist — and both are fixed:
+
+### A field select must address its base, not load it and throw the load away
+
+`buildSelectorAddr` built the operand's VALUE with `x := fb.buildExpr(e.X)` and
+then replaced it with the variable's alloca when `e.X` was an addressable local
+or global. The load stayed in the instruction list as dead IR, and for a large
+struct that dead IR is a full-struct copy. `flate.NewWriter`
+(`var dw Writer`, then `dw.d.init(w, level)`) emitted
+
+    %t5 = call ptr @runtime.alloc(...)
+    store { ...[131072 x i32], i1, i1 ... } zeroinitializer, ptr %t5
+    %t6 = load { ...[131072 x i32], i1, i1 ... }, ptr %t5     ; dead, 640KB
+
+The addressable case is now resolved BEFORE anything is emitted for the operand.
+
+**A regression this introduced, and how it was caught.** The first version used
+the alloca directly for every variable. But the alloca holds the variable's
+VALUE: for a struct-valued variable the alloca IS the address, while for a
+pointer-valued variable (`o := &outer{}`) the alloca holds the pointer and the
+select has to LOAD it first. Addressing the alloca directly read `o.in.n` out of
+the stack slot holding `o` and printed `2270074` instead of `41`. It was caught
+by a probe that prints every field rather than by a single pass/fail check, and
+it is pinned by
+`tests/regressions/should_compile/field_select_base_and_zero_store.mx`, which
+FAILS on the intermediate compiler (the fixture has teeth) and passes now.
+
+### A zero store of an aggregate is a memset
+
+`emitZeroInit` exists (ir_emit.mx) precisely because one
+`store {big} zeroinitializer` is expanded by the backend into one store per
+8 bytes, while `llvm.memset` lowers to a loop. It was only ever used for allocas;
+an explicit zero STORE went out as the aggregate form. On flate.Writer's 640KB
+that is ~80k stores, and clang's instruction selector aborted on one of them.
+`emitStore` now routes a zero store of an aggregate through `emitZeroInit`.
+
+Result: `MOXIEROOT=$PWD /tmp/mxc-r50c build -a -o /tmp/flate.bin
+./src/compress/flate` produces NO clang error at all. It ends with
+`ld.lld-22: error: undefined symbol: main.main`, which is the expected link
+failure for a library and is not this item's subject.
+
+### Left standing
+
+`flate.Writer` still carries `[131072 x i32]` and `[32768 x i32]` fields. Arrays
+are supposed to be gone from this tree ("an array type is leftover Go
+slice-bypass code"), so those fields are the next thing to rewrite as slices —
+512KB and 128KB of struct that no zeroing or copying wants to touch at all. The
+crash is fixed; the layout is still wrong by the project's own rule.
+
+## `hash/crc32`'s hardware kernels did not exist
+
+With flate compiling, `src/net/http` reached the LINK for the first time and
+reported:
+
+    ld.lld-22: error: undefined symbol: hash/crc32.castagnoliSSE42
+    ld.lld-22: error: undefined symbol: hash/crc32.castagnoliSSE42Triple
+    ld.lld-22: error: undefined symbol: hash/crc32.ieeeCLMUL
+    ld.lld-22: error: undefined symbol: main.main
+
+`crc32_amd64.mx` declared those three as bodiless functions "defined in
+crc32_amd64.s"; the file does not exist anywhere in the tree and the `//:noescape`
+assembler marker has no pass behind it. `crc32_arm64.mx` did the same for
+`castagnoliUpdate`/`ieeeUpdate`. 443 bodiless declarations exist across `src/`;
+these are the ones a real link reached.
+
+A CRC is a function of its input, not of the instruction that computed it, so the
+same update is now written in Moxie: `crcRawUpdate`, the reflected register
+update with NO pre- or post-inversion — which is the form the hardware kernels
+have and the form the callers expect, since both invert themselves
+(`^ieeeCLMUL(^crc, ...)`, `crc = ^crc; ...; return ^crc`).
+
+Verified three ways, in `tests/regressions/should_compile/crc32_hw_kernels.mx`:
+
+- the standard check values: IEEE("123456789") == 0xCBF43926 and
+  Castagnoli("123456789") == 0xE3069283;
+- the arch path agrees with the generic table path for 9, 63, 64, 503, 504, 505,
+  4031, 4032, 4033 and 10000 bytes. `Update` selects the arch kernels only for the
+  instance's OWN tables, so a table built by a second instance falls through to
+  `simpleUpdate` — that is how both paths for the same polynomial are compared;
+- the 10000-byte values (ieee 1494190728, castagnoli 369340837) match an
+  independent non-Moxie oracle, and the IEEE one matches `zlib.crc32` exactly.
+
+## `src/net/http` — where it stands after round 50
+
+Every codegen blocker is gone: the build compiles all 155 modules with **zero
+clang errors**. The link then needed the crc32 symbols above, now provided.
+
+The remaining link errors cannot be re-tested in this environment: the compiler's
+module resolver needs the `golang.org` checkout under `$MOXIEPATH`, and it is not
+on disk any more. The build logs `auto-fetch golang.org` and then
+`fatal: repository 'https://golang.org/' not found`, which is a network fetch for
+a path that is not a git repository. The earlier runs in this round got through
+because the checkout was still present; nothing in the tree provides it now
+(`find` finds no `hpack.mx` and no `golang.org` directory anywhere).
+
+That is worth a look on its own: the checkout disappeared between two builds in
+the same session, and a fetched module root is not scratch — if the compiler
+registers it as scratch it will be deleted on the first successful build and the
+next build will always try to re-clone.
