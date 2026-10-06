@@ -1,0 +1,34 @@
+// Regression: every letter is a valid token character.
+//
+// mime.isTokenChar built its bitmap as ONE 128-bit untyped constant, exactly as
+// net/textproto's validHeaderFieldByte did. Moxie does not evaluate a constant
+// wider than 64 bits exactly and this one came back with BOTH halves zero, so
+// every letter was rejected and a well-formed media type failed:
+//
+//	ParseMediaType("text/plain; charset=utf-8") -> "mime: no media type"
+//
+// The bitmap is now two 64-bit halves (isTokenCharLo / isTokenCharHi). This is
+// the same constant-folding limitation documented in docs/OPEN_WORK.md.
+package main
+
+import "mime"
+
+func main() {
+	mt, params, err := mime.ParseMediaType("text/plain; charset=utf-8")
+	if err != nil {
+		panic("ParseMediaType: " | err.Error())
+	}
+	if mt != "text/plain" {
+		panic("mediatype: [" | mt | "]")
+	}
+	if params["charset"] != "utf-8" {
+		panic("charset: [" | params["charset"] | "]")
+	}
+
+	// A space is NOT a token character, so this must be rejected.
+	if _, _, err3 := mime.ParseMediaType("te xt/plain"); err3 == nil {
+		panic("space accepted in a token")
+	}
+
+	println("ok")
+}

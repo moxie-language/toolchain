@@ -35,20 +35,18 @@ func isTSpecial(c byte) (rok bool) {
 		(uint64(1)<<(c-64))&(mask>>64)) != 0
 }
 
-// isTokenChar reports whether c is in 'token' as defined by RFC
-// 1521 and RFC 2045.
-func isTokenChar(c byte) (rok bool) {
-	// token := 1*<any (US-ASCII) CHAR except SPACE, CTLs,
-	//             or tspecials>
-	//
-	// mask is a 128-bit bitmap with 1s for allowed bytes,
-	// so that the byte c can be tested with a shift and an and.
-	// If c >= 128, then 1<<c and 1<<(c-64) will both be zero,
-	// and this function will return false.
-	const mask = 0 |
-		(1<<(10)-1)<<'0' |
-		(1<<(26)-1)<<'a' |
-		(1<<(26)-1)<<'A' |
+// The bitmap is two 64-bit halves because Moxie does not evaluate a constant
+// wider than 64 bits exactly. As one 128-bit literal it came back with BOTH
+// halves zero, so every letter was rejected and ParseMediaType failed on a
+// well-formed media type:
+//
+//	ParseMediaType("text/plain; charset=utf-8") -> "mime: no media type"
+//
+// Same constant-folding limitation as net/textproto's header bitmap (see
+// docs/OPEN_WORK.md); the bitmap appears in both places and both are now split.
+// Bits 0..63 sit in Lo, bits 64..127 in Hi as bit (c-64).
+const (
+	isTokenCharLo = (1<<(10)-1)<<'0' |
 		1<<'!' |
 		1<<'#' |
 		1<<'$' |
@@ -58,14 +56,31 @@ func isTokenChar(c byte) (rok bool) {
 		1<<'*' |
 		1<<'+' |
 		1<<'-' |
-		1<<'.' |
-		1<<'^' |
-		1<<'_' |
-		1<<'`' |
-		1<<'|' |
-		1<<'~'
-	return ((uint64(1)<<c)&(mask&(1<<64-1)) |
-		(uint64(1)<<(c-64))&(mask>>64)) != 0
+		1<<'.'
+	isTokenCharHi = (1<<(26)-1)<<('a'-64) |
+		(1<<(26)-1)<<('A'-64) |
+		1<<('^'-64) |
+		1<<('_'-64) |
+		1<<('`'-64) |
+		1<<('|'-64) |
+		1<<('~'-64)
+)
+
+// isTokenChar reports whether c is in 'token' as defined by RFC
+// 1521 and RFC 2045.
+func isTokenChar(c byte) (rok bool) {
+	// token := 1*<any (US-ASCII) CHAR except SPACE, CTLs,
+	//             or tspecials>
+	//
+	// A bitmap with 1s for allowed bytes, tested with a shift and an and.
+	// If c >= 128 it is not a token character and is rejected.
+	if c < 64 {
+		return isTokenCharLo&(uint64(1)<<c) != 0
+	}
+	if c < 128 {
+		return isTokenCharHi&(uint64(1)<<(c-64)) != 0
+	}
+	return false
 }
 
 // isToken reports whether s is a 'token' as defined by RFC 1521
