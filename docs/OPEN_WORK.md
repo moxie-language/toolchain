@@ -4453,3 +4453,71 @@ that produced that run.
   process group at the tool-call boundary and it reads as an OOM or a crash.
 - **A guard that turns a failure into a pass is a bug.** phase 3 did exactly
   that for an unknown number of rounds.
+
+# ============ UPDATE: round 61+ — float `++` was a no-op, and trig was broken with it ============
+
+## `x++` on a float silently did nothing
+
+`buildAssign`'s `Rhs == nil` branch (which is `x++` / `x--`) built the literal 1 as
+a **ConstInt** and merely labelled it with the operand's type:
+
+    one := &SSAConst{typ: lv.SSAType(), val: &ConstInt{V:1}}
+
+so the right-hand domain never matched a float operand and the statement compiled
+to nothing. Measured:
+
+    y := 2.0; y++       -> y is still 2.0
+    f := 1.5; f++       -> f is still 1.5
+    i := int64(2); i++  -> 3        integers never affected
+    y += 1              -> 3        compound assignment never affected
+
+Fixed (round 61, `d13d84c5`): the 1 is a ConstFloat when the operand is a float.
+Fixture `float_incdec.mx` panics pre-fix with "y++ on float64".
+
+## The trig functions were wrong because of it
+
+`math.Sin`/`Cos`/`Sincos` reduce the argument with `j++; y++` where y is a
+float64. With `y++` a no-op the reduced argument was wrong and the functions
+returned a valid sin/cos PAIR for the wrong angle:
+
+    Sin(1.0) = 0.977061263899476    want 0.8414709848078965
+    Cos(1.0) = -0.212958415159296   want 0.5403023058681398
+
+Correct for x <= 0.785 (octant 0, no reduction), wrong above it - which is what
+identified the reduction rather than the polynomials. After the fix Sincos, Sin,
+Cos, Tan, Asin and Atan2 are all correct for arguments that need quadrant
+reduction, and `math.J0` moved from -0.404278302239057 to -0.0723182119715167
+(true value -0.04838377646819797).
+
+## STILL OPEN: `math.J0`/`Y0` are slightly wrong for x >= 2
+
+Now that trig is right, the remaining error is small and systematic - the right
+shape and sign, off in the third decimal, at every x in the branch:
+
+    J0(2.0)  = 0.196738621067033   want 0.22389077914123567
+    J0(2.5)  = -0.0723182119715167 want -0.04838377646819797
+    J0(10.0) = -0.246760893383643  want -0.2459357644513483
+
+`Sqrt`, `SqrtPi` and `1/SqrtPi` are correct, so the fault is in `pzero`/`qzero`
+(the only tables this branch uses) or in the `ss`/`cc` adjustment.
+
+**Specific suspect, NOT yet tested:** `qzero` ends with
+
+    return (-0.125 + r/s) / x          // src/math/j0.mx
+
+while the comment directly above `qzero` states `qzero(x) = s*(-1.25 + (R/S))`
+with `s = 1/x`, which would be `s * (-1.25 + r/s)` and no division by x. Switching
+between them changes qzero by orders of magnitude, so one of the two is wrong and
+the difference is far too large for the small error observed - meaning the `/x`
+form is the one consistent with the measured closeness, and the real error is
+elsewhere (a coefficient, or the `zn`-based ss/cc adjustment above it).
+
+Do NOT guess a constant here. The useful next step is to evaluate `pzero(2.5)`
+and `qzero(2.5)` against a reference (mpmath or a table) rather than reasoning
+about the asymptotic comments, which contradict each other in Go's own source.
+Two reference values for that check: J0(2.5) = -0.04838377646819797 and
+pzero(2.5) ~ 1.0000..., with qzero the term that carries the error.
+
+`math.Y0(2.5)` currently returns exactly `math.J1(2.5)`'s value
+(+0.499417646028127 want +0.4980703596152319) - a coincidence worth checking
+once pzero/qzero are verified, since J1 uses `pone`/`qone` and a different table.
