@@ -4556,3 +4556,50 @@ the symptom was a wrong number rather than a rejection. Until the folder is
 exact, sweep for `<<` with a count >= 64: those three are only the ones a test
 happened to reach.
 
+
+# ============ UPDATE: round 63 — the folder now keeps >64-bit integer constants exactly ============
+
+`ConstInt` held only `V int64` plus an `Unsigned` marker, so an untyped integer
+constant needing more than 64 bits lost its high bits. Four separate defects were
+fixed one at a time in source before this (net/textproto's and mime's 128-bit
+bitmaps, math's `Two129` and `Two302` guards); this lands the folder half of the
+root cause.
+
+`ConstInt` gains `Exact *big.Int`, mirroring `ConstFloat.Exact` - which is how the
+untyped-FLOAT case (time.Date/time.Parse) had already been fixed. `intFoldBig`
+folds exactly when either side carries Exact or the operation can mint one (a
+shift), `intConstBig` keeps `V` as the low 64 bits so every existing reader keeps
+working, and `cvInt`, `cvFloat` and the comparisons prefer Exact.
+
+Verified by diffing the same probe against the same compiler without the patch:
+exactly two lines differ, both fixes, nothing regressed.
+
+    ((1<<26-1)<<'A') >> 64    0 -> 134217726
+    (1<<70) >> 64             0 -> 64
+
+## Still open: the constant->FLOAT conversion does not use Exact
+
+These were already 0 and are still 0:
+
+    float64(1<<70)      float64(1<<129)      1.0/(1<<70)     2.5 > 1<<129 -> true
+
+A wide integer constant reaches float through a runtime `uitofp` of its low 64
+bits rather than through `ConvertConstLocal`, so `cvFloat`'s Exact branch is never
+consulted. The next step is in `emitConvert` (`_mxc_stage4/ir_emit.mx`): when the
+operand is an integer constant and the target is a float, compute the float64 from
+Exact and emit the literal instead of the instruction. `constIntUnsigned` in that
+function is already the hook for the neighbouring case.
+
+## Two inline-vs-named-constant discrepancies, both pre-existing
+
+Measured on the UNPATCHED compiler, so not regressions, and both are the same
+"inline expression takes a different path" shape as the constant-receiver bug
+fixed in round 56:
+
+    const X = 0x1p129;  float64(X)     -> 6.80564733841877e+038   correct
+                        float64(0x1p129) -> 1.36112946768375e+039  TWICE the value
+    const M = 1<<64-1;  ...            -> 18446744073709551615    correct
+                        (1<<64-1).String() -> -1                  WRONG
+
+Worth chasing together with the conversion layer above, since both smell like the
+same emitter path.

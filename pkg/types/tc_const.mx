@@ -528,6 +528,108 @@ func decTextInt32(s string) (n int32) {
 	return
 }
 
+// intNeedsBig reports whether an integer constant is carried exactly because
+// its value does not fit 64 bits.
+func intNeedsBig(v ConstVal) (ok bool) {
+	if ci, isInt := v.(*ConstInt); isInt {
+		return ci.Exact != nil
+	}
+	return false
+}
+
+// intExact returns an integer constant's value, widening to big.Int when the
+// compact form cannot hold it.
+func intExact(v ConstVal) (x *big.Int) {
+	ci, isInt := v.(*ConstInt)
+	if !isInt || ci == nil {
+		return big.NewInt(0)
+	}
+	if ci.Exact != nil {
+		return ci.Exact
+	}
+	x = big.NewInt(0)
+	if ci.Unsigned && ci.V < 0 {
+		x.SetUint64(uint64(ci.V))
+		return x
+	}
+	x.SetInt64(ci.V)
+	return x
+}
+
+// intConstBig rebuilds a folded integer constant from an exact value, keeping
+// the exact form only while more than 64 bits are needed.
+func intConstBig(x *big.Int) (c ConstVal) {
+	if x == nil {
+		return &ConstInt{V:0}
+	}
+	if x.IsInt64() {
+		return &ConstInt{V:x.Int64()}
+	}
+	lo := x.Uint64()
+	if x.Sign() >= 0 && x.IsUint64() {
+		return &ConstInt{V:int64(lo), Unsigned:true}
+	}
+	// Wider than uint64. V still carries the low bits, as it always did, and
+	// Exact is what an exact reader must use.
+	return &ConstInt{V:int64(lo), Unsigned:true, Exact:x}
+}
+
+// intFoldBig folds an integer binary operation exactly. It returns nil for an
+// operation this path does not own. Shift counts beyond 512 bits are refused
+// rather than materialised: go/types caps untyped constant precision there too.
+func intFoldBig(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
+	xi := intExact(x)
+	yi := intExact(y)
+	r := big.NewInt(0)
+	switch op {
+	case token.Add:
+		r.Add(xi, yi)
+	case token.Sub:
+		r.Sub(xi, yi)
+	case token.Mul:
+		r.Mul(xi, yi)
+	case token.Div:
+		if yi.Sign() == 0 {
+			return &ConstInt{V:0}
+		}
+		r.Quo(xi, yi)
+	case token.Rem:
+		if yi.Sign() == 0 {
+			return &ConstInt{V:0}
+		}
+		r.Rem(xi, yi)
+	case token.And:
+		r.And(xi, yi)
+	case token.Or:
+		r.Or(xi, yi)
+	case token.Xor:
+		r.Xor(xi, yi)
+	case token.AndNot:
+		r.AndNot(xi, yi)
+	case token.Shl:
+		sh := yi.Int64()
+		if sh < 0 || sh > 512 {
+			return nil
+		}
+		r.Lsh(xi, uint32(sh))
+	case token.Shr:
+		sh := yi.Int64()
+		if sh < 0 {
+			return nil
+		}
+		if sh > 512 {
+			if xi.Sign() < 0 {
+				return &ConstInt{V: -1}
+			}
+			return &ConstInt{V: 0}
+		}
+		r.Rsh(xi, uint32(sh))
+	default:
+		return nil
+	}
+	return intConstBig(r)
+}
+
 func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 	// Untyped constant arithmetic mixes kinds: an integer operand against a
 	// float operand is a float operation. Every branch below tests the left
@@ -542,6 +644,20 @@ func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 	} else if _, yFloat := y.(*ConstFloat); yFloat {
 		if _, xInt := x.(*ConstInt); xInt {
 			x = floatConstOf(x)
+		}
+	}
+	// Untyped integer constants are arbitrary-precision in Go. When either side
+	// already carries an exact value, or the operation can mint one (a shift),
+	// fold with big.Int and convert once at the end. Without this `1 << 129`
+	// loses its high bits, which silently turned the guard `x > 1<<129` true for
+	// every positive x in math's Bessel functions.
+	if _, xInt := x.(*ConstInt); xInt {
+		if _, yInt := y.(*ConstInt); yInt {
+			if intNeedsBig(x) || intNeedsBig(y) || op == token.Shl {
+				if r := intFoldBig(op, x, y); r != nil {
+					return r
+				}
+			}
 		}
 	}
 	switch op {
@@ -707,6 +823,9 @@ func EvalBinaryLocal(op token.Operator, x ConstVal, y ConstVal) (c ConstVal) {
 func constEqual(x ConstVal, y ConstVal) (eq bool) {
 	if xi, matched := x.(*ConstInt); matched {
 		if _, yFloat := y.(*ConstFloat); !yFloat {
+			if intNeedsBig(x) || intNeedsBig(y) {
+				return intExact(x).Cmp(intExact(y)) == 0
+			}
 			if unsignedFold(x, y) {
 				return uint64(xi.V) == cvUint(y)
 			}
@@ -730,6 +849,9 @@ func constEqual(x ConstVal, y ConstVal) (eq bool) {
 func constLess(x ConstVal, y ConstVal) (lt bool) {
 	if xi, matched := x.(*ConstInt); matched {
 		if _, yFloat := y.(*ConstFloat); !yFloat {
+			if intNeedsBig(x) || intNeedsBig(y) {
+				return intExact(x).Cmp(intExact(y)) < 0
+			}
 			if unsignedFold(x, y) {
 				return uint64(xi.V) < cvUint(y)
 			}
@@ -886,6 +1008,11 @@ func ratTruncInt64(r *big.Rat) (n int64) {
 
 func cvInt(v ConstVal) (n int64) {
 	if ci, ok := v.(*ConstInt); ok {
+		if ci.Exact != nil {
+			// Wider than int64: the low 64 bits are what a narrowing conversion
+			// produces, and the range check is what rejects it.
+			return ci.Exact.Int64()
+		}
 		return ci.V
 	}
 	if cf, ok := v.(*ConstFloat); ok {
@@ -902,6 +1029,12 @@ func cvFloat(v ConstVal) (f float64) {
 		// An unsigned-marked constant's exact value is >= 2^63 and V holds its
 		// low bits, so the signed conversion flips it: `10.0 >= 1<<63` folded
 		// to `10.0 >= -9223372036854775808.0` and was true.
+		if ci.Exact != nil {
+			bf := big.NewFloat(0)
+			bf.SetInt(ci.Exact)
+			exactF, _ := bf.Float64()
+			return exactF
+		}
 		if ci.Unsigned {
 			return float64(uint64(ci.V))
 		}
