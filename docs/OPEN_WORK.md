@@ -4577,18 +4577,33 @@ exactly two lines differ, both fixes, nothing regressed.
     ((1<<26-1)<<'A') >> 64    0 -> 134217726
     (1<<70) >> 64             0 -> 64
 
-## Still open: the constant->FLOAT conversion does not use Exact
+## FIXED in round 64 (`b390dbf8`): the constant->float paths
 
-These were already 0 and are still 0:
+Two more layers, both closing paths that still used a wide constant's low bits:
 
-    float64(1<<70)      float64(1<<129)      1.0/(1<<70)     2.5 > 1<<129 -> true
+1. `T(constant)` was emitted as an `SSAConvert` even when it was a constant
+   expression. `foldConstConvert` (`ssa_builder.mx`) now folds it at build time
+   through `ConvertConstLocal`, which consults Exact - what go/types does.
+2. `floatExact` read `ci.V` for an integer constant, ignoring Exact, so every
+   mixed int/float operation used the low bits.
 
-A wide integer constant reaches float through a runtime `uitofp` of its low 64
-bits rather than through `ConvertConstLocal`, so `cvFloat`'s Exact branch is never
-consulted. The next step is in `emitConvert` (`_mxc_stage4/ir_emit.mx`): when the
-operand is an integer constant and the target is a float, compute the float64 from
-Exact and emit the literal instead of the instruction. `constIntUnsigned` in that
-function is already the hook for the neighbouring case.
+    float64(1<<129)       0 -> 6.80564733841877e+038
+    float64(1<<70)        0 -> 1.18059162071741e+021
+    1.0/(1<<70)           0 -> 8.470329472543003e-22
+    ((1<<26-1)<<'A')>>64  0 -> 134217726
+    (1<<70)>>64           0 -> 64
+
+## Still open: RUNTIME materialisation of a wide constant
+
+    x := 2.5;  x > 1<<129   ->  true   (want false)
+
+The left side is a variable, so this is an `fcmp` against a MATERIALISED constant,
+and materialising it goes through `intToFloat` (`ir_binop.mx`), which emits
+`sitofp`/`uitofp` of the low bits. `emitConvert` already folds the constant case
+(round 64); the binop path needs the same treatment - when an operand is an
+integer constant carrying Exact and the other side is a float, fold it to a float
+constant before the binop is created, rather than letting the backend widen the
+low bits.
 
 ## Two inline-vs-named-constant discrepancies, both pre-existing
 
