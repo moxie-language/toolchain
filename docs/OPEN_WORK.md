@@ -11,7 +11,7 @@ Four repositories, all on branch `dev`, all level with their remotes
 
 | repo | what it is | last known state |
 |------|------------|------------------|
-| `moxie` | the compiler, runtime and stdlib | `74c1fbeb` push-nil fix; suite 155/155, fixpoint converged |
+| `moxie` | the compiler, runtime and stdlib | `9d9eb412`; phases 0-5: 181 PASS / 0 FAIL, fixpoint PASS; phase 6: 63 PASS / 0 FAIL; round-49 generic-aggregate + dead-aggregate-load fixes (see the last section) |
 | `nostr` | shared nostr primitives and codecs | `98c7069` (musiquay vocabulary moved out) |
 | `morly` | the relay (`pkg/relay`, `pkg/store`, ...) | `b7dba37` |
 | `musiquay` | the web app, docs corpus, protocol vocabulary | `8dd6f59` (vocabulary at `pkg/protocol`) |
@@ -3605,3 +3605,286 @@ whether the port sends a pointer where an interface is wanted (source fix) or th
 select-send path fails to box the value (compiler fix) by looking at
 `serveMsgCh`'s element type, and check `%t183`'s definition in the captured IR.
 The IR capture recipe (find + copy while clang runs) is in the section above.
+
+# ============ UPDATE: value CONTEXT (sends box, bare returns align) ============
+
+Round 48. Tree: three fixes UNCOMMITTED while the gate runs. Compilers built from
+the tree: `/tmp/mxc-send4` (send coercion only) and `/tmp/mxc-bare1` (send
+coercion + bare-return alignment).
+
+## FIXED (uncommitted): a SEND must give its value the channel ELEMENT type
+
+`_mxc_stage4/ssa_builder.mx`: new `coerceSendValue(val, elem)` plus its use at
+BOTH send sites - the plain `case *syntax.SendStmt` in `buildStmt` and the
+`case *syntax.SendStmt` in `buildSelect`'s `SSASelectState` loop.
+
+Class: a send value's context is the channel's ELEMENT type, exactly as a
+parameter type is the context of an argument, and stage4 was storing the raw
+value. Two shapes followed from its absence:
+
+- `serveMsgCh <- msg` with `serveMsgCh` a `chan http2serveMsg` and `msg` a
+  `*http2startPushRequest`: the pointer was stored into the interface's 2-word
+  slot -
+    `'%t193' defined with type 'ptr' but expected '{ i64, ptr }'`
+    `store { i64, ptr } %t193, ptr %selsv289`
+  which blocked `(*http2responseWriter).Push`.
+- `errc <- nil` into a `chan error`: an untyped nil has no SSA type at all
+  (`llvmType(nil)` is `"void"`), so the send emitted
+  `store void null, ptr %chansv29` ("void type only allowed for function
+  results") from `net/http`'s `readPreface__anon1`. `coerceSendValue` turns it
+  into the nil OF THE ELEMENT TYPE.
+
+LEGACY PARITY (wood law): x/tools' builder already does this. Its vendored
+`builder.go` emits `emitConv(fn, b.expr(fn, comm.Value), chtyp.Elem())` in both
+places (the select-comm clause ~1790 and `case *ast.SendStmt` ~2850). This is
+stage4 catching up to legacy, not a new rule.
+
+## FIXED (uncommitted): a bare `return` fills result POSITIONS, blanks included
+
+`_mxc_stage4/ssa_builder.mx`, `buildReturn`'s bare-return arm (`s.Results ==
+nil`). It pushed ONLY `fb.namedResults`, and `NamedResults` holds only the NAMED
+results - one entry for `(_ T, err error)`. The one-element `SSAReturn` then made
+`emitReturn` take its single-value shortcut, and the exit serialiser decomposed
+that single value across every signature slot:
+
+- `(_ *persistConn, err error)` with a first result that is an interface -
+    `'%cext769' defined with type 'i64' but expected '{ i64, ptr }'`
+    `store { i64, ptr } %cext769, ptr %cet770`
+  (this is the round-47 net/http blocker, and the same class as the getConn
+  `%cext100` error fixed for the IMPLICIT return in `6a356673`),
+- `(_ *E, err error)` with a concrete first result, which instead reports at the
+  type level - `cannot use value of type interface{...} as *main.E in return
+  statement`, because the blank slot was holding the error.
+
+The arm is now positional: `vals[i]` belongs to `Signature.Results.At(i)`, a
+blank result occupies its position as the zero of its type, and the named
+results fill the remaining positions in order. Same alignment the implicit
+return at the end of a body already uses.
+
+LEGACY PARITY (wood law): x/tools does this already -
+`Function.results` (`func.go: addResultVar`) has one entry per result SLOT,
+blanks included (`for _, n := range field.Names` sees `_`), so its `Return`
+carries every slot and legacy's `emitArenaEpilogue` is driven by
+`instr.Results`. Stage4 catching up again.
+
+The two fixes above are the SAME defect family: a value stored where its context
+demanded a different type. That is why the net/http chain produced them
+back-to-back.
+
+## FIXED (uncommitted): `src/net/http/h2_bundle.mx` passed an error to `panic`
+
+Moxie's `panic` takes a string; the port passed `fmt.Errorf(...)` straight
+through, so the emitter called `runtime._panic` with an interface where a string
+is wanted (`'%t14' defined with type '{ i64, ptr }' but expected
+'{ ptr, i64, i64 }'`). Now `panic(fmt.Sprintf(...))`. Ordinary port bug, not a
+compiler defect.
+
+## NEW FIXTURE: `tests/regressions/should_compile/blank_result_bare_return.mx`
+
+Pins the bare-return alignment with three shapes: `(_ error, err error)`,
+`(n int64, _ error, err error)` (blank in the MIDDLE), and `(_ *E, err error)`.
+Each asserts the blank slot is the ZERO of its type and the named slot kept its
+value, so a swap fails both branches rather than passing one.
+
+Observed evidence, fresh compiler each time:
+
+- PRE-FIX (`/tmp/mxc-send4`, `-a`): fixture rc=1 -
+  `main.mx:57: cannot use value of type interface{Error() string; String()
+  string} as *main.E in return statement` (and a same-shape probe fails clang
+  with `value doesn't match function result type '{ { i64, ptr }, { i64, ptr }
+  }'`).
+- POST-FIX (`/tmp/mxc-bare1`, `-a`): fixture builds, runs, prints `ok`, rc=0.
+
+## net/http advanced past the round-47 blocker
+
+`'%cext769' ... at .ll:246679` is GONE. The chain moved to:
+
+    ./tmp/mxc-build-*/._src_net_http.ll:296054:12: error:
+      '%t64' defined with type '{ ptr, i64, i64 }' but expected 'i8'
+      296054 |   store i8 %t64, ptr %mu18
+
+`{ptr, i64, i64}` is a STRING and `%mu18` is a MAP-UPDATE alloca (`ir_map.mx`
+names both the key and the value temp `mu`, lines 66 and 69), so a string is
+being stored into an `i8` key/value slot. NEXT STEP: the enclosing function name
+(IR capture with a pid-targeted watcher, below) decides whether the map's
+declared key/elem type is wrong or the ported body passes a string where a byte
+is wanted - the same `(*ConnState).String` class of port error, but this time
+caught in the map-update store instead of a map index.
+
+## Gate status at the time of writing
+
+- `tests/run.sh --full` with `/tmp/mxc-send4` (send coercion alone): in flight,
+  83 PASS / 0 FAIL at phase 5 (wasm). Not yet a result.
+- `/tmp/mxc-bare1` (both compiler fixes): no full-suite run yet.
+- Neither compiler fix is committed until a full suite is green with
+  `selfhost:fixpoint` PASS.
+
+## Remaining queue (objective items, unchanged by this round)
+
+1. Generic monomorphization: imported generic types carrying no methods / the
+   method set of an instantiated generic (`dispMethodsByPkg` records only
+   non-generic names and `ir_iface.mx:401` skips the generic `*Named`; item 10),
+   the `i64`-vs-`i8` narrow field store in `src/internal/trace` (`base.mx:148
+   d.present[id/8] |= uint8(1) << (id % 8)`), and the `map[T]H[T]` literal
+   substitution failure.
+2. `elliptic.Curve` -> `interface dispatch: no impl for Params`, blocking
+   `crypto/ecdsa` P-256.
+3. `internal/coverage/{encodecounter,encodemeta,cformat}` and
+   `internal/trace/internal/tracev1` codegen.
+4. The named public API types in `src/net/**`: `net.IP`, `http.Header`,
+   `textproto.MIMEHeader`, `url.Values`, `net.Buffers` (struct-wrapper route).
+5. `syscall/js` (js && wasm only).
+6. `compress/flate` clang-22 backend crash.
+7. `regexp` and `text/template` do not exist.
+8. `debug/gosym`, `os.Pipe`'s `[2]int32`, syscall's `[2]Timeval`, cgo-gated
+   `os/user/cgo_lookup_unix.mx`, the embedded tzdata registration that never
+   runs.
+9. `x509.ParseCertificateRequest`'s `[][]ATV` SET plus the slice-of-slice parse
+   SIGSEGV.
+10. `extractImports` shares `scanFileRegions`' old comment-blindness (reverted
+    once; needs the bisect).
+11. stdlib capturing deferred closures are mis-compiled (13 files).
+12. The widened predicate sweep (items 1, 3, 11, 12, 14, 15 gate it).
+13. `fmt` prints `?` for a Named type over a basic (`time.Duration`); broad.
+14. `runtime_makeStrongFromWeak`: closed with no code change (no references).
+
+# ============ UPDATE: round 49 — generic aggregates, dead aggregate loads, phase 3 ============
+
+Round 49 landed four stage4 compiler fixes, one stdlib source fix and one test
+harness fix. Each was verified with a fresh `-a` compiler and an isolated
+reproducer; the suite gate is `tests/run.sh --full`.
+
+## 1. Monomorphization must substitute type parameters inside AGGREGATES
+
+`substTypeParams` had cases for `*TypeParam`, `*Pointer`, `*Slice` and
+`*Signature` only, so a substituted field that was an aggregate came back still
+holding the parameter: `m map[K]V` is a `TCMap`, `s []entry[K,V]` is a `Slice`
+wrapping a `Named`. `llvmType` has no case for a `TypeParam` and its fallback is
+`"i8"`, so `mapping[string,*node]`'s map slot was `alloca i8` receiving a
+`{ptr,i64,i64}` string key and `entry[K,V]` lowered to the layout `{i8, i8}`:
+
+    store i8 %t64, ptr %mu18
+    clang: '%t64' defined with type '{ ptr, i64, i64 }' but expected 'i8'
+
+This is net/http's `mapping[K,V]`/`entry[K,V]` (src/net/http/mapping.mx), the
+first blocker behind `src/net/http`.
+
+- New `substTypeIn(t, sub)` (`_mxc_stage4/ssa_builder.mx`) walks `TypeParam`,
+  `Pointer`, `Slice`, `Array`, `TCMap`, `TCChan`, `TCStruct`, `Named` and
+  `Signature`. `substTypeParams` now delegates to it.
+- A bare generic written inside a generic declaration (`s []entry[K,V]` inside
+  `mapping[K,V]`) carries no `TArgs` of its own, so its parameters are bound from
+  `sub` by NAME — the same binding Go applies.
+- The `Named` case moves only the ARGS and leaves `Under` as the generic body.
+  Minting a substituted struct and hanging it off `Under` gave the descriptor
+  pass a type nobody had declared:
+    use of undefined value '@reflect/types.type:struct:{s:slice:
+    named:main.entry[basic:invalid,basic:invalid],m:map:{...}}'
+- The LAYOUT is instead resolved in the emitter: `llvmTypeInner`
+  (`_mxc_stage4/ir_types.mx`) now lays out a `Named` that carries `TParams` +
+  `TArgs` by substituting the body for the duration of that one string. Only a
+  layout comes out of it, so nothing new enters the descriptor stream.
+- Legacy needs no mirror: x/tools + go/types instantiate generics before legacy
+  codegen ever sees them. Verified — `legacy/moxie build` accepts the reproducer
+  with rc=0.
+
+Reproducer: `tests/regressions/should_compile/generic_aggregate_subst.mx`
+(string/`*node`, `int32`/string and string/`int64` mappings, each crossing
+`maxSlice` so both the slice and the map paths run, plus a range over the map
+through a `func(k K, v V) bool` parameter). Pre-fix: rc=1 with the clang error
+above. Post-fix: builds, runs, prints `ok` on native and builds for wasm.
+
+## 2. `tailSplitTop` must count `[` `]` as well as `{` `}`
+
+The descriptor NAME for an instantiated generic carries a comma list in
+brackets (`named:main.entry[basic:invalid,basic:invalid]`). `tailSplitTop`
+tracked only brace depth, so splitting the `struct:{...}` tail cut one field into
+several — `struct:{s:slice:named:main.entry[a,b],m:map:{...}}` became THREE
+fields, `s`, a field literally named `basic`, and `m`. The type rebuilt from
+that name therefore named itself
+`struct:{s:slice:basic:invalid,basic:basic:invalid,m:map:{...}}`, the definition
+and the `named:` descriptor's reference disagreed, and clang rejected the module.
+Fixed in `_mxc_stage4/ir_descriptors.mx`.
+
+## 3. A discarded receiver value leaves dead aggregate loads
+
+`buildCall` / the defer path truncate the instructions emitted for the receiver
+when the resolved method needs its ADDRESS, but the test was
+`methodNeedsAddr(fn2, fixedRecv)` — and `resolveMethodCallWithRecv` has usually
+already taken that address itself, so asking about its own result could never
+report "a value where a pointer is wanted". The rollback never ran and the
+discarded value stayed as dead IR. For a large struct the dead IR is a
+full-struct load; `flate.(*Writer).Close` (`return w.d.close()`) emitted
+
+    %t4 = getelementptr inbounds {HUGE}, ptr %w, i32 0, i32 0
+    %t5 = load {HUGE}, ptr %t4, align 8
+
+a 640KB copy nothing read. clang's instruction selector, lowering that aggregate
+load field by field, hit an `i1` field and aborted:
+
+    fatal error: error in backend: Cannot select: 0x...: i1,ch = load<(load (s8)
+    from %ir.t4 + 655496, align 8)>
+
+Fixed by testing `methodNeedsAddr(fn2, recv)` — the operand that was just built.
+Verified: the dead load is gone from `(*Writer).Close`.
+
+## 4. `src/net/http/h2_bundle.mx` passed an `error` to `panic`
+
+`panic` takes a `string`; the two `panic(fmt.Errorf(...))` sites are now
+`panic(fmt.Sprintf(...))`.
+
+## 5. `tests/phase3_ir_validate.sh` never validated anything
+
+The phase reported PASS for a failing build. Three separate defects:
+
+- `rm -rf "$td"` ran INSIDE the loop, so from iteration 2 the log redirect
+  failed, the build never started, and the non-zero rc was turned into
+  `PASS ("0.0s (linker only)")` by a guard that accepted any non-zero rc whose
+  log did not match a crash pattern. A build that did not complete is a FAILURE.
+- `find "$td" -name '*.ll'` never matched: the compiler writes scratch under
+  `./tmp/mxc-build-<pid>/`, and it unlinks each module right after clang. `-work`
+  keeps that directory, and `-a` is needed or the cache answers everything and
+  nothing is emitted.
+- `opt -verify` is retired syntax in LLVM 22; it needs `-passes=verify`
+  (with `-disable-output`, or opt echoes the module).
+
+The phase now does ONE forced build of `pkg/types` — which pulls in `pkg/token`,
+`pkg/syntax` and `pkg/mxutil` — verifies EVERY emitted module with
+`opt -passes=verify`, and requires each package to have been compiled. Verified
+standalone: 4/4 PASS. `-o /dev/null` replaces the executable target, because
+these are libraries and the tree has no `main.main`; the link failing for want
+of `main` is not this phase's subject, and the old guard used exactly that
+failure to fabricate a pass.
+
+## 6. Where net/http now stands
+
+`src/net/http` reaches the link with all 155 modules compiled — the `%mu18`
+map-slot blocker, the bare-return `%cext769` blocker and the descriptor blocker
+are all gone. It now stops in a dependency, `compress/flate`, on a second LLVM
+backend crash:
+
+- `@flate.NewWriter` segfaults inside `SelectionDAG::ReplaceAllUsesWith` during
+  DAG combine. Its IR still contains the same class of dead aggregate load
+  (`%t6 = load {HUGE Writer}, ptr %t5`, unused) from `var dw Writer` followed by
+  `dw.d.init(w, level)`. Fixing the `Close` instance moved the failure from
+  `Cannot select` on `(*Writer).Close` to this segfault on `NewWriter`; the
+  remaining instance is not caught by the receiver rollback, so the receiver
+  expression for a local `var` of a huge struct still emits a value load before
+  the address. Next step: find where `var dw Writer` + `dw.d.method()` builds the
+  value, and stop emitting the dead load at its source.
+
+## Suite
+
+`tests/run.sh --full` with the final compiler (`/tmp/mxc-r49f`, installed as
+`./moxie`): phases 0-5 give 181 PASS and 0 FAIL, `selfhost:fixpoint` PASS
+(stage2 == stage3), and phase 6 gives 63 PASS and 0 FAIL when re-run with a real
+Go toolchain exported (its legacy half needs `go env GOROOT`; see below). The 8
+FAILs in the phase-6 section of the combined run were the hardcoded
+`/tmp/moxie-goroot`, now fixed - not one of them was a compiler disagreement.
+
+Phase 3 now really validates IR: it verifies every module the build emits.
+Phase 5's `wasm:push_index_nested_slice` failed once with
+`Failed to fetch ... /jsruntime/loader.mjs`, which is a harness flake, not
+codegen; it passed on the next run. Note that a single FAIL in phase 5 ends
+`run.sh` early (`set -e`), so phase 6 does not run at all in that case - that is
+why phase 6 needs its own invocation to be seen.
