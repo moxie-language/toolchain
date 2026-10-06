@@ -4286,12 +4286,16 @@ entirely WITHIN 64 bits and is a silent wrong value:
     float64(1<<64-1) = -1.00000000000000e+000   want +1.8446744073709552e+19
 
 `cvFloat` handles the `Unsigned` marker correctly (`float64(uint64(ci.V))`), so
-the mark is being LOST before it gets there. Prime suspect: `MaskConstToBasic`'s
-`Int64` branch returns `&ConstInt{V:n}` and drops `Unsigned` deliberately ("a
-signed 64-bit target is a genuinely signed value") - which is right when the
-target really is int64, but `1<<64-1` converted to int64 should be an OVERFLOW
-ERROR, not -1. The next step is to find which conversion path reaches that branch
-for a float64 target.
+the mark is being LOST before it gets there. **DISPROVEN in round 59**: making
+`MaskConstToBasic`'s `Int64` branch preserve `Unsigned` instead of dropping it
+changed nothing - all four probe lines stayed identical - so that branch is not
+on this path. `ConvertConstLocal`'s float arm (`fv := cvFloat(v)`) is also
+correct, so the loss is somewhere between the fold and the conversion call.
+
+Next step: build the probe with the IR wrapper and read what the constant
+becomes at the conversion, rather than guessing another branch. Two hypotheses
+have now been eliminated by experiment; the third attempt should be
+evidence-driven.
 
 Blast radius: `1 << 64 - 1` is `math.MaxUint64` and appears in
 `src/internal/runtime/math/math.mx`, `src/math/const.mx`,
