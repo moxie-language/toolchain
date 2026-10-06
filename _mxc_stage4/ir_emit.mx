@@ -2176,6 +2176,16 @@ func (e *irEmitter) emitStore(s *SSAStore) {
 			}
 		}
 	}
+	// A zero store of an AGGREGATE is a memset, exactly like a zeroed alloca.
+	// One `store {big} zeroinitializer` is expanded by the backend into one
+	// store per 8 bytes; for flate.Writer that is ~80k stores on a 640KB
+	// object, and clang's DAG combiner segfaulted in
+	// SelectionDAG::ReplaceAllUsesWith on it. emitZeroInit already exists for
+	// this reason (see its comment); an explicit zero store is no different.
+	if val == "zeroinitializer" && len(valType) > 0 && (valType[0] == '{' || valType[0] == '[') {
+		e.emitZeroInit(addr, valType)
+		return
+	}
 	e.w("  store ")
 	e.w(valType)
 	e.w(" ")

@@ -6215,41 +6215,78 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue)
 		}
 		}
 	} else {
-		x := fb.buildExpr(e.X)
-		if x == nil || x.SSAType() == nil {
-			if name2, ok22 := e.X.(*syntax.Name); ok22 {
-				obj := fb.lookupObject(name2.Value)
-				if pn2, ok23 := obj.(*PkgName); ok23 {
-					return fb.buildPkgMemberAddr(pn2, e.Sel.Value)
-				}
-			}
-			return nil
+		// An addressable operand - a local, a package-level global, a free
+		// variable - is addressed directly, BEFORE anything is emitted for it.
+		// The old order built the operand's VALUE with
+		// `x := fb.buildExpr(e.X)` and then replaced it with the variable's
+		// alloca, which left the value load in the instruction list as dead IR.
+		// For a large struct that dead IR is a full-struct copy: flate.NewWriter
+		// (`var dw Writer` then `dw.d.init(w, level)`) emitted
+		//   %t5 = call ptr @runtime.alloc(...)
+		//   store { ...[131072 x i32], i1, i1 ... } zeroinitializer, ptr %t5
+		//   %t6 = load { ...[131072 x i32], i1, i1 ... }, ptr %t5
+		// a 640KB copy nothing read, and clang died in
+		// SelectionDAG::ReplaceAllUsesWith while combining it. Same class as the
+		// discarded receiver in buildCall; here the operand is discarded inside
+		// this function rather than by the caller.
+		var baseAddr SSAValue
+		lookName := ""
+		if name3, ok25 := e.X.(*syntax.Name); ok25 {
+			lookName = name3.Value
 		}
-		baseType := x.SSAType()
-		addr = x
-		if _, ok24 := SafeUnderlying(baseType).(*Pointer); !ok24 {
-			found := false
-				if name3, ok25 := e.X.(*syntax.Name); ok25 {
-					obj := fb.lookupObject(name3.Value)
-					if obj != nil {
-						if alloc, ok2 := fb.vars[obj]; ok2 {
-							addr = alloc
-							baseType = NewPointer(baseType)
-							found = true
-						} else if g, okG := fb.fn.Pkg.Members[name3.Value].(*SSAGlobal); okG {
-							addr = g
-							baseType = NewPointer(baseType)
-							found = true
-						} else if fb.freeVarPtrs != nil {
-							if fv2, ok26 := fb.freeVarPtrs[name3.Value]; ok26 {
-								addr = fv2
-								baseType = NewPointer(baseType)
-								found = true
-							}
-						}
+		if lookName != "" {
+			obj := fb.lookupObject(lookName)
+			if obj != nil {
+				if alloc, ok2 := fb.vars[obj]; ok2 {
+					baseAddr = alloc
+				} else if g, okG := fb.fn.Pkg.Members[lookName].(*SSAGlobal); okG {
+					baseAddr = g
+				} else if fb.freeVarPtrs != nil {
+					if fv2, ok26 := fb.freeVarPtrs[lookName]; ok26 {
+						baseAddr = fv2
 					}
 				}
-			if !found {
+			}
+		}
+		if baseAddr != nil && baseAddr.SSAType() != nil {
+			// The alloca holds the variable's VALUE. A struct-valued variable
+			// is addressed by the alloca itself; a POINTER-valued variable
+			// (`o *outer`, the common case) must be loaded first, or the field
+			// offset is taken from the stack slot holding the pointer. Getting
+			// this wrong read `o.in.n` from the slot itself and printed
+			// 2270074 instead of 41.
+			bt := baseAddr.SSAType()
+			var vt Type
+			if bp, isPtr := SafeUnderlying(bt).(*Pointer); isPtr {
+				vt = bp.Base
+			}
+			valIsPtr := false
+			if vt != nil {
+				if _, isP := SafeUnderlying(vt).(*Pointer); isP {
+					valIsPtr = true
+				}
+			}
+			if valIsPtr {
+				addr = fb.emitLoad(baseAddr, vt)
+				structType = vt
+			} else {
+				addr = baseAddr
+				structType = bt
+			}
+		} else {
+			x := fb.buildExpr(e.X)
+			if x == nil || x.SSAType() == nil {
+				if name2, ok22 := e.X.(*syntax.Name); ok22 {
+					obj := fb.lookupObject(name2.Value)
+					if pn2, ok23 := obj.(*PkgName); ok23 {
+						return fb.buildPkgMemberAddr(pn2, e.Sel.Value)
+					}
+				}
+				return nil
+			}
+			baseType := x.SSAType()
+			addr = x
+			if _, ok24 := SafeUnderlying(baseType).(*Pointer); !ok24 {
 				alloc := &SSAAlloc{Comment: "fieldaddr.tmp"}
 				alloc.typ = NewPointer(baseType)
 				alloc.name = fb.nextName()
@@ -6258,8 +6295,8 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue)
 				addr = alloc
 				baseType = NewPointer(baseType)
 			}
+			structType = baseType
 		}
-		structType = baseType
 		if p4, ok27 := SafeUnderlying(structType).(*Pointer); ok27 {
 			structType = p4.Base
 		}

@@ -1,0 +1,77 @@
+// Regression: how a field select addresses its base, and how a zeroed
+// aggregate is written.
+//
+// A field select on a local variable must use the VARIABLE's address when the
+// variable's value is a struct, and must LOAD it when the value is a pointer:
+// the alloca holds the pointer, so taking the field offset from the alloca
+// read `o.in.n` out of the slot holding `o` itself. That bug printed 2270074
+// instead of 41.
+//
+// Addressing the struct-valued variable by loading its value first and then
+// throwing the load away left the load in the instruction list as dead IR.
+// For a large struct that dead IR is a full-struct copy: flate.NewWriter
+// (`var dw Writer`, then `dw.d.init(w, level)`) emitted a 640KB load nothing
+// read, and clang's DAG combiner segfaulted in
+// SelectionDAG::ReplaceAllUsesWith while combining it. The address is now
+// resolved before anything is emitted for the operand.
+//
+// The same shape produces the aggregate zero store: `var z outer` with `&z`
+// escaping is a runtime.alloc plus an explicit
+// `store {outer} zeroinitializer`. One such store is expanded by the backend
+// into one store per 8 bytes; on flate.Writer's 640KB that was clang's second
+// crash, in the instruction selector. A zero store of an aggregate is now a
+// memset, exactly as a zeroed alloca always was.
+package main
+
+type inner struct {
+	tab []int32
+	n   int64
+	ok  bool
+	bad bool
+}
+
+func (i *inner) bump(v int64) {
+	i.n = i.n + v
+}
+
+type outer struct {
+	in  inner
+	tag string
+}
+
+// struct-valued local, pointer-receiver method on its field, address escapes
+func viaStructLocal() (o *outer) {
+	var z outer
+	z.in.bump(41)
+	return &z
+}
+
+// pointer-valued local: the select must go through the pointer
+func viaPointerLocal() (n int64) {
+	o := &outer{}
+	o.in.bump(7)
+	return o.in.n
+}
+
+func main() {
+	o := viaStructLocal()
+	if o.in.n != 41 {
+		panic("struct local n")
+	}
+	// every other field of the aggregate must have been zeroed
+	if o.in.ok || o.in.bad {
+		panic("struct local bool not zero")
+	}
+	if o.in.tab != nil {
+		panic("struct local slice not zero")
+	}
+	if o.tag != "" {
+		panic("struct local tag not zero")
+	}
+
+	if viaPointerLocal() != 7 {
+		panic("pointer local n")
+	}
+
+	println("ok")
+}
