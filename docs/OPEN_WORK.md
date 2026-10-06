@@ -4747,3 +4747,39 @@ Two things to settle first:
 Worth doing together: make `LookupByName` deterministic (iterate sorted keys) so
 that any remaining caller is at least reproducible, and audit its other callers -
 the comment says it is deprecated, and every remaining read is a latent collision.
+
+## Round 68: import-first resolution attempted, and it did NOT fix ecdsa
+
+Applied the plan above - `cctx.sigDeclPkgImports`, set from
+`cctx.universe.Registry[pkgPath].Imports` at BOTH signature-resolution sites
+(`resolveMethodSigWithSubst`'s caller and the generic-FUNCTION instantiation at
+`ssa_builder.mx:9362`), read first by `resolveTypeExprWithSubst`'s SelectorExpr
+case. Rebuilt, re-measured: **both ecdsa errors are byte-identical.** Reverted.
+
+What that rules out, and what is left:
+
+- Both `resolveSignatureWithSubst` call sites are now covered (there are only
+  three, and the third is the recursive FuncType case), so `publicKeyToFIPS`'s
+  result type is NOT resolved by either of them. It is resolved on a path not yet
+  found.
+- `TCPackage.Imports` IS populated (`ssa_builder.mx:597`
+  `tcp.Imports = mxutil.Ensure(tcp.Imports, 1)`), so the field is usable - but the
+  likely reason the patch was inert is that **`cctx.universe.Registry[pkgPath]`
+  may not contain the package currently being compiled**: the Registry holds
+  resolved dependencies, and `crypto/ecdsa` is the package under compilation. If
+  `dp` was nil the context stayed empty and nothing changed, which matches the
+  measurement exactly.
+- Candidate sources for the declaring package's imports that do not depend on the
+  Registry: `fb.fn.Pkg.Pkg.Imports` (the builder's own package) and the file's
+  import decls, which the parser already has (`pb.segImports`,
+  `extractImports` in main.mx).
+
+**Next step is instrumentation, not another guess.** Print from
+`resolveTypeExprWithSubst`'s SelectorExpr case (and from the `*syntax.Name` case)
+when it resolves a selector whose qualifier is a known package name, with the
+qualifier, the member, the resolved path, and the caller's package path. One
+rebuild then names the path that actually resolves `ecdsa.PublicKey`, instead of
+eliminating three candidates per round.
+
+Do NOT start this by widening `LookupByName` again: three hypotheses have now been
+built on where the resolution happens and all three were wrong.
