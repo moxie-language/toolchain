@@ -1978,6 +1978,26 @@ func (fb *ssaFuncBuilder) coerceSendValue(val SSAValue, elem Type) (out SSAValue
 	return fb.coerceToInterface(val, elem)
 }
 
+// foldConstConvert folds `T(constant)` at build time. It matters because the
+// exact value of a wide integer constant must be used, not its low 64 bits:
+// leaving the conversion as an SSAConvert emitted `uitofp i64 0` for
+// `float64(1<<70)` and reported 0, and `2.5 > 1<<129` as true for every positive
+// x. ConvertConstLocal consults ConstInt.Exact, so folding here uses the real
+// value. Mirrors go/types, which folds conversions of constants.
+func (fb *ssaFuncBuilder) foldConstConvert(val SSAValue, target Type) (s SSAValue, ok bool) {
+	sc, isConst := val.(*SSAConst)
+	if !isConst || sc == nil || sc.val == nil || target == nil {
+		return nil, false
+	}
+	folded := ConvertConstLocal(sc.val, target)
+	if folded == nil {
+		return nil, false
+	}
+	out := &SSAConst{typ: target, val: folded}
+	out.name = fb.nextName()
+	return out, true
+}
+
 func (fb *ssaFuncBuilder) coerceToInterface(val SSAValue, targetType Type) (s SSAValue) {
 	if targetType == nil || val == nil || val.SSAType() == nil {
 		return val
@@ -5076,6 +5096,9 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 						retypeUntypedShift(binS, tn.Typ)
 					}
 					fb.checkConstConvert(args2[0], tn.Typ)
+					if folded, okF := fb.foldConstConvert(args2[0], tn.Typ); okF {
+						return folded
+					}
 					conv := &SSAConvert{X: args2[0]}
 					conv.typ = tn.Typ
 					fb.checkSliceToArrayConv(args2[0], tn.Typ)
@@ -5097,6 +5120,9 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 				retypeUntypedShift(binS, convType)
 			}
 			fb.checkConstConvert(args3[0], convType)
+			if folded, okF := fb.foldConstConvert(args3[0], convType); okF {
+				return folded
+			}
 			conv := &SSAConvert{X: args3[0]}
 			conv.typ = convType
 			fb.checkSliceToArrayConv(args3[0], convType)
