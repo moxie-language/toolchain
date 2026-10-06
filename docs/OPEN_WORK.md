@@ -4403,15 +4403,15 @@ that produced that run.
 
 ## Left, with the strongest available lead for each
 
-1. **`float64(unsigned >= 2^63)` is negative and `float64(1<<64-1)` is -1.**
-   Within 64 bits. `cvFloat` and `ConvertConstLocal`'s float arm are both
-   correct, and the `MaskConstToBasic` Int64 branch was DISPROVEN by experiment
-   in round 59. Best remaining hypothesis: the constant is materialised as an
-   int64 and the conversion is emitted as a runtime `sitofp`, so `Unsigned` is
-   never consulted. **Read the IR** (wrapper in `/tmp/cbin/clang-22`) rather than
-   guessing a fourth branch. Blast radius: `math.MaxUint64` in `math/const.mx`,
-   `math/bits` (x3), `internal/runtime/math`, `intrinsics`, `saferio`, `debug/elf`
-   and `net/http/h2_bundle`.
+1. ~~**`float64(unsigned >= 2^63)` is negative and `float64(1<<64-1)` is -1.**~~
+   **FIXED in round 61** (`6b9a7064`). Reading the IR (rather than guessing a
+   fourth branch) showed the runtime `sitofp i64 -1 to double`: `conversionOp`
+   answers from the source TYPE, and an untyped integer constant's type says
+   nothing about the `Unsigned` marker the folder put on its VALUE. One override
+   in `emitConvert` keyed on the marker fixes it. Verified positive and correct
+   for `1<<62`, `1<<63`, `1<<63+1`, `1<<64-1`, with `(-1)` and `-(1<<62)` still
+   negative, plus typed `uint64` and a typed `uint32` above 2^31 (also wrong
+   before). Fixture `unsigned_const_to_float.mx`.
 2. **The constant folder is not exact above 64 bits.** Two 128-bit bitmaps were
    found only because they gated parsing; `math/j0.mx`/`j1.mx`/`jn.mx` still have
    `Two129 = 1 << 129` and `lgamma.mx` has `Tiny = 1.0/(1 << 70)`. The fix is the
