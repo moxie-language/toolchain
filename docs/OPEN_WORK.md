@@ -4255,3 +4255,41 @@ The net/http probe costs ~20 minutes to build, and the failing layer was found
 in ~1 minute by probing `bufio` + `net/textproto` alone, then ~1 minute more to
 test `bytes.Cut` and the mask expression. Build the smallest program that can
 still fail, not the smallest program that contains the feature.
+
+# ============ UPDATE: round 55 — a parenthesised CONSTANT as a method receiver is garbage ============
+
+Chasing round 54's "where is the exactness lost" question turned up a
+different, much more basic bug. Measured with the installed compiler:
+
+    a := 42
+    a.String()          -> 42                   correct (typed variable)
+    (42).String()       -> 180388626474         want 42
+    (40+2).String()     -> 180388626474         want 42
+    (1<<26).String()    -> 180455735296         want 67108864
+    (1<<26-1).String()  -> 288230376218820607   want 67108863
+    (1<<26+1).String()  -> 288230371923853313   want 67108865
+
+The value is deterministic, not uninitialised memory, and the shape is exact:
+
+    180388626474 = 42<<32 | 42
+    180455735296 = 67108864<<32 | 67108864
+    288230376218820607 = 67108863<<32 | 67108863
+
+That is **x<<32 | x** - the low 32 bits replicated into the high half. So a
+parenthesised constant expression used as a METHOD RECEIVER is materialised by
+replicating its 32-bit value instead of widening it. It is a 32/64-bit widening
+bug on the constant-receiver path, and it is silent.
+
+This is also what the round-54 probes were actually hitting: `(1<<70).String()`
+and `(1<<26-1)<<'A'>>64` were not mis-folded 128-bit arithmetic so much as
+rendered through this path. **Re-examine the >64-bit const-fold item in that
+light before doing any big.Int work** - the reported garbage values
+(9741466863665152, 288068722172624896, 9741466930774015) all have this
+replicated-32-bit smell, and `1<<26-1` needs no more than 64 bits at all.
+
+Next step: find where a method call's CONSTANT receiver is built. Look at how
+`buildExpr` on a `*syntax.ParenExpr` / `*syntax.BasicLit` receiver produces its
+`SSAConst` type, and at the widening the emitter applies to it - the correct
+behaviour is the same as assigning the constant to a variable of its default
+type first (`a.String()` is right, so the variable path already widens
+correctly). Nothing was changed in round 55; the tree is as it was.
