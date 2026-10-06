@@ -4783,3 +4783,48 @@ eliminating three candidates per round.
 
 Do NOT start this by widening `LookupByName` again: three hypotheses have now been
 built on where the resolution happens and all three were wrong.
+
+## FIXED in round 69 (`4296622c`): crypto/ecdsa compiles
+
+Instrumentation, not a fourth guess, found it in one build. The debug output was:
+
+    DBG-TYRESOLVE qual=ecdsa member=PublicKey
+    DBG-TYRESOLVE   LookupByName -> path=[ecdsa]
+    DBG-REG ...                       <- no Registry key matching ecdsa at all
+
+Two facts came out of that, and the second one is the bug:
+
+1. **The package being compiled is NOT in `Universe.Registry`** - only its
+   dependencies are. That is exactly why round 68's patch was inert: it set the
+   import context from `Registry[pkgPath]`, which is nil for the package under
+   compilation. The hypothesis recorded last round was right; the fix just used
+   the wrong source for the imports.
+2. **`LookupByName`'s `ByName` cache is keyed on the Registry's LENGTH.** A
+   Registry write that REPLACES a package leaves the length unchanged, so the
+   cache is never rebuilt - and `Synthetic` stubs exist precisely to be replaced
+   by the real package ("Parallel workers must replace it with the real package
+   loaded from the dependency's .mxh"). The stale entry pointed at a package whose
+   `Path` was the bare name `ecdsa`, which is not a key in the Registry at all.
+
+The import list now comes from the builder's own package
+(`fb.fn.Pkg.Pkg.Imports`, populated for the package under compilation) and is
+consulted before the global map, at both generic signature-resolution sites.
+
+Verified: `crypto/ecdsa` compiles (only the expected `undefined symbol: main.main`
+of a library), the compiler self-hosts, `crypto/x509` and `crypto/ed25519` still
+compile, all six regression fixtures pass.
+
+### Two follow-ups this exposed
+
+1. **`LookupByName` is still wrong, and still nondeterministic in principle.**
+   The length-keyed cache means any in-place replacement can leave a stale entry,
+   and the `ByName` rebuild picks between same-named packages by map iteration
+   order. Make the cache generation-keyed (bump a counter on every Registry
+   write) or drop it, and audit the other callers - the global bridge is marked
+   DEPRECATED with "Do not add new reads", and this path was one.
+2. **Coverage gap.** No phase of the suite compiles `crypto/ecdsa`: phase 1 builds
+   only the compiler's own packages (`token mxutil syntax types rewrite`). A whole
+   class of stdlib codegen/type-check bugs is therefore invisible to the gate, and
+   this one sat until a survey found it. Adding a stdlib compile sweep - even just
+   the packages the objective names - would turn the next such find into a test
+   failure instead of a discovery.
