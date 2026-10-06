@@ -680,15 +680,20 @@ const toLower = 'a' - 'A'
 //	tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
 //	        "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
 //	token = 1*tchar
-func validHeaderFieldByte(c byte) (rok bool) {
-	// mask is a 128-bit bitmap with 1s for allowed bytes,
-	// so that the byte c can be tested with a shift and an and.
-	// If c >= 128, then 1<<c and 1<<(c-64) will both be zero,
-	// and this function will return false.
-	const mask = 0 |
-		(1<<(10)-1)<<'0' |
-		(1<<(26)-1)<<'a' |
-		(1<<(26)-1)<<'A' |
+// validHeaderFieldLo and validHeaderFieldHi are the same bitmap as the 128-bit
+// literal this replaces, split into two 64-bit halves because Moxie does not
+// evaluate a constant wider than 64 bits exactly: the single literal came out
+// with mask>>64 == 0 AND mask&(1<<64-1) == 0, so EVERY letter was rejected and
+// canonicalMIMEHeaderKey returned ok=false for every real header name. That is
+// what made http.ReadRequest fail with
+//
+//	malformed MIME header line: Host: example.com
+//
+// on a perfectly well-formed request, and it is the same constant-folding
+// precision bug that makes time.Date/time.Parse wrong (docs/OPEN_WORK.md).
+// Bits 0..63 sit in Lo, bits 64..127 in Hi as bit (c-64).
+const (
+	validHeaderFieldLo = (1<<(10)-1)<<'0' |
 		1<<'!' |
 		1<<'#' |
 		1<<'$' |
@@ -698,14 +703,26 @@ func validHeaderFieldByte(c byte) (rok bool) {
 		1<<'*' |
 		1<<'+' |
 		1<<'-' |
-		1<<'.' |
-		1<<'^' |
-		1<<'_' |
-		1<<'`' |
-		1<<'|' |
-		1<<'~'
-	return ((uint64(1)<<c)&(mask&(1<<64-1)) |
-		(uint64(1)<<(c-64))&(mask>>64)) != 0
+		1<<'.'
+	validHeaderFieldHi = (1<<(26)-1)<<('a'-64) |
+		(1<<(26)-1)<<('A'-64) |
+		1<<('^'-64) |
+		1<<('_'-64) |
+		1<<('`'-64) |
+		1<<('|'-64) |
+		1<<('~'-64)
+)
+
+func validHeaderFieldByte(c byte) (rok bool) {
+	// A bitmap with 1s for allowed bytes, tested with a shift and an and.
+	// If c >= 128 it is not a tchar and is rejected.
+	if c < 64 {
+		return validHeaderFieldLo&(uint64(1)<<c) != 0
+	}
+	if c < 128 {
+		return validHeaderFieldHi&(uint64(1)<<(c-64)) != 0
+	}
+	return false
 }
 
 // validHeaderValueByte reports whether c is a valid byte in a header

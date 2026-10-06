@@ -4108,3 +4108,76 @@ compiler crash at whatever stage it reached (`IR emit`, `compile objects`) and
 cost several rounds of misdiagnosis. Use
 `setsid bash -c '...' > log 2>&1 < /dev/null &` so the build owns its own
 process group, or keep the tool call alive until it finishes.
+
+# ============ UPDATE: round 52 — every MIME header failed, and it is the const-fold bug ============
+
+## `http.ReadRequest` failed because every LETTER was rejected
+
+`net/http`'s round trip was the last functional blocker. `ReadRequest` returned
+an error on a request `Request.Write` had just produced correctly. Isolating it
+with a cheap `bufio` + `net/textproto` probe (no net/http closure, so seconds
+instead of twenty minutes) put the failure in `textproto.ReadMIMEHeader`:
+
+    ................ ..... .......................... (ReadLine x4 all correct)
+    6 ReadMIMEHeader err=malformed MIME header line: Host: example.com
+    7 bytes.Cut ok=true k=[Host] v=[ example.com]      (Cut is fine)
+
+The line is well formed, `bytes.Cut` finds the colon, the value bytes are
+printable - so the rejection had to be `canonicalMIMEHeaderKey` returning
+`ok=false`, which it does when `validHeaderFieldByte` rejects a byte. That
+function built its bitmap as ONE 128-bit untyped constant:
+
+    const mask = 0 | (1<<(10)-1)<<'0' | (1<<(26)-1)<<'a' | (1<<(26)-1)<<'A' | ...
+    return ((uint64(1)<<c)&(mask&(1<<64-1)) | (uint64(1)<<(c-64))&(mask>>64)) != 0
+
+Measured, with the same expression in a standalone program:
+
+    mask int64 view = 288068722172624896
+    mask>>64        = 0
+    mask low 64     = 0
+    c=72 (H)  -> false      c=111 (o) -> false      c=65 (A)  -> false
+    c=122 (z) -> false      c=126 (~) -> false      c=57 (9)  -> true
+    c=45 (-)  -> true       c=33 (!)  -> true       c=32 ( )  -> false
+
+**Both halves of the 128-bit constant come back zero**, so every letter is
+rejected, so every real header name is rejected, so every MIME header block
+fails to parse. Only the sub-64-bit characters (digits, `-`, `!`, ...) survived.
+
+This is the SAME constant-folding precision bug the objective names for
+`time.Date`/`time.Parse` - "Moxie's folder goes through a float64 and loses the
+low bits of a ~9.2e18 intermediate" - reached through a different expression,
+and it is a second, much simpler reproduction of it.
+
+### Fixed
+
+`validHeaderFieldByte` now uses two 64-bit halves, neither of which needs more
+than 64 bits:
+
+    const (
+        validHeaderFieldLo = (1<<(10)-1)<<'0' | 1<<'!' | ... | 1<<'.'
+        validHeaderFieldHi = (1<<(26)-1)<<('a'-64) | (1<<(26)-1)<<('A'-64) | ... | 1<<('~'-64)
+    )
+    func validHeaderFieldByte(c byte) (rok bool) {
+        if c < 64  { return validHeaderFieldLo&(uint64(1)<<c) != 0 }
+        if c < 128 { return validHeaderFieldHi&(uint64(1)<<(c-64)) != 0 }
+        return false
+    }
+
+Verified: `ReadMIMEHeader err=<nil> host=[example.com] xtest=[hello]
+accept=[text/plain]`. The new fixture
+`tests/regressions/should_compile/mime_header_parse.mx` covers the whole tchar
+set from RFC 7230 and FAILS pre-fix with
+`malformed MIME header line: content-type: text/plain`.
+
+Note this is a symptom-level fix by necessity: the ROOT cause is the folder, and
+the folder is shared with `time.Date`/`time.Parse`. Until the folder is exact,
+every >64-bit constant in the tree is a landmine, and this one was found only
+because it happened to gate HTTP parsing. The folding fix (plus its legacy
+mirror) is still the real item.
+
+## Operational: cheap isolation beats the expensive end-to-end probe
+
+The net/http probe costs ~20 minutes to build, and the failing layer was found
+in ~1 minute by probing `bufio` + `net/textproto` alone, then ~1 minute more to
+test `bytes.Cut` and the mask expression. Build the smallest program that can
+still fail, not the smallest program that contains the feature.

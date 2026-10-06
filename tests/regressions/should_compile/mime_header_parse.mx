@@ -1,0 +1,74 @@
+// Regression: every letter is a valid header-field byte.
+//
+// validHeaderFieldByte built its bitmap as ONE 128-bit untyped constant:
+//
+//	const mask = 0 | (1<<(10)-1)<<'0' | (1<<(26)-1)<<'a' | (1<<(26)-1)<<'A' | ...
+//	return ((uint64(1)<<c)&(mask&(1<<64-1)) | (uint64(1)<<(c-64))&(mask>>64)) != 0
+//
+// Moxie does not evaluate a constant wider than 64 bits exactly. Both halves of
+// that one came back zero - mask>>64 == 0 AND mask&(1<<64-1) == 0 - so every
+// letter was rejected, canonicalMIMEHeaderKey returned ok=false for every real
+// header name, and http.ReadRequest failed on a well-formed request with
+//
+//	malformed MIME header line: Host: example.com
+//
+// This is the same constant-folding precision bug that makes time.Date and
+// time.Parse wrong, reached through a different expression. The bitmap is now
+// two 64-bit halves, neither of which needs more than 64 bits.
+//
+// This pins the whole tchar set from RFC 7230, so a future change that drops a
+// group of characters fails here instead of in every HTTP request.
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"net/textproto"
+)
+
+func parse(raw string) (h textproto.MIMEHeader, err error) {
+	return textproto.NewReader(bufio.NewReader(bytes.NewBuffer([]byte(raw)))).ReadMIMEHeader()
+}
+
+func main() {
+	// Every category: lowercase, uppercase, digits, and each punctuator that
+	// the mask carries. Keys are canonicalized, so expect Host/User-Agent etc.
+	raw := "content-type: text/plain\r\n" |
+		"X-Test-Case: v\r\n" |
+		"X-0123456789: v\r\n" |
+		"a!#$%&'*+-.: v\r\n" |
+		"x^_`|~: v\r\n" |
+		"\r\n"
+	h, err := parse(raw)
+	if err != nil {
+		panic("ReadMIMEHeader: " | err.Error())
+	}
+	if h.Get("Content-Type") != "text/plain" {
+		panic("Content-Type: [" | h.Get("Content-Type") | "]")
+	}
+	if h.Get("X-Test-Case") != "v" {
+		panic("X-Test-Case")
+	}
+	if h.Get("X-0123456789") != "v" {
+		panic("X-0123456789")
+	}
+	// The punctuator key is not canonicalized (it has no letters to fold), so
+	// read it back exactly as written.
+	if h.Get("a!#$%&'*+-.") != "v" {
+		panic("punctuator key")
+	}
+	if h.Get("x^_`|~") != "v" {
+		panic("x^_`|~ key")
+	}
+
+	// A blank line ends the header block and an empty block is not an error.
+	h2, err2 := parse("\r\n")
+	if err2 != nil {
+		panic("empty block: " | err2.Error())
+	}
+	if len(h2) != 0 {
+		panic("empty block not empty")
+	}
+
+	println("ok")
+}
