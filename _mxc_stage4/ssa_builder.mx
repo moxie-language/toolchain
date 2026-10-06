@@ -1775,6 +1775,19 @@ func (fb *ssaFuncBuilder) buildStmt(s syntax.Stmt) {
 		ch := fb.buildExpr(ss.Chan)
 		val := fb.buildExpr(ss.Value)
 		if ch != nil && val != nil {
+			// The channel's ELEMENT type is the send's context, the same way a
+			// parameter type is for an argument: a send of *T into an
+			// interface-element channel must BOX the value. Without this the raw
+			// pointer was stored into the interface's 2-word slot:
+			//   '%t193' defined with type 'ptr' but expected '{ i64, ptr }'
+			//     %t193 = load ptr, ptr %t183
+			//     store {i64, ptr} %t193, ptr %selsv289
+			// which is what blocked (*http2responseWriter).Push, whose
+			//   case sc.serveMsgCh <- msg:
+			// sends a *http2startPushRequest into a chan http2serveMsg.
+			if ce, isChan := SafeUnderlying(ch.SSAType()).(*TCChan); isChan && ce != nil && ce.Elem != nil {
+				val = fb.coerceSendValue(val, ce.Elem)
+			}
 			fb.emit(&SSASend{Chan: ch, X: val})
 		}
 	case *syntax.CallStmt:
@@ -1931,6 +1944,21 @@ func (fb *ssaFuncBuilder) buildAssign(s *syntax.AssignStmt) {
 		return
 	}
 	fb.buildStore(s.Lhs, rhs)
+}
+
+// coerceSendValue gives a send's value the channel ELEMENT type. An untyped nil
+// has no SSA type at all (llvmType(nil) is "void", which produced
+// `store void null` for `errc <- nil` into a chan error), so it becomes the nil
+// of the element type; a concrete value is boxed when the element is an
+// interface, exactly as an argument is.
+func (fb *ssaFuncBuilder) coerceSendValue(val SSAValue, elem Type) (out SSAValue) {
+	if val == nil || elem == nil {
+		return val
+	}
+	if val.SSAType() == nil {
+		return &SSAConst{typ: elem, val: &ConstNil{}}
+	}
+	return fb.coerceToInterface(val, elem)
 }
 
 func (fb *ssaFuncBuilder) coerceToInterface(val SSAValue, targetType Type) (s SSAValue) {
@@ -3846,6 +3874,18 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 				state.Dir = SelectDirSend
 				state.Chan = fb.buildExpr(comm.Chan)
 				state.Send = fb.buildExpr(comm.Value)
+				// Same context rule as a plain send: the channel's ELEMENT
+				// type governs, so a send of *T into an interface-element
+				// channel must box. This is the one that blocked net/http's
+				//   case sc.serveMsgCh <- msg:
+				// where serveMsgCh is a chan http2serveMsg and msg is a
+				// *http2startPushRequest: the raw pointer was stored into the
+				// interface's 2-word slot.
+				if state.Chan != nil && state.Send != nil {
+					if ce, isChan := SafeUnderlying(state.Chan.SSAType()).(*TCChan); isChan && ce != nil && ce.Elem != nil {
+						state.Send = fb.coerceSendValue(state.Send, ce.Elem)
+					}
+				}
 			case *syntax.AssignStmt:
 				var chanExpr syntax.Expr
 				if op, ok2 := comm.Rhs.(*syntax.Operation); ok2 && op.Y == nil && op.Op == token.Recv {
@@ -4081,13 +4121,51 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 			}
 		}
 	} else if len(fb.namedResults) > 0 {
-		for _, nr := range fb.namedResults {
-			elemType := nr.SSAType()
-			if p, ok := elemType.(*Pointer); ok {
-				elemType = p.Base
+		// A bare `return` in a function with named results: the values are
+		// POSITIONED by the signature, not by the named list. NamedResults holds
+		// only the NAMED results, so `func f() (_ error, err error)` has ONE
+		// entry for TWO results; pushing just that entry made a one-element
+		// SSAReturn, the exit serialiser decomposed the single interface across
+		// both slots, and its TYPE word went to the codec as the first result:
+		//   '%cext769' defined with type 'i64' but expected '{ i64, ptr }'
+		//   store { i64, ptr } %cext769, ptr %cet770
+		// A blank result occupies its position as the zero of its type and the
+		// named results fill the rest in order - the same alignment the implicit
+		// return at the end of a body uses. x/tools does this for legacy: its
+		// Function.results has one entry per result SLOT, blanks included.
+		nj := 0
+		if fb.fn.Signature != nil && fb.fn.Signature.Results != nil {
+			for i := int32(0); i < fb.fn.Signature.Results.Len(); i++ {
+				res := fb.fn.Signature.Results.At(i)
+				if res == nil {
+					continue
+				}
+				if res.Name == "" || res.Name == "_" {
+					vals = mxutil.Ensure(vals, 1)
+					push(vals, &SSAConst{typ: res.Typ, val: nil})
+					continue
+				}
+				if nj >= len(fb.namedResults) {
+					break
+				}
+				nr := fb.namedResults[nj]
+				nj++
+				elemType := nr.SSAType()
+				if p, ok := elemType.(*Pointer); ok {
+					elemType = p.Base
+				}
+				vals = mxutil.Ensure(vals, 1)
+				push(vals, fb.emitLoad(nr, elemType))
 			}
-			vals = mxutil.Ensure(vals, 1)
-			push(vals, fb.emitLoad(nr, elemType))
+		} else {
+			for _, nr := range fb.namedResults {
+				elemType := nr.SSAType()
+				if p, ok := elemType.(*Pointer); ok {
+					elemType = p.Base
+				}
+				vals = mxutil.Ensure(vals, 1)
+				push(vals, fb.emitLoad(nr, elemType))
+			}
 		}
 	}
 	if fb.fn.Signature != nil && fb.fn.Signature.Results != nil {
@@ -4254,7 +4332,13 @@ func (fb *ssaFuncBuilder) buildDeferMethodTarget(sel *syntax.SelectorExpr, argEx
 			// address, exactly as buildCall does for a direct method call. The
 			// arguments are built after that rollback, so no live value is
 			// left pointing at a discarded instruction.
-			if fb.methodNeedsAddr(mfn, fixedRecv) {
+			//
+			// The test is against `recv`, the operand that was just built, NOT
+			// against fixedRecv: resolveMethodCallWithRecv has usually already
+			// taken the address, so asking it about its own result can never
+			// report "a value where a pointer is wanted" and the discarded
+			// value survived as dead IR. See the same note in buildCall.
+			if fb.methodNeedsAddr(mfn, recv) {
 				if block != nil {
 					block.Instrs = block.Instrs[:recvMark]
 				}
@@ -5033,7 +5117,21 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 		recv := fb.buildExpr(sel.X)
 		if recv != nil && recv.SSAType() != nil {
 			if fn2, fixedRecv := fb.resolveMethodCallWithRecv(sel, recv); fn2 != nil {
-				if fb.methodNeedsAddr(fn2, fixedRecv) {
+				// Ask about `recv`, the operand that was just built, not about
+				// fixedRecv. resolveMethodCallWithRecv takes the operand's
+				// address itself when the method has a pointer receiver, so
+				// methodNeedsAddr(fn2, fixedRecv) can never report "a value
+				// where a pointer is wanted" - the rollback below never ran and
+				// the discarded value stayed in the instruction list as dead
+				// IR. For a large struct that dead IR is a full-struct load:
+				// flate.(*Writer).Close, whose `return w.d.close()` loads the
+				// 640KB compressor, emitted
+				//   %t5 = load { ...[131072 x i32], i1, i1 ... }, ptr %t4
+				// and clang's instruction selector, lowering that aggregate
+				// load field by field, hit an i1 field and aborted with
+				//   Cannot select: i1,ch = load<(load (s8) ... align 8)>
+				// which is what killed compress/flate and, through it, net/http.
+				if fb.methodNeedsAddr(fn2, recv) {
 					if block != nil {
 						block.Instrs = block.Instrs[:recvMark]
 					}
@@ -8334,28 +8432,134 @@ func (fb *ssaFuncBuilder) substTypeParams(t Type) (tv Type) {
 	if t == nil || fb.typeSubst == nil {
 		return t
 	}
+	return substTypeIn(t, fb.typeSubst)
+}
+
+// substTypeIn rewrites type parameters in t using sub. A bare TypeParam is the
+// easy case; the composite constructors matter exactly as much, because a
+// substituted field is just as often an aggregate. `m map[K]V` and
+// `s []entry[K,V]` are a TCMap and a Slice wrapping a Named, and leaving them
+// on the parameter handed the emitter a type it has no case for. llvmType's
+// fallback for an unrecognised type is "i8", so mapping[string,int64]'s map
+// slot became `alloca i8` receiving a {ptr,i64,i64} string key:
+//
+//	store i8 %t64, ptr %mu18
+//	clang: '%t64' defined with type '{ ptr, i64, i64 }' but expected 'i8'
+//
+// The same fallback lowered entry[K,V] to the layout {i8, i8}, so the alloca,
+// the store into it and the gep that read it back described three different
+// structs. Recursion terminates because a Named whose args are already its own
+// parameters substitutes nothing and comes back unchanged.
+func substTypeIn(t Type, sub map[string]Type) (tv Type) {
+	if t == nil || sub == nil {
+		return t
+	}
 	switch tt := t.(type) {
 	case *TypeParam:
-		if r, ok := fb.typeSubst[tt.String()]; ok {
+		if r, ok := sub[tt.String()]; ok {
 			return r
 		}
 	case *Pointer:
-		e := fb.substTypeParams(tt.Base)
+		e := substTypeIn(tt.Base, sub)
 		if e != tt.Base {
 			return NewPointer(e)
 		}
 	case *Slice:
-		e := fb.substTypeParams(tt.Elem)
+		e := substTypeIn(tt.Elem, sub)
 		if e != tt.Elem {
 			return NewSlice(e)
 		}
+	case *Array:
+		e := substTypeIn(tt.Elem, sub)
+		if e != tt.Elem {
+			return NewArray(e, tt.Len)
+		}
+	case *TCMap:
+		k := substTypeIn(tt.Key, sub)
+		v := substTypeIn(tt.Elem, sub)
+		if k != tt.Key || v != tt.Elem {
+			return NewTCMap(k, v)
+		}
+	case *TCChan:
+		e := substTypeIn(tt.Elem, sub)
+		if e != tt.Elem {
+			return NewTCChan(tt.Dir, e)
+		}
+	case *TCStruct:
+		changed := false
+		var fields []*TCVar
+		for i := int32(0); i < tt.NumFields(); i++ {
+			f := tt.Field(i)
+			nt := substTypeIn(f.Typ, sub)
+			if nt != f.Typ {
+				changed = true
+			}
+			fields = mxutil.Ensure(fields, 1)
+			push(fields, NewTCField(f.Pkg, f.Name, nt, f.Anonymous))
+		}
+		if changed {
+			return NewTCStruct(fields, tt.Tags)
+		}
+	case *Named:
+		if len(tt.TParams) == 0 {
+			return t
+		}
+		inner := map[string]Type{}
+		changed := false
+		if len(tt.TArgs) > 0 {
+			n := len(tt.TParams)
+			if len(tt.TArgs) < n {
+				n = len(tt.TArgs)
+			}
+			for i := int32(0); i < int32(n); i++ {
+				a := substTypeIn(tt.TArgs[i], sub)
+				if a != tt.TArgs[i] {
+					changed = true
+				}
+				inner[tt.TParams[i].String()] = a
+			}
+		} else {
+			// A generic type written inside a generic declaration carries no
+			// args of its own: `s []entry[K,V]` in mapping[K,V] names the
+			// ENCLOSING parameters, and the args live only in sub. Binding by
+			// name is the same binding Go applies. Without this the slice's
+			// element stayed the generic entry and the push/range temporaries
+			// were alloca {i8, i8} while the value stored into them was the
+			// substituted struct.
+			for i := int32(0); i < int32(len(tt.TParams)); i++ {
+				if r, ok := sub[tt.TParams[i].String()]; ok {
+					inner[tt.TParams[i].String()] = r
+					changed = true
+				}
+			}
+		}
+		if !changed {
+			return t
+		}
+		// Only the ARGS move: Under stays the generic body. Minting a
+		// substituted struct here and hanging it off Under gave the descriptor
+		// pass a type no one had declared - the build failed with
+		//   use of undefined value '@reflect/types.type:struct:{s:slice:
+		//   named:main.entry[basic:invalid,basic:invalid],m:map:...}'
+		// The layout is resolved where it is needed (ir_types llvmTypeInner);
+		// here only the binding has to travel, so field accesses and the
+		// emitter agree on the arguments.
+		args := []Type{}
+		for i := int32(0); i < int32(len(tt.TParams)); i++ {
+			if r, ok := inner[tt.TParams[i].String()]; ok {
+				push(args, r)
+			} else {
+				push(args, tt.TParams[i])
+			}
+		}
+		return &Named{Obj: tt.Obj, Under: tt.Under, Methods: tt.Methods, TParams: tt.TParams, TArgs: args}
 	case *Signature:
 		changed := false
 		var params []*TCVar
 		if tt.Params != nil {
 			for i := 0; i < tt.Params.Len(); i++ {
 				p := tt.Params.At(i)
-				nt := fb.substTypeParams(p.Typ)
+				nt := substTypeIn(p.Typ, sub)
 				if nt != p.Typ {
 					changed = true
 					params = mxutil.Ensure(params, 1)
@@ -8370,7 +8574,7 @@ func (fb *ssaFuncBuilder) substTypeParams(t Type) (tv Type) {
 		if tt.Results != nil {
 			for i := 0; i < tt.Results.Len(); i++ {
 				r := tt.Results.At(i)
-				nt := fb.substTypeParams(r.Typ)
+				nt := substTypeIn(r.Typ, sub)
 				if nt != r.Typ {
 					changed = true
 					results = mxutil.Ensure(results, 1)
@@ -8395,6 +8599,8 @@ func (fb *ssaFuncBuilder) substTypeParams(t Type) (tv Type) {
 	}
 	return t
 }
+
+
 
 func ssaExtractConst(v SSAValue) (s *SSAConst) {
 	if c, ok := v.(*SSAConst); ok {

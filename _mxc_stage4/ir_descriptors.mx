@@ -641,6 +641,16 @@ func tailAtoi64(s string) (n int64) {
 
 // tailSplitTop splits s at commas at brace depth 0.
 func tailSplitTop(s string) (parts []string) {
+	// depth counts BOTH {} and []. The [] of an instantiated generic carries a
+	// comma list, and splitting inside it turned one struct field into several:
+	//   struct:{s:slice:named:main.entry[basic:invalid,basic:invalid],m:map:{...}}
+	// split into THREE fields - s, a field literally named "basic", and m. The
+	// rebuilt type then named itself
+	//   struct:{s:slice:basic:invalid,basic:basic:invalid,m:map:{...}}
+	// so the definition and the reference from the named: descriptor disagreed
+	// and clang rejected the module with "use of undefined value
+	// '@reflect/types.type:struct:{s:slice:named:main.entry[...],m:map:{...}}'".
+	// A struct tag's contents are already skipped (a tag may contain ',' too).
 	depth := int32(0)
 	start := int32(0)
 	inTag := false
@@ -658,9 +668,9 @@ func tailSplitTop(s string) (parts []string) {
 		if inTag {
 			continue
 		}
-		if c == '{' {
+		if c == '{' || c == '[' {
 			depth++
-		} else if c == '}' {
+		} else if c == '}' || c == ']' {
 			depth--
 		} else if c == ',' && depth == 0 {
 			parts = mxutil.Ensure(parts, 1)

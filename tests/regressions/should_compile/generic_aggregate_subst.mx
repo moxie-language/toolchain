@@ -1,0 +1,135 @@
+// Regression: monomorphization must substitute type parameters inside
+// AGGREGATES, not only bare ones.
+//
+// substTypeParams had cases for TypeParam, Pointer, Slice and Signature only,
+// so a field like `m map[K]V` or `s []entry[K,V]` came back still holding the
+// parameter. llvmType has no case for a TypeParam and its fallback is "i8", so
+// mapping[string,*node]'s map slot was `alloca i8` receiving a {ptr,i64,i64}
+// string key and entry[K,V] lowered to the layout {i8, i8} while its
+// substituted field stores used the real shapes. net/http's routing tree
+// (mapping[K,V] with entry[K,V]) failed to compile as
+//   '%t64' defined with type '{ ptr, i64, i64 }' but expected 'i8'
+//     store i8 %t64, ptr %mu18
+// and this file reproduces that verbatim on the pre-fix compiler.
+//
+// Substitution now walks TCMap, Array, TCChan, TCStruct and Named, and an
+// instantiated Named carries the underlying type with its parameters bound, so
+// the aggregate layout and every field access describe the same struct.
+package main
+
+import "git.smesh.lol/moxie/pkg/mxutil"
+
+type entry[K comparable, V comparable] struct {
+	key   K
+	value V
+}
+
+type mapping[K comparable, V comparable] struct {
+	s []entry[K, V]
+	m map[K]V
+}
+
+const maxSlice = 8
+
+func (h *mapping[K, V]) add(k K, v V) {
+	if h.m == nil && len(h.s) < maxSlice {
+		h.s = mxutil.Ensure(h.s, 1)
+		h.s = push(h.s, entry[K, V]{k, v})
+	} else {
+		if h.m == nil {
+			h.m = map[K]V{}
+			for _, e := range h.s {
+				h.m[e.key] = e.value
+			}
+			h.s = nil
+		}
+		h.m[k] = v
+	}
+}
+
+func (h *mapping[K, V]) find(k K) (v V, found bool) {
+	if h.m != nil {
+		v, found = h.m[k]
+		return v, found
+	}
+	for _, e := range h.s {
+		if e.key == k {
+			return e.value, true
+		}
+	}
+	return v, false
+}
+
+func (h *mapping[K, V]) eachPair(f func(k K, v V) bool) (n int32) {
+	for k, v := range h.m {
+		if !f(k, v) {
+			return n
+		}
+		n = n + 1
+	}
+	return n
+}
+
+type node struct {
+	name string
+}
+
+func countNode(k string, v *node) (keep bool) { return true }
+
+func main() {
+	names := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+	wants := []string{"a0", "b1", "c2", "d3", "e4", "f5", "g6", "h7", "i8", "j9"}
+
+	// string keys, pointer values: the entry literal, the slice push, the
+	// slice-to-map promotion and the range-over-map value all carry K or V
+	var m mapping[string, *node]
+	for i, n := range names {
+		m.add(n, &node{name: wants[i]})
+	}
+	if m.eachPair(countNode) != 10 {
+		panic("eachPair count")
+	}
+	for i, n := range names {
+		got, ok := m.find(n)
+		if !ok {
+			panic("missing " | n)
+		}
+		if got.name != wants[i] {
+			panic("got " | got.name | " want " | wants[i])
+		}
+	}
+	if _, ok := m.find("zz"); ok {
+		panic("found zz")
+	}
+
+	// int32 keys with string values: the net/http shape - an i8 key slot
+	// beside a {ptr,i64,i64} value
+	byIDWants := []string{"v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9"}
+	var byID mapping[int32, string]
+	for i := int32(0); i < 10; i++ {
+		byID.add(i, byIDWants[i])
+	}
+	for i := int32(0); i < 10; i++ {
+		got, ok := byID.find(i)
+		if !ok {
+			panic("byID missing")
+		}
+		if got != byIDWants[i] {
+			panic("byID got " | got | " want " | byIDWants[i])
+		}
+	}
+
+	// string keys with an int64 value, the third slot shape
+	var tally mapping[string, int64]
+	for i, n := range names {
+		tally.add(n, int64(i)*3)
+	}
+	for i, n := range names {
+		got, ok := tally.find(n)
+		if !ok || got != int64(i)*3 {
+			panic("tally " | n)
+		}
+	}
+
+	println("ok")
+}

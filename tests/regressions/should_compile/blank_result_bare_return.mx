@@ -1,0 +1,102 @@
+// Regression: a bare `return` must fill result POSITIONS, not just the named
+// results.
+//
+// NamedResults holds only the NAMED results, so `(_ error, err error)` has ONE
+// entry for TWO results. buildReturn's bare-return arm pushed just that entry,
+// producing a one-element SSAReturn for a two-result function; the exit
+// serialiser then decomposed the single interface value across both slots and
+// fed its TYPE word to the codec as the first result - which is how net/http's
+// `(_ *persistConn, err error)` failed as
+//   '%cext769' defined with type 'i64' but expected '{ i64, ptr }'
+// and, on the path with no codec, as
+//   value doesn't match function result type '{ { i64, ptr }, { i64, ptr } }'.
+//
+// A blank result now occupies its position as the zero of its type and the named
+// results fill the remaining positions in order - the same alignment the
+// implicit return at the end of a body already used. x/tools does this for
+// legacy: its Function.results has one entry per result SLOT, blanks included.
+package main
+
+type E struct {
+	Msg string
+}
+
+func (e *E) Error() (s string) { return e.Msg }
+func (e *E) String() (s string) { return e.Msg }
+
+func mk(msg string) (e error) {
+	v := &E{Msg: msg}
+	e = v
+	return
+}
+
+// blank first: one named result, two results
+func twoErr(fail bool) (_ error, err error) {
+	if fail {
+		err = mk("boom")
+		return
+	}
+	return
+}
+
+// blank in the middle: two named results, three results
+func threeErr(a int64, fail bool) (n int64, _ error, err error) {
+	n = a
+	if fail {
+		err = mk("mid")
+		return
+	}
+	return
+}
+
+// a pointer result beside the interface one, so a swap shows as a bad value
+// rather than only as a clang type error
+func pairErr(fail bool) (_ *E, err error) {
+	if fail {
+		err = mk("pair")
+		return
+	}
+	return
+}
+
+func main() {
+	a, b := twoErr(false)
+	if a != nil || b != nil {
+		panic("twoErr(false)")
+	}
+	// the blank slot must be the zero of its type, the named one must keep its
+	// value: a swap satisfies neither branch
+	c, d := twoErr(true)
+	if c != nil || d == nil {
+		panic("twoErr(true)")
+	}
+	if d.Error() != "boom" {
+		panic("twoErr(true) text")
+	}
+
+	n, m, o := threeErr(41, false)
+	if n != 41 || m != nil || o != nil {
+		panic("threeErr(false)")
+	}
+	p, q, r := threeErr(42, true)
+	if p != 42 || q != nil || r == nil {
+		panic("threeErr(true)")
+	}
+	if r.Error() != "mid" {
+		panic("threeErr(true) text")
+	}
+
+	e1, e2 := pairErr(false)
+	if e1 != nil || e2 != nil {
+		panic("pairErr(false)")
+	}
+	f1, f2 := pairErr(true)
+	if f1 != nil || f2 == nil {
+		panic("pairErr(true)")
+	}
+	if f2.Error() != "pair" {
+		panic("pairErr(true) text")
+	}
+
+	println("ok")
+}

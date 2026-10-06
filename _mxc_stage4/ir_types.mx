@@ -65,6 +65,26 @@ func (e *irEmitter) llvmType(t Type) (s string) {
 }
 
 func (e *irEmitter) llvmTypeInner(t Type) (s string) {
+	// An instantiated generic lays out as its body with the arguments bound.
+	// The body itself keeps the parameters (Named.Under is never rewritten -
+	// a substituted struct hung off Under gave the descriptor pass a type
+	// nothing had declared), so the binding is applied here, where only a
+	// layout string comes out of it. Without this, mapping[string,int64]'s map
+	// slot was `alloca i8` and the entry layout {i8, i8}: llvmType has no case
+	// for a TypeParam and its fallback is "i8".
+	if n, ok := t.(*Named); ok && len(n.TParams) > 0 && len(n.TArgs) > 0 {
+		bind := map[string]Type{}
+		m := len(n.TParams)
+		if len(n.TArgs) < m {
+			m = len(n.TArgs)
+		}
+		for i := int32(0); i < int32(m); i++ {
+			bind[n.TParams[i].String()] = n.TArgs[i]
+		}
+		if body, okBody := substTypeIn(n.Under, bind).(*TCStruct); okBody {
+			return e.llvmStructType(body)
+		}
+	}
 	u := SafeUnderlying(t)
 	if u == nil {
 		if _, ok := t.(*Slice); ok {
