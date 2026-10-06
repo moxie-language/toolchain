@@ -1,0 +1,72 @@
+// Regression: math.J0/J1/Y0/Y1 must not take the "very large x" shortcut below
+// 2**129.
+//
+// j0.mx and j1.mx both guard their asymptotic branch with
+//
+//	Two129 = 1 << 129     // |x| > ~6.8056e+38
+//	if x > Two129 { ... skip pzero/qzero ... }
+//
+// Moxie does not evaluate a constant wider than 64 bits exactly, so `1 << 129`
+// folded to 0 and `x > Two129` was TRUE for every positive x - the shortcut was
+// taken permanently and pzero/qzero were never called:
+//
+//	J0(2.5) = -0.0723182119715167   want -0.04838377646819797
+//	Y0(2.5) = +0.499417646028127    want +0.4980703596152319
+//
+// pzero and qzero themselves were verified correct to 16 digits against an
+// independent reference, which is how the guard was found rather than a table.
+// `Two129` is now the exact hex float 0x1p129, and lgamma.mx's
+// `Tiny = 1.0 / (1 << 70)` is 0x1p-70 for the same reason.
+package main
+
+import "math"
+
+func close(got, want float64) (ok bool) {
+	d := got - want
+	if d < 0 {
+		d = -d
+	}
+	return d < 1e-14
+}
+
+func main() {
+	if !close(math.J0(2.0), 0.22389077914123567) {
+		panic("J0(2.0)")
+	}
+	if !close(math.J0(2.5), -0.04838377646819797) {
+		panic("J0(2.5)")
+	}
+	if !close(math.J0(3.0), -0.26005195490193343) {
+		panic("J0(3.0)")
+	}
+	if !close(math.J0(8.0), 0.17165080713755357) {
+		panic("J0(8.0)")
+	}
+	if !close(math.J0(10.0), -0.2459357644513483) {
+		panic("J0(10.0)")
+	}
+	if !close(math.J1(2.5), 0.4970941024642741) {
+		panic("J1(2.5)")
+	}
+	if !close(math.J1(10.0), 0.04347274616886144) {
+		panic("J1(10.0)")
+	}
+	if !close(math.Y0(2.5), 0.4980703596152319) {
+		panic("Y0(2.5)")
+	}
+	if !close(math.Y1(2.5), 0.14591813796678535) {
+		panic("Y1(2.5)")
+	}
+	lg, _ := math.Lgamma(3.0)
+	if !close(lg, 0.6931471805599455) {
+		panic("Lgamma(3)")
+	}
+	if !close(math.Gamma(3.0), 2.0) {
+		panic("Gamma(3)")
+	}
+	// the trig that the float-increment bug had broken
+	if !close(math.Sin(1.0), 0.8414709848078965) {
+		panic("Sin(1.0)")
+	}
+	println("ok")
+}
