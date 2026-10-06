@@ -4654,17 +4654,26 @@ The four source-level workarounds this limitation forced (two 128-bit bitmaps in
 and there is no reason to churn them - but they were symptoms, and this is the
 cause. Each is commented with why it is spelled that way.
 
-## Still open, separate, and both PRE-EXISTING
+## FIXED in round 66 (`25268ca8`): both remaining discrepancies
 
-Both are inline-only; the same values written as named constants are correct, and
-both were wrong before any of this work:
+1. `cvFloat` returned `cf.V` for a ConstFloat and ignored `Exact`, so an inline
+   hex float literal came out doubled:
 
-    const X = 0x1p129;  float64(X)       -> 6.80564733841877e+038   correct
-                        float64(0x1p129) -> 1.36112946768375e+039   TWICE the value
-    const M = 1<<64-1;  ...              -> 18446744073709551615    correct
-                        (1<<64-1).String() -> -1                    WRONG
+       const X = 0x1p129; float64(X)       -> 6.80564733841877e+038   correct
+                          float64(0x1p129) -> 1.36112946768375e+039   TWICE
 
-Same shape as the constant-receiver bug fixed in round 56 (a parenthesised/inline
-constant expression taking a different path from the same value in a variable or
-named constant), so the next step is to look at how an inline constant expression
-is given its default type, not at the folder.
+2. The default type of an untyped int is int64 (`UntypedToTyped`), which cannot
+   hold an unsigned-marked constant, so the builtin Stringer printed it signed:
+
+       (1<<64-1).String()  ->  -1
+       (1<<63).String()    ->  -9223372036854775808
+
+   `resolveMethodCallWithRecv` now resolves the builtin method on uint64 when the
+   receiver carries the Unsigned marker. Go rejects both expressions outright (the
+   constant overflows int); uint64 is the type that holds them.
+
+**Correction to the previous round's note:** this was NOT inline-only.
+`const MaxU = 1<<64-1; MaxU.String()` was -1 as well - the earlier probe had
+measured `float64(1<<64-1)`, a different expression. Measuring the *exact*
+expression under discussion, not a nearby one, is the lesson; it has now cost
+time in both directions.
