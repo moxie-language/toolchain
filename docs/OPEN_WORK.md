@@ -4249,6 +4249,32 @@ every >64-bit constant in the tree is a landmine, and this one was found only
 because it happened to gate HTTP parsing. The folding fix (plus its legacy
 mirror) is still the real item.
 
+## Second site of the 128-bit bitmap bug: `mime.isTokenChar`
+
+Round 57 found the same 128-bit untyped-constant bitmap in `src/mime/grammar.mx`
+that round 52 fixed in `src/net/textproto/reader.mx`. Both halves came back zero,
+so every letter was rejected as a token character and
+
+    mime.ParseMediaType("text/plain; charset=utf-8")
+      -> "mime: no media type"
+
+`mime` is on net/http's Content-Type path and net/mail's, so this was live. Fixed
+with the same two-64-bit-halves split; verified `mediatype=[text/plain]
+charset=[utf-8]`, and the new fixture `mime_media_type_parse.mx` panics pre-fix.
+
+Also found while sweeping for >64-bit constants, and NOT yet fixed:
+
+- `src/math/j0.mx`, `j1.mx`, `jn.mx` (several sites): `Two129 = 1 << 129`, used
+  in float arithmetic. Losing the high bits makes `Two129` wrong, so the Bessel
+  functions are wrong for large arguments.
+- `src/math/lgamma.mx`: `Tiny = 1.0 / (1 << 70)`.
+- `frac`-style helpers in the same files.
+
+These are the same class and should be checked with a probe rather than
+rewritten blind - `1 << 129` feeding a float comparison may or may not change the
+result. Sweep for `<<` with a count >= 64 and for 128-bit mask literals; two
+have now been found only because they gated parsing.
+
 ## Operational: cheap isolation beats the expensive end-to-end probe
 
 The net/http probe costs ~20 minutes to build, and the failing layer was found
