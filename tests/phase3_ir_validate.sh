@@ -14,33 +14,48 @@ fi
 
 td="$(tempdir "irval")"; rm -rf "$td"; mkdir -p "$td"
 
-for pkg in token mxutil syntax types; do
-	name="ir:$pkg"
-	t0=$(date +%s%N)
-	log="$td/${pkg}_build.log"
-	rc=0
-	MOXIEROOT="$ROOT" "$MOXIE" build -o "$td/${pkg}_out" "$ROOT/pkg/$pkg" >"$log" 2>&1 || rc=$?
-	if [ $rc -ne 0 ]; then
-		if grep -qE "panic:|caught signal|nil pointer" "$log" 2>/dev/null; then
-			log_fail "$name" "crash"
-		else
-			log_pass "$name" "0.0s (linker only)"
-		fi
-		rm -rf "$td"
-		continue
-	fi
-	# Try to find the .ll file and verify it
-	llfile=$(find "$td" -name "*.ll" 2>/dev/null | head -1)
-	if [ -n "$llfile" ]; then
-		if opt -verify "$llfile" >/dev/null 2>&1; then
-			t1=$(date +%s%N)
-			log_pass "$name" "ok"
-		else
-			log_fail "$name" "LLVM IR verification failed"
-		fi
-	else
-		t1=$(date +%s%N)
-		log_pass "$name" "0 (no .ll)"
-	fi
+# pkg/types imports pkg/syntax, pkg/token and pkg/mxutil, so ONE forced build
+# emits the IR of all four and every module can be verified.
+#
+# -a is required: the cache answers every package otherwise, no module is
+# emitted, and the phase has nothing to check.
+# -work is required: the compiler unlinks each .ll as soon as clang has read
+# it, so the emitted IR only survives in a kept scratch directory.
+#
+# The link is expected to fail - these are libraries, not commands, and the
+# tree has no main.main. Compilation is what this phase is about, so the
+# verdict comes from whether each module was emitted and whether opt accepts
+# it, never from the exit status alone.
+log="$td/build.log"
+MOXIEROOT="$ROOT" "$MOXIE" build -a -work -o /dev/null "$ROOT/pkg/types" >"$log" 2>&1 || true
+
+workdir=$(sed -n 's/^WORK=//p' "$log" | tail -1)
+if [ -z "$workdir" ] || [ ! -d "$workdir" ]; then
+	log_fail "ir:build" "$(tail -1 "$log" 2>/dev/null || echo 'no build log')"
 	rm -rf "$td"
-done
+else
+	bad=""
+	verified=0
+	for ll in "$workdir"/*.ll; do
+		[ -f "$ll" ] || continue
+		verified=$((verified + 1))
+		if ! opt -passes=verify -disable-output "$ll" >"$td/verify.log" 2>&1; then
+			bad="$(basename "$ll"): $(tail -1 "$td/verify.log")"
+			break
+		fi
+	done
+	for pkg in token mxutil syntax types; do
+		name="ir:$pkg"
+		if [ -n "$bad" ]; then
+			log_fail "$name" "$bad"
+		elif [ "$verified" -lt 4 ]; then
+			log_fail "$name" "only $verified module(s) emitted"
+		elif ! grep -q "compile .*/pkg/$pkg\b" "$log"; then
+			log_fail "$name" "package never compiled"
+		else
+			log_pass "$name" "ok"
+		fi
+	done
+	rm -rf "$workdir"
+	rm -rf "$td"
+fi

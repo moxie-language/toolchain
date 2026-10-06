@@ -13,6 +13,22 @@ source "$SCRIPT_DIR/util.sh"
 
 LEGACY="${LEGACY:-$ROOT/legacy/moxie}"
 
+# The legacy loader shells out to the Go toolchain for go/types, so the legacy
+# side of every comparison needs a real GOROOT. This used to be the hardcoded
+# /tmp/moxie-goroot, which is a scratch path: once it was gone every legacy case
+# failed with "go: cannot find GOROOT directory", reading as eight compiler
+# disagreements that were nothing of the sort. Resolve the toolchain that is
+# actually installed, and if there is none, skip the legacy half loudly - a
+# comparison with no reference is not evidence.
+LEGACY_GOROOT="${LEGACY_GOROOT:-}"
+if [ -z "$LEGACY_GOROOT" ]; then
+	if command -v go >/dev/null 2>&1; then
+		LEGACY_GOROOT="$(go env GOROOT 2>/dev/null)"
+	elif [ -n "${GOROOT:-}" ] && [ -x "$GOROOT/bin/go" ]; then
+		LEGACY_GOROOT="$GOROOT"
+	fi
+fi
+
 echo ""
 echo "=== Phase 6: build tags and allocation instrumentation ==="
 
@@ -619,8 +635,12 @@ reject_fixture() {
 		fxdir="$(fixture "$fx")"
 		rc=0
 		if [ "$cc" = "$LEGACY" ]; then
-			# The legacy loader shells out to the Go toolchain for go/types.
-			PATH="/tmp/moxie-goroot/bin:$PATH" GOROOT=/tmp/moxie-goroot \
+			if [ -z "$LEGACY_GOROOT" ]; then
+				log_skip "$name" "no Go toolchain for the legacy loader"
+				rm -rf "$td" "$fxdir"
+				continue
+			fi
+			PATH="$LEGACY_GOROOT/bin:$PATH" GOROOT="$LEGACY_GOROOT" \
 				MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$fxdir" >"$td/build.log" 2>&1 || rc=$?
 		else
 			MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$fxdir" >"$td/build.log" 2>&1 || rc=$?
@@ -662,7 +682,12 @@ reject_conflict_fixture() {
 		fxdir="$(fixture "$fx")"
 		rc=0
 		if [ "$cc" = "$LEGACY" ]; then
-			PATH="/tmp/moxie-goroot/bin:$PATH" GOROOT=/tmp/moxie-goroot \
+			if [ -z "$LEGACY_GOROOT" ]; then
+				log_skip "$name" "no Go toolchain for the legacy loader"
+				rm -rf "$td" "$fxdir"
+				continue
+			fi
+			PATH="$LEGACY_GOROOT/bin:$PATH" GOROOT="$LEGACY_GOROOT" \
 				MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$fxdir" >"$td/build.log" 2>&1 || rc=$?
 		else
 			MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$fxdir" >"$td/build.log" 2>&1 || rc=$?
