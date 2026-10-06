@@ -1809,7 +1809,24 @@ func (fb *ssaFuncBuilder) buildAssign(s *syntax.AssignStmt) {
 		if lv == nil {
 			return
 		}
-		one := &SSAConst{typ: lv.SSAType(), val: &ConstInt{V:1}}
+		// The 1 must be a constant OF the operand's kind, not an integer merely
+		// LABELLED with the operand's type. Building it as ConstInt while
+		// setting typ to the lvalue's type made `x++` a silent no-op on floats:
+		//
+		//	y := 2.0; y++   -> y is still 2.0
+		//	i := int64(2); i++ -> 3   (integers were never affected)
+		//
+		// That is what broke math.Sin and math.Cos: their range reduction does
+		// `j++; y++` after a float conversion, so y stayed the un-incremented
+		// value and Sin(1.0) returned 0.977061263899476 instead of
+		// 0.8414709848078965. Everything downstream of trig went with it -
+		// math.J0(2.5) was -0.404278302239057 instead of -0.04838377646819797.
+		var one SSAValue
+		if b, isBasic := SafeUnderlying(lv.SSAType()).(*Basic); isBasic && b.Info&IsFloat != 0 {
+			one = &SSAConst{typ: lv.SSAType(), val: &ConstFloat{V:1.0}}
+		} else {
+			one = &SSAConst{typ: lv.SSAType(), val: &ConstInt{V:1}}
+		}
 		op := OpAdd
 		if s.Op == token.Sub {
 			op = OpSub

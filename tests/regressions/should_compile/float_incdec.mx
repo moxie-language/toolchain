@@ -1,0 +1,81 @@
+// Regression: `x++` and `x--` on a FLOAT must actually change x.
+//
+// buildAssign's `Rhs == nil` branch built the literal 1 as a ConstInt and merely
+// LABELLED it with the operand's type:
+//
+//	one := &SSAConst{typ: lv.SSAType(), val: &ConstInt{V:1}}
+//
+// so the RHS domain never matched a float operand and the statement compiled to
+// nothing:
+//
+//	y := 2.0; y++      -> y is still 2.0
+//	f := 1.5; f++      -> f is still 1.5
+//	i := int64(2); i++ -> 3        (integers were never affected)
+//	y += 1             -> 3        (compound assignment was never affected)
+//
+// The 1 is now a ConstFloat for a float operand.
+//
+// This is the bug behind math.Sin and math.Cos: their range reduction does
+// `j++; y++` with y a float64, so y stayed un-incremented and the reduced
+// argument was wrong. Sin(1.0) returned 0.977061263899476 instead of
+// 0.8414709848078965, and everything downstream of trig went with it.
+package main
+
+import "math"
+
+func main() {
+	// float64, repeatedly, both directions
+	y := 2.0
+	y++
+	if y != 3.0 {
+		panic("y++ on float64")
+	}
+	y++
+	if y != 4.0 {
+		panic("y++ twice")
+	}
+	y--
+	if y != 3.0 {
+		panic("y-- on float64")
+	}
+
+	var f float32 = 1.25
+	f++
+	if f != 2.25 {
+		panic("f++ on float32")
+	}
+	f--
+	if f != 1.25 {
+		panic("f-- on float32")
+	}
+
+	// integers must keep working (this was the only case that did)
+	i := int64(2)
+	i++
+	i++
+	i--
+	if i != 3 {
+		panic("int64 ++/--")
+	}
+	var u uint32 = 7
+	u++
+	if u != 8 {
+		panic("uint32 ++")
+	}
+
+	// an element, not just a variable
+	p := []int32{1, 2, 3}
+	p[1]++
+	if p[1] != 3 {
+		panic("p[1]++")
+	}
+
+	// and the trig that depended on it
+	if math.Sin(1.0) != 0.8414709848078965 {
+		panic("Sin(1.0)")
+	}
+	if math.Cos(1.0) != 0.5403023058681398 {
+		panic("Cos(1.0)")
+	}
+	println("ok")
+}
