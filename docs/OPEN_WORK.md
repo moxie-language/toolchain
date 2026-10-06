@@ -3765,7 +3765,24 @@ caught in the map-update store instead of a map index.
     once; needs the bisect).
 11. stdlib capturing deferred closures are mis-compiled (13 files).
 12. The widened predicate sweep (items 1, 3, 11, 12, 14, 15 gate it).
-13. `fmt` prints `?` for a Named type over a basic (`time.Duration`); broad.
+13. `fmt` prints `?` for a Named type over a basic (`time.Duration`) - but only
+    for NUMERIC verbs. Measured in round 53 with a probe:
+
+        var d time.Duration = 1500000000
+        d.String()        -> "1.5s"
+        Sprintf("%v", d)  -> "1.5s"      (was the broken case; now correct)
+        Sprintf("%s", d)  -> "1.5s"
+        Sprintf("%d", d)  -> "?"         (Go prints 1500000000)
+        Sprintf("%v", MyInt(42)) with its own String() -> "MyInt!"
+        Sprintf("%v", int32(7))  -> "7"
+
+    So the Stringer path through `fmt` is fixed and what is left is the numeric
+    verbs: `%d`/`%x`/... on a Named type whose underlying type is a Basic.
+    `fmt` takes `...Stringer`, so there is no numeric method to call, and a
+    Named-over-basic has no promoted one; Go reaches the underlying int64 by
+    reflection, which Moxie does not have. Narrow, not broad - and it needs a
+    decision (a promoted numeric formatter on Named-over-basic, or leave `%d`
+    on such a type unsupported).
 14. `runtime_makeStrongFromWeak`: closed with no code change (no references).
 
 # ============ UPDATE: round 49 — generic aggregates, dead aggregate loads, phase 3 ============
