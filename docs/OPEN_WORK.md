@@ -4287,9 +4287,19 @@ light before doing any big.Int work** - the reported garbage values
 (9741466863665152, 288068722172624896, 9741466930774015) all have this
 replicated-32-bit smell, and `1<<26-1` needs no more than 64 bits at all.
 
-Next step: find where a method call's CONSTANT receiver is built. Look at how
-`buildExpr` on a `*syntax.ParenExpr` / `*syntax.BasicLit` receiver produces its
-`SSAConst` type, and at the widening the emitter applies to it - the correct
-behaviour is the same as assigning the constant to a variable of its default
-type first (`a.String()` is right, so the variable path already widens
-correctly). Nothing was changed in round 55; the tree is as it was.
+**FIXED in round 56** (`08cdbd61`). The cause was a type/width mismatch across
+two functions: `resolveMethodCallWithRecv` resolves the builtin Stringer from the
+operand's DEFAULT type (`UntypedToTyped` maps an untyped int to int64), while
+`resolveBuiltinMethod` allocated its receiver temporary at the OPERAND's type -
+i32 for a folded constant. `(*int64).String` then read 8 bytes out of a 4-byte
+alloca. The temporary is now allocated at the resolved type and `emitStore`
+widens into it. Verified: all six shapes above return the right value, a typed
+variable is unchanged, negative constants sign-extend (`(-7).String()` is
+`-7`), and a named type with its own Stringer still wins. The new fixture
+`const_receiver_width.mx` panics pre-fix with
+`(40+2).String() = 180388626474`.
+
+Consequence for the item below: the >64-bit "garbage" values recorded in round
+54 were largely this bug. `mask low 64` now reports 288068722172624896 instead of
+0 - the low half of the 128-bit mask is folded correctly and only the high half
+is still out of reach (`mask>>64` is still 0).
