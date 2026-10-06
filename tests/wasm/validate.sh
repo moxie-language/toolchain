@@ -21,7 +21,16 @@ if [ $# -gt 0 ]; then
 else
     for f in "$ROOT"/tests/regressions/should_compile/*.mx; do
         [ -f "$f" ] || continue
-        grep -q 'func main' "$f" && TARGETS+=("$f")
+        grep -q 'func main' "$f" || continue
+        # A fixture can declare itself native-only. The builtin Stringers exist
+        # only under the moxie.stringer build tag, which the wasm target does not
+        # carry, so a fixture that calls .String() on a builtin cannot even
+        # COMPILE for wasm - and a wasm build failure is a FAIL here, correctly,
+        # because it usually means the compiler is broken. The opt-out is
+        # explicit and opt-in: the fixture says so, and no pattern matching can
+        # quietly excuse a real failure.
+        grep -q '//:wasmtest skip' "$f" && continue
+        TARGETS+=("$f")
     done
     # Directory cases: main.mx plus a lib/ subpackage. A cross-package call is
     # not inlined and crosses the return codec, so whole classes of layout bug
