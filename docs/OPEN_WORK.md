@@ -11,7 +11,7 @@ Four repositories, all on branch `dev`, all level with their remotes
 
 | repo | what it is | last known state |
 |------|------------|------------------|
-| `moxie` | the compiler, runtime and stdlib | `694e3fbf`; `tests/run.sh --full`: 198 PASS / 0 FAIL / 0 SKIP, fixpoint PASS; net/http works end to end; mime + textproto token bitmaps fixed (round 57) |
+| `moxie` | the compiler, runtime and stdlib | `ad3f09ea`; `tests/run.sh --full`: 200 PASS / 0 FAIL / 0 SKIP, fixpoint PASS; net/http works end to end; float `++`/`--` fixed, which also repaired all of `math`'s trig (round 61) |
 | `nostr` | shared nostr primitives and codecs | `98c7069` (musiquay vocabulary moved out) |
 | `morly` | the relay (`pkg/relay`, `pkg/store`, ...) | `b7dba37` |
 | `musiquay` | the web app, docs corpus, protocol vocabulary | `8dd6f59` (vocabulary at `pkg/protocol`) |
