@@ -4618,3 +4618,53 @@ fixed in round 56:
 
 Worth chasing together with the conversion layer above, since both smell like the
 same emitter path.
+
+## CLOSED: the over-64-bit constant limitation
+
+Round 65 (`a984e0e6`) closed the last consumer. `intConstToFloat` (ir_binop.mx)
+materialises a float operand from `ci.String()`, and that rendered `V` - the low
+bits - so `1<<129` printed as "0" and
+
+    x := 2.5;  x > 1<<129   ->  true   (want false)
+
+for every positive x. `ConstInt.String` now returns the exact value when Exact is
+set.
+
+The full chain, all committed and suite-gated (204 PASS / 0 FAIL):
+
+| layer | commit |
+|---|---|
+| the folder keeps wide integer constants exactly (`ConstInt.Exact`) | `5dfae83e` |
+| a constant conversion is folded at build time (`foldConstConvert`) | `b390dbf8` |
+| `floatExact` and `cvFloat` read Exact | `b390dbf8` |
+| `ConstInt.String` renders Exact | `a984e0e6` |
+
+Before -> after, one probe, one compiler otherwise:
+
+    float64(1<<129)        0 -> 6.80564733841877e+038
+    float64(1<<70)         0 -> 1.18059162071741e+021
+    1.0/(1<<70)            0 -> 8.470329472543003e-22
+    ((1<<26-1)<<'A')>>64   0 -> 134217726
+    (1<<70)>>64            0 -> 64
+    2.5 > 1<<129        true -> false
+
+The four source-level workarounds this limitation forced (two 128-bit bitmaps in
+`net/textproto` and `mime`, `Two129` in `math/j0.mx` and `j1.mx`, `Two302` in
+`math/jn.mx`, `Tiny` in `lgamma.mx`) all remain - they are correct as written now
+and there is no reason to churn them - but they were symptoms, and this is the
+cause. Each is commented with why it is spelled that way.
+
+## Still open, separate, and both PRE-EXISTING
+
+Both are inline-only; the same values written as named constants are correct, and
+both were wrong before any of this work:
+
+    const X = 0x1p129;  float64(X)       -> 6.80564733841877e+038   correct
+                        float64(0x1p129) -> 1.36112946768375e+039   TWICE the value
+    const M = 1<<64-1;  ...              -> 18446744073709551615    correct
+                        (1<<64-1).String() -> -1                    WRONG
+
+Same shape as the constant-receiver bug fixed in round 56 (a parenthesised/inline
+constant expression taking a different path from the same value in a variable or
+named constant), so the next step is to look at how an inline constant expression
+is given its default type, not at the folder.
