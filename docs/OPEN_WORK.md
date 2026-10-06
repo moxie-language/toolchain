@@ -4275,6 +4275,40 @@ rewritten blind - `1 << 129` feeding a float comparison may or may not change th
 result. Sweep for `<<` with a count >= 64 and for 128-bit mask literals; two
 have now been found only because they gated parsing.
 
+## NEW and separate: an unsigned constant >= 2^63 converts to a NEGATIVE float64
+
+Found in round 58 while probing the >64-bit constants in `src/math`. This one is
+entirely WITHIN 64 bits and is a silent wrong value:
+
+    float64(1<<62)   = +4.61168601842739e+018   correct (fits int64)
+    float64(1<<63)   = -9.22337203685478e+018   want +9.223372036854776e+18
+    float64(1<<63+1) = -9.22337203685478e+018   want +9.223372036854776e+18
+    float64(1<<64-1) = -1.00000000000000e+000   want +1.8446744073709552e+19
+
+`cvFloat` handles the `Unsigned` marker correctly (`float64(uint64(ci.V))`), so
+the mark is being LOST before it gets there. Prime suspect: `MaskConstToBasic`'s
+`Int64` branch returns `&ConstInt{V:n}` and drops `Unsigned` deliberately ("a
+signed 64-bit target is a genuinely signed value") - which is right when the
+target really is int64, but `1<<64-1` converted to int64 should be an OVERFLOW
+ERROR, not -1. The next step is to find which conversion path reaches that branch
+for a float64 target.
+
+Blast radius: `1 << 64 - 1` is `math.MaxUint64` and appears in
+`src/internal/runtime/math/math.mx`, `src/math/const.mx`,
+`src/math/bits/bits.mx` (three sites), `src/internal/runtime/sys/intrinsics.mx`,
+`src/saferio/io.mx`, `src/debug/elf/file.mx` and `src/net/http/h2_bundle.mx`
+(twice). Any of those converting to float64 gets -1.
+
+## NEW: `math.J0` is wrong for arguments >= 2
+
+    math.J0(1.0)   = +7.65197686557967e-001    expect  0.7651976865579666   ok
+    math.J1(1.0)   = +4.40050585744934e-001    expect  0.4400505857449335   ok
+    math.J0(2.5)   = -4.04278302239057e-001    expect -0.04838377646819797 WRONG
+
+J0 is right for |x| < 2 and badly wrong above it, so the fault is in the
+rational-approximation branch (j0.mx), not in the `Two129` guard. Unexplored -
+recorded so the finding is not lost. `Lgamma(3)` and `Gamma(3)` are correct.
+
 ## Operational: cheap isolation beats the expensive end-to-end probe
 
 The net/http probe costs ~20 minutes to build, and the failing layer was found
