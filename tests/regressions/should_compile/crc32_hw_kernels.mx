@@ -1,0 +1,82 @@
+// Regression: hash/crc32's hardware kernels must exist AND be correct.
+//
+// crc32_amd64.mx declared castagnoliSSE42, castagnoliSSE42Triple and ieeeCLMUL
+// as bodiless functions "defined in crc32_amd64.s", and arm64 did the same for
+// castagnoliUpdate/ieeeUpdate. Those .s files were never ported and there is no
+// assembler pass for them, so every binary whose closure reached crc32 died at
+// link with "undefined symbol: hash/crc32.castagnoliSSE42" - which is exactly
+// where src/net/http stopped once its codegen blockers were gone.
+//
+// A CRC is a function of its input, not of the instruction that computed it, so
+// the same update is now written in Moxie (crcRawUpdate, the reflected register
+// update with no inversion - the form the hardware kernels have and the form
+// the callers expect, since they invert themselves).
+//
+// This pins both halves: the standard check values, and agreement between the
+// arch path and the generic table path for lengths that cross every internal
+// threshold. Update() picks the arch kernels only for the instance's OWN
+// tables; a table built by another instance falls through to simpleUpdate, so
+// the two paths for the same polynomial can be compared directly.
+package main
+
+import "hash/crc32"
+
+func fill(n int32) (b []byte) {
+	b = []byte{:n}
+	for i := int32(0); i < n; i++ {
+		b[i] = byte((i*7 + 13) & 0xff)
+	}
+	return b
+}
+
+func agree(n int32, c1, c2 *crc32.CRC32) {
+	data := fill(n)
+	ieeeArch := c1.Update(0, c1.IEEETable(), data)
+	ieeeGen := c1.Update(0, c2.IEEETable(), data)
+	castArch := c1.Update(0, c1.MakeTable(crc32.Castagnoli), data)
+	castGen := c1.Update(0, c2.MakeTable(crc32.Castagnoli), data)
+	if ieeeArch != ieeeGen {
+		panic("ieee arch != generic")
+	}
+	if castArch != castGen {
+		panic("castagnoli arch != generic")
+	}
+	if n == 10000 {
+		// Fixed by an independent (non-Moxie) oracle over the same pattern.
+		if ieeeArch != 1494190728 {
+			panic("ieee 10000 value")
+		}
+		if castArch != 369340837 {
+			panic("castagnoli 10000 value")
+		}
+	}
+}
+
+func main() {
+	c1 := crc32.NewCRC32()
+	c2 := crc32.NewCRC32()
+
+	// The standard check value for "123456789".
+	if c1.ChecksumIEEE([]byte("123456789")) != 0xCBF43926 {
+		panic("ieee check value")
+	}
+	if c1.Update(0, c1.MakeTable(crc32.Castagnoli), []byte("123456789")) != 0xE3069283 {
+		panic("castagnoli check value")
+	}
+
+	// 504 crosses castagnoliK1*3, 4032 crosses castagnoliK2*3, 64 crosses the
+	// IEEE CLMUL threshold, and the odd sizes leave a tail for the single-stream
+	// update after the triple loop.
+	agree(9, c1, c2)
+	agree(63, c1, c2)
+	agree(64, c1, c2)
+	agree(503, c1, c2)
+	agree(504, c1, c2)
+	agree(505, c1, c2)
+	agree(4031, c1, c2)
+	agree(4032, c1, c2)
+	agree(4033, c1, c2)
+	agree(10000, c1, c2)
+
+	println("ok")
+}

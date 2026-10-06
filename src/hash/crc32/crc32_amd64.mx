@@ -16,27 +16,59 @@ import (
 // This file contains the code to call the SSE 4.2 version of the Castagnoli
 // and IEEE CRC.
 
-// castagnoliSSE42 is defined in crc32_amd64.s and uses the SSE 4.2 CRC32
-// instruction.
+// The SSE 4.2 CRC32 instruction and the PCLMULQDQ kernels have no assembler
+// pass in this tree and their .s files were never ported, so these three used
+// to be bodiless declarations. Every binary whose closure reached crc32 then
+// died at link: "undefined symbol: hash/crc32.castagnoliSSE42",
+// "castagnoliSSE42Triple", "ieeeCLMUL" - which is where src/net/http stopped
+// once its codegen blockers were gone.
 //
-//:noescape
-func castagnoliSSE42(crc uint32, p []byte) (out uint32)
+// A CRC is a function of its input, not of the instruction that computed it, so
+// the same update is written out here in Moxie. What the hardware kernels
+// compute - and what archUpdateIEEE/archUpdateCastagnoli expect - is the
+// reflected register update with NO pre- or post-inversion; both callers invert
+// the value themselves (`^ieeeCLMUL(^crc, ...)`, `crc = ^crc; ...; return ^crc`),
+// so the raw form is what belongs here.
 
-// castagnoliSSE42Triple is defined in crc32_amd64.s and uses the SSE 4.2 CRC32
-// instruction.
-//
-//:noescape
+// crcRawUpdate is one reflected CRC register update with no inversion.
+func crcRawUpdate(crc uint32, poly uint32, p []byte) (out uint32) {
+	for _, v := range p {
+		crc = crc ^ uint32(v)
+		for k := 0; k < 8; k++ {
+			if crc&1 != 0 {
+				crc = (crc >> 1) ^ poly
+			} else {
+				crc >>= 1
+			}
+		}
+	}
+	return crc
+}
+
+// castagnoliSSE42 updates one stream with Castagnoli's polynomial.
+func castagnoliSSE42(crc uint32, p []byte) (out uint32) {
+	return crcRawUpdate(crc, Castagnoli, p)
+}
+
+// castagnoliSSE42Triple updates three independent streams. The hardware
+// interleaves them for instruction-level parallelism; each stream is still a
+// sequential update over its own rounds*24 bytes, which is exactly how far the
+// caller advances p (castagnoliK2/24 * 24 == castagnoliK2).
 func castagnoliSSE42Triple(
 	crcA, crcB, crcC uint32,
 	a, b, c []byte,
 	rounds uint32,
-) (retA uint32, retB uint32, retC uint32)
+) (retA uint32, retB uint32, retC uint32) {
+	nn := int32(rounds) * 24
+	return crcRawUpdate(crcA, Castagnoli, a[:nn]),
+		crcRawUpdate(crcB, Castagnoli, b[:nn]),
+		crcRawUpdate(crcC, Castagnoli, c[:nn])
+}
 
-// ieeeCLMUL is defined in crc_amd64.s and uses the PCLMULQDQ
-// instruction as well as SSE 4.1.
-//
-//:noescape
-func ieeeCLMUL(crc uint32, p []byte) (out uint32)
+// ieeeCLMUL updates one stream with the IEEE polynomial.
+func ieeeCLMUL(crc uint32, p []byte) (out uint32) {
+	return crcRawUpdate(crc, IEEE, p)
+}
 
 const castagnoliK1 = 168
 const castagnoliK2 = 1344
