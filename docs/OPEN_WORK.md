@@ -4313,6 +4313,35 @@ J0 is right for |x| < 2 and badly wrong above it, so the fault is in the
 rational-approximation branch (j0.mx), not in the `Two129` guard. Unexplored -
 recorded so the finding is not lost. `Lgamma(3)` and `Gamma(3)` are correct.
 
+## The `>= 64` shift sweep, completed
+
+Round 62 swept the whole tree (`src/`, `pkg/`, `_mxc_stage4/`) for `<<` with a
+count >= 64, because three live consumers of the >64-bit constant limitation had
+been found only by accident. Result: **15 sites, one of them still broken.**
+
+- `src/math/jn.mx:57,236` - `Two302 = 1 << 302`, twice, in `Jn` and `Yn`. Fixed to
+  `0x1p302`. Same failure as j0/j1: the guard `x >= Two302` was true for every
+  positive x, so `Jn(2,2.5)` was 0.411370710840181 against a true 0.4460590584396173.
+- Every other hit is `1<<64 - 1` (MaxUint64), which FITS uint64 and is correct:
+  `math/const.mx`, `math/bits` (x3), `internal/runtime/math`,
+  `internal/runtime/sys/intrinsics`, `saferio/io.mx`, `debug/elf/file.mx`,
+  `strconv/atoi.mx`, `net/http/h2_bundle.mx` (x3), plus the `(1<<64-1)/x` division
+  forms.
+- `src/mime/grammar.mx`'s `isTSpecial` was flagged and is **NOT affected**: all
+  its tspecials are ASCII below 64, so its mask never exceeded 64 bits. Measured
+  pre- and post-change behaviour on quoted-string escapes (`\(` unescaping) and
+  RFC 2231 percent-encoding and they were identical, so the edit was reverted as
+  cosmetic rather than committed as a fix. `isTokenChar` in the same file WAS
+  affected (its mask spans bits 33..126) and was fixed in round 57.
+- Huge decimal literals flagged by the sweep (`nistec.mx`'s curve primes,
+  `strconv/decimal.mx`, `strconv/itoa.mx`'s digit pairs) are inside STRING
+  arguments (`bigFromDecimal("...")`, `{9, "..."}`, `"2021..." | "..."`), not
+  numeric constants. Not affected.
+
+Method note: the sweep's first cut matched digits inside string literals and would
+have sent me chasing `strconv` and `crypto/elliptic`; reading each hit before
+acting is what kept that from becoming three wasted rounds.
+
 ## Operational: cheap isolation beats the expensive end-to-end probe
 
 The net/http probe costs ~20 minutes to build, and the failing layer was found
