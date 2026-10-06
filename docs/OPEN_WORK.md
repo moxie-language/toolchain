@@ -4677,3 +4677,73 @@ cause. Each is commented with why it is spelled that way.
 measured `float64(1<<64-1)`, a different expression. Measuring the *exact*
 expression under discussion, not a nearby one, is the lesson; it has now cost
 time in both directions.
+
+# ============ UPDATE: round 67 — crypto/ecdsa fails on a NONDETERMINISTIC package-name lookup ============
+
+## Survey first
+
+Built each package the objective names, with the current compiler, reading the
+first `*.mx:NN:` error rather than trusting the compiler's "compile errors"
+header (which is printed even when there are none - the first survey said all
+seven failed because of that):
+
+    debug/gosym                        ok
+    internal/coverage/encodecounter    ok
+    internal/coverage/encodemeta       ok
+    internal/coverage/cformat          ok
+    internal/trace/.../tracev1         ok
+    crypto/ed25519                     ok      <- the ed25519 item is closed
+    crypto/x509                        ok
+    crypto/ecdsa                       FAIL
+
+So the objective's gosym, coverage, tracev1 and ed25519 items are done, and
+`crypto/ecdsa` is the one real compile failure left among them. `net/http`
+compiles (the survey timed out on it only because it takes ~25 minutes).
+
+## The ecdsa failure is a nondeterminism bug, not a type bug
+
+    ecdsa.mx:642: cannot use value of type *crypto/internal/fips140/ecdsa.PublicKey
+                  as *ecdsa.PublicKey in return statement
+    ecdsa.mx:650: ... *crypto/internal/fips140/ecdsa.PrivateKey as *ecdsa.PrivateKey ...
+
+`src/crypto/ecdsa` is `package ecdsa` AND imports
+`crypto/internal/fips140/ecdsa`, which is also named `ecdsa` - exactly as Go's own
+source does. Inside that file a qualified `ecdsa.X` must therefore mean the
+IMPORT, because Go's rule is that an import named X shadows the package's own
+name within the file.
+
+`resolveTypeExprWithSubst`'s SelectorExpr case (`ssa_builder.mx`) does not do
+that. It calls `cctx.universe.LookupByName(pkgName.Value)`, and LookupByName
+(`pkg/types/tc_universe.mx`) builds a global `ByName[p.Name] = p` map:
+
+    for _, p := range u.Registry { u.ByName[p.Name] = p }
+
+With two loaded packages named `ecdsa`, **the winner is decided by map iteration
+order**. So this is the project's "incoherence" failure mode - the same source
+can compile or not depending on the run - and it has a DEPRECATED comment on the
+global bridge already ("Do not add new reads"), which this path is.
+
+## The fix, ready to apply
+
+Resolve the qualifier through the DECLARING package's imports before falling back
+to the global map. `TCPackage` has `Imports []*TCPackage`, so the lookup is:
+
+    for _, im := range declaring.Imports {
+        if im.Name == pkgName.Value {
+            if tn, ok := im.Scope.Lookup(ev.Sel.Value).(*TypeName); ok { return tn.Typ }
+        }
+    }
+
+Two things to settle first:
+
+1. `resolveTypeExprWithSubst` is package-level and receives only `pkgScope`. Either
+   thread the declaring `*TCPackage` in (three call sites: resolveMethodSigWithSubst,
+   resolveSignatureWithSubst, resolveTypeArgsExpr) or recover it from
+   `cctx.genericPkgScopes`' key, which is the package path.
+2. The `*syntax.Name` case just above consults `pkgScope` but accepts only a
+   `*TypeName`; imports are not in that scope, so the SelectorExpr case is the only
+   place that needs the import table.
+
+Worth doing together: make `LookupByName` deterministic (iterate sorted keys) so
+that any remaining caller is at least reproducible, and audit its other callers -
+the comment says it is deprecated, and every remaining read is a latent collision.
