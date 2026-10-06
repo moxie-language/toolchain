@@ -11,7 +11,7 @@ Four repositories, all on branch `dev`, all level with their remotes
 
 | repo | what it is | last known state |
 |------|------------|------------------|
-| `moxie` | the compiler, runtime and stdlib | `6250a720`; `tests/run.sh --full`: 193 PASS / 0 FAIL / 0 SKIP, fixpoint PASS; round-50 flate + crc32 fixes, net/http compiles and reaches the link (see the last sections) |
+| `moxie` | the compiler, runtime and stdlib | `6250a720`; `tests/run.sh --full`: 193 PASS / 0 FAIL / 0 SKIP, fixpoint PASS; net/http programs build, link and run; see the round-51 sections for the subslice-rule finding |
 | `nostr` | shared nostr primitives and codecs | `98c7069` (musiquay vocabulary moved out) |
 | `morly` | the relay (`pkg/relay`, `pkg/store`, ...) | `b7dba37` |
 | `musiquay` | the web app, docs corpus, protocol vocabulary | `8dd6f59` (vocabulary at `pkg/protocol`) |
@@ -4067,3 +4067,44 @@ assumes one of the two. Round 51 records it rather than changing either.
   `forkExecPipe`, which fills them through `Pipe2`. Under the rule as written
   that looked like a lost write; under the measured behaviour it is a view and
   works. Left alone, with the measurement above as the reason.
+
+## A program that imports net/http now builds, links and RUNS
+
+    MOXIEROOT=$PWD mxc build -o probe-nh.bin ./probe-nh    # imports net/http
+    ./probe-nh.bin
+
+    wrote GET /a/b?q=1 HTTP/1.1
+    Host: example.com
+    User-Agent: Go-http-client/1.1
+    Accept: text/plain
+    X-Test: hello
+
+    panic: ReadRequest
+
+The whole closure compiles (zero clang errors), links, and the program runs:
+`http.NewRequest`, `url` parsing, `Header.Set`, and `Request.Write` all produce
+exactly the right bytes - the request line, Host, and both headers, in order.
+
+`http.ReadRequest(bufio.NewReader(buf))` over the buffer just written then
+returns an error, and the probe panics on it before printing anything about the
+error. That is the next thing to look at, and the first candidate is the same
+class this round kept finding: the reader is handed as an INTERFACE
+(`*bytes.Buffer` -> `io.Reader` -> `bufio.NewReader`), and a value stored in an
+interface at a different type than the callee expects is how several of the
+earlier net/http blockers presented. Second candidate: `bufio.Reader` over a
+`bytes.Buffer`. Third: `readRequest` rejecting the shape, which is least likely
+given the bytes above are a well-formed request.
+
+To diagnose cheaply, print the error instead of panicking on it
+(`gerr.Error()` / `gerr.String()`), then read `readRequest`'s failure paths.
+The probe takes ~20 minutes to build, so get the whole diagnosis out of one run.
+
+## Operational: background builds must be detached
+
+Every long build in this round that was started with `nohup cmd &` from a tool
+call DIED silently when that call returned - the harness kills the process
+group, and `nohup` only ignores SIGHUP. It reads exactly like an OOM or a
+compiler crash at whatever stage it reached (`IR emit`, `compile objects`) and
+cost several rounds of misdiagnosis. Use
+`setsid bash -c '...' > log 2>&1 < /dev/null &` so the build owns its own
+process group, or keep the tool call alive until it finishes.
