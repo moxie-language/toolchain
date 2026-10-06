@@ -2445,17 +2445,37 @@ panics on its own `os` (see the bootstrap-artifact section above), so keep
   of type ([]byte, interface{Error() string; String() string}) as []byte`. These
   are genuinely wrong-ABI code that the `isUserPackagePath` gate has been hiding
   (see the soundness-gate section) - fix them, do not re-gate.
-- **stage4 constant folding is not exact for untyped float-containing
-  expressions.** `time.Date`/`time.Parse` are correct under legacy and wrong
-  under stage4: `time.Date(2023, March, 14, 15, 9, 26, 0, time.UTC()).Unix()`
-  gives `4744828235076861952` instead of `1678806566`, and
-  `absoluteToUnix` prints as `-9.223372e+018` (a float64) instead of an int64.
-  `src/time/time.mx:555`'s
-  `-(absoluteYears*365.2425 + marchThruDecember) * secondsPerDay` is an exact
-  untyped constant in Go (arbitrary-precision constant arithmetic) and must be
-  folded exactly, then converted; Moxie's folder goes through a float64 and
-  loses the low bits of a ~9.2e18 intermediate. The source is right; the fix is
-  in stage4's constant folding (and its legacy mirror already behaves).
+- **stage4 constant folding of untyped constants wider than 64 bits is not
+  exact** - still open. This entry used to describe `time.Date`/`time.Parse` as
+  broken; that is FIXED and this is the corrected, narrower statement.
+  Verified in round 53 with a `time`-only probe:
+
+      time.Date(2023, time.March, 14, 15, 9, 26, 0, time.UTC()).Unix()
+      -> 1678806566            (correct; the entry claimed 4744828235076861952)
+
+  `ConstFloat` carries `Exact *big.Rat`, which is how the time case was fixed:
+  the folder can now keep an untyped float-containing expression exact and
+  convert once at the end. `ConstInt` has no such field, so an untyped INTEGER
+  constant that needs more than 64 bits loses its high bits. Measured:
+
+      const hi = (1<<26 - 1) << 'A'
+      hi >> 64            -> 0            want 33554430
+      (round 52, the textproto bitmap:)
+      mask >> 64          -> 0            mask & (1<<64-1) -> 0
+
+  A mask literal that Go folds to a 128-bit bitmap came back with BOTH halves
+  zero, so `validHeaderFieldByte` rejected every letter and every MIME header
+  failed to parse. That source is worked around now (two 64-bit halves), but the
+  limitation remains and any other >64-bit untyped integer constant in the tree
+  is a landmine.
+
+  The fix is the one `ConstFloat` already demonstrates: give `ConstInt` an
+  `Exact *big.Int`, populate it in the folding ops (`Shl`, `Shr`, `And`, `Or`,
+  `Xor`, `AndNot`, `Mul`, `Quo`, `Rem`, the comparisons) and read it in the
+  conversions (`cvInt`, `cvUint`, `intConst`, `ToInt`, `constantValue`), falling
+  back to `V` when it is nil. `pkg/types` already imports `math/big`. The legacy
+  compiler uses `go/constant`, which is arbitrary-precision, so it folds these
+  exactly today - wood law says mirror, not invent.
 - `compress/flate` is rule-clean but clang-22 still crashes in its backend;
   `compress/gzip` links through it.
 - `src/syscall/js`, `net/http`'s `context.Value` gap, and the named public-API
