@@ -11,7 +11,7 @@ Four repositories, all on branch `dev`, all level with their remotes
 
 | repo | what it is | last known state |
 |------|------------|------------------|
-| `moxie` | the compiler, runtime and stdlib | `6250a720`; `tests/run.sh --full`: 193 PASS / 0 FAIL / 0 SKIP, fixpoint PASS; net/http programs build, link and run; see the round-51 sections for the subslice-rule finding |
+| `moxie` | the compiler, runtime and stdlib | `fa4b559d`; `tests/run.sh --full`: 195 PASS / 0 FAIL / 0 SKIP, fixpoint PASS; net/http works end to end (request write + ReadRequest round trip); see the round-51/52 sections for the subslice-rule finding and the const-fold evidence |
 | `nostr` | shared nostr primitives and codecs | `98c7069` (musiquay vocabulary moved out) |
 | `morly` | the relay (`pkg/relay`, `pkg/store`, ...) | `b7dba37` |
 | `musiquay` | the web app, docs corpus, protocol vocabulary | `8dd6f59` (vocabulary at `pkg/protocol`) |
@@ -4086,8 +4086,12 @@ The whole closure compiles (zero clang errors), links, and the program runs:
 exactly the right bytes - the request line, Host, and both headers, in order.
 
 `http.ReadRequest(bufio.NewReader(buf))` over the buffer just written then
-returns an error, and the probe panics on it before printing anything about the
-error. That is the next thing to look at, and the first candidate is the same
+returned an error and the probe panicked on it. **RESOLVED in round 52** - see
+the section below: every letter was being rejected as a header byte by the
+128-bit constant in `validHeaderFieldByte`. The same probe now prints `ok` with
+rc=0, so the whole round trip - request construction, `url` parsing,
+`Header.Set`, `Request.Write`, `bufio`, `textproto.ReadMIMEHeader` - is verified
+end to end. The old text follows for the diagnosis trail. That is the next thing to look at, and the first candidate is the same
 class this round kept finding: the reader is handed as an INTERFACE
 (`*bytes.Buffer` -> `io.Reader` -> `bufio.NewReader`), and a value stored in an
 interface at a different type than the callee expects is how several of the
