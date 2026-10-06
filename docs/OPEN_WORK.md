@@ -11,7 +11,7 @@ Four repositories, all on branch `dev`, all level with their remotes
 
 | repo | what it is | last known state |
 |------|------------|------------------|
-| `moxie` | the compiler, runtime and stdlib | `fa4b559d`; `tests/run.sh --full`: 195 PASS / 0 FAIL / 0 SKIP, fixpoint PASS; net/http works end to end (request write + ReadRequest round trip); see the round-51/52 sections for the subslice-rule finding and the const-fold evidence |
+| `moxie` | the compiler, runtime and stdlib | `39896f72`; `tests/run.sh --full`: 196 PASS / 0 FAIL / 0 SKIP, fixpoint PASS; net/http works end to end; the constant-receiver width bug is fixed (round 56) |
 | `nostr` | shared nostr primitives and codecs | `98c7069` (musiquay vocabulary moved out) |
 | `morly` | the relay (`pkg/relay`, `pkg/store`, ...) | `b7dba37` |
 | `musiquay` | the web app, docs corpus, protocol vocabulary | `8dd6f59` (vocabulary at `pkg/protocol`) |
