@@ -4367,3 +4367,89 @@ Consequence for the item below: the >64-bit "garbage" values recorded in round
 54 were largely this bug. `mask low 64` now reports 288068722172624896 instead of
 0 - the low half of the 128-bit mask is folded correctly and only the high half
 is still out of reach (`mask>>64` is still 0).
+
+# ============ GOAL CLOSE: rounds 47-60 — what landed, what is left ============
+
+The 60-round objective ended at round 60 with work remaining. This is the
+consolidated hand-off. `git log --oneline e2286ed0..HEAD` has the detail;
+this section is the summary a fresh context needs.
+
+## Landed, each verified by running, each committed
+
+| what | evidence |
+|---|---|
+| send values coerced to the channel element type | `errc <- nil` / `serveMsgCh <- msg`; x/tools already did this, so it was stage4 catching up |
+| bare `return` fills result POSITIONS, blanks included | net/http's `%cext769` and the "cannot use value ... as *main.E" errors |
+| generic type params substituted inside AGGREGATES (`substTypeIn`) | net/http's `mapping[K,V]`; fixture `generic_aggregate_subst.mx` |
+| `tailSplitTop` counts `[` `]` as well as `{` `}` | the descriptor-name split that mangled a struct into 3 fields |
+| field-select base addressed, not loaded-and-discarded | 640KB dead struct load in flate; fixture `field_select_base_and_zero_store.mx` |
+| zero store of an aggregate is a memset | flate's second clang crash |
+| `hash/crc32`'s asm-only kernels implemented in Moxie | undefined `castagnoliSSE42`; fixture `crc32_hw_kernels.mx`, checked against an independent oracle |
+| `net/textproto`'s 128-bit header bitmap split in two | every MIME header failed; fixture `mime_header_parse.mx` |
+| `mime`'s 128-bit token bitmap split in two | `ParseMediaType` failed; fixture `mime_media_type_parse.mx` |
+| builtin Stringer receiver allocated at the RESOLVED type | `(42).String()` was `42<<32\|42`; fixture `const_receiver_width.mx` |
+| phase 3 actually verifies IR (`-work`, `-a`, `opt -passes=verify`) | was reporting PASS for builds that never completed |
+| phase 6 resolves GOROOT instead of hardcoding `/tmp/moxie-goroot` | 8 legacy cases were failing on a missing toolchain |
+| `//:wasmtest skip` marker in the wasm phase | native-only fixtures no longer fail the wasm phase |
+
+**net/http compiles all 155 modules with zero clang errors and a program that
+imports it builds, links and RUNS** - request construction, `url` parsing,
+`Header.Set`, `Request.Write`, `bufio`, `textproto.ReadMIMEHeader` round-trip
+correctly. `compress/flate` compiles; `hash/crc32` links.
+
+Suite: **198 passed / 0 failed / 0 skipped**, `selfhost:fixpoint` PASS
+(stage2 == stage3). The installed `./moxie` is byte-identical to the compiler
+that produced that run.
+
+## Left, with the strongest available lead for each
+
+1. **`float64(unsigned >= 2^63)` is negative and `float64(1<<64-1)` is -1.**
+   Within 64 bits. `cvFloat` and `ConvertConstLocal`'s float arm are both
+   correct, and the `MaskConstToBasic` Int64 branch was DISPROVEN by experiment
+   in round 59. Best remaining hypothesis: the constant is materialised as an
+   int64 and the conversion is emitted as a runtime `sitofp`, so `Unsigned` is
+   never consulted. **Read the IR** (wrapper in `/tmp/cbin/clang-22`) rather than
+   guessing a fourth branch. Blast radius: `math.MaxUint64` in `math/const.mx`,
+   `math/bits` (x3), `internal/runtime/math`, `intrinsics`, `saferio`, `debug/elf`
+   and `net/http/h2_bundle`.
+2. **The constant folder is not exact above 64 bits.** Two 128-bit bitmaps were
+   found only because they gated parsing; `math/j0.mx`/`j1.mx`/`jn.mx` still have
+   `Two129 = 1 << 129` and `lgamma.mx` has `Tiny = 1.0/(1 << 70)`. The fix is the
+   one `ConstFloat.Exact` already demonstrates (`ConstInt.Exact`), and `math/big`
+   was verified exact at these sizes in round 54 - but do it AFTER item 1, which
+   is cheaper and may explain some of the same symptoms.
+3. **`math.J0` is wrong for |x| >= 2** (`J0(2.5)` = -0.404, want -0.0484). The
+   rational-approximation branch, not the `Two129` guard. `J1`, `Lgamma`, `Gamma`
+   are correct.
+4. **Named public API types in `src/net/**`** (`net.IP`, `http.Header`,
+   `MIMEHeader`, `url.Values`, `net.Buffers`) - unchanged, struct-wrapper route.
+5. **`src/syscall/js`**, **`debug/gosym`**, **`internal/coverage/{encodecounter,
+   encodemeta,cformat}`**, **`internal/trace/internal/tracev1`** - unchanged.
+6. **`regexp` and `text/template` do not exist** (`src/regexp`,
+   `src/text/template` are absent; `pkg/mxregexp` is not the stdlib package).
+7. **`crypto/ecdsa`** blocked by `elliptic.Curve` -> `interface dispatch: no impl
+   for Params`.
+8. **`x509.ParseCertificateRequest`** `[][]ATV` SET and the slice-of-slice SIGSEGV.
+9. **`fmt` numeric verbs on a Named-over-basic** (`%d` on `time.Duration` is `?`);
+   `%v` and `%s` are fixed.
+10. **The documented subslice rule does not match the compiler.** CLAUDE.md says a
+    subslice is a copy; measurement in round 51 shows every form ALIASES within a
+    frame, while escaping subslices are relocated at the return boundary. Neither
+    the rule nor the implementation was changed. This is a decision the project
+    has to make, and everything ported under the current rule assumes one of the
+    two.
+11. **443 bodiless declarations** across `src/` - the count includes build-tagged
+    files, so it overstates the risk; crc32's were the ones a real link reached.
+
+## Method notes worth carrying forward
+
+- **Verify the premise before implementing.** Four rounds were spent on premises
+  that turned out stale (`time.Date` already fixed; the >64-bit "garbage" was
+  mostly the constant-receiver bug; the `MaskConstToBasic` branch).
+- **Build the smallest program that can still fail.** The textproto failure was
+  isolated in ~1 minute with a `bufio`+`net/textproto` probe instead of a
+  20-minute net/http build.
+- **Background builds must be detached** (`setsid`), or the harness kills the
+  process group at the tool-call boundary and it reads as an OOM or a crash.
+- **A guard that turns a failure into a pass is a bug.** phase 3 did exactly
+  that for an unknown number of rounds.
