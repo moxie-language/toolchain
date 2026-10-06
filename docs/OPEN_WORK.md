@@ -2476,6 +2476,36 @@ panics on its own `os` (see the bootstrap-artifact section above), so keep
   back to `V` when it is nil. `pkg/types` already imports `math/big`. The legacy
   compiler uses `go/constant`, which is arbitrary-precision, so it folds these
   exactly today - wood law says mirror, not invent.
+
+  **Round 54 attempted exactly that and reverted it.** Two things were learned,
+  both worth keeping:
+
+  1. `math/big` is CORRECT at these sizes, so the foundation is sound. Measured:
+     `2^70` prints exactly, `2^70 >> 64` is 64, `IsUint64()` is false for it, and
+     `3^100` prints all 48 digits correctly. The earlier open item about
+     `Rat.Mul` returning `0/1` does not extend to `Int`.
+
+  2. The bug is WORSE than truncation, and this is the important part. A named
+     constant loses the high bits cleanly:
+
+         const hi = (1<<26-1) << 'A';  hi >> 64      -> 0
+
+     but the SAME expression written INLINE produces an arbitrary wrong value:
+
+         ((1<<26-1)<<'A') >> 64                      -> 9741466863665152
+         (1<<70) >> 64                               -> 0
+
+     (correct answers are 134217726 and 64). A silent wrong constant is the
+     deception case, not a clean failure, so this is not cosmetic.
+
+  The attempted fix turned the named-constant case into garbage as well, which is
+  strictly worse than the clean zero, so it was reverted rather than landed. The
+  folding half is straightforward; the missing piece is that the folded value is
+  narrowed somewhere between `EvalBinaryLocal` and the conversion that consumes
+  it (`ConvertConstLocal`, the const-declaration storage in `ir_typecheck.mx`,
+  and `ssa_builder.mx`'s `folded := EvalBinaryLocal(...)` at ~4898 all narrow),
+  so a value that is exact in the folder arrives inexact. Find that narrowing
+  first, then the `Exact` field has somewhere to live.
 - `compress/flate` is rule-clean but clang-22 still crashes in its backend;
   `compress/gzip` links through it.
 - `src/syscall/js`, `net/http`'s `context.Value` gap, and the named public-API
