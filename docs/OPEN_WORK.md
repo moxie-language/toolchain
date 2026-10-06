@@ -4489,35 +4489,41 @@ Cos, Tan, Asin and Atan2 are all correct for arguments that need quadrant
 reduction, and `math.J0` moved from -0.404278302239057 to -0.0723182119715167
 (true value -0.04838377646819797).
 
-## STILL OPEN: `math.J0`/`Y0` are slightly wrong for x >= 2
+## `math.J0`/`J1`/`Y0`/`Y1` were wrong for x >= 2 - `Two129` folded to 0
 
-Now that trig is right, the remaining error is small and systematic - the right
-shape and sign, off in the third decimal, at every x in the branch:
+Now RESOLVED (round 61, `4aa52746`). `j0.mx` and `j1.mx` guard their asymptotic
+branch with
 
-    J0(2.0)  = 0.196738621067033   want 0.22389077914123567
-    J0(2.5)  = -0.0723182119715167 want -0.04838377646819797
-    J0(10.0) = -0.246760893383643  want -0.2459357644513483
+    Two129 = 1 << 129      // |x| > ~6.8056e+38
+    if x > Two129 { ... skip pzero/qzero ... }
 
-`Sqrt`, `SqrtPi` and `1/SqrtPi` are correct, so the fault is in `pzero`/`qzero`
-(the only tables this branch uses) or in the `ss`/`cc` adjustment.
+and Moxie does not evaluate a constant wider than 64 bits exactly, so `1 << 129`
+folded to 0 - **`x > Two129` was true for every positive x**. The shortcut was
+taken permanently, `pzero`/`qzero` were never called, and every result for
+x >= 2 was wrong with the right shape and sign:
 
-**Specific suspect, NOT yet tested:** `qzero` ends with
+    J0(2.5) = -0.0723182119715167   want -0.04838377646819797
+    J1(2.5) = +0.499417646028127    want +0.4970941024642741
+    Y0(2.5) = +0.499417646028127    want +0.4980703596152319
 
-    return (-0.125 + r/s) / x          // src/math/j0.mx
+`Two129` is the exact hex float `0x1p129` now, and `lgamma.mx`'s
+`Tiny = 1.0 / (1 << 70)` is `0x1p-70`, which was the same problem.
 
-while the comment directly above `qzero` states `qzero(x) = s*(-1.25 + (R/S))`
-with `s = 1/x`, which would be `s * (-1.25 + r/s)` and no division by x. Switching
-between them changes qzero by orders of magnitude, so one of the two is wrong and
-the difference is far too large for the small error observed - meaning the `/x`
-form is the one consistent with the measured closeness, and the real error is
-elsewhere (a coefficient, or the `zn`-based ss/cc adjustment above it).
+**How it was found, because the method mattered more than the fix.** The error
+was small and systematic, so the suspect was the coefficient tables. Evaluating
+`pzero(2.5)` and `qzero(2.5)` with an independent reference (solving J0 and Y0's
+two equations for pu and qv) proved both correct to 16 digits, which ruled the
+tables out and pointed at the guard. A specific suspicion that `qzero`'s
+`(-0.125 + r/s) / x` was a factor-of-ten typo against the `s*(-1.25 + R/S)` in its
+own comment was **wrong** - the reference confirms the `/x` form - and it is
+recorded here so nobody re-opens it.
 
-Do NOT guess a constant here. The useful next step is to evaluate `pzero(2.5)`
-and `qzero(2.5)` against a reference (mpmath or a table) rather than reasoning
-about the asymptotic comments, which contradict each other in Go's own source.
-Two reference values for that check: J0(2.5) = -0.04838377646819797 and
-pzero(2.5) ~ 1.0000..., with qzero the term that carries the error.
+Correct now: J0 at 2.0/2.5/3.0/8.0/10.0, J1 at 2.5/10.0, Y0/Y1 at 2.5, Lgamma(3),
+Gamma(3), Sin(1.0). Fixture `bessel_large_x.mx` panics pre-fix with "J0(2.0)".
 
-`math.Y0(2.5)` currently returns exactly `math.J1(2.5)`'s value
-(+0.499417646028127 want +0.4980703596152319) - a coincidence worth checking
-once pzero/qzero are verified, since J1 uses `pone`/`qone` and a different table.
+This is the THIRD live consumer found for the >64-bit constant limitation
+(textproto's and mime's 128-bit bitmaps were the first two), and the first where
+the symptom was a wrong number rather than a rejection. Until the folder is
+exact, sweep for `<<` with a count >= 64: those three are only the ones a test
+happened to reach.
+
