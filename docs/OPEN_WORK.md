@@ -3995,3 +3995,75 @@ That is worth a look on its own: the checkout disappeared between two builds in
 the same session, and a fetched module root is not scratch — if the compiler
 registers it as scratch it will be deleted on the first successful build and the
 next build will always try to re-clone.
+
+# ============ UPDATE: round 51 — a subslice ALIASES, and the rule says it copies ============
+
+## The documented subslice rule does not match the compiler
+
+CLAUDE.md states, and the porting method depends on: "There is no aliasing: a
+subslice is a copy. `s[a:b]` allocates and copies. A write through a subslice
+does NOT reach the parent, so Go code that relied on overlapping views - in-place
+XOR, 'read src fully before writing dst', `copy` overlap reasoning - is wrong
+here." It is also in the compaction preservation line.
+
+Measured with the installed compiler, in one program (all four rows print the
+parent's element, not the copy's):
+
+    a := []int32{:4}; full := a[:];    set(full)   -> a[0]=7
+    b := []int32{:4}; part := b[0:2];  set(part)   -> b[0]=7
+    c := []int32{:4}; tail := c[1:];   set(tail)   -> c[1]=7
+    d := []int32{0,0,0,0}; e := d[:2]; e[0] = 5    -> d[0]=5
+
+and across a call boundary, where the rule would matter most:
+
+    func tailOf(s []int32) (t []int32) { return s[1:] }
+    a := []int32{1,2,3,4}; t := tailOf(a); t[0] = 99
+    -> a[1]=99, t[0]=99        (a method returning h.buf[1:] behaves the same)
+
+Three more, covering the forms porting actually leans on:
+
+    func onParam(s []int32) { s[1:3][0] = 55 }
+    a := []int32{1,2,3,4}; onParam(a)         -> a[1]=55
+    b := "abcd"; c := b[1:3]; c[0] = 'Z'      -> b="aZcd"
+    d := []int32{1,2,3,4}; d[1:3][0:1][0]=42  -> d[1]=42
+
+**Within a frame a subslice is a VIEW.** The one thing that does hold is arena
+safety at the escape boundary: a subslice of a callee-local slice, returned to
+the caller and then read after the callee's arena has been refilled with fresh
+allocations, still reads the right value (t[0]=2, len=3) - the return
+relocation copies it into the caller's arena. So the accurate model is:
+aliases while the backing is alive, relocated when the owning frame dies.
+
+That is not the same model as the rule, and the difference is load-bearing:
+
+- Code written to the rule (defensive copying before writing, rewriting Go
+  in-place algorithms) is not wrong, only slower.
+- Code that relies on aliasing - Go's own in-place XOR, `copy` overlap, "read
+  src fully before writing dst" - actually works here.
+- A future change that makes subslices copy "to match the rule" would silently
+  break all of that.
+- The os.Pipe comment in src/os/file_unix.mx cited the rule ("p[:] would be a
+  copy") as its rationale. That claim is false and the comment is corrected;
+  the code was always fine either way.
+
+Decision needed: is the RULE wrong (and should be rewritten to the
+alias-while-live / relocate-on-escape model) or is the IMPLEMENTATION wrong
+(and subslices must start copying)? Everything ported under the current rule
+assumes one of the two. Round 51 records it rather than changing either.
+
+## The rule-9 arrays in os.Pipe and syscall
+
+- `os.Pipe` was already converted to `p := []int32{:2}`.
+- The `[2]Timeval` / `[2]Timespec` in `src/syscall` are the CAST TARGET of
+  `(*[2]Timeval)(unsafe.Pointer(&tv[0]))` for the utimes/futimesat ABI, and
+  `pipe2`'s `*[2]_C_int` is the same shape. There is no slice spelling of "a
+  pointer to two consecutive Timevals" - Moxie removed slice-to-array
+  conversion - so these must stay arrays. The public API already takes slices
+  (`Utimes(path, tv []Timeval)`).
+- `caps.data [2]capData` and `iflags.name [IFNAMSIZ]byte` are struct fields
+  whose layout IS the kernel ABI (`struct caps`, `struct ifreq`); a slice field
+  would change the layout and the ioctl/capget would read garbage. They stay.
+- `mapPipe [2]int32` and `var p [2]int32` are passed as `mapPipe[:]` / `p[:]` to
+  `forkExecPipe`, which fills them through `Pipe2`. Under the rule as written
+  that looked like a lost write; under the measured behaviour it is a view and
+  works. Left alone, with the measurement above as the reason.
