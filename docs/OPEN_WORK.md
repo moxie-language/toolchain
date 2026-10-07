@@ -5024,6 +5024,52 @@ Also in this round: `monomorphizeAndCall` now only replaces
 Assigning nil for an unknown package cleared the caller's context, which is a
 regression introduced in round 73.
 
+## FIXED in round 77: syscall/js compiles for js/wasm, and three items re-measured clean
+
+**`syscall/js` was never compiled by anything.** Phase 5 builds wasm fixtures,
+which have a `main()` and never import it. `moxie build -target wasm ./src/syscall/js`
+reported ten uses of **`any`** - a type Moxie does not have - plus a
+`Value as Pointer` mismatch, and the resulting `rhs=nil` cascade.
+
+The port, which is what CLAUDE.md's "stdlib still contains `any`" note asks for:
+
+- `ValueOf(x any) Value` was a type switch over every Go kind, which cannot exist
+  without an empty interface or reflection. It is replaced by one constructor per
+  kind JavaScript can represent: `ValueOfNull`, `ValueOfBool`, `ValueOfInt`,
+  `ValueOfUint`, `ValueOfFloat`, `ValueOfString`, `ValueOfFunc`, `ValueOfArray`,
+  `ValueOfObject`. The conversion is now explicit at the call site, which is the
+  trade the rest of the port already makes.
+- `Set(p string, x Value)`, `SetIndex(i int32, x Value)` and
+  `storeArgs(args []Value, ...)` take `Value` directly. `Call`/`Invoke`/`New` were
+  already `...Value`, so `storeArgs` was being handed `[]Value` for a `[]any`
+  parameter; that whole conversion layer is gone.
+- `FuncOf(fn func(this Value, args []Value) Value)`, and the map behind it, no
+  longer return `any`, so `handleEvent`'s `result := f(this, args)` has a type.
+- The nineteen `runtime.KeepAlive(v)` calls are deleted. Moxie has no garbage
+  collector - reclamation is per-frame arena release - so nothing can be
+  collected early and `KeepAlive` is a no-op stub. They were also the
+  `Value as Pointer` errors. `"runtime"` left the imports with them.
+
+**`path/filepath` did not compile for wasm either**: `EvalSymlinks` calls
+`evalSymlinks`, which lives in `symlink_unix.mx` under `//:build unix`. The file
+contains one forwarding call into the portable `walkSymlinks`, so its tag is
+Go's, not a real dependency - widened to `unix || (js && wasm)`, the same form
+`path_unix.mx` already uses.
+
+**`tests/phase1c_wasm_sweep.sh`** compiles the js/wasm-only packages
+(`path/filepath`, `syscall/js`) and is wired into `--full` and `--phase 1c`.
+`net/http` for wasm is listed there as known-broken: its next failure is
+`internal/poll`'s js `accept`/`ReadFrom` (`rhs=nil`), which is its own chain.
+
+**Three objective items re-measured and already done**, with probes:
+
+- the `i64`-vs-`i8` narrow field store (`present[id/8] |= uint8(1) << (id % 8)`,
+  the `src/internal/trace/base.mx:148` shape) - compiles and runs, single and
+  looped;
+- the `map[T]H[T]` literal substitution (`map[int32]box[int32]{1: {v: 7}}`) -
+  compiles and runs, for `int32` and `string` keys;
+- `src/internal/trace` itself compiles.
+
 ### Still open
 
 - **`unsafe.Pointer`/`unsafe.TypeOf` accept anything.** `unsafe.Pointer` is

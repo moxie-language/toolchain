@@ -36,6 +36,7 @@ case "$PHASE" in
 	bash "$SCRIPT_DIR/restrictions/run.sh"
 	bash "$SCRIPT_DIR/phase1_packages.sh"
 	bash "$SCRIPT_DIR/phase1b_stdlib_sweep.sh"
+	bash "$SCRIPT_DIR/phase1c_wasm_sweep.sh"
 	bash "$SCRIPT_DIR/phase2_selfhost.sh"
 	bash "$SCRIPT_DIR/phase3_ir_validate.sh"
 	bash "$SCRIPT_DIR/phase4_binary_smoke.sh"
@@ -51,6 +52,7 @@ case "$PHASE" in
 		0) bash "$SCRIPT_DIR/regressions/run.sh"; bash "$SCRIPT_DIR/restrictions/run.sh" ;;
 		1) bash "$SCRIPT_DIR/phase1_packages.sh" ;;
 		1b) bash "$SCRIPT_DIR/phase1b_stdlib_sweep.sh" ;;
+		1c) bash "$SCRIPT_DIR/phase1c_wasm_sweep.sh" ;;
 		2) bash "$SCRIPT_DIR/phase2_selfhost.sh" ;;
 		3) bash "$SCRIPT_DIR/phase3_ir_validate.sh" ;;
 		4) bash "$SCRIPT_DIR/phase4_binary_smoke.sh" ;;

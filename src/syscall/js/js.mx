@@ -12,7 +12,6 @@
 package js
 
 import (
-	"runtime"
 	"unsafe"
 )
 
@@ -151,76 +150,66 @@ func Global() Value {
 	return valueGlobal
 }
 
-// ValueOf returns x as a JavaScript value:
-//
-//	| Go                     | JavaScript             |
-//	| ---------------------- | ---------------------- |
-//	| js.Value               | [its value]            |
-//	| js.Func                | function               |
-//	| nil                    | null                   |
-//	| bool                   | boolean                |
-//	| integers and floats    | number                 |
-//	| string                 | string                 |
-//	| []interface{}          | new array              |
-//	| map[string]interface{} | new object             |
-//
-// Panics if x is not one of the expected types.
-func ValueOf(x any) Value {
-	jsInit()
-	switch x := x.(type) {
-	case Value:
-		return x
-	case Func:
-		return x.Value
-	case nil:
-		return valueNull
-	case bool:
-		if x {
-			return valueTrue
-		} else {
-			return valueFalse
-		}
-	case int32:
-		return floatValue(float64(x))
-	case int8:
-		return floatValue(float64(x))
-	case int16:
-		return floatValue(float64(x))
-	case int64:
-		return floatValue(float64(x))
-	case uint32:
-		return floatValue(float64(x))
-	case uint8:
-		return floatValue(float64(x))
-	case uint16:
-		return floatValue(float64(x))
-	case uint64:
-		return floatValue(float64(x))
-	case uintptr:
-		return floatValue(float64(x))
-	case unsafe.Pointer:
-		return floatValue(float64(uintptr(x)))
-	case float32:
-		return floatValue(float64(x))
-	case float64:
-		return floatValue(x)
-	case string:
-		return makeValue(stringVal(x))
-	case []any:
-		a := arrayConstructor.New(len(x))
-		for i, s := range x {
-			a.SetIndex(i, s)
-		}
-		return a
-	case map[string]any:
-		o := objectConstructor.New()
-		for k, v := range x {
-			o.Set(k, v)
-		}
-		return o
-	default:
-		panic("ValueOf: invalid value")
+// There is no ValueOf(x any) here: Moxie has no empty interface and no
+// reflection, so one function cannot switch over every Go kind. Each kind that
+// JavaScript can represent gets its own constructor instead, which makes the
+// conversion explicit at the call site - the same trade the rest of the port
+// makes.
+
+// ValueOfNull returns the JavaScript null value.
+func ValueOfNull() (r Value) {
+	return valueNull
+}
+
+// ValueOfBool returns the JavaScript boolean for b.
+func ValueOfBool(b bool) (r Value) {
+	if b {
+		return valueTrue
 	}
+	return valueFalse
+}
+
+// ValueOfInt returns the JavaScript number for i.
+func ValueOfInt(i int64) (r Value) {
+	return floatValue(float64(i))
+}
+
+// ValueOfUint returns the JavaScript number for u.
+func ValueOfUint(u uint64) (r Value) {
+	return floatValue(float64(u))
+}
+
+// ValueOfFloat returns the JavaScript number for f.
+func ValueOfFloat(f float64) (r Value) {
+	return floatValue(f)
+}
+
+// ValueOfString returns the JavaScript string for s.
+func ValueOfString(s string) (r Value) {
+	return makeValue(stringVal(s))
+}
+
+// ValueOfFunc returns the JavaScript function that wraps f.
+func ValueOfFunc(f Func) (r Value) {
+	return f.Value
+}
+
+// ValueOfArray returns a JavaScript array holding vs in order.
+func ValueOfArray(vs []Value) (r Value) {
+	a := arrayConstructor.New(ValueOfInt(int64(len(vs))))
+	for i, v := range vs {
+		a.SetIndex(i, v)
+	}
+	return a
+}
+
+// ValueOfObject returns a JavaScript object with m's entries as properties.
+func ValueOfObject(m map[string]Value) (r Value) {
+	o := objectConstructor.New()
+	for k, v := range m {
+		o.Set(k, v)
+	}
+	return o
 }
 
 // stringVal copies string x to Javascript and returns a ref.
@@ -309,7 +298,6 @@ func (v Value) Get(p string) Value {
 		panic((&ValueError{"Value.Get", vType}).Error())
 	}
 	r := makeValue(valueGet(v.ref, p))
-	runtime.KeepAlive(v)
 	return r
 }
 
@@ -322,16 +310,13 @@ func (v Value) Get(p string) Value {
 //:noescape
 func valueGet(v ref, p string) ref
 
-// Set sets the JavaScript property p of value v to ValueOf(x).
+// Set sets the JavaScript property p of value v to x.
 // It panics if v is not a JavaScript object.
-func (v Value) Set(p string, x any) {
+func (v Value) Set(p string, x Value) {
 	if vType := v.Type(); !vType.isObject() {
 		panic((&ValueError{"Value.Set", vType}).Error())
 	}
-	xv := ValueOf(x)
-	valueSet(v.ref, p, xv.ref)
-	runtime.KeepAlive(v)
-	runtime.KeepAlive(xv)
+	valueSet(v.ref, p, x.ref)
 }
 
 // valueSet sets property p of ref v to ref x.
@@ -350,7 +335,6 @@ func (v Value) Delete(p string) {
 		panic((&ValueError{"Value.Delete", vType}).Error())
 	}
 	valueDelete(v.ref, p)
-	runtime.KeepAlive(v)
 }
 
 // valueDelete deletes the JavaScript property p of ref v.
@@ -369,23 +353,19 @@ func (v Value) Index(i int32) Value {
 		panic((&ValueError{"Value.Index", vType}).Error())
 	}
 	r := makeValue(valueIndex(v.ref, i))
-	runtime.KeepAlive(v)
 	return r
 }
 
 //:wasmimport gojs syscall/js.valueIndex
 func valueIndex(v ref, i int32) ref
 
-// SetIndex sets the JavaScript index i of value v to ValueOf(x).
+// SetIndex sets the JavaScript index i of value v to x.
 // It panics if v is not a JavaScript object.
-func (v Value) SetIndex(i int32, x any) {
+func (v Value) SetIndex(i int32, x Value) {
 	if vType := v.Type(); !vType.isObject() {
 		panic((&ValueError{"Value.SetIndex", vType}).Error())
 	}
-	xv := ValueOf(x)
-	valueSetIndex(v.ref, i, xv.ref)
-	runtime.KeepAlive(v)
-	runtime.KeepAlive(xv)
+	valueSetIndex(v.ref, i, x.ref)
 }
 
 //:wasmimport gojs syscall/js.valueSetIndex
@@ -414,12 +394,11 @@ func makeArgSlices(size int32) (argVals []Value, argRefs []ref) {
 
 // storeArgs maps input args onto respective Value and ref slices.
 // It can be paired with makeArgSlices to make-and-store JavaScript arg slices.
-func storeArgs(args []any, argValsDst []Value, argRefsDst []ref) {
+func storeArgs(args []Value, argValsDst []Value, argRefsDst []ref) {
 	// would go in makeArgs if the combined func was simple enough to inline
 	for i, arg := range args {
-		v := ValueOf(arg)
-		argValsDst[i] = v
-		argRefsDst[i] = v.ref
+		argValsDst[i] = arg
+		argRefsDst[i] = arg.ref
 	}
 }
 
@@ -430,7 +409,6 @@ func (v Value) Length() int32 {
 		panic((&ValueError{"Value.SetIndex", vType}).Error())
 	}
 	r := valueLength(v.ref)
-	runtime.KeepAlive(v)
 	return r
 }
 
@@ -444,8 +422,6 @@ func (v Value) Call(m string, args ...Value) Value {
 	argVals, argRefs := makeArgSlices(len(args))
 	storeArgs(args, argVals, argRefs)
 	res, ok := valueCall(v.ref, m, argRefs)
-	runtime.KeepAlive(v)
-	runtime.KeepAlive(argVals)
 	if !ok {
 		if vType := v.Type(); !vType.isObject() { // check here to avoid overhead in success case
 			panic((&ValueError{"Value.Call", vType}).Error())
@@ -477,8 +453,6 @@ func (v Value) Invoke(args ...Value) Value {
 	argVals, argRefs := makeArgSlices(len(args))
 	storeArgs(args, argVals, argRefs)
 	res, ok := valueInvoke(v.ref, argRefs)
-	runtime.KeepAlive(v)
-	runtime.KeepAlive(argVals)
 	if !ok {
 		if vType := v.Type(); vType != TypeFunction { // check here to avoid overhead in success case
 			panic((&ValueError{"Value.Invoke", vType}).Error())
@@ -505,8 +479,6 @@ func (v Value) New(args ...Value) Value {
 	argVals, argRefs := makeArgSlices(len(args))
 	storeArgs(args, argVals, argRefs)
 	res, ok := valueNew(v.ref, argRefs)
-	runtime.KeepAlive(v)
-	runtime.KeepAlive(argVals)
 	if !ok {
 		if vType := v.Type(); vType != TypeFunction { // check here to avoid overhead in success case
 			panic((&ValueError{"Value.Invoke", vType}).Error())
@@ -615,7 +587,6 @@ func (v Value) String() string {
 
 func jsString(v Value) string {
 	str, length := valuePrepareString(v.ref)
-	runtime.KeepAlive(v)
 	b := []byte{:length}
 	valueLoadString(str, b)
 	finalizeRef(str)
@@ -637,8 +608,6 @@ func valueLoadString(v ref, b []byte)
 // InstanceOf reports whether v is an instance of type t according to JavaScript's instanceof operator.
 func (v Value) InstanceOf(t Value) bool {
 	r := valueInstanceOf(v.ref, t.ref)
-	runtime.KeepAlive(v)
-	runtime.KeepAlive(t)
 	return r
 }
 
@@ -664,7 +633,6 @@ func (e *ValueError) String() string { return e.Error() }
 // It returns the number of bytes copied, which will be the minimum of the lengths of src and dst.
 func CopyBytesToGo(dst []byte, src Value) int32 {
 	n, ok := copyBytesToGo(dst, src.ref)
-	runtime.KeepAlive(src)
 	if !ok {
 		panic("syscall/js: CopyBytesToGo: expected src to be a Uint8Array or Uint8ClampedArray")
 	}
@@ -685,7 +653,6 @@ func copyBytesToGo(dst []byte, src ref) (int32, bool)
 // It returns the number of bytes copied, which will be the minimum of the lengths of src and dst.
 func CopyBytesToJS(dst Value, src []byte) int32 {
 	n, ok := copyBytesToJS(dst.ref, src)
-	runtime.KeepAlive(dst)
 	if !ok {
 		panic("syscall/js: CopyBytesToJS: expected dst to be a Uint8Array or Uint8ClampedArray")
 	}

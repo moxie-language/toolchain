@@ -11,13 +11,13 @@ import (
 )
 
 var (
-	funcs      map[uint32]func(Value, []Value) any
+	funcs      map[uint32]func(Value, []Value) Value
 	nextFuncID uint32
 )
 
 func funcsInit() {
 	if funcs != nil { return }
-	funcs = map[uint32]func(Value, []Value) any{}
+	funcs = map[uint32]func(Value, []Value) Value{}
 	nextFuncID = 1
 }
 
@@ -32,7 +32,7 @@ type Func struct {
 //
 // The Go function fn is called with the value of JavaScript's "this" keyword and the
 // arguments of the invocation. The return value of the invocation is
-// the result of the Go function mapped back to JavaScript according to ValueOf.
+// the result of the Go function mapped back to JavaScript: it is already a Value.
 //
 // Invoking the wrapped Go function from JavaScript will
 // pause the event loop and spawn a new goroutine.
@@ -46,7 +46,7 @@ type Func struct {
 // new goroutine.
 //
 // Func.Release must be called to free up resources when the function will not be invoked any more.
-func FuncOf(fn func(this Value, args []Value) any) Func {
+func FuncOf(fn func(this Value, args []Value) Value) Func {
 	jsInit()
 	funcsInit()
 	ensureEventHandler()
@@ -55,8 +55,8 @@ func FuncOf(fn func(this Value, args []Value) any) Func {
 	bubble := synctest.Acquire()
 	if bubble != nil {
 		origFn := fn
-		fn = func(this Value, args []Value) any {
-			var r any
+		fn = func(this Value, args []Value) Value {
+			var r Value
 			bubble.Run(func() {
 				r = origFn(this, args)
 			})
@@ -67,7 +67,7 @@ func FuncOf(fn func(this Value, args []Value) any) Func {
 	return Func{
 		id:     id,
 		bubble: bubble,
-		Value:  jsGo.Call("_makeFuncWrapper", id),
+		Value:  jsGo.Call("_makeFuncWrapper", ValueOfUint(uint64(id))),
 	}
 }
 
@@ -112,7 +112,7 @@ func handleEvent() bool {
 	// Retrieve the associated js.Func
 	f, ok := funcs[id]
 	if !ok {
-		Global().Get("console").Call("error", "call to released function")
+		Global().Get("console").Call("error", ValueOfString("call to released function"))
 		return true
 	}
 
