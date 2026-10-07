@@ -53,6 +53,7 @@ SWEEP=(
 	internal/coverage/cformat
 	internal/coverage/encodecounter
 	internal/coverage/encodemeta
+	internal/trace/internal/tracev1
 	math
 	math/big
 	mime
@@ -71,9 +72,9 @@ SWEEP=(
 
 # Packages known not to compile, with the reason. SKIP, never FAIL: the suite
 # must not encode today's breakage as acceptable, but it must not go red for a
-# defect that is already recorded either.
+# defect that is already recorded either. Empty is the goal - every entry here
+# is a package that should be fixed and then moved back into SWEEP.
 SWEEP_KNOWN=(
-	"internal/trace/internal/tracev1|X86 DAG->DAG crash (SelectionDAG::ReplaceAllUsesWith) on the 32 MiB aggregate load+store that relocating an escaped &[524288]Event{} emits"
 )
 
 td="$(tempdir stdlib_sweep)"
@@ -113,8 +114,10 @@ else
 fi
 rm -rf "$td"
 
-for entry in "${SWEEP_KNOWN[@]}"; do
-	pkg="${entry%%|*}"
-	reason="${entry#*|}"
-	log_skip "stdlib:$pkg" "$reason"
-done
+if [ "${#SWEEP_KNOWN[@]}" -gt 0 ]; then
+	for entry in "${SWEEP_KNOWN[@]}"; do
+		pkg="${entry%%|*}"
+		reason="${entry#*|}"
+		log_skip "stdlib:$pkg" "$reason"
+	done
+fi

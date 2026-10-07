@@ -4816,6 +4816,36 @@ func (fb *ssaFuncBuilder) buildOperandAddr(e syntax.Expr) (s SSAValue) {
 		if x.Y == nil && x.Op == token.Mul {
 			return fb.buildExpr(x.X)
 		}
+	case *syntax.CompositeLit:
+		// &T{...} builds the literal INTO the allocation the address denotes.
+		// Falling through to the value path below built the whole aggregate as
+		// an SSA VALUE and then copied it into a fresh arena allocation:
+		// tracev1's Events.grow does `push(l.buckets, &[eventsBucketSize]Event{})`
+		// with eventsBucketSize = 524288, so the IR carried a 32 MiB alloca, a
+		// 32 MiB load and a 32 MiB store, and clang's DAG combiner segfaulted in
+		// SelectionDAG::ReplaceAllUsesWith on it. buildCompositeLitInto already
+		// builds into an allocation for the `[]*T{{...}}` shorthand; this is the
+		// same thing written with an explicit `&`.
+		//
+		// Only aggregates take this path: a slice or map literal's value is a
+		// header/pointer, and taking its address means addressing that small
+		// value, which the existing path already handles correctly.
+		var litType Type
+		if x.Type != nil {
+			litType = fb.resolveType(x.Type)
+		}
+		if litType != nil {
+			switch SafeUnderlying(litType).(type) {
+			case *Array, *TCStruct:
+				alloc := fb.emitAlloc(litType, 0)
+				if litFullyCovers(x, litType) {
+					alloc.NoZero = true
+				}
+				fb.markAddrEscaping(alloc)
+				fb.buildCompositeLitInto(alloc, x, litType)
+				return alloc
+			}
+		}
 	}
 	xv := fb.buildExpr(e)
 	if xv == nil {

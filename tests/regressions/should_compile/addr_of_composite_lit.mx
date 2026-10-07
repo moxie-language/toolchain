@@ -1,0 +1,60 @@
+// &T{...} must build the literal INTO the allocation the address denotes.
+//
+// Falling through to the generic `&` path built the whole aggregate as an SSA
+// VALUE and then copied it into a fresh arena allocation. For an aggregate the
+// size of tracev1's Event (64 bytes) times eventsBucketSize (524288) that is a
+// 32 MiB alloca, a 32 MiB load and a 32 MiB store - and clang's DAG combiner
+// segfaults in SelectionDAG::ReplaceAllUsesWith on it (tracev1's
+// Events.grow: `push(l.buckets, &[eventsBucketSize]Event{})`). The array below
+// is deliberately that size and shape, so a regression crashes the compiler
+// rather than merely being wasteful.
+package main
+
+type event struct {
+	Ts    int64
+	G     uint64
+	Args  [4]uint64
+	StkID uint32
+	P     int32
+	Type  uint8
+}
+
+type holder struct {
+	p *event
+	n int32
+	s []byte
+}
+
+const bucketSize = 524288
+
+func main() {
+	// A partial literal leaves the unset fields at the zero value the allocator
+	// provides (runtime.alloc memzeros).
+	p := &event{Ts: 7}
+	if p.Ts != 7 || p.G != 0 || p.Args[3] != 0 || p.StkID != 0 || p.P != 0 || p.Type != 0 {
+		panic("partial &T{...} not zeroed")
+	}
+	// A fully covering literal keeps every field.
+	q := &event{Ts: 1, G: 2, Args: [4]uint64{3, 4, 5, 6}, StkID: 7, P: 8, Type: 9}
+	if q.Ts != 1 || q.G != 2 || q.Args[0] != 3 || q.Args[3] != 6 || q.StkID != 7 || q.P != 8 || q.Type != 9 {
+		panic("&T{...} fields wrong")
+	}
+	// Nested: an address-taken literal inside another address-taken literal.
+	h := &holder{p: &event{Ts: 11}, n: 4}
+	if h.p == nil || h.p.Ts != 11 || h.n != 4 || h.s != nil {
+		panic("nested &T{...} wrong")
+	}
+	// Distinct literals must not share storage.
+	if h.p == q {
+		panic("distinct &T{...} share an address")
+	}
+	// The large bucket: 32 MiB, zeroed and writable.
+	arr := &[bucketSize]event{}
+	if arr[0].Ts != 0 || arr[bucketSize-1].Ts != 0 {
+		panic("large &[N]T{} not zeroed")
+	}
+	arr[bucketSize-1].Ts = 42
+	if arr[bucketSize-1].Ts != 42 {
+		panic("large &[N]T{} not writable")
+	}
+}
