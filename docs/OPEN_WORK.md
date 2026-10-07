@@ -5210,6 +5210,57 @@ link failure), and every new file is js-only or `!linux`, so Linux sees exactly
 what it saw before apart from `rawdns.mx`'s new `unix` tag, which still includes
 Linux.
 
+## Round 81: net's js arm compiles - a misleading arity diagnostic, missing constants, and a comma-ok select bug
+
+The round-80 conclusion was "18 arity and comma-ok errors remain, so net's js arm
+needs a port". Half of that was wrong, and the way it was wrong is worth keeping.
+
+**The diagnostic was hiding the cause.** `checkCallArgs` reported "not enough
+arguments in call" without saying by how much or which way, and the numbers did
+not add up: `sysSocket(syscall.AF_INET, syscall.SOCK_STREAM, syscall.IPPROTO_TCP)`
+was reported as short of arguments while passing exactly the three the callee
+declares. Printing the counts turned 18 mysteries into one fact:
+
+    iprawsock_posix.mx:131: not enough arguments in call (want 8, have 7)
+    ipsock_posix.mx:35:    not enough arguments in call (want 3, have 0)
+    ipsock_posix.mx:57:    not enough arguments in call (want 4, have 2)
+
+`have 0` for a three-argument call means the arguments were **dropped**, not
+missed. An argument expression that fails to resolve is pushed as nil and
+`buildArgs` skips it, so the call loses it and the arity check then blames the
+caller. The undefined names were `syscall.AF_INET`, `SOCK_STREAM`,
+`IPPROTO_TCP`, `SOCK_DGRAM`, `IPPROTO_IPV6`, `IPV6_V6ONLY` and `AF_UNIX`.
+
+**Why they were undefined, and the fix.** Go's `$GOROOT/src/syscall/net_fake.go`
+declares those constants at the top of the file, above the `Sockaddr` types -
+and that is the file round 80 ported for the types only. Nothing else defines
+them for js: `zerrors_linux_*` is linux-only by filename, and `syscall_moxie.mx`
+covers the non-js wasm targets. `src/syscall/net_fake.mx` now carries the whole
+file, constants included (explicit values, equal to what Go's `iota` blocks
+produce). That removed 17 of the 18 errors at once.
+
+**A real compiler bug was the last one.** `case incoming, ok = <-ln.incoming:`
+in net's `fakeConnect` is the comma-ok pair in its ASSIGNMENT form, and
+`buildSelect` recognised the pair only when the statement was a definition:
+
+    pair := comm.Op == token.Def && len(names) == 2
+
+With `=` it bound the received `[]*netFD` to both names, so `ok` got the
+element's type: `cannot use value of type []*net.netFD as bool in assignment`.
+Two names is the pair either way. `select_comma_ok_assign` pins it, and it is a
+true before/after: the old compiler rejects it with
+`cannot use value of type int32 as bool in assignment` on both the assignment
+and the closed-channel case, the new one compiles and runs it.
+
+**Where that leaves net/http for wasm.** `net` now compiles for wasm. `net/http`
+gets all the way to its own SSA build and then the compiler stops on
+
+    panic: runtime error: interface dispatch: no impl for String
+
+which is the documented imported-generic-method-set item (`ir_iface.mx` skips
+the generic `*Named`, and the mxh index records only non-generic method names),
+not a js problem. phase 1c's reason now says exactly that.
+
 ### Still open
 
 - **`unsafe.Pointer`/`unsafe.TypeOf` accept anything.** `unsafe.Pointer` is

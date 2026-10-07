@@ -1,0 +1,59 @@
+// Regression: the comma-ok receive in an ASSIGNMENT-form select case.
+//
+// `case v, ok = <-ch:` (two names, `=`) is the pair form, exactly like
+// `case v, ok := <-ch:`. stage4 recognised the pair only when the statement was
+// a definition (token.Def), so the assignment form bound the received value to
+// BOTH names - giving the bool `ok` the channel element's type:
+//
+//	case incoming, ok = <-ln.incoming:   // net's fakeConnect
+//	  -> cannot use value of type []*net.netFD as bool in assignment
+//
+// That was the last error blocking net/http for wasm. The value must come from
+// this case's receive slot and ok from the select tuple's recvOk slot, and a
+// closed channel must report ok == false.
+package main
+
+func main() {
+	// A one-slot buffered channel with a value waiting.
+	ch := chan int32{1}
+	ch <- 7
+
+	var v int32
+	var ok bool
+	select {
+	case v, ok = <-ch:
+	default:
+		panic("the buffered value should have been received")
+	}
+	if !ok {
+		panic("ok must be true while the channel is open")
+	}
+	if v != 7 {
+		panic("wrong value received")
+	}
+
+	// A closed and drained channel reports ok == false, not a stale value.
+	close(ch)
+	v = 0
+	ok = true
+	select {
+	case v, ok = <-ch:
+	}
+	if ok {
+		panic("ok must be false after the channel is closed and drained")
+	}
+
+	// The definition form must keep working.
+	ch2 := chan int32{1}
+	ch2 <- 5
+	select {
+	case got, open := <-ch2:
+		if !open || got != 5 {
+			panic("definition form broke")
+		}
+	default:
+		panic("the buffered value should have been received")
+	}
+
+	println("ok")
+}

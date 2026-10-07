@@ -2045,16 +2045,21 @@ func (fb *ssaFuncBuilder) checkCallArgs(args []SSAValue, sig *Signature, hasDots
 	}
 	np := sig.Params.Len()
 	n := int32(len(args))
+	// Name the counts. "not enough arguments in call" alone cannot distinguish
+	// a caller that is short an argument from a signature that was resolved with
+	// the wrong arity - and the second is how a missing js/wasm variant of a
+	// function shows up, because the wrong declaration is silently preferred.
+	want := "want " | irItoa(np) | ", have " | irItoa(n)
 	if sig.Variadic && np > 0 {
 		if n < np-1 {
-			fb.errArgs("not enough arguments in call")
+			fb.errArgs("not enough arguments in call (" | want | ")")
 			return
 		}
 	} else if n > np {
-		fb.errArgs("too many arguments in call")
+		fb.errArgs("too many arguments in call (" | want | ")")
 		return
 	} else if n < np {
-		fb.errArgs("not enough arguments in call")
+		fb.errArgs("not enough arguments in call (" | want | ")")
 		return
 	}
 	for i := int32(0); i < n; i++ {
@@ -4047,7 +4052,14 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 				// `if !ok` negated a pointer - `xor ptr %t, -1` - and clang
 				// refused the module, which is how pkg/nostr/ws failed to build.
 				names := ssaExprNames(comm.Lhs)
-				pair := comm.Op == token.Def && len(names) == 2
+				// TWO names is the comma-ok pair, whether the statement
+				// defines or assigns. Requiring token.Def made the assignment
+				// form (`case incoming, ok = <-ch:`, which net's fakeConnect
+				// uses because ok is declared before the select) bind the
+				// received []*netFD to the bool `ok` and report "cannot use
+				// value of type []*net.netFD as bool in assignment" - the last
+				// error blocking net/http for wasm.
+				pair := len(names) == 2
 				for ni := int32(0); ni < int32(len(names)); ni++ {
 					name := names[ni]
 					if name.Value == "_" {

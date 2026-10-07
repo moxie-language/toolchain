@@ -4,15 +4,22 @@
 
 //:build js && wasm
 
-// Socket address types for the js/wasm target, mirroring
-// $GOROOT/src/syscall/net_fake.go.
+// Socket address types and the socket constants for the js/wasm target,
+// mirroring $GOROOT/src/syscall/net_fake.go.
 //
-// Go declares `type Sockaddr any` here. Moxie has no empty interface, so that
-// cannot be ported literally - which is why this file was missing and why
-// syscall.Sockaddr did not resolve for js at all. The interface below has the
-// same shape the unix build uses (one unexported method, so only this package
-// can define a Sockaddr), and the js implementations report ENOSYS because this
-// target has no sockets: every function in net_js.mx returns ENOSYS too.
+// The constants are part of the same file upstream and are the reason net's js
+// arm did not compile: without them every `syscall.AF_INET`-style argument
+// failed to resolve, the builder DROPPED the argument from the call, and the
+// arity check then reported "not enough arguments in call (want 8, have 7)" in
+// *_posix.mx - a misleading symptom that pointed at the callers, not at the
+// missing constants. Go declares them with iota; the values here are what those
+// iota blocks produce.
+//
+// Go also declares `type Sockaddr any` here. Moxie has no empty interface, so
+// that cannot be ported literally. The interface below has the same shape the
+// unix build uses (one unexported method, so only this package can define a
+// Sockaddr), and the js implementations report ENOSYS because this target has no
+// sockets: every function in net_js.mx returns ENOSYS too.
 //
 // The Addr fields stay arrays, exactly as Go declares them and as the unix
 // definitions in syscall_unix.mx do: they are address layout, not a slice
@@ -20,6 +27,43 @@
 package syscall
 
 import "unsafe"
+
+const (
+	AF_UNSPEC = 0x0
+	AF_UNIX   = 0x1
+	AF_INET   = 0x2
+	AF_INET6  = 0x3
+)
+
+const (
+	SOCK_STREAM    = 0x1
+	SOCK_DGRAM     = 0x2
+	SOCK_RAW       = 0x3
+	SOCK_SEQPACKET = 0x4
+)
+
+const (
+	IPPROTO_IP   = 0x0
+	IPPROTO_IPV4 = 0x4
+	IPPROTO_IPV6 = 0x29
+	IPPROTO_TCP  = 0x6
+	IPPROTO_UDP  = 0x11
+)
+
+const (
+	SOMAXCONN = 0x80
+)
+
+const (
+	IPV6_V6ONLY = 0x1
+	SO_ERROR    = 0x2
+)
+
+// Misc constants expected by package net but not supported.
+const (
+	F_DUPFD_CLOEXEC = 0x1
+	SYS_FCNTL       = 500
+)
 
 type Sockaddr interface {
 	sockaddr() (ptr unsafe.Pointer, slen uint32, err error)
