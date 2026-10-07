@@ -11,7 +11,7 @@ Four repositories, all on branch `dev`, all level with their remotes
 
 | repo | what it is | last known state |
 |------|------------|------------------|
-| `moxie` | the compiler, runtime and stdlib | `ad3f09ea`; `tests/run.sh --full`: 200 PASS / 0 FAIL / 0 SKIP, fixpoint PASS; net/http works end to end; float `++`/`--` fixed, which also repaired all of `math`'s trig (round 61) |
+| `moxie` | the compiler, runtime and stdlib | `082a5277` (code; docs follow it); `tests/run.sh --full`: 208 PASS / 0 FAIL / 1 SKIP, fixpoint PASS; `net/http`, `text/tabwriter` and `internal/coverage/{encodecounter,encodemeta,cformat}` compile again, and phase 1b now compiles 38 stdlib packages so the next regression there fails the gate (rounds 70-71) |
 | `nostr` | shared nostr primitives and codecs | `98c7069` (musiquay vocabulary moved out) |
 | `morly` | the relay (`pkg/relay`, `pkg/store`, ...) | `b7dba37` |
 | `musiquay` | the web app, docs corpus, protocol vocabulary | `8dd6f59` (vocabulary at `pkg/protocol`) |
@@ -4914,22 +4914,24 @@ shrinking it is deliberate. **Move a package to `SWEEP` when it is fixed.**
   `buildExpr` on `[524288]Event{}` is `buildArrayLit`, which ends in
   `return fb.emitLoad(alloc, typ)` (`ssa_builder.mx:6666`, and the same shape at
   `:6609`) - so the literal is loaded out of its alloca and then copied into the
-  arena. Two fixes, both needed:
+  arena. The fix is in `buildOperandAddr`: handle `*syntax.CompositeLit` of
+  **array or struct** type by building the literal *into* the allocation and
+  returning its address (`emitAlloc` + `buildCompositeLitInto` +
+  `markAddrEscaping`), never materializing the value - exactly what the
+  pointer-to-struct branch of `buildCompositeLitInto` already does at
+  `ssa_builder.mx:6919-6928` for the `[]*T{{...}}` shorthand. Slices and maps keep
+  the existing fallback; their value is a header/pointer, not a 32 MiB aggregate.
 
-  1. `buildOperandAddr` should handle `*syntax.CompositeLit` of **array or
-     struct** type by building the literal *into* the allocation and returning
-     its address (`emitAlloc` + `buildCompositeLitInto` + `markAddrEscaping`),
-     never materializing the value. Slices and maps keep the existing fallback -
-     their value is a header/pointer, not a 32 MiB aggregate.
-  2. `emitAlloc`'s `a.Heap` branch (`ir_alloc.mx:152-163`) does **not** zero the
-     allocation, which is why the copy existed - the store was what carried the
-     zeros in. Once (1) stops copying, a heap aggregate must get the same
-     `emitZeroInit` the stack branch already emits, or every `&T{}` with unset
-     fields silently reads uninitialized arena memory.
+  **No extra zeroing is needed, and adding it would be a mistake.** `emitAlloc`'s
+  `a.Heap` branch emits no memset, but it does not need one: `ArenaAllocTD` ends in
+  `memzero(ptr, size)` (`src/runtime/alloc.mx:2018`), so `runtime.alloc` already
+  returns zeroed memory. The 32 MiB load+store was redundant work, not the thing
+  carrying the zeros in - so the fix is the one change above, and a memset added
+  to the heap branch would zero 32 MiB twice per call.
 
-  (1) touches every address-taken composite literal in the tree, so it needs the
-  full gate, not a spot check. A probe fixture should assert both the value
-  (`&T{...}` fields) and that a large `&[N]T{}` produces a memset rather than a
+  The change touches every address-taken composite literal in the tree, so it
+  needs the full gate, not a spot check. A probe fixture should assert the field
+  values of a `&T{...}` AND that a large `&[N]T{}` emits a memset rather than a
   load/store pair.
 - **`unsafe.Pointer`/`unsafe.TypeOf` accept anything.** `unsafe.Pointer` is
   declared `__any->ptr`, so a struct value is accepted and silently becomes a
