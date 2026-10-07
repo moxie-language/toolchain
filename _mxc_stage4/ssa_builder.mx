@@ -678,6 +678,11 @@ func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t Type) {
 			}
 			return NewSlice(elem)
 		}
+		// See tcResolveNameInline's DotsType: a nil element type here leaves the
+		// parameter `void` while the variadic flag stays true, so callers build a
+		// slice for a void parameter. Name the type rather than emit that.
+		push(cctx.compileErrors, "undefined: " | typeExprName(ev.Elem))
+		return nil
 	}
 	return nil
 }
@@ -8872,6 +8877,10 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope
 			}
 			return NewSlice(elem)
 		}
+		// See tcResolveNameInline's DotsType: a nil element type leaves the
+		// parameter `void` while the variadic flag stays true.
+		push(cctx.compileErrors, "undefined: " | typeExprName(ev.Elem))
+		return nil
 	case *syntax.SliceType:
 		elem := resolveTypeExprWithSubst(ev.Elem, typeSubst, pkgScope)
 		if elem != nil {
@@ -9389,7 +9398,14 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, plainName str
 		}
 	}
 	savedImports2 := cctx.sigDeclPkgImports
-	cctx.sigDeclPkgImports = fb.declPkgImports(srcPkgPath)
+	// Only replace the context when the declaring package could be identified.
+	// Assigning nil here CLEARED the caller's context for a package that is
+	// neither the one being compiled nor in the Registry, which turned a
+	// resolution that used to keep working into an undefined one. Unknown means
+	// "leave what we had", not "resolve nothing".
+	if declImports := fb.declPkgImports(srcPkgPath); declImports != nil {
+		cctx.sigDeclPkgImports = declImports
+	}
 	sig := resolveSignatureWithSubst(fd.Type, typeSubst, srcScope)
 	if sig == nil {
 		cctx.sigDeclPkgImports = savedImports2

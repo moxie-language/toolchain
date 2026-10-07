@@ -4976,49 +4976,55 @@ keep per-operation timeouts. Dropping the timeouts instead would leave every
 dial and lookup to block until it finishes or fails, which is a capability
 change, not a cleanup.
 
+### FIXED in round 74: a variadic parameter whose element type cannot be resolved
+
+Found in round 73 while probing something else. Minimal reproducer:
+
+    package main
+    func f(args ...fmt.Stringer) {}
+    func main() {
+        var s fmt.Stringer = int32(1)
+        f(s)
+    }
+
+stage4 emitted invalid IR instead of reporting anything:
+
+    %t3 = insertvalue {ptr, i64, i64} %ms7, i64 %sx2, 2   ; the slice header
+    %t4 = getelementptr inbounds i8, ptr %t3, i32 0       ; GEP through the VALUE
+    call void @main.f(void %t3, ptr null)                 ; parameter type is void
+    error: '%t3' defined with type '{ ptr, i64, i64 }' but expected 'ptr'
+
+Legacy rejects the same source with `undefined: fmt` at both sites, so the source
+is invalid. The mechanism is that every `DotsType` case resolved its element and
+then **fell through to nil** when that failed, while the `variadic` flag is read
+from the AST shape independently - so the parameter became `void` and callers
+still built a slice for it.
+
+**The wrong fix, and why it is recorded here.** The obvious reading is "the
+resolver's global by-name fallback (`LookupByName`) let an unimported package
+resolve; delete it". That was built and measured, and it is wrong: with the
+fallback removed, a file that **does** `import "fmt"` got a nil element type
+anyway (the scope handed to the checker's resolver does not always carry the
+`PkgName` binding), the slice construction then computed a garbage element size,
+and the compiler panicked with `alloc: implausible size 137438953856` while
+compiling its own source. The same source compiled **and ran** correctly before
+the change. The fallback is load-bearing.
+
+The fix is at the three `DotsType` sites (`ir_typecheck.mx` `tcResolveNameInline`,
+`ssa_builder.mx` `pkgResolveTypeAST` and `resolveTypeExprWithSubst`): an element
+type that does not resolve is an error, reported by name via `typeExprName`
+(`pkg.Sel`, or the bare name), never a silent nil. Verified: the reproducer now
+reports `undefined: fmt.Stringer`; the same program **with** `import "fmt"`
+compiles and runs (`f(s) == 1`, `f(a, b) == 2`); `restrict:reject_unimported_pkg_type`
+pins the rejection; phase 0 is 81/81. The `LookupByName` fallback is left in place
+with a comment saying it is load-bearing and why.
+
+Also in this round: `monomorphizeAndCall` now only replaces
+`sigDeclPkgImports` when the declaring package could actually be identified.
+Assigning nil for an unknown package cleared the caller's context, which is a
+regression introduced in round 73.
+
 ### Still open
-
-- **A qualified type from a package the file never imported resolves anyway, and
-  in a variadic parameter position it becomes `void`.** Found in round 73 while
-  probing something else; it is the by-name fallback again. Minimal reproducer:
-
-      package main
-      func f(args ...fmt.Stringer) {}
-      func main() {
-          var s fmt.Stringer = int32(1)
-          f(s)
-      }
-
-  `main.mx` imports nothing, yet `fmt.Stringer` resolves - the resolver's last
-  resort is `cctx.universe.LookupByName(pkgName.Value)`, and `fmt` is in the
-  Registry because something else in the closure imports it. In the **variadic**
-  position the element type then comes back `void`, and the emitter produces
-  invalid IR instead of failing:
-
-      %t3 = insertvalue {ptr, i64, i64} %ms7, i64 %sx2, 2   ; the slice header
-      %t4 = getelementptr inbounds i8, ptr %t3, i32 0       ; GEP through the VALUE
-      call void @main.f(void %t3, ptr null)                 ; parameter type is void
-      error: '%t3' defined with type '{ ptr, i64, i64 }' but expected 'ptr'
-
-  The same source with a locally declared `stringer` interface, or with
-  `fmt.Stringer` as a NON-variadic parameter, compiles - so the blast radius is
-  narrower than "all qualified types", but the underlying fallback is the same
-  one round 70 fixed the staleness of.
-
-  **Legacy is the arbiter and it rejects the program**, which settles what the
-  fix is:
-
-      ../../../../../tmp/pv_legacy/pkg/main.mx:3:16: undefined: fmt
-      ../../../../../tmp/pv_legacy/pkg/main.mx:6:8: undefined: fmt
-
-  So `fmt` is not legitimately available without an import, the source is
-  invalid, and stage4 must say `undefined: fmt` at both sites like legacy does.
-  The invalid variadic IR is a **symptom** of the missing restriction, not a
-  codegen bug of its own - fix the resolver, not `DotsType`. Every `DotsType`
-  case resolves its element and returns `nil` silently when that fails
-  (`ssa_builder.mx:673`, `:8867`, `ir_typecheck.mx:1836`), and a nil parameter
-  type becomes `void`; those are the sites that must fail loud. Then verify a
-  genuinely imported interface in a variadic position still resolves.
 
 - **`unsafe.Pointer`/`unsafe.TypeOf` accept anything.** `unsafe.Pointer` is
   declared `__any->ptr`, so a struct value is accepted and silently becomes a
@@ -5031,7 +5037,7 @@ change, not a cleanup.
 - `crypto/ecdh`, `crypto/aes`, `crypto/cipher`, `crypto/sha256`, `crypto/hmac`,
   `encoding/json`, `encoding/xml`, `debug/gosym`, `math/big`, `time`,
   `compress/{flate,gzip,zlib}` and the rest of the sweep now compile and are in
-  `SWEEP` (39 packages, tracev1 included), so a regression in any of them fails phase 1b.
+  `SWEEP` (41 packages, tracev1/context/runtime/trace included), so a regression in any of them fails phase 1b.
 
 ### Environment note: the legacy compiler cannot be rebuilt here
 

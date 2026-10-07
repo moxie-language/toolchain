@@ -1,0 +1,33 @@
+// expected: undefined: fmt.Stringer
+//
+// A qualified type is only legal when its package is in scope: the file imports
+// it, or the signature being resolved belongs to a package whose imports we are
+// carrying for a monomorphization.
+//
+// stage4's type resolver ended with a global by-name fallback
+// (Universe.LookupByName), so `fmt.Stringer` resolved in a file that never
+// imported fmt - and in a variadic parameter position the element type then came
+// back nil from a diverging path, which became a `void` parameter and invalid
+// IR:
+//
+//	%t4 = getelementptr inbounds i8, ptr %t3, i32 0   ; GEP of the slice VALUE
+//	call void @main.f(void %t3, ptr null)
+//
+// Legacy rejects the same source with `undefined: fmt` at both sites. stage4
+// now rejects it too, naming the unresolved type.
+//
+// The fix is NOT to remove the resolver's by-name fallback: that fallback is
+// load-bearing for legitimate code (with it removed, a file that DOES import
+// fmt got a nil element type from a scope that did not carry the binding, the
+// slice construction computed a garbage element size, and the compiler panicked
+// with "alloc: implausible size"). The rule is at the DotsType sites instead -
+// a variadic parameter whose element type cannot be resolved is an error, never
+// a void parameter.
+package main
+
+func f(args ...fmt.Stringer) {}
+
+func main() {
+	var s fmt.Stringer = int32(1)
+	f(s)
+}

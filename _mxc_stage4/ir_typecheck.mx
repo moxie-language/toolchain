@@ -1683,6 +1683,21 @@ func tcSelectorConst(e syntax.Expr, scope *Scope) (c *TCConst) {
 	return nil
 }
 
+// typeExprName renders a type expression for a diagnostic: `pkg.Sel` for a
+// qualified type, `Name` for a bare one, and the empty string when it has
+// neither shape (then the caller's message is just "undefined: ").
+func typeExprName(e syntax.Expr) (s string) {
+	switch x := e.(type) {
+	case *syntax.Name:
+		return x.Value
+	case *syntax.SelectorExpr:
+		if n, ok := x.X.(*syntax.Name); ok {
+			return n.Value | "." | x.Sel.Value
+		}
+	}
+	return ""
+}
+
 func tcResolveNameInline(e syntax.Expr, scope *Scope) (t Type) {
 	if e == nil {
 		return nil
@@ -1713,7 +1728,13 @@ func tcResolveNameInline(e syntax.Expr, scope *Scope) (t Type) {
 				}
 			}
 		}
-		// Fallback: look up by short package name via index.
+		// Fallback: look up by short package name via index. It is load-bearing
+		// for legitimate code - removing it made the element type of
+		// `...fmt.Stringer` come back nil in a file that DOES import fmt (the
+		// scope handed to this resolver does not always carry the binding), and
+		// the slice construction then computed a garbage element size and
+		// panicked the compiler. An unresolvable type is caught by name at the
+		// DotsType/parameter sites instead.
 		if pkgName2, ok2 := ex.X.(*syntax.Name); ok2 {
 			if imp := cctx.universe.LookupByName(pkgName2.Value); imp != nil {
 				typeObj := imp.Scope.Lookup(ex.Sel.Value)
@@ -1841,6 +1862,16 @@ func tcResolveNameInline(e syntax.Expr, scope *Scope) (t Type) {
 			}
 			return NewSlice(elem)
 		}
+		// A variadic parameter whose element type does not resolve used to fall
+		// through to nil. The parameter type then became `void` while the
+		// variadic flag stayed true (it is read from the AST), so a caller built
+		// a slice and passed it to a void parameter:
+		//     call void @main.f(void %t3, ptr null)
+		// which clang rejects - or, when the scope happened to carry the
+		// binding, computed a garbage element size and panicked the compiler
+		// with "alloc: implausible size". Name the type instead.
+		push(cctx.compileErrors, "undefined: " | typeExprName(ex.Elem))
+		return nil
 	}
 	return nil
 }
