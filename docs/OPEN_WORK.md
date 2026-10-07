@@ -11,7 +11,7 @@ Four repositories, all on branch `dev`, all level with their remotes
 
 | repo | what it is | last known state |
 |------|------------|------------------|
-| `moxie` | the compiler, runtime and stdlib | `f5ba7376` (code/tests; docs follow it); `tests/run.sh --full`: 219 PASS / 0 FAIL / 1 SKIP, fixpoint PASS; native phase 1b compiles 41 stdlib packages with an empty known-broken list, phase 1c compiles the js/wasm-only packages (`syscall/js`, `path/filepath`) and records net/http as needing a port of net's js arm (18 arity/comma-ok errors), `context` and the embedded tzdata registration both have run-time tests (tzdata proved in a browser), the import scanner exists once instead of twice, and an unresolvable variadic element type is an error instead of a `void` parameter (rounds 70-80) |
+| `moxie` | the compiler, runtime and stdlib | `f8cbdedc` (code/tests; docs follow it); `tests/run.sh --full`: 221 PASS / 0 FAIL / 1 SKIP, fixpoint PASS; native phase 1b compiles 41 stdlib packages, phase 1c compiles the js/wasm-only packages and records net/http at the imported-generic-method-set item (`interface dispatch: no impl for String`), **net now compiles for wasm**, `context` and the embedded tzdata registration both have run-time tests (tzdata proved in a browser), the import scanner exists once instead of twice, and one open intermittent compiler segfault is recorded with its reproducer (rounds 70-81) |
 | `nostr` | shared nostr primitives and codecs | `98c7069` (musiquay vocabulary moved out) |
 | `morly` | the relay (`pkg/relay`, `pkg/store`, ...) | `b7dba37` |
 | `musiquay` | the web app, docs corpus, protocol vocabulary | `8dd6f59` (vocabulary at `pkg/protocol`) |
