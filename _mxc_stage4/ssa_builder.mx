@@ -9359,12 +9359,10 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, plainName str
 		}
 	}
 	savedImports2 := cctx.sigDeclPkgImports
-	if fb.fn != nil && fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil && fb.fn.Pkg.Pkg.Path == srcPkgPath {
-		cctx.sigDeclPkgImports = fb.fn.Pkg.Pkg.Imports
-	}
+	cctx.sigDeclPkgImports = fb.declPkgImports(srcPkgPath)
 	sig := resolveSignatureWithSubst(fd.Type, typeSubst, srcScope)
-	cctx.sigDeclPkgImports = savedImports2
 	if sig == nil {
+		cctx.sigDeclPkgImports = savedImports2
 		return nil, false
 	}
 	fn := &SSAFunction{
@@ -9377,8 +9375,39 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, plainName str
 	subFb := newSSAFuncBuilder(fn, fb.info)
 	subFb.typeSubst = typeSubst
 	subFb.srcScope = srcScope
+	// The BODY is source from the declaring package too, so its qualified
+	// types and methods resolve through the declaring package's imports for
+	// exactly the same reason the signature does. Restoring the context before
+	// buildBody left a clone with the CALLER's imports: net/http closes over
+	// crypto/tls, which instantiates crypto/internal/fips140/ecdsa's pad000,
+	// and that clone's `h.BlockSize()` on a *hmac.HMAC resolved to nothing -
+	// buildExpr returned nil, and the short var above it reported "cannot
+	// resolve type of short var blockSize in pad000__".
 	subFb.buildBody(fd)
+	cctx.sigDeclPkgImports = savedImports2
 	return fb.emitCallToSSAFunc(fn, args, hasDots), true
+}
+
+// declPkgImports returns the import list of the package that DECLARES the
+// generic being instantiated, which is not the package being compiled when the
+// instantiation happens downstream. The declaring package is a dependency
+// there, so its live list is unavailable and the paths recorded in
+// DirectImports are resolved through the Registry instead.
+func (fb *ssaFuncBuilder) declPkgImports(srcPkgPath string) (out []*TCPackage) {
+	if fb.fn != nil && fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil && fb.fn.Pkg.Pkg.Path == srcPkgPath {
+		return fb.fn.Pkg.Pkg.Imports
+	}
+	decl := cctx.universe.Registry[srcPkgPath]
+	if decl == nil {
+		return nil
+	}
+	for _, p := range cctx.universe.DirectImportPaths(decl) {
+		if ip := cctx.universe.Registry[p]; ip != nil {
+			out = mxutil.Ensure(out, 1)
+			push(out, ip)
+		}
+	}
+	return out
 }
 
 func (fb *ssaFuncBuilder) emitCallToSSAFunc(fn *SSAFunction, args []SSAValue, hasDots bool) (s SSAValue) {
