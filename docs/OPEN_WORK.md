@@ -11,7 +11,7 @@ Four repositories, all on branch `dev`, all level with their remotes
 
 | repo | what it is | last known state |
 |------|------------|------------------|
-| `moxie` | the compiler, runtime and stdlib | `082a5277` (code; docs follow it); `tests/run.sh --full`: 208 PASS / 0 FAIL / 1 SKIP, fixpoint PASS; `net/http`, `text/tabwriter` and `internal/coverage/{encodecounter,encodemeta,cformat}` compile again, and phase 1b now compiles 38 stdlib packages so the next regression there fails the gate (rounds 70-71) |
+| `moxie` | the compiler, runtime and stdlib | `1ed3d812` (code; docs follow it); `tests/run.sh --full`: 209 PASS / 0 FAIL / **0 SKIP**, fixpoint PASS; `net/http`, `text/tabwriter`, `internal/coverage/{encodecounter,encodemeta,cformat}` and `internal/trace/internal/tracev1` all compile, and phase 1b compiles 39 stdlib packages with an empty known-broken list (rounds 70-73) |
 | `nostr` | shared nostr primitives and codecs | `98c7069` (musiquay vocabulary moved out) |
 | `morly` | the relay (`pkg/relay`, `pkg/store`, ...) | `b7dba37` |
 | `musiquay` | the web app, docs corpus, protocol vocabulary | `8dd6f59` (vocabulary at `pkg/protocol`) |
