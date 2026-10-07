@@ -4828,3 +4828,129 @@ compile, all six regression fixtures pass.
    this one sat until a survey found it. Adding a stdlib compile sweep - even just
    the packages the objective names - would turn the next such find into a test
    failure instead of a discovery.
+
+## FIXED in rounds 70-71: the coverage gap, and what it was hiding
+
+The objective's list claimed `internal/coverage/{encodecounter,encodemeta,cformat}`
+compiled. They did not, and neither did `text/tabwriter` or `net/http`. The claim
+came from `moxie build -a ./_mxc_stage4` returning 0 - **the third time that
+command was treated as proof a package compiled.** It builds the compiler; it says
+nothing about any other package. Trust the artifact that runs the thing.
+
+### Correction to the round-69 note above
+
+The stale `ByName` entry's `Path` being the bare name `ecdsa` is not reproducible:
+no Registry write in the tree keys a package by a bare name (`NewTCPackage` is
+always called with the full path). The observable replacement is
+`registerBuiltins`' `Synthetic` stub being overwritten **at the same key** by
+`loadMxh` (`workerLoadDeps`, "existing != nil && !existing.Synthetic"). That is
+enough - same key, same length, different object - and it is what the fix in
+`rebuildByName`/`LookupByName` keys on now: the cached entry must be the object the
+Registry currently holds, and the rebuild order is total (shorter `Path` first,
+then lexicographic) instead of map iteration order.
+
+### phase 1b: the stdlib sweep (`tests/phase1b_stdlib_sweep.sh`)
+
+No phase compiled a stdlib package: phase 1 builds only `token mxutil syntax types
+rewrite`, and the rest build fixtures and the compiler. One build now blank-imports
+36 packages, which compiles all of them at once. A per-package build costs a full
+closure each and bought nothing - `net/http` alone is ~20 minutes - so the sweep is
+one build, ~20 minutes, added to `--full` only. Packages known broken are listed in
+`SWEEP_KNOWN` and SKIP with their reason, so the broken set stays visible and
+shrinking it is deliberate. **Move a package to `SWEEP` when it is fixed.**
+
+### What the sweep found, in the order it was fixed
+
+1. **`push`/`__moxie_append` gave an element no type** (`e43bcae2`).
+   `push(lines, nil)` in `text/tabwriter`'s `addLine` stored a `[]cell` element
+   rendered as the pointer literal (`store {ptr, i64, i64} null`), which clang
+   rejects. The element type is what decides the zero literal, and the builder is
+   where the element gets it - the same rule `coerceSendValue` already applied to a
+   send, so both sites call it now. Unblocked `text/tabwriter` and
+   `internal/coverage/cformat`. Legacy compiles **and runs** the same fixture
+   correctly, so this is a stage4-only defect; `nil_elem_push` pins it.
+2. **A monomorphized clone's BODY was built without the declaring package's
+   imports** (`d94ec154`). `monomorphizeAndCall` installed them only for the
+   signature, and only when the declaring package was the one being compiled.
+   `net/http` closes over `crypto/tls`, which instantiates
+   `crypto/internal/fips140/ecdsa`'s `pad000`; in that clone `hmac` is not an
+   import of the compiling package, so a method call on a `*hmac.HMAC` receiver
+   resolved to nothing. `declPkgImports` falls back to `DirectImports` +
+   `Registry` because a dependency has no live import list. No legacy mirror:
+   legacy builds instantiated generics through x/tools `ssa`, whose types go/types
+   already resolved with the declaring package's own imports.
+3. **`binary.Write`'s (typ, data) pair passed backwards** (`082a5277`). Six sites
+   in `internal/coverage` wrote `unsafe.TypeOf(*h), unsafe.Pointer(h)` where `h` is
+   a header **value**: `*h` dereferences a non-pointer and `unsafe.Pointer(h)` turns
+   the struct's bytes into a pointer. The decoder side of the same packages already
+   had the correct `unsafe.TypeOf(hdr), unsafe.Pointer(&hdr)`.
+
+### Still open
+
+- **`internal/trace/internal/tracev1` - located, not yet fixed.** clang crashes
+  (exit 139) in `X86 DAG->DAG Instruction Selection` on
+  `(*Events).grow`, at `SelectionDAG::ReplaceAllUsesWith` - the same crash class as
+  the flate fix, with a much larger object. `grow` does
+  `push(l.buckets, &[eventsBucketSize]Event{})` with `eventsBucketSize = 524288`
+  (32 MiB). The IR materializes the whole array as a **value**:
+
+      %t27 = alloca [524288 x Event]            ; 32 MiB stack alloca
+      call void @llvm.memset.p0.i64(ptr %t27, i8 0, i64 %zi5, i1 false)
+      %t28 = load [524288 x Event], ptr %t27    ; 32 MiB load
+      %t29 = call ptr @runtime.alloc(i64 %ha6, ...)
+      store [524288 x Event] %t28, ptr %t29     ; 32 MiB store
+
+  The alloca+memset is already right (that is the flate fix); what is wrong is
+  relocating the escaped aggregate by loading it as a value and storing it again.
+  An aggregate copy is a **memcpy**.
+
+  **Root cause located to the line.** `&x` goes to `buildOperandAddr`, which
+  handles a name, an index, a selector and `&*p`, and then falls through to:
+
+      xv := fb.buildExpr(e)              // whole array VALUE: alloca + load
+      a := &SSAAlloc{Heap: true}
+      fb.emitStore(a, xv)                // 32 MiB store
+
+  `buildExpr` on `[524288]Event{}` is `buildArrayLit`, which ends in
+  `return fb.emitLoad(alloc, typ)` (`ssa_builder.mx:6666`, and the same shape at
+  `:6609`) - so the literal is loaded out of its alloca and then copied into the
+  arena. Two fixes, both needed:
+
+  1. `buildOperandAddr` should handle `*syntax.CompositeLit` of **array or
+     struct** type by building the literal *into* the allocation and returning
+     its address (`emitAlloc` + `buildCompositeLitInto` + `markAddrEscaping`),
+     never materializing the value. Slices and maps keep the existing fallback -
+     their value is a header/pointer, not a 32 MiB aggregate.
+  2. `emitAlloc`'s `a.Heap` branch (`ir_alloc.mx:152-163`) does **not** zero the
+     allocation, which is why the copy existed - the store was what carried the
+     zeros in. Once (1) stops copying, a heap aggregate must get the same
+     `emitZeroInit` the stack branch already emits, or every `&T{}` with unset
+     fields silently reads uninitialized arena memory.
+
+  (1) touches every address-taken composite literal in the tree, so it needs the
+  full gate, not a spot check. A probe fixture should assert both the value
+  (`&T{...}` fields) and that a large `&[N]T{}` produces a memset rather than a
+  load/store pair.
+- **`unsafe.Pointer`/`unsafe.TypeOf` accept anything.** `unsafe.Pointer` is
+  declared `__any->ptr`, so a struct value is accepted and silently becomes a
+  pointer - which is why (3) produced invalid IR instead of a compile error. A
+  compile-time "not a pointer" error would have caught all six sites. That is a
+  restriction, so it is bilateral work (legacy + stage4, pinned by tests).
+- Three objective items were re-measured and are **already done**: `regexp`,
+  `text/template` and `os/user` all compile today. Only "compiles" is verified;
+  nothing exercises them at run time yet.
+- `crypto/ecdh`, `crypto/aes`, `crypto/cipher`, `crypto/sha256`, `crypto/hmac`,
+  `encoding/json`, `encoding/xml`, `debug/gosym`, `math/big`, `time`,
+  `compress/{flate,gzip,zlib}` and the rest of the 36 now compile and are in
+  `SWEEP`, so a regression in any of them fails phase 1b.
+
+### Environment note: the legacy compiler cannot be rebuilt here
+
+`legacy/` links LLVM but the cgo config selects `-L/usr/lib/llvm-20/lib -lLLVM-20`
+while `llvmpure_init.go` looks for `/usr/lib/llvm-22/lib/libLLVM-22.so`, and this
+machine has LLVM 20 headers only (`/usr/include/llvm-22` does not exist; the
+runtime `.so` at `/usr/lib/libLLVM-22.so` has no development files). So
+`go build` in `legacy/` fails at link with an undefined `PassBuilder` symbol.
+`tests/phase2_selfhost.sh` therefore runs the prebuilt `legacy/moxie` binary
+(Oct 5) rather than rebuilding it, and any `legacy/` source change made in this
+environment is **unverifiable** - state that plainly when it matters.
