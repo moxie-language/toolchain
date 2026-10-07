@@ -5305,14 +5305,24 @@ A length that is a stack address (`0x7fff...`) is what produced the earlier
 `alloc: implausible size 1.4e14` panic in the same shape - one garbage slice
 header, two symptoms.
 
-The asymmetry is the best clue: only the QUALIFIED unresolved name trips it, and
-the only thing the qualified path does that the bare one does not is call
-`cctx.universe.LookupByName`, which (round 70) rebuilds the by-name cache by
-switching the CURRENT arena to the root arena and back. A garbage slice length
-appearing right after that is consistent with the arena switch leaving state
-that a later allocation reuses. Next step: bisect that hypothesis with one build
-- give `LookupByName` a variant that does not switch arenas and see whether the
-crash rate goes to zero - before designing the fix. Measured rates: 3/40 with the default job count, 1/40 with
+Two hypotheses were tested and are **eliminated**:
+
+- the parallel worker path: `-j 1` still crashes;
+- the arena switch in round 70's `rebuildByName`. Removing the switch entirely
+  (allocating the by-name cache in the current arena instead) gave **1 crash in
+  60 runs** against 3/40 and 1/40 with it, so the rate is unchanged and the
+  switch is not the corruptor.
+
+What is left, precisely: the faulting `push` takes a **24-byte element**, and
+none of `tcResolveNameInline`'s own four pushes has a 24-byte element type
+(`[]Type` and `string` are 16, `[]*TCField` is 8). So the faulting code is in an
+INLINED callee, and the dwarf carries no `DW_TAG_inlined_subroutine` or variable
+info for gdb to name it. Next step, in order: rebuild with a unique string pushed
+next to each candidate push inside `tcResolveNameInline`'s callees (the
+InterfaceType/StructType path and `typeExprName`'s callers are the candidates) to
+see which one is on the stack at the fault; if that is unclear, `-work` plus the
+crash PC will name the module, and the `alloc: implausible size` panic in the
+same shape is the other reproducible face of the same corruption. Measured rates: 3/40 with the default job count, 1/40 with
 `-j 1`, 0/30 under gdb (which re-times the process enough to hide it), 0/30 on
 the compilers from rounds 73, 74 and 81 - so this is rare and possibly
 timing/allocation dependent, and the earlier versions are not exonerated by those
