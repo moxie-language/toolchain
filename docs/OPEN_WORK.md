@@ -5261,6 +5261,36 @@ which is the documented imported-generic-method-set item (`ir_iface.mx` skips
 the generic `*Named`, and the mxh index records only non-generic method names),
 not a js problem. phase 1c's reason now says exactly that.
 
+## Round 82: the net/http-wasm "no impl for String" panic is an INSTANTIATION mismatch, not an empty list
+
+The phase-1c skip for net/http was `interface dispatch: no impl for String`, which
+the round-81 notes attributed to the documented imported-generic-method-set item
+without evidence beyond the message. The message now says how many impls the
+dispatch list holds, and it is **268, none matching** - and that list contains
+every named type the compiler has (`*main.Named`, `*main.Basic`, `*main.SSAConst`,
+`*time.Time`, ...), so an empty or un-scanned list is ruled out.
+
+Two things had to be learned to get there:
+
+- The panic is a **runtime** panic of the compiler binary itself, not a
+  compile-time diagnostic. A core dump backtrace shows it raised by generated
+  dispatch code inside `git.smesh.lol/moxie/pkg/types.(*Signature).String()`,
+  called from `checkAssignable` <- `checkCallArgs` <- `buildPkgCall`: the compiler
+  was building an argument-mismatch MESSAGE for a call in net/http, and rendering
+  the signature dispatched `String()` on a `Type` that has no arm.
+- The message text is baked into the generated dispatch arms when the compiler is
+  BUILT, so the first build with the new message still printed the old one. Only a
+  second-generation build (`/tmp/mxc-r82 build -a` of the same source) shows it.
+  Worth remembering: diagnostics added to emitted code need two generations.
+
+So the shape is: a named type's plain form has an arm, and the value being
+dispatched is an **instantiated** `*Named` (TArgs set) whose `typeIDHash` differs
+from the plain one - which is exactly the two-part fix the older notes describe
+(the mxh index must record generic method names, and the instantiated `*Named` has
+to be keyed at the boxing site). The next step is to print the runtime typeID in
+the default arm and match it against the arm IDs, which names the missing
+instantiation outright.
+
 ## OPEN, found in round 81: the compiler segfaults on a qualified unresolved variadic type
 
 Not fixed, and it is the reason the round-74 restriction fixture changed shape.
