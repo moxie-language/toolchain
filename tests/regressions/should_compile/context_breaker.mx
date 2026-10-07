@@ -1,0 +1,109 @@
+// context is live stdlib code - net's dial/DNS timeouts, net/http's request
+// cancellation and crypto/tls's connection close all run through it - but no
+// repository imports it and nothing exercised it. This pins the breaker
+// semantics: Done/Err/Cause, the deadline timer, AfterFunc, and WithoutCancel.
+package main
+
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+// hit records that the AfterFunc callback ran. A Moxie func value carries no
+// environment, so the callback is a type with a Call method.
+type hit struct {
+	ran bool
+}
+
+func (h *hit) Call() {
+	h.ran = true
+}
+
+func main() {
+	bg := context.Background()
+	if bg.Done() != nil {
+		panic("Background().Done() must be nil")
+	}
+	if bg.Err() != nil {
+		panic("Background().Err() must be nil")
+	}
+
+	// WithCancel closes Done, sets Err, and runs a registered AfterFunc.
+	ctx, cancel := context.WithCancel(bg)
+	h1 := &hit{}
+	stop1 := context.AfterFunc(ctx, h1)
+	if h1.ran {
+		panic("AfterFunc ran before cancel")
+	}
+	cancel.Cancel()
+	if ctx.Err() != context.Canceled {
+		panic("cancel must set Err to Canceled")
+	}
+	if context.Cause(ctx) != context.Canceled {
+		panic("Cause of a plain cancel must be Canceled")
+	}
+	if !h1.ran {
+		panic("AfterFunc must run when the context is canceled")
+	}
+	if stop1.Stop() {
+		panic("Stop must report false once the callback has run")
+	}
+
+	// Stop before cancel prevents the callback.
+	ctx2, cancel2 := context.WithCancel(bg)
+	h2 := &hit{}
+	stop2 := context.AfterFunc(ctx2, h2)
+	if !stop2.Stop() {
+		panic("Stop must report true before the callback runs")
+	}
+	cancel2.Cancel()
+	if h2.ran {
+		panic("Stop must prevent the callback from running")
+	}
+
+	// WithCancelCause records the cause, which Cause returns instead of Canceled.
+	sentinel := errors.New("sentinel")
+	ctx3, cancel3 := context.WithCancelCause(bg)
+	cancel3.Cancel(sentinel)
+	if context.Cause(ctx3) != sentinel {
+		panic("Cause must return the cancellation cause")
+	}
+
+	// Cancellation propagates from parent to child.
+	parent, cancelParent := context.WithCancel(bg)
+	child, cancelChild := context.WithCancel(parent)
+	cancelParent.Cancel()
+	if child.Err() != context.Canceled {
+		panic("canceling the parent must cancel the child")
+	}
+	cancelChild.Cancel()
+
+	// WithoutCancel is never canceled, even when its parent is.
+	detached := context.WithoutCancel(parent)
+	if detached.Done() != nil || detached.Err() != nil {
+		panic("WithoutCancel must not observe the parent's cancellation")
+	}
+
+	// WithTimeout fires on its own. Moxie has no goroutines: one package-level
+	// timer is re-armed to the earliest deadline, so this also exercises the
+	// scheduler.
+	tctx, tcancel := context.WithTimeout(bg, 10*time.Millisecond)
+	for i := int32(0); i < 2000 && tctx.Err() == nil; i++ {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if tctx.Err() != context.DeadlineExceeded() {
+		panic("WithTimeout must expire with DeadlineExceeded")
+	}
+	if context.Cause(tctx) != context.DeadlineExceeded() {
+		panic("Cause of an expired deadline must be DeadlineExceeded")
+	}
+	tcancel.Cancel()
+
+	// An already-passed deadline cancels immediately, without a timer.
+	pctx, pcancel := context.WithDeadline(bg, time.Now().Add(-time.Second))
+	if pctx.Err() != context.DeadlineExceeded() {
+		panic("a past deadline must cancel immediately")
+	}
+	pcancel.Cancel()
+}

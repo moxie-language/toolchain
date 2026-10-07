@@ -32,6 +32,7 @@ SWEEP=(
 	compress/flate
 	compress/gzip
 	compress/zlib
+	context
 	crypto/aes
 	crypto/cipher
 	crypto/ecdh
@@ -64,6 +65,7 @@ SWEEP=(
 	net/url
 	os/user
 	regexp
+	runtime/trace
 	text/tabwriter
 	text/template
 	time

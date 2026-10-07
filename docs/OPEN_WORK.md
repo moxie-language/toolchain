@@ -4937,7 +4937,77 @@ the flate fix, with a much larger object. `grow` does
   compiles and runs the same fixture, so this is stage4-only: go/ssa lowers
   `&T{...}` to an alloc plus field stores and the address is that alloc.
 
+### Round 73: context surveyed - it stays, minus `TODO`
+
+Surveyed on the theory that `context` is irrelevant because spawn handles
+cascading shutdown. The measurements:
+
+- **No repository in the workspace imports it.** nostr, morly, musiquay, iskra,
+  smesh, harness, oracle, zilch and transdb all have zero `"context"` imports
+  (iskra's one hit was the string `"context"` in a `kindNames` table). Nothing an
+  app builds creates a context or a deadline.
+- **The stdlib does drive real work through it**, and none of it is
+  cross-process coordination: `net/dial.mx` dial deadlines,
+  `net/dnsclient_unix.mx` the DNS timeout, `net/lookup.mx` a lookup-group cancel,
+  `net/http/transport.mx` request cancellation and the connect timeout,
+  `net/http/server.mx` server and handler deadlines, `crypto/tls/tls.mx` the dial
+  timeout/deadline, `crypto/tls/quic.mx` the handshake context, and
+  `net/net.mx` defines `net.Error.Timeout()` **by identity** against
+  `context.DeadlineExceeded()` and `context.Canceled`.
+- It is not a Go shim: `breakerCtx` is Moxie's `chan struct{}` breaker with
+  parent/child cascade, and `deadlineScheduler` arms **one** package-level
+  `time.AfterFunc(d, deadlineFired)` for the earliest deadline instead of a
+  goroutine per context.
+
+So the package stays. What was removed is the one genuinely unreferenced piece:
+`TODO()` and its `todo` singleton - its only caller was `src/runtime/trace`,
+which is now de-contexted (its functions are no-ops, so a ctx parameter was
+accepted and ignored). Both `context` and `runtime/trace` were then added to the
+phase 1b sweep, so from round 73 they are compiled by the gate.
+
+`context_breaker` is the first test the package has ever had: it pins
+Done/Err/Cause identity, parent-to-child propagation, `AfterFunc` running on
+cancel and `Stop` preventing it, `WithoutCancel`, an expired deadline cancelling
+immediately, and `WithTimeout` actually firing through the scheduler.
+
+**If context is ever removed** (not now), the recorded direction is a dedicated
+timeout type inside `net` - a deadline plus a breaker - so dial, DNS and HTTP
+keep per-operation timeouts. Dropping the timeouts instead would leave every
+dial and lookup to block until it finishes or fails, which is a capability
+change, not a cleanup.
+
 ### Still open
+
+- **A qualified type from a package the file never imported resolves anyway, and
+  in a variadic parameter position it becomes `void`.** Found in round 73 while
+  probing something else; it is the by-name fallback again. Minimal reproducer:
+
+      package main
+      func f(args ...fmt.Stringer) {}
+      func main() {
+          var s fmt.Stringer = int32(1)
+          f(s)
+      }
+
+  `main.mx` imports nothing, yet `fmt.Stringer` resolves - the resolver's last
+  resort is `cctx.universe.LookupByName(pkgName.Value)`, and `fmt` is in the
+  Registry because something else in the closure imports it. In the **variadic**
+  position the element type then comes back `void`, and the emitter produces
+  invalid IR instead of failing:
+
+      %t3 = insertvalue {ptr, i64, i64} %ms7, i64 %sx2, 2   ; the slice header
+      %t4 = getelementptr inbounds i8, ptr %t3, i32 0       ; GEP through the VALUE
+      call void @main.f(void %t3, ptr null)                 ; parameter type is void
+      error: '%t3' defined with type '{ ptr, i64, i64 }' but expected 'ptr'
+
+  The same source with a locally declared `stringer` interface, or with
+  `fmt.Stringer` as a NON-variadic parameter, compiles - so the blast radius is
+  narrower than "all qualified types", but the underlying fallback is the same
+  one round 70 fixed the staleness of. Two things to do, and the first is the
+  root: make an unimported package name a loud `undefined: fmt` instead of a
+  global by-name hit (the scope's `PkgName` entries and `sigDeclPkgImports`
+  already carry the legitimate cases), then verify the variadic element type of a
+  real imported interface still resolves.
 
 - **`unsafe.Pointer`/`unsafe.TypeOf` accept anything.** `unsafe.Pointer` is
   declared `__any->ptr`, so a struct value is accepted and silently becomes a
