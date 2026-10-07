@@ -5261,6 +5261,53 @@ which is the documented imported-generic-method-set item (`ir_iface.mx` skips
 the generic `*Named`, and the mxh index records only non-generic method names),
 not a js problem. phase 1c's reason now says exactly that.
 
+## OPEN, found in round 81: the compiler segfaults on a qualified unresolved variadic type
+
+Not fixed, and it is the reason the round-74 restriction fixture changed shape.
+
+    package main
+    func f(args ...fmt.Stringer) {}      // fmt is NOT imported
+    func main() {
+        var s fmt.Stringer = int32(1)
+        f(s)
+    }
+
+Legacy rejects this with `undefined: fmt`. stage4 is *supposed* to fail loud the
+same way (round 74 made the DotsType sites report an unresolved element type by
+name instead of leaving a `void` parameter). Instead it crashes on roughly 2-7%
+of runs:
+
+    panic: runtime error at 0x000000000026e0c8: caught signal SIGSEGV
+
+and `addr2line -e ./moxie 0x26e0c8` says **`runtime.memcpy`** - the same address in
+every crash captured. Measured rates: 3/40 with the default job count, 1/40 with
+`-j 1`, 0/30 under gdb (which re-times the process enough to hide it), 0/30 on
+the compilers from rounds 73, 74 and 81 - so this is rare and possibly
+timing/allocation dependent, and the earlier versions are not exonerated by those
+small samples.
+
+What narrows it down:
+
+- The BARE form is clean: `func f(args ...Undefined) {}` reports
+  `undefined: Undefined` and crashed 0/40. Only the QUALIFIED unresolved name
+  (`fmt.Stringer` with no import) trips it, so the crash is on the selector path.
+- It is not the parallel worker path: `-j 1` still crashed.
+
+Because of it, `tests/restrictions/reject_undefined_variadic_type.mx` uses the
+bare name to pin the round-74 rule, and the qualified form is **not covered by
+the suite** - deliberately, and this note is the record of that. The next step is
+a deterministic reproducer (it is 2-7%, so a loop plus `-work` and the crash PC
+is the tool that has worked before) and then a backtrace; gdb's timing hides it,
+so instrumenting the selector path in `tcResolveNameInline`/`DotsType` is the
+more promising route.
+
+Related coherence gap this exposed, same area: a **non-variadic** unimported
+qualified type is still ACCEPTED (`func f(x fmt.Stringer)` with no import builds
+with rc=0), because the resolver's global by-name fallback answers it. So the
+rule "an unimported package qualifier is undefined" holds only in the variadic
+path today, which is why removing the fallback was attempted in round 74 and
+reverted when it broke legitimate code.
+
 ### Still open
 
 - **`unsafe.Pointer`/`unsafe.TypeOf` accept anything.** `unsafe.Pointer` is
