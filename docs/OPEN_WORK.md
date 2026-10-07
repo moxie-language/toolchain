@@ -4853,11 +4853,13 @@ then lexicographic) instead of map iteration order.
 
 No phase compiled a stdlib package: phase 1 builds only `token mxutil syntax types
 rewrite`, and the rest build fixtures and the compiler. One build now blank-imports
-36 packages, which compiles all of them at once. A per-package build costs a full
+39 packages, which compiles all of them at once. A per-package build costs a full
 closure each and bought nothing - `net/http` alone is ~20 minutes - so the sweep is
 one build, ~20 minutes, added to `--full` only. Packages known broken are listed in
 `SWEEP_KNOWN` and SKIP with their reason, so the broken set stays visible and
-shrinking it is deliberate. **Move a package to `SWEEP` when it is fixed.**
+shrinking it is deliberate. **`SWEEP_KNOWN` is empty as of round 73** - every
+package the sweep named now compiles; add an entry only for a defect already
+recorded here, and move it back to `SWEEP` when it is fixed.
 
 ### What the sweep found, in the order it was fixed
 
@@ -4885,14 +4887,13 @@ shrinking it is deliberate. **Move a package to `SWEEP` when it is fixed.**
    the struct's bytes into a pointer. The decoder side of the same packages already
    had the correct `unsafe.TypeOf(hdr), unsafe.Pointer(&hdr)`.
 
-### Still open
+### FIXED in round 73 (`1ed3d812`): internal/trace/internal/tracev1 compiles
 
-- **`internal/trace/internal/tracev1` - located, not yet fixed.** clang crashes
-  (exit 139) in `X86 DAG->DAG Instruction Selection` on
-  `(*Events).grow`, at `SelectionDAG::ReplaceAllUsesWith` - the same crash class as
-  the flate fix, with a much larger object. `grow` does
-  `push(l.buckets, &[eventsBucketSize]Event{})` with `eventsBucketSize = 524288`
-  (32 MiB). The IR materializes the whole array as a **value**:
+clang crashed (exit 139) in `X86 DAG->DAG Instruction Selection` on
+`(*Events).grow`, at `SelectionDAG::ReplaceAllUsesWith` - the same crash class as
+the flate fix, with a much larger object. `grow` does
+`push(l.buckets, &[eventsBucketSize]Event{})` with `eventsBucketSize = 524288`
+(32 MiB). The IR materialized the whole array as a **value**:
 
       %t27 = alloca [524288 x Event]            ; 32 MiB stack alloca
       call void @llvm.memset.p0.i64(ptr %t27, i8 0, i64 %zi5, i1 false)
@@ -4929,10 +4930,15 @@ shrinking it is deliberate. **Move a package to `SWEEP` when it is fixed.**
   carrying the zeros in - so the fix is the one change above, and a memset added
   to the heap branch would zero 32 MiB twice per call.
 
-  The change touches every address-taken composite literal in the tree, so it
-  needs the full gate, not a spot check. A probe fixture should assert the field
-  values of a `&T{...}` AND that a large `&[N]T{}` emits a memset rather than a
-  load/store pair.
+  Verified: tracev1 compiles and links; `addr_of_composite_lit` - deliberately
+  bucket-sized, so a regression crashes the compiler rather than merely being
+  wasteful - compiles, runs, and its IR has **zero** `load`/`store` of
+  `[524288 x event]` where the old path had both; phase 0 is 79/79. Legacy
+  compiles and runs the same fixture, so this is stage4-only: go/ssa lowers
+  `&T{...}` to an alloc plus field stores and the address is that alloc.
+
+### Still open
+
 - **`unsafe.Pointer`/`unsafe.TypeOf` accept anything.** `unsafe.Pointer` is
   declared `__any->ptr`, so a struct value is accepted and silently becomes a
   pointer - which is why (3) produced invalid IR instead of a compile error. A
@@ -4943,8 +4949,8 @@ shrinking it is deliberate. **Move a package to `SWEEP` when it is fixed.**
   nothing exercises them at run time yet.
 - `crypto/ecdh`, `crypto/aes`, `crypto/cipher`, `crypto/sha256`, `crypto/hmac`,
   `encoding/json`, `encoding/xml`, `debug/gosym`, `math/big`, `time`,
-  `compress/{flate,gzip,zlib}` and the rest of the 36 now compile and are in
-  `SWEEP`, so a regression in any of them fails phase 1b.
+  `compress/{flate,gzip,zlib}` and the rest of the sweep now compile and are in
+  `SWEEP` (39 packages, tracev1 included), so a regression in any of them fails phase 1b.
 
 ### Environment note: the legacy compiler cannot be rebuilt here
 
