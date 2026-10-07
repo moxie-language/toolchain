@@ -2229,18 +2229,29 @@ compiler's closure. They fail identically before and after the migration
 (`undefined: regexp`). Leave them; do not invent a `regexp` package and do not
 rewrite them against `mxregexp` as part of this migration.
 
-## The relative-path entry point: a real bug, and a testing trap
+## The relative-path entry point: CORRECTED - it is Go's import-path rule
 
-`moxie build <a relative directory inside the repo>` does **not** emit
-`main.main`: the link fails with `undefined symbol: main.main`, and the build
-otherwise succeeds. The same directory given as an **absolute** path links and
-runs. `tests/run.sh` uses absolute paths, so the suite is sound - but any manual
-reproduction with a relative path will look like a missing entry point and waste
-time. Two consequences worth fixing: the entry-point path should not depend on how
-the target was spelled, and `tests/util.sh`'s `compile_and_run` treats
-`undefined symbol: main.` as **success**, which turns a non-linking fixture into a
-silent PASS. That acceptance is a guard; the root cause is the relative-path
-resolution, and the guard should go with it.
+**This section previously called it a bug. It is not, and the correction is
+measured (round 78).**
+
+A **bare** path is an import path, exactly as in Go: `moxie build relmainprobe`
+resolves `relmainprobe` as an import path, never reads `./relmainprobe/main.mx`
+as the entry package, and the link fails with `undefined symbol: main.main` while
+the build otherwise succeeds. Spelling it as a directory works in both forms:
+
+    moxie build -o /tmp/rel.bin ./relmainprobe     # rc=0, runs
+    moxie build -o /tmp/abs.bin "$PWD/relmainprobe" # rc=0, runs
+    moxie build -o /tmp/bare.bin relmainprobe       # rc=1, undefined symbol: main.main
+
+So the entry point does not depend on "how the target was spelled" beyond the
+deliberate `import path` vs `directory` distinction - which is required for
+`moxie build fmt` to mean the stdlib package. Nothing to fix here.
+
+The second half of the old note is done: **`tests/util.sh`'s acceptance of
+`undefined symbol: main.` is gone** and verified - `compile_and_run` returns 1 for
+any linker failure, with the reason recorded in its comment. A fixture that does
+not link now FAILS, which is what exposed the whole `undefined symbol: main.`
+family in the first place.
 
 ## Named public-API types still to dissolve in `src/net/**`
 
@@ -5069,6 +5080,42 @@ Go's, not a real dependency - widened to `unix || (js && wasm)`, the same form
 - the `map[T]H[T]` literal substitution (`map[int32]box[int32]{1: {v: 7}}`) -
   compiles and runs, for `int32` and `string` keys;
 - `src/internal/trace` itself compiles.
+
+## VERIFIED in round 78: the embedded tzdata registration, and the relative-path correction
+
+**Nothing imported `time/tzdata`, so its registration never ran in any build.**
+That is the whole of the "unrun embedded tzdata registration" item: the mechanism
+was already correct - `time/tzdata`'s `init()` calls
+`registerLoadFromEmbeddedTZData`, which `//:linkname` binds to
+`time.initRegisterLoadFromEmbeddedTZData`, which stores the loader in the
+`loadFromEmbeddedTZData` package var that `loadLocation` consults after the
+platform sources - but `grep -rln '"time/tzdata"'` over the tree returned
+nothing. The embedded zip was dead weight in every binary.
+
+`tzdata_embedded` now imports it and asserts three zones:
+
+    tokyo=JST        (UTC+9, no DST)
+    newyork=EST      (UTC-5)
+    sydney=AEDT      (UTC+11, DST active on that date)
+
+**Why this is a native-AND-wasm fixture, not a native one.** On a host with
+`/usr/share/zoneinfo` the native run is answered by the system database, and
+`_platformZoneSources()` is the same list for every target, so no native test can
+reach the embedded path - there is no zone in the embedded blob that is missing
+from the disk copy. In the browser there is no zoneinfo at all, so the wasm run is
+answered ONLY by the embedded loader. Phase 5 compares the two outputs, so a
+registration that stopped working would panic in the browser and fail. Verified by
+running the module through `tests/wasm/run.py`: it printed the same four lines as
+native, rc=0.
+
+Two smaller facts this turned up:
+
+- The wasm target does **not** set the `moxie.stringer` build tag, so builtin
+  Stringers (`int32.String()`) do not exist there. A fixture that is compared
+  native-against-wasm must not call them - the first draft of this fixture failed
+  to build for wasm on `int32.String()` and prints the zone names instead.
+- `typeExprName`-style diagnostics aside, the wasm build of this fixture links the
+  whole embedded zip: the module is ~1.15 MB with the import.
 
 ### Still open
 

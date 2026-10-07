@@ -1,0 +1,60 @@
+// The embedded timezone database is opt-in: importing time/tzdata runs its
+// init, which registers its loader with package time through a linkname
+// (time.initRegisterLoadFromEmbeddedTZData). Nothing in the tree imported it,
+// so the registration never ran in any build and the embedded data was dead
+// weight.
+//
+// This asserts a zone name and offset from the loaded database. On a host with
+// /usr/share/zoneinfo the NATIVE run is answered by the system database, so a
+// native-only test would pass even with the registration broken. In the browser
+// there is no zoneinfo at all and _platformZoneSources() points at paths that do
+// not exist, so the wasm run is answered ONLY by the embedded loader - which is
+// why this fixture is compared native-against-wasm by phase 5.
+package main
+
+import (
+	"time"
+
+	_ "time/tzdata"
+)
+
+func main() {
+	loc, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		panic("LoadLocation(Asia/Tokyo): " | err.Error())
+	}
+	// 2024-01-01T00:00:00Z is 09:00 in Tokyo: JST, UTC+9, no DST.
+	t := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC())
+	name, off := t.In(loc).Zone()
+	if name != "JST" || off != 9*60*60 {
+		panic("Asia/Tokyo zone is wrong: " | name)
+	}
+	// A second zone, and one with a negative offset, so the loader runs twice.
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		panic("LoadLocation(America/New_York): " | err.Error())
+	}
+	n2, o2 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC()).In(ny).Zone()
+	if n2 != "EST" || o2 != -5*60*60 {
+		panic("America/New_York zone is wrong: " | n2)
+	}
+	// A southern-hemisphere zone that is in DST on this date, so the offset is
+	// not the zone's standard one.
+	syd, err := time.LoadLocation("Australia/Sydney")
+	if err != nil {
+		panic("LoadLocation(Australia/Sydney): " | err.Error())
+	}
+	n3, o3 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC()).In(syd).Zone()
+	if n3 != "AEDT" || o3 != 11*60*60 {
+		panic("Australia/Sydney zone is wrong: " | n3)
+	}
+	// Print, so the native/wasm comparison in phase 5 has something to compare.
+	// A registration that did not run would panic above in the browser, where
+	// there is no zoneinfo to fall back to. The builtin Stringers are behind the
+	// moxie.stringer build tag, which the wasm target does not set, so the zone
+	// names are printed rather than the numeric offsets.
+	println("tokyo=" | name)
+	println("newyork=" | n2)
+	println("sydney=" | n3)
+	println("tzdata registration ok")
+}
