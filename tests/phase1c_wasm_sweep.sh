@@ -27,7 +27,7 @@ SWEEP=(
 # the suite must not encode today's breakage as acceptable, but it must not go
 # red for a defect that is already recorded either.
 SWEEP_KNOWN=(
-	"net/http|internal/poll's js accept/ReadFrom do not resolve a type (rhs=nil)"
+	"net/http|net's js-only files have never been compiled: 18 call-arity and comma-ok-select errors remain in *_posix.mx and net_fake.mx after the missing syscall/net stubs were ported"
 )
 
 for pkg in "${SWEEP[@]}"; do

@@ -105,69 +105,69 @@ func validateResolvedAddr(net string, family int32, sa sockaddr) (rerr error) {
 
 	switch net {
 	case "tcp", "tcp4", "tcp6":
-		sa, ok := sa.(*TCPAddr)
+		tcpAddr, ok := sa.(*TCPAddr)
 		if !ok {
 			return &AddrError{
 				Err:  "non-TCP address for " + net + " network",
 				Addr: sa.String(),
 			}
 		}
-		if err := validateIP(sa.IP); err != nil {
+		if err := validateIP(tcpAddr.IP); err != nil {
 			return err
 		}
-		if sa.Port <= 0 || sa.Port >= 1<<16 {
+		if tcpAddr.Port <= 0 || tcpAddr.Port >= 1<<16 {
 			return &AddrError{
 				Err:  "port out of range",
-				Addr: sa.String(),
+				Addr: tcpAddr.String(),
 			}
 		}
 		return nil
 
 	case "udp", "udp4", "udp6":
-		sa, ok := sa.(*UDPAddr)
+		udpAddr, ok := sa.(*UDPAddr)
 		if !ok {
 			return &AddrError{
 				Err:  "non-UDP address for " + net + " network",
 				Addr: sa.String(),
 			}
 		}
-		if err := validateIP(sa.IP); err != nil {
+		if err := validateIP(udpAddr.IP); err != nil {
 			return err
 		}
-		if sa.Port <= 0 || sa.Port >= 1<<16 {
+		if udpAddr.Port <= 0 || udpAddr.Port >= 1<<16 {
 			return &AddrError{
 				Err:  "port out of range",
-				Addr: sa.String(),
+				Addr: udpAddr.String(),
 			}
 		}
 		return nil
 
 	case "unix", "unixgram", "unixpacket":
-		sa, ok := sa.(*UnixAddr)
+		unixAddr, ok := sa.(*UnixAddr)
 		if !ok {
 			return &AddrError{
 				Err:  "non-Unix address for " + net + " network",
 				Addr: sa.String(),
 			}
 		}
-		if sa.Name != "" {
-			i := len(sa.Name) - 1
-			for i > 0 && !os.IsPathSeparator(sa.Name[i]) {
+		if unixAddr.Name != "" {
+			i := len(unixAddr.Name) - 1
+			for i > 0 && !os.IsPathSeparator(unixAddr.Name[i]) {
 				i--
 			}
-			for i > 0 && os.IsPathSeparator(sa.Name[i]) {
+			for i > 0 && os.IsPathSeparator(unixAddr.Name[i]) {
 				i--
 			}
 			if i <= 0 {
 				return &AddrError{
 					Err:  "unix socket name missing path component",
-					Addr: sa.Name,
+					Addr: unixAddr.Name,
 				}
 			}
-			if _, err := os.Stat(sa.Name[:i+1]); err != nil {
+			if _, err := os.Stat(unixAddr.Name[:i+1]); err != nil {
 				return &AddrError{
 					Err:  err.String(),
-					Addr: sa.Name,
+					Addr: unixAddr.Name,
 				}
 			}
 		}
@@ -610,8 +610,8 @@ func (pq *packetQueue) recvfrom(dt *deadlineTimer, b []byte, wholePacket bool, c
 	}
 
 	if checkFrom != nil {
-		if err := checkFrom(p.from); err != nil {
-			return 0, nil, err
+		if cerr := checkFrom(p.from); cerr != nil {
+			return 0, nil, cerr
 		}
 	}
 
@@ -690,22 +690,24 @@ func sysSocket(family, sotype, proto int32) (rn int32, rerr error) {
 }
 
 func fakeListen(fd *netFD, laddr sockaddr) (err error) {
-	wrapErr := func(err error) error {
-		if errno, ok := err.(syscall.Errno); ok {
-			err = os.NewSyscallError("listen", errno)
+	// The closure parameter is named werr, not err: Moxie rejects a declaration
+	// that shadows one in an enclosing scope, and the named result above is err.
+	wrapErr := func(werr error) error {
+		if errno, isErrno := werr.(syscall.Errno); isErrno {
+			werr = os.NewSyscallError("listen", errno)
 		}
-		if errors.Is(err, syscall.EADDRINUSE) {
-			return err
+		if errors.Is(werr, syscall.EADDRINUSE) {
+			return werr
 		}
 		if laddr != nil {
-			if _, ok := err.(*AddrError); !ok {
-				err = &AddrError{
-					Err:  err.String(),
+			if _, isAddrErr := werr.(*AddrError); !isAddrErr {
+				werr = &AddrError{
+					Err:  werr.String(),
 					Addr: laddr.String(),
 				}
 			}
 		}
-		return err
+		return werr
 	}
 
 	ffd := newFakeNetFD(fd)
@@ -716,8 +718,8 @@ func fakeListen(fd *netFD, laddr sockaddr) (err error) {
 		}
 	}()
 
-	if err := ffd.assignFakeAddr(matchIPFamily(fd.family, laddr)); err != nil {
-		return wrapErr(err)
+	if aerr := ffd.assignFakeAddr(matchIPFamily(fd.family, laddr)); aerr != nil {
+		return wrapErr(aerr)
 	}
 
 	ffd.fakeAddr = fakeAddr(fd.laddr.(sockaddr))
@@ -745,19 +747,19 @@ func fakeListen(fd *netFD, laddr sockaddr) (err error) {
 
 func fakeConnect(ctx context.Context, fd *netFD, laddr, raddr sockaddr) (rerr error) {
 	wrapErr := func(err error) error {
-		if errno, ok := err.(syscall.Errno); ok {
+		if errno, isErrno := err.(syscall.Errno); isErrno {
 			err = os.NewSyscallError("connect", errno)
 		}
 		if errors.Is(err, syscall.EADDRINUSE) {
 			return err
 		}
-		if terr, ok := err.(interface{ Timeout() bool }); !ok || !terr.Timeout() {
+		if terr, isTimeout := err.(interface{ Timeout() bool }); !isTimeout || !terr.Timeout() {
 			// For consistency with the net implementation on other platforms,
 			// if we don't need to preserve the Timeout-ness of err we should
 			// wrap it in an AddrError. (Unfortunately we can't wrap errors
 			// that convey structured information, because AddrError reduces
 			// the wrapped Err to a flat string.)
-			if _, ok := err.(*AddrError); !ok {
+			if _, isAddrErr := err.(*AddrError); !isAddrErr {
 				err = &AddrError{
 					Err:  err.String(),
 					Addr: raddr.String(),
@@ -786,7 +788,7 @@ func fakeConnect(ctx context.Context, fd *netFD, laddr, raddr sockaddr) (rerr er
 
 	switch fd.sotype {
 	case syscall.SOCK_DGRAM:
-		if ua, ok := fd.laddr.(*UnixAddr); !ok || ua.Name != "" {
+		if ua, isUnix := fd.laddr.(*UnixAddr); !isUnix || ua.Name != "" {
 			fd.fakeNetFD.fakeAddr = fakeAddr(fd.laddr.(sockaddr))
 			if _, dup := sockets[fd.fakeNetFD.fakeAddr]; dup {
 				return wrapErr(syscall.EADDRINUSE)
@@ -910,8 +912,8 @@ func (ffd *fakeNetFD) assignFakeAddr(addr sockaddr) (rerr error) {
 			nextPort := func() (int32, bool) {
 				for {
 					nextPortCounter++
-					port := nextPortCounter
-					if port <= 0 || port >= 1<<16 {
+					candidate := nextPortCounter
+					if candidate <= 0 || candidate >= 1<<16 {
 						// nextPortCounter ran off the end of the port space.
 						// Bump it back into range.
 						nextPortCounter = 0
@@ -925,7 +927,7 @@ func (ffd *fakeNetFD) assignFakeAddr(addr sockaddr) (rerr error) {
 						continue
 					}
 
-					if port <= prevPort {
+					if candidate <= prevPort {
 						// nextPortCounter has wrapped around since the last time we read it.
 						if portWrapped {
 							// This is the second wraparound, so we've scanned the whole port space
@@ -936,8 +938,8 @@ func (ffd *fakeNetFD) assignFakeAddr(addr sockaddr) (rerr error) {
 						}
 					}
 
-					prevPort = port
-					return int32(port), true
+					prevPort = candidate
+					return int32(candidate), true
 				}
 			}
 
@@ -1022,9 +1024,9 @@ func (ffd *fakeNetFD) readFrom(p []byte) (n int32, sa syscall.Sockaddr, err erro
 
 func (ffd *fakeNetFD) readFromInet4(p []byte, sa *syscall.SockaddrInet4) (n int32, err error) {
 	n, _, err = ffd.queue.recvfrom(ffd.readDeadline, p, true, func(from sockaddr) error {
-		fromSA, err := from.sockaddr(syscall.AF_INET)
-		if err != nil {
-			return err
+		fromSA, saErr := from.sockaddr(syscall.AF_INET)
+		if saErr != nil {
+			return saErr
 		}
 		if fromSA == nil {
 			return os.NewSyscallError("readFromInet4", syscall.EINVAL)
@@ -1037,9 +1039,9 @@ func (ffd *fakeNetFD) readFromInet4(p []byte, sa *syscall.SockaddrInet4) (n int3
 
 func (ffd *fakeNetFD) readFromInet6(p []byte, sa *syscall.SockaddrInet6) (n int32, err error) {
 	n, _, err = ffd.queue.recvfrom(ffd.readDeadline, p, true, func(from sockaddr) error {
-		fromSA, err := from.sockaddr(syscall.AF_INET6)
-		if err != nil {
-			return err
+		fromSA, saErr := from.sockaddr(syscall.AF_INET6)
+		if saErr != nil {
+			return saErr
 		}
 		if fromSA == nil {
 			return os.NewSyscallError("readFromInet6", syscall.EINVAL)

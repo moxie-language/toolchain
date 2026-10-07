@@ -5145,6 +5145,71 @@ Two smaller facts this turned up:
 - `typeExprName`-style diagnostics aside, the wasm build of this fixture links the
   whole embedded zip: the module is ~1.15 MB with the import.
 
+## Round 80: net for js/wasm - the missing per-target files, and the real size of the job
+
+`net/http` for wasm was the phase-1c skip. Chasing it turned up a family of
+files that Go has and this port does not, then a much larger truth behind them.
+
+**Ported (all verified by builds):**
+
+- **`src/syscall/net_js.mx`** - Go's `$GOROOT/src/syscall/net_js.go`, which the
+  port had never brought over. Its absence did not read as `undefined:
+  syscall.Accept`: it read as `cannot resolve type of short var ns in accept`
+  while compiling `internal/poll`, because `internal/poll`'s js build
+  (`fd_unix.mx` and `sys_cloexec.mx` are tagged for js, exactly as Go tags them)
+  calls `syscall.Accept`, and an unresolved call left the short var's type nil,
+  which then became a `void` parameter. All sixteen functions return ENOSYS,
+  except `SetSockoptInt` and `SetNonblock`, which return nil.
+- **`src/syscall/net_fake.mx`** - Go's `net_fake.go` (`js || wasip1`), which
+  declares the `Sockaddr` family. Go writes `type Sockaddr any` there, which is
+  why it had been skipped: Moxie has no empty interface. It is now the same
+  shape the unix build uses - one unexported `sockaddr()` method, so only the
+  package can define a Sockaddr - and the js implementations report ENOSYS,
+  which is the truth for a target with no sockets. `net/fd_posix.mx` needs
+  `*syscall.SockaddrInet4` and `net/file_posix.mx` type-switches on it, so the
+  types have to exist and implement the interface.
+- **`src/net/splice_stub.mx`** - Go's `splice_stub.go` (`!linux`). The real one
+  is `splice_linux.mx`, which the `_linux` filename suffix already restricts to
+  linux, so every other target compiles the stub.
+- **`src/net/mptcpsock_stub.mx`** - Go's `mptcpsock_stub.go` (`!linux`), same
+  shape: `dialMPTCP`, `listenMPTCP` and `isUsingMultipathTCP`.
+- **`src/net/rawdns_js.mx`** plus a `//:build unix` tag on `rawdns.mx`.
+  `rawdns.mx` is Moxie-specific, not a Go file, so it inherited no build
+  constraint and was being compiled for js, where it uses raw sockets and
+  `syscall.SetsockoptTimeval` (which does not exist for js in Go either). Its
+  only exported use is `rawLookupHost`, called from `lookup_unix.mx:69` and
+  `dnsclient_unix.mx:556` as a fallback *after* the standard resolver returns
+  nothing, so the js stub returns nil and those callers are unchanged.
+- **Shadowing fixes in `net_fake.mx`**, which is js-only and therefore had never
+  been compiled: `v, ok := v.(T)` re-declarations in `validateResolvedAddr`
+  (three), the `ok`s in `fakeConnect`'s and `fakeListen`'s `wrapErr` closures,
+  `err` in `readFromInet4`/`readFromInet6`'s callbacks, `port` in
+  `assignFakeAddr`'s `nextPort`, and `if err := ...` in `recvfrom` and
+  `fakeListen`. Moxie rejects any of these that shadows a name in an enclosing
+  scope - including a named result.
+
+**What that leaves, and it is the real story.** With the stubs in place the error
+list stops being about missing files and becomes:
+
+    18 errors in net's js-only and *_posix.mx files:
+      iprawsock_posix, tcpsock_posix, unixsock_posix, ipsock_posix,
+      udpsock_posix  - "not enough arguments in call"
+      net_fake.mx:290,339,347,838 - "cannot use value of type []*net.netFD
+                                     as bool in assignment"
+
+So `net`'s js-only half has **never been compiled by anything**, and it is not a
+few stubs away: it has call sites that do not match their callees' arity, and
+comma-ok receives in `select` cases that the compiler does not accept. That is a
+port of the js arm of `net`, not a fix, and it is recorded as such in phase 1c
+rather than chased here. The five files above are still correct and still
+necessary - they took the build from "missing syscall definitions" to "the js
+code itself does not compile".
+
+Native is unaffected and verified: `src/net` builds (only the expected library
+link failure), and every new file is js-only or `!linux`, so Linux sees exactly
+what it saw before apart from `rawdns.mx`'s new `unix` tag, which still includes
+Linux.
+
 ### Still open
 
 - **`unsafe.Pointer`/`unsafe.TypeOf` accept anything.** `unsafe.Pointer` is
