@@ -11,7 +11,7 @@ Four repositories, all on branch `dev`, all level with their remotes
 
 | repo | what it is | last known state |
 |------|------------|------------------|
-| `moxie` | the compiler, runtime and stdlib | `1ed3d812` (code; docs follow it); `tests/run.sh --full`: 209 PASS / 0 FAIL / **0 SKIP**, fixpoint PASS; `net/http`, `text/tabwriter`, `internal/coverage/{encodecounter,encodemeta,cformat}` and `internal/trace/internal/tracev1` all compile, and phase 1b compiles 39 stdlib packages with an empty known-broken list (rounds 70-73) |
+| `moxie` | the compiler, runtime and stdlib | `b922271d` (code; docs follow it); `tests/run.sh --full`: 211 PASS / 0 FAIL / **0 SKIP**, fixpoint PASS; `net/http`, `text/tabwriter`, `internal/coverage/{encodecounter,encodemeta,cformat}` and `internal/trace/internal/tracev1` all compile, phase 1b compiles 41 stdlib packages (context and runtime/trace included) with an empty known-broken list, and `context` finally has a run-time test (rounds 70-73) |
 | `nostr` | shared nostr primitives and codecs | `98c7069` (musiquay vocabulary moved out) |
 | `morly` | the relay (`pkg/relay`, `pkg/store`, ...) | `b7dba37` |
 | `musiquay` | the web app, docs corpus, protocol vocabulary | `8dd6f59` (vocabulary at `pkg/protocol`) |
@@ -5003,11 +5003,22 @@ change, not a cleanup.
   The same source with a locally declared `stringer` interface, or with
   `fmt.Stringer` as a NON-variadic parameter, compiles - so the blast radius is
   narrower than "all qualified types", but the underlying fallback is the same
-  one round 70 fixed the staleness of. Two things to do, and the first is the
-  root: make an unimported package name a loud `undefined: fmt` instead of a
-  global by-name hit (the scope's `PkgName` entries and `sigDeclPkgImports`
-  already carry the legitimate cases), then verify the variadic element type of a
-  real imported interface still resolves.
+  one round 70 fixed the staleness of.
+
+  **Legacy is the arbiter and it rejects the program**, which settles what the
+  fix is:
+
+      ../../../../../tmp/pv_legacy/pkg/main.mx:3:16: undefined: fmt
+      ../../../../../tmp/pv_legacy/pkg/main.mx:6:8: undefined: fmt
+
+  So `fmt` is not legitimately available without an import, the source is
+  invalid, and stage4 must say `undefined: fmt` at both sites like legacy does.
+  The invalid variadic IR is a **symptom** of the missing restriction, not a
+  codegen bug of its own - fix the resolver, not `DotsType`. Every `DotsType`
+  case resolves its element and returns `nil` silently when that fails
+  (`ssa_builder.mx:673`, `:8867`, `ir_typecheck.mx:1836`), and a nil parameter
+  type becomes `void`; those are the sites that must fail loud. Then verify a
+  genuinely imported interface in a variadic position still resolves.
 
 - **`unsafe.Pointer`/`unsafe.TypeOf` accept anything.** `unsafe.Pointer` is
   declared `__any->ptr`, so a struct value is accepted and silently becomes a
