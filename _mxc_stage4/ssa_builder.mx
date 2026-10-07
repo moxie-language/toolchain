@@ -5419,23 +5419,23 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 	case BuiltinAppend:
 		if len(args) > 1 {
 			if sl, ok := SafeUnderlying(args[0].SSAType()).(*Slice); ok {
-				if _, isIface := SafeUnderlying(sl.Elem).(*TCInterface); isIface {
-					for i := 1; i < len(args); i++ {
-						if e.HasDots && i == 1 {
-							continue
-						}
-						if args[i] == nil || args[i].SSAType() == nil {
-							continue
-						}
-						if _, argIface := SafeUnderlying(args[i].SSAType()).(*TCInterface); argIface {
-							continue
-						}
-						mi := &SSAMakeInterface{X: args[i], IType: sl.Elem}
-						mi.typ = sl.Elem
-						mi.name = fb.nextName()
-						fb.emit(mi)
-						args[i] = mi
+				for i := 1; i < len(args); i++ {
+					if e.HasDots && i == 1 {
+						continue
 					}
+					// Every pushed/appended element is a value of the slice's
+					// ELEMENT type, exactly as a sent value is a value of the
+					// channel's element type. Box it when the element is an
+					// interface, and give an argument that has no type of its
+					// own - the untyped nil - the nil of the element type.
+					// Leaving the untyped nil alone made `push(lines, nil)`
+					// (text/tabwriter's addLine) emit `store []cell null`, and
+					// clang rejected the module: "null must be a pointer type".
+					// The zero of a slice is zeroinitializer, not the pointer
+					// literal null. Only the type of the value decides that,
+					// which is why it is the builder's job and not the
+					// emitter's.
+					args[i] = fb.coerceSendValue(args[i], sl.Elem)
 				}
 			}
 		}
@@ -5544,23 +5544,23 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		}
 		if len(args) > 1 {
 			if sl, ok := SafeUnderlying(args[0].SSAType()).(*Slice); ok {
-				if _, isIface := SafeUnderlying(sl.Elem).(*TCInterface); isIface {
-					for i := 1; i < len(args); i++ {
-						if e.HasDots && i == 1 {
-							continue
-						}
-						if args[i] == nil || args[i].SSAType() == nil {
-							continue
-						}
-						if _, argIface := SafeUnderlying(args[i].SSAType()).(*TCInterface); argIface {
-							continue
-						}
-						mi := &SSAMakeInterface{X: args[i], IType: sl.Elem}
-						mi.typ = sl.Elem
-						mi.name = fb.nextName()
-						fb.emit(mi)
-						args[i] = mi
+				for i := 1; i < len(args); i++ {
+					if e.HasDots && i == 1 {
+						continue
 					}
+					// Every pushed/appended element is a value of the slice's
+					// ELEMENT type, exactly as a sent value is a value of the
+					// channel's element type. Box it when the element is an
+					// interface, and give an argument that has no type of its
+					// own - the untyped nil - the nil of the element type.
+					// Leaving the untyped nil alone made `push(lines, nil)`
+					// (text/tabwriter's addLine) emit `store []cell null`, and
+					// clang rejected the module: "null must be a pointer type".
+					// The zero of a slice is zeroinitializer, not the pointer
+					// literal null. Only the type of the value decides that,
+					// which is why it is the builder's job and not the
+					// emitter's.
+					args[i] = fb.coerceSendValue(args[i], sl.Elem)
 				}
 			}
 		}
