@@ -11,7 +11,7 @@ Four repositories, all on branch `dev`, all level with their remotes
 
 | repo | what it is | last known state |
 |------|------------|------------------|
-| `moxie` | the compiler, runtime and stdlib | `b922271d` (code; docs follow it); `tests/run.sh --full`: 211 PASS / 0 FAIL / **0 SKIP**, fixpoint PASS; `net/http`, `text/tabwriter`, `internal/coverage/{encodecounter,encodemeta,cformat}` and `internal/trace/internal/tracev1` all compile, phase 1b compiles 41 stdlib packages (context and runtime/trace included) with an empty known-broken list, and `context` finally has a run-time test (rounds 70-73) |
+| `moxie` | the compiler, runtime and stdlib | `a33f2de6` (code; docs follow it); `tests/run.sh --full`: 212 PASS / 0 FAIL / **0 SKIP**, fixpoint PASS; `net/http`, `text/tabwriter`, `internal/coverage/{encodecounter,encodemeta,cformat}` and `internal/trace/internal/tracev1` all compile, phase 1b compiles 41 stdlib packages with an empty known-broken list, `context` has a run-time test, and an unresolvable variadic element type is now an error instead of a `void` parameter (rounds 70-74) |
 | `nostr` | shared nostr primitives and codecs | `98c7069` (musiquay vocabulary moved out) |
 | `morly` | the relay (`pkg/relay`, `pkg/store`, ...) | `b7dba37` |
 | `musiquay` | the web app, docs corpus, protocol vocabulary | `8dd6f59` (vocabulary at `pkg/protocol`) |
