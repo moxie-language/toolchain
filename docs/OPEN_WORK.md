@@ -11,7 +11,7 @@ Four repositories, all on branch `dev`, all level with their remotes
 
 | repo | what it is | last known state |
 |------|------------|------------------|
-| `moxie` | the compiler, runtime and stdlib | `0f3e9056` (code/tests; docs follow it); `tests/run.sh --full`: 217 PASS / 0 FAIL / 1 SKIP, fixpoint PASS; native phase 1b compiles 41 stdlib packages with an empty known-broken list, phase 1c compiles the js/wasm-only packages (`syscall/js`, `path/filepath`), `context` and the embedded tzdata registration both have run-time tests (tzdata proved in a browser), and an unresolvable variadic element type is an error instead of a `void` parameter (rounds 70-78) |
+| `moxie` | the compiler, runtime and stdlib | `679e700c` (code/tests; docs follow it); `tests/run.sh --full`: 219 PASS / 0 FAIL / 1 SKIP, fixpoint PASS; native phase 1b compiles 41 stdlib packages with an empty known-broken list, phase 1c compiles the js/wasm-only packages (`syscall/js`, `path/filepath`), `context` and the embedded tzdata registration both have run-time tests (tzdata proved in a browser), the import scanner exists once instead of twice, and an unresolvable variadic element type is an error instead of a `void` parameter (rounds 70-79) |
 | `nostr` | shared nostr primitives and codecs | `98c7069` (musiquay vocabulary moved out) |
 | `morly` | the relay (`pkg/relay`, `pkg/store`, ...) | `b7dba37` |
 | `musiquay` | the web app, docs corpus, protocol vocabulary | `8dd6f59` (vocabulary at `pkg/protocol`) |
