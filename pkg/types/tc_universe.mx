@@ -28,20 +28,66 @@ type UniverseState struct {
 // LookupByName returns the package with the given short name, or nil.
 func (u *UniverseState) LookupByName(name string) (pkg *TCPackage) {
 	if u.ByName == nil || u.byNameSeq != int32(len(u.Registry)) {
-		// The ByName cache must outlive any single package compile, so
-		// build it in the root arena (the caller's arena owns the state).
-		saved := runtime.CurrentArena()
-		runtime.SetCurrentArena(runtime.RootArena())
-		u.ByName = map[string]*TCPackage{}
-		for _, p := range u.Registry {
-			if p != nil {
-				u.ByName[p.Name] = p
-			}
-		}
-		u.byNameSeq = int32(len(u.Registry))
-		runtime.SetCurrentArena(saved)
+		u.rebuildByName()
 	}
+	p := u.ByName[name]
+	if p == nil {
+		return nil
+	}
+	// A Registry write that REPLACES a package does not change its length, so the
+	// check above cannot see it. That replacement is the normal path, not an
+	// exotic one: registerBuiltins installs Synthetic stubs, and loadMxh later
+	// overwrites the same key with the real package read from a dependency's
+	// .mxh (main.mx, workerLoadDeps - "existing != nil && !existing.Synthetic").
+	// The cache then still answered with the stub, whose Scope holds almost none
+	// of the real package's declarations, for the rest of the build. Verify the
+	// cached entry is the object the Registry holds now, and rebuild once if it
+	// is not.
+	if cur, live := u.Registry[p.Path]; live && cur == p {
+		return p
+	}
+	u.rebuildByName()
 	return u.ByName[name]
+}
+
+// rebuildByName rebuilds the name->package cache.
+//
+// Two loaded packages can share a name - crypto/ecdsa and
+// crypto/internal/fips140/ecdsa - and the winner used to be whichever the map
+// yielded last, i.e. map iteration order, so the same source could resolve
+// differently between runs. The order is now a total, reproducible policy:
+// shorter path first, then lexicographic. That is not what disambiguates a real
+// collision (import-scoped resolution does, see resolveTypeExprWithSubst); it is
+// what stops the answer from being random.
+func (u *UniverseState) rebuildByName() {
+	// The ByName cache must outlive any single package compile, so build it in
+	// the root arena (the caller's arena owns the state).
+	saved := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
+	u.ByName = map[string]*TCPackage{}
+	// Scratch declared OUTSIDE the loop: a `:=` in the body of a loop in a
+	// self-mutating method lands in the sovereign arena on every iteration, which
+	// the compiler rejects by name.
+	var cur *TCPackage
+	for _, p := range u.Registry {
+		if p == nil {
+			continue
+		}
+		cur = u.ByName[p.Name]
+		if cur == nil || betterPkgName(p, cur) {
+			u.ByName[p.Name] = p
+		}
+	}
+	u.byNameSeq = int32(len(u.Registry))
+	runtime.SetCurrentArena(saved)
+}
+
+// betterPkgName reports whether a should win a name collision against b.
+func betterPkgName(a *TCPackage, b *TCPackage) (ok bool) {
+	if len(a.Path) != len(b.Path) {
+		return len(a.Path) < len(b.Path)
+	}
+	return a.Path < b.Path
 }
 
 // Global bridge - DEPRECATED. Will be removed once all call sites
