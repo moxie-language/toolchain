@@ -1828,61 +1828,19 @@ func extractPkgName(data []byte) (s string) {
 }
 
 func extractImports(data []byte) (ss []string) {
-	imports := []string{:0:32}
-	off := int32(0)
-	for off < int32(len(data)) {
-		ls := off
-		for off < int32(len(data)) && data[off] != '\n' {
-			off++
-		}
-		le := off
-		if off < int32(len(data)) {
-			off++
-		}
-		// Trim
-		for ls < le && (data[ls] == ' ' || data[ls] == '\t') {
-			ls++
-		}
-		for le > ls && (data[le-1] == ' ' || data[le-1] == '\t' || data[le-1] == '\r') {
-			le--
-		}
-		line := string(data[ls:le])
-		if line == "import (" {
-			// Scan block
-			for off < int32(len(data)) {
-				bls := off
-				for off < int32(len(data)) && data[off] != '\n' {
-					off++
-				}
-				ble := off
-				if off < int32(len(data)) {
-					off++
-				}
-				for bls < ble && (data[bls] == ' ' || data[bls] == '\t') {
-					bls++
-				}
-				for ble > bls && (data[ble-1] == ' ' || data[ble-1] == '\t' || data[ble-1] == '\r') {
-					ble--
-				}
-				bt := string(data[bls:ble])
-				if bt == ")" {
-					break
-				}
-				imp := mxutil.ExtractQuoted(bt)
-				if imp != "" {
-					imports = appendUniq(imports, imp)
-				}
-			}
-			continue
-		}
-		if mxutil.HasPrefix(line, "import ") {
-			imp := mxutil.ExtractQuoted(line[7:])
-			if imp != "" {
-				imports = appendUniq(imports, imp)
-			}
+	// One comment-aware scanner, not two. This used to be a second, comment-blind
+	// copy of the import scan that matched `import (` inside a doc comment and
+	// contributed a bogus spec to dependency discovery; scanFileRegions already
+	// knows which bytes are code, and it is the one the parser uses, so the two
+	// cannot drift. It returns raw import specs - with the quotes, and with any
+	// alias or blank identifier - so each is reduced to its path here.
+	_, _, fimps := scanFileRegions(data, map[string]bool{})
+	for _, spec := range fimps {
+		if imp := mxutil.ExtractQuoted(spec); imp != "" {
+			ss = appendUniq(ss, imp)
 		}
 	}
-	return imports
+	return ss
 }
 
 type srcSpan struct {

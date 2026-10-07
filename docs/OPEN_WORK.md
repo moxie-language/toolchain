@@ -3366,6 +3366,34 @@ awareness `scanFileRegions` now has, by calling `firstCodeOnLine(data, ls, le,
 inBlock)` and tracking the block-comment state across lines, so a doc comment
 containing the text `import (` cannot contribute a bogus import spec.
 
+**DONE in round 79, by delegation instead of by copying the logic.** Re-writing
+the scan inside `extractImports` is what legacy could not lower (`unknown special
+variable with appending linkage: @0` after LowerInterfaces). The scanner does not
+need to be written twice at all: `scanFileRegions` already returns the import
+specs, so `extractImports` is now
+
+	_, _, fimps := scanFileRegions(data, map[string]bool{})
+	for _, spec := range fimps {
+		if imp := mxutil.ExtractQuoted(spec); imp != "" {
+			ss = appendUniq(ss, imp)
+		}
+	}
+
+one comment-aware scanner, with the raw specs (quotes, aliases, blank identifier)
+reduced to paths at the boundary. Verified that legacy can lower it -
+`legacy/moxie build -a -o /tmp/s1 ./_mxc_stage4` returns 0, where the previous
+shape failed - and the whole suite is green on it.
+
+**What is and is not proved.** `import_in_comment` pins the shape: a real `/* */
+block whose prose contains `import (` plus a quoted path, with the real import
+after it. It passes BEFORE and AFTER the change, because the bogus spec is only
+ever added to the dependency-discovery list and an unresolvable entry there is
+tolerated - it never reaches the work dir, the cache or the mxh. So the honest
+claim is that this removes a duplicated scanner that could drift from the
+parser's (the failure mode the two copies invite), not that it fixes an
+observable build failure. A file whose prose block swallowed the rest of the scan
+could also have had REAL imports missed; that is the latent half.
+
 Result: **it broke `selfhost:stage1`.** The suite went from rc=0 / 185 PASS to
 rc=1 with only 72 PASS and
 
