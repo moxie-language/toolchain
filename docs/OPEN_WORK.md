@@ -5280,7 +5280,39 @@ of runs:
     panic: runtime error at 0x000000000026e0c8: caught signal SIGSEGV
 
 and `addr2line -e ./moxie 0x26e0c8` says **`runtime.memcpy`** - the same address in
-every crash captured. Measured rates: 3/40 with the default job count, 1/40 with
+every crash captured.
+
+**Round 82 got a real backtrace** from a `systemd-coredump` core (the shell's
+"core dumped" was not wasted):
+
+    #0  runtime[memcpy]
+    #1  runtime[memmove]
+    #2  main[tcResolveNameInline]
+    #3  main[tcResolveFuncInline]
+    #4  main[typeCheckPkg]
+    #5  main[CompileToIR]
+    #6  main[compileSource]
+    #7  main[compilePkgSource]
+    #8  main[buildPkgsSerial]
+    #9  main.main
+
+So it is inside type checking, exactly where the unresolved variadic element is
+being resolved - not in the emitter or the linker. The faulting call is a `push`
+of a 24-byte element: the disassembly shows `call runtime.slicePush` followed by
+`memmove(dst = newdata + oldlen*24, src = &stackslot, 24)`, and the value that
+goes wrong is the old LENGTH taken from the stack slot holding the slice header.
+A length that is a stack address (`0x7fff...`) is what produced the earlier
+`alloc: implausible size 1.4e14` panic in the same shape - one garbage slice
+header, two symptoms.
+
+The asymmetry is the best clue: only the QUALIFIED unresolved name trips it, and
+the only thing the qualified path does that the bare one does not is call
+`cctx.universe.LookupByName`, which (round 70) rebuilds the by-name cache by
+switching the CURRENT arena to the root arena and back. A garbage slice length
+appearing right after that is consistent with the arena switch leaving state
+that a later allocation reuses. Next step: bisect that hypothesis with one build
+- give `LookupByName` a variant that does not switch arenas and see whether the
+crash rate goes to zero - before designing the fix. Measured rates: 3/40 with the default job count, 1/40 with
 `-j 1`, 0/30 under gdb (which re-times the process enough to hide it), 0/30 on
 the compilers from rounds 73, 74 and 81 - so this is rare and possibly
 timing/allocation dependent, and the earlier versions are not exonerated by those
