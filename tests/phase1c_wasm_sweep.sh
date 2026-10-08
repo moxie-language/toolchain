@@ -19,6 +19,7 @@ echo "=== Phase 1c: js/wasm compile sweep ==="
 
 # Packages that must compile for -target wasm.
 SWEEP=(
+	net/http
 	path/filepath
 	syscall/js
 )
@@ -27,7 +28,6 @@ SWEEP=(
 # the suite must not encode today's breakage as acceptable, but it must not go
 # red for a defect that is already recorded either.
 SWEEP_KNOWN=(
-	"net/http|net now compiles for wasm; net/http itself panics the compiler with 'interface dispatch: no impl for String', the documented imported-generic-method-set item"
 )
 
 for pkg in "${SWEEP[@]}"; do

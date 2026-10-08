@@ -5283,13 +5283,51 @@ Two things had to be learned to get there:
   second-generation build (`/tmp/mxc-r82 build -a` of the same source) shows it.
   Worth remembering: diagnostics added to emitted code need two generations.
 
-So the shape is: a named type's plain form has an arm, and the value being
-dispatched is an **instantiated** `*Named` (TArgs set) whose `typeIDHash` differs
-from the plain one - which is exactly the two-part fix the older notes describe
-(the mxh index must record generic method names, and the instantiated `*Named` has
-to be keyed at the boxing site). The next step is to print the runtime typeID in
-the default arm and match it against the arm IDs, which names the missing
-instantiation outright.
+**Round 83 measured it, and the inference above was WRONG.** Printing the
+unmatched descriptor from the default arm - which, as a diagnostic added to
+generated code, again needed two bootstrap generations - gives
+
+    interface dispatch: unmatched type descriptor 0x0
+
+**NULL**. Not an instantiation whose hash differs: an interface value with a nil
+type descriptor. So a `Type` in the 268-arm dispatch is `nil`, and the fix is not
+about generic methods at all.
+
+The chain, from the same core backtrace: the compiler was rendering an
+argument-mismatch message for a call in net/http via
+`pkg/types.(*Signature).String()`, and that renderer calls `.String()` on
+`t.Results.At(0).Typ` / `v.Typ` / `sl.Elem` - which is **nil** whenever a
+declaration's type failed to resolve (the checker records the error and leaves
+the slot nil). Dispatching `.String()` on the nil interface boxes a NULL
+descriptor and panics. The crash was in the ERROR PATH.
+
+## FIXED in round 83: net/http compiles for wasm
+
+Three changes, in the order the evidence forced them.
+
+1. **A nil `Type` no longer crashes a diagnostic.** `pkg/types` renders types from
+   `Array`/`Slice`/`Pointer`/`TCMap`/`Chan` and the tuple walkers
+   (`writeParams`, `Signature.String`, `Struct.String`, the interface-method
+   writer) through a new `typeString`, which prints `<unresolved>` for a nil type
+   instead of dispatching `String()` on it. The nil case is expected - it is what
+   an unresolved declaration leaves behind, and the error path is the one place
+   that must never abort.
+2. **That revealed the real errors, which were all in `net/http/roundtrip_js.mx`:**
+   the js transport still used the OLD `any`-based `syscall/js` API that round 77
+   replaced. Ported: `opt.Set("method", js.ValueOfString(req.Method))` and the
+   other `Set`/`Call` arguments through `ValueOfString`/`ValueOfInt`/`ValueOfFunc`,
+   the six `FuncOf` callbacks return `js.Value` with `js.ValueOfNull()` for the
+   bare `return nil`, and the closure-local `body` is renamed `respBody` (it
+   shadowed, which Moxie rejects).
+3. **`net/http` now builds for `-target wasm`** (a 27 MB module) and phase 1c has
+   no known-broken entries left: `net/http`, `path/filepath` and `syscall/js` all
+   pass, 3/3 with zero skips.
+
+The lesson worth keeping, on top of the two-generation rule: a fail-loud panic is
+only as good as the path that reports it. "no impl for String" was loud, but it
+was raised while trying to REPORT a plain type error, and it hid that error for
+three rounds. The next dispatch-shaped panic should print the descriptor (now
+trivial: the temporary print is removed, the message carries the impl count).
 
 ## OPEN, found in round 81: the compiler segfaults on a qualified unresolved variadic type
 

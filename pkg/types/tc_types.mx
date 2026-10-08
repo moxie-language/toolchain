@@ -159,7 +159,7 @@ func NewArray(elem Type, n int64) (a *Array) {
 	a = (&Array{}); a.Len = n; a.Elem = elem; return a
 }
 func (t *Array) Underlying() (tv Type) { return t }
-func (t *Array) String() (s string) { return "[" | token.Itoa64(t.Len) | "]" | t.Elem.String() }
+func (t *Array) String() (s string) { return "[" | token.Itoa64(t.Len) | "]" | typeString(t.Elem) }
 
 // ----------------------------------------------------------------------------
 // Slice
@@ -170,7 +170,7 @@ func NewSlice(elem Type) (s *Slice) {
 	s = (&Slice{}); s.Elem = elem; return s
 }
 func (t *Slice) Underlying() (tv Type) { return t }
-func (t *Slice) String() (s string) { return "[]" | t.Elem.String() }
+func (t *Slice) String() (s string) { return "[]" | typeString(t.Elem) }
 
 // ----------------------------------------------------------------------------
 // Pointer
@@ -182,7 +182,7 @@ func NewPointer(base Type) (p *Pointer) {
 }
 func (t *Pointer) Elem() (tv Type) { return t.Base }
 func (t *Pointer) Underlying() (tv Type) { return t }
-func (t *Pointer) String() (s string) { return "*" | t.Base.String() }
+func (t *Pointer) String() (s string) { return "*" | typeString(t.Base) }
 
 // ----------------------------------------------------------------------------
 // Map
@@ -193,7 +193,7 @@ func NewTCMap(key, elem Type) (t *TCMap) {
 	t = (&TCMap{}); t.Key = key; t.Elem = elem; return t
 }
 func (t *TCMap) Underlying() (tv Type) { return t }
-func (t *TCMap) String() (s string) { return "map[" | t.Key.String() | "]" | t.Elem.String() }
+func (t *TCMap) String() (s string) { return "map[" | typeString(t.Key) | "]" | typeString(t.Elem) }
 
 // ----------------------------------------------------------------------------
 // Chan
@@ -218,11 +218,11 @@ func (t *TCChan) Underlying() (tv Type) { return t }
 func (t *TCChan) String() (s string) {
 	switch t.Dir {
 	case TCSendOnly:
-		return "chan<- " | t.Elem.String()
+		return "chan<- " | typeString(t.Elem)
 	case TCRecvOnly:
-		return "<-chan " | t.Elem.String()
+		return "<-chan " | typeString(t.Elem)
 	}
-	return "chan " | t.Elem.String()
+	return "chan " | typeString(t.Elem)
 }
 
 // ----------------------------------------------------------------------------
@@ -299,7 +299,7 @@ func (t *TCStruct) String() (s string) {
 			sb.WriteString(f.Name)
 			sb.WriteByte(' ')
 		}
-		sb.WriteString(f.Typ.String())
+		sb.WriteString(typeString(f.Typ))
 		if tag := t.Tag(i); tag != "" {
 			sb.WriteString(" \"")
 			sb.WriteString(tag)
@@ -331,7 +331,7 @@ func (t *Tuple) String() (s string) {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		sb.WriteString(v.Typ.String())
+		sb.WriteString(typeString(v.Typ))
 	}
 	sb.WriteByte(')')
 	return sb.String()
@@ -362,12 +362,26 @@ func (t *Signature) String() (s string) {
 	if t.Results != nil && t.Results.Len() > 0 {
 		sb.WriteByte(' ')
 		if t.Results.Len() == 1 && t.Results.At(0).Name == "" {
-			sb.WriteString(t.Results.At(0).Typ.String())
+			sb.WriteString(typeString(t.Results.At(0).Typ))
 		} else {
 			writeParams(&sb, t.Results, false)
 		}
 	}
 	return sb.String()
+}
+
+// typeString renders a Type for a diagnostic. The nil case is expected, not
+// defensive: when a declaration's type fails to resolve, the checker records the
+// error and leaves the slot nil, and the report that follows has to render it.
+// Dispatching String() on the nil interface instead reached the dispatch default
+// arm with a NULL type descriptor and aborted the compiler with "interface
+// dispatch: no impl for String" while compiling net/http for wasm - a crash in
+// the error path, which is the one place that must always work.
+func typeString(t Type) (s string) {
+	if t == nil {
+		return "<unresolved>"
+	}
+	return t.String()
 }
 
 func writeParams(sb *bytes.Buffer, t *Tuple, variadic bool) {
@@ -383,11 +397,11 @@ func writeParams(sb *bytes.Buffer, t *Tuple, variadic bool) {
 		if variadic && i == len(t.Vars)-1 {
 			if sl, ok := v.Typ.(*Slice); ok {
 				sb.WriteString("...")
-				sb.WriteString(sl.Elem.String())
+				sb.WriteString(typeString(sl.Elem))
 				continue
 			}
 		}
-		sb.WriteString(v.Typ.String())
+		sb.WriteString(typeString(v.Typ))
 	}
 	sb.WriteByte(')')
 }
@@ -444,7 +458,7 @@ func (t *TCInterface) String() (s string) {
 		if sig.Results != nil && sig.Results.Len() > 0 {
 			sb.WriteByte(' ')
 			if sig.Results.Len() == 1 {
-				sb.WriteString(sig.Results.At(0).Typ.String())
+				sb.WriteString(typeString(sig.Results.At(0).Typ))
 			} else {
 				writeParams(&sb, sig.Results, false)
 			}

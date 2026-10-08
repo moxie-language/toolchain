@@ -106,18 +106,18 @@ func (t *Transport) RoundTrip(req *Request) (rresponse *Response, rerr error) {
 	opt := js.Global().Get("Object").New()
 	// See https://developer.mozilla.org/en-US/docs/Web/API/WindowOrWorkerGlobalScope/fetch
 	// for options available.
-	opt.Set("method", req.Method)
-	opt.Set("credentials", "same-origin")
+	opt.Set("method", js.ValueOfString(req.Method))
+	opt.Set("credentials", js.ValueOfString("same-origin"))
 	if h := req.Header.Get(jsFetchCreds); h != "" {
-		opt.Set("credentials", h)
+		opt.Set("credentials", js.ValueOfString(h))
 		req.Header.Del(jsFetchCreds)
 	}
 	if h := req.Header.Get(jsFetchMode); h != "" {
-		opt.Set("mode", h)
+		opt.Set("mode", js.ValueOfString(h))
 		req.Header.Del(jsFetchMode)
 	}
 	if h := req.Header.Get(jsFetchRedirect); h != "" {
-		opt.Set("redirect", h)
+		opt.Set("redirect", js.ValueOfString(h))
 		req.Header.Del(jsFetchRedirect)
 	}
 	if !ac.IsUndefined() {
@@ -126,7 +126,7 @@ func (t *Transport) RoundTrip(req *Request) (rresponse *Response, rerr error) {
 	headers := js.Global().Get("Headers").New()
 	for key, values := range req.Header {
 		for _, value := range values {
-			headers.Call("append", key, value)
+			headers.Call("append", js.ValueOfString(key), js.ValueOfString(value))
 		}
 	}
 	opt.Set("headers", headers)
@@ -147,19 +147,19 @@ func (t *Transport) RoundTrip(req *Request) (rresponse *Response, rerr error) {
 		}
 		req.Body.Close()
 		if len(bodyBytes) != 0 {
-			buf := _uint8Array().New(len(bodyBytes))
+			buf := _uint8Array().New(js.ValueOfInt(int64(len(bodyBytes))))
 			js.CopyBytesToJS(buf, bodyBytes)
 			opt.Set("body", buf)
 		}
 	}
 
-	fetchPromise := js.Global().Call("fetch", req.URL.String(), opt)
+	fetchPromise := js.Global().Call("fetch", js.ValueOfString(req.URL.String()), opt)
 	var (
 		respCh           = chan *Response{1}
 		errCh            = chan error{1}
 		success, failure js.Func
 	)
-	success = js.FuncOf(func(this js.Value, args []js.Value) any {
+	success = js.FuncOf(func(this js.Value, args []js.Value) js.Value {
 		success.Release()
 		failure.Release()
 
@@ -185,13 +185,13 @@ func (t *Transport) RoundTrip(req *Request) (rresponse *Response, rerr error) {
 			cl, err := strconv.ParseInt(clHeader, 10, 64)
 			if err != nil {
 				errCh <- fmt.Errorf("net/http: ill-formed Content-Length header: %v", err)
-				return nil
+				return js.ValueOfNull()
 			}
 			if cl < 0 {
 				// Content-Length values less than 0 are invalid.
 				// See: https://datatracker.ietf.org/doc/html/rfc2616/#section-14.13
 				errCh <- fmt.Errorf("net/http: invalid Content-Length header: %q", clHeader)
-				return nil
+				return js.ValueOfNull()
 			}
 			contentLength = cl
 		default:
@@ -200,15 +200,15 @@ func (t *Transport) RoundTrip(req *Request) (rresponse *Response, rerr error) {
 		}
 
 		b := result.Get("body")
-		var body io.ReadCloser
+		var respBody io.ReadCloser
 		// The body is undefined when the browser does not support streaming response bodies (Firefox),
 		// and null in certain error cases, i.e. when the request is blocked because of CORS settings.
 		if !b.IsUndefined() && !b.IsNull() {
-			body = &streamReader{stream: b.Call("getReader")}
+			respBody = &streamReader{stream: b.Call("getReader")}
 		} else {
 			// Fall back to using ArrayBuffer
 			// https://developer.mozilla.org/en-US/docs/Web/API/Body/arrayBuffer
-			body = &arrayReader{arrayPromise: result.Call("arrayBuffer")}
+			respBody = &arrayReader{arrayPromise: result.Call("arrayBuffer")}
 		}
 
 		code := result.Get("status").Int()
@@ -228,13 +228,13 @@ func (t *Transport) RoundTrip(req *Request) (rresponse *Response, rerr error) {
 			Header:        header,
 			ContentLength: contentLength,
 			Uncompressed:  uncompressed,
-			Body:          body,
+			Body:          respBody,
 			Request:       req,
 		}
 
-		return nil
+		return js.ValueOfNull()
 	})
-	failure = js.FuncOf(func(this js.Value, args []js.Value) any {
+	failure = js.FuncOf(func(this js.Value, args []js.Value) js.Value {
 		success.Release()
 		failure.Release()
 
@@ -254,10 +254,10 @@ func (t *Transport) RoundTrip(req *Request) (rresponse *Response, rerr error) {
 			}
 		}
 		errCh <- fmt.Errorf("net/http: fetch() failed: %s", errMsg)
-		return nil
+		return js.ValueOfNull()
 	})
 
-	fetchPromise.Call("then", success, failure)
+	fetchPromise.Call("then", js.ValueOfFunc(success), js.ValueOfFunc(failure))
 	select {
 	case <-req.Context().Done():
 		if !ac.IsUndefined() {
@@ -299,29 +299,29 @@ func (r *streamReader) Read(p []byte) (n int32, err error) {
 			bCh   = chan []byte{1}
 			errCh = chan error{1}
 		)
-		success := js.FuncOf(func(this js.Value, args []js.Value) any {
+		success := js.FuncOf(func(this js.Value, args []js.Value) js.Value {
 			result := args[0]
 			if result.Get("done").Bool() {
 				errCh <- io.EOF
-				return nil
+				return js.ValueOfNull()
 			}
 			value := []byte{:result.Get("value").Get("byteLength").Int()}
 			js.CopyBytesToGo(value, result.Get("value"))
 			bCh <- value
-			return nil
+			return js.ValueOfNull()
 		})
 		defer success.Release()
-		failure := js.FuncOf(func(this js.Value, args []js.Value) any {
+		failure := js.FuncOf(func(this js.Value, args []js.Value) js.Value {
 			// Assumes it's a TypeError. See
 			// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypeError
 			// for more information on this type. See
 			// https://streams.spec.whatwg.org/#byob-reader-read for the spec on
 			// the read method.
 			errCh <- errors.New(args[0].Get("message").String())
-			return nil
+			return js.ValueOfNull()
 		})
 		defer failure.Release()
-		r.stream.Call("read").Call("then", success, failure)
+		r.stream.Call("read").Call("then", js.ValueOfFunc(success), js.ValueOfFunc(failure))
 		select {
 		case b := <-bCh:
 			r.pending = b
@@ -365,25 +365,25 @@ func (r *arrayReader) Read(p []byte) (n int32, err error) {
 			bCh   = chan []byte{1}
 			errCh = chan error{1}
 		)
-		success := js.FuncOf(func(this js.Value, args []js.Value) any {
+		success := js.FuncOf(func(this js.Value, args []js.Value) js.Value {
 			// Wrap the input ArrayBuffer with a Uint8Array
 			uint8arrayWrapper := _uint8Array().New(args[0])
 			value := []byte{:uint8arrayWrapper.Get("byteLength").Int()}
 			js.CopyBytesToGo(value, uint8arrayWrapper)
 			bCh <- value
-			return nil
+			return js.ValueOfNull()
 		})
 		defer success.Release()
-		failure := js.FuncOf(func(this js.Value, args []js.Value) any {
+		failure := js.FuncOf(func(this js.Value, args []js.Value) js.Value {
 			// Assumes it's a TypeError. See
 			// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypeError
 			// for more information on this type.
 			// See https://fetch.spec.whatwg.org/#concept-body-consume-body for reasons this might error.
 			errCh <- errors.New(args[0].Get("message").String())
-			return nil
+			return js.ValueOfNull()
 		})
 		defer failure.Release()
-		r.arrayPromise.Call("then", success, failure)
+		r.arrayPromise.Call("then", js.ValueOfFunc(success), js.ValueOfFunc(failure))
 		select {
 		case b := <-bCh:
 			r.pending = b
