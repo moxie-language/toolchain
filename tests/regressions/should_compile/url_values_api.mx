@@ -1,0 +1,49 @@
+/*
+url.Values is an ALIAS with free functions, and the whole API works through it.
+
+A named map type is not allowed in Moxie, so `type Values map[string][]byte`
+became `type Values = map[string][]byte` (round 96) and its six methods became
+free functions: ValuesGet, ValuesSet, ValuesAdd, ValuesDel, ValuesHas,
+ValuesEncode. This fixture is the end-to-end guard: construction, both setters,
+Get returning the FIRST value, Has, Del, Encode's sorted output, and ParseQuery
+feeding the same free functions. Writing through a map parameter is what makes
+the alias route viable at all - Set/Add/Del do exactly that inside net/url.
+
+The alias keeps public API compatibility for the NAME (`url.Values` still spells
+the type, and `url.Values{}` still builds one), which is the point of the route;
+what callers write changes from `v.Get(k)` to `url.ValuesGet(v, k)`.
+*/
+package main
+
+import (
+	"net/url"
+)
+
+func main() {
+	v := url.Values{}
+	url.ValuesSet(v, "b", "2")
+	url.ValuesAdd(v, "a", "1")
+	url.ValuesAdd(v, "a", "3")
+	if url.ValuesGet(v, "a") != "1" {
+		panic("get returns the first value")
+	}
+	if !url.ValuesHas(v, "b") {
+		panic("has")
+	}
+	enc := url.ValuesEncode(v)
+	if enc != "a=1&a=3&b=2" {
+		panic("encode: " | enc)
+	}
+	parsed, err := url.ParseQuery("x=1&y=2&y=3")
+	if err != nil {
+		panic("parse")
+	}
+	if url.ValuesGet(parsed, "y") != "2" {
+		panic("parsed y")
+	}
+	url.ValuesDel(parsed, "x")
+	if url.ValuesHas(parsed, "x") {
+		panic("del")
+	}
+	println("values=" | enc)
+}

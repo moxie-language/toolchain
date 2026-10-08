@@ -6031,3 +6031,56 @@ declaration's own case.
   `selfhost:fixpoint PASS (stage2 == stage3)`, phase 1b (41 packages) and the
   wasm phase. The gated binary was rebuilt from this tree and is byte-identical
   (`3655d5c10531cbad78dd7cbd95796ea2c43a1c829b4ea9c916c7f1f9d5207db6`).
+
+## FIXED in round 96: `url.Values` dissolved - alias plus free functions
+
+The named-public-API list in `src/net/**` had five types left after `IPMask`,
+`HardwareAddr`, `ProtocolError` and `Dir` were dissolved. This round takes the
+smallest: `url.Values`, six methods, a named MAP type (`map[string][][]byte`) and
+therefore not allowed in Moxie.
+
+The route is the one the tree already uses for `IPMask`/`HardwareAddr` - an alias
+plus free functions:
+
+    -type Values map[string][][]byte
+    +type Values = map[string][][]byte
+
+    (v Values) Get(key string) (rs string)   -> ValuesGet(v Values, key string) (rs string)
+    (v Values) Set(key, value string)        -> ValuesSet(v Values, key, value string)
+    (v Values) Add(key, value string)        -> ValuesAdd(v Values, key, value string)
+    (v Values) Del(key string)               -> ValuesDel(v Values, key string)
+    (v Values) Has(key string) (rok bool)    -> ValuesHas(v Values, key string) (rok bool)
+    (v Values) Encode() (rs string)          -> ValuesEncode(v Values) (rs string)
+
+The NAME survives, which is the point of the route: `url.Values` still spells the
+type, `url.Values{}` still builds one, and `http.Request.Form`/`PostForm` are
+unchanged. What callers write changes from `v.Get(k)` to `url.ValuesGet(v, k)`.
+
+Call sites: exactly two `.Encode()` uses - `net/http/client.mx`
+(`Client.PostForm`) and `internal/trace/traceviewer/http.mx` - and nothing else
+in the tree, which the compiler confirmed by building `net/http` clean after
+them. **That a map can be written through a free function's parameter is what
+makes this route viable for a map type at all**: `ValuesSet`/`ValuesAdd`/
+`ValuesDel` do exactly that, and the new `url_values_api` fixture exercises
+construction, both setters, `Get` returning the FIRST value, `Has`, `Del`,
+`Encode`'s sorted output and a `ParseQuery` round trip.
+
+Found next door, NOT caused here: `internal/trace/traceviewer/format` still fails
+with `undefined: any` (an `Arg any` field) - the recorded any-removal debt. That
+package is in no test phase; its call site was updated for correctness and cannot
+be compiled until the debt is paid.
+
+**Remaining named types to dissolve:** `net.IP` (18 methods), `net.Buffers`,
+`net/http.Header` (13), `net/textproto.MIMEHeader` (5).
+
+### Verified
+
+- `url_values_api` compiles AND runs, natively and on wasm: construction, both
+  setters, `Get` returning the first value, `Has`, `Del`, `Encode`'s sorted
+  output (`a=1&a=3&b=2`) and a `ParseQuery` round trip.
+- `net/http` compiles with the alias (the whole `Client.PostForm` path), phase 1b
+  passes on all 41 stdlib packages, and phase 1c compiles the wasm sweep.
+- **FULL GATE: 244 PASS / 0 FAIL / 0 SKIP**, including
+  `selfhost:fixpoint PASS (stage2 == stage3)`. This round changed stdlib source
+  only - no compiler change - so the gate's own compilation of `net/url`,
+  `net/http` and the fixture is the artifact under test.
