@@ -691,6 +691,16 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 				continue
 			}
 			sig := tcResolveFuncInlineWithRecv(fd.Type, fd.Recv, scope)
+			if !recvTypeHasIndex(fd.Recv.Type) {
+				// A method on a NON-generic receiver cannot name a type
+				// parameter of its own - Go and Moxie both refuse method-level
+				// type params - so every name in its signature must resolve,
+				// exactly as for a non-generic top-level function. `func (s *S)
+				// m(x Undefined)` built with rc=0 and then crashed at run time.
+				// A generic receiver is excluded because its type params are not
+				// in this scope, where they are indistinguishable from a typo.
+				reportUndefinedSignatureTypes(fd.Type, scope)
+			}
 			fn := NewTCFunc(pkg, fd.Name.Value, sig)
 			isPtr := false
 			var named *Named

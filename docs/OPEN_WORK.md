@@ -5718,6 +5718,74 @@ typo reintroduced, crypto/tls now fails with `undefined: cs`; with it fixed, the
   whole sweep is clean.
 
 **Still open from this round:** a method or func literal with a bare undefined
-name, and a nil type inside an inline struct type - `tcResolveNameInline`
-returns a `TCStruct` for one regardless of whether its fields resolved, so the
-walker never gets the chance to explain it.
+name (the METHOD half is fixed in round 90; the func literal is still open, with
+its measurement), and a nil type inside an inline struct type -
+`tcResolveNameInline` returns a `TCStruct` for one regardless of whether its
+fields resolved, so the walker never gets the chance to explain it.
+
+## FIXED in round 90: a method's signature is checked like a function's
+
+Round 86 applied the signature rule to non-generic top-level functions and listed
+methods and func literals as still open. Both were measured this round, with the
+compiler built at round 86:
+
+    func (s *S) m(x Undefined) (r string) { return x.String() }
+        build rc=0, then SIGABRT at run time
+    f := func(x Undefined) (r string) { return x.String() }
+        build rc=0, then SIGABRT at run time
+    func (b *Box[K,V]) Set(k K, val V)     (legitimate)
+        build rc=0, runs
+
+The METHOD case is closed with the same helper, called from the method loop:
+a method on a NON-generic receiver cannot declare type parameters - Go and Moxie
+both refuse method-level type params - so every name in its signature must
+resolve, exactly as for a top-level function. A generic receiver is excluded for
+the same reason the top-level rule excludes generic functions: its type params
+are not in the scope where the signature is resolved, and `V` there is
+indistinguishable from a typo.
+
+Measurement discipline as in round 86:
+
+- `reject_undefined_method_param_type` pins the rejection (`undefined: Undefined`).
+- `forward_type_constructors` grew two methods - one taking the imported
+  `fmt.Stringer`, one taking a type declared later in the file - so the method
+  rule is exercised on the two shapes that must NOT be reported.
+- `generic_receiver_param_type` still compiles and runs, which is the guard that
+  the generic-receiver exclusion stays.
+- The 41-package stdlib sweep is the real false-positive test: it contains
+  thousands of methods, including ones whose signatures name imported and
+  generic types.
+
+**Still open: the func LITERAL, measured above.** Its signature is resolved where
+the enclosing function's genericity is not known, and a literal inside a generic
+body may legitimately name the enclosing type parameters - which look exactly
+like an undefined name. Closing it means carrying the enclosing `TParamList` (or
+the absence of one) down to the literal's resolution site, and only then
+applying the rule. The site with that information is `buildFuncLit`
+(`ssa_builder.mx:7103`), which resolves the literal's signature and has `fb` in
+hand: `fb.typeSubst == nil` is exactly "the enclosing body is not a generic
+instantiation", and the literal inherits it (`ab.typeSubst = fb.typeSubst`). The
+package scope passed there already resolves qualified and package-level names,
+which is why the qualified half of this rule is safe at that site today.
+
+**Also still open, and measured this round:** `type S struct { n Undefined }`
+builds with rc=0. Unlike the signature cases it did NOT visibly misbehave -
+`s.n.String()` returned the expected value in the probe - so it is recorded as a
+nil field type that is tolerated end to end rather than as a confirmed
+miscompile. `tcResolveNameInline` returns a `TCStruct` for an inline struct type
+regardless of whether its fields resolved, so the walker used by the signature
+rule never gets to explain it.
+
+### Verified
+
+- `reject_undefined_method_param_type` is rejected with `undefined: Undefined`.
+  Before this round the same method built rc=0 and aborted at run time.
+- `forward_type_constructors` (now including a method taking `fmt.Stringer` and
+  one taking a type declared later in the file) and `generic_receiver_param_type`
+  compile AND run.
+- Phase 0 94/94 (phase 0b included), phase 1b PASS on all 41 stdlib packages,
+  phase 1c 3/3.
+- **FULL GATE: 233 PASS / 0 FAIL / 0 SKIP**, including
+  `selfhost:fixpoint PASS (stage2 == stage3)`. The gated binary was rebuilt from
+  this tree and is byte-identical
+  (`0c9f7c0b402e791fc8d27b7e192be330b12d7550d0d10cf85818bd391dc9f12b`).
