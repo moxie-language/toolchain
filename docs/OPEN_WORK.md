@@ -5789,3 +5789,83 @@ rule never gets to explain it.
   `selfhost:fixpoint PASS (stage2 == stage3)`. The gated binary was rebuilt from
   this tree and is byte-identical
   (`0c9f7c0b402e791fc8d27b7e192be330b12d7550d0d10cf85818bd391dc9f12b`).
+
+## FIXED in round 93: func literals, and local types in a literal's signature
+
+Round 90 closed the method form and left the func literal open with its site
+identified. Measured with the round-90 compiler:
+
+    f := func(x Undefined) (r string) { return x.String() }
+        build rc=0, then SIGABRT at run time
+
+The rule now runs in `buildFuncLit` under the soundness precondition that the
+enclosing body is not a generic instantiation (`fb.typeSubst == nil`): a literal
+there cannot name a type parameter, so every name in its signature must resolve.
+A literal inside a monomorphized body may legitimately name the enclosing type
+parameters, which are in no scope at that point and look exactly like a typo.
+
+The first attempt was refused by the stdlib sweep, and the refusal was correct:
+`internal/trace/internal/tracev1` declares `type gdesc` and `type pdesc` INSIDE
+a function and passes both to a literal, and those names live in
+`fb.localTypes`, not in the package scope the rule resolved against. Two things
+followed.
+
+**1. A real silent miscompile fell out of it.** A func literal whose parameter
+type is declared locally in the enclosing body did not work at all:
+
+    func localTypeLit() (r string) {
+        type inner struct { n string }
+        f := func(x inner) (out string) { return x.n }
+        return f(inner{n: "ok"})
+    }
+    -> printed "" (empty), rc=0
+
+`fb.resolveTypeAST` consults `fb.localTypes` for expression types, but
+`buildFuncLit` resolved the literal's SIGNATURE straight against the package
+scope, and the literal's own builder did not inherit `localTypes` at all - unlike
+`typeSubst`, `srcScope` and `fileScope`, which it did inherit. So the parameter
+was typed nil and the literal returned an empty string with no diagnostic
+anywhere. Both halves are fixed: the signature is resolved against the package
+scope with the visible local type names in a child scope, and the literal's
+builder inherits `fb.localTypes` like its other context. After the fix the probe
+prints `got: ok`.
+
+**2. The rule's precondition is then just "not generic".** With local types
+resolving correctly at that site, the temporary `len(fb.localTypes) == 0`
+exclusion was removed: a bare name there now either resolves (local, imported or
+package-level) or is a genuine typo.
+
+Verified: `generic_funclit_param_type` (a literal inside a generic body naming
+`T`) and `local_type_funclit_param_type` (a literal taking a locally declared
+type) compile AND run; `reject_undefined_funclit_param_type` is rejected with
+`undefined: Undefined`; `forward_type_constructors` gained literals taking
+`fmt.Stringer` and a forward-referenced type; the `tracev1` package compiles and
+runs.
+
+**Found on the way, and NOT this round's bug: the wasm target traps on a func
+literal inside a generic body.** `wrap[T](...)` with `g := func(x T) (y T)`
+prints correctly natively and traps in the browser (`app.wasm._start`,
+`wasm-function[152]`) on wasm. `generic_funclit_param_type` therefore carries
+`//:wasmtest skip` with the reason in the fixture, and the wasm-safe half of the
+guard was split out into `local_type_funclit_param_type`, which does run on wasm.
+
+Measured with the COMMITTED round-90 compiler as well - the same wasm function
+index and the same offset - so the trap predates this round and is not caused by
+the func-literal rule; it is a separate wasm codegen defect and is recorded here
+as open. The rule exclusion itself is still verified natively, which is where the
+compiler's own diagnostics are checked.
+
+### Verified
+
+- `reject_undefined_funclit_param_type` is rejected with `undefined: Undefined`;
+  the same literal built rc=0 and aborted at run time before this round.
+- `local_type_funclit_param_type` compiles and RUNS (native and wasm); it
+  printed an empty string instead of `ok` before the fix.
+- `generic_funclit_param_type` compiles and runs natively, with
+  `//:wasmtest skip` and the pre-existing wasm trap recorded above.
+- `forward_type_constructors` (now with literals taking `fmt.Stringer` and a
+  forward-referenced type) compiles and runs; the `tracev1` package compiles.
+- **FULL GATE: 237 PASS / 0 FAIL / 0 SKIP**, including
+  `selfhost:fixpoint PASS (stage2 == stage3)` and the wasm phase. The gated
+  binary was rebuilt from this tree and is byte-identical
+  (`d47ab865505bd4d29e35b6bab2e0c6bb918f2f36899764b0dade8e48058631fa`).

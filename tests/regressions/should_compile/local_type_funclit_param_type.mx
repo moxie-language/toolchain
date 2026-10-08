@@ -1,0 +1,34 @@
+/*
+A func literal whose parameter type is declared LOCALLY in the enclosing body.
+
+This was a silent miscompile until round 93: `buildFuncLit` resolved the
+literal's signature straight against the package scope, and the literal's own
+builder did not inherit the enclosing `fb.localTypes` (unlike typeSubst,
+srcScope and fileScope, which it did inherit). So `inner` resolved to nothing,
+the parameter was typed nil, and the literal returned an EMPTY string with no
+diagnostic:
+
+    -> printed "" (empty), rc=0
+
+Both halves are fixed: the signature resolves against the package scope with the
+visible local type names in a child scope, and the literal's builder inherits
+`fb.localTypes`. This fixture is the guard, and it runs on wasm too, where the
+construct is sound.
+*/
+package main
+
+func localTypeLit() (r string) {
+	type inner struct {
+		n string
+	}
+	f := func(x inner) (out string) {
+		return x.n
+	}
+	return f(inner{n: "ok"})
+}
+
+func main() {
+	if localTypeLit() != "ok" {
+		panic("local type literal")
+	}
+}

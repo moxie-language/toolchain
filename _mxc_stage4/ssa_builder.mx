@@ -7099,8 +7099,35 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *syntax.FuncLit) (s SSAValue) {
 			sig, _ = tv.Type.(*Signature)
 		}
 	}
+	// A literal's signature may name a type declared LOCALLY in the enclosing
+	// body. fb.resolveTypeAST consults fb.localTypes for expression types, but
+	// this signature resolution went straight to the package scope, so
+	// `type inner struct{...}; f := func(x inner)` typed the parameter nil and
+	// the literal returned an empty string - a silent miscompile, measured.
+	// Build the same view the enclosing body has: the package scope with the
+	// local type names in a child scope. Scoping is Go's, so fb.localTypes is
+	// exactly what is visible at this point in the body.
+	litScope := fb.fn.Pkg.Pkg.Scope
+	if len(fb.localTypes) > 0 {
+		ls := NewScope(litScope)
+		for ln, lt := range fb.localTypes {
+			ls.Insert(NewTypeName(fb.fn.Pkg.Pkg, ln, lt))
+		}
+		litScope = ls
+	}
 	if sig == nil && e.Type != nil {
-		sig = tcResolveFuncInline(e.Type, fb.fn.Pkg.Pkg.Scope)
+		sig = tcResolveFuncInline(e.Type, litScope)
+	}
+	if fb.typeSubst == nil && e.Type != nil {
+		// A literal whose enclosing body is NOT a generic instantiation cannot
+		// name a type parameter of its own, so every name in its signature must
+		// resolve, exactly as for a non-generic function or method. `f := func(x
+		// Undefined) (r string) { return x.String() }` built with rc=0 and then
+		// aborted at run time. The generic exclusion is a soundness precondition,
+		// not a convenience: a literal inside a monomorphized body may name the
+		// enclosing type parameters (typeSubst is set there), which are not in
+		// any scope here and look exactly like a typo.
+		reportUndefinedSignatureTypes(e.Type, litScope)
 	}
 	name := fb.fn.name | "__anon" | ssaItoa(len(fb.fn.AnonFuncs)+1)
 	anon := &SSAFunction{
@@ -7121,6 +7148,9 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *syntax.FuncLit) (s SSAValue) {
 	ab.typeSubst = fb.typeSubst
 	ab.srcScope = fb.srcScope
 	ab.fileScope = fb.fileScope
+	// The body may name the enclosing body's local types too; they are Go-scoped
+	// to the enclosing block, which is the literal's home.
+	ab.localTypes = fb.localTypes
 	d := &syntax.FuncDecl{
 		Name: &syntax.Name{Value: name},
 		Type: e.Type,

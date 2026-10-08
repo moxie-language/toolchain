@@ -1,0 +1,47 @@
+//:wasmtest skip
+/*
+A func literal inside a GENERIC body may name the enclosing type parameter, and
+must not be reported as undefined.
+
+The func-literal rule added in round 93 applies only where the enclosing body is
+not a generic instantiation. Inside one it must stay silent: `func(x T)` is
+legitimate, and `T` is not in the scope the literal's signature is resolved
+against - it is supplied by the instantiation's type substitution (typeSubst),
+which is exactly the condition the rule checks. Without that condition this
+fixture fails with `undefined: T`.
+
+NATIVE-ONLY, and the reason is precise: the wasm target has a SEPARATE,
+pre-existing bug on exactly this construct. A func literal inside a generic body
+that names the type parameter traps in the browser (`app.wasm._start`) while the
+native binary is correct. Measured with the committed round-90 compiler as well -
+same wasm function index and offset - so it is not this round's doing. It is
+recorded in docs/OPEN_WORK.md. The opt-out is here because this fixture cannot
+guard the rule on a target where the construct itself is broken.
+*/
+package main
+
+func wrap[T comparable](v T, n int32) (r T) {
+	g := func(x T) (y T) {
+		return x
+	}
+	for i := int32(0); i < n; i++ {
+		v = g(v)
+	}
+	return v
+}
+
+func apply[T comparable](v T, f func(T) T) (r T) {
+	return f(v)
+}
+
+func main() {
+	if wrap(int32(7), 2) != 7 {
+		panic("wrap")
+	}
+	if wrap("hi", 1) != "hi" {
+		panic("wrap string")
+	}
+	if apply(int32(5), func(x int32) (y int32) { return x }) != 5 {
+		panic("apply")
+	}
+}
