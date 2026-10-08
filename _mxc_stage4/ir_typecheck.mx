@@ -663,6 +663,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 					continue
 				}
 				sig := tcResolveFuncInline(dd.Type, scope)
+				reportUndefinedSignatureTypes(dd.Type, scope)
 				obj := scope.Lookup(dd.Name.Value)
 				if obj != nil {
 					if fn, ok := obj.(*TCFunc); ok && sig != nil {
@@ -1011,6 +1012,12 @@ func regScopeLookup(regPkg *TCPackage, n string) (o Object) {
 // typecheck arena - only the refined mxh text touches disk.
 func TypeCheckOnly(src []byte, name string, mxhPath string) {
 	memLine("   tc-in "|name)
+	// This pass has its own arena and frees it, so it must not leave compile
+	// errors behind: their bytes and the slice backing array live in that arena,
+	// and the next CompileToIR's gate used to read them from memory that was
+	// already gone - an empty message misattributed to an unrelated package, and
+	// a SIGSEGV inside the dedupe scan that read one.
+	cctx.compileErrors = nil
 	arenaSize := uintptr(len(src)) * 50
 	if arenaSize < 4*1024*1024 {
 		arenaSize = 4 * 1024 * 1024
@@ -1066,6 +1073,11 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	if compileArenaSize > 512*1024*1024 {
 		compileArenaSize = 512 * 1024 * 1024
 	}
+	// Errors belong to the pass that records them. This pass frees its arena at
+	// the end, so it starts from an empty list and consumes its own entries at
+	// the gate below; entries left by a previous pass would point into memory
+	// that pass already released (see TypeCheckOnly).
+	cctx.compileErrors = nil
 	// Scan generic decls in the caller's arena: the resulting AST nodes
 	// and generic scopes are referenced by later package compiles and
 	// must outlive this package's compile arena.
@@ -1116,7 +1128,9 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 			errSegs = mxutil.Ensure(errSegs, 1)
 			push(errSegs, "; " | ce | "\n")
 		}
-		cctx.compileErrors = cctx.compileErrors[:0]
+		// Drop the backing array, not just the length: it lives in this pass's
+		// arena, which is released before the next pass runs.
+		cctx.compileErrors = nil
 		res := joinStrs(errSegs)
 		runtime.ManualArenaExit(arena)
 		resCopy := []byte{:len(res)}
@@ -1729,6 +1743,135 @@ func firstQualifiedTypeName(e syntax.Expr) (name string) {
 		}
 	}
 	return ""
+}
+
+// firstUnresolvedTypeName returns `pkg.Sel` (or the bare name) of the first name
+// in a type expression that does not resolve in the given scope, or "" when
+// every name in it does. A parameter type that resolved to nil needs a reason in
+// its diagnostic, and the reason is always a name - `*Undefined` and
+// `[]Undefined` fail through their element, not at the top of the expression, so
+// the search goes through the constructors. The leaf decision is
+// tcResolveNameInline's own, not a second opinion about what resolves.
+func firstUnresolvedTypeName(e syntax.Expr, scope *Scope) (name string) {
+	switch ex := e.(type) {
+	case *syntax.Name:
+		if tcResolveNameInline(ex, scope) == nil {
+			return ex.Value
+		}
+	case *syntax.SelectorExpr:
+		if tcResolveNameInline(ex, scope) == nil {
+			return typeExprName(ex)
+		}
+	case *syntax.Operation:
+		if ex.Y == nil && ex.X != nil {
+			return firstUnresolvedTypeName(ex.X, scope)
+		}
+	case *syntax.SliceType:
+		return firstUnresolvedTypeName(ex.Elem, scope)
+	case *syntax.ArrayType:
+		return firstUnresolvedTypeName(ex.Elem, scope)
+	case *syntax.DotsType:
+		return firstUnresolvedTypeName(ex.Elem, scope)
+	case *syntax.ChanType:
+		return firstUnresolvedTypeName(ex.Elem, scope)
+	case *syntax.MapType:
+		if q := firstUnresolvedTypeName(ex.Key, scope); q != "" {
+			return q
+		}
+		return firstUnresolvedTypeName(ex.Value, scope)
+	case *syntax.IndexExpr:
+		if q := firstUnresolvedTypeName(ex.X, scope); q != "" {
+			return q
+		}
+		return firstUnresolvedTypeName(ex.Index, scope)
+	case *syntax.ListExpr:
+		// The type arguments of a multi-argument instantiation: `Pair[Undefined,
+		// string]` resolved to nothing through its index list, and the parameter
+		// was accepted with rc=0.
+		for _, el := range ex.ElemList {
+			if el != nil {
+				if q := firstUnresolvedTypeName(el, scope); q != "" {
+					return q
+				}
+			}
+		}
+	case *syntax.StructType:
+		for _, f := range ex.FieldList {
+			if f != nil {
+				if q := firstUnresolvedTypeName(f.Type, scope); q != "" {
+					return q
+				}
+			}
+		}
+	case *syntax.FuncType:
+		for _, f := range ex.ParamList {
+			if f != nil {
+				if q := firstUnresolvedTypeName(f.Type, scope); q != "" {
+					return q
+				}
+			}
+		}
+		for _, f := range ex.ResultList {
+			if f != nil {
+				if q := firstUnresolvedTypeName(f.Type, scope); q != "" {
+					return q
+				}
+			}
+		}
+	case *syntax.InterfaceType:
+		for _, f := range ex.MethodList {
+			if f != nil {
+				if q := firstUnresolvedTypeName(f.Type, scope); q != "" {
+					return q
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// reportUndefinedSignatureTypes reports a parameter or result type that did not
+// resolve, for a declaration that cannot have type parameters of its own - a
+// non-generic top-level function - where therefore EVERY name in the type must
+// resolve, bare or qualified. `func f(x Undefined)` built with rc=0 and then
+// panicked at run time (the call returned an empty string), and a result does the
+// same: `func f() (r Undefined)` built and then failed its own assertion. Both
+// are the nil-type leak the qualified parameter form had before round 85. The
+// bare name is not reported by tcResolveFuncInline because an unbound type
+// parameter looks identical to the resolver there, and methods are not covered
+// here for the same reason - a generic receiver's type params are not in scope
+// when its signature is resolved.
+func reportUndefinedSignatureTypes(ft *syntax.FuncType, scope *Scope) {
+	if ft == nil {
+		return
+	}
+	reportUndefinedFieldTypes(ft.ParamList, scope)
+	reportUndefinedFieldTypes(ft.ResultList, scope)
+}
+
+func reportUndefinedFieldTypes(fields []*syntax.Field, scope *Scope) {
+	for _, f := range fields {
+		if f == nil || f.Type == nil {
+			continue
+		}
+		// No "did the whole type resolve" gate: a generic instantiation whose
+		// type argument does not resolve comes back as the UN-instantiated base
+		// type, so the whole type is non-nil and `Pair[Undefined, string]` was
+		// accepted. The walker asks about every name it finds, and a name that
+		// resolves to nothing in a signature that cannot have type parameters is
+		// an error whether or not the surrounding type resolved.
+		if name := firstUnresolvedTypeName(f.Type, scope); name != "" {
+			// The established push pattern, deliberately: an earlier version of
+			// this report deduplicated by scanning cctx.compileErrors, and the one
+			// unexplained intermittent crash seen while building this round was a
+			// SIGSEGV inside that scan (reading the slice header at cctx+0x18 from
+			// an address whose arena was no longer mapped). Nothing here needs to
+			// read the list, so it does not. A qualified parameter can therefore
+			// carry the same message twice, once from tcResolveFuncInline.
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, "undefined: " | name)
+		}
+	}
 }
 
 // typeExprName renders a type expression for a diagnostic: `pkg.Sel` for a

@@ -5570,6 +5570,13 @@ by mirroring a feature.
   (`tcResolveFuncReturn`, `tcSelectorConst`) plus `ir_chan`'s `"io"` lookup; the
   two *type* resolvers no longer resolve anything by global short name.
 
+- **FULL GATE at this commit: 232 PASS / 0 FAIL / 0 SKIP** (`bash tests/run.sh
+  --full`), including `selfhost:fixpoint PASS (stage2 == stage3)` and the wasm
+  runs of the two new guards. The gated binary was rebuilt from this tree and is
+  byte-identical
+  (`4a03cc1855d52d6f8da89feca3fcec6ddf2fa37eee4d91009eb58bef27bc3468`), so the
+  gate covers exactly what is committed.
+
 ### Still open from this round
 
 - `unsafe.Sizeof` reaches the checker's *type* resolver as a value selector; it
@@ -5593,3 +5600,124 @@ by mirroring a feature.
   code that deliberately tolerates nil (there are empty branches for exactly that
   in `tcResolveFuncInline`), so the rule was not extended there; no miscompile
   from a nil result has been measured.
+
+## FIXED in round 86: a bare undefined name is undefined too, in parameters and results
+
+Round 85 removed the global by-name fallback and reported an unresolved
+QUALIFIED parameter type. It also measured, and recorded as still open, that the
+BARE form leaks: `func f(x Undefined)` built with rc=0 and then panicked at run
+time. This round closes that, plus two more shapes found by looking for the same
+thing rather than by guessing.
+
+The cause is one nil type again: `tcResolveNameInline` returns nil for a name that
+resolves to nothing, the Signature slot keeps the nil, and nothing downstream
+objects. The qualified form could be reported from the shared resolver, because a
+qualified name in a parameter type is always a package. A bare name there is
+ambiguous - an unbound type parameter of a generic receiver resolves to nothing in
+exactly the same way - so the rule is applied at the one site where the ambiguity
+cannot exist: the non-generic top-level function, which `typeCheckPkg` reaches
+only after `len(dd.TParamList) > 0` has `continue`d away.
+
+**Measured, every one with rc=0 and a wrong or useless program:**
+
+    func f(x Undefined) (s string) { return x.String() }        -> returned ""
+    func f() (r Undefined) { return r }                         -> carried nothing
+    func f(p Pair[Undefined, string]) (n int32)                 -> accepted
+    func f(x *Undefined) / ([]Undefined) / (map[string]Undefined)
+
+**The fix covers each:**
+
+- `reportUndefinedSignatureTypes` walks the parameter AND result lists of a
+  non-generic top-level function and reports the first name that does not
+  resolve. Both lists, because a result leaks identically - the same nil, one
+  slot further right. There is deliberately no "did the whole type resolve"
+  gate: a generic instantiation whose type ARGUMENT does not resolve comes back
+  as the un-instantiated base type, so the whole type is non-nil and
+  `Pair[Undefined, string]` was accepted with rc=0.
+- `firstUnresolvedTypeName` descends pointer, slice, array, map (key then
+  value), channel, variadic, index and func type, the index LIST of a
+  multi-argument instantiation, and inline struct/interface/func fields, and
+  asks `tcResolveNameInline` about each Name/SelectorExpr leaf. So the diagnostic
+  names the name that actually failed - `map[string]Undefined` says
+  `undefined: Undefined`, not `string` - and the walker does not form a second
+  opinion about what resolves.
+- the append uses the established `mxutil.Ensure` + `push` pair. A qualified
+  parameter can therefore carry the same message twice, once from
+  `tcResolveFuncInline` and once from the walk; that is cosmetic, and the
+  alternative was the dedupe read described below.
+
+**Guards, so the rule cannot turn into a false positive.** A type declared later
+in the file must not be reported, in every constructor and in both parameter and
+result position (`forward_type_constructors`), and a generic receiver's type
+parameter must not be reported (`generic_receiver_param_type`). The second one is
+also why the rule does not cover methods or func literals at all: their
+signatures are resolved with a scope that may not carry a generic receiver's
+type params, where `V` is indistinguishable from a typo.
+
+**Fixtures:** `reject_undefined_param_type`, `reject_undefined_elem_param_type`,
+`reject_undefined_type_arg_param` and `reject_undefined_result_type` for the
+rejections, plus the two `should_compile` guards above.
+
+**The intermittent crash, root-caused, and the stdlib bug the rule caught.** The
+first version of this report deduplicated by scanning `cctx.compileErrors`, and
+it died once with SIGSEGV inside that scan. The same investigation found the
+sweep failing on `math/bits` with an EMPTY error message, and a second run
+aborting with `alloc: implausible size` - all three are one bug:
+
+    #0 main[pushCompileError] 0x817daf   (mov 0x10(%rsi),%rdi)
+    #1 main[reportUndefinedFieldTypes]
+    #2 main[reportUndefinedSignatureTypes]
+    #3 main[typeCheckPkg] -> main[CompileToIR] -> main.main
+
+`TypeCheckOnly` - the pre-pass that typechecks a package to build its mxh - never
+cleared `cctx.compileErrors`, and it FREES its arena when it returns. So its
+entries, and the slice backing array holding them, were left pointing into
+released memory. The next `CompileToIR` saw `len(compileErrors) > 0`, read the
+freed bytes, and reported them against an unrelated package: that is the empty
+`; ` message blamed on `math/bits`, the `alloc: implausible size` abort when the
+reused memory fed the SSA builder, and the SIGSEGV when the dedupe scan read a
+slice header from an address whose arena was gone.
+
+Fixed by giving each typecheck pass its own errors: `cctx.compileErrors` is reset
+at the entry of `TypeCheckOnly` and of `CompileToIR`, and the gate drops the
+backing array (`= nil`) instead of truncating it, so nothing can outlive the
+arena it was allocated in. The dedupe helper was removed with it - the report
+does not need to read the list.
+
+What the rule caught on its first full run is the point of having it:
+
+    src/crypto/tls/prf.mx:182
+    -func newFinishedHash(version uint16, cs *cs) (rfinishedHash finishedHash) {
+    +func newFinishedHash(version uint16, cs *cipherSuite) (rfinishedHash finishedHash) {
+
+`cs` is declared nowhere in the tree, and the function below it takes
+`suite *cipherSuite`. So the parameter type of a crypto/tls function was
+UNDEFINED, the checker left it nil, and nothing anywhere objected - the package
+compiled and the arc was silently typed by a nil. Verified end to end: with the
+typo reintroduced, crypto/tls now fails with `undefined: cs`; with it fixed, the
+41-package sweep compiles and RUNS.
+
+### Verified
+
+- `reject_undefined_param_type` (bare), `reject_undefined_elem_param_type`
+  (`*Undefined`, `[]Undefined`, `map[string]Undefined`), and
+  `reject_undefined_type_arg_param` (`Pair[Undefined, string]`) and
+  `reject_undefined_result_type` are each rejected with the name that does not
+  resolve - `map[string]Undefined` reports `Undefined`, not `string`, because
+  the walk asks the resolver about each name instead of taking the first.
+- The two guards compile AND RUN: `forward_type_constructors` (every constructor,
+  parameter and result position, with the type declared later in the file) and
+  `generic_receiver_param_type` (a method's parameter typed by its generic
+  receiver's type parameter, which must NOT be reported).
+- Phase 0 93/93, phase 0b included; phase 1b PASS - all 41 stdlib packages
+  compile and the sweep binary runs; phase 1c 3/3.
+- The rule catches a real stdlib defect and attributes it correctly: with
+  `cs *cs` restored in `src/crypto/tls/prf.mx`, the build fails with
+  `undefined: cs` / `compile error for crypto/tls` (before this round it
+  compiled, with a nil parameter type nobody looked at); with the fix, the
+  whole sweep is clean.
+
+**Still open from this round:** a method or func literal with a bare undefined
+name, and a nil type inside an inline struct type - `tcResolveNameInline`
+returns a `TCStruct` for one regardless of whether its fields resolved, so the
+walker never gets the chance to explain it.

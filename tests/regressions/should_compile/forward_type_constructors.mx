@@ -1,0 +1,137 @@
+/*
+Every type constructor, with the type it names declared LATER in the file.
+
+The bare-undefined rule added in round 86 reports a parameter type that does not
+resolve for a non-generic top-level function, and it can only do that safely if
+the scope is complete when the function declarations are resolved: a
+forward-referenced type, an imported qualified type, a predeclared type and a
+locally declared type all have to resolve to something. The checker resolves
+every TypeDecl before it resolves any FuncDecl, so they do - and this fixture is
+what says so, through pointer, slice, array-of-slice, map (key and value),
+variadic, func-typed and inline-interface parameters.
+
+It is the counterweight to reject_undefined_param_type: that fixture says a name
+which resolves to nothing is an error, this one says a name that resolves later
+in the file is not.
+*/
+package main
+
+import (
+	"fmt"
+	"unsafe"
+)
+
+func bare(x S) (s string) {
+	return x.Name
+}
+
+func ptr(x *S) (s string) {
+	return x.Name
+}
+
+func sliceParam(x []S) (n int32) {
+	return int32(len(x))
+}
+
+func mapVal(x map[string]S) (n int32) {
+	return int32(len(x))
+}
+
+func mapKey(x map[S]string) (n int32) {
+	return int32(len(x))
+}
+
+func funcParam(f func(S) S, v S) (r S) {
+	return f(v)
+}
+
+func ifaceParam(x interface{ String() string }) (s string) {
+	return x.String()
+}
+
+func variadic(args ...S) (n int32) {
+	return int32(len(args))
+}
+
+func qualified(x fmt.Stringer) (s string) {
+	return x.String()
+}
+
+func qualifiedPtr(x *fmt.Stringer) (s string) {
+	return (*x).String()
+}
+
+func rawPointer(p unsafe.Pointer) (b bool) {
+	return p != nil
+}
+
+type S struct {
+	Name string
+}
+
+func (s *S) String() (out string) {
+	return s.Name
+}
+
+func identity(v S) (r S) {
+	return v
+}
+
+func resultForward() (s S) {
+	return S{Name: "ok"}
+}
+
+func resultPtrForward() (s *S) {
+	return &S{Name: "ok"}
+}
+
+func resultSliceForward() (s []S) {
+	return []S{S{Name: "ok"}}
+}
+
+func main() {
+	v := S{Name: "ok"}
+	if bare(v) != "ok" {
+		panic("bare")
+	}
+	if ptr(&v) != "ok" {
+		panic("ptr")
+	}
+	if sliceParam([]S{v}) != 1 {
+		panic("slice")
+	}
+	if mapVal(map[string]S{"a": v}) != 1 {
+		panic("map value")
+	}
+	if mapKey(map[S]string{v: "a"}) != 1 {
+		panic("map key")
+	}
+	if funcParam(identity, v).Name != "ok" {
+		panic("func")
+	}
+	if ifaceParam(&v) != "ok" {
+		panic("iface")
+	}
+	if variadic(v, v) != 2 {
+		panic("variadic")
+	}
+	if qualified(&v) != "ok" {
+		panic("qualified")
+	}
+	p := fmt.Stringer(&v)
+	if qualifiedPtr(&p) != "ok" {
+		panic("qualified ptr")
+	}
+	if rawPointer(nil) {
+		panic("raw pointer")
+	}
+	if resultForward().Name != "ok" {
+		panic("result forward")
+	}
+	if resultPtrForward().Name != "ok" {
+		panic("result ptr forward")
+	}
+	if int32(len(resultSliceForward())) != 1 {
+		panic("result slice forward")
+	}
+}
