@@ -5919,13 +5919,10 @@ silent ones:
   and now fails with `undefined: inner`. Go scoping says a local type must be
   declared before use, so the error is correct - but note that Moxie previously
   died rather than rejecting it.
-- a RECURSIVE local type (`type node struct { n string; next *node }`) still
-  crashes, with the same signature as the undefined-field crash. The
-  self-reference resolves to nil because the type's own name is not registered
-  before its body is resolved. The fix is two-phase registration (create the
-  local type name first, insert it, then resolve and attach its underlying type),
-  which is exactly what the package-level path does; it is recorded here as the
-  next step, and no fixture pins it because the suite must not carry a crash.
+- a RECURSIVE local type (`type node struct { n string; next *node }`) crashed
+  with the same signature as the undefined-field crash, because the
+  self-reference resolved to nil before the type's own name existed.
+  **FIXED in round 95** - see below.
 
 **The legacy compiler could not build the first version of this check, and that
 is its own finding.** `bad := ""` - a variable initialized to an EMPTY STRING
@@ -5971,3 +5968,66 @@ generic type declarations in the existing guards compile and run;
   `selfhost:fixpoint PASS (stage2 == stage3)`, phase 1b (41 packages) and the
   wasm phase. The gated binary was rebuilt from this tree and is byte-identical
   (`4b99d6d760e95bdf6e552b5e113bae0488f2b541ca54fb430f3ac5007ff0b7ca`).
+
+## FIXED in round 95: a recursive local type no longer crashes the compiler
+
+Round 94 recorded the last piece of the local-type work: a recursive LOCAL type
+declaration still crashed, because its body was resolved in one pass and the
+self-referential field was typed before the type's own name existed - so `next`
+came out nil.
+
+    func chain() (r string) {
+        type node struct { n string; next *node }
+        b := node{n: "b"}
+        a := node{n: "a", next: &b}
+        return a.next.n
+    }
+    -> SIGSEGV before this round (same address as the undefined-field crash)
+
+The declaration now registers its NAME first and attaches the underlying type
+afterwards, which is exactly what the package-level path does with `NewNamed`:
+
+    placeholder := NewNamed(NewTypeName(pkg, name, nil), nil)
+    localTypes[name] = placeholder
+    resolved := resolveTypeAST(dd.Type)
+    if resolved != nil { placeholder.Under = resolved }
+
+**One correction found by measurement.** The first version kept the plain
+resolved struct as the registered type - "identical storage semantics, only
+self-references change" - and that was wrong: `node{n: "a", next: &b}` then
+failed with
+
+    cannot use value of type *struct{n string; next *main.node} as *main.node
+
+because the field pointed at the Named while the composite literal's type was the
+plain struct: TWO representations of one local type. The registered type IS the
+Named now, so every use and the recursive field are the same object - the shape a
+package-level type has. A declaration whose field did not resolve is still
+dropped outright (round 94's refusal).
+
+Verified: the recursive probe compiles and RUNS (native and wasm);
+`recursive_local_type` pins it, including assignment between two local-type
+values and a field write; the local controls (a plain local type, an earlier
+local type referenced by a later one), the `tracev1` package with its
+`gdesc`/`pdesc` locals, and the undefined-field rejection all still behave; phase
+1b passes on all 41 stdlib packages, so making local types Named did not disturb
+how they are used elsewhere.
+
+**Still open:** a local type referenced BEFORE its declaration is a loud
+`undefined: <name>` error (it crashed before round 94). Go scopes a local type
+from its declaration onward, so the error is correct, but Moxie previously died
+rather than rejecting it - if order-independent local types are wanted, the
+pre-registration pass belongs above the statement loop rather than inside the
+declaration's own case.
+
+### Verified
+
+- `recursive_local_type` compiles AND runs, natively and on wasm (the wasm
+  validator compares its output with the native run).
+- The undefined-field local rejection still reports `undefined: Undefined` with
+  NO signal; the local controls (plain local type, earlier-local reference,
+  assignment and field write) compile and run; the `tracev1` package compiles.
+- **FULL GATE: 242 PASS / 0 FAIL / 0 SKIP**, including
+  `selfhost:fixpoint PASS (stage2 == stage3)`, phase 1b (41 packages) and the
+  wasm phase. The gated binary was rebuilt from this tree and is byte-identical
+  (`3655d5c10531cbad78dd7cbd95796ea2c43a1c829b4ea9c916c7f1f9d5207db6`).

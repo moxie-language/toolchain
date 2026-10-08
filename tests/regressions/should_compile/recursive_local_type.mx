@@ -1,0 +1,47 @@
+/*
+A recursively-typed LOCAL type declaration, and ordinary use of a local type.
+
+`type node struct { n string; next *node }` inside a function crashed the
+compiler with SIGSEGV before round 95 (measured with the committed round-94
+compiler at the same address as the undefined-field crash): the body was resolved
+in one pass, so the self-referential field was typed before the type's own name
+existed and came out nil. The declaration now registers its NAME first and
+attaches the underlying type afterwards - the same shape a package-level
+declaration has through NewNamed - so the recursive field and every other use see
+one type, not two representations of it.
+
+The `inner` part is the control: a plain local type, assignment between two of
+its values, and a field write, none of which may regress.
+*/
+package main
+
+func chain() (r string) {
+	type node struct {
+		n    string
+		next *node
+	}
+	b := node{n: "b"}
+	a := node{n: "a", next: &b}
+	return a.next.n
+}
+
+func mutate() (r int32) {
+	type inner struct {
+		n int32
+	}
+	x := inner{n: 1}
+	y := inner{n: 2}
+	x = y
+	x.n = x.n + y.n
+	return x.n
+}
+
+func main() {
+	println("chain=" | chain())
+	if chain() != "b" {
+		panic("chain")
+	}
+	if mutate() != 4 {
+		panic("mutate")
+	}
+}

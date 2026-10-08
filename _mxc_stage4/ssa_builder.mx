@@ -3004,7 +3004,18 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 		}
 	case *syntax.TypeDecl:
 		if dd.Name != nil {
+			// Register the NAME before resolving the body, so a self-referential
+			// field (`type node struct { next *node }`) resolves to this type
+			// instead of nil. Resolving in one pass left that field nil and the
+			// compiler died with SIGSEGV (measured with the committed compiler);
+			// package-level declarations avoid it the same way, with NewNamed
+			// followed by attaching the underlying type.
+			placeholder := NewNamed(NewTypeName(fb.fn.Pkg.Pkg, dd.Name.Value, nil), nil)
+			fb.localTypes[dd.Name.Value] = placeholder
 			resolved := fb.resolveTypeAST(dd.Type)
+			if resolved != nil {
+				placeholder.Under = resolved
+			}
 			bad := false
 			if fb.typeSubst == nil && dd.Type != nil {
 				// A local type declaration's fields are otherwise unchecked:
@@ -3033,8 +3044,15 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			// Refuse the type when a field did not resolve: the error is
 			// recorded, and registering it would let the body build values of a
 			// type that has a nil field - which is what crashed the compiler.
-			if resolved != nil && !bad {
-				fb.localTypes[dd.Name.Value] = resolved
+			// The registered type IS the Named that a self-referential field
+			// points at: registering the plain resolved struct instead made two
+			// representations of one local type, and `node{n: "a", next: &b}`
+			// failed with "cannot use value of type *struct{...} as *main.node".
+			// This is the same shape a package-level type has. A type whose field
+			// did not resolve is dropped entirely - the error is recorded and the
+			// body must not build a value of it.
+			if bad || resolved == nil {
+				delete(fb.localTypes, dd.Name.Value)
 			}
 		}
 	}
