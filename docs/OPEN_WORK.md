@@ -11,7 +11,7 @@ Four repositories, all on branch `dev`, all level with their remotes
 
 | repo | what it is | last known state |
 |------|------------|------------------|
-| `moxie` | the compiler, runtime and stdlib | `8a5fc311` (code; docs follow it); `tests/run.sh --full`: 221 PASS / 0 FAIL / **0 SKIP**, fixpoint PASS; native phase 1b compiles 41 stdlib packages, phase 1c compiles the js/wasm-only packages with **no known-broken entries** (`net/http`, `path/filepath`, `syscall/js`), **net now compiles for wasm**, `context` and the embedded tzdata registration both have run-time tests (tzdata proved in a browser), the import scanner exists once instead of twice, and one open intermittent compiler segfault is recorded with its reproducer (rounds 70-81) |
+| `moxie` | the compiler, runtime and stdlib | `cc972af6` (code; docs follow it); `tests/run.sh --full`: 222 PASS / 0 FAIL / **0 SKIP**, fixpoint PASS; native phase 1b compiles 41 stdlib packages, phase 1c compiles the js/wasm-only packages with **no known-broken entries** (`net/http`, `path/filepath`, `syscall/js`), **net now compiles for wasm**, `context` and the embedded tzdata registration both have run-time tests (tzdata proved in a browser), the import scanner exists once instead of twice, the intermittent compiler segfault found in round 81 is fixed at root and its case is pinned by a restriction fixture again (rounds 70-84) |
 | `nostr` | shared nostr primitives and codecs | `98c7069` (musiquay vocabulary moved out) |
 | `morly` | the relay (`pkg/relay`, `pkg/store`, ...) | `b7dba37` |
 | `musiquay` | the web app, docs corpus, protocol vocabulary | `8dd6f59` (vocabulary at `pkg/protocol`) |
