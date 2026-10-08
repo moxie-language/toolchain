@@ -8974,12 +8974,30 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope
 					}
 				}
 			}
-			if imp := cctx.universe.LookupByName(pkgName.Value); imp != nil {
-				typeObj := imp.Scope.Lookup(ev.Sel.Value)
-				if typeObj != nil {
-					if tn, ok2 := typeObj.(*TypeName); ok2 {
+			// The scope of the file that WROTE the qualifier. ScanGenericDecls
+			// rebuilds a declaring package's scope with a PkgName binding per
+			// import, so this route is that package's own import list, already
+			// resolved to live packages. It is the same route the type checker
+			// uses (tcResolveNameInline), and the one this resolver was missing:
+			// it consulted only sigDeclPkgImports, which is empty for a plain
+			// body build, so `unsafe.Pointer` in a scanned type declaration
+			// resolved to nil and the global short-name map was masking it.
+			if pkgScope != nil {
+				if pn, ok4 := pkgScope.Lookup(pkgName.Value).(*PkgName); ok4 && pn != nil && pn.Imported != nil && pn.Imported.Scope != nil {
+					if tn, ok5 := pn.Imported.Scope.Lookup(ev.Sel.Value).(*TypeName); ok5 && tn != nil {
 						return tn.Typ
 					}
+				}
+			}
+			// Neither route answered. If the name is a package the compiler
+			// knows, the qualifier is one legacy rejects, so say so. This is
+			// only a diagnostic: "the name is a known package" is NOT the rule
+			// (an unimported package is not in the Registry at all), and the
+			// real rule is enforced where a nil type would do damage - see
+			// tcResolveFuncInline, which reports an unresolved parameter type.
+			if imp := cctx.universe.LookupByName(pkgName.Value); imp != nil && imp.Scope != nil {
+				if tn, ok6 := imp.Scope.Lookup(ev.Sel.Value).(*TypeName); ok6 && tn != nil {
+					push(cctx.compileErrors, "undefined: " | pkgName.Value)
 				}
 			}
 		}

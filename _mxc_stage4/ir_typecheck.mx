@@ -1683,6 +1683,54 @@ func tcSelectorConst(e syntax.Expr, scope *Scope) (c *TCConst) {
 	return nil
 }
 
+// firstQualifiedTypeName returns the `pkg.Name` of the first qualified name in
+// a type expression, searching through the type constructors, or "" when it has
+// none. Qualified names are the ones a parameter type can only mean as a
+// package, which is what makes them safe to report when the type did not
+// resolve; a bare name is excluded because an unbound type parameter looks the
+// same here.
+func firstQualifiedTypeName(e syntax.Expr) (name string) {
+	switch ex := e.(type) {
+	case *syntax.SelectorExpr:
+		return typeExprName(ex)
+	case *syntax.Operation:
+		if ex.Y == nil && ex.X != nil {
+			return firstQualifiedTypeName(ex.X)
+		}
+	case *syntax.SliceType:
+		return firstQualifiedTypeName(ex.Elem)
+	case *syntax.ArrayType:
+		return firstQualifiedTypeName(ex.Elem)
+	case *syntax.DotsType:
+		return firstQualifiedTypeName(ex.Elem)
+	case *syntax.ChanType:
+		return firstQualifiedTypeName(ex.Elem)
+	case *syntax.MapType:
+		if q := firstQualifiedTypeName(ex.Key); q != "" {
+			return q
+		}
+		return firstQualifiedTypeName(ex.Value)
+	case *syntax.IndexExpr:
+		return firstQualifiedTypeName(ex.X)
+	case *syntax.FuncType:
+		for _, f := range ex.ParamList {
+			if f != nil {
+				if q := firstQualifiedTypeName(f.Type); q != "" {
+					return q
+				}
+			}
+		}
+		for _, f := range ex.ResultList {
+			if f != nil {
+				if q := firstQualifiedTypeName(f.Type); q != "" {
+					return q
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // typeExprName renders a type expression for a diagnostic: `pkg.Sel` for a
 // qualified type, `Name` for a bare one, and the empty string when it has
 // neither shape (then the caller's message is just "undefined: ").
@@ -1716,35 +1764,34 @@ func tcResolveNameInline(e syntax.Expr, scope *Scope) (t Type) {
 			}
 		}
 	case *syntax.SelectorExpr:
+		// A qualified type is only legal when its package is IN SCOPE, which is
+		// the file's import list: legacy reports `undefined: fmt` for
+		// `fmt.Stringer` in a file that does not import fmt, and stage4 used to
+		// answer that from the global short-name map, so the two compilers
+		// disagreed about what is a compile error. Round 74 tried this removal
+		// and reverted when it appeared to break legitimate code; the breakage
+		// was the nil variadic slice type, fixed at its root in round 84, so it
+		// is retried here.
 		pkgName, ok := ex.X.(*syntax.Name)
 		if ok && scope != nil {
 			_, pkgObj := scope.LookupParent(pkgName.Value)
 			if pn, ok2 := pkgObj.(*PkgName); ok2 && pn.Imported != nil {
 				typeObj := pn.Imported.Scope.Lookup(ex.Sel.Value)
 				if typeObj != nil {
-					if tn, ok3 := typeObj.(*TypeName); ok3 {
+					if tn, ok3 := typeObj.(*TypeName); ok3 && tn != nil {
 						return tn.Typ
 					}
 				}
 			}
 		}
-		// Fallback: look up by short package name via index. It is load-bearing
-		// for legitimate code - removing it made the element type of
-		// `...fmt.Stringer` come back nil in a file that DOES import fmt (the
-		// scope handed to this resolver does not always carry the binding), and
-		// the slice construction then computed a garbage element size and
-		// panicked the compiler. An unresolvable type is caught by name at the
-		// DotsType/parameter sites instead.
-		if pkgName2, ok2 := ex.X.(*syntax.Name); ok2 {
-			if imp := cctx.universe.LookupByName(pkgName2.Value); imp != nil {
-				typeObj := imp.Scope.Lookup(ex.Sel.Value)
-				if typeObj != nil {
-					if tn, ok3 := typeObj.(*TypeName); ok3 {
-						return tn.Typ
-					}
-				}
-			}
-		}
+		// Nothing is reported when the qualifier is absent. "The package is known
+		// by name" was too weak a condition - an unimported package is not in the
+		// Registry at all, so LookupByName answers nil and no error is raised -
+		// and "the qualifier is in no scope" is too strong, because a selector
+		// `x.Field` on a value this resolver's scope does not carry reaches this
+		// case too (that is how `undefined: s` was produced in math/big and
+		// net/http). The rule is enforced where a nil type cannot be tolerated:
+		// see tcResolveFuncInline.
 	case *syntax.IndexExpr:
 		// Generic instantiation Curve[T]: carry the type args on a shallow
 		// Named copy so var/field/return types keep their instantiation
@@ -1964,6 +2011,21 @@ func tcResolveFuncInline(ft *syntax.FuncType, scope *Scope) (s *Signature) {
 			continue
 		}
 		typ := tcResolveNameInline(p.Type, scope)
+		if typ == nil && p.Type != nil {
+			// A parameter's type must resolve. `func f(x fmt.Stringer)` in a file
+			// that never imports fmt left this nil: the function type-checked and
+			// the CALLER silently miscompiled - the call returned an empty string
+			// where legacy reports `undefined: fmt`. A QUALIFIED name in a
+			// parameter type can only be a package (a field selector cannot appear
+			// there), so it is reported by name, the same way the DotsType branch
+			// reports an unresolved variadic element. It is searched for through
+			// the type constructors, not just at the top: `*fmt.Stringer` left the
+			// same nil type and crashed at run time. Bare names are left alone -
+			// they are also how an unbound type parameter looks here.
+			if q := firstQualifiedTypeName(p.Type); q != "" {
+				push(cctx.compileErrors, "undefined: " | q)
+			}
+		}
 		pname := ""
 		if p.Name != nil {
 			pname = p.Name.Value

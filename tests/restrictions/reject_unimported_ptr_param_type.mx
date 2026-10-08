@@ -1,0 +1,30 @@
+// expected: undefined: fmt.Stringer
+//
+// The qualified-parameter rule has to search THROUGH the type constructors, not
+// just look at the top of the type expression.
+//
+// With `x fmt.Stringer` the unresolved qualified name is the whole type, and
+// reject_unimported_param_type pins it. With `p *fmt.Stringer` the unresolved
+// name is under a pointer, the parameter type still came back nil, and stage4
+// accepted the source and miscompiled it - measured, with the method call
+// crashing at run time (SIGABRT) where legacy reports `undefined: fmt`:
+//
+//	func f(x *fmt.Stringer) (s string) { return x.String() }   // fmt NOT imported
+//
+// The checker now collects the first qualified name anywhere in a parameter
+// type - through pointer, slice, array, map, channel, variadic and func types -
+// and reports it when the type did not resolve. Bare names are deliberately
+// excluded, because that is also how an unbound type parameter appears here.
+package main
+
+func f(x *fmt.Stringer) (s string) {
+	return x.String()
+}
+
+func main() {
+	v := int32(7)
+	s := f(&v)
+	if s != "7" {
+		panic(s)
+	}
+}

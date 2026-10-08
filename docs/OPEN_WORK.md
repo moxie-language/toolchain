@@ -5058,6 +5058,15 @@ compiles and runs (`f(s) == 1`, `f(a, b) == 2`); `restrict:reject_unimported_pkg
 pins the rejection; phase 0 is 81/81. The `LookupByName` fallback is left in place
 with a comment saying it is load-bearing and why.
 
+**Superseded in round 85 - the premise above was wrong.** The legitimate-import
+failure was the nil variadic slice type, fixed at its root in round 84, not a
+missing `PkgName` binding: the scope handed to `resolveTypeExprWithSubst` DOES
+carry one binding per import (round 85 instrumented every miss and found a
+non-nil scope each time), and the resolver simply never consulted it, only
+`sigDeclPkgImports`. The fallback is gone: the scope route replaced it, and an
+unimported qualifier is reported as undefined in both the non-variadic and the
+variadic form. See the round-85 section at the end of this file.
+
 Also in this round: `monomorphizeAndCall` now only replaces
 `sigDeclPkgImports` when the declaring package could actually be identified.
 Assigning nil for an unknown package cleared the caller's context, which is a
@@ -5445,11 +5454,11 @@ so instrumenting the selector path in `tcResolveNameInline`/`DotsType` is the
 more promising route.
 
 Related coherence gap this exposed, same area: a **non-variadic** unimported
-qualified type is still ACCEPTED (`func f(x fmt.Stringer)` with no import builds
-with rc=0), because the resolver's global by-name fallback answers it. So the
-rule "an unimported package qualifier is undefined" holds only in the variadic
-path today, which is why removing the fallback was attempted in round 74 and
-reverted when it broke legitimate code.
+qualified type was still ACCEPTED (`func f(x fmt.Stringer)` with no import built
+with rc=0), because the resolver's global by-name fallback answered it. The rule
+"an unimported package qualifier is undefined" therefore held only in the
+variadic path, which is why removing the fallback was attempted in round 74 and
+reverted when it broke legitimate code. **FIXED in round 85** - see below.
 
 ### Still open
 
@@ -5476,3 +5485,111 @@ runtime `.so` at `/usr/lib/libLLVM-22.so` has no development files). So
 `tests/phase2_selfhost.sh` therefore runs the prebuilt `legacy/moxie` binary
 (Oct 5) rather than rebuilding it, and any `legacy/` source change made in this
 environment is **unverifiable** - state that plainly when it matters.
+
+## FIXED in round 85: an unimported qualifier is undefined, in both forms
+
+The coherence gap recorded at the end of round 84 is closed, and the global
+by-name fallback that produced it is gone. Two things were wrong, and the first
+was hiding the second.
+
+**1. `resolveTypeExprWithSubst` never consulted the scope for a qualified name.**
+Its `SelectorExpr` case answered `pkg.Sel` only from `cctx.sigDeclPkgImports`,
+which is populated in the monomorphization paths (`monomorphizeAndCall`,
+`tryGenericMethodCall`) and is EMPTY during a plain body build. But
+`ScanGenericDecls` already rebuilds the declaring package's scope WITH a `PkgName`
+binding per import (`ir_typecheck.mx:825-857`) and passes it in as `pkgScope` -
+the resolver simply never looked at it.
+
+Measured, not inferred: instrumenting the miss printed
+`pkg=unsafe sel=Pointer n=0` four times and
+`pkg=fs sel=PathError / FileMode / FileInfo / DirEntry` three times each while
+building `runtime`, every one with a non-nil scope. `sigDeclPkgImports` was empty
+(`n=0`) for all of them. The global short-name map answered them instead, which
+is exactly why nothing looked wrong. Adding the scope route fixed the legitimate
+case, and this is the route the type checker already used.
+
+**2. The report could not be keyed on "the package is known by name".** An
+unimported package is not in the Registry at all, so `LookupByName` answers nil,
+no error is raised, and the parameter type comes back nil - the function still
+type-checks and the CALLER silently miscompiles:
+
+    package main
+    func f(x fmt.Stringer) (s string) { return x.String() }   // fmt NOT imported
+    func main() { s := f(int32(7)); if s != "7" { panic(s) } }
+
+    build rc=0, then at run time: panic: got [] want [7]
+
+The report now lives where a nil type cannot be tolerated: the parameter loop of
+the function-type resolver (`tcResolveFuncInline`), the same shape as the
+round-74/84 `DotsType` rule, and it names the type (`undefined: fmt.Stringer`).
+A qualified name in a parameter type can only be a package; a bare name is left
+alone, because that is also how an unbound type parameter looks there.
+
+**It has to search through the type constructors, and that was measured too.** A
+first version looked only at the top of the type expression, so it caught
+`x fmt.Stringer` but not `p *fmt.Stringer` - which still built with rc=0 and
+then died at run time with SIGABRT. `firstQualifiedTypeName` now walks pointer,
+slice, array, map, channel, variadic, index and func types and reports the first
+qualified name found; `reject_unimported_ptr_param_type` pins that form. The
+slice form happened to be caught already, but for the wrong reason - the
+composite literal argument was dropped and the arity check complained
+(`not enough arguments in call (want 1, have 0)`), which is loud but misleading.
+
+**A first attempt was wrong, and it is recorded rather than quietly dropped.**
+Reporting `undefined: pkg` from the shared resolver whenever the qualifier was in
+no scope made math/big, net/http (js/wasm) and `asn1_tag_crosspkg` fail with
+`undefined: s`: a selector `x.Field` on a value the resolver's scope does not
+carry reaches the same case. The two `LookupByName` reports are back to their
+weak form ("the package is known AND the member is a type"), which is a pure
+diagnostic, and the rule is enforced at the parameter site instead.
+
+**Bilateral: no legacy change is needed.** Legacy already rejects
+`fmt.Stringer` in a file that does not import fmt with `undefined: fmt`;
+stage4's fallback WAS the divergence, and removing it brings stage4 to legacy,
+which is the arbiter for behaviour. Wood law is satisfied by agreement here, not
+by mirroring a feature.
+
+### Verified
+
+- `reject_unimported_param_type` and `reject_unimported_ptr_param_type` (new
+  fixtures, the two sources above) are rejected with `undefined: fmt.Stringer`.
+- `reject_unimported_pkg_type` (variadic, qualified) and
+  `reject_undefined_variadic_type` (bare) are still rejected.
+- The legitimate forms compile and RUN: the same function in a file that does
+  `import "fmt"`, and a file importing fmt + unsafe with a `[]fmt.Stringer`
+  parameter and an `unsafe.Pointer` result. `runtime`, the package the removed
+  fallback was load-bearing for, builds, and phase 1b is 41/41.
+- **FULL GATE at this commit: 224 PASS / 0 FAIL / 0 SKIP** (`bash tests/run.sh
+  --full`), including `selfhost:fixpoint PASS (stage2 == stage3)`, phase 0 55/55,
+  phase 0b 32/32 (the two new fixtures among them), phase 1b 41/41 and phase 1c
+  3/3. That is the round's acceptance artifact - the same binary
+  (`bcdd89bc874551d3f88c2c236aadfe6b8b1c1081fd25fea4bcd8a6feb4435842`) was
+  rebuilt from the committed source and is byte-identical, so the gate covers
+  exactly what is committed.
+- The three `LookupByName` sites that remain are value-resolution contexts
+  (`tcResolveFuncReturn`, `tcSelectorConst`) plus `ir_chan`'s `"io"` lookup; the
+  two *type* resolvers no longer resolve anything by global short name.
+
+### Still open from this round
+
+- `unsafe.Sizeof` reaches the checker's *type* resolver as a value selector; it
+  is answered by no scope (it is compiler magic), and nothing reports it. That is
+  a value path, not this one, but it is why the "member is a type" condition
+  exists in both `LookupByName` reports.
+- **The BARE non-variadic form leaks too, and it was measured**:
+  `func f(x Undefined) (s string) { return x.String() }` in a file that defines
+  nothing named `Undefined` builds with rc=0 and then panics at run time
+  (`s != "7"` with an empty string). It is not reported yet because a bare name
+  that does not resolve is ambiguous in a way a qualified one is not: a generic
+  receiver's type parameter (`func (a Array[K,V]) Push(v V)`) and a
+  forward-referenced type both have the same shape to `tcResolveNameInline` as a
+  typo. That reading is a HYPOTHESIS, not a measurement - what is measured is the
+  leak. Qualified names are free of the ambiguity (they come from the import
+  list, not from declaration order or a type-param scope), which is why the rule
+  could be made sound for them first. Closing the bare form means proving the
+  scope is complete at the resolution site, or threading the enclosing
+  `TParamList`/receiver params in, and only then reporting there.
+- A nil *result* type is not covered either. The result list resolves through
+  code that deliberately tolerates nil (there are empty branches for exactly that
+  in `tcResolveFuncInline`), so the rule was not extended there; no miscompile
+  from a nil result has been measured.
