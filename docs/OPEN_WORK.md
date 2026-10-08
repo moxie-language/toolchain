@@ -5329,9 +5329,42 @@ was raised while trying to REPORT a plain type error, and it hid that error for
 three rounds. The next dispatch-shaped panic should print the descriptor (now
 trivial: the temporary print is removed, the message carries the impl count).
 
-## OPEN, found in round 81: the compiler segfaults on a qualified unresolved variadic type
+## FIXED in round 84: the compiler segfault on a qualified unresolved variadic type
 
-Not fixed, and it is the reason the round-74 restriction fixture changed shape.
+**Root cause, finally.** `wrapVariadicArgs` takes the variadic parameter's type and
+builds the slice that carries the trailing arguments:
+
+    sliceType := sig.Params.At(sig.Params.Len() - 1).Typ
+    var elemType Type
+    if sl, ok := SafeUnderlying(sliceType).(*Slice); ok { elemType = sl.Elem }
+    ...
+    ms := &SSAMakeSlice{Len: lenVal, Cap: lenVal}
+    ms.typ = sliceType
+
+For this input the parameter's type IS nil - the DotsType sites report the
+unresolved element by name and return nil, which is the round-74 fail-loud - and
+the builder then went on to emit a **MakeSlice whose element type was nil**. The
+allocation size and the slice header were computed from that garbage type: the
+disassembly of the crash showed `slicePush` followed by
+`memmove(dst = newdata + oldlen*24, src = &stackslot, 24)` with the header's
+length holding a stack address, which is also where the `alloc: implausible size
+1.4e14` panic in the same shape came from. One nil type, two symptoms, and the
+intermittency was just whether the garbage size happened to be benign.
+
+The fix is one refusal at the top of `wrapVariadicArgs`: if the variadic
+parameter's type is nil, return the arguments unwrapped. The error is already
+recorded, so the build fails exactly as before - but the compiler no longer
+synthesizes a value of a type it could not resolve. This is the "refuse the exit
+ramp" shape: the loud error already existed, and what was missing was declining to
+continue.
+
+Verified: 80 runs of the reproducer, **0 crashes**, all 80 reporting
+`undefined: fmt.Stringer`; before the fix it was 3/40, 1/40 and 1/60 across three
+batches. `reject_unimported_pkg_type` is restored with the QUALIFIED form, so the
+rule is pinned by the case that used to crash, and `reject_undefined_variadic_type`
+keeps the bare form.
+
+The original notes are kept below, since the elimination work is what led here.
 
     package main
     func f(args ...fmt.Stringer) {}      // fmt is NOT imported

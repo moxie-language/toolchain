@@ -5387,6 +5387,16 @@ func (fb *ssaFuncBuilder) wrapVariadicArgs(args []SSAValue, sig *Signature) (ss 
 		return result2
 	}
 	sliceType := sig.Params.At(sig.Params.Len() - 1).Typ
+	// A variadic parameter whose type failed to resolve is nil, and the error is
+	// already recorded by name at the DotsType sites. Building the variadic slice
+	// anyway emitted an SSAMakeSlice with a nil element type, so the allocation
+	// size and the slice header were computed from garbage: the header's length
+	// came out as a stack address and the compiler segfaulted in runtime.memcpy
+	// on roughly 2-7% of runs, on exactly this input. A compiler must not
+	// synthesize a value of a type it could not resolve - refuse instead.
+	if sliceType == nil {
+		return args
+	}
 	var elemType Type
 	if sl, ok := SafeUnderlying(sliceType).(*Slice); ok {
 		elemType = sl.Elem
