@@ -609,6 +609,17 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 					}
 				}
 			}
+			// A struct, interface or func type RESOLVES even when one of its
+			// field types does not: `type S struct { n Undefined }` built with
+			// rc=0 and every use of s.n compiled to nothing - the print silently
+			// vanished - and the same held for an unimported `n fmt.Stringer`.
+			// Report the first name in the declaration that resolves to nothing.
+			// tScope carries a generic declaration's type params, so `T` in
+			// `type S[T comparable] struct { v T }` resolves and is not reported.
+			if undef := firstUnresolvedTypeName(td.Type, tScope); undef != "" {
+				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+				push(cctx.compileErrors, "undefined: " | undef)
+			}
 		}
 	}
 	for _, d := range file.DeclList {

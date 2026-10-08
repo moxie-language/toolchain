@@ -5718,10 +5718,9 @@ typo reintroduced, crypto/tls now fails with `undefined: cs`; with it fixed, the
   whole sweep is clean.
 
 **Still open from this round:** a method or func literal with a bare undefined
-name (the METHOD half is fixed in round 90; the func literal is still open, with
-its measurement), and a nil type inside an inline struct type -
-`tcResolveNameInline` returns a `TCStruct` for one regardless of whether its
-fields resolved, so the walker never gets the chance to explain it.
+name (the METHOD half is fixed in round 90 and the func literal in round 93),
+and a nil type inside an inline struct type. The TYPE DECLARATION half is fixed
+in round 94, which also found and fixed a compiler crash in the local form.
 
 ## FIXED in round 90: a method's signature is checked like a function's
 
@@ -5869,3 +5868,106 @@ compiler's own diagnostics are checked.
   `selfhost:fixpoint PASS (stage2 == stage3)` and the wasm phase. The gated
   binary was rebuilt from this tree and is byte-identical
   (`d47ab865505bd4d29e35b6bab2e0c6bb918f2f36899764b0dade8e48058631fa`).
+
+## FIXED in round 94: field types are checked, and a local type with a broken field no longer crashes the compiler
+
+Round 93's still-open list still carried "a nil type inside an inline struct
+type". Measured natively with the round-93 compiler:
+
+    type S struct { n Undefined }
+    s := S{}
+    println("n=[" | s.n.String() | "]")
+    -> build rc=0, printed NOTHING
+
+and the same for an unimported `n fmt.Stringer`. A struct type RESOLVES even
+when a field type does not, so the declaration was accepted, the field was typed
+nil, and every use of it compiled away without a word. The signature rule cannot
+see this - it walks parameter and result types - so the declaration is now
+checked directly: `typeCheckPkg` reports the first name in a type declaration
+that resolves to nothing, with the generic declaration's type params in scope so
+`T` in `type S[T comparable] struct { v T }` still resolves. Package-level
+forward references are order-independent and are not reported
+(`type Outer struct { inner Inner }` before `Inner` is fine) - that is pinned by
+a new guard case in `forward_type_constructors`.
+
+**Chasing it found a compiler CRASH, in the function-local form.** A LOCAL type
+declaration is resolved by the SSA builder, not by `typeCheckPkg`, and it was
+never checked at all:
+
+    func f() (r string) {
+        type inner struct { n Undefined }
+        x := inner{}
+        return x.n.String()
+    }
+    -> SIGSEGV in the SSA build (litFullyCovers <- buildCompositeLit)
+
+Confirmed with the committed round-93 compiler at the same address, so the crash
+is pre-existing, not a regression. It is fixed the same way: the local
+declaration is checked (with the local types visible so far PLUS the type's own
+name in scope, so an earlier local type and a recursive field are not called
+undefined), and a type whose field did not resolve is NOT registered. That is
+the refusal shape from CLAUDE.md's guard rules: the error is recorded, and the
+body must not build a value of a type that has a nil field. The probe now fails
+with `undefined: Undefined` and no signal.
+
+Two more local-declaration behaviours were measured while checking the fix, both
+pre-existing crashes that the new check turns into loud errors rather than
+silent ones:
+
+- a LOCAL type referenced before its declaration (`type outer struct { b inner }`
+  then `type inner struct{...}`) crashed with SIGSEGV on the committed compiler
+  and now fails with `undefined: inner`. Go scoping says a local type must be
+  declared before use, so the error is correct - but note that Moxie previously
+  died rather than rejecting it.
+- a RECURSIVE local type (`type node struct { n string; next *node }`) still
+  crashes, with the same signature as the undefined-field crash. The
+  self-reference resolves to nil because the type's own name is not registered
+  before its body is resolved. The fix is two-phase registration (create the
+  local type name first, insert it, then resolve and attach its underlying type),
+  which is exactly what the package-level path does; it is recorded here as the
+  next step, and no fixture pins it because the suite must not carry a crash.
+
+**The legacy compiler could not build the first version of this check, and that
+is its own finding.** `bad := ""` - a variable initialized to an EMPTY STRING
+LITERAL - made legacy emit an unnamed used global:
+
+    error: unknown special variable with appending linkage: @0
+
+which fails LLVM verification, so `selfhost:stage1` failed while stage4 built the
+same source cleanly. Bisected by file and then by construct: the `ir_typecheck`
+half alone builds under legacy; the `ssa_builder` half fails ONLY with that
+empty-string variable, and an equivalent `bad := false` plus
+`len(badName) > 0` builds clean. The wording was therefore rewritten (identical
+behaviour), but the divergence is legacy's and is recorded here: **legacy
+mis-handles a variable initialized to an empty string literal in this shape**,
+producing an appending-linkage global whose name LLVM renumbers to `0`.
+`legacy/compiler/llvmutil/llvm.go:MergeAppendingGlobals` only folds strays whose
+base name it has already SEEN, and a global with no base name has nothing to fold
+into. It cannot be fixed from here because legacy cannot be built in this
+environment (see the note at the end of this file); stage4 does not share the
+defect.
+
+Verified: `reject_undefined_field_type` (bare), `reject_unimported_field_type`
+(qualified) and `reject_undefined_local_field_type` are rejected with the name
+that does not resolve and with NO signal; the local control (a valid local type,
+an earlier local type referenced by a later one) compiles and runs;
+`forward_type_constructors` (now with a forward-referenced struct field) and the
+generic type declarations in the existing guards compile and run;
+`type S[T comparable] struct { v T }` still resolves `T`; and
+`legacy/moxie build -a ./_mxc_stage4` succeeds on this source.
+
+### Verified
+
+- `reject_undefined_field_type` (bare field), `reject_unimported_field_type`
+  (qualified field) and `reject_undefined_local_field_type` (function-local
+  type declaration) are each rejected with the name that does not resolve, and
+  the local one no longer produces a signal: the crash is gone.
+- `forward_type_constructors` (now with a forward-referenced package-level
+  struct field) and the generic type guards compile AND run; a valid local type
+  and an earlier-local-type reference compile and run.
+- `legacy/moxie build -a ./_mxc_stage4` succeeds on this source, which is what
+  `selfhost:stage1` tests.
+- **FULL GATE: 240 PASS / 0 FAIL / 0 SKIP**, including
+  `selfhost:fixpoint PASS (stage2 == stage3)`, phase 1b (41 packages) and the
+  wasm phase. The gated binary was rebuilt from this tree and is byte-identical
+  (`4b99d6d760e95bdf6e552b5e113bae0488f2b541ca54fb430f3ac5007ff0b7ca`).

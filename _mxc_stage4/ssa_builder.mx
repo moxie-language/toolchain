@@ -3005,7 +3005,35 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 	case *syntax.TypeDecl:
 		if dd.Name != nil {
 			resolved := fb.resolveTypeAST(dd.Type)
-			if resolved != nil {
+			bad := false
+			if fb.typeSubst == nil && dd.Type != nil {
+				// A local type declaration's fields are otherwise unchecked:
+				// `type inner struct { n Undefined }` inside a function left the
+				// field type nil and the compiler DIED in the SSA build (SIGSEGV
+				// in litFullyCovers/buildCompositeLit, measured with the
+				// committed round-93 compiler) instead of reporting the name.
+				// The local types visible so far go in scope, plus this type's
+				// own name, so an earlier local type and a recursive field are
+				// not called undefined. A generic body is excluded: its type
+				// parameters are not names in any scope here.
+				ls := NewScope(fb.fn.Pkg.Pkg.Scope)
+				for ln, lt := range fb.localTypes {
+					ls.Insert(NewTypeName(fb.fn.Pkg.Pkg, ln, lt))
+				}
+				if resolved != nil {
+					ls.Insert(NewTypeName(fb.fn.Pkg.Pkg, dd.Name.Value, resolved))
+				}
+				badName := firstUnresolvedTypeName(dd.Type, ls)
+				if len(badName) > 0 {
+					bad = true
+					cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+					push(cctx.compileErrors, "undefined: " | badName)
+				}
+			}
+			// Refuse the type when a field did not resolve: the error is
+			// recorded, and registering it would let the body build values of a
+			// type that has a nil field - which is what crashed the compiler.
+			if resolved != nil && !bad {
 				fb.localTypes[dd.Name.Value] = resolved
 			}
 		}
