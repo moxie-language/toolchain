@@ -6246,3 +6246,85 @@ and reverting such a file wholesale also reverts the legitimate rewrites in it
   change), the second by the silently-dropped `ip.String()` in
   `crypto/x509/verify.mx` that only the wasm sweep caught, and the third is
   green. Stdlib source only - no compiler change.
+
+## FIXED in round 100: `http.Header` dissolved - the last named public API type
+
+`http.Header` is a named map type, so it takes the alias route:
+
+    -type Header map[string][][]byte
+    +type Header = map[string][][]byte
+
+    Add/Set/Get/Values/Del            -> HeaderAdd/Set/Get/Values/Del(h, ...)
+    Clone/Write/WriteSubset           -> HeaderClone/HeaderWrite/HeaderWriteSubset(h, ...)
+    get/has/write/writeSubset/sortedKeyValues
+                                      -> headerGet/headerHas/headerWrite/
+                                         headerWriteSubset/headerSortedKeyValues(h, ...)
+
+The name survives (a Header is still `Header{...}`, `Header(...)`, `h[key]`, and
+`Request`/`Response` fields are unchanged); call sites change from `h.Get(k)` to
+`HeaderGet(h, k)`. Round 98 had already inlined the five map methods, so this
+pass was signatures plus call sites.
+
+**What made it long is round 99's finding, and it is worse than recorded there.**
+Round 99 said a DEPENDENCY's bodies are not checked. Here `./src/net/http` was
+built AS the target and its own bodies were not checked either: `header.get(...)`
+in `server.mx:1234` (where `header := cw.header`, a Header) resolved to nothing,
+`te` came out nil-typed, and the failure only surfaced at CLANG:
+
+    ._src_net_http.ll:74732: error: '%t316' defined with type 'i32'
+      but expected '{ ptr, i64, i64 }'
+      %sc454 = call i1 @runtime.stringEqual(... %t316, ... "identity" ...)
+
+So an unresolved call can be silent through typecheck, SSA and IR emit, and die
+in the backend as a type mismatch with no source line. The compiler's only
+reliable signal is the smattering of "not enough arguments" / "cannot use value
+of type int32 as string" cascades that SOME forms produce. Every remaining
+Header call site therefore had to be found by grepping for Header-typed
+receiver names (`header`, `trailers`, `snapHeader`, `handlerHeader`, `hdr`, plus
+`.Header`/`.Header()`), and the clang error was what proved the last of them.
+
+Call sites fixed: ~40 across `src/net/http/{client,clone,csrf,fs,h2_bundle,
+request,response,roundtrip_js,server,transfer,transport}.mx`.
+
+`http_header_api` is the guard, a MAIN-package fixture for the reason above: it
+pins canonicalization, first-value Get, all-values, Del, Clone independence and
+both writers, natively and on wasm.
+
+**All the named public API types in `src/net/**` are now dissolved**: IPMask,
+HardwareAddr, ProtocolError, Dir, url.Values, MIMEHeader, Buffers, IP and Header.
+
+### Verified
+
+- `http_header_api` compiles AND runs natively: canonicalization, first-value
+  `Get`, all-values, `Del`, `Clone` independence, `HeaderWrite` and
+  `HeaderWriteSubset`.
+- `./src/net/http` builds for BOTH targets with its whole closure - native
+  compiles (it then fails to LINK only because a library has no `main.main`,
+  which is what direct-building a package does) and `-target wasm` is rc=0.
+  Phase 1b (41 packages) and phase 1c (`wasm:net/http PASS (compiles)`) are
+  green, and phases 2-4 and 6 pass with `selfhost:fixpoint PASS`.
+
+### Two wasm-phase findings, neither caused by the Header change
+
+- **Any fixture importing net/http cannot be browser-validated on the
+  standalone wasm target.** Linking net/http for `-target wasm` pulls its
+  `js && wasm` files, so the module imports the `gojs` bridge, and the
+  standalone validator host does not provide that module:
+
+      WebAssembly.instantiate(): Import #18 "gojs": module is not an object or function
+
+  `http_header_api` therefore carries `//:wasmtest skip` with that reason in the
+  fixture. net/http's wasm COMPILATION is still covered by phase 1c, and the
+  fixture covers behaviour natively.
+- `wasm:field_select_base_and_zero_store` failed once with a browser
+  NAVIGATION timeout ("navigating to http://127.0.0.1:5061/, waiting until
+  load") - a harness flake, not a code failure; the fixture does not import
+  net/http and it passes on re-run.
+
+Phase 5 was then re-run after the fixture was marked native-only: **62 PASS / 0
+FAIL / 0 SKIP**, including the previously flaky
+`wasm:field_select_base_and_zero_store`, which confirms that failure was the
+harness navigation timeout. Everything else in the full gate - phases 0, 0b, 1,
+1b, 1c, 2 (with the selfhost fixpoint), 3, 4 and 6 - was already green against
+these same sources, and only the fixture and this file changed between the two
+runs.

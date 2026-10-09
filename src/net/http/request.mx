@@ -462,7 +462,7 @@ func (r *Request) Clone(ctx context.Context) (rrequest *Request) {
 	*r2 = *r
 	r2.ctx = ctx
 	r2.URL = cloneURL(r.URL)
-	r2.Header = r.Header.Clone()
+	r2.Header = HeaderClone(r.Header, )
 	r2.Trailer = r.Trailer.Clone()
 	if s := r.TransferEncoding; s != nil {
 		s2 := [][]byte{:len(s)}
@@ -492,7 +492,7 @@ func (r *Request) ProtoAtLeast(major, minor int32) (rok bool) {
 
 // UserAgent returns the client's User-Agent, if sent in the request.
 func (r *Request) UserAgent() (rs string) {
-	return r.Header.Get("User-Agent")
+	return HeaderGet(r.Header, "User-Agent")
 }
 
 // Cookies parses and returns the HTTP cookies sent with the request.
@@ -534,10 +534,10 @@ func (r *Request) Cookie(name string) (rcookie *Cookie, rerr error) {
 // a Cookie header already present in the request.
 func (r *Request) AddCookie(c *Cookie) {
 	s := fmt.Sprintf("%s=%s", sanitizeCookieName(c.Name), sanitizeCookieValue(c.Value, c.Quoted))
-	if a := r.Header.Get("Cookie"); a != "" {
-		r.Header.Set("Cookie", a+"; "+s)
+	if a := HeaderGet(r.Header, "Cookie"); a != "" {
+		HeaderSet(r.Header, "Cookie", a+"; "+s)
 	} else {
-		r.Header.Set("Cookie", s)
+		HeaderSet(r.Header, "Cookie", s)
 	}
 }
 
@@ -550,7 +550,7 @@ func (r *Request) AddCookie(c *Cookie) {
 // alternate (correct English) spelling req.Referrer() but cannot
 // diagnose programs that use Header["Referrer"].
 func (r *Request) Referer() (rs string) {
-	return r.Header.Get("Referer")
+	return HeaderGet(r.Header, "Referer")
 }
 
 // multipartByReader is a sentinel value.
@@ -575,7 +575,7 @@ func (r *Request) MultipartReader() (rreader *multipart.Reader, rerr error) {
 }
 
 func (r *Request) multipartReader(allowMixed bool) (rreader *multipart.Reader, rerr error) {
-	v := r.Header.Get("Content-Type")
+	v := HeaderGet(r.Header, "Content-Type")
 	if v == "" {
 		return nil, ErrNotMultipart()
 	}
@@ -756,8 +756,8 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 	// Use the defaultUserAgent unless the Header contains one, which
 	// may be blank to not send the header.
 	userAgent := defaultUserAgent
-	if r.Header.has("User-Agent") {
-		userAgent = r.Header.Get("User-Agent")
+	if headerHas(r.Header, "User-Agent") {
+		userAgent = HeaderGet(r.Header, "User-Agent")
 	}
 	if userAgent != "" {
 		userAgent = newlineToSpace().Replace(userAgent)
@@ -1033,7 +1033,7 @@ func NewRequestWithContext(ctx context.Context, method, ur3 string, bod3 io.Read
 // Authorization header, if the request uses HTTP Basic Authentication.
 // See RFC 2617, Section 2.
 func (r *Request) BasicAuth() (username, password string, ok bool) {
-	auth := r.Header.Get("Authorization")
+	auth := HeaderGet(r.Header, "Authorization")
 	if auth == "" {
 		return "", "", false
 	}
@@ -1082,7 +1082,7 @@ func parseBasicAuth(auth string) (username, password string, ok bool) {
 // password. For instance, when used with OAuth2, both arguments must
 // be URL encoded first with [url.QueryEscape].
 func (r *Request) SetBasicAuth(username, password string) {
-	r.Header.Set("Authorization", "Basic "+basicAuth(username, password))
+	HeaderSet(r.Header, "Authorization", "Basic "+basicAuth(username, password))
 }
 
 // parseRequestLine parses "GET /foo HTTP/1.1" into its three parts.
@@ -1202,7 +1202,7 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
 	// the same. In the second case, any Host line is ignored.
 	req.Host = req.URL.Host
 	if req.Host == "" {
-		req.Host = req.Header.get("Host")
+		req.Host = headerGet(req.Header, "Host")
 	}
 
 	fixPragmaCacheControl(req.Header)
@@ -1321,7 +1321,7 @@ func parsePostForm(r *Request) (vs url.Values, err error) {
 		err = errors.New("missing form body")
 		return
 	}
-	ct := r.Header.Get("Content-Type")
+	ct := HeaderGet(r.Header, "Content-Type")
 	// RFC 7231, section 3.1.1.5 - empty type
 	//   MAY be treated as application/octet-stream
 	if ct == "" {
@@ -1565,21 +1565,21 @@ func (r *Request) patIndex(name string) (rn int32) {
 }
 
 func (r *Request) expectsContinue() (rok bool) {
-	return hasToken(r.Header.get("Expect"), "100-continue")
+	return hasToken(headerGet(r.Header, "Expect"), "100-continue")
 }
 
 func (r *Request) wantsHttp10KeepAlive() (rok bool) {
 	if r.ProtoMajor != 1 || r.ProtoMinor != 0 {
 		return false
 	}
-	return hasToken(r.Header.get("Connection"), "keep-alive")
+	return hasToken(headerGet(r.Header, "Connection"), "keep-alive")
 }
 
 func (r *Request) wantsClose() (rok bool) {
 	if r.Close {
 		return true
 	}
-	return hasToken(r.Header.get("Connection"), "close")
+	return hasToken(headerGet(r.Header, "Connection"), "close")
 }
 
 func (r *Request) closeBody() (rerr error) {
@@ -1598,7 +1598,7 @@ func (r *Request) isReplayable() (rok bool) {
 		// The Idempotency-Key, while non-standard, is widely used to
 		// mean a POST or other request is idempotent. See
 		// https://golang.org/issue/19943#issuecomment-421092421
-		if r.Header.has("Idempotency-Key") || r.Header.has("X-Idempotency-Key") {
+		if headerHas(r.Header, "Idempotency-Key") || headerHas(r.Header, "X-Idempotency-Key") {
 			return true
 		}
 	}
@@ -1635,6 +1635,6 @@ func requestMethodUsuallyLacksBody(method string) (rok bool) {
 // requiresHTTP1 reports whether this request requires being sent on
 // an HTTP/1 connection.
 func (r *Request) requiresHTTP1() (rok bool) {
-	return hasToken(r.Header.Get("Connection"), "upgrade") &&
-		ascii.EqualFold(r.Header.Get("Upgrade"), "websocket")
+	return hasToken(HeaderGet(r.Header, "Connection"), "upgrade") &&
+		ascii.EqualFold(HeaderGet(r.Header, "Upgrade"), "websocket")
 }

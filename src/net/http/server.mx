@@ -376,7 +376,7 @@ func (cw *chunkWriter) close() {
 		// zero chunk to mark EOF
 		bw.WriteString("0\r\n")
 		if trailers := cw.res.finalTrailers(); trailers != nil {
-			trailers.Write(bw) // the writer handles noting errors
+			HeaderWrite(trailers, bw) // the writer handles noting errors
 		}
 		// final blank line after the trailers (whether
 		// present or not)
@@ -520,7 +520,7 @@ func (w *response) requestTooLarge() {
 	w.closeAfterReply = true
 	w.requestBodyLimitHit = true
 	if !w.wroteHeader {
-		w.Header().Set("Connection", "close")
+		HeaderSet(w.Header(), "Connection", "close")
 	}
 }
 
@@ -1015,7 +1015,7 @@ func (w *response) Header() (rheader Header) {
 		// Accessing the header between logically writing it
 		// and physically writing it means we need to allocate
 		// a clone to snapshot the logically written state.
-		w.cw.header = w.handlerHeader.Clone()
+		w.cw.header = HeaderClone(w.handlerHeader)
 	}
 	w.calledHeader = true
 	return w.handlerHeader
@@ -1094,7 +1094,7 @@ func (w *response) WriteHeader(code int32) {
 		writeStatusLine(w.conn.bufw, w.req.ProtoAtLeast(1, 1), code, w.statusBuf[:])
 
 		// Per RFC 8297 we must not clear the current header map
-		w.handlerHeader.WriteSubset(w.conn.bufw, _excludedHeadersNoBody())
+		HeaderWriteSubset(w.handlerHeader, w.conn.bufw, _excludedHeadersNoBody())
 		w.conn.bufw.Write(crlf)
 		w.conn.bufw.Flush()
 
@@ -1105,16 +1105,16 @@ func (w *response) WriteHeader(code int32) {
 	w.status = code
 
 	if w.calledHeader && w.cw.header == nil {
-		w.cw.header = w.handlerHeader.Clone()
+		w.cw.header = HeaderClone(w.handlerHeader)
 	}
 
-	if cl := w.handlerHeader.get("Content-Length"); cl != "" {
+	if cl := headerGet(w.handlerHeader, "Content-Length"); cl != "" {
 		v, err := strconv.ParseInt(cl, 10, 64)
 		if err == nil && v >= 0 {
 			w.contentLength = v
 		} else {
 			w.conn.server.logf("http: invalid Content-Length of %q", cl)
-			w.handlerHeader.Del("Content-Length")
+			HeaderDel(w.handlerHeader, "Content-Length")
 		}
 	}
 }
@@ -1202,7 +1202,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	var excludeHeader map[string]bool
 	delHeader := func(key string) {
 		if owned {
-			header.Del(key)
+			HeaderDel(header, key)
 			return
 		}
 		if _, ok := header[key]; !ok {
@@ -1231,7 +1231,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 		foreachHeaderElement(v, cw.res.declareTrailer)
 	}
 
-	te := header.get("Transfer-Encoding")
+	te := headerGet(header, "Transfer-Encoding")
 	hasTE := te != ""
 
 	// If the handler is done but never sent a Content-Length
@@ -1248,7 +1248,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	// send a Content-Length header.
 	// Further, we don't send an automatic Content-Length if they
 	// set a Transfer-Encoding, because they're generally incompatible.
-	if w.handlerDone && !trailers && !hasTE && bodyAllowedForStatus(w.status) && !header.has("Content-Length") && (!isHEAD || len(p) > 0) {
+	if w.handlerDone && !trailers && !hasTE && bodyAllowedForStatus(w.status) && !headerHas(header, "Content-Length") && (!isHEAD || len(p) > 0) {
 		w.contentLength = int64(len(p))
 		setHeader.contentLength = strconv.AppendInt(cw.res.clenBuf[:0], int64(len(p)), 10)
 	}
@@ -1256,8 +1256,8 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	// If this was an HTTP/1.0 request with keep-alive and we sent a
 	// Content-Length back, we can make this a keep-alive response ...
 	if w.wants10KeepAlive && keepAlivesEnabled {
-		sentLength := header.get("Content-Length") != ""
-		if sentLength && header.get("Connection") == "keep-alive" {
+		sentLength := headerGet(header, "Content-Length") != ""
+		if sentLength && headerGet(header, "Connection") == "keep-alive" {
 			w.closeAfterReply = false
 		}
 	}
@@ -1274,7 +1274,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 		w.closeAfterReply = true
 	}
 
-	if header.get("Connection") == "close" || !keepAlivesEnabled {
+	if headerGet(header, "Connection") == "close" || !keepAlivesEnabled {
 		w.closeAfterReply = true
 	}
 
@@ -1372,7 +1372,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 
 		// If the Content-Encoding was set and is non-blank,
 		// we shouldn't sniff the body. See Issue 31753.
-		ce := header.Get("Content-Encoding")
+		ce := HeaderGet(header, "Content-Encoding")
 		hasCE := len(ce) > 0
 		if !hasCE && !haveType && !hasTE && len(p) > 0 {
 			setHeader.contentType = DetectContentType(p)
@@ -1383,7 +1383,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 		}
 	}
 
-	if !header.has("Date") {
+	if !headerHas(header, "Date") {
 		setHeader.date = time.Now().UTC().AppendFormat(cw.res.dateBuf[:0], TimeFormat)
 	}
 
@@ -1442,7 +1442,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	// protocol switch response and if KeepAlives are not enabled.
 	// See https://golang.org/issue/36381.
 	delConnectionHeader := w.closeAfterReply &&
-		(!keepAlivesEnabled || !hasToken(cw.header.get("Connection"), "close")) &&
+		(!keepAlivesEnabled || !hasToken(headerGet(cw.header, "Connection"), "close")) &&
 		!isProtocolSwitchResponse(w.status, header)
 	if delConnectionHeader {
 		delHeader("Connection")
@@ -1452,7 +1452,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	}
 
 	writeStatusLine(w.conn.bufw, w.req.ProtoAtLeast(1, 1), code, w.statusBuf[:])
-	cw.header.WriteSubset(w.conn.bufw, excludeHeader)
+	HeaderWriteSubset(cw.header, w.conn.bufw, excludeHeader)
 	setHeader.Write(w.conn.bufw)
 	w.conn.bufw.Write(crlf)
 }
@@ -1974,7 +1974,7 @@ func (c *conn) serve(ctx context.Context) {
 				req.Body = &expectContinueReader{readCloser: req.Body, resp: w}
 				w.canWriteContinue = true
 			}
-		} else if req.Header.get("Expect") != "" {
+		} else if headerGet(req.Header, "Expect") != "" {
 			w.sendExpectationFailed()
 			return
 		}
@@ -2116,7 +2116,7 @@ func (w *response) sendExpectationFailed() {
 	// than 100-continue MAY respond with a 417 (Expectation
 	// Failed) status code to indicate that the unexpected
 	// expectation cannot be met."
-	w.Header().Set("Connection", "close")
+	HeaderSet(w.Header(), "Connection", "close")
 	w.WriteHeader(StatusExpectationFailed)
 	w.finishRequest()
 }
@@ -2288,7 +2288,7 @@ type methodNotAllowedHandler struct {
 }
 
 func (x *methodNotAllowedHandler) ServeHTTP(w ResponseWriter, r *Request) {
-	w.Header().Set("Allow", bytes.Join(x.allowed, ", "))
+	HeaderSet(w.Header(), "Allow", bytes.Join(x.allowed, ", "))
 	Error(w, StatusText(StatusMethodNotAllowed), StatusMethodNotAllowed)
 }
 
@@ -2752,7 +2752,7 @@ func (mux *ServeMux) matchingMethods(host, pat6 string) (rbyte [][]byte) {
 func (mux *ServeMux) ServeHTTP(w ResponseWriter, r *Request) {
 	if r.RequestURI == "*" {
 		if r.ProtoAtLeast(1, 1) {
-			w.Header().Set("Connection", "close")
+			HeaderSet(w.Header(), "Connection", "close")
 		}
 		w.WriteHeader(StatusBadRequest)
 		return
@@ -3847,7 +3847,7 @@ func (oc *onceCloseListener) close() { oc.closeErr = oc.Listener.Close() }
 type globalOptionsHandler struct{}
 
 func (globalOptionsHandler) ServeHTTP(w ResponseWriter, r *Request) {
-	w.Header().Set("Content-Length", "0")
+	HeaderSet(w.Header(), "Content-Length", "0")
 	if r.ContentLength != 0 {
 		// Read up to 4KB of OPTIONS body (as mentioned in the
 		// spec as being reserved for future use), but anything

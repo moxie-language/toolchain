@@ -21,13 +21,19 @@ import (
 //
 // The keys should be in canonical form, as returned by
 // [CanonicalHeaderKey].
-type Header map[string][][]byte
+//
+// Header is an ALIAS for map[string][][]byte: the name stays usable for API
+// compatibility (a Header is still written Header{...}, converted with
+// Header(...) and read with h[key]) while the methods move to free functions,
+// because a named map type is not allowed and an alias cannot carry methods.
+// See url.Values, textproto.MIMEHeader, net.IP and net.Buffers.
+type Header = map[string][][]byte
 
 // Add adds the key, value pair to the header.
 // It appends to any existing values associated with key.
 // The key is case insensitive; it is canonicalized by
 // [CanonicalHeaderKey].
-func (h Header) Add(key, value string) {
+func HeaderAdd(h Header, key, value string) {
 	ck := textproto.CanonicalMIMEHeaderKey(key)
 	h[ck] = push(h[ck], value)
 }
@@ -37,7 +43,7 @@ func (h Header) Add(key, value string) {
 // associated with key. The key is case insensitive; it is
 // canonicalized by [textproto.CanonicalMIMEHeaderKey].
 // To use non-canonical keys, assign to the map directly.
-func (h Header) Set(key, value string) {
+func HeaderSet(h Header, key, value string) {
 	h[textproto.CanonicalMIMEHeaderKey(key)] = [][]byte{value}
 }
 
@@ -47,7 +53,7 @@ func (h Header) Set(key, value string) {
 // used to canonicalize the provided key. Get assumes that all
 // keys are stored in canonical form. To use non-canonical keys,
 // access the map directly.
-func (h Header) Get(key string) (rs string) {
+func HeaderGet(h Header, key string) (rs string) {
 	if h == nil {
 		return ""
 	}
@@ -63,7 +69,7 @@ func (h Header) Get(key string) (rs string) {
 // used to canonicalize the provided key. To use non-canonical
 // keys, access the map directly.
 // The returned slice is not a copy.
-func (h Header) Values(key string) (rbyte [][]byte) {
+func HeaderValues(h Header, key string) (rbyte [][]byte) {
 	if h == nil {
 		return nil
 	}
@@ -71,7 +77,7 @@ func (h Header) Values(key string) (rbyte [][]byte) {
 }
 
 // get is like Get, but key must already be in CanonicalHeaderKey form.
-func (h Header) get(key string) (rs string) {
+func headerGet(h Header, key string) (rs string) {
 	if v := h[key]; len(v) > 0 {
 		return v[0]
 	}
@@ -80,7 +86,7 @@ func (h Header) get(key string) (rs string) {
 
 // has reports whether h has the provided key defined, even if it's
 // set to 0-length slice.
-func (h Header) has(key string) (rok bool) {
+func headerHas(h Header, key string) (rok bool) {
 	_, ok := h[key]
 	return ok
 }
@@ -88,21 +94,21 @@ func (h Header) has(key string) (rok bool) {
 // Del deletes the values associated with key.
 // The key is case insensitive; it is canonicalized by
 // [CanonicalHeaderKey].
-func (h Header) Del(key string) {
+func HeaderDel(h Header, key string) {
 	delete(h, textproto.CanonicalMIMEHeaderKey(key))
 }
 
 // Write writes a header in wire format.
-func (h Header) Write(w io.Writer) (rerr error) {
-	return h.write(w, nil)
+func HeaderWrite(h Header, w io.Writer) (rerr error) {
+	return headerWrite(h, w, nil)
 }
 
-func (h Header) write(w io.Writer, trace *httptrace.ClientTrace) (rerr error) {
-	return h.writeSubset(w, nil, trace)
+func headerWrite(h Header, w io.Writer, trace *httptrace.ClientTrace) (rerr error) {
+	return headerWriteSubset(h, w, nil, trace)
 }
 
 // Clone returns a copy of h or nil if h is nil.
-func (h Header) Clone() (rheader Header) {
+func HeaderClone(h Header) (rheader Header) {
 	if h == nil {
 		return nil
 	}
@@ -175,7 +181,7 @@ type headerSorter struct {
 // sortedKeyValues returns h's keys sorted in the returned kvs
 // slice. The headerSorter used to sort is also returned, for possible
 // return to headerSorterCache.
-func (h Header) sortedKeyValues(exclude map[string]bool) (kvs []keyValues, hs *headerSorter) {
+func headerSortedKeyValues(h Header, exclude map[string]bool) (kvs []keyValues, hs *headerSorter) {
 	hs = &headerSorter{}
 	if cap(hs.kvs) < len(h) {
 		hs.kvs = []keyValues{:0:len(h)}
@@ -195,16 +201,16 @@ func (h Header) sortedKeyValues(exclude map[string]bool) (kvs []keyValues, hs *h
 // WriteSubset writes a header in wire format.
 // If exclude is not nil, keys where exclude[key] == true are not written.
 // Keys are not canonicalized before checking the exclude map.
-func (h Header) WriteSubset(w io.Writer, exclude map[string]bool) (rerr error) {
-	return h.writeSubset(w, exclude, nil)
+func HeaderWriteSubset(h Header, w io.Writer, exclude map[string]bool) (rerr error) {
+	return headerWriteSubset(h, w, exclude, nil)
 }
 
-func (h Header) writeSubset(w io.Writer, exclude map[string]bool, trace *httptrace.ClientTrace) (rerr error) {
+func headerWriteSubset(h Header, w io.Writer, exclude map[string]bool, trace *httptrace.ClientTrace) (rerr error) {
 	ws, ok := w.(io.StringWriter)
 	if !ok {
 		ws = stringWriter{w}
 	}
-	kvs, sorter := h.sortedKeyValues(exclude)
+	kvs, sorter := headerSortedKeyValues(h, exclude)
 	var formattedVals [][]byte
 	for _, kv := range kvs {
 		if !httpguts.ValidHeaderFieldName(kv.key) {

@@ -6116,13 +6116,13 @@ func (sc *http2serverConn) newWriterAndRequest(st *http2stream, f *http2MetaHead
 	header := Header{}
 	rp.Header = header
 	for _, hf := range f.RegularFields() {
-		header.Add(sc.canonicalHeader(hf.Name), hf.Value)
+		HeaderAdd(header, sc.canonicalHeader(hf.Name), hf.Value)
 	}
 	if rp.Authority == "" {
-		rp.Authority = header.Get("Host")
+		rp.Authority = HeaderGet(header, "Host")
 	}
 	if rp.Protocol != "" {
-		header.Set(":protocol", rp.Protocol)
+		HeaderSet(header, ":protocol", rp.Protocol)
 	}
 
 	rw, req, err := sc.newWriterAndRequestNoBody(st, rp)
@@ -6519,8 +6519,8 @@ func (rws *http2responseWriterState) writeChunk(p []byte) (n int32, err error) {
 	if !rws.sentHeader {
 		rws.sentHeader = true
 		var ctype, clen string
-		if clen = rws.snapHeader.Get("Content-Length"); clen != "" {
-			rws.snapHeader.Del("Content-Length")
+		if clen = HeaderGet(rws.snapHeader, "Content-Length"); clen != "" {
+			HeaderDel(rws.snapHeader, "Content-Length")
 			if cl, er6 := strconv.ParseUint(clen, 10, 63); er6 == nil {
 				rws.sentContentLen = int64(cl)
 			} else {
@@ -6534,7 +6534,7 @@ func (rws *http2responseWriterState) writeChunk(p []byte) (n int32, err error) {
 		_, hasContentType := rws.snapHeader["Content-Type"]
 		// If the Content-Encoding is non-blank, we shouldn't
 		// sniff the body. See Issue golang.org/issue/31753.
-		ce := rws.snapHeader.Get("Content-Encoding")
+		ce := HeaderGet(rws.snapHeader, "Content-Encoding")
 		hasCE := len(ce) > 0
 		if !hasCE && !hasContentType && http2bodyAllowedForStatus(rws.status) && len(p) > 0 {
 			ctype = DetectContentType(p)
@@ -6555,7 +6555,7 @@ func (rws *http2responseWriterState) writeChunk(p []byte) (n int32, err error) {
 		// TODO: remove more Connection-specific header fields here, in addition
 		// to "Connection".
 		if _, ok := rws.snapHeader["Connection"]; ok {
-			v := rws.snapHeader.Get("Connection")
+			v := HeaderGet(rws.snapHeader, "Connection")
 			delete(rws.snapHeader, "Connection")
 			if v == "close" {
 				rws.conn.startGracefulShutdown()
@@ -6816,7 +6816,7 @@ func (rws *http2responseWriterState) writeHeader(code int32) {
 		_, cl := h["Content-Length"]
 		_, te := h["Transfer-Encoding"]
 		if cl || te {
-			h = h.Clone()
+			h = HeaderClone(h)
 			h.Del("Content-Length")
 			h.Del("Transfer-Encoding")
 		}
@@ -8539,7 +8539,7 @@ func (cs *http2clientStream) writeRequest(req *Request, streamf func(*http2clien
 	// wait for setting frames to be received, a server can change this value later,
 	// but we just wait for the first settings frame
 	var isExtendedConnect bool
-	if req.Method == "CONNECT" && req.Header.Get(":protocol") != "" {
+	if req.Method == "CONNECT" && HeaderGet(req.Header, ":protocol") != "" {
 		isExtendedConnect = true
 	}
 
@@ -9520,9 +9520,9 @@ func (rl *http2clientConnReadLoop) handleResponse(cs *http2clientStream, f *http
 	cs.bytesRemain = res.ContentLength
 	res.Body = http2transportResponseBody{cs}
 
-	if cs.requestedGzip && http2asciiEqualFold(res.Header.Get("Content-Encoding"), "gzip") {
-		res.Header.Del("Content-Encoding")
-		res.Header.Del("Content-Length")
+	if cs.requestedGzip && http2asciiEqualFold(HeaderGet(res.Header, "Content-Encoding"), "gzip") {
+		HeaderDel(res.Header, "Content-Encoding")
+		HeaderDel(res.Header, "Content-Length")
 		res.ContentLength = -1
 		res.Body = &http2gzipReader{body: res.Body}
 		res.Uncompressed = true

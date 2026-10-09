@@ -187,7 +187,7 @@ func dirList(w ResponseWriter, r *Request, f File) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	HeaderSet(w.Header(), "Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, "<!doctype html>\n")
 	fmt.Fprintf(w, "<meta name=\"viewport\" content=\"width=device-width\">\n")
 	fmt.Fprintf(w, "<pre>\n")
@@ -218,7 +218,7 @@ func serveError(w ResponseWriter, text []byte, code int32) {
 		"Etag",
 		"Last-Modified",
 	} {
-		if h.has(k) {
+		if headerHas(h, k) {
 			h.Del(k)
 		}
 	}
@@ -312,7 +312,7 @@ func serveContent(w ResponseWriter, r *Request, name []byte, modtime time.Time, 
 				return
 			}
 		}
-		w.Header().Set("Content-Type", ctype)
+		HeaderSet(w.Header(), "Content-Type", ctype)
 	} else if len(ctypes) > 0 {
 		ctype = ctypes[0]
 	}
@@ -343,7 +343,7 @@ func serveContent(w ResponseWriter, r *Request, name []byte, modtime time.Time, 
 			ranges = nil
 			break
 		}
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+		HeaderSet(w.Header(), "Content-Range", fmt.Sprintf("bytes */%d", size))
 		serveError(w, err.String(), StatusRequestedRangeNotSatisfiable)
 		return
 	default:
@@ -378,14 +378,14 @@ func serveContent(w ResponseWriter, r *Request, name []byte, modtime time.Time, 
 		}
 		sendSize = ra.length
 		code = StatusPartialContent
-		w.Header().Set("Content-Range", ra.contentRange(size))
+		HeaderSet(w.Header(), "Content-Range", ra.contentRange(size))
 	case len(ranges) > 1:
 		sendSize = rangesMIMESize(ranges, ctype, size)
 		code = StatusPartialContent
 
 		pr, pw := io.Pipe()
 		mw := multipart.NewWriter(pw)
-		w.Header().Set("Content-Type", "multipart/byteranges; boundary="+mw.Boundary())
+		HeaderSet(w.Header(), "Content-Type", "multipart/byteranges; boundary="+mw.Boundary())
 		sendContent = pr
 		defer pr.Close() // cause writing goroutine to fail and exit if CopyN doesn't finish.
 		func() {
@@ -412,7 +412,7 @@ func serveContent(w ResponseWriter, r *Request, name []byte, modtime time.Time, 
 		}()
 	}
 
-	w.Header().Set("Accept-Ranges", "bytes")
+	HeaderSet(w.Header(), "Accept-Ranges", "bytes")
 
 	// We should be able to unconditionally set the Content-Length here.
 	//
@@ -439,8 +439,8 @@ func serveContent(w ResponseWriter, r *Request, name []byte, modtime time.Time, 
 	// A possible future improvement on this might be to look at the type
 	// of the ResponseWriter, and always set Content-Length if it's one
 	// that we recognize.
-	if len(ranges) > 0 || w.Header().Get("Content-Encoding") == "" {
-		w.Header().Set("Content-Length", strconv.FormatInt(sendSize, 10))
+	if len(ranges) > 0 || HeaderGet(w.Header(), "Content-Encoding") == "" {
+		HeaderSet(w.Header(), "Content-Length", strconv.FormatInt(sendSize, 10))
 	}
 	w.WriteHeader(code)
 
@@ -500,7 +500,7 @@ const (
 )
 
 func checkIfMatch(w ResponseWriter, r *Request) (rcondResult condResult) {
-	im := r.Header.Get("If-Match")
+	im := HeaderGet(r.Header, "If-Match")
 	if im == "" {
 		return condNone
 	}
@@ -520,7 +520,7 @@ func checkIfMatch(w ResponseWriter, r *Request) (rcondResult condResult) {
 		if etag == "" {
 			break
 		}
-		if etagStrongMatch(etag, w.Header().get("Etag")) {
+		if etagStrongMatch(etag, headerGet(w.Header(), "Etag")) {
 			return condTrue
 		}
 		im = remain
@@ -530,7 +530,7 @@ func checkIfMatch(w ResponseWriter, r *Request) (rcondResult condResult) {
 }
 
 func checkIfUnmodifiedSince(r *Request, modtime time.Time) (rcondResult condResult) {
-	ius := r.Header.Get("If-Unmodified-Since")
+	ius := HeaderGet(r.Header, "If-Unmodified-Since")
 	if ius == "" || isZeroTime(modtime) {
 		return condNone
 	}
@@ -549,7 +549,7 @@ func checkIfUnmodifiedSince(r *Request, modtime time.Time) (rcondResult condResu
 }
 
 func checkIfNoneMatch(w ResponseWriter, r *Request) (rcondResult condResult) {
-	inm := r.Header.get("If-None-Match")
+	inm := headerGet(r.Header, "If-None-Match")
 	if inm == "" {
 		return condNone
 	}
@@ -570,7 +570,7 @@ func checkIfNoneMatch(w ResponseWriter, r *Request) (rcondResult condResult) {
 		if etag == "" {
 			break
 		}
-		if etagWeakMatch(etag, w.Header().get("Etag")) {
+		if etagWeakMatch(etag, headerGet(w.Header(), "Etag")) {
 			return condFalse
 		}
 		buf = remain
@@ -582,7 +582,7 @@ func checkIfModifiedSince(r *Request, modtime time.Time) (rcondResult condResult
 	if r.Method != "GET" && r.Method != "HEAD" {
 		return condNone
 	}
-	ims := r.Header.Get("If-Modified-Since")
+	ims := HeaderGet(r.Header, "If-Modified-Since")
 	if ims == "" || isZeroTime(modtime) {
 		return condNone
 	}
@@ -603,13 +603,13 @@ func checkIfRange(w ResponseWriter, r *Request, modtime time.Time) (rcondResult 
 	if r.Method != "GET" && r.Method != "HEAD" {
 		return condNone
 	}
-	ir := r.Header.get("If-Range")
+	ir := headerGet(r.Header, "If-Range")
 	if ir == "" {
 		return condNone
 	}
 	etag, _ := scanETag(ir)
 	if etag != "" {
-		if etagStrongMatch(etag, w.Header().Get("Etag")) {
+		if etagStrongMatch(etag, HeaderGet(w.Header(), "Etag")) {
 			return condTrue
 		} else {
 			return condFalse
@@ -639,7 +639,7 @@ func isZeroTime(t time.Time) (rok bool) {
 
 func setLastModified(w ResponseWriter, modtime time.Time) {
 	if !isZeroTime(modtime) {
-		w.Header().Set("Last-Modified", modtime.UTC().Format(TimeFormat))
+		HeaderSet(w.Header(), "Last-Modified", modtime.UTC().Format(TimeFormat))
 	}
 }
 
@@ -687,7 +687,7 @@ func checkPreconditions(w ResponseWriter, r *Request, modtime time.Time) (done b
 		}
 	}
 
-	rangeHeader = r.Header.get("Range")
+	rangeHeader = headerGet(r.Header, "Range")
 	if rangeHeader != "" && checkIfRange(w, r, modtime) == condFalse {
 		rangeHeader = ""
 	}
@@ -805,7 +805,7 @@ func localRedirect(w ResponseWriter, r *Request, newPath []byte) {
 	if q := r.URL.RawQuery; q != "" {
 		newPath += "?" + q
 	}
-	w.Header().Set("Location", newPath)
+	HeaderSet(w.Header(), "Location", newPath)
 	w.WriteHeader(StatusMovedPermanently)
 }
 
