@@ -34,7 +34,15 @@ const (
 // is a semantic property of the address, not just the
 // length of the byte slice: a 16-byte slice can still
 // be an IPv4 address.
-type IP []byte
+//
+// IP is an ALIAS for []byte: the name stays usable for API compatibility (an
+// IP is still written IP{...}, converted with IP(...), indexed and passed to
+// len) while the methods move to free functions, because a named slice type is
+// not allowed and an alias cannot carry methods. See IPMask in this file,
+// HardwareAddrString in net/mac and url.Values for the same shape. No IP
+// method mutates the receiver, so an alias loses nothing that a value receiver
+// carried.
+type IP = []byte
 
 // An IPMask is a bitmask that can be used to manipulate
 // IP addresses for IP addressing and routing.
@@ -118,22 +126,22 @@ func IPv6linklocalallrouters() (riP IP) { return IP{0xff, 0x02, 0, 0, 0, 0, 0, 0
 
 // IsUnspecified reports whether ip is an unspecified address, either
 // the IPv4 address "0.0.0.0" or the IPv6 address "::".
-func (ip IP) IsUnspecified() (rok bool) {
-	return ip.Equal(IPv4zero()) || ip.Equal(IPv6unspecified())
+func IPIsUnspecified(ip IP) (rok bool) {
+	return IPEqual(ip, IPv4zero()) || IPEqual(ip, IPv6unspecified())
 }
 
 // IsLoopback reports whether ip is a loopback address.
-func (ip IP) IsLoopback() (rok bool) {
-	if ip4 := ip.To4(); ip4 != nil {
+func IPIsLoopback(ip IP) (rok bool) {
+	if ip4 := IPTo4(ip); ip4 != nil {
 		return ip4[0] == 127
 	}
-	return ip.Equal(IPv6loopback())
+	return IPEqual(ip, IPv6loopback())
 }
 
 // IsPrivate reports whether ip is a private address, according to
 // RFC 1918 (IPv4 addresses) and RFC 4193 (IPv6 addresses).
-func (ip IP) IsPrivate() (rok bool) {
-	if ip4 := ip.To4(); ip4 != nil {
+func IPIsPrivate(ip IP) (rok bool) {
+	if ip4 := IPTo4(ip); ip4 != nil {
 		// Following RFC 1918, Section 3. Private Address Space which says:
 		//   The Internet Assigned Numbers Authority (IANA) has reserved the
 		//   following three blocks of the IP address space for private internets:
@@ -150,8 +158,8 @@ func (ip IP) IsPrivate() (rok bool) {
 }
 
 // IsMulticast reports whether ip is a multicast address.
-func (ip IP) IsMulticast() (rok bool) {
-	if ip4 := ip.To4(); ip4 != nil {
+func IPIsMulticast(ip IP) (rok bool) {
+	if ip4 := IPTo4(ip); ip4 != nil {
 		return ip4[0]&0xf0 == 0xe0
 	}
 	return len(ip) == IPv6len && ip[0] == 0xff
@@ -159,14 +167,14 @@ func (ip IP) IsMulticast() (rok bool) {
 
 // IsInterfaceLocalMulticast reports whether ip is
 // an interface-local multicast address.
-func (ip IP) IsInterfaceLocalMulticast() (rok bool) {
+func IPIsInterfaceLocalMulticast(ip IP) (rok bool) {
 	return len(ip) == IPv6len && ip[0] == 0xff && ip[1]&0x0f == 0x01
 }
 
 // IsLinkLocalMulticast reports whether ip is a link-local
 // multicast address.
-func (ip IP) IsLinkLocalMulticast() (rok bool) {
-	if ip4 := ip.To4(); ip4 != nil {
+func IPIsLinkLocalMulticast(ip IP) (rok bool) {
+	if ip4 := IPTo4(ip); ip4 != nil {
 		return ip4[0] == 224 && ip4[1] == 0 && ip4[2] == 0
 	}
 	return len(ip) == IPv6len && ip[0] == 0xff && ip[1]&0x0f == 0x02
@@ -174,8 +182,8 @@ func (ip IP) IsLinkLocalMulticast() (rok bool) {
 
 // IsLinkLocalUnicast reports whether ip is a link-local
 // unicast address.
-func (ip IP) IsLinkLocalUnicast() (rok bool) {
-	if ip4 := ip.To4(); ip4 != nil {
+func IPIsLinkLocalUnicast(ip IP) (rok bool) {
+	if ip4 := IPTo4(ip); ip4 != nil {
 		return ip4[0] == 169 && ip4[1] == 254
 	}
 	return len(ip) == IPv6len && ip[0] == 0xfe && ip[1]&0xc0 == 0x80
@@ -189,13 +197,13 @@ func (ip IP) IsLinkLocalUnicast() (rok bool) {
 // the exception of IPv4 directed broadcast addresses.
 // It returns true even if ip is in IPv4 private address space or
 // local IPv6 unicast address space.
-func (ip IP) IsGlobalUnicast() (rok bool) {
+func IPIsGlobalUnicast(ip IP) (rok bool) {
 	return (len(ip) == IPv4len || len(ip) == IPv6len) &&
-		!ip.Equal(IPv4bcast()) &&
-		!ip.IsUnspecified() &&
-		!ip.IsLoopback() &&
-		!ip.IsMulticast() &&
-		!ip.IsLinkLocalUnicast()
+		!IPEqual(ip, IPv4bcast()) &&
+		!IPIsUnspecified(ip) &&
+		!IPIsLoopback(ip) &&
+		!IPIsMulticast(ip) &&
+		!IPIsLinkLocalUnicast(ip)
 }
 
 // Is p all zeros?
@@ -210,7 +218,7 @@ func isZeros(p IP) (rok bool) {
 
 // To4 converts the IPv4 address ip to a 4-byte representation.
 // If ip is not an IPv4 address, To4 returns nil.
-func (ip IP) To4() (riP IP) {
+func IPTo4(ip IP) (riP IP) {
 	if len(ip) == IPv4len {
 		return ip
 	}
@@ -225,7 +233,7 @@ func (ip IP) To4() (riP IP) {
 
 // To16 converts the IP address ip to a 16-byte representation.
 // If ip is not an IP address (it is the wrong length), To16 returns nil.
-func (ip IP) To16() (riP IP) {
+func IPTo16(ip IP) (riP IP) {
 	if len(ip) == IPv4len {
 		return IPv4(ip[0], ip[1], ip[2], ip[3])
 	}
@@ -243,8 +251,8 @@ func _classCMask() (riPMask IPMask) { return IPv4Mask(0xff, 0xff, 0xff, 0) }
 // DefaultMask returns the default IP mask for the IP address ip.
 // Only IPv4 addresses have default masks; DefaultMask returns
 // nil if ip is not a valid IPv4 address.
-func (ip IP) DefaultMask() (riPMask IPMask) {
-	if ip = ip.To4(); ip == nil {
+func IPDefaultMask(ip IP) (riPMask IPMask) {
+	if ip = IPTo4(ip); ip == nil {
 		return nil
 	}
 	switch {
@@ -267,7 +275,7 @@ func allFF(b []byte) (rok bool) {
 }
 
 // Mask returns the result of masking the IP address ip with mask.
-func (ip IP) Mask(mask IPMask) (riP IP) {
+func IPApplyMask(ip IP, mask IPMask) (riP IP) {
 	if len(mask) == IPv6len && len(ip) == IPv4len && allFF(mask[:12]) {
 		mask = mask[12:]
 	}
@@ -292,7 +300,7 @@ func (ip IP) Mask(mask IPMask) (riP IP) {
 //   - dotted decimal ("192.0.2.1"), if ip is an IPv4 or IP4-mapped IPv6 address
 //   - IPv6 conforming to RFC 5952 ("2001:db8::1"), if ip is a valid IPv6 address
 //   - the hexadecimal form of ip, without punctuation, if no other cases apply
-func (ip IP) String() (rs string) {
+func IPString(ip IP) (rs string) {
 	if len(ip) == 0 {
 		return "<nil>"
 	}
@@ -310,7 +318,7 @@ func (ip IP) String() (rs string) {
 		const maxCap = len("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
 		buf = []byte{:0:maxCap}
 	}
-	buf = ip.appendTo(buf)
+	buf = ipAppendTo(ip, buf)
 	return string(buf)
 }
 
@@ -328,14 +336,14 @@ func ipEmptyString(ip IP) (rs string) {
 	if len(ip) == 0 {
 		return ""
 	}
-	return ip.String()
+	return IPString(ip)
 }
 
 // appendTo appends the string representation of ip to b and returns the expanded b
 // If len(ip) != IPv4len or IPv6len, it appends nothing.
-func (ip IP) appendTo(b []byte) (rb []byte) {
+func ipAppendTo(ip IP, b []byte) (rb []byte) {
 	// If IPv4, use dotted notation.
-	if p4 := ip.To4(); len(p4) == IPv4len {
+	if p4 := IPTo4(ip); len(p4) == IPv4len {
 		ip = p4
 	}
 	addr, _ := netip.AddrFromSlice(ip)
@@ -345,7 +353,7 @@ func (ip IP) appendTo(b []byte) (rb []byte) {
 // AppendText implements the [encoding.TextAppender] interface.
 // The encoding is the same as returned by [IP.String], with one exception:
 // When len(ip) is zero, it appends nothing.
-func (ip IP) AppendText(b []byte) (rb []byte, rerr error) {
+func IPAppendText(ip IP, b []byte) (rb []byte, rerr error) {
 	if len(ip) == 0 {
 		return b, nil
 	}
@@ -353,15 +361,15 @@ func (ip IP) AppendText(b []byte) (rb []byte, rerr error) {
 		return b, &AddrError{Err: "invalid IP address", Addr: hexString(ip)}
 	}
 
-	return ip.appendTo(b), nil
+	return ipAppendTo(ip, b), nil
 }
 
 // MarshalText implements the [encoding.TextMarshaler] interface.
 // The encoding is the same as returned by [IP.String], with one exception:
 // When len(ip) is zero, it returns an empty slice.
-func (ip IP) MarshalText() (rb []byte, rerr error) {
+func IPMarshalText(ip IP) (rb []byte, rerr error) {
 	// 24 is satisfied with all IPv4 addresses and short IPv6 addresses
-	b, err := ip.AppendText([]byte{:0:24})
+	b, err := IPAppendText(ip, []byte{:0:24})
 	if err != nil {
 		return nil, err
 	}
@@ -370,7 +378,7 @@ func (ip IP) MarshalText() (rb []byte, rerr error) {
 
 // UnmarshalText implements the [encoding.TextUnmarshaler] interface.
 // The IP address is expected in a form accepted by [ParseIP].
-func (ip *IP) UnmarshalText(text []byte) (rerr error) {
+func IPUnmarshalText(ip *IP, text []byte) (rerr error) {
 	if len(text) == 0 {
 		*ip = nil
 		return nil
@@ -387,7 +395,7 @@ func (ip *IP) UnmarshalText(text []byte) (rerr error) {
 // Equal reports whether ip and x are the same IP address.
 // An IPv4 address and that same address in IPv6 form are
 // considered to be equal.
-func (ip IP) Equal(x IP) (rok bool) {
+func IPEqual(ip IP, x IP) (rok bool) {
 	if len(ip) == len(x) {
 		return bytealg.Equal(ip, x)
 	}
@@ -401,8 +409,8 @@ func (ip IP) Equal(x IP) (rok bool) {
 	return false
 }
 
-func (ip IP) matchAddrFamily(x IP) (rok bool) {
-	return ip.To4() != nil && x.To4() != nil || ip.To16() != nil && ip.To4() == nil && x.To16() != nil && x.To4() == nil
+func ipMatchAddrFamily(ip IP, x IP) (rok bool) {
+	return IPTo4(ip) != nil && IPTo4(x) != nil || IPTo16(ip) != nil && IPTo4(ip) == nil && IPTo16(x) != nil && IPTo4(x) == nil
 }
 
 // If mask is a sequence of 1 bits followed by 0 bits,
@@ -454,7 +462,7 @@ func IPMaskString(m IPMask) (rs string) {
 }
 
 func networkNumberAndMask(n *IPNet) (ip IP, m IPMask) {
-	if ip = n.IP.To4(); ip == nil {
+	if ip = IPTo4(n.IP); ip == nil {
 		ip = n.IP
 		if len(ip) != IPv6len {
 			return nil, nil
@@ -479,7 +487,7 @@ func networkNumberAndMask(n *IPNet) (ip IP, m IPMask) {
 // Contains reports whether the network includes ip.
 func (n *IPNet) Contains(ip IP) (rok bool) {
 	nn, m := networkNumberAndMask(n)
-	if x := ip.To4(); x != nil {
+	if x := IPTo4(ip); x != nil {
 		ip = x
 	}
 	l := len(ip)
@@ -513,9 +521,9 @@ func (n *IPNet) String() (rs string) {
 	}
 	l := simpleMaskLength(m)
 	if l == -1 {
-		return nn.String() + "/" + IPMaskString(m)
+		return IPString(nn) + "/" + IPMaskString(m)
 	}
-	return nn.String() + "/" + itoa.Uitoa(uint32(l))
+	return IPString(nn) + "/" + itoa.Uitoa(uint32(l))
 }
 
 // ParseIP parses s as an IP address, returning the result.
@@ -564,7 +572,7 @@ func ParseCIDR(s string) (riP IP, riPNet *IPNet, rerr error) {
 	}
 	m := CIDRMask(n, ipAddr.BitLen())
 	addr16 := ipAddr.As16()
-	return IP(addr16[:]), &IPNet{IP: IP(addr16[:]).Mask(m), Mask: m}, nil
+	return IP(addr16[:]), &IPNet{IP: IPApplyMask(IP(addr16[:]), m), Mask: m}, nil
 }
 
 func copyIP(x IP) (riP IP) {

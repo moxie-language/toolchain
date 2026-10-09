@@ -1,0 +1,70 @@
+/*
+net.IP is an ALIAS with free functions, and the address predicates still hold.
+
+A named slice type is not allowed in Moxie, so `type IP []byte` became
+`type IP = []byte` (round 99) and its 19 methods became free functions:
+IPIsUnspecified, IPIsLoopback, IPIsPrivate, IPIsMulticast,
+IPIsInterfaceLocalMulticast, IPIsLinkLocalMulticast, IPIsLinkLocalUnicast,
+IPIsGlobalUnicast, IPTo4, IPTo16, IPDefaultMask, IPApplyMask, IPString,
+IPAppendText, IPMarshalText, IPEqual, IPUnmarshalText, plus the unexported
+ipAppendTo/ipMatchAddrFamily. No IP method mutates the receiver, so the alias
+loses nothing a value receiver carried - `IPMask` in the same file, `url.Values`
+and `net.Buffers` are the other three route shapes.
+
+The fixture is end-to-end on purpose: the compiler checks the MAIN package's
+bodies thoroughly but tolerates an unresolved call in a dependency's body, so a
+dependency-only check would not prove the free functions exist. This calls them
+and checks the values, including the 4-byte/16-byte form equivalence that
+IPEqual normalizes and IPNet.Contains' use of the mask.
+*/
+package main
+
+import (
+	"net"
+)
+
+func main() {
+	ip := net.ParseIP("192.168.1.5")
+	if ip == nil {
+		panic("parse")
+	}
+	if net.IPString(ip) != "192.168.1.5" {
+		panic("string: " | net.IPString(ip))
+	}
+	if net.IPIsUnspecified(ip) {
+		panic("unspecified")
+	}
+	if !net.IPIsPrivate(ip) {
+		panic("private")
+	}
+	if net.IPIsLoopback(ip) {
+		panic("loopback")
+	}
+	ip4 := net.IPTo4(ip)
+	if ip4 == nil || len(ip4) != 4 {
+		panic("to4")
+	}
+	ip16 := net.IPTo16(ip)
+	if ip16 == nil || len(ip16) != 16 {
+		panic("to16")
+	}
+	if !net.IPEqual(ip, ip16) {
+		panic("equal across 4 and 16 byte forms")
+	}
+	if !net.IPIsLoopback(net.ParseIP("127.0.0.1")) {
+		panic("loopback 127.0.0.1")
+	}
+	m := net.CIDRMask(24, 32)
+	ones, bits := net.IPMaskSize(m)
+	if ones != 24 || bits != 32 {
+		panic("mask size")
+	}
+	n := &net.IPNet{IP: ip, Mask: m}
+	if !n.Contains(net.ParseIP("192.168.1.99")) {
+		panic("contains in-net")
+	}
+	if n.Contains(net.ParseIP("10.0.0.1")) {
+		panic("contains out-of-net")
+	}
+	println("ip ok")
+}

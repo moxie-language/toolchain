@@ -6176,3 +6176,73 @@ of several values and `Del` removes them all.
   packages); phase 1c compiles the wasm sweep.
 - **FULL GATE: 248 PASS / 0 FAIL / 0 SKIP**, including
   `selfhost:fixpoint PASS (stage2 == stage3)`. Stdlib source only this round.
+
+## FIXED in round 99: `net.IP` dissolved - the slice route, and what the compiler does NOT check
+
+`net.IP` is a named SLICE type with 18 methods, none of which mutates the
+receiver, so it takes the alias route (the `IPMask`/`HardwareAddr` shape):
+
+    -type IP []byte
+    +type IP = []byte
+
+    IsUnspecified/IsLoopback/IsPrivate/IsMulticast/IsInterfaceLocalMulticast/
+    IsLinkLocalMulticast/IsLinkLocalUnicast/IsGlobalUnicast
+        -> IPIs*(ip)
+    To4/To16/DefaultMask        -> IPTo4/IPTo16/IPDefaultMask(ip)
+    Mask(mask)                  -> IPApplyMask(ip, mask)   (IPMask is the type name)
+    String/AppendText/MarshalText -> IPString/IPAppendText/IPMarshalText(ip)
+    Equal(x)/UnmarshalText(t)   -> IPEqual(ip, x)/IPUnmarshalText(ip, t)
+    appendTo/matchAddrFamily    -> ipAppendTo/ipMatchAddrFamily(ip, ...)
+
+**The important finding of this round is about the compiler, not the type.** After
+the alias went in, `moxie build -a` on `net` reported **rc=0** while
+`tcpsock_posix.mx:137` still said `l.IP.Equal(r.IP)` - a call that cannot resolve
+against `[]byte`. A probe inside the package (`func _probeEqual(a, b IP) bool {
+return a.Equal(b) }`) also compiled. The same expression in a USER program is
+rejected:
+
+    main.mx:9: Equal undefined (type string has no field or method Equal)
+
+So the main package's bodies are checked and a dependency's are not: an
+unresolved call inside a dependency body is dropped silently, and a short var
+that depends on it only surfaces later ("cannot resolve type of short var X
+(rhs=nil)") or not at all. Every remaining IP method call in the tree had to be
+found by inspection instead of by the compiler, and one was found only after the
+new fixture exercised `net.IPNet.Contains` at run time:
+
+    src/net/{tcpsock_posix,iprawsock,ipsock,sock_posix,tcpsock,udpsock,udpsock_posix,addrselect,dial}.mx
+    src/net/http/socks_bundle.mx
+
+`ip_api` is the guard, and it is deliberately a MAIN-package fixture for exactly
+that reason: it calls ParseIP, IPString, the Is* predicates, IPTo4/IPTo16,
+IPEqual (across the 4-byte and 16-byte forms), CIDRMask, IPMaskSize and
+`IPNet.Contains`, and it prints `ip ok`. It found the `addrselect.mx` sites that
+the dependency build had passed over.
+
+The wasm sweep caught one more site the native build had passed over -
+`crypto/x509/verify.mx:826` called `ip.String()` on a `net.IP` LOCAL, which no
+`.IP.<method>` grep could see, and the dropped argument surfaced as the
+misleading `not enough arguments in call (want 8, have 7)`. A direct build of
+`./src/net/http` - both targets - is the check that catches this class, because
+building a package as the TARGET gives its whole closure the thorough treatment:
+after that fix, native and wasm both compile.
+
+Two traps worth recording for the remaining passes: `netip.Addr` has its OWN
+IsLoopback/IsLinkLocalUnicast/IsMulticast/IsPrivate/IsGlobalUnicast methods, so a
+blanket rewrite of those names breaks `addrselect.mx` (it did, and was reverted);
+and reverting such a file wholesale also reverts the legitimate rewrites in it
+(the `To4` sites had to be redone).
+
+### Verified
+
+- `ip_api` compiles AND runs, natively and on wasm: ParseIP, IPString, the Is*
+  predicates, IPTo4/IPTo16, IPEqual across the 4-byte and 16-byte forms,
+  CIDRMask, IPMaskSize and `IPNet.Contains` (which uses IPApplyMask internally).
+- `./src/net/http` builds for BOTH targets with its whole closure given the
+  thorough treatment, and phase 1b (41 packages) plus phase 1c (wasm) pass.
+- **FULL GATE: 250 PASS / 0 FAIL / 0 SKIP**, including
+  `selfhost:fixpoint PASS (stage2 == stage3)`. This round needed three gate runs:
+  the first was invalidated by the `mime_header_parse` fixture (round 98's API
+  change), the second by the silently-dropped `ip.String()` in
+  `crypto/x509/verify.mx` that only the wasm sweep caught, and the third is
+  green. Stdlib source only - no compiler change.
