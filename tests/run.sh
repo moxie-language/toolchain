@@ -3,8 +3,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MOXIEROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-export STATUSFILE="${STATUSFILE:-/tmp/moxie-test-status-$$}"
-export TMPROOT="${TMPROOT:-/tmp/moxie-tests-$$}"
+# Working artifacts live in the TREE (./tmp, git-ignored), not /tmp: /tmp is
+# wiped between sessions here, and losing a half-finished gate's temp root,
+# status file and logs costs a full re-run. Override either variable to put them
+# elsewhere.
+export STATUSFILE="${STATUSFILE:-$MOXIEROOT/tmp/moxie-test-status-$$}"
+export TMPROOT="${TMPROOT:-$MOXIEROOT/tmp/moxie-tests-$$}"
 export MOXIEROOT
 > "$STATUSFILE"
 mkdir -p "$TMPROOT"

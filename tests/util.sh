@@ -17,8 +17,10 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-STATUSFILE="${STATUSFILE:-/tmp/moxie-test-status-$$}"
-TMPROOT="${TMPROOT:-/tmp/moxie-tests-$$}"
+# Same policy as run.sh: artifacts in the tree's ./tmp, never /tmp, which is
+# wiped between sessions here.
+STATUSFILE="${STATUSFILE:-$MOXIEROOT/tmp/moxie-test-status-$$}"
+TMPROOT="${TMPROOT:-$MOXIEROOT/tmp/moxie-tests-$$}"
 
 log_pass() {
 	local name="$1" extra="$2"

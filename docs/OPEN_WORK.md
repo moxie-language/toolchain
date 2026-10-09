@@ -6328,3 +6328,20 @@ harness navigation timeout. Everything else in the full gate - phases 0, 0b, 1,
 1b, 1c, 2 (with the selfhost fixpoint), 3, 4 and 6 - was already green against
 these same sources, and only the fixture and this file changed between the two
 runs.
+
+## Working artifacts live in the tree's `./tmp`, never `/tmp`
+
+`/tmp` is wiped between sessions on this machine. Losing half a gate's temp root,
+status file and logs costs a full re-run - hours - so the policy is now built
+into the harness rather than remembered:
+
+- `tests/run.sh` and `tests/util.sh` default `TMPROOT` and `STATUSFILE` to
+  `$MOXIEROOT/tmp/...` (both overridable by exporting them).
+- `tmp/` and `tests/tmp/` are already in `.gitignore`, and the compiler's own
+  `./tmp/mxc-build-*` work dirs are relative to the CWD, so running builds from
+  the repository root keeps everything under the tree.
+- Long runs record their log in the tree too, e.g.
+  `bash tests/run.sh --full > tmp/gate.log 2>&1`, and the compiler build is
+  `MOXIEROOT=$PWD ./moxie build -a -o tmp/mxc-<round> ./_mxc_stage4`.
+- Nothing needed for a resume may be left only in `/tmp` or only in `$HOME`:
+  put it in `tmp/` (git-ignored) so it survives with the checkout.
