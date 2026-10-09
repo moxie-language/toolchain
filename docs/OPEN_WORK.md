@@ -6130,3 +6130,49 @@ one, leaving the remainder in `Runs[0]`.
   `selfhost:fixpoint PASS (stage2 == stage3)`. Stdlib source only this round - no
   compiler change - so the gate's compilation of `net` plus the fixture is the
   artifact under test.
+
+## FIXED in round 98: `textproto.MIMEHeader` dissolved, and `http.Header`'s delegations inlined
+
+`MIMEHeader` is a named MAP type (`map[string][][]byte`), so it takes the alias
+route proven by `url.Values`:
+
+    -type MIMEHeader map[string][][]byte
+    +type MIMEHeader = map[string][][]byte
+
+    (h MIMEHeader) Add(key, value []byte)     -> MIMEHeaderAdd(h, key, value)
+    (h MIMEHeader) Set(key, value []byte)     -> MIMEHeaderSet(h, key, value)
+    (h MIMEHeader) Get(key []byte) (rb []byte) -> MIMEHeaderGet(h, key)
+    (h MIMEHeader) Values(key []byte)          -> MIMEHeaderValues(h, key)
+    (h MIMEHeader) Del(key []byte)             -> MIMEHeaderDel(h, key)
+
+The route was cheap here because almost nothing called the methods: the type is
+used as a value (signatures, `Part.Header`, conversions, `MIMEHeader{...}`
+literals) and the maps are read and written directly. The ONE caller shape was
+`net/http.Header`'s five delegating methods, which did
+`textproto.MIMEHeader(h).Add(key, value)` and friends - so those five bodies are
+now direct map operations (canonicalize, then index/push/delete), which also
+removes the conversion from every Header method call.
+
+Six call sites in `mime/multipart` used the methods directly and moved to the
+free functions: `p.Header.Get("Content-Disposition")` and
+`bp.Header.Get(cte)`/`bp.Header.Del(cte)` in `multipart.mx`, and three
+`h.Set(...)` calls in `writer.mx` (`CreateFormFile`, `CreateFormField`).
+
+`mime_header_api` pins what makes this type more than a map: every operation
+CANONICALIZES the key, so a key written as `x-lower` is found as `X-LOWER` and
+one written as `Content-Type` is found as `content-type`; `Get` returns the FIRST
+of several values and `Del` removes them all.
+
+### Verified
+
+- `mime_header_api` compiles AND runs, natively and on wasm: canonicalization
+  both ways (`x-lower` found as `X-LOWER`, `Content-Type` found as
+  `content-type`), `Get` returning the first of several values, `Values` keeping
+  every value in order, `Del` removing them all.
+- `mime_header_parse` (the pre-existing fixture) was updated to the free
+  functions and passes again, natively and on wasm - it was the one caller of
+  the removed methods inside the suite.
+- `net/http`, `mime/multipart` and `net/textproto` compile (phase 1b, 41
+  packages); phase 1c compiles the wasm sweep.
+- **FULL GATE: 248 PASS / 0 FAIL / 0 SKIP**, including
+  `selfhost:fixpoint PASS (stage2 == stage3)`. Stdlib source only this round.

@@ -1,0 +1,46 @@
+/*
+textproto.MIMEHeader is an ALIAS with free functions, and canonicalization holds.
+
+A named map type is not allowed in Moxie, so `type MIMEHeader map[string][][]byte`
+became `type MIMEHeader = map[string][][]byte` (round 98) and its five methods
+became free functions: MIMEHeaderAdd, MIMEHeaderSet, MIMEHeaderGet,
+MIMEHeaderValues, MIMEHeaderDel.
+
+The interesting part of this type is that every operation CANONICALIZES the key
+(CanonicalMIMEHeaderKey), which is what makes header lookup case-insensitive -
+so the fixture pins that, not just storage: a key written as `x-lower` is found
+as `X-LOWER`, and a value written as `Content-Type` is found as `content-type`.
+It also pins Get returning the FIRST of several values and Del removing them all.
+
+net/http.Header's five delegating methods were inlined to direct map operations
+in the same round, so this type's methods now have exactly one caller shape:
+the free functions below.
+*/
+package main
+
+import (
+	"net/textproto"
+)
+
+func main() {
+	h := textproto.MIMEHeader{}
+	textproto.MIMEHeaderSet(h, "Content-Type", "text/plain")
+	textproto.MIMEHeaderAdd(h, "X-Multi", "one")
+	textproto.MIMEHeaderAdd(h, "X-Multi", "two")
+	textproto.MIMEHeaderSet(h, "x-lower", "yes")
+	if textproto.MIMEHeaderGet(h, "content-type") != "text/plain" {
+		panic("get canonicalized key")
+	}
+	if textproto.MIMEHeaderGet(h, "X-LOWER") != "yes" {
+		panic("get lower-case written key")
+	}
+	vs := textproto.MIMEHeaderValues(h, "x-multi")
+	if len(vs) != 2 || string(vs[1]) != "two" {
+		panic("values keeps every value in order")
+	}
+	textproto.MIMEHeaderDel(h, "X-Multi")
+	if textproto.MIMEHeaderGet(h, "x-multi") != "" {
+		panic("del removes every value")
+	}
+	println("mimeheader ok")
+}
