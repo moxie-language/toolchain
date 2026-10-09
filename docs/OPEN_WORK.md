@@ -6084,3 +6084,49 @@ be compiled until the debt is paid.
   `selfhost:fixpoint PASS (stage2 == stage3)`. This round changed stdlib source
   only - no compiler change - so the gate's own compilation of `net/url`,
   `net/http` and the fixture is the artifact under test.
+
+## FIXED in round 97: `net.Buffers` dissolved into a struct - the mutating-method shape
+
+Round 96 took `url.Values` with the alias-plus-free-functions route. `net.Buffers`
+is the case where that route CANNOT work, and the reason is a language rule, not
+taste:
+
+    type Buffers [][]byte          // a named slice type: not allowed
+
+`Read` and `WriteTo` CONSUME the runs they write, and free functions cannot
+express that: a slice assigned through a parameter does not write back (there is
+no aliasing, and a subslice is a copy). So Buffers became a struct that KEEPS its
+pointer-receiver methods:
+
+    type Buffers struct {
+        Runs [][]byte
+    }
+
+What changed: the declaration; the field accesses inside the three methods
+(`*v` -> `v.Runs`, `(*v)[0] = ...` -> `v.Runs[0] = ...`, `*v = (*v)[1:]` ->
+`v.Runs = v.Runs[1:]`); and the writev cast in `writev_unix.mx` -
+`fd.pfd.Writev((*[][]byte)(v))` -> `fd.pfd.Writev(&v.Runs)`, which no longer
+needs an unsafe cast (the `unsafe` import stays for `unsafe.Pointer(fd)`).
+
+What did NOT change: every call site - `v.WriteTo(w)`, `v.Read(p)`,
+`w.writeBuffers(v)` and the `buffersWriter` interface all take `*Buffers` as
+before. Construction becomes `Buffers{Runs: ...}`; no in-tree construction sites
+existed, and the only other user of the type is `writev_unix.mx`.
+
+`net_buffers_api` pins the semantics that forced the route: `WriteTo` drains the
+runs it wrote, and `Read` drains whole runs plus the consumed part of a partial
+one, leaving the remainder in `Runs[0]`.
+
+### Verified
+
+- `net_buffers_api` compiles AND runs, natively and on wasm: `WriteTo` drains the
+  runs it wrote (6 bytes out, `len(Runs) == 0` after), and `Read` drains whole
+  runs plus the consumed part of a partial one (3 bytes read leaves `Runs[0]` as
+  `d`).
+- `net` compiles alone and `net/http` (whose writev path is the only in-tree user
+  besides the type itself) compiles in phase 1b; phase 1c compiles the wasm
+  sweep.
+- **FULL GATE: 246 PASS / 0 FAIL / 0 SKIP**, including
+  `selfhost:fixpoint PASS (stage2 == stage3)`. Stdlib source only this round - no
+  compiler change - so the gate's compilation of `net` plus the fixture is the
+  artifact under test.

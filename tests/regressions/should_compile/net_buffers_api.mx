@@ -1,0 +1,55 @@
+/*
+net.Buffers is a STRUCT holding the runs, and its consuming methods still consume.
+
+A named slice type is not allowed in Moxie, so `type Buffers [][]byte` became
+`type Buffers struct { Runs [][]byte }` (round 97). The alias-plus-free-functions
+route used for net.IPMask and url.Values does NOT fit here: Read and WriteTo
+consume what they write, and a slice assigned through a free function's parameter
+does not write back - the mutation would be lost. Pointer-receiver methods on a
+struct keep it, and every call site is unchanged (`v.WriteTo(w)`, `v.Read(p)`);
+what changes is construction: `Buffers{Runs: ...}`.
+
+This fixture pins the semantics that made the route necessary: WriteTo drains the
+runs it wrote, and Read drains whole runs and the consumed part of a partial one,
+leaving the remainder in Runs[0].
+*/
+package main
+
+import (
+	"bytes"
+	"net"
+)
+
+func main() {
+	b := net.Buffers{Runs: [][]byte{[]byte("ab"), []byte("cd"), []byte("ef")}}
+	var buf bytes.Buffer
+	n, err := b.WriteTo(&buf)
+	if err != nil {
+		panic("writeto")
+	}
+	if n != 6 {
+		panic("writeto n")
+	}
+	if buf.String() != "abcdef" {
+		panic("out: " | buf.String())
+	}
+	if len(b.Runs) != 0 {
+		panic("writeto does not consume")
+	}
+	c := net.Buffers{Runs: [][]byte{[]byte("ab"), []byte("cd")}}
+	p := []byte{:3}
+	rn, rerr := c.Read(p)
+	if rerr != nil {
+		panic("read err")
+	}
+	if rn != 3 {
+		panic("read n")
+	}
+	if string(p) != "abc" {
+		panic("read: " | string(p))
+	}
+	if len(c.Runs) != 1 || string(c.Runs[0]) != "d" {
+		panic("remainder")
+	}
+	println("buffers ok")
+}
