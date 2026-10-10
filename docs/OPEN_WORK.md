@@ -6792,3 +6792,16 @@ regression - both causes are conditions of the target:
   validator host has no such file; it carries the same opt-out.
 
 Phase 5 was then re-run alone: **total 61, passed 61, failed 0, skipped 0**.
+
+## Round 103 commits
+
+    efbdf32c  docs: rounds 85-103 - what was measured, what is still open
+    727887ee  round 103: an import that resolves to nothing is an error, and a local
+              type keeps its descriptor (39 files, -19330 lines: the dead importers)
+    834b4485  round 102: a func literal in a monomorphized body lost its signature
+    e43ee327  round 101: judge the stdlib again - 30 silently-dropped calls found
+    09680a70  tests: TMPROOT must stay outside the tree
+
+`./moxie` was refreshed from the tree and is the stage4 fixpoint binary:
+
+    ./moxie == tmp/mxc-r103k == tmp/mxc-r103l  (sha256 b1463fa4...4f98)
