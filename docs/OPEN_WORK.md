@@ -6335,8 +6335,15 @@ runs.
 status file and logs costs a full re-run - hours - so the policy is now built
 into the harness rather than remembered:
 
-- `tests/run.sh` and `tests/util.sh` default `TMPROOT` and `STATUSFILE` to
-  `$MOXIEROOT/tmp/...` (both overridable by exporting them).
+- `STATUSFILE` and every log default to the tree: `$MOXIEROOT/tmp/...`, and long
+  runs are redirected there (`> tmp/gate.log`).
+- `TMPROOT` - the throwaway per-fixture copies - MUST stay OUTSIDE the tree, and
+  that was measured the hard way: with `TMPROOT` under `$MOXIEROOT/tmp`,
+  `restrict:reject_slice_to_array_ptr` FAILED because a fixture inside the tree
+  is not a user package, so the language restrictions do not fire. The same
+  fixture is rejected from `/tmp` and from `$HOME` and accepted from
+  `$MOXIEROOT/tmp`. It now defaults to `${HOME:-/tmp}/moxie-tests-$$`: outside
+  the tree, and still readable after a `/tmp` wipe.
 - `tmp/` and `tests/tmp/` are already in `.gitignore`, and the compiler's own
   `./tmp/mxc-build-*` work dirs are relative to the CWD, so running builds from
   the repository root keeps everything under the tree.
@@ -6345,3 +6352,443 @@ into the harness rather than remembered:
   `MOXIEROOT=$PWD ./moxie build -a -o tmp/mxc-<round> ./_mxc_stage4`.
 - Nothing needed for a resume may be left only in `/tmp` or only in `$HOME`:
   put it in `tmp/` (git-ignored) so it survives with the checkout.
+
+## FIXED in round 101: the stdlib is judged again - 30 silently-dropped calls found
+
+Rounds 99 and 100 each ended with the same complaint: an unresolved call inside a
+non-main package body was dropped SILENTLY, so the only way to find one was to
+grep, and one surfaced only in clang as
+
+    ._src_net_http.ll:74732: error: '%t316' defined with type 'i32'
+      but expected '{ ptr, i64, i64 }'
+
+The diagnostic that would have caught them already existed:
+`reportUndefinedField` (`ssa_builder.mx`), which reports
+`X undefined (type T has no field or method X)`. It was restricted to USER
+packages:
+
+    if !isUserPackagePath(restrictPath(fb.fn.Pkg.Pkg.Path)) { return }
+    // "the stdlib has selector shapes stage4 cannot resolve yet ... would be false errors"
+
+That exclusion was measured, not assumed. Removing it and forcing a full rebuild
+of the 41-package closure produced **six more `net.IP` call sites that greps had
+missed** and **eighteen more `http.Header` call sites**, with ZERO false
+positives in the first-party tree:
+
+    src/net/ipsock_posix.mx (String x3, Equal)  src/net/lookup.mx (To16)
+    src/crypto/x509/verify.mx (Equal, String)
+    src/net/http/{fs,request,response,server,transfer,transport,h2_bundle}.mx (24 in all)
+
+VENDORED `golang.org/x/...` stays excluded, and that is a MEASURED false-positive
+shape, not a guess: `idna.Profile` carries `bidirule func([]byte) bool` and the
+package calls `p.bidirule(label)`, a call through a function-typed field, which
+the walker reports as an unknown field. So the path check became exactly that:
+`golang.org/x/` (and its `vendor/` spelling) is skipped, everything else in the
+tree is judged. If another false error appears, narrow the SHAPE checks.
+
+The wasm target then gave up six more, none of which any native build could see:
+
+- `src/os/file_posix.mx` had NO build tag, so the wasm `os` package used
+  `file_other.mx`'s stub `File` and `file.mx`'s `SetDeadline` /
+  `SetReadDeadline` / `SetWriteDeadline` called `f.setDeadline(...)` and friends
+  into nothing. Go tags that file `unix || (js && wasm)`; it now carries the same
+  tag here.
+- `src/net/net_fake.mx` (wasm-only) called `ip.String()` twice.
+- `src/crypto/x509/verify.mx` called `san.String()` in a wasm-reachable path.
+
+Both targets now compile the whole closure with the diagnostic on, and the 41
+package sweep compiles AND runs.
+
+## RE-MEASURED in round 102: closure captures WORK - the "13 mis-compiled files" item is stale
+
+OPEN_WORK item 11 has said for many rounds that "stdlib capturing deferred
+closures are mis-compiled (13 files)", and CLAUDE.md states as architecture that
+a closure "does NOT capture variables from the enclosing function scope" - a
+function value carries only a code pointer. Both are contradicted by running the
+compiler. With `-allow-closure-captures` (the escape hatch the app repos use),
+four shapes were built and run:
+
+    n := int32(41)
+    f := func(x int32) int32 { return x + n }
+    f(1)                      -> captured=42
+
+    apply(g, 1)               -> escaped=42      (closure passed to another func)
+    defer func(){ print(m) }() -> deferred=7     (deferred closure)
+    inc := func(){ n = n + 1 }; inc() -> write-local=2   (WRITE propagates)
+    p := &m; addp := func(){ *p = *p + 5 }; apply(addp) -> write-pointer=15
+    k := 100; read := func() int32 { return k }; k = 200; read() -> 200
+                                                 (aliasing: the closure sees
+                                                  the enclosing local's later
+                                                  mutation)
+
+So reads, writes, aliasing through a deferred closure and a closure that escapes
+into another function are all correct. Whatever the intent of the architecture
+note, the implementation keeps the enclosing state alive and visible, and item
+11's blanket claim is not supported: no counterexample was produced by any of
+these shapes. What is still true is the *restriction*: a user package is
+rejected without `-allow-closure-captures` (that is a language rule, enforced,
+not a codegen defect) - and the 13 stdlib files that trip it are listed in item
+11 only as files that USE captures, not as files that are broken.
+
+The next step for this item is therefore not a rewrite of 13 files: it is a
+counterexample hunt. Exercise the specific stdlib closures (net/conf.mx's debug
+closure, iter.mx's panic propagation, hooks.mx's exit hook) at RUN time; if one
+misbehaves, the probe above is the template for pinning it.
+
+## FIXED in round 102: the generic-literal trap - a func literal in a monomorphized body lost its signature
+
+The wasm trap recorded in round 93 (and measured with the committed round-90
+compiler, so it predates the func-literal rule) is fixed, and the root cause was
+NOT wasm-specific.
+
+A func literal inside a monomorphized body got its signature from
+`tcResolveFuncInline(e.Type, litScope)` where `litScope` held the package scope
+plus local types - but NOT the enclosing instantiation's type ARGUMENTS. So
+`func(x T) (y T)` resolved `T` to nothing:
+
+    [lit] main.wrap__int32 src=fallback params=[nil] results=[nil]
+
+(measured with instrumented `buildFuncLit`). One nil signature, two symptoms:
+
+- NATIONALLY the call was emitted as a VOID indirect call, so the result was
+  silently DISCARDED - `v = g(v)` left `v` unchanged. An identity closure hides
+  that completely, which is why every probe so far passed natively.
+- on WASM the same signature became `call_indirect (type (i32,i32)->nil)` with
+  the closure value stored void, and the module trapped at run time with
+  `null function or function signature mismatch` (wasm-objdump, node - the
+  browser's message names the same function).
+
+The fix is to put the instantiation's type arguments in the scope, the same way
+local types already were:
+
+    for tn, tt := range fb.typeSubst {
+        ls.Insert(NewTypeName(fb.fn.Pkg.Pkg, tn, tt))
+    }
+
+and then, because a signature with a nil-typed slot is never legitimate, to
+re-resolve once when either source produced one (`sigHasNilSlot`) - the checker's
+own signature for a literal in a generic body can carry the unsubstituted
+TypeParam, and `llvmType` has no case for one.
+
+Verified by the new `generic_closure_result` fixture, whose closure returns a
+CAPTURED value rather than its argument, so a discarded result is observable:
+it PANICS with `replace int32` on the previous compiler (build rc=0, run rc=134)
+and prints `generic closure result ok` on this one, natively and in the browser.
+`generic_funclit_param_type` no longer needs `//:wasmtest skip` - it was the
+fixture that pinned the trap - and passes on both targets.
+
+## FIXED in round 103: an unresolvable import was skipped silently, and four SWEEP entries named packages that do not exist
+
+The loader's dependency walk dropped any import whose path resolved to no
+package:
+
+    pkg := discoverPkg(path, r.root)
+    if pkg == nil {
+        if path == r.rootPkg { fatal("cannot find package " | path) }
+        return                      // <- silent for every DEPENDENCY
+    }
+
+`discoverPkg` returns nil exactly when no `.mx` file is includable for the
+target, so this is the "no such package" case, not a build-tag case that some
+other layer handles. legacy has always failed loud
+(`legacy/loader/mxlist.go`: `resolving %q: package %q not found`), and the
+skipped import drops every symbol the importer needed while the build returns 0.
+The walk now reports `cannot find package X (imported by Y)`, and `C` - the CGo
+pseudo-import legacy skips by name - is skipped here too.
+
+**What it was hiding, measured.** A main importing `_ "encoding/json"`,
+`_ "text/template"`, `_ "regexp"` and `_ "definitely/not/a/package"` built with
+`rc=0`; legacy rejects all four (`package %q not found`). Consequences:
+
+- **Four phase-1b SWEEP entries named packages that do not exist at all**:
+  `encoding/json` and `encoding/xml` went with the reflect/any exodus
+  (`3b6e25e8`, `4da18fb0`), `regexp` and `text/template` with the same sweep.
+  Phase 1b reported "41 packages ok" while skipping four of them - and it was
+  the phase whose whole purpose is to make broken packages visible. They are
+  off the list, and with the loader strict the list is now self-verifying: an
+  entry that does not resolve fails the build.
+- **Ten more importers of nonexistent packages, all unreachable dead code**,
+  each verified to have no in-tree importer before removal: `internal/lazyregexp`,
+  `internal/lazytemplate`, `internal/coverage/pods`,
+  `internal/coverage/cfile/testsupport.mx`, `internal/trace/testtrace`,
+  `internal/trace/traceviewer`, `internal/profile/prune.mx`, and
+  `_mxc_stage4/{syntax,token,cmd/mxlex}` - stale duplicates of
+  `pkg/{syntax,token}` whose imports (`mxc/token`, `mxc/syntax`) never resolved.
+  `index/suffixarray` keeps its SA-IS core: only `FindAllIndex`, whose sole
+  dependency was `regexp`, is gone (a comment names what it did).
+- The `cgo` files are NOT affected: `evalBuildLine` treats an unknown tag as
+  false, so `cgo && !osusergo && unix` excludes them and os/user compiles the
+  pure-Moxie implementation. That is now RUN-verified by `os_user_api`
+  (`user.Current`, `Lookup("root")`, `LookupGroup("root")`, and a lookup that
+  must fail), not merely "it compiles".
+
+**Wood law:** legacy already implements this rule, so the change is stage4
+catching up - no legacy edit is needed, and the diagnostic text deliberately
+mirrors legacy's.
+
+## FIXED in round 103: a function-local named type lost its type descriptor
+
+Found because the loader became strict and `internal/trace` could finally be
+built as a target: **the package did not compile at all**.
+
+    _src_internal_trace.ll:41908: error: use of undefined value
+      '@reflect/types.type:slice:named:trace.perP'
+
+`MutatorUtilizationV2` declares `type perP struct { gc, series int32 }` INSIDE
+the function and uses `[]perP`; the monomorphized `mxutil.Ensure__trace.perP`
+relocates its `[]perP` result through the codec, and the descriptor the codec
+call names had no definition.
+
+Two failures of the same root cause, measured in the IR:
+
+    pre-fix:  @"reflect/types.type:named:main.perP" = constant { i8 0, ptr null }   <- kind 0 stub
+              (no slice descriptor at all; the reference dangles)
+    post-fix: @"reflect/types.type:named:main.perP"          = { i8 58, ... pkgpath, "main.perP" }
+              @"reflect/types.type:pointer:named:main.perP"  = ...
+              @"reflect/types.type:slice:named:main.perP"    = { i8 22, ptr private, ptr named }
+              @"reflect/types.type:pointer:slice:named:main.perP" = ...
+
+**Root cause.** Descriptors are emitted at module tail by RECONSTRUCTING the
+type from the descriptor tail text (`typeFromTail`), because the collected Type
+objects may point into released fn-arena memory. A package-level named type is
+found through `e.pkg.Pkg.Scope` by name; a function-local type has no
+package-scope declaration, so `typeFromTail("named:trace.perP")` returned
+`Typ[Invalid]` (emitting the kind-0 stub, which is a silent wrong descriptor for
+every codec/interface read), and `typeFromTail("slice:named:trace.perP")`
+rebuilt the element as `basic:invalid`, emitting the slice descriptor under the
+name `slice:basic:invalid` - a definition for a name nobody referenced.
+
+**Fix.** A local type declaration now builds its type in the package arena and
+registers it under the tail its own name produces (`registerLocalType`), and
+`typeFromTail` consults that registry after the scope lookups. Two things had to
+be true for this to be sound, and both were checked:
+
+- The registry must outlive the declaring function, so it lives in the PACKAGE
+  arena. `cctx.compileArena` was declared and cleared but never assigned - a
+  dead field; it is now set where the package arena is created and cleared with
+  it (`cctx.localTypeReg = nil` at every `ArenaFree`), which also fixes
+  `collectTypeDesc`'s arena switch for any caller that used cctx rather than the
+  emitter's own copy.
+- A local type can only be NAMED by code in its own package, so the registry of
+  the package being compiled is always the right one - the same module both
+  references and defines these descriptors.
+
+Verified by running: `./src/internal/trace` was rc=1 with clang's "use of
+undefined value" before the change and compiles after it (rc=1 only for the
+library link's `undefined symbol: main.main`). Also verified in the IR, above,
+and by four new SWEEP entries that only compile because of this fix:
+`internal/trace`, `index/suffixarray`, `internal/profile`,
+`internal/coverage/cfile`.
+
+Recorded, NOT fixed (measured, loud not silent): two local types with the SAME
+name in one package collide, because a local type's descriptor tail and
+instantiation symbol are built from pkg+name only:
+
+    func a() { type T struct{ x int32; data []byte };  ... mxutil.Ensure(ts, 1) }
+    func b() { type T struct{ y int32; name []byte };  ... mxutil.Ensure(ts, 1) }
+    main.mx:24: cannot use value of type []main.T as []main.T in assignment
+
+The instantiation cache keyed on the name is the thing to change, and a
+per-declaration discriminator in the local type's name is the fix; it touches
+descriptor tails, instantiation symbols and interface-dispatch matching at once,
+so it wants its own round and its own gate.
+
+Also measured while here, so nobody has to re-derive it: `emitCodecDecode` does
+not call `collectTypeDesc` (only `emitCodecEncode` does). That is not a live
+hole - a decode is always emitted in the same module as its matching encode
+(intra-module return relocation), and cross-module calls do not use the codec
+pair at all: the caller's module of a cross-package call contains ZERO
+`codecDecodeValue` calls (verified on a two-package probe).
+
+## RE-MEASURED in round 103: os/user, the rule-9 arrays, and the live fork path
+
+- **os/user** compiles the pure-Moxie files (`lookup_unix.mx`,
+  `listgroups_unix.mx`, `user.mx`, `lookup.mx`, `lookup_stubs.mx`) with the four
+  cgo-gated files excluded, and it WORKS: `user.Current()` ->
+  `uid=1000 name=mleku home=/home/mleku`, `user.Lookup("root")` -> `uid=0 gid=0`,
+  `user.LookupGroup("root")` -> `name=root gid=0`. Pinned by `os_user_api`.
+- **Rule-9 arrays**: `os.Pipe` already uses `p := []int32{:2}` with a comment
+  saying why. The `[2]T` sites that remain in `src/syscall` are in
+  `exec_linux.mx` (line 5 is `//:build ignore`) and `exec_unix.mx` (same tag),
+  i.e. files no target compiles - reference copies of Go's syscall exec, not
+  live code. The live fork path is `src/os/exec_linux.mx`, it contains no
+  arrays, and it works: `os.StartProcess("/bin/echo", ...)` printed the child's
+  `child-says-hi` and the parent exited 0.
+- **`src/os/exec`** exists but holds only `ExitError`: `exec.Command` is not
+  implemented, so `os/exec` cannot be used by an app yet (a missing feature, not
+  a defect in the item list). `os.StartProcess` is the working entry point.
+
+## FIXED in round 103: unsafe.Pointer's operand, and a bare relative build target
+
+**`unsafe.Pointer(x)` where x is not a pointer is now a compile error.** The type
+is declared `__any->ptr`, so every operand type was accepted and a value that is
+not a pointer silently BECAME one: `unsafe.Pointer(b)` for a struct `b`
+compiled and produced a pointer to nothing, and `unsafe.Pointer(int32(1))`
+folded to a nil Pointer and printed nil. The spec allows exactly a pointer, a
+uintptr, unsafe.Pointer itself or nil, and go/types enforces that on the legacy
+side, so this is stage4 catching up.
+
+Two things had to be measured to make the check right rather than plausible:
+
+- **The constant fold ran before the check.** `unsafe.Pointer(int32(1))` folded
+  to a constant and returned, so a check placed after `foldConstConvert` never
+  saw it (`unsafe.Pointer(int32(1))` compiled, rc=0). The shape checks now run
+  before the fold in both conversion paths.
+- **Type identity is the wrong question.** `uintptr` in this tree is a NAMED
+  type over the target word (`pkg/types/tc_universe.mx`: `NewNamed(NewTypeName(
+  nil, "uintptr", nil), uintptrUnderlying)`), not the Basic, so
+  `V == Typ[Uintptr]` and even a Kind test on the underlying type rejected
+  `unsafe.Pointer(ring)` for a `ring uintptr` parameter - 49 false errors in
+  `src/runtime`. The predicates compare KINDS and accept the uintptr named type
+  by name.
+
+Verified by running: struct / slice / string / int32 / map / constant operands
+are all rejected with `cannot convert value of type T to unsafe.Pointer (only a
+pointer, a uintptr or nil)`; `unsafe.Pointer(&b)`, `unsafe.Pointer(uintptr(0))`
+and `unsafe.Pointer(nil)` compile and run; the whole `net/http` native closure
+and `src/runtime` build with ZERO diagnostics from it, so no first-party site is
+a false positive. Fixture: `reject_unsafe_ptr_nonpointer`.
+
+**A bare relative directory is a target.** `moxie build pkg` died with
+`cannot find package pkg` while `moxie build ./pkg` built the same tree.
+`isDirPath` already called a bare relative directory a directory - that is what
+selects `ensureModuleRoot` - but `discoverPkg`'s directory branch accepts only
+".", "..", "/", "./" and "../", so the bare spelling fell through to
+import-path resolution and resolved to nothing. `normalizeTarget` now spells it
+`./pkg` once, where the target is read, so `discoverPkg`, `targetPkgPath` and
+`compilePath` all see the same thing. Verified by running all five spellings
+(absolute, `./pkg`, `pkg`, `a/b`, `.`) - they build and print `entry ok` - and a
+library target (`src/net/url`) still behaves as a library.
+
+**`debug/gosym` has a functional test written, and it is PARKED, not passing.**
+`gosym_pclntab` builds a Go 1.2 pclntab by hand - header, functab with a
+sentinel PC, two `_func` records, a file table and four pc-value programs - then
+asserts `LookupFunc`, `PCToFunc`, `PCToLine` and `LineTable.PCToLine` against
+it. Writing it found the relocation bug recorded below: `NewTable`'s returned
+Table points at a recycled copy of the caller's LineTable, so `tbl.PCToLine`
+dies in interface dispatch. The fixture now lives in
+`tests/regressions/known_fail/` (outside the suite's auto-run set, so the suite
+stays green) with the analysis in its header, and it moves back the moment that
+bug is fixed. Nothing exercised that parser before this round either way: the
+package compiled and no test called `NewLineTable` or `NewTable`.
+
+## NEW OPEN ITEM (round 103): a returned object keeps a pointer to a COPY of a caller's object, in the callee's frame arena
+
+Found while making `debug/gosym` run-verified. **Not fixed** - it is a runtime
+relocation bug and the reproduction is parked at
+`tests/regressions/known_fail/gosym_pclntab.mx` (out of the suite's auto-run
+set, so the suite stays green; move it back when this closes).
+
+**Shape.** A function stores a POINTER PARAMETER into a local struct and returns
+the address of that local:
+
+    func NewTable(symtab []byte, pcln *LineTable) (out *Table, err error) {
+        var t Table
+        if pcln.isGo12() { t.go12line = pcln }   // caller-arena object
+        ...
+        return &t, nil
+    }
+
+At the return, the relocation is supposed to copy the returned Table into the
+caller's arena and keep `t.go12line` pointing at the caller's own LineTable
+(identity, because it is an ancestor-arena pointer, not the callee's transient
+frame). Measured with temporary prints in `findFunc`, it does not: the Table's
+field points at a second address in the same arena, allocated AFTER the returned
+Table, whose contents are already recycled by the next call.
+
+    main: lt=0x7f218c806c50 tbl=0x7f218c807a20
+    findFunc recv=0x7f218c806c50 v=2 nfun=2      <- lt.PCToLine, correct
+    findFunc recv=0x7f218c808138 v=0 nfun=3620744 <- tbl.PCToLine, recycled copy
+    panic: interface dispatch: no impl for Uint64 (6 impl(s), none matches)
+
+gdb on the failing call: `#1 (*funcTab).uint32  #2 (*funcTab).pc
+#3 (*LineTable).findFunc  #4 (*LineTable).go12PCToFile  #5 (*Table).PCToLine`,
+and the garbage fields are why the interface dispatch cannot match - the iface
+slot read from the recycled memory holds a uint64-shaped word.
+
+**What was ruled out by measurement** (each probe compiled and run): a plain
+`return &local` and `return &CompositeLit` are relocated correctly and survive
+churn; `(ptr, error)` returns in all three spellings (bare `return`, named
+assignment, direct) are correct; a struct embedding `*T` returned by value from
+a method on `T` is correct; a struct with map/interface/slice fields returned
+across a package boundary is correct. What is NOT yet reduced to a small probe is
+this exact combination - caller-arena object + pointer parameter stored into a
+returned local + heavy allocation inside the same call.
+
+**Next step.** Reduce it further with the parked fixture as the oracle (delete
+fields from `LineTable`/`Table` until it stops failing), then fix the relocation:
+the transience test that decides "copy or keep identity" is classifying a
+caller-arena pointer as transient and copying it into the frame arena that the
+return is about to release.
+
+## ENVIRONMENT (round 103): libLLVM-22 is gone, so phase 2 cannot run here
+
+`tests/phase2_selfhost.sh` stops at `selfhost:stage1`:
+
+    legacy compiler failed: purego LLVM: cannot find libLLVM-22; set LLVM_LIB_PATH
+
+`/usr/lib/libLLVM-22.so` no longer exists on this machine and neither does
+`/usr/include/llvm-22`; the only LLVM left is `/usr/lib/llvm-20` (headers AND
+libs, too old for the tree's pin). Earlier sessions had the runtime `.so`, which
+was enough for the prebuilt `legacy/moxie` to run its backend even though it
+could not be rebuilt; now legacy's CODEGEN cannot run either, so the
+legacy -> stage4 half of the bootstrap chain is unavailable here, and the
+`selfhost:stage1` failure is environmental, not a regression.
+
+The stage4 -> stage4 fixpoint is still checkable without legacy, and was:
+
+    tmp/mxc-r103k  (built by tmp/mxc-r103j, -a)  sha256 b1463fa4b268386f27fd0bf67ebe3955b7d4e41c85f8c9e7766d8749106d4f98
+    tmp/mxc-r103l  (built by tmp/mxc-r103k, -a)  sha256 b1463fa4b268386f27fd0bf67ebe3955b7d4e41c85f8c9e7766d8749106d4f98
+
+IDENTICAL, so a generation reproduces itself.
+
+See the round-103 verification block below for the exact hashes and the phases
+that were run in this environment.
+
+## Round 103: what was verified, in this environment
+
+The gate (tests/run.sh --full, MOXIE=tmp/mxc-r103j) was run and reached phase 2,
+where the ENVIRONMENT stops it (libLLVM-22 is gone, above). The phases that do
+not need legacy were then run on their own, and the results are:
+
+| phase | result |
+| --- | --- |
+| 0 regressions (native, 130 fixtures) | PASS, 0 FAIL |
+| 0b restrictions | PASS, 0 FAIL - `reject_missing_import` and `reject_unsafe_ptr_nonpointer` both reject with the expected message |
+| 1 package compilation smoke | PASS |
+| 1b stdlib sweep | **41 packages ok** - includes the four new entries (internal/trace, index/suffixarray, internal/profile, internal/coverage/cfile) |
+| 1c js/wasm sweep | PASS (net/http, path/filepath, syscall/js) |
+| 2 self-hosting chain | ENVIRONMENTAL FAIL at `selfhost:stage1` (legacy's backend cannot load libLLVM-22) |
+| 3 IR validate | PASS |
+| 4 binary smoke | PASS |
+| 5 browser wasm validator | re-run after `os_user_api` was marked native-only: see below |
+| 6 instrumentation | every `:stage4` variant PASS; every `:legacy` variant FAILs for the phase-2 reason |
+
+`selfhost:fixpoint` equivalence was established without legacy, by the stage4
+lineage, with byte-identical output:
+
+    tmp/mxc-r103k  built by tmp/mxc-r103j -a  ==  tmp/mxc-r103l  built by tmp/mxc-r103k -a
+
+Phase 5's first run reported three failures, and NONE of them was a code
+regression - both causes are conditions of the target:
+
+- `const_exact_fold` and `generic_type_method` print through `.String()` on a
+  builtin, and the wasm target does not carry the builtin String() bodies:
+  they live in `src/runtime/stringer.mx` behind `//:build moxie.stringer`, and
+  `buildTagTrue("moxie.stringer")` is deliberately false for wasm
+  (`_mxc_stage4/main.mx`: "the wasm target has its own codec path and does not
+  carry them"), so the interface path uses the synthesized identity wrappers
+  (`emitBasicIdentities`) instead of a real method. A DIRECT `x.String()` call
+  therefore cannot type-check on wasm:
+
+      main.mx:37: String undefined (type int64 has no field or method String)
+
+  Reproduced with the round-95-era `./moxie` as well, so it predates this
+  round. Both fixtures are about constant folding and generic methods, not
+  about wasm stringer support, so they now carry `//:wasmtest skip` with that
+  reason - the explicit opt-out `tests/wasm/validate.sh` documents for exactly
+  this case.
+- `os_user_api` reads /etc/passwd through os/user, and the standalone wasm
+  validator host has no such file; it carries the same opt-out.
+
+Phase 5 was then re-run alone: **total 61, passed 61, failed 0, skipped 0**.
