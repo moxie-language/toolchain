@@ -549,6 +549,50 @@ func (e *irEmitter) collectTypeDesc(t Type) {
 	runtime.SetCurrentArena(saved)
 }
 
+// registerLocalType records a function-local named type under the descriptor
+// tail its own name produces, so typeFromTail can rebuild it at module tail.
+// A local type has no package-scope TypeName, which is the only thing
+// typeFromTail can look up, so without this the descriptor of a local type and
+// of everything containing one degraded: "named:trace.perP" became a kind-0
+// stub and "slice:named:trace.perP" was emitted as slice:basic:invalid, so the
+// codec call referencing it had no definition at all.
+//
+// The registry and its key are compile-arena allocations for the reason
+// collectTypeDesc documents: the declaring function's arena is long gone by
+// the time the tail is read.
+func registerLocalType(named *Named) {
+	if named == nil || named.Obj == nil || named.Obj.Pkg == nil {
+		return
+	}
+	saved := runtime.CurrentArena()
+	runtime.SetCurrentArena(cctx.compileArena)
+	if cctx.localTypeReg == nil {
+		cctx.localTypeReg = map[string]Type{}
+	}
+	key := compileArenaString(normalizePkgPath(named.Obj.Pkg.Path) | "." | named.Obj.Name)
+	if _, ok := cctx.localTypeReg[key]; !ok {
+		cctx.localTypeReg[key] = named
+	}
+	runtime.SetCurrentArena(saved)
+}
+
+// compileArenaString copies s into cctx.compileArena so the key survives the
+// declaring function's arena release. The free-function twin of
+// irEmitter.arenaString, for callers with no emitter. The compile arena must
+// already be current.
+func compileArenaString(s string) (out string) {
+	if len(s) == 0 {
+		return ""
+	}
+	ptr := runtime.ArenaAlloc(cctx.compileArena, uintptr(len(s)))
+	buf := unsafe.Slice((*byte)(ptr), len(s))
+	n := int32(len(s))
+	for i := int32(0); i < n; i++ {
+		buf[i] = s[i]
+	}
+	return string(buf)
+}
+
 
 
 // emitBasicIdentities defines the synthetic String() identity wrappers for
@@ -1025,7 +1069,15 @@ func (e *irEmitter) typeFromTailInner(tail string) (t Type) {
 				}
 			}
 		}
-	
+		// A function-local type has no package-scope entry, so the lookups
+		// above cannot find it; the registry written by registerLocalType is
+		// the only way back from the tail to the type. Its key is the same
+		// string typeDescName builds for a local Named: pkg.Name.
+		if cctx.localTypeReg != nil {
+			if lt, ok := cctx.localTypeReg[rest]; ok {
+				return e.instantiateTail(lt, targs)
+			}
+		}
 		return Typ[Invalid]
 	}
 	return Typ[Invalid]

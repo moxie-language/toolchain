@@ -586,6 +586,26 @@ func isDirPath(pkgPath string) (ok bool) {
 	return len(listFiles(pkgPath, ".mx")) > 0
 }
 
+// normalizeTarget spells a directory target the way the loader expects it.
+// isDirPath already calls a bare relative directory ("pkg", "a/b") a directory,
+// but discoverPkg's directory branch accepts only ".", "..", "/", "./" and
+// "../", so `moxie build pkg` fell through to import-path resolution and died
+// with "cannot find package pkg" while `moxie build ./pkg` built the same tree.
+// Applied once where the target is read, so every consumer - discoverPkg,
+// targetPkgPath, compilePath - sees the same spelling.
+func normalizeTarget(pkgPath string) (out string) {
+	if pkgPath == "" || pkgPath == "." || pkgPath == ".." {
+		return pkgPath
+	}
+	if mxutil.HasPrefix(pkgPath, "/") || mxutil.HasPrefix(pkgPath, "./") || mxutil.HasPrefix(pkgPath, "../") {
+		return pkgPath
+	}
+	if isDirPath(pkgPath) {
+		return "./" | pkgPath
+	}
+	return pkgPath
+}
+
 // ensureModuleRoot settles the one import prefix the compiler maps to its own
 // tree, once per process and before any package discovery. There is no module
 // file: the toolchain's prefix resolves to MOXIEROOT, and every other import
@@ -2947,15 +2967,12 @@ type resolver struct {
 	visited map[string]bool
 	order   []*pkgInfo
 	root    string
-	// rootPkg is the package the build was asked for. A dependency that
-	// resolves to nothing is skipped (builtin-only and optional packages rely
-	// on that), but the requested package resolving to nothing means the path
-	// does not exist - the legacy loader reports that as "cannot find package"
-	// and this compiler used to link a stub instead.
+	// rootPkg is the package the build was asked for. It is named in the
+	// diagnostic for an import that resolves to nothing.
 	rootPkg string
 }
 
-func (r *resolver) walk(path string) {
+func (r *resolver) walk(path, importer string) {
 	if r.visited[path] {
 		return
 	}
@@ -2963,15 +2980,27 @@ func (r *resolver) walk(path string) {
 	if isBuiltinOnly(path) {
 		return
 	}
-	pkg := discoverPkg(path, r.root)
-	if pkg == nil {
-		if path == r.rootPkg {
-			fatal("cannot find package " | path)
-		}
+	if path == "C" {
+		// CGo pseudo-import: there is no package to discover. legacy
+		// (loader/mxlist.go) skips it by name and this side must agree.
 		return
 	}
+	pkg := discoverPkg(path, r.root)
+	if pkg == nil {
+		// An import that resolves to nothing is an ERROR, never a skip.
+		// Skipping one drops every symbol the importer needed and still
+		// reports success, which is how four SWEEP entries (encoding/json,
+		// encoding/xml, regexp, text/template) came to name packages that do
+		// not exist in this tree at all while phase 1b reported "41 packages
+		// ok": a blank import of a missing package compiles to nothing.
+		// legacy answers `package %q not found`; same rule, importer named.
+		if importer == "" {
+			fatal("cannot find package " | path)
+		}
+		fatal("cannot find package " | path | " (imported by " | importer | ")")
+	}
 	for _, imp := range pkg.imports {
-		r.walk(imp)
+		r.walk(imp, path)
 	}
 	r.order = mxutil.Ensure(r.order, 1)
 	push(r.order, pkg)
@@ -2984,7 +3013,7 @@ func resolveAll(rootPkg string, root string) (ss []*pkgInfo) {
 		root:    root,
 		rootPkg: rootPkg,
 	}
-	r.walk(rootPkg)
+	r.walk(rootPkg, "")
 	return r.order
 }
 
@@ -4863,7 +4892,7 @@ func cmdDispIndex() {
 	root := moxieRoot()
 	pkgPath := "."
 	if len(os.Args) > 2 {
-		pkgPath = os.Args[2]
+		pkgPath = normalizeTarget(os.Args[2])
 	}
 	pkgs := resolveAll(pkgPath, root)
 	// pkgHash folds the link set key in, and that is only computed during a
@@ -5202,6 +5231,7 @@ func cmdTest(args []string) {
 	if pkgPath == "" {
 		pkgPath = "."
 	}
+	pkgPath = normalizeTarget(pkgPath)
 	if mxutil.AllocSitesEnabled() || bst.cover {
 		// The site table is built while packages are emitted, so a package
 		// taken from the build cache would be missing from it.
@@ -5677,7 +5707,7 @@ func resolveTestDeps(testPkg *pkgInfo, root string) (ss []*pkgInfo) {
 		root:    root,
 	}
 	for _, imp := range testPkg.imports {
-		r.walk(imp)
+		r.walk(imp, testPkg.path)
 	}
 	r.order = mxutil.Ensure(r.order, 1)
 	push(r.order, testPkg)
@@ -6232,6 +6262,7 @@ func main() {
 	if pkgPath == "" {
 		fatal("no package specified")
 	}
+	pkgPath = normalizeTarget(pkgPath)
 	if outpath == "" {
 		outpath = pathBase(pkgPath)
 	}

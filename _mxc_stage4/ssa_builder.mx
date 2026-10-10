@@ -1,6 +1,7 @@
 package main
 
 import (
+	"runtime"
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"git.smesh.lol/moxie/pkg/syntax"
 	"git.smesh.lol/moxie/pkg/token"
@@ -3010,12 +3011,22 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			// compiler died with SIGSEGV (measured with the committed compiler);
 			// package-level declarations avoid it the same way, with NewNamed
 			// followed by attaching the underlying type.
+			// A local type is still a COMPILE-TIME type: its descriptor is
+			// emitted at module tail, after this function's arena is released.
+			// Building it in the fn arena left the emitter nothing to read -
+			// it reconstructs types from the descriptor tail, and a local type
+			// has no package-scope declaration to find - so the type is built
+			// in the compile arena and registered under the tail its own name
+			// produces. Same reasoning as collectTypeDesc.
+			savedArena := runtime.CurrentArena()
+			runtime.SetCurrentArena(cctx.compileArena)
 			placeholder := NewNamed(NewTypeName(fb.fn.Pkg.Pkg, dd.Name.Value, nil), nil)
 			fb.localTypes[dd.Name.Value] = placeholder
 			resolved := fb.resolveTypeAST(dd.Type)
 			if resolved != nil {
 				placeholder.Under = resolved
 			}
+			runtime.SetCurrentArena(savedArena)
 			bad := false
 			if fb.typeSubst == nil && dd.Type != nil {
 				// A local type declaration's fields are otherwise unchecked:
@@ -3053,6 +3064,8 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			// body must not build a value of it.
 			if bad || resolved == nil {
 				delete(fb.localTypes, dd.Name.Value)
+			} else {
+				registerLocalType(placeholder)
 			}
 		}
 	}
@@ -5174,6 +5187,73 @@ func (fb *ssaFuncBuilder) checkSliceToArrayConv(x SSAValue, dst Type) {
 	push(cctx.compileErrors, "slice-to-array-pointer conversion is not allowed: work in slices")
 }
 
+// isUnsafePtrType reports whether t is the unsafe.Pointer type. Compared by
+// KIND, not identity: a type reaches a body through several construction paths
+// (the universe's Typ sentinels, a signature description, a parsed declaration),
+// and identity comparisons missed shapes that are the same type.
+func isUnsafePtrType(t Type) (ok bool) {
+	if t == nil {
+		return false
+	}
+	b, isB := SafeUnderlying(t).(*Basic)
+	return isB && b.Kind == UnsafePointer
+}
+
+// isUintptrType reports whether t is uintptr. In this tree uintptr is a NAMED
+// type over the target word (pkg/types/tc_universe.mx: NewNamed(NewTypeName(nil,
+// "uintptr", nil), uintptrUnderlying)), not a Basic, so a Kind test alone
+// rejected `unsafe.Pointer(ring)` in 49 places in src/runtime - every one of
+// them the uintptr-to-Pointer conversion the spec allows.
+func isUintptrType(t Type) (ok bool) {
+	if t == nil {
+		return false
+	}
+	if b, isB := SafeUnderlying(t).(*Basic); isB && b.Kind == Uintptr {
+		return true
+	}
+	if n, isN := t.(*Named); isN && n.Obj != nil && n.Obj.Name == "uintptr" {
+		return true
+	}
+	return false
+}
+
+// checkUnsafePtrConv reports a conversion to unsafe.Pointer whose operand is
+// not a pointer, a uintptr, unsafe.Pointer itself or untyped nil.
+//
+// unsafe.Pointer is declared `__any->ptr`, so every operand type was accepted
+// and a value that is not a pointer silently BECAME one - which is how six
+// sites in src/net produced invalid IR instead of a compile error (rounds
+// 43/84: the type checker handed the backend a value whose width it had
+// guessed, and clang rejected the module with no source line). The spec allows
+// exactly a pointer, a uintptr and nil, and go/types enforces that on the
+// legacy side, so this is stage4 catching up rather than a new restriction.
+//
+// A generic body is skipped: its operand type is still a TypeParam, and the
+// instantiation is what knows the concrete type.
+func (fb *ssaFuncBuilder) checkUnsafePtrConv(val SSAValue, T Type) {
+	if val == nil || !isUnsafePtrType(T) {
+		return
+	}
+	V := val.SSAType()
+	if V == nil {
+		return
+	}
+	if _, isTP := V.(*TypeParam); isTP {
+		return
+	}
+	if _, isPtr := SafeUnderlying(V).(*Pointer); isPtr {
+		return
+	}
+	if isUnsafePtrType(V) || isUintptrType(V) {
+		return
+	}
+	if b, isB := SafeUnderlying(V).(*Basic); isB && b.Kind == UntypedNil {
+		return
+	}
+	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+	push(cctx.compileErrors, fb.errPos() | "cannot convert value of type " | V.String() | " to unsafe.Pointer (only a pointer, a uintptr or nil)")
+}
+
 func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 	if fb.fn != nil && fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil {
 		checkParenCallTarget(e, fb.fn.Pkg.Pkg.Path)
@@ -5198,12 +5278,18 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 						retypeUntypedShift(binS, tn.Typ)
 					}
 					fb.checkConstConvert(args2[0], tn.Typ)
+					// The shape checks run BEFORE the fold: foldConstConvert
+					// returns a constant for a constant operand, and a check
+					// placed after it never saw `unsafe.Pointer(int32(1))` -
+					// which folded to a nil Pointer and compiled (measured:
+					// rc=0, printed nil, where go/types rejects the source).
+					fb.checkSliceToArrayConv(args2[0], tn.Typ)
+					fb.checkUnsafePtrConv(args2[0], tn.Typ)
 					if folded, okF := fb.foldConstConvert(args2[0], tn.Typ); okF {
 						return folded
 					}
 					conv := &SSAConvert{X: args2[0]}
 					conv.typ = tn.Typ
-					fb.checkSliceToArrayConv(args2[0], tn.Typ)
 					conv.name = fb.nextName()
 					fb.emit(conv)
 					return conv
@@ -5222,12 +5308,13 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 				retypeUntypedShift(binS, convType)
 			}
 			fb.checkConstConvert(args3[0], convType)
+			fb.checkSliceToArrayConv(args3[0], convType)
+			fb.checkUnsafePtrConv(args3[0], convType)
 			if folded, okF := fb.foldConstConvert(args3[0], convType); okF {
 				return folded
 			}
 			conv := &SSAConvert{X: args3[0]}
 			conv.typ = convType
-			fb.checkSliceToArrayConv(args3[0], convType)
 			conv.name = fb.nextName()
 			fb.emit(conv)
 			return conv

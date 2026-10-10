@@ -1,0 +1,223 @@
+/*
+NOT RUN BY THE SUITE: this fixture fails today, and it is parked here - out of
+tests/regressions/should_compile/ - because it is the reproduction of an OPEN
+RELOCATION BUG (recorded in docs/OPEN_WORK.md, round 103). Move it back the
+moment the bug is fixed; do not delete it.
+
+What fails, measured: `tbl, err := gosym.NewTable(nil, lt)` returns a Table that
+points at a COPY of the caller's LineTable, and that copy is placed in
+NewTable's own frame arena - released when NewTable returns. The next call
+reuses the memory, so `tbl.PCToLine` reads a garbage LineTable (`version=0`,
+`nfunctab=3620744`) and dies in interface dispatch:
+
+    interface dispatch: no impl for Uint64 (6 impl(s), none matches)
+    #1 debug/gosym.(*funcTab).uint32
+    #2 debug/gosym.(*funcTab).pc
+    #3 debug/gosym.(*LineTable).findFunc
+    #4 debug/gosym.(*LineTable).go12PCToFile
+    #5 debug/gosym.(*Table).PCToLine
+
+Instrumented receivers show it: `lt.PCToLine` reaches findFunc with the address
+main holds (0x...6c50, version=2, nfunctab=2), while `tbl.PCToLine` reaches it
+with 0x...8138 - a different address in the same arena, allocated AFTER the
+returned Table, whose contents are already recycled. A pointer PARAMETER stored
+into a local struct whose address is returned (`t.go12line = pcln` then
+`return &t, nil`) is what triggers it; plain `&local` and `&composite` returns
+are relocated correctly, and so are `(ptr, error)` returns - measured, four
+probe shapes, all passing.
+
+-----------------------------------------------------------------------------
+
+debug/gosym parses a Go 1.2 pclntab and answers function and line lookups.
+
+The package compiled but nothing exercised it: no test in the tree called
+NewLineTable or NewTable, so the whole parser (header, functab, _func records,
+the pc-value program decoder, the file table) was unverified. This fixture
+builds a pclntab BY HAND - two functions, two files, both line programs - and
+asserts what the table says, which is the only way to test the parser without
+shipping a Go binary.
+
+Layout written here, all of it in the format parsePclnTab/go12Funcs/
+go12PCToFile/go12PCToLine read (ver12, little endian, ptrsize 8, quantum 1):
+
+    0x000  0xfffffffb magic, two zero bytes, quantum 1, pointer size 8
+    0x008  nfunctab = 2
+    0x010  functab: (pc, funcoff) for each func, then a sentinel PC:
+           0x1000/0x080, 0x1020/0x0C0, sentinel 0x1040
+    0x038  fileoff = 0x100
+    0x080  _func main.alpha: entry 0x1000, nameoff 0x180, deferreturn 8,
+           pcfile 0x1C0, pcln 0x1C2
+    0x0C0  _func main.beta:  entry 0x1020, nameoff 0x190, pcfile 0x1C4,
+           pcln 0x1C6
+    0x100  filetab: count 2, offsets 0x1A0 and 0x1B0
+    0x180  "main.alpha", 0x190 "main.beta", 0x1A0 "alpha.mx", 0x1B0 "beta.mx"
+    0x1C0  pc-value programs, one (value delta, pc delta) varint pair each:
+           file alpha 04 20 (file 1), line alpha 0A 20 (line 4)
+           file beta  06 20 (file 2), line beta  14 20 (line 9)
+
+The varints are zigzag: 0x04 -> +2, 0x0A -> +5, 0x06 -> +3, 0x14 -> +10, and
+the value starts at -1, so alpha reports file 1 / line 4 and beta file 2 /
+line 9, with a pc delta of 32 covering the function.
+*/
+package main
+
+import (
+	"debug/gosym"
+)
+
+// table is the pclntab under construction. The writes go through a receiver:
+// a slice parameter is an immutable borrow, so the byte store has to happen
+// where the slice is owned.
+type table struct {
+	d []byte
+}
+
+func (b *table) put8(off int32, v byte) {
+	b.d[off] = v
+}
+
+func (b *table) put32(off int32, v uint32) {
+	for i := int32(0); i < 4; i++ {
+		b.d[off+i] = byte(v >> (8 * uint32(i)))
+	}
+}
+
+func (b *table) put64(off int32, v uint64) {
+	for i := int32(0); i < 8; i++ {
+		b.d[off+i] = byte(v >> (8 * uint32(i)))
+	}
+}
+
+func (b *table) putStr(off int32, s string) {
+	for i := int32(0); i < int32(len(s)); i++ {
+		b.d[off+i] = s[i]
+	}
+	b.d[off+int32(len(s))] = 0
+}
+
+func build() (d []byte) {
+	d = []byte{:512}
+	for i := int32(0); i < 512; i++ {
+		d[i] = 0
+	}
+	b := table{d: d}
+
+	// Header: magic, two zeros, quantum, pointer size.
+	b.put8(0, 0xfb)
+	b.put8(1, 0xff)
+	b.put8(2, 0xff)
+	b.put8(3, 0xff)
+	b.put8(6, 1)
+	b.put8(7, 8)
+	b.put64(8, 2) // nfunctab
+
+	// functab: pc/funcoff pairs then the sentinel PC.
+	b.put64(0x010, 0x1000)
+	b.put64(0x018, 0x080)
+	b.put64(0x020, 0x1020)
+	b.put64(0x028, 0x0C0)
+	b.put64(0x030, 0x1040)
+	b.put32(0x038, 0x100) // fileoff
+
+	// _func main.alpha at 0x080: entry, nameoff, args, deferreturn, pcfile, pcln.
+	b.put64(0x080, 0x1000)
+	b.put32(0x088, 0x180)
+	b.put32(0x090, 8)
+	b.put32(0x098, 0x1C0)
+	b.put32(0x09C, 0x1C2)
+
+	// _func main.beta at 0x0C0.
+	b.put64(0x0C0, 0x1020)
+	b.put32(0x0C8, 0x190)
+	b.put32(0x0D8, 0x1C4)
+	b.put32(0x0DC, 0x1C6)
+
+	// File table: count then one offset per file (index 0 is the count word,
+	// so file N is read at 4*N).
+	b.put32(0x100, 2)
+	b.put32(0x104, 0x1A0)
+	b.put32(0x108, 0x1B0)
+
+	b.putStr(0x180, "main.alpha")
+	b.putStr(0x190, "main.beta")
+	b.putStr(0x1A0, "alpha.mx")
+	b.putStr(0x1B0, "beta.mx")
+
+	// pc-value programs.
+	b.put8(0x1C0, 0x04)
+	b.put8(0x1C1, 0x20)
+	b.put8(0x1C2, 0x0A)
+	b.put8(0x1C3, 0x20)
+	b.put8(0x1C4, 0x06)
+	b.put8(0x1C5, 0x20)
+	b.put8(0x1C6, 0x14)
+	b.put8(0x1C7, 0x20)
+
+	return b.d
+}
+
+func main() {
+	lt := gosym.NewLineTable(build(), 0x1000)
+	tbl, err := gosym.NewTable(nil, lt)
+	if err != nil {
+		panic("NewTable: " | err.Error())
+	}
+	if len(tbl.Funcs) != 2 {
+		panic("func count " | int32(len(tbl.Funcs)).String())
+	}
+
+	a := tbl.LookupFunc("main.alpha")
+	if a == nil {
+		panic("main.alpha not found")
+	}
+	if a.Entry != 0x1000 || a.End != 0x1020 {
+		panic("alpha bounds " | a.Entry.String() | "-" | a.End.String())
+	}
+	if a.FrameSize != 8 {
+		panic("alpha frame size " | a.FrameSize.String())
+	}
+	b := tbl.LookupFunc("main.beta")
+	if b == nil {
+		panic("main.beta not found")
+	}
+	if b.Entry != 0x1020 || b.End != 0x1040 {
+		panic("beta bounds " | b.Entry.String() | "-" | b.End.String())
+	}
+	if tbl.LookupFunc("main.nope") != nil {
+		panic("a function that is not in the table was found")
+	}
+
+	if f := tbl.PCToFunc(0x1010); f == nil || f.Sym.Name != "main.alpha" {
+		panic("PCToFunc 0x1010 did not resolve to main.alpha")
+	}
+	if f := tbl.PCToFunc(0x1030); f == nil || f.Sym.Name != "main.beta" {
+		panic("PCToFunc 0x1030 did not resolve to main.beta")
+	}
+	if tbl.PCToFunc(0x1040) != nil {
+		panic("PCToFunc found a function at the sentinel PC")
+	}
+	if tbl.PCToFunc(0x0fff) != nil {
+		panic("PCToFunc found a function below the first entry")
+	}
+
+	file, line, fn := tbl.PCToLine(0x1004)
+	if fn == nil || file != "alpha.mx" || line != 4 {
+		panic("PCToLine 0x1004 = " | file | ":" | line.String())
+	}
+	file, line, fn = tbl.PCToLine(0x1030)
+	if fn == nil || file != "beta.mx" || line != 9 {
+		panic("PCToLine 0x1030 = " | file | ":" | line.String())
+	}
+	_, _, fn = tbl.PCToLine(0x2000)
+	if fn != nil {
+		panic("PCToLine resolved a pc outside the table")
+	}
+
+	// PCToLine on the LineTable itself is the deprecated path into the same
+	// decoder, and it must agree with the Table.
+	if lt.PCToLine(0x1004) != 4 || lt.PCToLine(0x1030) != 9 {
+		panic("LineTable.PCToLine disagrees with Table.PCToLine")
+	}
+
+	println("gosym ok")
+}

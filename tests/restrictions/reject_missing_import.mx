@@ -1,0 +1,35 @@
+// expected: cannot find package
+//
+// An import whose path resolves to no package is an ERROR, in every position.
+//
+// Until round 103 this compiler skipped such an import when the importer was a
+// dependency (only the package the build was ASKED for was reported), so a
+// blank import of a package that does not exist compiled to nothing and the
+// build returned 0. legacy has always answered `package %q not found`
+// (loader/mxlist.go resolveDir), so this is the missing half of a rule both
+// compilers must share.
+//
+// What it hid, measured: four entries of the phase-1b stdlib sweep -
+// encoding/json, encoding/xml, regexp and text/template - name packages that
+// do not exist in this tree at all (encoding/json and encoding/xml went with
+// the reflect/any exodus in 3b6e25e8 and 4da18fb0; regexp and text/template
+// with the same sweep), and `_ "encoding/json"` compiled to nothing while the
+// sweep reported "41 packages ok". Ten more files (internal/lazyregexp,
+// internal/lazytemplate, internal/coverage/{cfile,pods},
+// internal/trace/{testtrace,traceviewer}, internal/profile/prune.mx,
+// index/suffixarray, and the stale _mxc_stage4/{syntax,token,cmd/mxlex}
+// copies) imported packages that do not exist and were never built by
+// anything - they are removed in the same round.
+//
+// The blank import is the case that must not regress: a used import fails
+// later anyway, but a blank one has no symbol to miss, and a side-effect
+// import that silently does not happen is the worst version of this bug.
+package main
+
+import (
+	_ "nonexistent/pkg"
+)
+
+func main() {
+	println("unreachable")
+}

@@ -1,0 +1,68 @@
+//:wasmtest skip
+/*
+WASM TEST SKIPPED, and the reason is the target, not the fixture: os/user reads
+/etc/passwd and /etc/group through the filesystem, and the standalone wasm
+validator host has no such files, so every lookup returns "no such file". The
+native run is where this package's behaviour can be asserted (see below), and
+the wasm target's os/user COMPILATION is covered by phase 1c.
+os/user resolves users and groups with the pure-Moxie implementation.
+
+The package carries both routes the way Go does: `cgo_lookup_cgo.mx`,
+`cgo_lookup_unix.mx`, `cgo_listgroups_unix.mx` and `getgrouplist_unix.mx` are
+`cgo && !osusergo && unix`, and `lookup_unix.mx`, `listgroups_unix.mx` and
+`lookup_stubs.mx` are `!cgo || osusergo`. Moxie has no cgo and no `osusergo`
+build tag, and evalBuildLine treats an unknown tag as false, so the cgo files
+are excluded and the pure implementation is the one that compiles - verified
+here by running it, because "the package compiles" was exactly the claim that
+turned out to be worth nothing for four other packages in round 103 (the
+sweep listed packages that do not exist and reported them ok).
+
+`lookup_stubs.mx` and `lookup_unix.mx` are BOTH selected by `!cgo`; the stub
+file holds only the declarations the unix file does not define, which is why
+the pair links.
+
+Every lookup gets its own error name: Moxie rejects a redeclaration that
+shadows an enclosing one, so `u, err := ...` twice in one scope is a compile
+error, not the Go idiom it looks like.
+*/
+package main
+
+import (
+	"os/user"
+)
+
+func main() {
+	u, cerr := user.Current()
+	if cerr != nil {
+		panic("user.Current: " | cerr.Error())
+	}
+	if len(u.Uid) == 0 || len(u.Username) == 0 {
+		panic("user.Current returned an empty uid/username")
+	}
+
+	r, lerr := user.Lookup("root")
+	if lerr != nil {
+		panic("user.Lookup(root): " | lerr.Error())
+	}
+	if r.Uid != "0" || r.Gid != "0" {
+		panic("user.Lookup(root) uid=" | r.Uid | " gid=" | r.Gid)
+	}
+	if len(r.Username) == 0 || len(r.HomeDir) == 0 {
+		panic("user.Lookup(root) returned an empty username/home")
+	}
+
+	g, gerr := user.LookupGroup("root")
+	if gerr != nil {
+		panic("user.LookupGroup(root): " | gerr.Error())
+	}
+	if g.Name != "root" || g.Gid != "0" {
+		panic("user.LookupGroup(root) name=" | g.Name | " gid=" | g.Gid)
+	}
+
+	missing, merr := user.Lookup("moxie-no-such-user-42")
+	if merr == nil {
+		panic("user.Lookup of a nonexistent user did not fail, returned " | missing.Username)
+	}
+
+	println("os/user ok")
+}

@@ -106,6 +106,18 @@ type compileCtx struct {
 	irOutputFile         string
 	curPkgPath           string
 	lastMxhData          string
+	// localTypeReg maps the descriptor tail a FUNCTION-LOCAL named type
+	// produces ("pkg.Name", the string typeDescName builds) to the type
+	// itself. Descriptors are emitted from the tail text at module tail, long
+	// after the declaring function returned, and a local type has no
+	// package-scope declaration for typeFromTail to find: without this
+	// registry "named:trace.perP" came out as a {i8 0, ptr null} stub and
+	// "slice:named:trace.perP" was emitted under a DIFFERENT name
+	// (slice:basic:invalid), leaving the codec call's reference dangling -
+	// internal/trace did not compile at all ("use of undefined value
+	// '@reflect/types.type:slice:named:trace.perP'"). Entries live in
+	// cctx.compileArena, so reading them at module tail is safe.
+	localTypeReg         map[string]Type
 }
 
 // wasmSpawnTarget is one function reachable through spawn() on the wasm
@@ -1106,6 +1118,10 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 
 	memLine("   ci-pre "|name)
 	arena := runtime.ArenaNew(compileArenaSize)
+	// The package arena apart from the arena STACK: anything that must survive
+	// the per-function fn arenas (descriptor state, the local-type registry)
+	// is allocated here and freed with the package.
+	cctx.compileArena = arena
 	runtime.ManualArenaEnter(arena)
 
 	pkg, file := typeCheckPkg(src, name, arena)
@@ -1133,6 +1149,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 		copy(resCopy, res)
 		runtime.ArenaFree(arena)
 		cctx.compileArena = nil
+		cctx.localTypeReg = nil
 		return string(resCopy)
 	}
 
@@ -1158,6 +1175,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 		copy(resCopy, res)
 		runtime.ArenaFree(arena)
 		cctx.compileArena = nil
+		cctx.localTypeReg = nil
 		return string(resCopy)
 	}
 	emitter := newIREmitter(ssaPkg, triple, int32(len(cctx.tcPkgSrc)))
@@ -1192,6 +1210,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	// Bulk reclaim: reset arena for next compilation.
 	runtime.ArenaFree(arena)
 	cctx.compileArena = nil
+	cctx.localTypeReg = nil
 	memLine("   ci-free "|name)
 	return result
 }

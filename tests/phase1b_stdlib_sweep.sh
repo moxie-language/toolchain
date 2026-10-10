@@ -28,6 +28,16 @@ echo "=== Phase 1b: Stdlib compile sweep ==="
 
 # Packages that must compile. net/http carries the crypto/tls closure, which is
 # what reaches crypto/ecdsa and its fips140 generics.
+#
+# Every entry here must RESOLVE. It did not always: encoding/json, encoding/xml,
+# regexp and text/template were on this list while no such package existed in
+# the tree, and the sweep reported "41 packages ok" because the compiler skipped
+# an import it could not resolve instead of failing (round 103). encoding/json
+# and encoding/xml went with the reflect/any exodus (3b6e25e8, 4da18fb0);
+# regexp and text/template are not reflect-free either, and every in-tree
+# importer of them was dead code, removed in the same round. With the loader
+# strict, an entry naming a package that does not exist fails the build - so
+# this list is now self-verifying and a missing package can never pass again.
 SWEEP=(
 	compress/flate
 	compress/gzip
@@ -47,13 +57,15 @@ SWEEP=(
 	encoding/base64
 	encoding/binary
 	encoding/hex
-	encoding/json
-	encoding/xml
 	hash/crc32
 	hash/fnv
+	index/suffixarray
+	internal/coverage/cfile
 	internal/coverage/cformat
 	internal/coverage/encodecounter
 	internal/coverage/encodemeta
+	internal/profile
+	internal/trace
 	internal/trace/internal/tracev1
 	math
 	math/big
@@ -64,10 +76,8 @@ SWEEP=(
 	net/textproto
 	net/url
 	os/user
-	regexp
 	runtime/trace
 	text/tabwriter
-	text/template
 	time
 	unicode/utf8
 )
