@@ -7151,6 +7151,30 @@ func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ Type, sl *Sl
 	return ms
 }
 
+// sigHasNilSlot reports whether a signature has a parameter or result whose type
+// did not resolve. Nil is never a legal slot type, so this is the test for "this
+// signature was resolved without enough context".
+func sigHasNilSlot(sig *Signature) (ok bool) {
+	if sig == nil {
+		return true
+	}
+	if sig.Params != nil {
+		for i := int32(0); i < sig.Params.Len(); i++ {
+			if sig.Params.At(i) == nil || sig.Params.At(i).Typ == nil {
+				return true
+			}
+		}
+	}
+	if sig.Results != nil {
+		for i := int32(0); i < sig.Results.Len(); i++ {
+			if sig.Results.At(i) == nil || sig.Results.At(i).Typ == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (fb *ssaFuncBuilder) buildFuncLit(e *syntax.FuncLit) (s SSAValue) {
 	var sig *Signature
 	if fb.info != nil {
@@ -7167,16 +7191,37 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *syntax.FuncLit) (s SSAValue) {
 	// local type names in a child scope. Scoping is Go's, so fb.localTypes is
 	// exactly what is visible at this point in the body.
 	litScope := fb.fn.Pkg.Pkg.Scope
-	if len(fb.localTypes) > 0 {
+	if len(fb.localTypes) > 0 || len(fb.typeSubst) > 0 {
 		ls := NewScope(litScope)
 		for ln, lt := range fb.localTypes {
 			ls.Insert(NewTypeName(fb.fn.Pkg.Pkg, ln, lt))
+		}
+		// The enclosing instantiation's type ARGUMENTS, so a literal inside a
+		// monomorphized body resolves `func(x T) (y T)` to the substituted
+		// types. Without them T resolved to nothing and the literal's signature
+		// came out params=[nil] results=[nil]: the CALL was emitted as a void
+		// indirect call (native silently ignored the result; wasm trapped on
+		// "null function or function signature mismatch" because the closure
+		// value was stored void). This is the generic-literal trap recorded in
+		// the wasm section.
+		for tn, tt := range fb.typeSubst {
+			ls.Insert(NewTypeName(fb.fn.Pkg.Pkg, tn, tt))
 		}
 		litScope = ls
 	}
 	if sig == nil && e.Type != nil {
 		sig = tcResolveFuncInline(e.Type, litScope)
 	}
+	// A signature with a nil-typed slot is never legitimate: re-resolve it with
+	// the scope above (which now carries the type arguments). The checker's own
+	// signature for a literal in a generic body can carry the unsubstituted
+	// TypeParam, and llvmType has no case for one.
+	if e.Type != nil && sigHasNilSlot(sig) {
+		if alt := tcResolveFuncInline(e.Type, litScope); alt != nil && !sigHasNilSlot(alt) {
+			sig = alt
+		}
+	}
+
 	if fb.typeSubst == nil && e.Type != nil {
 		// A literal whose enclosing body is NOT a generic instantiation cannot
 		// name a type parameter of its own, so every name in its signature must

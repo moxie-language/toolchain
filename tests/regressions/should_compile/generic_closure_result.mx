@@ -1,0 +1,62 @@
+/*
+A func literal inside a GENERIC body returns its result, natively AND on wasm.
+
+The literal's signature was resolved without the enclosing instantiation's type
+arguments, so `func(x T) (y T)` came out params=[nil] results=[nil] and the CALL
+was emitted as a VOID indirect call:
+
+- natively the result was silently DISCARDED - `v = g(v)` left v unchanged, so an
+  identity closure looked correct and the bug hid behind that. A closure that
+  returns something else exposes it immediately.
+- on wasm the same signature produced
+  `call_indirect (type (i32,i32)->nil)` against a closure value stored void, and
+  the program trapped with "null function or function signature mismatch"
+  (recorded in the wasm section of docs/OPEN_WORK.md as the generic-literal trap).
+
+`replace` is the shape that fails both ways before the fix and passes after:
+it IGNORES its first argument and returns its second, so a discarded result is
+observable, and the wasm call has a real i32 result.
+
+The closure takes both values as PARAMETERS on purpose: a closure that captured
+`w` from the enclosing scope is a language-restriction violation for user code
+(`closure captures outer variable(s) [w]`), and the suite compiles fixtures from
+a path where that rule applies - unlike a build inside the tree, which does not
+enforce it. Capture-free is what a user fixture must be.
+*/
+package main
+
+func replace[T comparable](v T, w T, n int32) (r T) {
+	g := func(x T, y T) (z T) {
+		return y
+	}
+	for i := int32(0); i < n; i++ {
+		v = g(v, w)
+	}
+	return v
+}
+
+func identity[T comparable](v T, n int32) (r T) {
+	g := func(x T) (y T) {
+		return x
+	}
+	for i := int32(0); i < n; i++ {
+		v = g(v)
+	}
+	return v
+}
+
+func main() {
+	if replace(int32(1), int32(9), 1) != 9 {
+		panic("replace int32")
+	}
+	if replace("a", "b", 2) != "b" {
+		panic("replace string")
+	}
+	if identity(int32(7), 3) != 7 {
+		panic("identity int32")
+	}
+	if identity("hi", 1) != "hi" {
+		panic("identity string")
+	}
+	println("generic closure result ok")
+}
