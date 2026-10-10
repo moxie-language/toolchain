@@ -5768,14 +5768,27 @@ func (fb *ssaFuncBuilder) reportUndefinedField(sel *syntax.SelectorExpr, t Type)
 	if sel == nil || sel.Sel == nil || sel.Sel.Value == "" {
 		return
 	}
-	// User packages only, like the other assignability diagnostics: the stdlib
-	// has selector shapes stage4 cannot resolve yet (a method on a generic
-	// instantiation, e.g. array.Array.Next) and reporting those would be
-	// false errors. go/types still covers the stdlib on the legacy side.
 	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
 		return
 	}
-	if !isUserPackagePath(restrictPath(fb.fn.Pkg.Pkg.Path)) {
+	// The tree's OWN packages are all judged now, stdlib included. This used to
+	// report for USER packages only, because the stdlib had selector shapes
+	// stage4 could not resolve yet (a method on a generic instantiation, e.g.
+	// array.Array.Next) and those were false errors. The cost of that exclusion
+	// was measured in rounds 99-100: an unresolved call in a stdlib body was
+	// dropped SILENTLY - `l.IP.Equal(r.IP)` after net.IP became an alias,
+	// `header.get(...)` after Header did - surfacing at best as a misleading
+	// arity error and at worst in clang as
+	// "'%t316' defined with type 'i32' but expected '{ ptr, i64, i64 }'", with no
+	// source line at all. With first-party stdlib judged, the sweep immediately
+	// found six more net.IP call sites that greps had missed.
+	//
+	// VENDORED golang.org/x/... stays excluded: its port is known incomplete and
+	// a call through a function-typed field there (`p.bidirule(label)`, a
+	// func([]byte) bool field on idna.Profile) is exactly the false-positive
+	// shape the old path check protected against. If another false error
+	// appears, narrow the SHAPE checks below rather than widening this.
+	if vpath := restrictPath(fb.fn.Pkg.Pkg.Path); mxutil.HasPrefix(vpath, "golang.org/x/") || mxutil.HasPrefix(vpath, "vendor/golang.org/x/") {
 		return
 	}
 	// A field selected on a map value (m[k].f) is legal even though the map
