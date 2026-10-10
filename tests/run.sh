@@ -3,12 +3,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MOXIEROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Working artifacts live in the TREE (./tmp, git-ignored), not /tmp: /tmp is
-# wiped between sessions here, and losing a half-finished gate's temp root,
-# status file and logs costs a full re-run. Override either variable to put them
-# elsewhere.
+# Two different lifetimes, two different places:
+#   STATUSFILE lives in the TREE's ./tmp (git-ignored) so a half-finished gate's
+#   status survives a /tmp wipe; /tmp is wiped between sessions here.
+#   TMPROOT holds the throwaway fixture copies and MUST stay OUTSIDE the tree:
+#   a fixture inside the tree is not a user package, so the language
+#   restrictions do not fire (measured: the same fixture is rejected from /tmp
+#   and from $HOME, and ACCEPTED from $MOXIEROOT/tmp). $HOME rather than /tmp so
+#   a phase's logs can still be read after a wipe.
 export STATUSFILE="${STATUSFILE:-$MOXIEROOT/tmp/moxie-test-status-$$}"
-export TMPROOT="${TMPROOT:-$MOXIEROOT/tmp/moxie-tests-$$}"
+export TMPROOT="${TMPROOT:-${HOME:-/tmp}/moxie-tests-$$}"
 export MOXIEROOT
 > "$STATUSFILE"
 mkdir -p "$TMPROOT"

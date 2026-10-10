@@ -20,7 +20,9 @@ NC='\033[0m'
 # Same policy as run.sh: artifacts in the tree's ./tmp, never /tmp, which is
 # wiped between sessions here.
 STATUSFILE="${STATUSFILE:-$MOXIEROOT/tmp/moxie-test-status-$$}"
-TMPROOT="${TMPROOT:-$MOXIEROOT/tmp/moxie-tests-$$}"
+# Outside the tree on purpose: a fixture inside the tree is not a user package,
+# so the restriction rules would not fire (see run.sh).
+TMPROOT="${TMPROOT:-${HOME:-/tmp}/moxie-tests-$$}"
 
 log_pass() {
 	local name="$1" extra="$2"
