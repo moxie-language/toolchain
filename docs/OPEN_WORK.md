@@ -7359,3 +7359,84 @@ whichever sees it first), and an undefined type name inside `[]chan T` must be
 `undefined: T`. Next round starts by instrumenting `buildExpr`'s nil-returning
 and `default` paths to name the node that is dropped.
 
+
+## FIXED in round 112: a diagnostic that was printed and then ignored - the build exited 0 with a working binary
+
+The open item from round 111 was exact: `x := []chan abc + 1`, `x := []chan
+__slicealloc(int32, 2)` and `x := []int32` were all accepted, the trailing
+expression vanished, and no undefined-type error was ever raised. What it did
+not yet name was the mechanism.
+
+The compiler was ALREADY reporting it:
+
+```
+compile error: cannot resolve type of short var x in main (rhs=nil)
+main.mx:5: cannot use value of type []int32 as int32 in assignment
+mxc: compile error for main
+```
+
+Both lines appear, and the build still succeeds. `buildExpr` returns nil for a
+type node, `buildShortVarDecl` reads that as "type could not be resolved",
+writes the diagnostic straight to stderr with `mxutil.WriteStr`, substitutes
+`Typ[Int32]` so the pass can continue, and returns. The list that actually fails
+a build is `cctx.compileErrors`, which `CompileToIR` gates on and turns into the
+`;`-prefixed error IR that `compileSource` funnels into `fatal("compile error
+for " | pkgName)`. A direct stderr write never reaches it, so the compiler
+exits 0 with a binary built from the placeholder type.
+
+**A measurement decided where the fix goes.** Instrumenting `buildExpr`'s
+fallthrough and compiling the compiler's own closure counted the nodes dropped
+there:
+
+```
+230 SLICE_TYPE
+  5 CHAN_TYPE
+```
+
+So the fallthrough is hit constantly by REAL code - the type of a composite
+literal, the target of a conversion (`[]byte(s)`) - and reporting there would
+break every slice literal in the tree. The nil is not the bug; the bug is the
+consumer that treats nil as a value. The fallthrough now says so in a comment
+and stays silent.
+
+**The fix** is one entry point and its callers:
+
+- `reportCompileError(msg)` in `ir_typecheck.mx`, beside `cctx`, registers a
+  diagnostic the way the typechecker always has;
+- all six diagnostics that wrote to stderr and continued now register instead -
+  the short-var one, `new()`, the two `clear` sites, and the rune/string
+  concatenation one, which was pushing AND writing, so the write was a duplicate;
+- `buildShortVarDecl` reports once, and only when nothing upstream already
+  explained the statement (`compileErrorCount` before the RHS build), naming the
+  kind when the RHS is a type node and the variable otherwise. `Typ[Int32]`
+  stays as the continue-and-collect placeholder, and the registered error is
+  what fails the build.
+
+**Verified by running** (`reject_type_as_value`, new phase-0b restriction; each
+is now a nonzero exit with the message, and each was ACCEPTED before):
+
+| source | now |
+| --- | --- |
+| `x := []int32` | `cannot use a slice type as a value` |
+| `x := []chan int32` | `cannot use a slice type as a value` |
+| `x := []chan abc` | `cannot use a slice type as a value` |
+| `x := map[int32]int32` | `cannot use a map type as a value` |
+| `x := []chan abc + 1` | `cannot resolve the type of y in main - the right-hand side is not a value` |
+| `x := []chan __slicealloc(int32, 2)` | `cannot resolve the type of y in main - the right-hand side is not a value` |
+
+and every legitimate form still compiles: `x := []int32{:2}`, `var y []int32`
+with `y = []int32{1, 2}`, `s := []byte("hi")`, `m := map[int32]int32{}`,
+`x := []T{{1}}`.
+
+`x := []int32` is NOT a supported declaration form, which is what makes
+rejecting it right rather than a regression: it declares `x` as int32 (the
+placeholder), proven by `main.mx:5: cannot use value of type []int32 as int32 in
+assignment`, and no file in `src/`, `pkg/` or `cmd/` uses a bare type as a
+short-var RHS. The gate logs for round 111 contained ZERO `compile error:` lines,
+so no package or fixture was relying on an ignored diagnostic - which is why
+routing all six through the gate could be done in one step.
+
+Wording nuance left as is: for `x := []chan __slicealloc(int32, 2)` the RHS is a
+CALL whose callee is the type, so the message says the type of the variable
+could not be resolved rather than naming the callee. It is loud and it fails the
+build; naming the callee is a refinement, not a correctness gap.
