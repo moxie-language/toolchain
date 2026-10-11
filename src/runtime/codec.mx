@@ -541,8 +541,13 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 			codecWriteVarint(cb, uint64(uint32(idx)))
 			return
 		}
-		codecSeenAdd(ss, p)
+		// The target is registered only by the paths that do NOT descend into
+		// it (stable, escaped). A descending pointer leaves registration to the
+		// pointee's own branch, which registers its address BEFORE its children
+		// on both sides - adding it here as well was a second entry the decoder
+		// did not make, and that asymmetry is what shifted back-references.
 		if codecIsStableAddr(uintptr(p)) {
+			codecSeenAdd(ss, p)
 			codecNoteStable(uintptr(p))
 			codecWriteVarint(cb, codecTagStable)
 			codecWriteRaw(cb, unsafe.Pointer(&p), 8)
@@ -562,11 +567,13 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 			// registration - this is the path the relay reported three times a
 			// run (pointee arena class 1), leaking a frame for every one.
 			if sovFindContainingArena(uintptr(p)) != nil {
+				codecSeenAdd(ss, p)
 				codecNoteStable(uintptr(p))
 				codecWriteVarint(cb, codecTagStable)
 				codecWriteRaw(cb, unsafe.Pointer(&p), 8)
 				return
 			}
+			codecSeenAdd(ss, p)
 			codecEscapeNote()
 			codecWriteVarint(cb, codecTagStable)
 			codecWriteRaw(cb, unsafe.Pointer(&p), 8)
@@ -627,12 +634,30 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		nf := typ.NumField()
 		codecWriteVarint(cb, codecTagStruct)
 		codecWriteVarint(cb, uint64(uint32(nf)))
-		// Register all field addresses in the seen-set so that pointer
-		// fields referencing other fields within the same struct (e.g.,
-		// fmt.buf *buffer pointing to pp.buf) are handled as back-references
-		// instead of serializing duplicate copies.
+		// Register the struct's own address FIRST, then every field address.
+		// The decode side registers in exactly this order (codecDecodeValue's
+		// KindStruct case and codecDecodeInto's), and the two tables are
+		// position-indexed: a back-reference carries the encoder's index and the
+		// decoder resolves it by position, so any extra or missing entry on
+		// either side shifts every later back-reference to the WRONG object.
+		//
+		// Registering the base is what makes a self-referential struct work:
+		// the address is in the table before its fields are walked, so a field
+		// pointing back at the struct - or at an enclosing slice element - is
+		// encoded as a back-reference rather than recursively re-encoded.
+		codecSeenAdd(ss, ptr)
 		for i := int32(0); i < nf; i++ {
 			off := typ.StructFieldOffset(i)
+			if off == 0 {
+				// Field 0 sits AT the struct's address, so the base entry
+				// above already covers it. Registering both would add one
+				// entry per struct that the other side would have to mirror
+				// and that every later back-reference index would have to
+				// step over - the tables are position-indexed and looked up
+				// by a linear scan, so extra entries are both a correctness
+				// hazard and a cost.
+				continue
+			}
 			fp := unsafe.Add(ptr, off)
 			codecSeenAdd(ss, fp)
 		}
@@ -682,6 +707,39 @@ func codecDecodeInto(cb *CodecBuf, ds *codecDecodeSeen, dst unsafe.Pointer, typ 
 		cb.pos += int32(sz)
 		return
 	}
+	if k == KindStruct {
+		// Decoded IN PLACE, exactly like codecDecodeValue's KindStruct case:
+		// the seen-set entry for a struct must be the address its fields and any
+		// back-references end up living at. Registering a temporary buffer and
+		// then memcpy-ing it into the field left every internal back-reference
+		// pointing at that temporary, and shifted the decode-side table against
+		// the encode side's.
+		tag := codecReadVarint(cb)
+		if tag != codecTagStruct {
+			runtimePanic("codec expected struct tag")
+		}
+		nf := int32(codecReadVarint(cb))
+		codecDecodeSeenAdd(ds, dst)
+		for i := int32(0); i < nf; i++ {
+			off := typ.StructFieldOffset(i)
+			if off == 0 {
+				continue // covered by the base entry, as on the encode side
+			}
+			fp := unsafe.Add(dst, off)
+			codecDecodeSeenAdd(ds, fp)
+		}
+		expectedNf := typ.NumField()
+		if nf != expectedNf {
+			runtimePanic("codec struct field count mismatch")
+		}
+		for i := int32(0); i < nf; i++ {
+			ft := typ.StructFieldType(i)
+			off := typ.StructFieldOffset(i)
+			fp := unsafe.Add(dst, off)
+			codecDecodeInto(cb, ds, fp, ft)
+		}
+		return
+	}
 	if k == KindPointer {
 		tag := codecReadVarint(cb)
 		switch tag {
@@ -695,11 +753,11 @@ func codecDecodeInto(cb *CodecBuf, ds *codecDecodeSeen, dst unsafe.Pointer, typ 
 				runtimePanic("codec backref nil")
 			}
 			*(*unsafe.Pointer)(dst) = orig
-			codecDecodeSeenAdd(ds, orig)
 			return
 		case codecTagPtr:
+			// The pointee's own decode registers its address (before its
+			// children); adding it again here desynchronised the two tables.
 			inner := codecDecodeValue(cb, ds, typ.Elem())
-			codecDecodeSeenAdd(ds, inner)
 			*(*unsafe.Pointer)(dst) = inner
 			return
 		case codecTagStable:
@@ -818,11 +876,9 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 			}
 			buf := alloc(typ.Size(), unsafe.Pointer(typ))
 			*(*unsafe.Pointer)(buf) = orig
-			codecDecodeSeenAdd(ds, orig)
 			return buf
 		case codecTagPtr:
 			inner := codecDecodeValue(cb, ds, typ.Elem())
-			codecDecodeSeenAdd(ds, inner)
 			buf := alloc(typ.Size(), unsafe.Pointer(typ))
 			*(*unsafe.Pointer)(buf) = inner
 			return buf
@@ -876,6 +932,9 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 		codecDecodeSeenAdd(ds, buf)
 		for i := int32(0); i < nf; i++ {
 			off := typ.StructFieldOffset(i)
+			if off == 0 {
+				continue // covered by the base entry, as on the encode side
+			}
 			fp := unsafe.Add(buf, off)
 			codecDecodeSeenAdd(ds, fp)
 		}
@@ -1154,7 +1213,8 @@ func codecEncodePtrValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, ele
 		codecWriteVarint(cb, uint64(uint32(idx)))
 		return
 	}
-	codecSeenAdd(ss, ptr)
+	// No registration here: the pointee's own branch registers its address
+	// before its children, which is the entry the decoder creates too.
 	codecWriteVarint(cb, codecTagPtr)
 	codecEncodeValue(cb, ss, ptr, elemType)
 }

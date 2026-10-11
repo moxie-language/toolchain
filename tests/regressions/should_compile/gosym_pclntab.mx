@@ -1,32 +1,32 @@
+//:wasmtest skip
+// Native-only: the asserts print through .String() on builtins, and the wasm
+// target does not carry the builtin String() bodies (they are behind the
+// moxie.stringer tag, which is off there). tests/wasm/validate.sh documents
+// this opt-out; the fixture is about the pclntab parser, not about wasm
+// stringers.
 /*
-NOT RUN BY THE SUITE: this fixture fails today, and it is parked here - out of
-tests/regressions/should_compile/ - because it is the reproduction of an OPEN
-RELOCATION BUG (recorded in docs/OPEN_WORK.md, round 103). Move it back the
-moment the bug is fixed; do not delete it.
+debug/gosym parses a Go 1.2 pclntab and answers function and line lookups.
 
-What fails, measured: `tbl, err := gosym.NewTable(nil, lt)` returns a Table that
-points at a COPY of the caller's LineTable, and that copy is placed in
-NewTable's own frame arena - released when NewTable returns. The next call
-reuses the memory, so `tbl.PCToLine` reads a garbage LineTable (`version=0`,
-`nfunctab=3620744`) and dies in interface dispatch:
+The package compiled but nothing exercised it: no test in the tree called
+NewLineTable or NewTable, so the whole parser (header, functab, _func records,
+the pc-value program decoder, the file table) was unverified. This fixture
+builds a pclntab BY HAND - two functions, two files, both line programs - and
+asserts what the table says, which is the only way to test the parser without
+shipping a Go binary.
 
-    interface dispatch: no impl for Uint64 (6 impl(s), none matches)
-    #1 debug/gosym.(*funcTab).uint32
-    #2 debug/gosym.(*funcTab).pc
-    #3 debug/gosym.(*LineTable).findFunc
-    #4 debug/gosym.(*LineTable).go12PCToFile
-    #5 debug/gosym.(*Table).PCToLine
+Writing it found a CODEC bug, fixed in the same round: a pointer that closes a
+cycle back into the returned object's own slice was not fixed up, because the
+decode-side seen table grew an extra entry per struct and per pointer, so every
+later back-reference resolved by position to the WRONG object. `NewTable`'s
+Table pointed at a recycled copy of the caller's LineTable and the process died
+in interface dispatch ("no impl for Uint64"). The fixture is the reproduction
+that pinned it and now passes; see docs/OPEN_WORK.md, round 104.
 
-Instrumented receivers show it: `lt.PCToLine` reaches findFunc with the address
-main holds (0x...6c50, version=2, nfunctab=2), while `tbl.PCToLine` reaches it
-with 0x...8138 - a different address in the same arena, allocated AFTER the
-returned Table, whose contents are already recycled. A pointer PARAMETER stored
-into a local struct whose address is returned (`t.go12line = pcln` then
-`return &t, nil`) is what triggers it; plain `&local` and `&composite` returns
-are relocated correctly, and so are `(ptr, error)` returns - measured, four
-probe shapes, all passing.
+File-table note, learned the hard way: the first word of the file table is the
+table's own LENGTH, not the file count - a table with two files is three words
+(length, offset, offset) and file number N is read at 4*N. Written as "2" the
+second file is unreachable and the Uint32 read runs off the end.
 
------------------------------------------------------------------------------
 
 debug/gosym parses a Go 1.2 pclntab and answers function and line lookups.
 
@@ -132,9 +132,12 @@ func build() (d []byte) {
 	b.put32(0x0D8, 0x1C4)
 	b.put32(0x0DC, 0x1C6)
 
-	// File table: count then one offset per file (index 0 is the count word,
-	// so file N is read at 4*N).
-	b.put32(0x100, 2)
+	// File table: the first word is the table's own LENGTH (a table with two
+	// files is three words: length, offset, offset) and a file number N is read
+	// at 4*N, so the pc-value programs below use 1 and 2. Getting this wrong is
+	// how the first version of this fixture failed: it wrote 2 for two files,
+	// which makes file 2 unreachable and the Uint32 read run off the end.
+	b.put32(0x100, 3)
 	b.put32(0x104, 0x1A0)
 	b.put32(0x108, 0x1B0)
 

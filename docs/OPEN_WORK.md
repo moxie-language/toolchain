@@ -6805,3 +6805,97 @@ Phase 5 was then re-run alone: **total 61, passed 61, failed 0, skipped 0**.
 `./moxie` was refreshed from the tree and is the stage4 fixpoint binary:
 
     ./moxie == tmp/mxc-r103k == tmp/mxc-r103l  (sha256 b1463fa4...4f98)
+
+## FIXED in round 104: the codec's two seen tables drifted, so cyclic back-references resolved to the wrong object
+
+Round 103 parked a relocation bug in `tests/regressions/known_fail/`. It is now
+fixed, the fixture passes (`gosym ok`), and it is back in `should_compile/`.
+
+**The shape, reduced by measurement.** Three variants of one probe, each
+returning `&localStruct` from a lib function, each holding a pointer to a
+CALLER-allocated object:
+
+| variant | contents of the returned struct | result |
+| --- | --- | --- |
+| A | caller pointer only | correct |
+| B | caller pointer + plain slice | correct |
+| C | caller pointer + slice whose elements point back into that slice | **garbage** (`ownerV=-1742715504`, want 10) |
+
+The embedding was a red herring; the **cycle** is the trigger. In variant C the
+leaf's `owner` field points back at the slice element that owns it, and after
+the return it pointed at recycled memory - which is exactly what killed
+`debug/gosym`: `NewTable`'s returned Table held a pointer to a recycled copy of
+the caller's LineTable and the process died in interface dispatch
+(`no impl for Uint64`).
+
+**The mechanism, with instrumentation.** Both sides keep an append-only table of
+addresses; the ENCODER writes a back-reference as the *index* of an address in
+its table and the DECODER resolves that index *by position*, so the two tables
+must receive exactly the same sequence of addresses. They did not. For the tiny
+graph in variant C:
+
+    ENC adds: 16      DEC adds: 24
+
+Three decode-side extras, each of which shifted every later back-reference:
+
+- the struct case registered the struct's base address AND each field address,
+  while the encoder registered only the fields (for a struct reached through a
+  pointer that made the counts match by accident, and for one reached directly
+  it did not);
+- the pointer `codecTagPtr` case registered `inner` AFTER the pointee's own
+  branch had already registered its address, so a pointer-to-struct added one
+  entry the encoder never added;
+- the `codecTagBackref` case registered `orig` again, though the encoder adds
+  nothing when it emits a back-reference.
+
+**The fix** is one rule both sides now follow, written in `src/runtime/codec.mx`:
+
+- a struct registers its OWN address first, then every field address (this is
+  also what makes a self-referential struct - or a slice element that points
+  back at itself - encode as a back-reference instead of recursing);
+- a pointer registers its target ONLY when it does not descend into it (the
+  stable and escaped-basic paths); a descending pointer leaves registration to
+  the pointee, which registers itself before its children;
+- a back-reference registers nothing;
+- `codecDecodeInto` now decodes structs IN PLACE, so the address it registers is
+  the field's real address. It previously decoded into a temporary and memcpy'd
+  it into the field, which registered the temporary - so a back-reference into a
+  struct-typed field pointed at a copy that nothing else would ever update.
+
+**Verified by running.** The variant-C probe prints the right value; the gosym
+fixture prints `gosym ok`; the compiler-bound cost is unchanged (5.7s against
+7.1s for the pre-change compiler on the probe build, where the version that
+registered the duplicated field-0 entry took over 7 minutes - the tables are
+position-indexed and linearly scanned, so an extra entry per struct is both a
+correctness hazard and a quadratic cost); the compiler rebuilds with the changed runtime and
+the stage4 fixpoint is byte-identical:
+
+    tmp/mxc-r104a (built by ./moxie)      sha256 a603ff3aa02d8b548344...
+    tmp/mxc-r104b (built by tmp/mxc-r104a) sha256 a603ff3aa02d8b548344...
+
+**A bake lesson, recorded because it cost an hour.** A user program links
+`sysroot/runtime_go.bc`, NOT the runtime compiled from source, so an edit to
+`src/runtime/codec.mx` is invisible to probes and fixtures until
+`./moxie build-runtime` regenerates the bake. The instrumented probe printed
+nothing at first for exactly this reason. The bake in the tree was from Oct 9
+and is now current; any future runtime edit must re-bake before the suite can
+see it.
+
+**Fixture bug found on the way** (mine, not the compiler's): the first word of a
+Go 1.2 file table is the table's own LENGTH - a table with two files is three
+words (length, offset, offset) and file number N is read at `4*N`. Written as
+"2" for two files, the second file is unreachable and the `Uint32` read runs off
+the end. That surfaced as an index-out-of-range panic only AFTER the codec fix
+let execution reach it; before, the LineTable pointer itself was garbage.
+
+**New finding, NOT fixed** (a diagnostic gap of the round-100 class): the
+concatenation operator with a plain builtin operand emits invalid IR instead of
+a type error.
+
+    println("i64=" | a)        // a int64
+    error: '%t7' defined with type 'i64' but expected '{ ptr, i64, i64 }'
+      %cc4 = extractvalue {ptr, i64, i64} %t7, 0
+
+The idiom in this tree is `a.String()`, which is why nobody hit it; the compiler
+should report "cannot use value of type int64 as string in concatenation". Both
+targets are affected (native and wasm).
