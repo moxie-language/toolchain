@@ -7081,6 +7081,20 @@ Fixpoint: `tmp/mxc-r107b` == `tmp/mxc-r107c` (sha256 958955b0cb36072917274e8d...
 `tmp/mxc-r107a`, built by the PREVIOUS generation, differs - the one-generation
 lag this file already documents, and the new lineage reproduces itself.
 
+## Round 108: what was verified, in this environment
+
+The change is jsruntime (host stubs) plus one fixture marker, so the phases whose
+behaviour it can affect were run rather than all of them
+(MOXIE=./moxie, the round-107 fixpoint binary - no compiler change this round):
+
+| phase | result |
+| --- | --- |
+| 0 regressions + 0b restrictions | **114 PASS, 0 FAIL, 0 SKIP** |
+| 5 browser wasm validator | **68 passed, 0 failed, 0 skipped** - the run WITH `http_header_api` wasm-enabled |
+
+Phases 1b, 1c, 3, 4 and 6 do not touch the browser host: their results from
+round 107 stand, and the compiler and stdlib sources are unchanged since.
+
 ## Round 107: what was verified, in this environment
 
 `tests/run.sh --phase N` for every phase that does not need legacy
@@ -7098,3 +7112,38 @@ lag this file already documents, and the new lineage reproduces itself.
 | 6 instrumentation | every `:stage4` variant PASS; the 28 `:legacy` FAILs are environmental (libLLVM-22 is gone) |
 
 `./moxie` is the round-107 fixpoint binary (sha256 958955b0cb36072917274e8d...).
+
+## FIXED in round 108: the validator host can load a module that imports gojs
+
+`http_header_api` carried `//:wasmtest skip` because linking net/http for
+`-target wasm` pulls its `js && wasm` files, the module then imports the `gojs`
+bridge (`//:wasmimport gojs syscall/js.*`), and the standalone host provided
+only `wasi_snapshot_preview1` and `env`:
+
+    WebAssembly.instantiate(): Import #18 "gojs": module is not an object or function
+
+The bridge itself stays unimplemented - it is Go-compat surface a jsruntime app
+does not use - but the TEST host can now ask for load-only stubs:
+
+- `buildHostImports` adds a `gojs` namespace ONLY when
+  `globalThis.__moxie_test_stubs === true`, and every stub reports itself on
+  stderr the first time it is called, so a fixture that actually reaches the
+  bridge is visible instead of quietly wrong;
+- `startDomain` carries that flag into the Worker's boot message and
+  `worker-host.mjs` sets it before instantiating, because the module is
+  instantiated in a Worker rather than on the page;
+- `tests/wasm/host.html` - the test page - sets it. A production page does not,
+  so a module that needs the real bridge still fails loudly there.
+
+Verified by running: `http_header_api` - the one fixture that links the bridge -
+PASSES the browser validator with the stubs, output matching native, and phase 5
+reported **68 passed, 0 failed** on the run that included it.
+
+It is nevertheless still marked native-only, and now by COST rather than by
+failure: its native and wasm builds together take about **35 minutes**, and
+`tests/wasm/validate.sh` wipes the per-compiler package cache at the start of
+every run on purpose ("each run measures a cold compile"), so that cost is paid
+on EVERY phase-5 run - a 2.4x tax on the phase. The marker's comment says all of
+this and gives the one-line command to run it directly, so the capability is
+documented and reachable rather than hidden; Header behaviour natively is
+covered every run by phase 0, and net/http compiling for wasm by phase 1c.

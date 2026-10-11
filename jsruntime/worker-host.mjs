@@ -74,6 +74,10 @@ function runEntry(wasmPath, fnIdx, args, chanList) {
 globalThis.addEventListener('message', (e) => {
   const m = e.data;
   if (!m) return;
+  // The test host asks for load-only stubs (the gojs namespace); a production
+  // page never sets this, so a module that needs the real bridge still fails
+  // loudly there.
+  globalThis.__moxie_test_stubs = m.stubs === true;
   if (m.kind === 'root') runRoot(m.wasm);
   else if (m.kind === 'entry') runEntry(m.wasm, m.fnIdx, m.args || new Uint8Array(0), m.chans);
 });

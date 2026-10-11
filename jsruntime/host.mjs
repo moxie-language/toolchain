@@ -925,6 +925,29 @@ export function buildHostImports(mem) {
         return prop in target ? target[prop] : (() => 0);
       },
     }),
+    // gojs is the Go wasm_exec convention that syscall/js compiles against
+    // (`//:wasmimport gojs syscall/js.*`). A Moxie browser app goes through
+    // jsruntime/ instead, so these imports only appear when a module LINKS
+    // syscall/js - net/http's js RoundTripper does - and a module that needs
+    // the bridge must fail loudly rather than load against silence. The
+    // namespace is therefore provided ONLY when the test host asks for it
+    // (globalThis.__moxie_test_stubs, set by tests/wasm/host.html), where the
+    // fixture under test does not call it and the point is to exercise the
+    // rest of the module. A call still reports itself on stderr, so a fixture
+    // that does reach it is visible instead of quietly wrong.
+    ...(globalThis.__moxie_test_stubs === true ? {
+      gojs: new Proxy({}, {
+        get(_target, prop) {
+          return (..._args) => {
+            globalThis.postMessage({
+              kind: 'stderr',
+              text: `[test-host] gojs.${String(prop)} called: the gojs bridge is not provided by this host\n`,
+            });
+            return 0;
+          };
+        },
+      }),
+    } : {}),
   };
 }
 
@@ -975,7 +998,7 @@ export function startDomain(boot, onSettled, relayUp) {
     if (onSettled) onSettled(new Error(msg));
     else globalThis.postMessage({ kind: 'stderr', text: '[domain] ' + msg + '\n' });
   });
-  w.postMessage(boot);
+  w.postMessage({ ...boot, stubs: globalThis.__moxie_test_stubs === true });
   return w;
 }
 
