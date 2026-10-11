@@ -1633,6 +1633,12 @@ func checkClosureCaptures(p *SSAPackage) {
 		return
 	}
 	if !isUserPackagePath(restrictPath(p.Pkg.Path)) {
+		// A dependency's captures are LEGAL (see above), but -report-closure-
+		// captures asks for them anyway: the report is what turned "the stdlib
+		// has 13 files with capturing closures" from a claim into a list.
+		if bst != nil && bst.reportCaptures {
+			reportCapturePackage(p)
+		}
 		return
 	}
 	names := []string{:0:len(p.Members)}
@@ -1649,6 +1655,45 @@ func checkClosureCaptures(p *SSAPackage) {
 		if f, ok := p.Members[n].(*SSAFunction); ok {
 			checkCaptureFunc(f, 0)
 		}
+	}
+}
+
+// reportCapturePackage prints every capturing function in a package to stderr.
+// Reporting only: nothing here can fail a build.
+func reportCapturePackage(p *SSAPackage) {
+	names := []string{:0:len(p.Members)}
+	for n := range p.Members {
+		names = mxutil.Ensure(names, 1)
+		push(names, n)
+	}
+	for i := int32(1); i < int32(len(names)); i++ {
+		for j := i; j > 0 && names[j] < names[j-1]; j-- {
+			names[j], names[j-1] = names[j-1], names[j]
+		}
+	}
+	for _, n := range names {
+		if f, ok := p.Members[n].(*SSAFunction); ok {
+			reportCaptureFunc(f, 0)
+		}
+	}
+}
+
+func reportCaptureFunc(f *SSAFunction, depth int32) {
+	if f == nil || depth > 32 {
+		return
+	}
+	captured := ""
+	for i := int32(0); i < int32(len(f.FreeVars)); i++ {
+		if i > 0 {
+			captured = captured | ", "
+		}
+		captured = captured | f.FreeVars[i].name
+	}
+	if captured != "" {
+		mxutil.WriteStr(2, "capture: " | f.name | " [" | captured | "]\n")
+	}
+	for _, af := range f.AnonFuncs {
+		reportCaptureFunc(af, depth+1)
 	}
 }
 

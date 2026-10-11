@@ -1,0 +1,55 @@
+/*
+Closure-capture SEMANTICS, exercised at run time instead of argued about.
+
+The capture rule is a restriction on user code (a closure is a standalone
+function; capture state belongs in a sovereign type passed as a receiver), and
+this file obeys it. What the stdlib does internally is a different question, and
+the recorded claim - "stdlib capturing deferred closures are mis-compiled (13
+files)" - had no run-time evidence either way. Compiling the whole 42-package
+sweep with -report-closure-captures shows the stdlib relies on captures in 185
+places, so the shapes they use are pinned here, in a DEPENDENCY package (where
+the rule does not apply), by running them:
+
+  read an outer local, pass the closure on, write through the captured local,
+  write through a captured pointer, observe a later mutation of the captured
+  local, defer a closure, bind a method value, capture a loop variable, and
+  capture through a slice element.
+*/
+package main
+
+import (
+	"tests/regressions/should_compile/capture_semantics/lib"
+)
+
+func main() {
+	if got := lib.ReadOuter(); got != 42 {
+		panic("ReadOuter = " | got.String() | ", want 42")
+	}
+	if got := lib.Escaped(); got != 42 {
+		panic("Escaped = " | got.String() | ", want 42")
+	}
+	if got := lib.WriteOuter(); got != 3 {
+		panic("WriteOuter = " | got.String() | ", want 3")
+	}
+	if got := lib.WriteThroughPointer(); got != 15 {
+		panic("WriteThroughPointer = " | got.String() | ", want 15")
+	}
+	if got := lib.Aliasing(); got != 200 {
+		panic("Aliasing = " | got.String() | ", want 200 (the closure reads the CURRENT value)")
+	}
+	if got := lib.Deferred(); got != 8 {
+		panic("Deferred = " | got.String() | ", want 8")
+	}
+	if got := lib.MethodValue(); got != 2 {
+		panic("MethodValue = " | got.String() | ", want 2")
+	}
+	first, last := lib.LoopVar()
+	if first != last {
+		panic("LoopVar differs per iteration: first=" | first.String() | " last=" | last.String() |
+			" - the loop variable is shared, and this fixture pins that")
+	}
+	if got := lib.SliceElement(); got != 20 {
+		panic("SliceElement = " | got.String() | ", want 20")
+	}
+	println("capture semantics ok (loop var shared: " | first.String() | ")")
+}

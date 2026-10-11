@@ -7213,3 +7213,127 @@ processes, so the fixture says so and phase 5 skips it):
 
 `os/exec` is also a new phase-1b SWEEP entry, so "it compiles" is now checked
 every run.
+
+## FIXED in round 111: three slice-presize shapes were mis-scanned, and `return expr` ignored deferred writes
+
+### The `{:n}` presize rewrite read the type backwards
+
+`_mxc_stage4/ir_rewrite.mx` rewrites `T{...}` slice literals into
+`__slicealloc(T, ...)` before parsing. `findSliceTypeStart` walks BACKWARDS from
+the `{` to find where the type begins, and its three boundary rules each had a
+hole:
+
+| source | scan returned | result |
+| --- | --- | --- |
+| `[]map[int32]int32{:2}` | the `[` of `map[` | `[int32]int32` as the type text |
+| `[]func() int32{:2}` | `int32` (stopped at the space) | `int32` as the type text |
+| `[]chan int32{:2}` | `int32` (stopped at the space) | `int32` as the type text |
+
+Instrumenting the rewrite (env-gated stderr, since removed) printed the fact
+that settled it:
+
+```
+DBG presize scan at=50 -> lbrack=38 text=[[int32]int32]
+DBG presize scan at=47 -> lbrack=42 text=[int32]
+```
+
+A balanced `[...]` pair closed to depth zero and was taken for the type's own
+`[`, so the key brackets of `map[K]V` (and of a generic `List[T]`) won. And a
+space ended the type unconditionally, which is right for `return nat{:1}` but
+wrong for a type whose text contains a space.
+
+Both rules are now qualified:
+
+- a balanced pair starts the type only when the byte to its left is **not** an
+  identifier byte, so `map[`/`List[` are skipped and the scan continues to the
+  real `[`;
+- a space ends the type only when the identifier it follows is not the result
+  type of an open construct - `)`/`]` (`func() int32`, `map[K]V`) or a bare
+  type keyword (`chan int32`, and `struct`/`interface`/`func`/`map` for
+  symmetry).
+
+Verified by running, all 17 shapes in one matrix (`x := <lit>` then
+`len`/`cap`): `[]int32{:2}`, `[]byte{:4}`, `[]string{:3}`, `[]struct{ n int32 }{:2}`,
+`[][]int32{:2}`, `[]map[int32]int32{:2}`, `[]func() int32{:2}`, `[]chan int32{:2}`,
+`[]map[string]func(int32) int32{:2}` all give `len == cap == n`; `[]int32{:0:2}`,
+`[]map[int32]int32{:0:2}`, `[]func() int32{:0:2}`, `[]chan int32{:0:2}` give
+`len=0 cap=2`; `[]int32{:2:8}` gives `len=2 cap=8`; `[]byte{}` gives `0/0`;
+`[]int32{7}` and `[]int32{1, 2, 3}` give `1/1` and `3/3`; and
+`[]func() int32{:2}` with `x[0] = func() (r int32) { return 7 }` returns `f0=7`.
+
+Earlier in the round a branch was added to the rewrite for a "presize form" of
+`{:n}`. Instrumentation showed it was **unreachable**: `inner` is the text
+AFTER the `{:`, so `{:2}` reaches the element/presize branch with `inner=[2]`,
+which already emits the correct two-argument `__slicealloc(T, 2)`. The only
+input that reached the new branch was `{::2}`, which the pre-change compiler
+rejected loudly (`syntax error: unexpected comma, expected expression`), and the
+branch silently gave it a meaning. It is removed.
+
+**Bootstrap note:** the tree's `[]T{:n}` means `len == cap == n`; the "len 0,
+cap n" spelling is `[]T{:0:n}`. A fixture that hand-wrote a Go-style
+`if len(x) == cap(x) { grown := []T{:len(x)+4}; ... }` growth guard was
+therefore appending past presized nil elements - `capture_semantics` segfaulted
+on `fs[0]()` for exactly that reason, on BOTH the pre-fix and post-fix
+compiler. The fixture now grows with a cursor write.
+
+### `return expr` returned pre-defer values
+
+`_mxc_stage4/ir_emit.mx` ran the defers (`emitRunDefers`) before returning, but
+the value it returned was `r.Results[0]`, a register the SSA had loaded from the
+named-result slot BEFORE the return instruction - so a deferred write to a named
+result was silently discarded. Measured, before the fix:
+
+```
+ReturnLit=5   (want 11)   defer func(){ n = n + 6 }(); return 5
+TwoResults=1,2 (want 7,2)
+ReadSlot result=5 slotSeenByDefer=0   the slot itself read as zero inside the defer
+Chain result=1 g=7        the deferred closures DO share the enclosing frame
+```
+
+`Chain` is what localized it: the first-registered closure read the second's
+write (g=7), so the frame was live and shared - only the value handed to the
+caller was stale.
+
+`emitReturn` now does what Go does, in Go's order: store the operands into the
+named-result slots, run the defers, then load the slots and return those. The
+bilateral evidence is in the vendored go/ssa that legacy builds its SSA with
+(`legacy/vendor/golang.org/x/tools/go/ssa/builder.go`): it stores the results,
+emits `RunDefers`, and then "Reload (potentially) named result variables to form
+the result tuple". Legacy already had the correct order through go/ssa, so the
+fix is stage4-only and both compilers now agree.
+
+Verified by running (`named_result_defers`, new fixture): `ReturnLit=11`,
+`TwoResults=7,2`, `ReadSlot=5 slotInDefer=5`, `BareReturn=7`, `WriteBack=7`,
+`Chain=7 g=107`, `ViaLocal=3`, `NoDefer=5`.
+
+### Pinned: closure captures in dependency packages
+
+`capture_semantics` (new fixture, main + lib) runs nine capture shapes inside a
+DEPENDENCY package, where the user-code capture restriction does not apply:
+read an outer local, escape the closure, write the outer local, write through a
+captured pointer, observe a later mutation, defer a closure, bind a method
+value, share a loop variable, and capture a slice element. It prints
+`capture semantics ok (loop var shared: 3)`.
+
+The recorded claim that "capturing deferred closures are mis-compiled in 13
+stdlib files" had no run-time evidence either way. The measurement that
+replaced it: compiling the whole 42-package phase-1b sweep with the new
+`-report-closure-captures` flag lists **185** capturing functions, top packages
+`(*ClientTrace)` 16, `(*http2serverConn)` 11, `(*Logger)` 10, `(*Builder)` 10,
+`(*Transport)` 8, `(*persistConn)` 8. No counterexample to capture semantics was
+found; the named-result ordering defect above was found by RUNNING the shapes
+rather than by reading them.
+
+### New open item: the parser silently accepts an expression where a type belongs
+
+Found while chasing the mis-scanned rewrites, and independent of them:
+
+```
+x := []chan __slicealloc(int32, 2)     compiles, len=0 cap=0
+```
+
+This is what turned "the rewrite produced a wrong type text" into a silent zero
+slice instead of an error - it is why `[]map[int32]int32{:2}` reported `0/0`
+rather than failing. A malformed type in a slice/channel type expression must be
+a syntax error.
+

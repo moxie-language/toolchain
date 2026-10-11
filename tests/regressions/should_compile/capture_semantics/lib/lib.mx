@@ -1,0 +1,135 @@
+package lib
+
+// This package is a DEPENDENCY of a user program, and the closure-capture rule
+// applies to user code only (legacy exempts dependencies the same way, and the
+// stdlib relies on captures throughout: compiling the 42-package sweep with
+// -report-closure-captures lists 185 capturing functions). So the capture
+// shapes that stdlib code depends on can be exercised here, at run time, which
+// is what "the 13 stdlib files that capture" needed and never had.
+
+// ReadOuter: a closure reading an enclosing local.
+func ReadOuter() (n int32) {
+	base := int32(41)
+	f := func(x int32) (y int32) {
+		return x + base
+	}
+	return f(1)
+}
+
+// Escaped: the same closure passed to another function.
+func Escaped() (n int32) {
+	base := int32(41)
+	f := func(x int32) (y int32) {
+		return x + base
+	}
+	return apply(f, 1)
+}
+
+func apply(f func(int32) int32, x int32) (y int32) {
+	return f(x)
+}
+
+// WriteOuter: a write through the captured local must reach the enclosing
+// frame, not a copy of it.
+func WriteOuter() (n int32) {
+	n = 1
+	inc := func() {
+		n = n + 1
+	}
+	inc()
+	inc()
+	return n
+}
+
+// WriteThroughPointer: a captured pointer writing its pointee.
+func WriteThroughPointer() (n int32) {
+	v := int32(10)
+	p := &v
+	add := func() {
+		*p = *p + 5
+	}
+	applyVoid(add)
+	return v
+}
+
+func applyVoid(f func()) {
+	f()
+}
+
+// Aliasing: the closure reads the enclosing local's CURRENT value, so a later
+// mutation is visible to it. This is the documented behaviour and the reason a
+// stdlib closure that binds a receiver or an argument keeps working.
+func Aliasing() (n int32) {
+	k := int32(100)
+	read := func() (y int32) {
+		return k
+	}
+	k = 200
+	return read()
+}
+
+// Deferred: a deferred closure runs at return and still sees the frame.
+func Deferred() (n int32) {
+	m := int32(7)
+	defer func() {
+		n = n + m
+	}()
+	n = 1
+	return n
+}
+
+// MethodValue: a bound method value is a capture of the receiver, the shape
+// legacy's rule names explicitly.
+type counter struct {
+	n int32
+}
+
+func (c *counter) bump() {
+	c.n++
+}
+
+func MethodValue() (n int32) {
+	c := &counter{}
+	b := c.bump
+	b()
+	b()
+	return c.n
+}
+
+// LoopVar reports what a closure created inside a loop captures: the loop
+// variable itself, shared across iterations, or a fresh one per iteration.
+// Moxie has no specification for this, so the fixture pins the behaviour the
+// implementation actually has rather than assuming either answer.
+func LoopVar() (first, last int32) {
+	var fs []func() int32
+	for i := int32(0); i < 3; i++ {
+		fs = addOne(fs, func() (y int32) {
+			return i
+		})
+	}
+	return fs[0](), fs[2]()
+}
+
+func addOne(fs []func() int32, f func() int32) (out []func() int32) {
+	// `[]T{:n}` presizes len == cap == n, so this is not `make([]T, 0, n)`:
+	// growing means allocating the new length and writing through a cursor.
+	// (A hand-written capacity guard on top of `{:n}` appends past the
+	// presized nil elements instead.)
+	out = []func() int32{:len(fs) + 1}
+	for i := int32(0); i < len(fs); i++ {
+		out[i] = fs[i]
+	}
+	out[len(fs)] = f
+	return out
+}
+
+// SliceElement: a closure capturing a slice ELEMENT through its index, the
+// place where Moxie's "a subslice is a copy" rule and capture interact.
+func SliceElement() (n int32) {
+	xs := []int32{1, 2, 3}
+	f := func() (y int32) {
+		return xs[1]
+	}
+	xs[1] = 20
+	return f()
+}

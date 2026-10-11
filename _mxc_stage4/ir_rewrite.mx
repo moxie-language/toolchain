@@ -506,6 +506,52 @@ func rewriteSliceMakeLiterals(src []byte) (buf []byte) {
 	return joinChunks(chunks)
 }
 
+func isIdentByteAt(src []byte, k int32) (r bool) {
+	if k < 0 {
+		return false
+	}
+	ch := src[k]
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '.'
+}
+
+// followsConstruct reports whether the identifier at start is the result type
+// of a construct whose text continues leftward, in which case a space before it
+// is inside the type rather than a boundary: `func() int32` and `map[K]V` end in
+// `)` / `]`, while `chan int32` and friends end in a bare type keyword.
+func followsConstruct(src []byte, start int32) (r bool) {
+	k := start - 1
+	for k >= 0 && (src[k] == ' ' || src[k] == '\t') {
+		k--
+	}
+	if k < 0 {
+		return false
+	}
+	if src[k] == ')' || src[k] == ']' {
+		return true
+	}
+	for _, kw := range []string{"chan", "map", "func", "struct", "interface"} {
+		if wordEndsAt(src, k+1, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// wordEndsAt reports whether word occupies src[end-len(word):end] as a whole
+// word (not as the tail of a longer identifier).
+func wordEndsAt(src []byte, end int32, word string) (r bool) {
+	n := int32(len(word))
+	if end < n {
+		return false
+	}
+	for i := int32(0); i < n; i++ {
+		if src[end-n+i] != word[i] {
+			return false
+		}
+	}
+	return !isIdentByteAt(src, end-n-1)
+}
+
 func findSliceTypeStart(src []byte, braceIdx int32) (n int32) {
 	j := braceIdx - 1
 	for j >= 0 && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n') {
@@ -516,10 +562,42 @@ func findSliceTypeStart(src []byte, braceIdx int32) (n int32) {
 	}
 	depth := 0
 	parenDepth := 0
+	// braceDepth tracks the TYPE's own braces: `[]struct{ n int32 }{:2}` must
+	// scan back over `struct{ n int32 }` as one unit. Without it the `}` of the
+	// struct was treated as a boundary and the type text came out as
+	// `int32 }`, which the parser then rejected with "unexpected :". inTag
+	// skips a backquoted struct tag, whose contents may hold braces or colons.
+	braceDepth := 0
+	inTag := false
 	candidate := -1
 	identStart := -1
 	for j >= 0 {
 		ch := src[j]
+		if ch == '`' {
+			inTag = !inTag
+			j--
+			continue
+		}
+		if inTag {
+			j--
+			continue
+		}
+		if ch == '}' {
+			braceDepth++
+			j--
+			continue
+		}
+		if ch == '{' {
+			if braceDepth > 0 {
+				braceDepth--
+			}
+			j--
+			continue
+		}
+		if braceDepth > 0 {
+			j--
+			continue
+		}
 		if ch == ')' {
 			parenDepth++
 		} else if ch == '(' {
@@ -542,7 +620,10 @@ func findSliceTypeStart(src []byte, braceIdx int32) (n int32) {
 			depth++
 		} else if ch == '[' {
 			depth--
-			if depth == 0 {
+			if depth == 0 && !isIdentByteAt(src, j-1) {
+				// A balanced pair starts the type only when nothing names it:
+				// the `[` of `map[K]V` or of a generic `List[T]` is preceded by
+				// an identifier and must not be mistaken for the slice's `[`.
 				candidate = j
 			}
 		} else if depth == 0 && parenDepth == 0 {
@@ -553,7 +634,7 @@ func findSliceTypeStart(src []byte, braceIdx int32) (n int32) {
 				// A space after a type name ends the type: `return nat{:1}`
 				// must not scan back into the `return` keyword. Spaces
 				// before any type char (e.g. `[]byte {`) are skipped.
-				if identStart >= 0 {
+				if identStart >= 0 && !followsConstruct(src, identStart) {
 					return identStart
 				}
 				j--

@@ -2271,9 +2271,60 @@ func (e *irEmitter) flushPhiTruncs() {
 	e.pendingPhiTruncs = e.pendingPhiTruncs[:0]
 }
 
+// returnOperand coerces a return value to the declared result type, converting
+// width, pointer/int and zero mismatches. Same conversions the single-result
+// return path applies.
+func (e *irEmitter) returnOperand(res SSAValue, expectType string) (val string) {
+	typ := e.llvmType(res.SSAType())
+	val = e.operand(res)
+	if typ == "void" {
+		typ = expectType
+	}
+	if expectType == "void" {
+		expectType = typ
+	}
+	if val == "null" && expectType != "ptr" {
+		return "zeroinitializer"
+	}
+	val = e.coerceInt(val, typ, expectType, e.isUnsignedType(res.SSAType()))
+	if typ != expectType && val != "zeroinitializer" {
+		if expectType == "ptr" && e.intBits(typ) > 0 {
+			e.nextReg++
+			rc := "%rc" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(rc) ; e.w(" = inttoptr ") ; e.w(typ) ; e.w(" ") ; e.w(val) ; e.w(" to ptr\n")
+			return rc
+		}
+		if typ == "ptr" && e.intBits(expectType) > 0 {
+			e.nextReg++
+			rc := "%rc" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(rc) ; e.w(" = ptrtoint ptr ") ; e.w(val) ; e.w(" to ") ; e.w(expectType) ; e.w("\n")
+			return rc
+		}
+		if !(e.intBits(typ) > 0 && e.intBits(expectType) > 0) {
+			return "zeroinitializer"
+		}
+	}
+	return val
+}
+
 func (e *irEmitter) emitReturn(r *SSAReturn) {
 	isRecoverBlock := e.curFunc.Recover != nil && e.currentEmitBlock == e.curFunc.Recover
 	e.deferCheckpointOn = false
+	// `return expr` with named results assigns the result slots, runs the
+	// defers, and returns the slots - the order Go uses. Returning the
+	// expression registers directly lost every deferred write to a named
+	// result (`defer func(){ n = n + 6 }(); return n` returned the pre-defer
+	// value) and left the slot reading as zero inside the defer itself.
+	savedIntoResults := false
+	if len(e.curFunc.NamedResults) > 0 && !isRecoverBlock && len(r.Results) == len(e.curFunc.NamedResults) {
+		for i, res := range r.Results {
+			nr := e.curFunc.NamedResults[i]
+			nrt := e.namedResultType(nr)
+			val := e.returnOperand(res, nrt)
+			e.w("  store ") ; e.w(nrt) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(e.regName(nr)) ; e.w("\n")
+		}
+		savedIntoResults = true
+	}
 	if len(e.deferList) > 0 && !isRecoverBlock {
 		e.emitRunDefers()
 	}
@@ -2284,7 +2335,7 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 		e.declareRuntime("runtime.destroyDeferFrame", "void", "ptr")
 	}
 	frt := e.funcRetType(e.curFunc)
-	if len(r.Results) == 0 {
+	if len(r.Results) == 0 || savedIntoResults {
 		rt := e.funcRetType(e.curFunc)
 		if rt == "void" {
 			// Route through the epilogue: a void method can still be a
