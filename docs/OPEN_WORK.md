@@ -7028,3 +7028,22 @@ nothing to do with stringers: `http_header_api` (the validator host provides no
 `gojs` module) and `os_user_api` (the host has no /etc/passwd).
 
 Fixpoint: `tmp/mxc-r106b` == `tmp/mxc-r106c` (sha256 d845fb52424abe0dfab25b6f...).
+
+## Round 106: what was verified, in this environment
+
+`tests/run.sh --phase N` for every phase that does not need legacy
+(MOXIE=tmp/mxc-r106c, both runtimes re-baked from the fixed source):
+**209 PASS, 0 non-legacy failures**.
+
+| phase | result |
+| --- | --- |
+| 0 regressions + 0b restrictions | **113 PASS, 0 FAIL, 0 SKIP** |
+| 1b stdlib sweep | **41 packages ok** |
+| 1c js/wasm sweep | PASS (net/http, path/filepath, syscall/js) - the wasm runtime now carries stringer.mx and still compiles |
+| 3 IR validate | 4/4 |
+| 4 binary smoke | 1/1 |
+| 5 browser wasm validator | **66 passed, 0 failed, 0 skipped** - FOUR more than round 105, exactly the fixtures the Stringer fix unparked |
+| 6 instrumentation | every `:stage4` variant PASS; the 28 `:legacy` FAILs are environmental (libLLVM-22 is gone) |
+
+`./moxie` is the round-106 fixpoint binary (sha256 d845fb52424abe0dfab25b6f...),
+and `sysroot/runtime_go.bc` plus `runtime_go_wasm.bc` were re-baked with it.
