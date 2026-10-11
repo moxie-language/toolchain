@@ -1,0 +1,74 @@
+//:wasmtest skip
+// Native-only: a browser domain has no child processes to fork. os/exec's
+// functions exist for the wasm target as stubs (syscall's js files), so the
+// package compiles there, but running one cannot work and this fixture says so
+// rather than pretending.
+/*
+os/exec works: Command, Run, Output, CombinedOutput, Dir, and the exit status.
+
+The package held only ExitError, and it could not have held more: three layers
+below it were TODO stubs.
+
+  - os.Process.Wait returned ErrNotImplemented, so nothing could learn how a
+    child ended;
+  - os.ProcessState answered "" and false for every process, so even a
+    successful child looked failed;
+  - os.StartProcess REFUSED ProcAttr.Files and ProcAttr.Dir outright, so a pipe
+    could not be handed to a child and Output had no way to capture anything.
+
+All three are implemented now: Wait4 fills a real ProcessState (Exited,
+ExitCode, Success, String, Sys), and forkExec's child chdirs to Dir and dup2s
+each Files[i] onto fd i before execve - which is what makes a captured pipe
+possible at all. The child cannot report a dup2 failure to the parent yet
+(there is no error pipe), so it exits 127, the same code a failed execve gives.
+
+This fixture is the end-to-end evidence: a real pipe is read, a real exit code
+comes back, and Dir reaches the child.
+*/
+package main
+
+import (
+	"os/exec"
+)
+
+func main() {
+	out, err := exec.Command("/bin/echo", "hello", "world").Output()
+	if err != nil {
+		panic("Output: " | err.Error())
+	}
+	if string(out) != "hello world\n" {
+		panic("Output = [" | string(out) | "], want [hello world]")
+	}
+
+	rerr := exec.Command("/bin/sh", "-c", "exit 3").Run()
+	if rerr == nil {
+		panic("a non-zero exit came back as success")
+	}
+	ee, isExit := rerr.(*exec.ExitError)
+	if !isExit {
+		panic("non-zero exit is not an *ExitError: " | rerr.String())
+	}
+	if ee.ExitCode() != 3 {
+		panic("ExitCode is " | ee.ExitCode().String() | ", want 3")
+	}
+
+	c := exec.Command("/bin/pwd")
+	c.Dir = "/"
+	pout, perr := c.Output()
+	if perr != nil {
+		panic("pwd: " | perr.Error())
+	}
+	if string(pout) != "/\n" {
+		panic("pwd in / printed [" | string(pout) | "]")
+	}
+
+	both, cerr := exec.Command("/bin/sh", "-c", "echo out; echo err 1>&2").CombinedOutput()
+	if cerr != nil {
+		panic("CombinedOutput: " | cerr.Error())
+	}
+	if string(both) != "out\nerr\n" {
+		panic("CombinedOutput = [" | string(both) | "]")
+	}
+
+	println("os/exec ok")
+}

@@ -75,6 +75,7 @@ SWEEP=(
 	net/http
 	net/textproto
 	net/url
+	os/exec
 	os/user
 	runtime/trace
 	text/tabwriter

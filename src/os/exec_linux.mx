@@ -72,7 +72,43 @@ func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int32, err error
 	}
 
 	if p == 0 {
-		// Child process: replace with the new binary.
+		// Child process. Apply the attributes BEFORE replacing the image,
+		// because after execve there is no code of ours left to run:
+		//
+		//   - Dir becomes the child's working directory;
+		//   - Files[i] becomes the child's fd i, which is what makes
+		//     exec.Cmd.Output possible at all - the parent hands over the
+		//     write end of a pipe as fd 1 and reads the read end.
+		//
+		// A failure here cannot be reported to the parent (there is no
+		// error pipe yet), so it exits 127, the same code a failed execve
+		// gives. Fds above 2 are not wired and not closed: a caller that
+		// needs them passes them in Files and inherits the rest.
+		if attr.Dir != "" {
+			if cerr := syscall.Chdir(attr.Dir); cerr != nil {
+				libc_exit(127)
+			}
+		}
+		// Every dup2 runs BEFORE any close: two slots may name the same fd
+		// (exec.CombinedOutput hands one pipe over as both stdout and stderr),
+		// so closing a source after its first use left the second dup2 with
+		// EBADF - measured as a child that exited 127 while Output, which uses
+		// a single slot, worked.
+		for i := 0; i < len(attr.Files) && i < 3; i++ {
+			srcFD := int32(attr.Files[i])
+			if srcFD == int32(i) {
+				continue
+			}
+			if derr := syscall.Dup2(srcFD, int32(i)); derr != nil {
+				libc_exit(127)
+			}
+		}
+		for i := 0; i < len(attr.Files) && i < 3; i++ {
+			srcFD := int32(attr.Files[i])
+			if srcFD > 2 {
+				syscall.Close(srcFD)
+			}
+		}
 		err = execve(argv0, argv, attr.Env)
 		// execve only returns on failure - child must exit to avoid
 		// two copies of the parent running.
@@ -92,16 +128,11 @@ func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int32, err error
 func startProcess(name string, argv []string, attr *ProcAttr) (p *Process, err error) {
 	initSignals()
 	if attr != nil {
-		if attr.Dir != "" {
-			return nil, ErrNotImplementedDir
-		}
-
+		// Dir and Files ARE implemented now (chdir and dup2 in the child);
+		// only Sys remains, because the syscall attributes it carries have
+		// no meaning here.
 		if attr.Sys != nil {
 			return nil, ErrNotImplementedSys
-		}
-
-		if len(attr.Files) != 0 {
-			return nil, ErrNotImplementedFiles
 		}
 	}
 

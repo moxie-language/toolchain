@@ -1,6 +1,10 @@
 package exec
 
-import "os"
+import (
+	"errors"
+	"io"
+	"os"
+)
 
 // An ExitError reports an unsuccessful exit by a command.
 type ExitError struct {
@@ -24,3 +28,164 @@ func (e *ExitError) Error() (rs string) {
 }
 
 func (e *ExitError) String() (rs string) { return e.Error() }
+
+// Cmd is one command to run. Build it with Command, which fills Args the way
+// the exec convention expects (Args[0] is the program name).
+//
+// There are no goroutines here, so a stream can only be wired to an *os.File:
+// there is nothing to copy an arbitrary io.Writer on the side. Output therefore
+// hands the child the write end of a pipe and reads the read end, rather than
+// pumping a buffer while the child runs.
+type Cmd struct {
+	// Path is the program to run.
+	Path string
+	// Args holds the command line, Args[0] being the program name.
+	Args []string
+	// Env is the child's environment; nil inherits the parent's.
+	Env []string
+	// Dir is the child's working directory; "" inherits the parent's.
+	Dir string
+
+	// Stdin, Stdout and Stderr name the child's standard streams. A nil
+	// stream is inherited from the parent.
+	Stdin  *os.File
+	Stdout *os.File
+	Stderr *os.File
+
+	// Process is the child once started, and ProcessState how it ended.
+	Process      *os.Process
+	ProcessState *os.ProcessState
+}
+
+// Command returns a Cmd that will run name with the given arguments.
+func Command(name string, arg ...string) (c *Cmd) {
+	c = &Cmd{Path: name}
+	c.Args = []string{:len(arg) + 1}
+	c.Args[0] = name
+	for i := int32(0); i < int32(len(arg)); i++ {
+		c.Args[i+1] = arg[i]
+	}
+	return c
+}
+
+// fdOf is the fd to hand the child for one stream: the caller's file when one
+// was named, and otherwise the parent's own fd for that slot, which is what
+// "inherited" means to dup2.
+func fdOf(f *os.File, inherit uintptr) (fd uintptr) {
+	if f == nil {
+		return inherit
+	}
+	return f.Fd()
+}
+
+// Start forks and execs the command, without waiting for it.
+func (c *Cmd) Start() (err error) {
+	if c.Path == "" {
+		return errors.New("exec: no command")
+	}
+	if c.Process != nil {
+		return errors.New("exec: already started")
+	}
+	attr := &os.ProcAttr{Dir: c.Dir, Env: c.Env}
+	// Files is built only when a stream was named. With no Files the child
+	// inherits all three, which is what Run wants; a list of 0/1/2 would be
+	// three dup2 calls onto themselves.
+	if c.Stdin != nil || c.Stdout != nil || c.Stderr != nil {
+		files := []uintptr{:3}
+		files[0] = fdOf(c.Stdin, 0)
+		files[1] = fdOf(c.Stdout, 1)
+		files[2] = fdOf(c.Stderr, 2)
+		attr.Files = files
+	}
+	p, perr := os.StartProcess(c.Path, c.Args, attr)
+	if perr != nil {
+		return perr
+	}
+	c.Process = p
+	return nil
+}
+
+// Wait reaps the child and reports a non-zero exit as an *ExitError.
+func (c *Cmd) Wait() (err error) {
+	if c.Process == nil {
+		return errors.New("exec: not started")
+	}
+	p := c.Process
+	st, werr := p.Wait()
+	c.Process = nil
+	if werr != nil {
+		return werr
+	}
+	c.ProcessState = st
+	if !st.Success() {
+		return &ExitError{ProcessState: st}
+	}
+	return nil
+}
+
+// Run starts the command and waits for it, with the child's streams inherited.
+func (c *Cmd) Run() (err error) {
+	if serr := c.Start(); serr != nil {
+		return serr
+	}
+	return c.Wait()
+}
+
+// Output runs the command and returns its standard output. A non-zero exit
+// comes back as an *ExitError, and the output collected so far is still
+// returned, as it is in Go.
+func (c *Cmd) Output() (out []byte, err error) {
+	pr, pw, perr := os.Pipe()
+	if perr != nil {
+		return nil, perr
+	}
+	saved := c.Stdout
+	c.Stdout = pw
+	serr := c.Start()
+	// The parent MUST drop its copy of the write end before reading: the pipe
+	// stays open while any process holds it, so keeping this one would make
+	// the read below wait for an EOF that never comes.
+	pw.Close()
+	if serr != nil {
+		pr.Close()
+		c.Stdout = saved
+		return nil, serr
+	}
+	out, rerr := io.ReadAll(pr)
+	pr.Close()
+	c.Stdout = saved
+	werr := c.Wait()
+	if werr != nil {
+		return out, werr
+	}
+	return out, rerr
+}
+
+// CombinedOutput is Output with standard error going to the same pipe.
+func (c *Cmd) CombinedOutput() (out []byte, err error) {
+	pr, pw, perr := os.Pipe()
+	if perr != nil {
+		return nil, perr
+	}
+	savedOut := c.Stdout
+	savedErr := c.Stderr
+	c.Stdout = pw
+	c.Stderr = pw
+	serr := c.Start()
+	pw.Close()
+	if serr != nil {
+		pr.Close()
+		c.Stdout = savedOut
+		c.Stderr = savedErr
+		return nil, serr
+	}
+	out, rerr := io.ReadAll(pr)
+	pr.Close()
+	c.Stdout = savedOut
+	c.Stderr = savedErr
+	werr := c.Wait()
+	if werr != nil {
+		return out, werr
+	}
+	return out, rerr
+}

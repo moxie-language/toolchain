@@ -37,32 +37,57 @@ type ProcAttr struct {
 // ErrProcessDone indicates a Process has finished.
 var ErrProcessDone error
 
+// ProcessState holds what wait4 reported. The methods were TODO stubs that
+// answered "" and false for every process, so nothing above them could tell a
+// successful child from a failed one - which is why exec.Cmd could not exist.
 type ProcessState struct {
+	status syscall.WaitStatus
+	pid    int32
 }
 
 func (p *ProcessState) String() (rs string) {
-	return "" // TODO
+	if p == nil {
+		return "process not started"
+	}
+	if p.status.Exited() {
+		code := p.status.ExitStatus()
+		if code == 0 {
+			return "exit status 0"
+		}
+		return "exit status " | code.String()
+	}
+	if p.status.Signaled() {
+		return "signal " | p.status.Signal().String()
+	}
+	return "process state unknown"
 }
+
 func (p *ProcessState) Success() (rok bool) {
-	return false // TODO
+	return p.status.Exited() && p.status.ExitStatus() == 0
 }
 
 // Sys returns system-dependent exit information about
 // the process. Convert it to the appropriate underlying
 // type, such as syscall.WaitStatus on Unix, to access its contents.
 func (p *ProcessState) Sys() (rpointer unsafe.Pointer) {
-	return nil // TODO
+	return unsafe.Pointer(&p.status)
 }
 
 func (p *ProcessState) Exited() (rok bool) {
-	return false // TODO
+	return p.status.Exited()
 }
 
 // ExitCode returns the exit code of the exited process, or -1
 // if the process hasn't exited or was terminated by a signal.
 func (p *ProcessState) ExitCode() (rn int32) {
-	return -1 // TODO
+	if !p.status.Exited() {
+		return -1
+	}
+	return p.status.ExitStatus()
 }
+
+// Pid is the process the state belongs to, -1 after Wait has reaped it.
+func (p *ProcessState) Pid() (rn int32) { return p.pid }
 
 type Process struct {
 	Pid int32
@@ -74,19 +99,39 @@ func StartProcess(name string, argv []string, attr *ProcAttr) (rprocess *Process
 	return startProcess(name, argv, attr)
 }
 
+// Wait reaps the child and reports how it ended. wait4 is the only way to learn
+// a child's exit status, and without it every caller saw ErrNotImplemented.
 func (p *Process) Wait() (rprocessState *ProcessState, rerr error) {
 	if p.Pid == -1 {
 		return nil, syscall.EINVAL
 	}
-	return nil, ErrNotImplemented
+	pid := p.Pid
+	var st syscall.WaitStatus
+	for {
+		_, werr := syscall.Wait4(pid, &st, 0, nil)
+		if werr == syscall.EINTR {
+			// A signal arrived while waiting; the child is still there.
+			continue
+		}
+		if werr != nil {
+			return nil, werr
+		}
+		break
+	}
+	p.Pid = -1
+	return &ProcessState{status: st, pid: pid}, nil
 }
 
 func (p *Process) Kill() (rerr error) {
-	return ErrNotImplemented
+	return syscall.Kill(p.Pid, syscall.SIGKILL)
 }
 
 func (p *Process) Signal(sig Signal) (rerr error) {
-	return ErrNotImplemented
+	s, ok := sig.(syscall.Signal)
+	if !ok {
+		return syscall.EINVAL
+	}
+	return syscall.Kill(p.Pid, s)
 }
 
 func Ignore(sig ...Signal) {

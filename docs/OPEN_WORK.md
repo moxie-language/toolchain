@@ -7170,3 +7170,46 @@ semantics, which the new fixture `unsafe_typeof` does:
 Verified by running: native `unsafe.TypeOf ok`, the wasm validator PASSes it
 too, and phase 0 reports **115 passed, 0 failed, 0 skipped** with it in the
 suite (114 before it).
+
+## FIXED in round 110: `os/exec` works - and three TODO stubs were why it could not
+
+`src/os/exec` held only `ExitError`. It could not have held more, because three
+layers under it were stubs:
+
+- `os.Process.Wait` returned `ErrNotImplemented`, so nothing could learn how a
+  child ended;
+- `os.ProcessState` answered `""` and `false` for every process, so even a
+  successful child looked failed;
+- `os.StartProcess` REFUSED `ProcAttr.Files` and `ProcAttr.Dir` outright
+  (`ErrNotImplementedFiles`, `ErrNotImplementedDir`), so a pipe could not be
+  handed to a child and `Output` had no way to capture anything.
+
+All three are implemented:
+
+- `Wait` calls `syscall.Wait4` (retrying on EINTR) and fills a real
+  `ProcessState` - `Exited`, `ExitCode`, `Success`, `String`, `Sys` - which is
+  also what `ExitError` reports through;
+- `forkExec`'s child now `chdir`s to `Dir` and `dup2`s each `Files[i]` onto fd
+  `i` before `execve`. It cannot report a failure to the parent yet (there is no
+  error pipe), so it exits 127, the same code a failed `execve` gives;
+- `exec.Cmd` lands on top: `Command`, `Start`, `Wait`, `Run`, `Output`,
+  `CombinedOutput`, with `Dir`, `Env` and the three stream files.
+
+**One measurement shaped the child wiring.** Every `dup2` must run BEFORE any
+close, because two slots can name the SAME fd: `CombinedOutput` hands one pipe
+over as both stdout and stderr, and closing the source after its first use left
+the second `dup2` with EBADF - observed as `CombinedOutput: exit status 127`
+while `Output`, which uses one slot, worked.
+
+**Verified by running** (`os_exec_api`, native - a browser domain has no child
+processes, so the fixture says so and phase 5 skips it):
+
+- `exec.Command("/bin/echo", "hello", "world").Output()` returns exactly
+  `hello world\n` through a real pipe;
+- `exec.Command("/bin/sh", "-c", "exit 3").Run()` returns an `*exec.ExitError`
+  whose `ExitCode()` is 3;
+- `Cmd.Dir = "/"` reaches the child: `/bin/pwd` prints `/`;
+- `CombinedOutput` collects `out\nerr\n`, both streams on one pipe.
+
+`os/exec` is also a new phase-1b SWEEP entry, so "it compiles" is now checked
+every run.
