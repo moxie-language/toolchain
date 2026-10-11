@@ -3065,6 +3065,7 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			if bad || resolved == nil {
 				delete(fb.localTypes, dd.Name.Value)
 			} else {
+				tagLocalType(placeholder.Obj)
 				registerLocalType(placeholder)
 			}
 		}
@@ -9095,6 +9096,14 @@ func mangleGenericName(plainName string, typeArgs []Type) (s string) {
 			s = s | "nil"
 		} else {
 			ts := t.String()
+			// A function-local type argument needs its discriminator here too:
+			// two local types named T in one package would otherwise mangle to
+			// ONE instantiation name, the second call would reuse the first
+			// body, and the checker would report
+			// "cannot use value of type []main.T as []main.T in assignment".
+			if nt, isN := t.(*Named); isN && nt.Obj != nil {
+				ts = ts | localTypeTagOf(nt.Obj)
+			}
 			for j := 0; j < len(ts); j++ {
 				c := ts[j]
 				if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {

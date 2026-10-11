@@ -118,6 +118,17 @@ type compileCtx struct {
 	// '@reflect/types.type:slice:named:trace.perP'"). Entries live in
 	// cctx.compileArena, so reading them at module tail is safe.
 	localTypeReg         map[string]Type
+	// localTypeTag gives each function-local type declaration a unique
+	// discriminator ("#1", "#2", ...) keyed by its TypeName. A local type's
+	// Obj.Name is only "T", so two declarations named T in one package were
+	// ONE type as far as the descriptor tail (named:main.T) and the
+	// instantiation symbol (Ensure__main.T) were concerned: the second
+	// instantiation reused the first body and the type checker then reported
+	// "cannot use value of type []main.T as []main.T in assignment". The tag
+	// goes in the tail and the mangled symbol only - Obj.Name stays T, so
+	// diagnostics keep the name the source used.
+	localTypeTag         map[*TypeName]string
+	localTypeSeq         int32
 }
 
 // wasmSpawnTarget is one function reachable through spawn() on the wasm
@@ -1150,6 +1161,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 		runtime.ArenaFree(arena)
 		cctx.compileArena = nil
 		cctx.localTypeReg = nil
+		cctx.localTypeTag = nil
 		return string(resCopy)
 	}
 
@@ -1176,6 +1188,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 		runtime.ArenaFree(arena)
 		cctx.compileArena = nil
 		cctx.localTypeReg = nil
+		cctx.localTypeTag = nil
 		return string(resCopy)
 	}
 	emitter := newIREmitter(ssaPkg, triple, int32(len(cctx.tcPkgSrc)))
@@ -1211,6 +1224,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	runtime.ArenaFree(arena)
 	cctx.compileArena = nil
 	cctx.localTypeReg = nil
+	cctx.localTypeTag = nil
 	memLine("   ci-free "|name)
 	return result
 }

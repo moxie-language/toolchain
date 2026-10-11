@@ -127,6 +127,10 @@ func (e *irEmitter) typeDescNameInner(t Type) (s string) {
 		} else {
 			nm = nm | normalizePkgPath(named.Obj.Pkg.Path) | "." | named.Obj.Name
 		}
+		// A function-local declaration carries a discriminator so two types
+		// named T in one package are two descriptors and two instantiation
+		// symbols. Obj.Name is left alone, so diagnostics still say main.T.
+		nm = nm | localTypeTagOf(named.Obj)
 		if len(named.TArgs) > 0 {
 			nm = nm | "["
 			for i, ta := range named.TArgs {
@@ -569,9 +573,41 @@ func registerLocalType(named *Named) {
 	if cctx.localTypeReg == nil {
 		cctx.localTypeReg = map[string]Type{}
 	}
-	key := compileArenaString(normalizePkgPath(named.Obj.Pkg.Path) | "." | named.Obj.Name)
+	key := compileArenaString(normalizePkgPath(named.Obj.Pkg.Path) | "." | named.Obj.Name | localTypeTagOf(named.Obj))
 	if _, ok := cctx.localTypeReg[key]; !ok {
 		cctx.localTypeReg[key] = named
+	}
+	runtime.SetCurrentArena(saved)
+}
+
+// localTypeTagOf returns the discriminator for a function-local type
+// declaration, or "" for a package-level type. Keyed by the TypeName, which
+// every instantiation of the type reuses (they all carry the origin's Obj), so
+// a generic local type is covered too.
+func localTypeTagOf(tn *TypeName) (tag string) {
+	if tn == nil || cctx == nil || cctx.localTypeTag == nil {
+		return ""
+	}
+	if v, ok := cctx.localTypeTag[tn]; ok {
+		return v
+	}
+	return ""
+}
+
+// tagLocalType assigns the next discriminator to a local type declaration. The
+// map and its keys live in the compile arena, like localTypeReg.
+func tagLocalType(tn *TypeName) {
+	if tn == nil || cctx == nil {
+		return
+	}
+	saved := runtime.CurrentArena()
+	runtime.SetCurrentArena(cctx.compileArena)
+	if cctx.localTypeTag == nil {
+		cctx.localTypeTag = map[*TypeName]string{}
+	}
+	if _, ok := cctx.localTypeTag[tn]; !ok {
+		cctx.localTypeSeq++
+		cctx.localTypeTag[tn] = compileArenaString("#" | simpleItoa(cctx.localTypeSeq))
 	}
 	runtime.SetCurrentArena(saved)
 }

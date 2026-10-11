@@ -1,0 +1,57 @@
+/*
+Two function-local types with the SAME name in one package are two types.
+
+A local declaration's TypeName is only "T", so the descriptor tail
+(`named:main.T`) and the instantiation symbol (`Ensure__main.T`) were the same
+for both: the second `mxutil.Ensure[[]T]` call reused the first instantiation's
+body, and the checker then refused the assignment with
+
+    main.mx:24: cannot use value of type []main.T as []main.T in assignment
+
+which is a true statement about a false premise. Each local declaration now
+carries a discriminator (`#1`, `#2`, ...) keyed by its TypeName - instantiations
+carry the origin's Obj, so a generic local type is covered too - and the
+discriminator appears only in the descriptor tail and the mangled symbol.
+`Obj.Name` is left alone, so diagnostics still say `main.T`, and a local type
+never crosses a package boundary, so the mxh text (which keeps the plain name)
+is unaffected.
+*/
+package main
+
+import (
+	"git.smesh.lol/moxie/pkg/mxutil"
+)
+
+func first() (n int32) {
+	type T struct {
+		x    int32
+		data []byte
+	}
+	ts := []T{}
+	ts = mxutil.Ensure(ts, 1)
+	ts = push(ts, T{x: 1, data: []byte("abcd")})
+	return ts[0].x + int32(len(ts[0].data))
+}
+
+func second() (n int32) {
+	type T struct {
+		y    int32
+		name []byte
+	}
+	ts := []T{}
+	ts = mxutil.Ensure(ts, 1)
+	ts = push(ts, T{y: 2, name: []byte("xy")})
+	return ts[0].y*10 + int32(len(ts[0].name))
+}
+
+func main() {
+	a := first()
+	b := second()
+	if a != 5 {
+		panic("first() = " | a.String() | ", want 5")
+	}
+	if b != 22 {
+		panic("second() = " | b.String() | ", want 22")
+	}
+	println("same-name local types ok")
+}

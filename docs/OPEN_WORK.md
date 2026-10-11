@@ -7047,3 +7047,36 @@ Fixpoint: `tmp/mxc-r106b` == `tmp/mxc-r106c` (sha256 d845fb52424abe0dfab25b6f...
 
 `./moxie` is the round-106 fixpoint binary (sha256 d845fb52424abe0dfab25b6f...),
 and `sysroot/runtime_go.bc` plus `runtime_go_wasm.bc` were re-baked with it.
+
+## FIXED in round 107: two function-local types with the same name were ONE type
+
+The repro was recorded in round 103 and left open. Two functions, each declaring
+its own `type T struct{...}`, each calling `mxutil.Ensure(ts, 1)`:
+
+    main.mx:24: cannot use value of type []main.T as []main.T in assignment
+
+A true statement about a false premise. A local declaration's TypeName is only
+`T`, so as far as two things were concerned the two types were the same one:
+
+- the descriptor tail - `named:main.T` - so one descriptor described two layouts;
+- the instantiation SYMBOL - `mangleGenericName` builds `Ensure__main.T` from
+  `Type.String()`, and `monomorphizeAndCall` memoizes instantiations by that
+  name in `targetPkg.Members` - so the second call reused the FIRST body and then
+  the checker refused the assignment.
+
+Each local declaration now gets a discriminator (`#1`, `#2`, ...) keyed by its
+TypeName; every instantiation reuses the origin's `Obj`, so a generic local type
+is covered too. The tag is appended in exactly two places - `typeDescName`'s
+Named branch and `mangleGenericName` - and `registerLocalType`'s registry key
+carries it, so `typeFromTail` still rebuilds the type at module tail.
+`Obj.Name` is left alone, so diagnostics keep saying `main.T`, and a local type
+can never be named by another package, so the mxh text (which keeps the plain
+name) is unaffected.
+
+Verified by running: the recorded failure compiles now and prints `a=5 b=22`,
+while r106c still reports the old error on the same source - so the fixture
+discriminates. New fixture: `local_type_same_name`.
+
+Fixpoint: `tmp/mxc-r107b` == `tmp/mxc-r107c` (sha256 958955b0cb36072917274e8d...).
+`tmp/mxc-r107a`, built by the PREVIOUS generation, differs - the one-generation
+lag this file already documents, and the new lineage reproduces itself.
