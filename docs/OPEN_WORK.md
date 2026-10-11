@@ -7334,6 +7334,28 @@ x := []chan __slicealloc(int32, 2)     compiles, len=0 cap=0
 
 This is what turned "the rewrite produced a wrong type text" into a silent zero
 slice instead of an error - it is why `[]map[int32]int32{:2}` reported `0/0`
-rather than failing. A malformed type in a slice/channel type expression must be
-a syntax error.
+rather than failing.
+
+Sharper, after mapping it: the PARSER is not at fault. It reports correctly
+where a type is expected (`var y []chan 5` -> `unexpected literal 5`,
+`var y []chan __slicealloc(int32, 2)` -> `unexpected ( at end of statement`),
+and `stmtList` does enforce a statement terminator. What is accepted is the
+EXPRESSION form, and it swallows trailing tokens:
+
+```
+x := []chan __slicealloc(int32, 2)   accepted, len=0 cap=0
+x := []chan abc(1)                   accepted, len=0
+x := []chan abc + 1                  accepted, len=0    <- `+ 1` silently dropped
+x := []chan abc                      accepted, len=0    <- undefined type, no error
+x := []chan int32(5)                 refused, but as a codegen error
+```
+
+Present on the pre-round-111 compiler as well (`mxc-r107c`), so it is old. The
+statement parses, the RHS is a `*syntax.Operation` whose X is a slice/channel
+TYPE rather than a value, and the front-end drops it and stores a zero slice
+instead of failing loud. Two things follow: an expression that is not a value
+must be an error at the point it is built (the type-checker or the SSA builder,
+whichever sees it first), and an undefined type name inside `[]chan T` must be
+`undefined: T`. Next round starts by instrumenting `buildExpr`'s nil-returning
+and `default` paths to name the node that is dropped.
 
