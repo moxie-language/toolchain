@@ -6918,3 +6918,53 @@ targets are affected (native and wasm).
 `./moxie` is now the round-104 fixpoint binary (`tmp/mxc-r104d`,
 sha256 1100c0c8ffb7eca48740c74f...), identical to `tmp/mxc-r104c`, and
 `sysroot/runtime_go.bc` was re-baked from the fixed source with it.
+
+## FIXED in round 105: `|` with a non-text operand died in clang instead of saying why
+
+    var a int64 = 5
+    println("x=" | a)
+
+emitted a concatenation anyway and the backend rejected the module with
+
+    error: '%t7' defined with type 'i64' but expected '{ ptr, i64, i64 }'
+      %cc4 = extractvalue {ptr, i64, i64} %t7, 0
+
+which names no source line, no type and no operator - the class of diagnostic
+gap round 100 recorded for `header.get(...)`. `|` is the concatenation operator
+when EITHER side is text and the bitwise OR otherwise, so a text/other MIX is a
+type error, and it is now reported where it is written:
+
+    main.mx:5: cannot concatenate value of type untyped string with value of type
+    int64 ('|' concatenates text; use .String() on the value)
+
+The rule needed three measurements to avoid rejecting legal code:
+
+- `TextType` covers BOTH spellings, because `string` and `[]byte` are one type
+  here, so `"a" | []byte("b")` stays legal;
+- a NAMED string type is text through its underlying type (`type label string`);
+- two non-text operands are a bitwise OR and must keep working (`(n | 2) | 8`),
+  so only a MIX is an error;
+- a type parameter is skipped: in a generic body the operand type is not
+  resolved yet, and `"x" | v` with `v` constrained to `~string` is legal by
+  instantiation.
+
+Verified by running: the mixed form is rejected with the positioned message
+above; `concat_text_forms` compiles and runs natively AND for the wasm target
+(it deliberately prints no number, so it does not hit the builtin-Stringer gap);
+the check does not fire on the compiler's own source (a self-build with it is
+clean) and the stage4 fixpoint is byte-identical:
+
+    tmp/mxc-r105a (built by ./moxie)       sha256 9a55f13f2bddd931cde72a7c...
+    tmp/mxc-r105b (built by tmp/mxc-r105a) sha256 9a55f13f2bddd931cde72a7c...
+
+Recorded rather than fixed, because fixing it would mean re-verifying the whole
+suite for a cosmetic gain: `"x" | r` with a RUNE already had its own message
+("cannot concatenate rune with string - convert to UTF-8 first") and now gets
+this one too, so that one shape reports twice. Both name the same line and both
+are true.
+
+Fixtures: `reject_concat_non_text` (restriction) and `concat_text_forms`
+(regression). Legacy's verdict on the source could not be measured here - the
+prebuilt legacy binary now dies in LLVM init before it reaches its type checker
+(libLLVM-22 is gone) - but the change cannot regress a working program: the
+rejected source previously produced a clang error rather than a binary.

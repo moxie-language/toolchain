@@ -5044,6 +5044,28 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 			push(cctx.compileErrors, "cannot concatenate rune with string")
 		}
 	}
+	// '|' concatenates when EITHER side is text and is the bitwise OR
+	// otherwise, so a text/other MIX is a type error. It used to be emitted as a
+	// concatenation regardless, and clang rejected the module with
+	//   '%t7' defined with type 'i64' but expected '{ ptr, i64, i64 }'
+	//   %cc4 = extractvalue {ptr, i64, i64} %t7, 0
+	// which names no source line, no type and no operator - the operand simply
+	// has to be a string, which is what .String() is for.
+	//
+	// TextType covers BOTH spellings of text (string and []byte are one type in
+	// Moxie), so `"a" | []byte("b")` stays legal. A type parameter is skipped:
+	// in a generic body its type is not resolved yet, and `"x" | v` with v
+	// constrained to ~string is legal by instantiation.
+	if op == OpOr {
+		if _, xTP := x.SSAType().(*TypeParam); !xTP {
+			if _, yTP := y.SSAType().(*TypeParam); !yTP {
+				if TextType(x.SSAType()) != TextType(y.SSAType()) {
+					cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+					push(cctx.compileErrors, fb.errPos() | "cannot concatenate value of type " | x.SSAType().String() | " with value of type " | y.SSAType().String() | " ('|' concatenates text; use .String() on the value)")
+				}
+			}
+		}
+	}
 	if xc, ok := x.(*SSAConst); ok {
 		if yc, ok2 := y.(*SSAConst); ok2 {
 			if xc.val != nil && yc.val != nil {
