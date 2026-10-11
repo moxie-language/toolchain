@@ -7147,3 +7147,26 @@ on EVERY phase-5 run - a 2.4x tax on the phase. The marker's comment says all of
 this and gives the one-line command to run it directly, so the capability is
 documented and reachable rather than hidden; Header behaviour natively is
 covered every run by phase 0, and net/http compiling for wasm by phase 1c.
+
+## DECIDED and PINNED in round 109: `unsafe.TypeOf` accepts any operand on purpose
+
+The objective's unsafe item named two builtins, and they are opposite cases.
+`unsafe.Pointer(x)` was the bug - declared `__any->ptr`, it accepted a struct or
+slice value and silently made it a pointer, which is why six sites in `src/net`
+produced invalid IR instead of a compile error. That is fixed and pinned
+(`reject_unsafe_ptr_nonpointer`, round 103). `unsafe.TypeOf(x)` returning the
+compiler's own descriptor for whatever `x` is IS its purpose: the operand is
+never converted, and comparing two descriptor pointers is how a Moxie program
+asks "are these the same type" without reflection. Restricting it would remove
+an ability, not close a hole - so the decision is to leave it and PIN the
+semantics, which the new fixture `unsafe_typeof` does:
+
+- two `int64` values have the same descriptor;
+- `int64` and `int32` do not;
+- two different struct types do not;
+- a slice and a pointer do not;
+- two function-local types in one function do not (the round-107 identity).
+
+Verified by running: native `unsafe.TypeOf ok`, the wasm validator PASSes it
+too, and phase 0 reports **115 passed, 0 failed, 0 skipped** with it in the
+suite (114 before it).

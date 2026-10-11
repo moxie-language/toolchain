@@ -1,0 +1,62 @@
+/*
+unsafe.TypeOf accepts ANY operand, and that is the design - not the hole that
+unsafe.Pointer had.
+
+The objective's unsafe item named two builtins. `unsafe.Pointer(x)` was the bug:
+declared `__any->ptr`, it accepted a struct or slice value and silently made it a
+pointer, which is why six sites in src/net produced invalid IR instead of a
+compile error; that is now a checked conversion (round 103,
+reject_unsafe_ptr_nonpointer). `unsafe.TypeOf(x)` is the opposite case: returning
+the compiler's OWN descriptor for whatever x is IS its purpose, the operand is
+never converted, and comparing two of those pointers is how a program asks "are
+these the same type" without reflection. Restricting it would remove the ability,
+not a hole.
+
+This fixture pins the semantics so a future widening of the unsafe checks cannot
+quietly break them: same type compares equal, different types do not, and that
+holds across basic widths, struct shapes, composite kinds and two local types in
+one function (which round 107 made distinct types).
+*/
+package main
+
+import (
+	"unsafe"
+)
+
+type alpha struct {
+	x int32
+}
+
+type beta struct {
+	y []byte
+}
+
+func main() {
+	var a int64 = 1
+	var b int64 = 2
+	var c int32 = 3
+	if unsafe.TypeOf(a) != unsafe.TypeOf(b) {
+		panic("two int64 values have different descriptors")
+	}
+	if unsafe.TypeOf(a) == unsafe.TypeOf(c) {
+		panic("int64 and int32 share a descriptor")
+	}
+	var x alpha
+	var y beta
+	if unsafe.TypeOf(x) == unsafe.TypeOf(y) {
+		panic("two different struct types share a descriptor")
+	}
+	var s []byte = "s"
+	var p *alpha = &x
+	if unsafe.TypeOf(s) == unsafe.TypeOf(p) {
+		panic("a slice and a pointer share a descriptor")
+	}
+	type localOne struct{ n int32 }
+	type localTwo struct{ m int32 }
+	var l1 localOne
+	var l2 localTwo
+	if unsafe.TypeOf(l1) == unsafe.TypeOf(l2) {
+		panic("two local types share a descriptor")
+	}
+	println("unsafe.TypeOf ok")
+}
