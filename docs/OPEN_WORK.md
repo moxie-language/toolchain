@@ -6968,3 +6968,20 @@ Fixtures: `reject_concat_non_text` (restriction) and `concat_text_forms`
 prebuilt legacy binary now dies in LLVM init before it reaches its type checker
 (libLLVM-22 is gone) - but the change cannot regress a working program: the
 rejected source previously produced a clang error rather than a binary.
+
+## Round 105: what was verified, in this environment
+
+`tests/run.sh --phase N` for every phase that does not need legacy
+(MOXIE=tmp/mxc-r105b), 195 PASS and ZERO non-legacy failures:
+
+| phase | result |
+| --- | --- |
+| 0 regressions + 0b restrictions | **113 PASS, 0 FAIL, 0 SKIP** |
+| 1b stdlib sweep | **41 packages ok** - the concat rule does not false-positive anywhere in the stdlib closure |
+| 1c js/wasm sweep | PASS (net/http, path/filepath, syscall/js) |
+| 3 IR validate | 4/4 |
+| 4 binary smoke | 1/1 |
+| 5 browser wasm validator | **62 passed, 0 failed, 0 skipped** - one MORE than round 104, because `concat_text_forms` is wasm-capable |
+| 6 instrumentation | every `:stage4` variant PASS; the 28 FAILs are all `:legacy`, which cannot run here (libLLVM-22 is gone) |
+
+`./moxie` is the round-105 fixpoint binary (sha256 9a55f13f2bddd931cde72a7c...).
