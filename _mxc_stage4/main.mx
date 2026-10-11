@@ -2763,10 +2763,16 @@ func buildTagTrue(tag string) (ok bool) {
 	case "wasm", "js", "moxie.wasm":
 		return mxutil.TargetArch() == "wasm"
 	case "moxie.stringer":
-		// The builtin String() bodies (src/runtime/stringer.mx) are part of
-		// the native runtime. The wasm target has its own codec path and
-		// does not carry them, so the tag stays off there.
-		return mxutil.TargetArch() != "wasm"
+		// The builtin String() bodies (src/runtime/stringer.mx) are part of the
+		// runtime on EVERY target. They used to be native-only, with the wasm
+		// target substituting identity thunks (emitBasicIdentities) whose only
+		// sound case is []byte: boxing an int64 into a Stringer and calling
+		// String() through it produced a garbage slice header, and the standalone
+		// wasm host died in fd_write with "RangeError: Offset is outside the
+		// bounds of the DataView" while printing it. Measured: with the thunks,
+		// `var s Stringer = n; s.String()` traps in the browser; with the real
+		// bodies it prints 42, exactly as it does natively.
+		return true
 	case "moxie.linux":
 		return mxutil.TargetArch() != "wasm"
 	case "wasm_unknown":
@@ -2868,7 +2874,7 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 			"faketime", "baremetal", "nintendoswitch",
 			"boringcrypto", "cgo",
 			"runtime_memhash_leveldb", "runtime_memhash_tsip",
-			"runtime_asserts", "moxie.stringer"}
+			"runtime_asserts"}
 	} else {
 		forbidden = []string{"none", "wasm", "js", "ignore", "compiler_bootstrap",
 			"scheduler.tasks", "scheduler.cores", "scheduler.asyncify",

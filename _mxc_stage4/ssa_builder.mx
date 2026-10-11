@@ -5943,6 +5943,8 @@ func (fb *ssaFuncBuilder) reportUndefinedField(sel *syntax.SelectorExpr, t Type)
 	if t != nil {
 		name = t.String()
 	}
+	if name == "int64" && sel.Sel.Value == "String" {
+	}
 	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 	push(cctx.compileErrors, fb.errPos() | sel.Sel.Value | " undefined (type " | name | " has no field or method " | sel.Sel.Value | ")")
 }
@@ -7964,7 +7966,18 @@ func (fb *ssaFuncBuilder) resolveBuiltinMethod(t Type, typeName string, sel *syn
 	}
 	rtPkg := cctx.universe.Registry["runtime"]
 	if rtPkg == nil {
-		return nil, nil, false
+		// The runtime is BAKED for this target (sysroot/runtime_go_wasm.bc):
+		// its type graph is deliberately not in the registry, but the BAKE
+		// carries the method bodies - `llvm-dis runtime_go_wasm.bc` shows
+		// runtime.(*int64).String - so declare the method as an external symbol
+		// against a stand-in package instead of reporting it missing. Giving up
+		// here is why `.String()` on a builtin said "no field or method String"
+		// on wasm while the same source compiled natively, and it is the last
+		// piece of the wasm Stringer gap: the bodies must also be SELECTED for
+		// the target (buildTagTrue("moxie.stringer")), which they now are.
+		stub := NewTCPackage("runtime", "runtime")
+		stubPkg := fb.ensureImportedSSAPackage(stub)
+		return stubPkg.ExternalFunc(mangled, m.Signature()), target, true
 	}
 	impPkg := fb.ensureImportedSSAPackage(rtPkg)
 	return impPkg.ExternalFunc(mangled, m.Signature()), target, true

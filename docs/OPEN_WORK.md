@@ -6985,3 +6985,46 @@ rejected source previously produced a clang error rather than a binary.
 | 6 instrumentation | every `:stage4` variant PASS; the 28 FAILs are all `:legacy`, which cannot run here (libLLVM-22 is gone) |
 
 `./moxie` is the round-105 fixpoint binary (sha256 9a55f13f2bddd931cde72a7c...).
+
+## FIXED in round 106: the wasm Stringer gap - boxed builtins formatted as garbage and `.String()` would not compile
+
+Two independent causes, both measured, both fixed.
+
+**1. The builtin String() bodies were not selected for wasm.**
+`buildTagTrue("moxie.stringer")` returned false for the wasm target (and the tag
+was also listed in that target's forbidden set), so `src/runtime/stringer.mx`
+stayed out and the interface path substituted identity thunks
+(`emitBasicIdentities`). Those thunks are sound only for `[]byte`: boxing an
+`int64` into a Stringer and calling `String()` produced a garbage slice header,
+and the standalone host died printing it -
+
+    JS error: RangeError: Offset is outside the bounds of the DataView
+        at DataView.prototype.setUint32 (host.mjs:881, fd_write)
+        at app.wasm.runtime.printstring
+        at app.wasm.main.main
+
+The tag is now true on EVERY target and out of the wasm forbidden list, so wasm
+carries the real bodies - one source of truth for String(), as native does.
+
+**2. A baked runtime's symbols could not be referenced.**
+With the bodies selected the method set did have `String` (instrumented:
+`methods=1` on the universe's int64), yet `resolveBuiltinMethod` still failed,
+because it looks the runtime package up in `cctx.universe.Registry` and the wasm
+runtime is BAKED (`sysroot/runtime_go_wasm.bc`), so it is deliberately not in
+the registry - the keys at that point were
+`[errors][io][main][moxie][os][unsafe]`. It now declares the method as an
+EXTERNAL symbol against a stand-in runtime package, which the link resolves
+against the bake; the bake does carry `runtime.(*int64).String` (verified with
+`llvm-dis-22 runtime_go_wasm.bc`).
+
+**Verified by running.** The boxing probe (`var s Stringer = n; s.String()`)
+traps in the browser before the fix and passes after, printing `[42]`, `[7]`,
+`[1.50000000000000e+000]` exactly as native does. A direct `.String()` probe
+compiles for wasm and passes the validator. And FOUR fixtures that were
+native-only *because of this gap* dropped their `//:wasmtest skip` and now pass
+browser validation: `const_exact_fold`, `generic_type_method`, `gosym_pclntab`,
+`const_receiver_width`. The only remaining opt-outs name reasons that have
+nothing to do with stringers: `http_header_api` (the validator host provides no
+`gojs` module) and `os_user_api` (the host has no /etc/passwd).
+
+Fixpoint: `tmp/mxc-r106b` == `tmp/mxc-r106c` (sha256 d845fb52424abe0dfab25b6f...).
