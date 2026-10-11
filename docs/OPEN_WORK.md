@@ -7080,3 +7080,21 @@ discriminates. New fixture: `local_type_same_name`.
 Fixpoint: `tmp/mxc-r107b` == `tmp/mxc-r107c` (sha256 958955b0cb36072917274e8d...).
 `tmp/mxc-r107a`, built by the PREVIOUS generation, differs - the one-generation
 lag this file already documents, and the new lineage reproduces itself.
+
+## Round 107: what was verified, in this environment
+
+`tests/run.sh --phase N` for every phase that does not need legacy
+(MOXIE=tmp/mxc-r107c, per-compiler caches so nothing stale is reused):
+**210 PASS, 0 non-legacy failures**.
+
+| phase | result |
+| --- | --- |
+| 0 regressions + 0b restrictions | **114 PASS, 0 FAIL, 0 SKIP** - includes `local_type_same_name` |
+| 1b stdlib sweep | **41 packages ok** - the stdlib's own local types (internal/trace's `perP` among them) go through the new naming |
+| 1c js/wasm sweep | PASS (net/http, path/filepath, syscall/js) |
+| 3 IR validate | 4/4 |
+| 4 binary smoke | 1/1 |
+| 5 browser wasm validator | **67 passed, 0 failed, 0 skipped** - one more than round 106 |
+| 6 instrumentation | every `:stage4` variant PASS; the 28 `:legacy` FAILs are environmental (libLLVM-22 is gone) |
+
+`./moxie` is the round-107 fixpoint binary (sha256 958955b0cb36072917274e8d...).
