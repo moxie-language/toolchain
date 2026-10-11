@@ -6899,3 +6899,22 @@ a type error.
 The idiom in this tree is `a.String()`, which is why nobody hit it; the compiler
 should report "cannot use value of type int64 as string in concatenation". Both
 targets are affected (native and wasm).
+
+## Round 104: what was verified, in this environment
+
+`tests/run.sh --phase N` for every phase that does not need legacy
+(MOXIE=tmp/mxc-r104d, with the runtime re-baked from the fixed source):
+
+| phase | result |
+| --- | --- |
+| 0 regressions (native) + 0b restrictions | **109 PASS, 0 FAIL** - includes the unparked `gosym_pclntab`, `os_user_api`, `reject_missing_import`, `reject_unsafe_ptr_nonpointer` |
+| 1b stdlib sweep | **41 packages ok** |
+| 1c js/wasm sweep | PASS (net/http, path/filepath, syscall/js) |
+| 3 IR validate | 4/4 |
+| 4 binary smoke | 1/1 |
+| 5 browser wasm validator | **61 passed, 0 failed, 0 skipped** |
+| 6 instrumentation | every `:stage4` variant PASS; the 28 FAILs are ALL `:legacy` variants, which cannot run here (libLLVM-22 is gone - see the environment note above). Zero non-legacy failures. |
+
+`./moxie` is now the round-104 fixpoint binary (`tmp/mxc-r104d`,
+sha256 1100c0c8ffb7eca48740c74f...), identical to `tmp/mxc-r104c`, and
+`sysroot/runtime_go.bc` was re-baked from the fixed source with it.
