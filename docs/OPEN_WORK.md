@@ -4,6 +4,116 @@ State carried across context compaction. Ordered queue, the decisions already
 taken, the findings that motivated them, and the two designs in flight
 (module removal, user-code exemption). Update this file when the queue moves.
 
+## REMAINING WORK (as of round 125) - read this first
+
+Everything below this section is history, evidence and closed items. This is the
+actual queue, in the order I would take it.
+
+### 1. A generic named function type is not substituted in the typechecker's visit of an instantiated body  [CODE - top priority]
+
+Whole repro, one file, no imports:
+
+    type Seq[V comparable] func(yield func(V) bool)
+
+    func gen[V comparable](v V) (s Seq[V]) {
+        return func(yield func(V) bool) {     // line 6
+            yield(v)
+        }
+    }
+
+    var got int32
+    func yieldIt(v int32) (cont bool) { got = v; return false }
+
+    func main() {
+        s := gen[int32](7)
+        s(yieldIt)                            // line 20
+    }
+
+    main.mx:6:  cannot use value of type func(yield func(int32) bool) as main.Seq in return statement
+    main.mx:20: cannot use value of type func(v int32) (cont bool) as func(V) bool in argument to function
+
+Both diagnostics print the UNSUBSTITUTED type (`main.Seq` with no type argument,
+`func(V) bool` with the parameter still in it) while the values being rejected
+carry the correctly substituted `int32` forms. The SSA path substitutes
+correctly - `monomorphizeAndCall` builds the signature with
+`resolveSignatureWithSubst(fd.Type, typeSubst, srcScope)` (`ssa_builder.mx:9772`)
+and sets `subFb.typeSubst` for the body. The failing checks are typechecker
+checks, and `ir_typecheck.mx:627` notes that monomorphized bodies substitute via
+`fb.typeSubst` - so the typecheck's own visit of an instantiated body is the side
+still holding the unsubstituted signature. Make it substitute the way the
+builder's signature resolution already does.
+
+This one defect is what makes the whole `iter.Seq`/`Seq2` surface unusable:
+instantiating `maps.Values[map[string]int32, string, int32]` fails inside its own
+body with the same two shapes (`... as iter.Seq2 in return statement`,
+`... as func(K, V) bool in argument`).
+
+### 2. Sweep gap, part of closing 1  [TEST]
+
+`iter`, `maps` and `slices` are NOT phase-1b sweep entries, which is why no gate
+ever compiled the iterator API. Add them, and add a run-verified fixture that
+exercises `maps.Keys`/`Values`/`All`, `slices.Values`/`Collect` and a
+hand-written `iter.Seq` (a draft exists in this file's round-125 entry; note
+`slices.Collect` lives in `src/slices/iter_wasm.mx`, so it is wasm-only and a
+native fixture cannot use it).
+
+### 3. Rule-9 arrays in `syscall` / `os.Pipe`  [DECISION, then maybe a pin]
+
+`src/syscall/exec_unix.mx:141` declares `var p [2]int32`, and
+`syscall_linux_amd64.mx` carries `*[2]Timeval` / `*[2]Timespec` in its //sys
+directives. They are alias/unsafe-bound and correct today. This needs a decision
+(keep and pin with a run-verified fixture that exercises `os.Pipe` and a
+time-setting syscall, or convert), not a patch.
+
+### 4. `syscall/js` and `net/http/roundtrip_js` rule debt  [DECISION]
+
+Inside their `js && wasm` build constraint they use value receivers, `any` and
+mutated globals. They compile (phase 1c) and nothing runs them. Either convert
+them to the Moxie shapes, or pin them with a wasm fixture driven through the
+`gojs` stubs (the validator host already has those stubs behind
+`__moxie_test_stubs`).
+
+### Operational rules learned the hard way (not code work)
+
+- **Never run `moxie build -a` or `tests/wasm/validate.sh` while
+  `tests/run.sh --phase N` is in flight.** Both clear the SHARED
+  `$HOME/moxie/cache`. Observed damage, twice each: the phase's log simply stops
+  mid-fixture with no error, and the next phase-5 run reports false FAILs
+  (`context_breaker`, `hash_basic`) on a cache that was just deleted underneath
+  it. With nothing else running, both are green.
+- Phase 2 (selfhost) and the `:legacy` variants of phase 6 need libLLVM-22,
+  which is not installed here. Those failures are environmental.
+
+### Gate state on the current tree (commit `5fb14785`)
+
+- phase 0 regressions+restrictions: **122 PASS / 0 FAIL / 0 SKIP** (green)
+- phase 1b: **42 stdlib packages** (green)
+- phase 1c / 3 / 4 / 5: started after that and STOPPED mid-1c at the user's
+  request, so they are NOT green for this tree. Round 125 removed four
+  `src/os/user` files that were excluded on every target, so nothing there should
+  move; re-run them before trusting that. The last clean run of all four was
+  round 124 (1c 3/3, 3 4/4, 4 1/1, 5 73/0/0).
+
+### Closed in rounds 112-125, so nobody re-opens them
+
+- printed-but-ignored diagnostics: fixed (round 112, `reject_type_as_value`).
+- untyped integer constants wider than 64 bits: fixed (round 123,
+  `const_fold_exact`).
+- `crypto/ed25519` struct-wrapper design: done earlier, now pinned by
+  `ed25519_roundtrip` (native + wasm).
+- `debug/gosym` / the round-103 arena item: re-verified fixed; the cause was the
+  codec's two seen tables drifting (round 104), not relocation.
+- the "newly surfaced, sized, not done" list: `crypto/ecdsa`, `compress/flate`
+  and `gzip`, the `src/net` public types (now aliases), net/http's
+  `context.Value` gap (removed by design in `cbfbe313`), `internal/coverage/*`
+  and `tracev1` - all resolved (round-124 reconciliation).
+- `makeStrongFromWeak`: removed. `regexp`/`text/template`: excluded by design,
+  with the reasoning in the sweep's own comment. relative-path entry point,
+  tzdata registration, the `tests/util.sh` non-linking-pass guard, `syscall/js`
+  compilation: resolved/verified.
+- `os/user`'s cgo-gated files: dead references, removed (round 125);
+  `os_user_api` prints `os/user ok`.
+
 ## Where things stand
 
 Four repositories, all on branch `dev`, all level with their remotes
@@ -11,7 +121,7 @@ Four repositories, all on branch `dev`, all level with their remotes
 
 | repo | what it is | last known state |
 |------|------------|------------------|
-| `moxie` | the compiler, runtime and stdlib | `4af5bfd5` (fixtures+docs; the compiler is `7fb19370`); `tests/run.sh --full` after round 124: phase 0 regressions+restrictions **122 PASS / 0 FAIL / 0 SKIP**, phase 1b compiles **42** stdlib packages, phase 1c 3/3 js/wasm-only, phase 3 4/4 IR validate, phase 4 1/1 smoke, phase 5 wasm fixtures **73 PASS / 0 FAIL**, phase 6 has **0 `:stage4` failures**, bootstrap fixpoint PASS (r123b == r123c); phases 2 and the `:legacy` variants of 6 are environmental FAILs (libLLVM-22 is not installed). Rounds 112-124: printed diagnostics now fail the build, untyped integer constants wider than 64 bits fold exactly, crypto/ed25519 runs end to end under a fixture, and the goal's item list is down to the rule-9 arrays, the js&&wasm rule debt, the dead os/user cgo files and the `any`-in-generics skip-list |
+| `moxie` | the compiler, runtime and stdlib | `5fb14785` (the compiler is `7fb19370`); phase 0 **122 PASS / 0 FAIL / 0 SKIP** and phase 1b (**42** stdlib packages) are green on this tree; phase 1c/3/4/5 were stopped mid-run at the user's request (last clean run, round 124: 3/3, 4/4, 1/1, 73/0/0), and phase 6 has 0 `:stage4` failures; phases 2 and the `:legacy` variants of 6 are environmental (no libLLVM-22). SEE "REMAINING WORK" AT THE TOP - the real queue is now one code defect (generic named function types unsubstituted in the typechecker), the iter/maps/slices sweep gap, the rule-9 array decision and the js&&wasm rule debt |
 | `nostr` | shared nostr primitives and codecs | `98c7069` (musiquay vocabulary moved out) |
 | `morly` | the relay (`pkg/relay`, `pkg/store`, ...) | `b7dba37` |
 | `musiquay` | the web app, docs corpus, protocol vocabulary | `8dd6f59` (vocabulary at `pkg/protocol`) |
