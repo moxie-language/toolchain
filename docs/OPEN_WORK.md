@@ -8037,3 +8037,51 @@ immediately-invoked literals left** in the package.
 crypto/ecdsa/rsa/elliptic, math/big, os/exec, internal/trace(+tracev1),
 internal/profile, index/suffixarray, mime/multipart, compress/*, encoding/*,
 debug/gosym, runtime/trace - reports ZERO.
+
+## Round 134: net's control adapters and debug closures (net 29 -> 5)
+
+**The ten control adapters were dead code around a deprecated field.** Every
+dialer and listener built a closure whose only job was to adapt the deprecated
+`Control` (no context) to `ControlContext`:
+
+    ctrlCtxFn := sd.Dialer.ControlContext
+    if ctrlCtxFn == nil && sd.Dialer.Control != nil {
+        ctrlCtxFn = func(ctx, network, address, c) error { return sd.Dialer.Control(...) }
+    }
+
+`Dialer.Control` is never SET anywhere in the tree, and `ListenConfig` had only
+the non-context form. So, per the standing rule (remove dead references rather
+than keep them): `Dialer.Control` is gone, `ListenConfig.Control` is
+`ControlContext` with the context-carrying signature (matching `Dialer`), and all
+ten adapters collapse to `ctrlCtxFn := <config>.ControlContext`. Ten captures,
+zero behaviour change - nothing ever populated the old field.
+
+**Then four more:**
+
+- `nss.mx`'s `parseCriteria` handed `foreachField` a closure that pushed onto its
+  local slice. `foreachField` now takes a `fieldSink` interface
+  (`add(field string) error`) and calls it directly; the accumulating state is a
+  `criteriaBuilder` whose `add` is the body that closure had. That is the
+  "add the parameters that actually get modified" shape, and it keeps parse.mx
+  generic instead of coupling it to nss types.
+- `conf.mx`'s three deferred DEBUG prints (addrLookupOrder, hostLookupOrder,
+  initConfVal) are deferred CALLS to free functions now. `debugLookupOrder` takes
+  `ret *hostLookupOrder` because deferred arguments are evaluated at defer time -
+  the value being printed is set by the return, so it must be read through a
+  pointer when the defer runs.
+
+Measured: `net` 29 -> 5 capturing closures, and the package builds.
+
+**The five left in net are structural, and need decisions rather than patches:**
+
+1. `(*Resolver).lookupIPAddr__mval1` - a bound method value (`recv` is the
+   environment); the fix is to call the method directly, as `pkg/syntax` did.
+2. `(*Resolver).lookupIPAddr__anon2` and `(*Resolver).internetAddrList__anon1` -
+   resolver fan-out over several lookup paths; the state (resolverFunc,
+   lookupGroupCtx, network, host, net, portnum) wants a holder the fan-out drives.
+3. `(*pipeDeadline).set` - the callback goes to `time.AfterFunc`, whose signature
+   has no room for the deadline. This is the timer-service question: either the
+   deadline state moves into a spawn'd timer worker (the documented manager/worker
+   timer pattern) or the callback stays a capture.
+4. `sendFile` - the callback goes to `syscall.RawConn.Write`, same problem, and
+   the syscall layer owns that signature.

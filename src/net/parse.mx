@@ -235,17 +235,25 @@ func removeComment(line string) (rs string) {
 	return line
 }
 
-// foreachField runs fn on each non-empty run of non-space bytes in x.
-// It returns the first non-nil error returned by fn.
-func foreachField(x string, fn func(field string) error) (rerr error) {
+// fieldSink receives each field. It is an interface rather than a func because
+// the caller that accumulates fields has to MUTATE state: a closure that pushed
+// onto a local slice is exactly the capture a Moxie function value cannot carry,
+// so the state lives in the sink and foreachField calls it directly.
+type fieldSink interface {
+	add(field string) (err error)
+}
+
+// foreachField runs sink.add on each non-empty run of non-space bytes in x.
+// It returns the first non-nil error.
+func foreachField(x string, sink fieldSink) (rerr error) {
 	x = trimSpace(x)
 	for len(x) > 0 {
 		sp := bytealg.IndexByteString(x, ' ')
 		if sp == -1 {
-			return fn(x)
+			return sink.add(x)
 		}
 		if field := trimSpace(x[:sp]); len(field) > 0 {
-			if err := fn(field); err != nil {
+			if err := sink.add(field); err != nil {
 				return err
 			}
 		}

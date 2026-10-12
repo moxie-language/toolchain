@@ -214,32 +214,42 @@ func parseNSSConf(f *parseFile) (rnssConf *nssConf) {
 }
 
 // parses "foo=bar !foo=bar"
-func parseCriteria(x string) (c []nssCriterion, err error) {
-	err = foreachField(x, func(f string) error {
-		not := false
-		if len(f) > 0 && f[0] == '!' {
-			not = true
-			f = f[1:]
-		}
-		if len(f) < 3 {
-			return errors.New("criterion too short")
-		}
-		eq := bytealg.IndexByteString(f, '=')
-		if eq == -1 {
-			return errors.New("criterion lacks equal sign")
-		}
-		if hasUpperCase(f) {
-			lower := []byte(f)
-			lowerASCIIBytes(lower)
-			f = string(lower)
-		}
-		c = mxutil.Ensure(c, 1)
-		c = push(c, nssCriterion{
-			negate: not,
-			status: f[:eq],
-			action: f[eq+1:],
-		})
-		return nil
+// criteriaBuilder accumulates the criteria parseCriteria produces. The parse used
+// to hand foreachField a closure that pushed onto its local slice; that closure's
+// environment is what a Moxie function value cannot carry.
+type criteriaBuilder struct {
+	c []nssCriterion
+}
+
+func (b *criteriaBuilder) add(f string) (err error) {
+	not := false
+	if len(f) > 0 && f[0] == '!' {
+		not = true
+		f = f[1:]
+	}
+	if len(f) < 3 {
+		return errors.New("criterion too short")
+	}
+	eq := bytealg.IndexByteString(f, '=')
+	if eq == -1 {
+		return errors.New("criterion lacks equal sign")
+	}
+	if hasUpperCase(f) {
+		lower := []byte(f)
+		lowerASCIIBytes(lower)
+		f = string(lower)
+	}
+	b.c = mxutil.Ensure(b.c, 1)
+	b.c = push(b.c, nssCriterion{
+		negate: not,
+		status: f[:eq],
+		action: f[eq+1:],
 	})
-	return
+	return nil
+}
+
+func parseCriteria(x string) (c []nssCriterion, err error) {
+	b := &criteriaBuilder{}
+	err = foreachField(x, b)
+	return b.c, err
 }

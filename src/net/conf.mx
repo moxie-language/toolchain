@@ -84,6 +84,47 @@ func systemConf() (rresolverConf *resolverConf) {
 
 // initConfVal initializes confVal based on the environment
 // that will not change during program execution.
+// debugLookupOrder prints a lookup-order result AFTER the return value is set,
+// which is why it takes a pointer: deferred call arguments are evaluated when the
+// defer is registered, not when it runs.
+func debugLookupOrder(what string, name []byte, ret *hostLookupOrder) {
+	r := *ret
+	print("go package net: ", what, "(", name, ") = ", r.String(), "\n")
+}
+
+// debugConfValInit is the deferred GODEBUG report of initConfVal. It was a
+// closure over dnsMode; the globals it reads are read when it runs either way.
+func debugConfValInit(dnsMode string) {
+	if confVal.dnsDebugLevel > 1 {
+		println("go package net: confVal.netCgo =", confVal.netCgo, " netGo =", confVal.netGo)
+	}
+	if dnsMode != "go" && dnsMode != "cgo" && dnsMode != "" {
+		println("go package net: GODEBUG=netdns contains an invalid dns mode, ignoring it")
+	}
+	switch {
+	case netGoBuildTag || !cgoAvailable:
+		if dnsMode == "cgo" {
+			println("go package net: ignoring GODEBUG=netdns=cgo as the binary was compiled without support for the cgo resolver")
+		} else {
+			println("go package net: using the Go DNS resolver")
+		}
+	case netCgoBuildTag:
+		if dnsMode == "go" {
+			println("go package net: GODEBUG setting forcing use of the Go resolver")
+		} else {
+			println("go package net: using the cgo DNS resolver")
+		}
+	default:
+		if dnsMode == "go" {
+			println("go package net: GODEBUG setting forcing use of the Go resolver")
+		} else if dnsMode == "cgo" {
+			println("go package net: GODEBUG setting forcing use of the cgo resolver")
+		} else {
+			println("go package net: dynamic selection of DNS resolver")
+		}
+	}
+}
+
 func initConfVal() {
 	dnsMode, debugLevel := goDebugNetDNS()
 	confVal.netGo = netGoBuildTag || dnsMode == "go"
@@ -91,36 +132,7 @@ func initConfVal() {
 	confVal.dnsDebugLevel = debugLevel
 
 	if confVal.dnsDebugLevel > 0 {
-		defer func() {
-			if confVal.dnsDebugLevel > 1 {
-				println("go package net: confVal.netCgo =", confVal.netCgo, " netGo =", confVal.netGo)
-			}
-			if dnsMode != "go" && dnsMode != "cgo" && dnsMode != "" {
-				println("go package net: GODEBUG=netdns contains an invalid dns mode, ignoring it")
-			}
-			switch {
-			case netGoBuildTag || !cgoAvailable:
-				if dnsMode == "cgo" {
-					println("go package net: ignoring GODEBUG=netdns=cgo as the binary was compiled without support for the cgo resolver")
-				} else {
-					println("go package net: using the Go DNS resolver")
-				}
-			case netCgoBuildTag:
-				if dnsMode == "go" {
-					println("go package net: GODEBUG setting forcing use of the Go resolver")
-				} else {
-					println("go package net: using the cgo DNS resolver")
-				}
-			default:
-				if dnsMode == "go" {
-					println("go package net: GODEBUG setting forcing use of the Go resolver")
-				} else if dnsMode == "cgo" {
-					println("go package net: GODEBUG setting forcing use of the cgo resolver")
-				} else {
-					println("go package net: dynamic selection of DNS resolver")
-				}
-			}
-		}()
+		defer debugConfValInit(dnsMode)
 	}
 
 	// The remainder of this function sets preferCgo based on
@@ -180,9 +192,7 @@ func (c *resolverConf) mustUseGoResolver(r *Resolver) (rok bool) {
 // It also returns dnsConfig when it was used to determine the lookup order.
 func (c *resolverConf) addrLookupOrder(r *Resolver, addr []byte) (ret hostLookupOrder, dnsConf *dnsConfig) {
 	if c.dnsDebugLevel > 1 {
-		defer func() {
-			print("go package net: addrLookupOrder(", addr, ") = ", ret.String(), "\n")
-		}()
+		defer debugLookupOrder("addrLookupOrder", addr, &ret)
 	}
 	return c.lookupOrder(r, "")
 }
@@ -192,9 +202,7 @@ func (c *resolverConf) addrLookupOrder(r *Resolver, addr []byte) (ret hostLookup
 // It also returns dnsConfig when it was used to determine the lookup order.
 func (c *resolverConf) hostLookupOrder(r *Resolver, hostname []byte) (ret hostLookupOrder, dnsConf *dnsConfig) {
 	if c.dnsDebugLevel > 1 {
-		defer func() {
-			print("go package net: hostLookupOrder(", hostname, ") = ", ret.String(), "\n")
-		}()
+		defer debugLookupOrder("hostLookupOrder", hostname, &ret)
 	}
 	return c.lookupOrder(r, hostname)
 }
