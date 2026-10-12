@@ -889,8 +889,17 @@ func ConvertConstLocal(v ConstVal, target Type) (c ConstVal) {
 		// made math.MaxUint64 (1<<64-1) read as signed and its shifts and
 		// divisions come out negative.
 		unsigned := false
+		// Exact must survive a conversion to an UNTYPED integer target. A named
+		// constant is stored by converting it to its declared type, so dropping
+		// it here threw away the high bits of every >64-bit untyped constant:
+		// `const hi = (1<<26-1) << 'A'` folded to 0 at `hi >> 64` while the
+		// same expression written inline stayed exact. MaskConstToBasic passes
+		// an untyped target through unchanged and rebuilds a sized one without
+		// Exact, which is right - a sized value really is truncated.
+		var exact *big.Int
 		if ci, isInt := v.(*ConstInt); isInt {
 			unsigned = ci.Unsigned
+			exact = ci.Exact
 		}
 		// A float constant converted to an integer truncates its EXACT value
 		// toward zero, as Go does. cvInt goes through cf.V, and float64 cannot
@@ -903,7 +912,7 @@ func ConvertConstLocal(v ConstVal, target Type) (c ConstVal) {
 				unsigned = iv < 0 && r.Sign() > 0
 			}
 		}
-		return MaskConstToBasic(&ConstInt{V:iv, Unsigned:unsigned}, b)
+		return MaskConstToBasic(&ConstInt{V:iv, Unsigned:unsigned, Exact:exact}, b)
 	case b.Info&IsFloat != 0:
 		// An untyped target keeps the exact value; a sized one rounds to it
 		// (float32(0.1) is the float32 value, not the decimal literal).

@@ -1,0 +1,47 @@
+/*
+Untyped integer constants wider than 64 bits must fold exactly whether they are
+written inline or named.
+
+The named form used to lose the high bits. A const declaration stores its value
+by converting it to the declared type, and ConvertConstLocal rebuilt the ConstInt
+with only its 64-bit slot - dropping the Exact *big.Int that the folder had
+produced - so `const hi = (1<<26-1) << 'A'` came back 0 at `hi >> 64` while the
+same expression written inline was exact. A silently wrong constant is the
+deception case, not a clean failure, so the two spellings are asserted EQUAL
+here: that oracle needs no hand-computed constant, and the four values below are
+small enough to check by hand ('A' is 65, so hi>>64 is (2^26-1)<<1).
+*/
+package main
+
+const hi = (1 << 26 - 1) << 'A'
+const big = 1 << 70
+const mask = (1 << 64 - 1) << 8
+
+// The textproto bitmap shape that first exposed this: a mask literal wider than
+// 64 bits, whose halves both came back zero so every MIME header failed to parse.
+const bitmap = ((1 << 26 - 1) << 'A') | ((1 << 26 - 1) << 'a')
+
+func main() {
+	if got, want := int64(hi>>64), int64(134217726); got != want {
+		panic("named hi>>64 = " | got.String() | ", want " | want.String())
+	}
+	if got, want := int64(hi>>64), int64((((1 << 26 - 1) << 'A') >> 64)); got != want {
+		panic("named hi>>64 = " | got.String() | " but the same expression inline = " | want.String())
+	}
+	if got, want := int64(big>>64), int64(64); got != want {
+		panic("named big>>64 = " | got.String() | ", want 64")
+	}
+	if got, want := int64(big>>64), int64((1 << 70) >> 64); got != want {
+		panic("named big>>64 = " | got.String() | " but inline = " | want.String())
+	}
+	if got, want := int64(mask>>64), int64(255); got != want {
+		panic("named mask>>64 = " | got.String() | ", want 255")
+	}
+	if got := int64(bitmap >> 64); got == 0 {
+		panic("the high half of the >64-bit bitmap folded to zero")
+	}
+	if got, want := int64(bitmap>>64), int64((((1 << 26 - 1) << 'A') | ((1 << 26 - 1) << 'a')) >> 64); got != want {
+		panic("named bitmap>>64 = " | got.String() | " but inline = " | want.String())
+	}
+	println("untyped wide-constant folding ok")
+}
