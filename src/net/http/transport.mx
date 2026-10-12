@@ -1532,11 +1532,9 @@ func (t *Transport) queueForDial(w *wantConn) {
 func (t *Transport) startDialConnForLocked(w *wantConn) {
 	t.dialsInProgress.cleanFrontCanceled()
 	t.dialsInProgress.pushBack(w)
-	func() {
-		t.dialConnFor(w)
-		w.cancelCtx = context.CancelFunc{}
-		w.cancelSet = false
-	}()
+	t.dialConnFor(w)
+	w.cancelCtx = context.CancelFunc{}
+	w.cancelSet = false
 }
 
 // dialConnFor dials on behalf of w and delivers the result to w.
@@ -1631,16 +1629,14 @@ func (pconn *persistConn) addTLS(ctx context.Context, name string, trace *httptr
 			errc <- tlsHandshakeTimeoutError{}
 		})
 	}
-	func() {
-		if trace != nil {
-			httptrace.TLSHandshakeStart(trace)
-		}
-		err := tlsConn.HandshakeContext(ctx)
-		if timer != nil {
-			timer.Stop()
-		}
-		errc <- err
-	}()
+	if trace != nil {
+		httptrace.TLSHandshakeStart(trace)
+	}
+	hsErr := tlsConn.HandshakeContext(ctx)
+	if timer != nil {
+		timer.Stop()
+	}
+	errc <- hsErr
 	if err := <-errc; err != nil {
 		plainConn.Close()
 		if err == (tlsHandshakeTimeoutError{}) {

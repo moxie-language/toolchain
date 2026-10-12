@@ -7959,3 +7959,23 @@ closures to turn into direct calls, and `__mvalN` bound method values.
 
 Note for the public API: a user hook now takes the trace as its last argument
 (`func(hostPort string, ct *httptrace.ClientTrace)`). That is the cost of (a).
+
+## Round 131: seven immediately-invoked literals inlined (net/http 145 -> 138)
+
+`func() { ... }()` blocks in net/http capture the enclosing frame for no
+structural reason - they are blocks, not values. Seven had no locals escaping and
+no defer/return inside, so they are now plain statements: `filetransport.mx`'s
+response-writer fill, `h2_bundle`'s closeNotifier wait and reqBody close,
+`transport`'s startDialConnForLocked, `socks_bundle`'s deadline select,
+`transport`'s TLS handshake block (its `err` renamed `hsErr` to avoid shadowing),
+and `h2_bundle`'s client-preface read (`buf` -> `prefaceBuf`).
+
+Five IIFEs remain and each needs more than inlining: `client.mx`'s
+`setRequestCancel` and `h2_bundle`'s ping writer RETURN or assign through
+closures, and `server.mx`'s wraps a `defer func(){ recover() }` whose panic channel
+is a local parameter - those want the same "widen the signature, pass what is
+modified" treatment the httptrace hooks got.
+
+Verified: net/http+httptrace builds, the probe runs, and the closure report drops
+from 145 to 138. Gates: phase 0 123 passed / 0 failed / 0 skipped, phase 1b 45
+packages.

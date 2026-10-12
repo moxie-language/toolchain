@@ -4990,17 +4990,15 @@ func (sc *http2serverConn) readPreface() (rerr error) {
 		return nil
 	}
 	errc := chan error{1}
-	func() {
-		// Read the client preface
-		buf := []byte{:len(http2ClientPreface)}
-		if _, err := io.ReadFull(sc.conn, buf); err != nil {
-			errc <- err
-		} else if !bytes.Equal(buf, http2clientPreface) {
-			errc <- fmt.Errorf("bogus greeting %q", buf)
-		} else {
-			errc <- nil
-		}
-	}()
+	// Read the client preface
+	prefaceBuf := []byte{:len(http2ClientPreface)}
+	if _, prefaceErr := io.ReadFull(sc.conn, prefaceBuf); prefaceErr != nil {
+		errc <- prefaceErr
+	} else if !bytes.Equal(prefaceBuf, http2clientPreface) {
+		errc <- fmt.Errorf("bogus greeting %q", prefaceBuf)
+	} else {
+		errc <- nil
+	}
 	timer := sc.srv.newTimer(http2prefaceTimeout) // TODO: configurable on *Server?
 	defer timer.Stop()
 	select {
@@ -6757,10 +6755,8 @@ func (w *http2responseWriter) CloseNotify() (rbool <-chan bool) {
 		ch = chan bool{1}
 		rws.closeNotifierCh = ch
 		cw := rws.stream.cw
-		func() {
-			cw.Wait() // wait for close
-			ch <- true
-		}()
+		cw.Wait() // wait for close
+		ch <- true
 	}
 	return ch
 }
@@ -7665,11 +7661,9 @@ func (cs *http2clientStream) closeReqBodyLocked() {
 	}
 	cs.reqBodyClosed = chan struct{}{}
 	reqBodyClosed := cs.reqBodyClosed
-	func() {
-		cs.cc.t.markNewGoroutine()
-		cs.reqBody.Close()
-		close(reqBodyClosed)
-	}()
+	cs.cc.t.markNewGoroutine()
+	cs.reqBody.Close()
+	close(reqBodyClosed)
 }
 
 type http2stickyErrWriter struct {
