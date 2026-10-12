@@ -7500,3 +7500,106 @@ Still open, and this is now the whole of it:
    importing those three packages (`discoverPkg`'s skip-list), which silently
    drops symbols. The real fix is the concrete-constraint refactor plus deleting
    the skip-list; the skip-list's removal is the completion condition.
+
+## FIXED in round 125: the cgo-gated `os/user` files were dead references, and are gone
+
+The goal's list carried "the cgo-gated os/user files" as an open item. What they
+actually were, measured with the compiler's own file list:
+
+    discover os/user [lookup_unix.mx, listgroups_unix.mx, user.mx, lookup.mx,
+                      lookup_stubs.mx]
+
+Five files are live. Four were dead and could never compile:
+
+    cgo_lookup_cgo.mx        imports "C"          - the loader refuses it
+    getgrouplist_unix.mx     imports "C"          - the loader refuses it
+    cgo_lookup_unix.mx       references _C_*      - defined ONLY by the file above
+    cgo_listgroups_unix.mx   references _C_*      - defined ONLY by the file above
+
+So the pair that looked like a fallback was not one: the `_C_*` type aliases and
+accessors live exclusively in `cgo_lookup_cgo.mx`, which is itself excluded, so
+the other two could not resolve a single one of the C-shaped types they are
+written against. `getGroupList` and `groupRetry`, the only functions they
+contributed, have no reference anywhere in the tree. Moxie has no cgo and no
+`osusergo` build tag, so no configuration selects any of the four; keeping them
+is a dead reference, which is what the standing rule says to remove rather than
+keep "in case".
+
+Removed, and verified by running after the removal:
+
+- the `os_user_api` regression prints `os/user ok` (it asserts `Current`,
+  `Lookup("root")`'s uid/gid/home, and the group lookups through the real
+  `/etc/passwd` and `/etc/group`);
+- `archive/tar`, the stdlib package that imports `os/user`, still builds and runs;
+- the fixture's header no longer describes the cgo route as present, and records
+  the measurement above instead.
+
+The pure implementation was never the backup - it is the only implementation, and
+it is the one the fixture has been running all along.
+
+## NEW OPEN ITEM (round 125): a generic named function type is not substituted in the instantiated body
+
+Found while trying to run the iterator APIs (`maps.Keys`/`Values`/`All`,
+`slices.Values`/`Collect`) to prove the compiler's `any`-in-generics skip-list is
+gone. `slices.Collect` turned out to be `iter_wasm.mx` (wasm-only, my error), but
+reducing that away left a real defect. Whole repro, one file:
+
+    type Seq[V comparable] func(yield func(V) bool)
+
+    func gen[V comparable](v V) (s Seq[V]) {
+        return func(yield func(V) bool) {     // line 6
+            yield(v)
+        }
+    }
+
+    var got int32
+    func yieldIt(v int32) (cont bool) { got = v; return false }
+
+    func main() {
+        s := gen[int32](7)
+        s(yieldIt)                            // line 20
+    }
+
+    main.mx:6:  cannot use value of type func(yield func(int32) bool) as main.Seq in return statement
+    main.mx:20: cannot use value of type func(v int32) (cont bool) as func(V) bool in argument to function
+
+Both diagnostics print the UNSUBSTITUTED type - `main.Seq` with no type argument,
+and `func(V) bool` with the type parameter still in it - while the values being
+rejected carry the correctly substituted `func(yield func(int32) bool)` and
+`func(v int32) (cont bool)`. So the substitution reaches the func literal, the
+call argument and the closure's parameter, and does NOT reach the instantiated
+function's own signature: its result type is still `Seq[V]` and its parameter is
+still `func(V) bool`. That is why instantiating `maps.Values[map[string]int32,
+string, int32]` fails inside its own body
+
+    cannot use value of type func(yield func(string, int32) bool) as iter.Seq2 in return statement
+    cannot use value of type func(k string, v int32) (cont bool) as func(K, V) bool in argument to function
+
+- the same two shapes, one level down in the stdlib.
+
+**Where to look next (measured by reading, not guessed).** The SSA path DOES
+substitute the signature - `monomorphizeAndCall` builds it with
+`resolveSignatureWithSubst(fd.Type, typeSubst, srcScope)`
+(`ssa_builder.mx:9772`) and sets `subFb.typeSubst` for the body. The failing
+diagnostics are not from there; they are typechecker diagnostics
+("cannot use value of type ... in return statement"), and the comment at
+`ir_typecheck.mx:627` notes that monomorphized bodies substitute via
+`fb.typeSubst` - i.e. the TYPECHECK's own visit of an instantiated body is the
+side still holding the unsubstituted signature (`main.Seq` for the result,
+`func(V) bool` for the parameter) while the func literal and the call argument
+beside it carry the substituted `int32` forms. Fixing it means making the
+typecheck's instantiated-body check substitute the same way the builder's
+signature resolution already does.
+
+**Why no gate caught it: `maps`, `slices` and `iter` are NOT phase-1b sweep
+entries.** The sweep's list has 42 packages and none of them is the iterator
+surface, so the whole `iter.Seq`/`Seq2` API is un-compiled and un-run by the
+suite. Adding `iter`, `maps` and `slices` to the sweep is part of closing this.
+
+## HAZARD (round 125, same root cause as the validator one): `moxie build -a` clears the SHARED cache
+
+Running `./moxie build -a ...` while `tests/run.sh --phase 0/1b` is in flight
+kills those runs the same way `tests/wasm/validate.sh` does: the log simply stops
+mid-fixture, twice in a row, with no error. `-a` clears the `.bc` build cache that
+the phases are reading from. Anything that clears the cache - `-a`, the wasm
+validator - must run when no phase is running.
