@@ -7773,3 +7773,103 @@ generic named func type is expected -
 The target prints as the bare `iter.Seq`, so the parameter type lost its
 instantiation args on that path; a value already of the parameter's type works,
 which is why the fixture returns `iter.Seq[int32]` from a function instead.
+
+## Round 128: closure-capture elimination, batch 1 - and two build hazards found doing it
+
+Inventories, all with `-report-closure-captures`:
+
+- 31 small packages (`compress/*`, `crypto/*` small, `encoding/*`, `hash/*`,
+  `internal/coverage/*`, `mime*`, `net/textproto`, `net/url`, `os/user`,
+  `runtime/trace`, `text/tabwriter`, `unicode/utf8`) -> **3 captures**, all in
+  `(*Hooks).Run`.
+- `bytes`, `context`, `fmt`, `sort`, `time` -> **0 captures**. Their closure
+  literals already take everything through parameters.
+- `log` -> the `(*Logger)` cluster: EVERY logging path handed `output` a
+  formatting callback closed over the caller's frame.
+
+**FIXED - `src/log/log.mx`.** `output(pc, calldepth, appendOutput func([]byte)
+[]byte)` is now `output(pc, calldepth, msg []byte)`. Twenty call sites collapsed
+(`fmt.Append*(b, ...)` -> `fmt.Append*(nil, ...)`, `push(b, s...)` -> `s`), and
+the body appends the message itself:
+
+    *buf = mxutil.Ensure(*buf, len(msg))
+    *buf = push(*buf, msg...)
+
+The message is now built before the lock instead of inside it; the header is
+still formatted under the lock, so ordering is unchanged.
+
+**FIXED - `src/internal/runtime/exithook/hooks.mx`.** `Run`'s three deferred
+closures are now deferred CALLS to free functions that take the receiver
+(`hooksUnlock`, `hooksClearRunGoid`, `hooksThrowOnPanic`) - a direct call's
+arguments live in the defer frame, which is the point. `recover` still works
+because the deferred function is the one calling it.
+
+Verified: the `log`-only report build is rc=0 with **0 captures**, and the
+31-package batch rebuild is rc=0 with **0 captures**.
+
+**HAZARD 1 - the compiler auto-fetches from the network.** An unresolved import
+runs `git clone https://golang.org` (`main.mx:841`, "auto-fetch golang.org"),
+and when the clone fails it returns "" and the build CONTINUES. Offline this
+hangs for as long as the network makes it hang, and it created
+`$HOME/moxie/golang.org` as a side effect. A build must not reach the network,
+and an import it cannot resolve must fail loudly.
+
+**HAZARD 2 - the repo lock is not reclaimable.** The clone holds
+`$HOME/moxie/<repo>.lock` (content: a PID) with no timeout and no stale-PID
+check. The killed clone left `golang.org.lock` behind, and the next build sat in
+`waiting for lock: golang.org` forever - a build that will never finish and never
+say why. Removing the lock unblocked it.
+
+## Round 128: the net/http inventory (161 closures), and one part of it that the rule cannot mechanically fix
+
+`net/http` + `httptrace` + their closure account for **161 capturing closures in
+~120 distinct functions**. Top clusters, measured:
+
+    16  (*ClientTrace).Compose
+     5  setRequestCancel
+     4  (*persistConn).readLoop
+     3  (*Transport).dialConn          3  http2configureTransports
+     3  http2ConfigureServer           3  EncodeHeaders
+     2  (*socksDialer).connect         2  (*Request).write
+     2  (*persistConn).addTLS          2  NewRequestWithContext
+     2  (*http2ClientConn).roundTrip   2  (*Decoder).DecodeFull
+    ...then a long tail of 1s: (*sysListener).listen*, (*transferWriter).write*,
+    (*timeoutHandler).ServeHTTP, (*Transport).{roundTrip,getConn,
+    startDialConnForLocked,dialConn__mval2,tryPutIdleConn__mval1}, ...
+
+Two shapes in there are NOT ordinary closures:
+
+**1. Bound method values (`__mvalN`)** - `(*Transport).tryPutIdleConn__mval1`,
+`dialConn__mval2` and friends. The compiler emits these itself; the receiver IS
+the environment. The doc's earlier `pkg/syntax` round removed sixteen of exactly
+this kind by calling the method directly instead of materialising a value, and
+net/http needs the same treatment.
+
+**2. `(*ClientTrace).Compose` - 16 closures that the rule cannot remove without an
+API decision.** Every composed hook is, by construction, a closure over the two
+hooks it composes:
+
+    if prev, cur := old.GetConn, t.GetConn; cur != nil {
+        t.GetConn = func(hostPort string) { cur(hostPort); prev(hostPort) }
+    } else {
+        t.GetConn = prev
+    }
+
+Sixteen hooks, sixteen closures. A free function cannot stand in (a Moxie
+function value carries no environment), a bound method cannot either (the
+receiver is a capture by definition), and the hook signature has no room for a
+holder - `func(hostPort string)` is the public API. `Compose` is LIVE: it is
+called from `src/net/http/request.mx:413`.
+
+So this needs a decision, not a patch, and the options are:
+
+  (a) redesign the hook signatures to carry a holder (wide public API change);
+  (b) drop `Compose` and change `request.mx:413` to consult both traces directly
+      at the point of notification (loses the single-trace contract);
+  (c) accept a narrow, documented exception for hook COMPOSITION - the one shape
+      where a function value must carry an environment - while everything else
+      (the wrapper closures, the `__mval`s) is refactored.
+
+Everything else in the 161 is ordinary work: turn scheduling closures into direct
+calls, give the work a helper with explicit parameters, and drop the `__mval`
+bound-method values.

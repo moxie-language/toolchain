@@ -57,6 +57,24 @@ func (s *Hooks) Add(h Hook) {
 // If an exit hook panics, Run will throw with the panic on the stack.
 // If an exit hook invokes exit in the same goroutine, the goroutine will throw.
 // If an exit hook invokes exit in another goroutine, that exit will block.
+// hooksUnlock releases the exit-hook lock. Free functions with the receiver as
+// an explicit parameter keep Run's deferred work out of a closure.
+func hooksUnlock(s *Hooks) {
+	s.locked = 0
+}
+
+func hooksClearRunGoid(s *Hooks) {
+	s.runGoid = 0
+}
+
+// hooksThrowOnPanic must be the deferred function itself, because recover only
+// applies to the function deferred directly.
+func hooksThrowOnPanic(s *Hooks) {
+	if e := recover(); e != "" {
+		s.Throw("exit hook invoked panic")
+	}
+}
+
 func (s *Hooks) Run(code int32) {
 	for s.locked != 0 {
 		if s.Goid() == s.runGoid {
@@ -65,15 +83,13 @@ func (s *Hooks) Run(code int32) {
 		s.Gosched()
 	}
 	s.locked = 1
-	defer func() { s.locked = 0 }()
+	// Deferred CALLS, not deferred closures: a closure over s is a capture,
+	// and a Moxie function value carries no environment. A direct call's
+	// arguments (here the receiver) live in the defer frame instead.
+	defer hooksUnlock(s)
 	s.runGoid = s.Goid()
-	defer func() { s.runGoid = 0 }()
-
-	defer func() {
-		if e := recover(); e != "" {
-			s.Throw("exit hook invoked panic")
-		}
-	}()
+	defer hooksClearRunGoid(s)
+	defer hooksThrowOnPanic(s)
 
 	// Declared once, outside the loop: a declaration in a loop in a
 	// self-mutating method is rejected, and the scratch would otherwise be
