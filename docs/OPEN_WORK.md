@@ -8085,3 +8085,75 @@ Measured: `net` 29 -> 5 capturing closures, and the package builds.
    timer pattern) or the callback stays a capture.
 4. `sendFile` - the callback goes to `syscall.RawConn.Write`, same problem, and
    the syscall layer owns that signature.
+
+## Round 135: every remaining net/http capture is named, with its target
+
+The report names the ENCLOSING function for a compiler-generated bound method
+value (`setRequestCancel__mval1`), not the method, which is why grepping for the
+method names found nothing. A throwaway instrumented compiler (two lines in
+`buildMethodValue`, gated on `-report-closure-captures`, reverted immediately
+after) printed the pair instead. All 25 remaining `__mval`s in net/http, exact:
+
+    (*chunkWriter).writeHeader                 -> declareTrailer
+    (*Config).ProxyFunc                        -> proxyForURL
+    (*conn).serve                              -> startBackgroundRead
+    (*http2ClientConn).closeConn               -> forceCloseConn
+    (*http2clientConnReadLoop).endStream       -> copyTrailers
+    (*http2clientConnReadLoop).run             -> healthCheck
+    http2ConfigureServer                       -> startGracefulShutdown
+    (*http2responseWriter).SetReadDeadline__anon1  -> onReadTimeout
+    (*http2responseWriter).SetWriteDeadline__anon1 -> onWriteTimeout
+    (*http2responseWriterState).writeChunk     -> declareTrailer
+    (*http2serverConn).newStream               -> onWriteTimeout
+    (*http2serverConn).processHeaders          -> onReadTimeout
+    (*http2serverConn).processSettings         -> processSetting
+    (*http2serverConn).serve                   -> onIdleTimer, onReadIdleTimer, onSettingsTimer
+    (*http2serverConn).shutDownIn              -> onShutdownTimer
+    (*http2Server).serveConn                   -> processSetting
+    (*http2stream).endStream                   -> copyTrailersToHandlerRequest
+    (*http2Transport).newClientConn            -> onIdleTimeout
+    (*http2writePushPromise).writeFrame        -> writeHeaderBlock
+    (*http2writeResHeaders).writeFrame         -> writeHeaderBlock
+    (*Transport).dialConn                      -> Authenticate
+    (*Transport).tryPutIdleConn                -> closeConnIfStillIdle
+
+(`(*Resolver).lookupIPAddr -> lookupIP` is the net one; `setRequestCancel__mval1`
+was removed in round 132.)
+
+**Family A - convertible by widening the in-tree helper that receives the method
+value into a sink, exactly as `nss.foreachField` was:**
+
+| helper | callers | sites it fixes |
+| --- | --- | --- |
+| `foreachHeaderElement` / `http2foreachHeaderElement` | 4 / 2 | declareTrailer x2 |
+| `registerOnHitEOF` | 3 | startBackgroundRead |
+| `closeWithErrorAndCode` | 2 | copyTrailers, copyTrailersToHandlerRequest |
+| `ForeachSetting` | 4 | processSetting x2 |
+| `http2splitHeaderBlock` | 2 | writeHeaderBlock x2 |
+| `http2ConfigureServer`'s `RegisterOnShutdown` | 1 | startGracefulShutdown |
+| `(*Config).ProxyFunc` and `(*Transport).dialConn`'s `Authenticate` | - | need a look; ProxyFunc RETURNS a func, so it may be structural |
+
+~14 call sites in all, so it is one batch, not fourteen commits.
+
+**Family B - the timer callbacks, and the design that fixes them.** Twelve of the
+25 are methods handed to a timer:
+
+    sc.idleTimer       = sc.srv.afterFunc(sc.srv.IdleTimeout, sc.onIdleTimer)
+    cc.idleTimer       = time.AfterFunc(d, cc.onIdleTimeout)
+    pconn.idleTimer    = time.AfterFunc(t.IdleConnTimeout, pconn.closeConnIfStillIdle)
+    ... onReadTimeout, onWriteTimeout, onReadIdleTimer, onSettingsTimer,
+        onShutdownTimer, healthCheck, forceCloseConn
+
+`afterFunc`/`time.AfterFunc` take `func()`, which has no room for the receiver -
+the same wall as `pipeDeadline.set` and `sendFile`'s `syscall.RawConn.Write`.
+`http2Server.afterFunc` is however OUR field (net/http sets it through
+`http2.ConfigureServer`), so it can carry a receiver: replace
+`afterFunc func(time.Duration, func()) *Timer` with a form that takes the owner
+and a KIND -
+
+    afterFunc func(d time.Duration, owner timerSink, kind int32) *Timer
+    type timerSink interface { onTimer(kind int32) }
+
+- and the owner switches on the kind. That is the "simpler structure to enable
+  capturing the parameters that actually get modified" shape, applied to timers,
+  and it needs a decision because it changes an exported configuration field.
