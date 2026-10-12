@@ -4,113 +4,109 @@ State carried across context compaction. Ordered queue, the decisions already
 taken, the findings that motivated them, and the two designs in flight
 (module removal, user-code exemption). Update this file when the queue moves.
 
-## REMAINING WORK (as of round 125) - read this first
+## REMAINING WORK (as of round 127) - read this first
 
 Everything below this section is history, evidence and closed items. This is the
-actual queue, in the order I would take it.
+actual queue, in the order to take it.
 
-### 1. A generic named function type is not substituted in the typechecker's visit of an instantiated body  [CODE - top priority]
+### 1. The stdlib's closure captures  [REFACTOR - the standing directive]
 
-Whole repro, one file, no imports:
+**Decision (owner, round 127): closures do not capture, ANYWHERE.** A function
+value carries a code pointer and no environment; a frame arena dies at the
+creating call's return (`FnArenaPop` + `ArenaRelease` per return, `munmap` only
+per domain exit), and there is no escape analysis to separate a closure that
+stays inside its frame from one that is returned, stored in a global or a
+receiver field, or run by `defer` at return time. So compliance moves rather than
+the rule: compiler first (DONE), then the stdlib, then drop `/pkg/` from
+`isUserPackagePath`.
 
-    type Seq[V comparable] func(yield func(V) bool)
+**Compiler: DONE.** `-report-closure-captures` on a full self-build reports
+**0** (was 17: sixteen in `pkg/syntax`, one in `ir_deepcopy.mx`). The last one,
+`ssaRecvRooted`'s recursive `walk`, is an iterative worklist now.
 
-    func gen[V comparable](v V) (s Seq[V]) {
-        return func(yield func(V) bool) {     // line 6
-            yield(v)
-        }
-    }
+**Stdlib: 185 capturing functions** across the 42-package sweep (round-111
+measurement; top packages `(*ClientTrace)` 16, `(*http2ServerConn)` 11,
+`(*Logger)` 10, `(*Builder)` 10, `(*Transport)` 8, `(*persistConn)` 8). The sweep
+now covers 45 packages, so RE-RUN the report first to get the current list.
 
-    var got int32
-    func yieldIt(v int32) (cont bool) { got = v; return false }
+Shapes to expect, and where a worked example already exists in this tree:
+`p.list`-style callbacks (removed from `pkg/syntax` by consuming the separator
+and letting each caller drive its own loop); `errh func(line, col, msg)` scanner
+callbacks (removed by giving `Scanner`/`Source` the owning `*Parser` and calling
+`p.scanError` directly); deferred closures that write a named result (store into
+the slot, run the defers, then load the slot - round 111's ordering fix); bound
+method values, where the receiver IS the environment (either resolve the selector
+as a direct call or reject the value by name).
 
-    func main() {
-        s := gen[int32](7)
-        s(yieldIt)                            // line 20
-    }
+### 2. Function symbol passed where a FOREIGN instantiated generic named func type is expected  [CODE, narrow]
 
-    main.mx:6:  cannot use value of type func(yield func(int32) bool) as main.Seq in return statement
-    main.mx:20: cannot use value of type func(v int32) (cont bool) as func(V) bool in argument to function
+    func Collect(seq iter.Seq[int32]) (…)     // imported
+    lib.Collect(lib.Counter)
 
-Both diagnostics print the UNSUBSTITUTED type (`main.Seq` with no type argument,
-`func(V) bool` with the parameter still in it) while the values being rejected
-carry the correctly substituted `int32` forms. The SSA path substitutes
-correctly - `monomorphizeAndCall` builds the signature with
-`resolveSignatureWithSubst(fd.Type, typeSubst, srcScope)` (`ssa_builder.mx:9772`)
-and sets `subFb.typeSubst` for the body. The failing checks are typechecker
-checks, and `ir_typecheck.mx:627` notes that monomorphized bodies substitute via
-`fb.typeSubst` - so the typecheck's own visit of an instantiated body is the side
-still holding the unsubstituted signature. Make it substitute the way the
-builder's signature resolution already does.
+    cannot use value of type func(func(int32) bool) as iter.Seq in argument to function
 
-This one defect is what makes the whole `iter.Seq`/`Seq2` surface unusable:
-instantiating `maps.Values[map[string]int32, string, int32]` fails inside its own
-body with the same two shapes (`... as iter.Seq2 in return statement`,
-`... as func(K, V) bool in argument`).
-
-### 2. Sweep gap, part of closing 1  [TEST]
-
-`iter`, `maps` and `slices` are NOT phase-1b sweep entries, which is why no gate
-ever compiled the iterator API. Add them, and add a run-verified fixture that
-exercises `maps.Keys`/`Values`/`All`, `slices.Values`/`Collect` and a
-hand-written `iter.Seq` (a draft exists in this file's round-125 entry; note
-`slices.Collect` lives in `src/slices/iter_wasm.mx`, so it is wasm-only and a
-native fixture cannot use it).
+The target prints as the bare `iter.Seq`, so the parameter type loses its
+instantiation args on that path (round 126 bound the instantiation everywhere
+else, which is what fixed the two documented errors and made `maps.Values`/
+`All`/`Keys` compile). A value already of the parameter's type works, which is
+why the `iter_apis` fixture returns `iter.Seq[int32]` from a function instead of
+passing the symbol.
 
 ### 3. Rule-9 arrays in `syscall` / `os.Pipe`  [DECISION, then maybe a pin]
 
 `src/syscall/exec_unix.mx:141` declares `var p [2]int32`, and
 `syscall_linux_amd64.mx` carries `*[2]Timeval` / `*[2]Timespec` in its //sys
-directives. They are alias/unsafe-bound and correct today. This needs a decision
-(keep and pin with a run-verified fixture that exercises `os.Pipe` and a
-time-setting syscall, or convert), not a patch.
+directives. Alias/unsafe-bound and correct today; needs a decision (keep and pin
+with a run-verified fixture that exercises `os.Pipe` and a time-setting syscall,
+or convert), not a patch.
 
 ### 4. `syscall/js` and `net/http/roundtrip_js` rule debt  [DECISION]
 
-Inside their `js && wasm` build constraint they use value receivers, `any` and
-mutated globals. They compile (phase 1c) and nothing runs them. Either convert
-them to the Moxie shapes, or pin them with a wasm fixture driven through the
-`gojs` stubs (the validator host already has those stubs behind
-`__moxie_test_stubs`).
+Inside their `js && wasm` constraint they use value receivers, `any` and mutated
+globals. They compile (phase 1c); nothing runs them. Either convert them to the
+Moxie shapes, or pin them with a wasm fixture driven through the `gojs` stubs
+(the validator host already has those behind `__moxie_test_stubs`).
 
 ### Operational rules learned the hard way (not code work)
 
 - **Never run `moxie build -a` or `tests/wasm/validate.sh` while
   `tests/run.sh --phase N` is in flight.** Both clear the SHARED
-  `$HOME/moxie/cache`. Observed damage, twice each: the phase's log simply stops
-  mid-fixture with no error, and the next phase-5 run reports false FAILs
-  (`context_breaker`, `hash_basic`) on a cache that was just deleted underneath
-  it. With nothing else running, both are green.
-- Phase 2 (selfhost) and the `:legacy` variants of phase 6 need libLLVM-22,
-  which is not installed here. Those failures are environmental.
+  `$HOME/moxie/cache`. Observed, repeatedly: the phase's log stops mid-fixture
+  with no error, and the next phase-5 run reports false FAILs
+  (`context_breaker`, `hash_basic`). Plain concurrent builds are fine; only the
+  cache-clearing ones are not.
+- Phase 2 (selfhost) and the `:legacy` variants of phase 6 need libLLVM-22, which
+  is not installed here. Environmental.
 
-### Gate state on the current tree (commit `5fb14785`)
+### Gate state on the current tree (commit `05087330`, compiler `05087330`)
 
-- phase 0 regressions+restrictions: **122 PASS / 0 FAIL / 0 SKIP** (green)
-- phase 1b: **42 stdlib packages** (green)
-- phase 1c / 3 / 4 / 5: started after that and STOPPED mid-1c at the user's
-  request, so they are NOT green for this tree. Round 125 removed four
-  `src/os/user` files that were excluded on every target, so nothing there should
-  move; re-run them before trusting that. The last clean run of all four was
-  round 124 (1c 3/3, 3 4/4, 4 1/1, 5 73/0/0).
+- phase 0 regressions+restrictions: **123 PASS / 0 FAIL / 0 SKIP** (green)
+- phase 1b: **45 stdlib packages** (green, now including `iter`, `maps`, `slices`)
+- bootstrap fixpoint: **r127a == r127b == r127c** (green)
+- phase 1c / 3 / 4 / 5 were NOT re-run for this compiler; the last clean run of
+  all four was round 124 (1c 3/3, 3 4/4, 4 1/1, 5 73/0/0). Re-run them before
+  trusting wasm, and run them alone (see the cache rule above).
 
-### Closed in rounds 112-125, so nobody re-opens them
+### Closed in rounds 112-127, so nobody re-opens them
 
+- generic instantiation is bound into the types it is compared against (round
+  126): the two documented errors are gone, `maps.Values`/`All`/`Keys` compile,
+  `iter`/`maps`/`slices` are sweep entries, and the sweep gap that hid it is
+  closed.
+- the compiler's own closure captures: 17 -> 0 (round 127).
 - printed-but-ignored diagnostics: fixed (round 112, `reject_type_as_value`).
 - untyped integer constants wider than 64 bits: fixed (round 123,
   `const_fold_exact`).
-- `crypto/ed25519` struct-wrapper design: done earlier, now pinned by
-  `ed25519_roundtrip` (native + wasm).
-- `debug/gosym` / the round-103 arena item: re-verified fixed; the cause was the
-  codec's two seen tables drifting (round 104), not relocation.
+- `crypto/ed25519`: struct wrapper done earlier, pinned by `ed25519_roundtrip`.
+- `debug/gosym` / the round-103 arena item: fixed in round 104 (codec seen
+  tables), re-verified round 123 with `returned_object_identity`.
 - the "newly surfaced, sized, not done" list: `crypto/ecdsa`, `compress/flate`
-  and `gzip`, the `src/net` public types (now aliases), net/http's
-  `context.Value` gap (removed by design in `cbfbe313`), `internal/coverage/*`
-  and `tracev1` - all resolved (round-124 reconciliation).
-- `makeStrongFromWeak`: removed. `regexp`/`text/template`: excluded by design,
-  with the reasoning in the sweep's own comment. relative-path entry point,
-  tzdata registration, the `tests/util.sh` non-linking-pass guard, `syscall/js`
-  compilation: resolved/verified.
+  and `gzip`, the `src/net` public types (aliases), net/http's `context.Value`
+  (removed by design in `cbfbe313`), `internal/coverage/*` and `tracev1` - all
+  resolved (round-124 reconciliation).
+- `makeStrongFromWeak` removed; `regexp`/`text/template` excluded by design;
+  relative-path entry point, tzdata registration, the `tests/util.sh`
+  non-linking-pass guard: resolved/verified.
 - `os/user`'s cgo-gated files: dead references, removed (round 125);
   `os_user_api` prints `os/user ok`.
 
