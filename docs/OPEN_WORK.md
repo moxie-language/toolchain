@@ -11,7 +11,7 @@ Four repositories, all on branch `dev`, all level with their remotes
 
 | repo | what it is | last known state |
 |------|------------|------------------|
-| `moxie` | the compiler, runtime and stdlib | `7fb19370` (code; docs follow it); `tests/run.sh --full` after round 123: phase 0 regressions+restrictions **121 PASS / 0 FAIL / 0 SKIP**, phase 1b compiles **42** stdlib packages, phase 1c 3/3 js/wasm-only, phase 3 4/4 IR validate, phase 4 1/1 smoke, phase 5 wasm fixtures **72 PASS / 0 FAIL**, phase 6 has **0 `:stage4` failures**, bootstrap fixpoint PASS (r123b == r123c); phases 2 and the `:legacy` variants of 6 are environmental FAILs (libLLVM-22 is not installed). Rounds 112-123: printed diagnostics now fail the build, the round-103 arena item is re-verified fixed (codec seen tables, not relocation), and untyped integer constants wider than 64 bits fold exactly whether named or inline |
+| `moxie` | the compiler, runtime and stdlib | `4af5bfd5` (fixtures+docs; the compiler is `7fb19370`); `tests/run.sh --full` after round 124: phase 0 regressions+restrictions **122 PASS / 0 FAIL / 0 SKIP**, phase 1b compiles **42** stdlib packages, phase 1c 3/3 js/wasm-only, phase 3 4/4 IR validate, phase 4 1/1 smoke, phase 5 wasm fixtures **73 PASS / 0 FAIL**, phase 6 has **0 `:stage4` failures**, bootstrap fixpoint PASS (r123b == r123c); phases 2 and the `:legacy` variants of 6 are environmental FAILs (libLLVM-22 is not installed). Rounds 112-124: printed diagnostics now fail the build, untyped integer constants wider than 64 bits fold exactly, crypto/ed25519 runs end to end under a fixture, and the goal's item list is down to the rule-9 arrays, the js&&wasm rule debt, the dead os/user cgo files and the `any`-in-generics skip-list |
 | `nostr` | shared nostr primitives and codecs | `98c7069` (musiquay vocabulary moved out) |
 | `morly` | the relay (`pkg/relay`, `pkg/store`, ...) | `b7dba37` |
 | `musiquay` | the web app, docs corpus, protocol vocabulary | `8dd6f59` (vocabulary at `pkg/protocol`) |
@@ -2501,11 +2501,15 @@ net/http is a green sweep entry.
    `js && wasm` build constraint (value receivers, `any`, mutated globals).
    They compile (phase 1c) but no fixture runs them.
 
-**Hazard found while doing this (worth knowing before the next gate run):**
-`tests/wasm/validate.sh` deletes `$HOME/moxie/cache` at start. Running it at the
-same time as `tests/run.sh --phase 0/5` makes its own cold build die silently
-mid-SSA with no error text, and it can pull the cache out from under the phases.
-Run it alone.
+**Hazard found while doing this, and CONFIRMED by its damage:**
+`tests/wasm/validate.sh` deletes `$HOME/moxie/cache` at start. Run at the same
+time as `tests/run.sh --phase 0/5` it kills its own cold build silently mid-SSA
+with no error text, it killed BOTH sibling runs outright that way (each phase's
+log simply stops mid-fixture), and the phase-5 rerun that followed reported
+`context_breaker` and `hash_basic` as FAIL - two fixtures that pass in every
+other run, failing on a cache that had just been deleted underneath them. With
+nothing else running, phase 5 is 73 passed / 0 failed and both fixtures pass.
+Run the validator alone.
 
 The section below is kept as it was written, for the record.
 
@@ -7454,3 +7458,45 @@ a int32 = 1 << 40` is still refused. Bootstrap fixpoint r123b == r123c.
 A worked-around source in the tree (the textproto bitmap, split into two 64-bit
 halves) is no longer required for correctness; the bitmap shape is one of the
 assertions in the fixture.
+
+## Round 124: what is actually left of the goal's list, measured
+
+Swept the objective's own item list against the tree and the gates. Resolved
+since they were written, with the evidence:
+
+- **`makeStrongFromWeak`**: no occurrence anywhere in the tree (`*.mx`, `*.go`,
+  vendor excepted). Removed rather than stubbed, which is the standing rule.
+- **`regexp` and `text/template`**: deliberately absent. The sweep's own comment
+  records the reasoning - neither is reflect-free, and every in-tree importer was
+  dead code removed in the same round; with the loader strict, naming a package
+  that does not exist now fails the build, so the list is self-verifying.
+- **the relative-path entry point**: CORRECTED and VERIFIED (round 78) - it is
+  Go's own import-path rule, not a bug.
+- **the embedded tzdata registration**: VERIFIED in round 78, including in a
+  browser.
+- **`debug/gosym`, `syscall/js` compilation, `internal/coverage/*`,
+  `internal/trace/internal/tracev1`, `compress/flate`, `crypto/ecdsa`,
+  `crypto/ed25519`, the `src/net` public types, net/http's `context.Value`**:
+  see the round-124 reconciliation above; all are done, and the packages are
+  green phase-1b/1c sweep entries.
+
+Still open, and this is now the whole of it:
+
+1. **The rule-9 arrays in `syscall`/`os.Pipe`** - `exec_unix.mx:141`'s
+   `var p [2]int32` and the `*[2]Timeval`/`*[2]Timespec` //sys directives. They
+   work; they need a decision (keep and pin with a run-verified fixture, or
+   convert), not a patch.
+2. **`src/syscall/js` and `net/http/roundtrip_js` rule debt** inside their
+   `js && wasm` constraint (value receivers, `any`, mutated globals). They
+   compile; nothing runs them. Either convert them or pin them with a wasm
+   fixture through the gojs stubs.
+3. **The cgo-gated `src/os/user/cgo_*.mx` files are dead references.** They carry
+   no build constraint of their own, `os/user` compiles and is a green sweep
+   entry without them, and their job is done by the non-cgo implementations
+   beside them. The standing rule is to remove dead references, not keep them.
+4. **`any` in generic signatures** (`iter`, `weak`,
+   `crypto/internal/fips140cache`, and generic functions across
+   `maps`/`slices`/`bytes`/`internal/trace`): the compiler still SKIPS any file
+   importing those three packages (`discoverPkg`'s skip-list), which silently
+   drops symbols. The real fix is the concrete-constraint refactor plus deleting
+   the skip-list; the skip-list's removal is the completion condition.
