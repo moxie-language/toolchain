@@ -2438,135 +2438,76 @@ committed state. A compiler built by a `./moxie` that predates the dispatch fix
 panics on its own `os` (see the bootstrap-artifact section above), so keep
 `./moxie` current after any value-box-to-pointer-receiver conversion.
 
-## Newly surfaced, sized, not done
+## Round 124: the "newly surfaced, sized, not done" list is checked, item by item
 
-- **`crypto/ed25519` is a rule conflict, not debt.** `PublicKey`/`PrivateKey`
-  are named slice types (banned) *and* are asserted as value types by
-  `crypto/tls`/`crypto/x509` and used as a value `crypto.Signer` (and value
-  receivers are banned). Both bans cannot hold at once. The coherent resolution
-  is the pattern already used for `asn1.ObjectIdentifier`/`RawContent`: make
-  `PrivateKey`/`PublicKey` **structs** wrapping `[]byte`, with pointer receivers
-  and a free constructor, and adapt the call sites. That is a wide ripple (tls,
-  x509, and anything signing), so it is a deliberate design step.
-  `crypto/tls` and `crypto/x509` are otherwise wide-clean; ed25519 is their only
-  unmet dependency.
-- **The widened predicate now surfaces real type mismatches.** e.g.
-  `crypto/ecdsa` reports 16 `cannot use value of type *crypto/internal/fips140/
-  ecdsa.PublicKey as *ecdsa.PublicKey in return statement` and `cannot use value
-  of type ([]byte, interface{Error() string; String() string}) as []byte`. These
-  are genuinely wrong-ABI code that the `isUserPackagePath` gate has been hiding
-  (see the soundness-gate section) - fix them, do not re-gate.
-- **stage4 constant folding of untyped constants wider than 64 bits is not
-  exact** - still open. This entry used to describe `time.Date`/`time.Parse` as
-  broken; that is FIXED and this is the corrected, narrower statement.
-  Verified in round 53 with a `time`-only probe:
+Each claim in this section (below, kept as written) was re-measured against the
+tree and the round-123 gate logs. Most of them are DONE; two are real.
 
-      time.Date(2023, time.March, 14, 15, 9, 26, 0, time.UTC()).Unix()
-      -> 1678806566            (correct; the entry claimed 4744828235076861952)
+**DONE - `crypto/ed25519`.** The struct-wrapper design landed in `bc4a9067`:
+`PublicKey`/`PrivateKey` are structs wrapping `[]byte`, `PublicKeyOf`/
+`PrivateKeyOf` are the constructors, `Bytes()` reads the bytes back, and the
+methods have pointer receivers. The call sites in `crypto/tls`/`crypto/x509`
+already assert on the value type and use `*ed25519.PrivateKey`. Round 124 makes
+the verification DURABLE: the original evidence was a throwaway `/tmp/edprobe`,
+and no fixture in the tree mentioned ed25519 at all. `ed25519_roundtrip` (new
+phase-0 regression, also wasm-validated) now runs, on every gate:
 
-  `ConstFloat` carries `Exact *big.Rat`, which is how the time case was fixed:
-  the folder can now keep an untyped float-containing expression exact and
-  convert once at the end. `ConstInt` has no such field, so an untyped INTEGER
-  constant that needs more than 64 bits loses its high bits. Measured:
+    GenerateKey -> Sign -> Verify; a tampered message is rejected;
+    Seed -> NewKeyFromSeed -> Equal -> signs identically;
+    PrivateKey.Public() -> crypto.PublicKey -> ed25519.PublicKey assertion
+      (the shape crypto/tls depends on);
+    `var signer crypto.Signer = &priv` and Sign/Public through the INTERFACE
+      (the pointer receiver, which is what the rule conflict was about);
+    PublicKeyOf(Bytes()) identity, and the rebuilt key verifies the signature.
 
-      const hi = (1<<26 - 1) << 'A'
-      hi >> 64            -> 0            want 33554430
-      (round 52, the textproto bitmap:)
-      mask >> 64          -> 0            mask & (1<<64-1) -> 0
+It prints `ed25519 ok`.
 
-  A mask literal that Go folds to a 128-bit bitmap came back with BOTH halves
-  zero, so `validHeaderFieldByte` rejected every letter and every MIME header
-  failed to parse. That source is worked around now (two 64-bit halves), but the
-  limitation remains and any other >64-bit untyped integer constant in the tree
-  is a landmine.
+**DONE - `crypto/ecdsa`'s 16 wrong-ABI returns.** `crypto/ecdsa` is a phase-1b
+SWEEP entry (line 49) and the sweep is green, so the whole crypto/tls closure
+compiles; those `cannot use value of type *crypto/internal/fips140/ecdsa.PublicKey`
+errors are gone.
 
-  The fix is the one `ConstFloat` already demonstrates: give `ConstInt` an
-  `Exact *big.Int`, populate it in the folding ops (`Shl`, `Shr`, `And`, `Or`,
-  `Xor`, `AndNot`, `Mul`, `Quo`, `Rem`, the comparisons) and read it in the
-  conversions (`cvInt`, `cvUint`, `intConst`, `ToInt`, `constantValue`), falling
-  back to `V` when it is nil. `pkg/types` already imports `math/big`. The legacy
-  compiler uses `go/constant`, which is arbitrary-precision, so it folds these
-  exactly today - wood law says mirror, not invent.
+**DONE - the >64-bit untyped integer constant.** Fixed in round 123 (see the
+entry above): `ConvertConstLocal` was dropping `ConstInt.Exact` on the
+declaration path.
 
-  **Round 54 attempted exactly that and reverted it.** Two things were learned,
-  both worth keeping:
+**DONE - `compress/flate`'s clang-22 crash.** `compress/flate` and
+`compress/gzip` are both phase-1b sweep entries (lines 42-43) and the sweep is
+green. `crypto/tls` links through them.
 
-  1. `math/big` is CORRECT at these sizes, so the foundation is sound. Measured:
-     `2^70` prints exactly, `2^70 >> 64` is 64, `IsUint64()` is false for it, and
-     `3^100` prints all 48 digits correctly. The earlier open item about
-     `Rat.Mul` returning `0/1` does not extend to `Int`.
+**DONE - the named public API types in `src/net`.** They are ALIASES now, not
+named types: `type IP = []byte`, `type IPMask = []byte`,
+`type HardwareAddr = []byte`, `Header = map[string][][]byte`; `Buffers`, `Dir`
+and `ProtocolError` are structs. The ban on named slice/map types no longer
+applies to any of them.
 
-  2. The bug is WORSE than truncation, and this is the important part. A named
-     constant loses the high bits cleanly:
+**DONE - `net/http`'s `context.Value` gap, by REMOVAL.** `cbfbe313`:
+"net/http carries per-request state concretely; `context.Value`/`WithValue`,
+`ServerContextKey`, `LocalAddrContextKey`, `httptrace`'s context API and
+`internal/nettrace` are gone". The gap was not filled, it was designed out, and
+net/http is a green sweep entry.
 
-         const hi = (1<<26-1) << 'A';  hi >> 64      -> 0
+**DONE - `src/internal/coverage/{cfile,cformat,encodecounter,encodemeta}` and
+`internal/trace/internal/tracev1`.** All are phase-1b sweep entries (lines
+63-69) and the sweep is green.
 
-     but the SAME expression written INLINE produces an arbitrary wrong value:
+**STILL OPEN, and now the only items from this section:**
 
-         ((1<<26-1)<<'A') >> 64                      -> 9741466863665152
-         (1<<70) >> 64                               -> 0
+1. The rule-9 arrays: `src/syscall/exec_unix.mx:141` still declares
+   `var p [2]int32`, and `syscall_linux_amd64.mx` still carries `*[2]Timeval` /
+   `*[2]Timespec` in its //sys directives. The doc's own note stands - they are
+   alias/unsafe-bound and correct today, so they need a decision, not a patch.
+2. `src/syscall/js` and `net/http/roundtrip_js` remain RULE DEBT inside their
+   `js && wasm` build constraint (value receivers, `any`, mutated globals).
+   They compile (phase 1c) but no fixture runs them.
 
-     (correct answers are 134217726 and 64). A silent wrong constant is the
-     deception case, not a clean failure, so this is not cosmetic.
+**Hazard found while doing this (worth knowing before the next gate run):**
+`tests/wasm/validate.sh` deletes `$HOME/moxie/cache` at start. Running it at the
+same time as `tests/run.sh --phase 0/5` makes its own cold build die silently
+mid-SSA with no error text, and it can pull the cache out from under the phases.
+Run it alone.
 
-  The attempted fix turned the named-constant case into garbage as well, which is
-  strictly worse than the clean zero, so it was reverted rather than landed. The
-  folding half is straightforward; the missing piece is that the folded value is
-  narrowed somewhere between `EvalBinaryLocal` and the conversion that consumes
-  it (`ConvertConstLocal`, the const-declaration storage in `ir_typecheck.mx`,
-  and `ssa_builder.mx`'s `folded := EvalBinaryLocal(...)` at ~4898 all narrow),
-  so a value that is exact in the folder arrives inexact. Find that narrowing
-  first, then the `Exact` field has somewhere to live.
-- `compress/flate` is rule-clean but clang-22 still crashes in its backend;
-  `compress/gzip` links through it.
-- `src/syscall/js`, `net/http`'s `context.Value` gap, and the named public-API
-  types in `src/net/**` are unchanged from the sections above.
-- `os.Pipe`'s `var p [2]int32` and syscall's `[2]Timeval`/`[2]Timespec` unsafe
-  casts are the remaining rule-9 arrays; both are alias/unsafe-bound and correct
-  today, so they need their own decision.
-
-# Queue item 1 done: the soundness checks are ungated, and the wave is cleared
-
-`checkAssignable`, `errArgs`, `checkConstConvert` and `checkDefaultRepr` no
-longer return early on `!isUserPackagePath`. Correctness is not a style rule, and
-the predicate that gates the style rules was gating these too, so the whole
-stdlib went unchecked: that is how `natMul(z.a, stk, x.a, y.a)` - an `Int` where
-`[]Word` is declared, result discarded - compiled into a broken `math/big`.
-`go/types` reports the same mismatches and the legacy compiler always surfaced
-them, so stage4 was the odd one out once the migration had cleaned the tree.
-
-`errPos` also puts the failing position into these diagnostics in the
-`prefix:number:` shape `remapErrorLines` expects, so they name `file:line`. The
-eight violations in `src/runtime` were unlocatable before that.
-
-The wave was **three real defects in the whole tree**, and one of them was a
-genuine compiler bug:
-
-1. **A binary constant expression lost its typed operand's type.**
-   `const c = uintptr(64) * 1024 * 1024` was untyped - `tcInferTypeFromExpr` has
-   no binary case, so the declaration fell back to `UntypedTypeOfCV` and `x := c`
-   took the int32 default. `src/runtime`'s arena growth does
-   `newCap := arenaDefaultRegion` (a uintptr constant), so `newCap` was int32 and
-   `cap*2`, the 4095 rounding and `sysMap`'s uintptr parameter all ran in 32 bits.
-   Fixed in `tcInferConstTypeFromExpr` with Go's rule (an untyped constant
-   combines with a typed one and keeps the typed operand's type; comparisons and
-   logical operators stay untyped bool). Legacy was always right, so this is
-   stage4 catching up.
-2. **`src/net/**` passed `*netFD` to `runtime.KeepAlive`, whose parameter is
-   `unsafe.Pointer`** - 20 sites in 8 files, now spelled `unsafe.Pointer(x)`.
-   `src/syscall/js` has 19 more, all inside its `js && wasm` constraint, so they
-   go with that package's own debt.
-3. **`pkg/rewrite/resolve.mx` built `[]typeapi.Type` and handed it to
-   `types.NewTCInterface`, which takes `[]types.Type`.** Neither an assignment
-   nor an interface conversion is legal (`types.Type`'s method set is larger), so
-   the values are asserted on append; they always come from the types package's
-   constructors. The `typeapi` interface itself stays: `pkg/syntax` and
-   `pkg/types/shared_types` need the minimal view.
-
-Verified: a sweep of `pkg/**`, `cmd/**` and the previously wide-unclean packages
-reports **zero** soundness violations, and `tests/run.sh --full` is **175 passed
-/ 0 failed / 0 skipped** with the checks ungated, `pkg/rewrite` and
-`selfhost:stage1` included, `selfhost:fixpoint` holding.
+The section below is kept as it was written, for the record.
 
 ## What is left for the widened predicate
 

@@ -1,0 +1,90 @@
+/*
+crypto/ed25519 end to end, run rather than described.
+
+The keys are structs wrapping the raw bytes (PublicKeyOf/PrivateKeyOf are the
+constructors, Bytes() reads them back) because Moxie forbids named slice types
+while crypto/tls and crypto/x509 must still assert on the key's VALUE type and
+use a private key as a value crypto.Signer. Commit bc4a9067 made that change and
+verified it with a throwaway probe in /tmp; this fixture is the durable form of
+that verification, so the shapes tls depends on cannot regress silently:
+
+  generate, sign, verify, reject a tampered message,
+  Seed -> NewKeyFromSeed round trip and Equal,
+  Public() -> crypto.PublicKey -> ed25519.PublicKey assertion,
+  signing through the crypto.Signer INTERFACE (the pointer receiver),
+  PublicKeyOf(Bytes()) identity.
+*/
+package main
+
+import (
+	"crypto"
+	"crypto/ed25519"
+	"crypto/rand"
+)
+
+func main() {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader())
+	if err != nil {
+		panic("GenerateKey: " | err.Error())
+	}
+	msg := []byte("moxie ed25519 round trip")
+	sig := ed25519.Sign(priv, msg)
+	if len(sig) != ed25519.SignatureSize {
+		panic("signature size = " | int32(len(sig)).String() | ", want " | int32(ed25519.SignatureSize).String())
+	}
+	if !ed25519.Verify(pub, msg, sig) {
+		panic("Verify rejected a valid signature")
+	}
+	tampered := []byte("moxie ed25519 round trip!")
+	if ed25519.Verify(pub, tampered, sig) {
+		panic("Verify accepted a tampered message")
+	}
+
+	seed := priv.Seed()
+	if len(seed) != ed25519.SeedSize {
+		panic("seed size = " | int32(len(seed)).String() | ", want " | int32(ed25519.SeedSize).String())
+	}
+	priv2 := ed25519.NewKeyFromSeed(seed)
+	if !priv2.Equal(priv) {
+		panic("NewKeyFromSeed(Seed()) is not the same private key")
+	}
+	sig3 := ed25519.Sign(priv2, msg)
+	if !ed25519.Verify(pub, msg, sig3) {
+		panic("a key rebuilt from its seed signs differently")
+	}
+
+	cp := priv.Public()
+	ap, ok := cp.(ed25519.PublicKey)
+	if !ok {
+		panic("PrivateKey.Public() did not yield crypto.PublicKey as ed25519.PublicKey")
+	}
+	if !ap.Equal(pub) {
+		panic("Public() does not match the generated public key")
+	}
+
+	var signer crypto.Signer = &priv
+	sig2, err2 := signer.Sign(rand.Reader(), msg, crypto.Hash(0))
+	if err2 != nil {
+		panic("Signer.Sign: " | err2.Error())
+	}
+	if !ed25519.Verify(pub, msg, sig2) {
+		panic("a signature made through crypto.Signer does not verify")
+	}
+	sp, ok2 := signer.Public().(ed25519.PublicKey)
+	if !ok2 || !sp.Equal(pub) {
+		panic("crypto.Signer.Public() is not the same public key")
+	}
+
+	raw := pub.Bytes()
+	if len(raw) != ed25519.PublicKeySize {
+		panic("public key size = " | int32(len(raw)).String() | ", want " | int32(ed25519.PublicKeySize).String())
+	}
+	again := ed25519.PublicKeyOf(raw)
+	if !again.Equal(pub) {
+		panic("PublicKeyOf(Bytes()) is not the same key")
+	}
+	if !ed25519.Verify(again, msg, sig) {
+		panic("a key rebuilt from its bytes does not verify")
+	}
+	println("ed25519 ok")
+}
