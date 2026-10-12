@@ -11,7 +11,7 @@ Four repositories, all on branch `dev`, all level with their remotes
 
 | repo | what it is | last known state |
 |------|------------|------------------|
-| `moxie` | the compiler, runtime and stdlib | `ecf1bfa8` (code; docs follow it); `tests/run.sh --full` after round 112: phase 0 regressions+restrictions **119 PASS / 0 FAIL / 0 SKIP**, phase 1b compiles **42** stdlib packages, phase 1c 3/3 js/wasm-only, phase 3 4/4 IR validate, phase 4 1/1 smoke, phase 5 wasm fixtures **70 PASS / 0 FAIL**, phase 6 has **0 `:stage4` failures**, bootstrap fixpoint PASS (r112b == r112c); phases 2 and the `:legacy` variants of 6 are environmental FAILs (libLLVM-22 is not installed). Round 112 made every printed front-end diagnostic fail the build - six of them were written to stderr and ignored, so a type used as a value (`x := []int32`) compiled to an int32 placeholder and exited 0 |
+| `moxie` | the compiler, runtime and stdlib | `7fb19370` (code; docs follow it); `tests/run.sh --full` after round 123: phase 0 regressions+restrictions **121 PASS / 0 FAIL / 0 SKIP**, phase 1b compiles **42** stdlib packages, phase 1c 3/3 js/wasm-only, phase 3 4/4 IR validate, phase 4 1/1 smoke, phase 5 wasm fixtures **72 PASS / 0 FAIL**, phase 6 has **0 `:stage4` failures**, bootstrap fixpoint PASS (r123b == r123c); phases 2 and the `:legacy` variants of 6 are environmental FAILs (libLLVM-22 is not installed). Rounds 112-123: printed diagnostics now fail the build, the round-103 arena item is re-verified fixed (codec seen tables, not relocation), and untyped integer constants wider than 64 bits fold exactly whether named or inline |
 | `nostr` | shared nostr primitives and codecs | `98c7069` (musiquay vocabulary moved out) |
 | `morly` | the relay (`pkg/relay`, `pkg/store`, ...) | `b7dba37` |
 | `musiquay` | the web app, docs corpus, protocol vocabulary | `8dd6f59` (vocabulary at `pkg/protocol`) |
@@ -7465,3 +7465,51 @@ Wording nuance left as is: for `x := []chan __slicealloc(int32, 2)` the RHS is a
 CALL whose callee is the type, so the message says the type of the variable
 could not be resolved rather than naming the callee. It is loud and it fails the
 build; naming the callee is a refinement, not a correctness gap.
+
+## FIXED in round 123: untyped integer constants wider than 64 bits lost their high bits WHEN NAMED
+
+The entry below said `ConstInt` has no exact field and that the narrowing had to
+be found before one could live anywhere. Both halves of that are now out of
+date, and the measurement that replaced them is small.
+
+**The exact machinery already existed.** `ConstInt` has carried `Exact
+*big.Int` for a while, `intExact` prefers it, `intConstBig` keeps it while more
+than 64 bits are needed, and floats have had `Exact *big.Rat` all along. What
+was still broken was one conversion:
+
+    case b.Info&IsInteger != 0:
+        iv := cvInt(v)
+        ...
+        return MaskConstToBasic(&ConstInt{V:iv, Unsigned:unsigned}, b)
+
+`ConvertConstLocal` rebuilt the constant with its 64-bit slot and **dropped
+`Exact`**. That is the declaration path - `localizeConstVal` calls it to store a
+named constant at its declared type - and it is the ONLY path that goes through
+it, which is exactly why the same expression was exact inline and zero when
+named. `MaskConstToBasic` already had the right shape: an untyped target passes
+the value through unchanged, a sized one is rebuilt without `Exact` (correct -
+a sized value really is truncated).
+
+The fix carries `Exact` into that constructed value. Measured before and after,
+on the same probe:
+
+| expression | before | after |
+| --- | --- | --- |
+| `const big = 1<<70; big >> 64` | 0 | **64** |
+| `const big = 1<<70; big >> 70` | 0 | **1** |
+| `const m = (1<<64-1)<<8; m >> 64` | 0 | **255** |
+| `const hi = (1<<26-1) << 'A'; hi >> 64` | 0 | **134217726** (= the inline value) |
+| `(((1<<26-1) << 'A') >> 64)` inline | 134217726 | 134217726 (unchanged) |
+
+Note the doc's old "want 33554430" for `hi >> 64` was itself wrong: `'A'` is 65,
+so `(2^26-1) << 65 >> 64` is `(2^26-1) << 1`. The oracle that needs no hand
+arithmetic is named-versus-inline, and that is what the new fixture asserts.
+
+**Verified by running** (`const_fold_exact`, new phase-0 regression, also checked
+for wasm): before the fix it panics with `named hi>>64 = 0, want 134217726`; after
+it prints `untyped wide-constant folding ok`. Typed overflow is unchanged - `var
+a int32 = 1 << 40` is still refused. Bootstrap fixpoint r123b == r123c.
+
+A worked-around source in the tree (the textproto bitmap, split into two 64-bit
+halves) is no longer required for correctness; the bitmap shape is one of the
+assertions in the fixture.
