@@ -7713,3 +7713,67 @@ kills those runs the same way `tests/wasm/validate.sh` does: the log simply stop
 mid-fixture, twice in a row, with no error. `-a` clears the `.bc` build cache that
 the phases are reading from. Anything that clears the cache - `-a`, the wasm
 validator - must run when no phase is running.
+
+## DECIDED (round 127): closures do NOT capture, anywhere - the compiler and the stdlib get refactored to obey the rule
+
+The design question was re-opened and settled by the owner: a function value in
+Moxie carries a code pointer and no environment, a frame arena dies at the
+creating call's return (FnArenaPop + ArenaRelease per return; munmap only per
+domain exit), and there is no escape analysis to separate the closures that stay
+inside their frame from the ones returned, stored in a global, stored in a
+receiver field, or run by `defer` at return time. Capturing in-scope variables is
+therefore forbidden, and the answer is NOT to relax the rule: it is to refactor
+everywhere - compiler first, then the stdlib, then drop the `/pkg/` carve-out.
+
+**Compiler status, measured with `-report-closure-captures` on a full
+self-build: ONE capture left.**
+
+    capture: ssaRecvRooted__anon1 [seen, recvParam, walk, localStore]
+
+`pkg/syntax` is clean - the sixteen (seven `__mval` bound-method-value wrappers,
+`appendGroup`, `trace`, `argList`, `complitexpr`, `structType`, `interfaceType`,
+`listSep`'s callers, `paramList`, and the `init`/`initBytes` scanner callbacks)
+were removed in the earlier rounds recorded above, the last two by giving
+`Scanner.Init`/`InitBytes` and `Source.init`/`initBytes` the owning `*Parser`.
+The one left is the recursive `walk` closure in `_mxc_stage4/ir_deepcopy.mx`,
+now rewritten as an iterative worklist (`recvWalkItem` + `mxutil.Ensure`/`push`,
+`seen` map, depth cap) so the compiler obeys the rule it enforces. Build and
+report verification follow this entry.
+
+**Stdlib status: 185 capturing functions** across the 42-package sweep (round-111
+measurement, top packages `(*ClientTrace)` 16, `(*http2serverConn)` 11,
+`(*Logger)` 10, `(*Builder)` 10, `(*Transport)` 8, `(*persistConn)` 8). That is
+the bulk of the refactor and it is what blocks dropping `/pkg/` from
+`isUserPackagePath`.
+
+## FIXED in round 126: a generic instantiation is now bound into the types it is compared against
+
+The doc's top item. `resolveTypeExprWithSubst`'s IndexExpr case builds a shallow
+instantiated Named (`TArgs` set) and deliberately leaves `Under` generic - which
+is right, `llvmTypeInner` binds the parameters itself for LAYOUT. Nothing bound
+them for COMPARISON, so a monomorphized body compared a substituted value against
+an unsubstituted shape:
+
+    main.mx:6:  cannot use value of type func(yield func(int32) bool) as main.Seq in return statement
+    main.mx:20: cannot use value of type func(v int32) (cont bool) as func(V) bool in argument to function
+
+`checkAssignable` now binds both sides before reporting
+(`bindInstantiation`: the Named's own TArgs, then the enclosing function's
+`fb.typeSubst`), and takes the bound types for every check below so diagnostics
+name the real types; `buildCall` derives the callee signature from the bound
+type, which fixes the argument and variadic paths together. Verified: the exact
+repro compiles and prints `got=7`; `Take(Counter)` with a parameter of the
+instantiated named func type passes; `iter_apis` (new fixture) instantiates
+`maps.Values`, `maps.All`, `maps.Keys` and a generic `Seq[V]` and prints
+`iterators ok`. `iter`, `maps` and `slices` are now phase-1b sweep entries.
+Fixpoint: r126b == r126c == r126d.
+
+**Still open, narrower:** passing a function SYMBOL where a FOREIGN instantiated
+generic named func type is expected -
+
+    func (l *lib) ... ; main: lib.Collect(lib.Counter)     // Collect(seq iter.Seq[int32])
+    cannot use value of type func(func(int32) bool) as iter.Seq in argument to function
+
+The target prints as the bare `iter.Seq`, so the parameter type lost its
+instantiation args on that path; a value already of the parameter's type works,
+which is why the fixture returns `iter.Seq[int32]` from a function instead.

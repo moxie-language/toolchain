@@ -1,0 +1,87 @@
+package lib
+
+import (
+	"iter"
+	"maps"
+)
+
+// Seq is a generic named FUNCTION type: the shape whose instantiation was not
+// bound. `Gen[V]` returns a literal holding the substituted `func(int32) bool`
+// while the declared result is `Seq[V]`, and calling the returned value passes a
+// concrete function where the parameter is `func(V) bool`.
+type Seq[V comparable] func(yield func(V) bool)
+
+func Gen[V comparable](v V) (s Seq[V]) {
+	return func(yield func(V) bool) {
+		yield(v)
+	}
+}
+
+func SumSeq(v int32) (sum int32) {
+	total := int32(0)
+	Gen[int32](v)(func(x int32) (cont bool) {
+		total = total + x
+		return true
+	})
+	return total
+}
+
+// SumValues instantiates maps.Values - a stdlib generic whose own body returns a
+// func literal while capturing its parameter - and calls it. Instantiating it
+// used to fail inside its own body:
+//
+//	cannot use value of type func(yield func(string, int32) bool) as iter.Seq2 in return statement
+//	cannot use value of type func(k string, v int32) (cont bool) as func(K, V) bool in argument
+func SumValues(m map[string]int32) (sum int32) {
+	total := int32(0)
+	maps.Values(m)(func(v int32) (cont bool) {
+		total = total + v
+		return true
+	})
+	return total
+}
+
+func CountPairs(m map[string]int32) (n int32) {
+	c := int32(0)
+	maps.All(m)(func(k string, v int32) (cont bool) {
+		c = c + 1
+		return true
+	})
+	return c
+}
+
+func Keys(m map[string]int32) (out []string) {
+	out = []string{:0:4}
+	maps.Keys(m)(func(k string) (cont bool) {
+		out = push(out, k)
+		return true
+	})
+	return out
+}
+
+// Collect drives a hand-written iter.Seq, so the interface itself is exercised
+// without depending on which slices/maps entry points exist on this target
+// (slices.Collect lives in slices/iter_wasm.mx and is wasm-only).
+func Collect(seq iter.Seq[int32]) (out []int32) {
+	out = []int32{:0:4}
+	seq(func(v int32) (cont bool) {
+		out = push(out, v)
+		return true
+	})
+	return out
+}
+
+// CounterSeq returns an iter.Seq[int32] the way the stdlib does: a func literal
+// returned as an instantiated generic named function type. Passing the function
+// SYMBOL Counter directly where iter.Seq[int32] is expected is a separate,
+// narrower defect (recorded in OPEN_WORK round 127); a value already of the
+// parameter's type needs no assignability step and exercises the substitution.
+func CounterSeq() (s iter.Seq[int32]) {
+	return func(yield func(int32) bool) {
+		for i := int32(0); i < 3; i++ {
+			if !yield(i) {
+				return
+			}
+		}
+	}
+}

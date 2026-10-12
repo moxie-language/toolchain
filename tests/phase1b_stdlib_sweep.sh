@@ -67,6 +67,9 @@ SWEEP=(
 	internal/profile
 	internal/trace
 	internal/trace/internal/tracev1
+	iter
+	maps
+	slices
 	math
 	math/big
 	mime

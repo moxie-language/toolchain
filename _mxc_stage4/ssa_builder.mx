@@ -2150,6 +2150,38 @@ func (fb *ssaFuncBuilder) errPos() (s string) {
 	return ""
 }
 
+// instantiatedUnder returns a Named generic's body with its own instantiation
+// arguments bound. The body is never rewritten (see llvmTypeInner: "Named.Under
+// is never rewritten - a substituted struct hung off Under gave the descriptor
+// pass a type nothing had declared"), so the ONLY thing that knows what the
+// parameters stand for is TArgs. llvmTypeInner already binds them to produce a
+// layout; everything that compares types has to bind them the same way, or the
+// two disagree about the same type.
+func instantiatedUnder(t Type) (tv Type) {
+	n, ok := t.(*Named)
+	if !ok || len(n.TParams) == 0 || len(n.TArgs) == 0 {
+		return t
+	}
+	m := len(n.TParams)
+	if len(n.TArgs) < m {
+		m = len(n.TArgs)
+	}
+	bind := map[string]Type{}
+	for i := int32(0); i < int32(m); i++ {
+		bind[n.TParams[i].String()] = n.TArgs[i]
+	}
+	return substTypeIn(n.Under, bind)
+}
+
+// bindInstantiation applies every binding a monomorphized body carries: the
+// named type's own TArgs, then the enclosing function's type parameters via
+// fb.typeSubst. `Seq[V]` inside a function instantiated at int32 is a Named
+// whose TArgs are [V] and whose V is bound to int32 by fb.typeSubst, so one
+// stage is not enough.
+func (fb *ssaFuncBuilder) bindInstantiation(t Type) (tv Type) {
+	return fb.substTypeParams(instantiatedUnder(t))
+}
+
 func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 	if val == nil || T == nil {
 		return
@@ -2172,6 +2204,21 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 	}
 	if Assignable(V, T) {
 		return
+	}
+	// The expected type of a monomorphized body still carries its type
+	// parameters: `type Seq[V comparable] func(yield func(V) bool)` resolved as
+	// `Seq[V]` keeps the parameter in Under, so a func literal that already
+	// holds the substituted `func(yield func(int32) bool)` was rejected with
+	// "cannot use value of type func(yield func(int32) bool) as main.Seq in
+	// return statement", and `maps.Values[...]` failed the same way inside its
+	// own body. Bind both sides and only report if the bound pair is still
+	// incompatible; the bound types replace the originals for every check
+	// below, which is also what makes the diagnostics name the real types.
+	if Vs, Ts := fb.bindInstantiation(V), fb.bindInstantiation(T); Vs != V || Ts != T {
+		if Assignable(Vs, Ts) {
+			return
+		}
+		V, T = Vs, Ts
 	}
 	// Constants and untyped values arrive with a default or unresolved type
 	// (an untyped int is int32, a short-declared "s" keeps untyped string), so
@@ -5518,15 +5565,27 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 		return fb.buildBuiltinCall(e, bi, args)
 	}
 
-	var retType Type
+	// A func-typed VALUE can be an instantiated generic named type (`Seq[int32]`),
+	// and its body keeps the parameter (`func(V) bool`) until the instantiation
+	// args recorded on the Named are bound. Binding here is what lets
+	// `s(yieldIt)` see `func(int32) bool` as the parameter type; without it the
+	// argument was rejected with "cannot use value of type func(v int32)
+	// (cont bool) as func(V) bool in argument to function", and the same
+	// unbound extraction below wrapped variadics against the wrong type.
+	calleeSig := (*Signature)(nil)
 	if fn.SSAType() != nil {
-		if sig, ok := SafeUnderlying(fn.SSAType()).(*Signature); ok {
-			fb.checkCallArgs(args, sig, e.HasDots)
-			if sig.Results != nil && sig.Results.Len() == 1 {
-				retType = sig.Results.At(0).Typ
-			} else if sig.Results != nil && sig.Results.Len() > 1 {
-				retType = sig.Results
-			}
+		if sig, ok := SafeUnderlying(fb.bindInstantiation(fn.SSAType())).(*Signature); ok {
+			calleeSig = sig
+		}
+	}
+
+	var retType Type
+	if calleeSig != nil {
+		fb.checkCallArgs(args, calleeSig, e.HasDots)
+		if calleeSig.Results != nil && calleeSig.Results.Len() == 1 {
+			retType = calleeSig.Results.At(0).Typ
+		} else if calleeSig.Results != nil && calleeSig.Results.Len() > 1 {
+			retType = calleeSig.Results
 		}
 	} else if ssaFn, ok := fn.(*SSAFunction); ok && ssaFn.Signature != nil {
 		sig := ssaFn.Signature
@@ -5537,13 +5596,11 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 		}
 	}
 
-	if fn.SSAType() != nil {
-		if sig, ok := SafeUnderlying(fn.SSAType()).(*Signature); ok {
-			if sig.Variadic && !e.HasDots {
-				args = fb.wrapVariadicArgs(args, sig)
-			}
-			args = fb.coerceArgsToInterface(args, sig)
+	if calleeSig != nil {
+		if calleeSig.Variadic && !e.HasDots {
+			args = fb.wrapVariadicArgs(args, calleeSig)
 		}
+		args = fb.coerceArgsToInterface(args, calleeSig)
 	}
 
 	call := &SSACall{Call: SSACallCommon{Value: fn, Args: args}}
