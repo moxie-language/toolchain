@@ -144,15 +144,36 @@ func ssaFuncHasReceiverWrite(fn *SSAFunction) (ok bool) {
 	return false
 }
 
+// recvWalkItem is one node of the receiver-derivation walk with its depth, so
+// the walk can be iterative: recursion needs a closure, and a Moxie function
+// value carries no environment for that closure to read.
+type recvWalkItem struct {
+	v     SSAValue
+	depth int32
+}
+
 // ssaRecvRooted reports whether v derives from the receiver param through
 // field/index/slice operations, resolving loads of local allocas to the value
 // stored into them.
+//
+// Iterative with an explicit worklist. It used to be a recursive closure
+// capturing seen, recvParam, walk and localStore, which was the last closure
+// capture in the compiler's own source (the -report-closure-captures run lists
+// it): the compiler must obey the rule it enforces. Reachability is the same
+// question either way - the first node popped that IS the receiver param
+// answers it - and seen keeps the worklist bounded.
 func ssaRecvRooted(v SSAValue, recvParam SSAValue, localStore map[SSAValue]SSAValue) (ok bool) {
+	if v == nil {
+		return false
+	}
 	seen := map[SSAValue]bool{}
-	var walk func(x SSAValue, depth int32) bool
-	walk = func(x SSAValue, depth int32) bool {
+	work := []recvWalkItem{:0:16}
+	work = push(work, recvWalkItem{v: v, depth: 0})
+	for i := int32(0); i < len(work); i++ {
+		x := work[i].v
+		depth := work[i].depth + 1
 		if x == nil || depth > 64 || seen[x] {
-			return false
+			continue
 		}
 		seen[x] = true
 		if x == recvParam {
@@ -160,25 +181,29 @@ func ssaRecvRooted(v SSAValue, recvParam SSAValue, localStore map[SSAValue]SSAVa
 		}
 		switch vv := x.(type) {
 		case *SSAFieldAddr:
-			return walk(vv.X, depth+1)
+			work = mxutil.Ensure(work, 1)
+			work = push(work, recvWalkItem{v: vv.X, depth: depth})
 		case *SSAIndexAddr:
-			return walk(vv.X, depth+1)
+			work = mxutil.Ensure(work, 1)
+			work = push(work, recvWalkItem{v: vv.X, depth: depth})
 		case *SSASlice:
-			return walk(vv.X, depth+1)
+			work = mxutil.Ensure(work, 1)
+			work = push(work, recvWalkItem{v: vv.X, depth: depth})
 		case *SSAUnOp:
+			next := vv.X
 			if vv.Op == OpMul {
 				if sv, has := localStore[vv.X]; has && sv != nil {
-					return walk(sv, depth+1)
+					next = sv
 				}
 			}
-			return walk(vv.X, depth+1)
+			work = mxutil.Ensure(work, 1)
+			work = push(work, recvWalkItem{v: next, depth: depth})
 		case *SSAMakeInterface:
-			return walk(vv.X, depth+1)
-		default:
-			return false
+			work = mxutil.Ensure(work, 1)
+			work = push(work, recvWalkItem{v: vv.X, depth: depth})
 		}
 	}
-	return walk(v, 0)
+	return false
 }
 
 func (e *irEmitter) emitArenaPrologue() (ok bool) {
