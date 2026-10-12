@@ -7356,8 +7356,11 @@ TYPE rather than a value, and the front-end drops it and stores a zero slice
 instead of failing loud. Two things follow: an expression that is not a value
 must be an error at the point it is built (the type-checker or the SSA builder,
 whichever sees it first), and an undefined type name inside `[]chan T` must be
-`undefined: T`. Next round starts by instrumenting `buildExpr`'s nil-returning
-and `default` paths to name the node that is dropped.
+`undefined: T`. **RESOLVED in round 112** (see below): the node WAS named by
+instrumenting `buildExpr`'s fallthrough, and the count decided the fix - 230
+slice-type drops in the compiler's own closure are composite-literal and
+conversion types, so the fallthrough stays silent and the consumer that treated
+the nil as a value reports instead.
 
 
 ## FIXED in round 112: a diagnostic that was printed and then ignored - the build exited 0 with a working binary
