@@ -24,17 +24,27 @@ import (
 //
 // See https://blog.golang.org/http-tracing for more.
 type ClientTrace struct {
+	// prev is the trace this one composes: Compose links the old trace here and
+	// the dispatch helpers call every hook along the chain. Composition used to
+	// be sixteen closures, each closing over the two hooks it composed - which
+	// is exactly what a Moxie function value cannot carry.
+	prev *ClientTrace
+
+	// Every hook receives the ClientTrace it belongs to as its LAST argument,
+	// so a hook can reach trace state through the parameter instead of closing
+	// over it.
+	//
 	// GetConn is called before a connection is created or
 	// retrieved from an idle pool. The hostPort is the
 	// "host:port" of the target or proxy. GetConn is called even
 	// if there's already an idle cached connection available.
-	GetConn func(hostPort string)
+	GetConn func(hostPort string, ct *ClientTrace)
 
 	// GotConn is called after a successful connection is
 	// obtained. There is no hook for failure to obtain a
 	// connection; instead, use the error from
 	// Transport.RoundTrip.
-	GotConn func(GotConnInfo)
+	GotConn func(info GotConnInfo, ct *ClientTrace)
 
 	// PutIdleConn is called when the connection is returned to
 	// the idle pool. If err is nil, the connection was
@@ -44,69 +54,69 @@ type ClientTrace struct {
 	// PutIdleConn is called before the caller's Response.Body.Close
 	// call returns.
 	// For HTTP/2, this hook is not currently used.
-	PutIdleConn func(err error)
+	PutIdleConn func(err error, ct *ClientTrace)
 
 	// GotFirstResponseByte is called when the first byte of the response
 	// headers is available.
-	GotFirstResponseByte func()
+	GotFirstResponseByte func(ct *ClientTrace)
 
 	// Got100Continue is called if the server replies with a "100
 	// Continue" response.
-	Got100Continue func()
+	Got100Continue func(ct *ClientTrace)
 
 	// Got1xxResponse is called for each 1xx informational response header
 	// returned before the final non-1xx response. Got1xxResponse is called
 	// for "100 Continue" responses, even if Got100Continue is also defined.
 	// If it returns an error, the client request is aborted with that error value.
-	Got1xxResponse func(code int32, header textproto.MIMEHeader) error
+	Got1xxResponse func(code int32, header textproto.MIMEHeader, ct *ClientTrace) error
 
 	// DNSStart is called when a DNS lookup begins.
-	DNSStart func(DNSStartInfo)
+	DNSStart func(info DNSStartInfo, ct *ClientTrace)
 
 	// DNSDone is called when a DNS lookup ends.
-	DNSDone func(DNSDoneInfo)
+	DNSDone func(info DNSDoneInfo, ct *ClientTrace)
 
 	// ConnectStart is called when a new connection's Dial begins.
 	// If net.Dialer.DualStack (IPv6 "Happy Eyeballs") support is
 	// enabled, this may be called multiple times.
-	ConnectStart func(network, addr []byte)
+	ConnectStart func(network, addr []byte, ct *ClientTrace)
 
 	// ConnectDone is called when a new connection's Dial
 	// completes. The provided err indicates whether the
 	// connection completed successfully.
 	// If net.Dialer.DualStack ("Happy Eyeballs") support is
 	// enabled, this may be called multiple times.
-	ConnectDone func(network, addr []byte, err error)
+	ConnectDone func(network, addr []byte, err error, ct *ClientTrace)
 
 	// TLSHandshakeStart is called when the TLS handshake is started. When
 	// connecting to an HTTPS site via an HTTP proxy, the handshake happens
 	// after the CONNECT request is processed by the proxy.
-	TLSHandshakeStart func()
+	TLSHandshakeStart func(ct *ClientTrace)
 
 	// TLSHandshakeDone is called after the TLS handshake with either the
 	// successful handshake's connection state, or a non-nil error on handshake
 	// failure.
-	TLSHandshakeDone func(tls.ConnectionState, error)
+	TLSHandshakeDone func(state tls.ConnectionState, err error, ct *ClientTrace)
 
 	// WroteHeaderField is called after the Transport has written
 	// each request header. At the time of this call the values
 	// might be buffered and not yet written to the network.
-	WroteHeaderField func(key string, value [][]byte)
+	WroteHeaderField func(key string, value [][]byte, ct *ClientTrace)
 
 	// WroteHeaders is called after the Transport has written
 	// all request headers.
-	WroteHeaders func()
+	WroteHeaders func(ct *ClientTrace)
 
 	// Wait100Continue is called if the Request specified
 	// "Expect: 100-continue" and the Transport has written the
 	// request headers but is waiting for "100 Continue" from the
 	// server before writing the request body.
-	Wait100Continue func()
+	Wait100Continue func(ct *ClientTrace)
 
 	// WroteRequest is called with the result of writing the
 	// request and any body. It may be called multiple times
 	// in the case of retried requests.
-	WroteRequest func(WroteRequestInfo)
+	WroteRequest func(info WroteRequestInfo, ct *ClientTrace)
 }
 
 // WroteRequestInfo contains information provided to the WroteRequest
@@ -124,116 +134,156 @@ func (t *ClientTrace) Compose(old *ClientTrace) {
 	if old == nil {
 		return
 	}
-	if old.GetConn != nil {
-		if prev, cur := old.GetConn, t.GetConn; cur != nil {
-			t.GetConn = func(hostPort string) { cur(hostPort); prev(hostPort) }
-		} else {
-			t.GetConn = prev
+	// Chain, do not nest. The hooks stay exactly as they are and the dispatch
+	// helpers below walk the whole chain, which is what the sixteen composing
+	// closures did: this trace's hook first, then the older trace's.
+	t.prev = old
+}
+
+// The helpers below are how hooks are called from net/http and from any code
+// holding a ClientTrace. Each walks the composed chain, skips nil hooks and
+// tolerates a nil trace, so a call site needs neither a nil guard nor a value
+// that would have to close over one.
+
+func GetConn(t *ClientTrace, hostPort string) {
+	for c := t; c != nil; c = c.prev {
+		if c.GetConn != nil {
+			c.GetConn(hostPort, c)
 		}
 	}
-	if old.GotConn != nil {
-		if prev, cur := old.GotConn, t.GotConn; cur != nil {
-			t.GotConn = func(info GotConnInfo) { cur(info); prev(info) }
-		} else {
-			t.GotConn = prev
+}
+
+func GotConn(t *ClientTrace, info GotConnInfo) {
+	for c := t; c != nil; c = c.prev {
+		if c.GotConn != nil {
+			c.GotConn(info, c)
 		}
 	}
-	if old.PutIdleConn != nil {
-		if prev, cur := old.PutIdleConn, t.PutIdleConn; cur != nil {
-			t.PutIdleConn = func(err error) { cur(err); prev(err) }
-		} else {
-			t.PutIdleConn = prev
+}
+
+func PutIdleConn(t *ClientTrace, err error) {
+	for c := t; c != nil; c = c.prev {
+		if c.PutIdleConn != nil {
+			c.PutIdleConn(err, c)
 		}
 	}
-	if old.GotFirstResponseByte != nil {
-		if prev, cur := old.GotFirstResponseByte, t.GotFirstResponseByte; cur != nil {
-			t.GotFirstResponseByte = func() { cur(); prev() }
-		} else {
-			t.GotFirstResponseByte = prev
+}
+
+func GotFirstResponseByte(t *ClientTrace) {
+	for c := t; c != nil; c = c.prev {
+		if c.GotFirstResponseByte != nil {
+			c.GotFirstResponseByte(c)
 		}
 	}
-	if old.Got100Continue != nil {
-		if prev, cur := old.Got100Continue, t.Got100Continue; cur != nil {
-			t.Got100Continue = func() { cur(); prev() }
-		} else {
-			t.Got100Continue = prev
+}
+
+func Got100Continue(t *ClientTrace) {
+	for c := t; c != nil; c = c.prev {
+		if c.Got100Continue != nil {
+			c.Got100Continue(c)
 		}
 	}
-	if old.Got1xxResponse != nil {
-		if prev, cur := old.Got1xxResponse, t.Got1xxResponse; cur != nil {
-			t.Got1xxResponse = func(code int32, header textproto.MIMEHeader) error { cur(code, header); return prev(code, header) }
-		} else {
-			t.Got1xxResponse = prev
+}
+
+// HasGot1xxResponse reports whether any trace in the composed chain has a
+// Got1xxResponse hook. The HTTP/2 layer uses the hook's PRESENCE to decide who
+// limits the size of 1xx responses, so it cannot be folded into the call.
+func HasGot1xxResponse(t *ClientTrace) (ok bool) {
+	for c := t; c != nil; c = c.prev {
+		if c.Got1xxResponse != nil {
+			return true
 		}
 	}
-	if old.DNSStart != nil {
-		if prev, cur := old.DNSStart, t.DNSStart; cur != nil {
-			t.DNSStart = func(info DNSStartInfo) { cur(info); prev(info) }
-		} else {
-			t.DNSStart = prev
+	return false
+}
+
+func Got1xxResponse(t *ClientTrace, code int32, header textproto.MIMEHeader) (err error) {
+	for c := t; c != nil; c = c.prev {
+		if c.Got1xxResponse != nil {
+			if e := c.Got1xxResponse(code, header, c); e != nil {
+				return e
+			}
 		}
 	}
-	if old.DNSDone != nil {
-		if prev, cur := old.DNSDone, t.DNSDone; cur != nil {
-			t.DNSDone = func(info DNSDoneInfo) { cur(info); prev(info) }
-		} else {
-			t.DNSDone = prev
+	return nil
+}
+
+func DNSStart(t *ClientTrace, info DNSStartInfo) {
+	for c := t; c != nil; c = c.prev {
+		if c.DNSStart != nil {
+			c.DNSStart(info, c)
 		}
 	}
-	if old.ConnectStart != nil {
-		if prev, cur := old.ConnectStart, t.ConnectStart; cur != nil {
-			t.ConnectStart = func(network, addr []byte) { cur(network, addr); prev(network, addr) }
-		} else {
-			t.ConnectStart = prev
+}
+
+func DNSDone(t *ClientTrace, info DNSDoneInfo) {
+	for c := t; c != nil; c = c.prev {
+		if c.DNSDone != nil {
+			c.DNSDone(info, c)
 		}
 	}
-	if old.ConnectDone != nil {
-		if prev, cur := old.ConnectDone, t.ConnectDone; cur != nil {
-			t.ConnectDone = func(network, addr []byte, err error) { cur(network, addr, err); prev(network, addr, err) }
-		} else {
-			t.ConnectDone = prev
+}
+
+func ConnectStart(t *ClientTrace, network, addr []byte) {
+	for c := t; c != nil; c = c.prev {
+		if c.ConnectStart != nil {
+			c.ConnectStart(network, addr, c)
 		}
 	}
-	if old.TLSHandshakeStart != nil {
-		if prev, cur := old.TLSHandshakeStart, t.TLSHandshakeStart; cur != nil {
-			t.TLSHandshakeStart = func() { cur(); prev() }
-		} else {
-			t.TLSHandshakeStart = prev
+}
+
+func ConnectDone(t *ClientTrace, network, addr []byte, err error) {
+	for c := t; c != nil; c = c.prev {
+		if c.ConnectDone != nil {
+			c.ConnectDone(network, addr, err, c)
 		}
 	}
-	if old.TLSHandshakeDone != nil {
-		if prev, cur := old.TLSHandshakeDone, t.TLSHandshakeDone; cur != nil {
-			t.TLSHandshakeDone = func(cs tls.ConnectionState, err error) { cur(cs, err); prev(cs, err) }
-		} else {
-			t.TLSHandshakeDone = prev
+}
+
+func TLSHandshakeStart(t *ClientTrace) {
+	for c := t; c != nil; c = c.prev {
+		if c.TLSHandshakeStart != nil {
+			c.TLSHandshakeStart(c)
 		}
 	}
-	if old.WroteHeaderField != nil {
-		if prev, cur := old.WroteHeaderField, t.WroteHeaderField; cur != nil {
-			t.WroteHeaderField = func(key string, value [][]byte) { cur(key, value); prev(key, value) }
-		} else {
-			t.WroteHeaderField = prev
+}
+
+func TLSHandshakeDone(t *ClientTrace, state tls.ConnectionState, err error) {
+	for c := t; c != nil; c = c.prev {
+		if c.TLSHandshakeDone != nil {
+			c.TLSHandshakeDone(state, err, c)
 		}
 	}
-	if old.WroteHeaders != nil {
-		if prev, cur := old.WroteHeaders, t.WroteHeaders; cur != nil {
-			t.WroteHeaders = func() { cur(); prev() }
-		} else {
-			t.WroteHeaders = prev
+}
+
+func WroteHeaderField(t *ClientTrace, key string, value [][]byte) {
+	for c := t; c != nil; c = c.prev {
+		if c.WroteHeaderField != nil {
+			c.WroteHeaderField(key, value, c)
 		}
 	}
-	if old.Wait100Continue != nil {
-		if prev, cur := old.Wait100Continue, t.Wait100Continue; cur != nil {
-			t.Wait100Continue = func() { cur(); prev() }
-		} else {
-			t.Wait100Continue = prev
+}
+
+func WroteHeaders(t *ClientTrace) {
+	for c := t; c != nil; c = c.prev {
+		if c.WroteHeaders != nil {
+			c.WroteHeaders(c)
 		}
 	}
-	if old.WroteRequest != nil {
-		if prev, cur := old.WroteRequest, t.WroteRequest; cur != nil {
-			t.WroteRequest = func(info WroteRequestInfo) { cur(info); prev(info) }
-		} else {
-			t.WroteRequest = prev
+}
+
+func Wait100Continue(t *ClientTrace) {
+	for c := t; c != nil; c = c.prev {
+		if c.Wait100Continue != nil {
+			c.Wait100Continue(c)
+		}
+	}
+}
+
+func WroteRequest(t *ClientTrace, info WroteRequestInfo) {
+	for c := t; c != nil; c = c.prev {
+		if c.WroteRequest != nil {
+			c.WroteRequest(info, c)
 		}
 	}
 }

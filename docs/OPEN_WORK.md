@@ -7907,3 +7907,55 @@ fixpoint r129d == r129e == r129f.
 STILL OPEN from this family: the repo lock has no stale-PID reclaim
 (`waitRepoLock` waits forever on `$HOME/moxie/<repo>.lock`), which is how a killed
 clone blocked the next build indefinitely.
+
+## Round 130: the httptrace hooks are WIDENED, so Compose needs no closures (16 gone)
+
+Owner decision: option (a), widen the hook signatures. Done, and the whole
+composition mechanism is now environment-free.
+
+**The shape.** Every hook takes the ClientTrace it belongs to as its LAST
+parameter, so a hook can reach trace state through the parameter instead of
+closing over it:
+
+    GetConn func(hostPort string, ct *ClientTrace)
+    GotConn func(info GotConnInfo, ct *ClientTrace)
+    Got1xxResponse func(code int32, header textproto.MIMEHeader, ct *ClientTrace) error
+    ...16 in all
+
+**Compose is a chain, not a nest.** It used to build sixteen closures, each
+closing over the two hooks it composed. Now it links the older trace into a
+`prev` field and the DISPATCH helpers walk the chain:
+
+    func (t *ClientTrace) Compose(old *ClientTrace) { t.prev = old }
+
+    func GetConn(t *ClientTrace, hostPort string) {
+        for c := t; c != nil; c = c.prev {
+            if c.GetConn != nil { c.GetConn(hostPort, c) }
+        }
+    }
+
+Sixteen such helpers, which is also what call sites use now - so a call site
+needs neither a nil guard nor a bound method value.
+
+**Call sites and guards.** 30 hook calls in five files became helper calls
+(h2_bundle 7, header 1, request 5, transfer 4, transport 13). The 26
+`trace.X == nil` / `trace.X != nil` guards were reduced to their structural part
+(`trace != nil`, or the enclosing conditions) by LINE-LEVEL edits - only the
+hook-identity conjunct went away, because a guard on the FIRST trace's hook would
+skip a composed one. An earlier attempt that dedented whole blocks with a regex
+broke transport.mx; those five files were reverted and redone this way.
+
+**The 1xx plumbing collapsed.** `get1xxTraceFunc`/`http2traceGot1xxResponseFunc`
+existed only to hand the hook out as a plain `func(int32, MIMEHeader) error`
+value; with the hook widened there is nowhere for the trace to live in that type.
+The one call site now uses the helper directly, plus a chain-aware predicate
+`HasGot1xxResponse` because the HTTP/2 layer uses the hook's PRESENCE (not just
+its result) to decide who limits 1xx response size.
+
+**Measured:** the net/http+httptrace closure went from **161 to 145** capturing
+closures - the 16 `(*ClientTrace).Compose` ones are gone - the package builds, and
+the probe runs (`http`). The remaining 145 are the ordinary shapes: wrapper
+closures to turn into direct calls, and `__mvalN` bound method values.
+
+Note for the public API: a user hook now takes the trace as its last argument
+(`func(hostPort string, ct *httptrace.ClientTrace)`). That is the cost of (a).

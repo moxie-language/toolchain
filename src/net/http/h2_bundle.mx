@@ -7636,12 +7636,6 @@ type http2clientStream struct {
 	resTrailer *Header // client's Response.Trailer
 }
 
-// get1xxTraceFunc returns the value of request's httptrace.ClientTrace.Got1xxResponse func,
-// if any. It returns nil if not set or if the Go version is too old.
-func (cs *http2clientStream) get1xxTraceFunc() (rerror func(int32, textproto.MIMEHeader) error) {
-	return http2traceGot1xxResponseFunc(cs.trace)
-}
-
 func (cs *http2clientStream) abortStream(err error) {
 	cs.abortStreamLocked(err)
 }
@@ -9447,11 +9441,11 @@ func (rl *http2clientConnReadLoop) handleResponse(cs *http2clientStream, f *http
 		if f.StreamEnded() {
 			return nil, errors.New("1xx informational response with END_STREAM flag")
 		}
-		if fn := cs.get1xxTraceFunc(); fn != nil {
+		if httptrace.HasGot1xxResponse(cs.trace) {
 			// If the 1xx response is being delivered to the user,
 			// then they're responsible for limiting the number
 			// of responses.
-			if erE := fn(statusCode, textproto.MIMEHeader(header)); erE != nil {
+			if erE := httptrace.Got1xxResponse(cs.trace, statusCode, textproto.MIMEHeader(header)); erE != nil {
 				return nil, erE
 			}
 		} else {
@@ -10186,15 +10180,15 @@ func (t *http2Transport) idleConnTimeout() (rduration time.Duration) {
 
 func http2traceGetConn(req *Request, hostPort string) {
 	trace := req.ClientTrace()
-	if trace == nil || trace.GetConn == nil {
+	if trace == nil {
 		return
 	}
-	trace.GetConn(hostPort)
+	httptrace.GetConn(trace, hostPort)
 }
 
 func http2traceGotConn(req *Request, cc *http2ClientConn, reused bool) {
 	trace := req.ClientTrace()
-	if trace == nil || trace.GotConn == nil {
+	if trace == nil {
 		return
 	}
 	ci := httptrace.GotConnInfo{Conn: cc.tconn}
@@ -10204,45 +10198,39 @@ func http2traceGotConn(req *Request, cc *http2ClientConn, reused bool) {
 		ci.IdleTime = cc.t.timeSince(cc.lastActive)
 	}
 
-	trace.GotConn(ci)
+	httptrace.GotConn(trace, ci)
 }
 
 func http2traceWroteHeaders(trace *httptrace.ClientTrace) {
-	if trace != nil && trace.WroteHeaders != nil {
-		trace.WroteHeaders()
+	if trace != nil {
+		httptrace.WroteHeaders(trace)
 	}
 }
 
 func http2traceGot100Continue(trace *httptrace.ClientTrace) {
 	if trace != nil && trace.Got100Continue != nil {
-		trace.Got100Continue()
+		httptrace.Got100Continue(trace)
 	}
 }
 
 func http2traceWait100Continue(trace *httptrace.ClientTrace) {
 	if trace != nil && trace.Wait100Continue != nil {
-		trace.Wait100Continue()
+		httptrace.Wait100Continue(trace)
 	}
 }
 
 func http2traceWroteRequest(trace *httptrace.ClientTrace, err error) {
-	if trace != nil && trace.WroteRequest != nil {
-		trace.WroteRequest(httptrace.WroteRequestInfo{Err: err})
+	if trace != nil {
+		httptrace.WroteRequest(trace, httptrace.WroteRequestInfo{Err: err})
 	}
 }
 
 func http2traceFirstResponseByte(trace *httptrace.ClientTrace) {
-	if trace != nil && trace.GotFirstResponseByte != nil {
-		trace.GotFirstResponseByte()
+	if trace != nil {
+		httptrace.GotFirstResponseByte(trace)
 	}
 }
 
-func http2traceGot1xxResponseFunc(trace *httptrace.ClientTrace) (rerror func(int32, textproto.MIMEHeader) error) {
-	if trace != nil {
-		return trace.Got1xxResponse
-	}
-	return nil
-}
 
 // dialTLSWithContext uses tls.Dialer, added in Go 1.15, to open a TLS
 // connection.

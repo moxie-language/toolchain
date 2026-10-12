@@ -1429,8 +1429,8 @@ func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (_ *persis
 	req := treq.Request
 	trace := treq.trace
 	ctx := req.Context()
-	if trace != nil && trace.GetConn != nil {
-		trace.GetConn(cm.addr())
+	if trace != nil {
+		httptrace.GetConn(trace, cm.addr())
 	}
 
 	// Detach from the request context's cancellation signal.
@@ -1465,7 +1465,7 @@ func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (_ *persis
 	case r := <-w.result:
 		// Trace success but only for HTTP/1.
 		// HTTP/2 calls trace.GotConn itself.
-		if r.pc != nil && r.pc.alt == nil && trace != nil && trace.GotConn != nil {
+		if r.pc != nil && r.pc.alt == nil && trace != nil {
 			info := httptrace.GotConnInfo{
 				Conn:   r.pc.conn,
 				Reused: r.pc.isReused(),
@@ -1474,7 +1474,7 @@ func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (_ *persis
 				info.WasIdle = true
 				info.IdleTime = time.Since(r.idleAt)
 			}
-			trace.GotConn(info)
+			httptrace.GotConn(trace, info)
 		}
 		if r.err != nil {
 			// If the request has been canceled, that's probably
@@ -1632,8 +1632,8 @@ func (pconn *persistConn) addTLS(ctx context.Context, name string, trace *httptr
 		})
 	}
 	func() {
-		if trace != nil && trace.TLSHandshakeStart != nil {
-			trace.TLSHandshakeStart()
+		if trace != nil {
+			httptrace.TLSHandshakeStart(trace)
 		}
 		err := tlsConn.HandshakeContext(ctx)
 		if timer != nil {
@@ -1648,14 +1648,14 @@ func (pconn *persistConn) addTLS(ctx context.Context, name string, trace *httptr
 			// wait for the call to HandshakeContext to return.
 			<-errc
 		}
-		if trace != nil && trace.TLSHandshakeDone != nil {
-			trace.TLSHandshakeDone(tls.ConnectionState{}, err)
+		if trace != nil {
+			httptrace.TLSHandshakeDone(trace, tls.ConnectionState{}, err)
 		}
 		return err
 	}
 	cs := tlsConn.ConnectionState()
-	if trace != nil && trace.TLSHandshakeDone != nil {
-		trace.TLSHandshakeDone(cs, nil)
+	if trace != nil {
+		httptrace.TLSHandshakeDone(trace, cs, nil)
 	}
 	pconn.tlsState = &cs
 	pconn.conn = tlsConn
@@ -1692,19 +1692,19 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 		if tc, ok := pconn.conn.(*tls.Conn); ok {
 			// Handshake here, in case DialTLS didn't. TLSNextProto below
 			// depends on it for knowing the connection state.
-			if trace != nil && trace.TLSHandshakeStart != nil {
-				trace.TLSHandshakeStart()
+			if trace != nil {
+				httptrace.TLSHandshakeStart(trace)
 			}
 			if er9 := tc.HandshakeContext(ctx); er9 != nil {
 				pconn.conn.Close()
-				if trace != nil && trace.TLSHandshakeDone != nil {
-					trace.TLSHandshakeDone(tls.ConnectionState{}, er9)
+				if trace != nil {
+					httptrace.TLSHandshakeDone(trace, tls.ConnectionState{}, er9)
 				}
 				return nil, er9
 			}
 			cs := tc.ConnectionState()
-			if trace != nil && trace.TLSHandshakeDone != nil {
-				trace.TLSHandshakeDone(cs, nil)
+			if trace != nil {
+				httptrace.TLSHandshakeDone(trace, cs, nil)
 			}
 			pconn.tlsState = &cs
 		}
@@ -2162,13 +2162,13 @@ func (pc *persistConn) readLoop() {
 		trace := treq.trace
 		if err := pc.t.tryPutIdleConn(pc); err != nil {
 			closeErr = err
-			if trace != nil && trace.PutIdleConn != nil && err != errKeepAlivesDisabled {
-				trace.PutIdleConn(err)
+			if trace != nil && err != errKeepAlivesDisabled {
+				httptrace.PutIdleConn(trace, err)
 			}
 			return false
 		}
-		if trace != nil && trace.PutIdleConn != nil {
-			trace.PutIdleConn(nil)
+		if trace != nil {
+			httptrace.PutIdleConn(trace, nil)
 		}
 		return true
 	}
@@ -2363,9 +2363,9 @@ func is408Message(buf []byte) (rok bool) {
 // 100-continue") from the server. It returns the final non-100 one.
 // trace is optional.
 func (pc *persistConn) readResponse(rc requestAndChan, trace *httptrace.ClientTrace) (resp *Response, err error) {
-	if trace != nil && trace.GotFirstResponseByte != nil {
+	if trace != nil {
 		if peek, erF := pc.br.Peek(1); erF == nil && len(peek) == 1 {
-			trace.GotFirstResponseByte()
+			httptrace.GotFirstResponseByte(trace)
 		}
 	}
 
@@ -2381,7 +2381,7 @@ func (pc *persistConn) readResponse(rc requestAndChan, trace *httptrace.ClientTr
 		resCode = resp.StatusCode
 		if continueCh != nil && resCode == StatusContinue {
 			if trace != nil && trace.Got100Continue != nil {
-				trace.Got100Continue()
+				httptrace.Got100Continue(trace)
 			}
 			continueCh <- struct{}{}
 			continueCh = nil
@@ -2391,7 +2391,7 @@ func (pc *persistConn) readResponse(rc requestAndChan, trace *httptrace.ClientTr
 		is1xxNonTerminal = is1xx && resCode != StatusSwitchingProtocols
 		if is1xxNonTerminal {
 			if trace != nil && trace.Got1xxResponse != nil {
-				if erG := trace.Got1xxResponse(resCode, textproto.MIMEHeader(resp.Header)); erG != nil {
+				if erG := httptrace.Got1xxResponse(trace, resCode, textproto.MIMEHeader(resp.Header)); erG != nil {
 					return nil, erG
 				}
 				// If the 1xx response was delivered to the user,
