@@ -286,6 +286,31 @@ var errNoOverlap error
 // if modtime.IsZero(), modtime is unknown.
 // content must be seeked to the beginning of the file.
 // The sizeFunc is called at most once. Its error, if any, is sent in the HTTP response.
+// writeMultiRange streams each range as a multipart part. A named function with
+// explicit parameters replaced the closure this was, which captured pw, mw,
+// ranges, content, ctype and size.
+func writeMultiRange(pw *io.PipeWriter, mw *multipart.Writer, ranges []httpRange, content io.ReadSeeker, ctype []byte, size int64) {
+	for _, ra := range ranges {
+		// werr, not err: Moxie makes shadowing a compile error, and serveContent
+		// already has an err in scope.
+		part, werr := mw.CreatePart(ra.mimeHeader(ctype, size))
+		if werr != nil {
+			pw.CloseWithError(werr)
+			return
+		}
+		if _, serr := content.Seek(ra.start, io.SeekStart); serr != nil {
+			pw.CloseWithError(serr)
+			return
+		}
+		if _, cerr := io.CopyN(part, content, ra.length); cerr != nil {
+			pw.CloseWithError(cerr)
+			return
+		}
+	}
+	mw.Close()
+	pw.Close()
+}
+
 func serveContent(w ResponseWriter, r *Request, name []byte, modtime time.Time, sizeFunc func() (int64, error), content io.ReadSeeker) {
 	setLastModified(w, modtime)
 	done, rangeReq := checkPreconditions(w, r, modtime)
@@ -388,28 +413,7 @@ func serveContent(w ResponseWriter, r *Request, name []byte, modtime time.Time, 
 		HeaderSet(w.Header(), "Content-Type", "multipart/byteranges; boundary="+mw.Boundary())
 		sendContent = pr
 		defer pr.Close() // cause writing goroutine to fail and exit if CopyN doesn't finish.
-		func() {
-			for _, ra := range ranges {
-				// werr, not err: Moxie makes shadowing a compile error, and
-				// serveContent already has an err in scope. Go allows the
-				// shadow, so the port was silent about it.
-				part, werr := mw.CreatePart(ra.mimeHeader(ctype, size))
-				if werr != nil {
-					pw.CloseWithError(werr)
-					return
-				}
-				if _, serr := content.Seek(ra.start, io.SeekStart); serr != nil {
-					pw.CloseWithError(serr)
-					return
-				}
-				if _, cerr := io.CopyN(part, content, ra.length); cerr != nil {
-					pw.CloseWithError(cerr)
-					return
-				}
-			}
-			mw.Close()
-			pw.Close()
-		}()
+		writeMultiRange(pw, mw, ranges, content, ctype, size)
 	}
 
 	HeaderSet(w.Header(), "Accept-Ranges", "bytes")

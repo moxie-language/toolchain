@@ -8005,3 +8005,35 @@ widened to `<-chan struct{}` - before anything was committed.
 Measured: net/http+httptrace 138 -> 132 capturing closures, with no
 `setRequestCancel`/`doCancel`/`cancelState` entry left in the report. Gates:
 phase 0 123 passed / 0 failed / 0 skipped, phase 1b 45 packages.
+
+## Round 133: the last four IIFEs in net/http are gone, and the REST of the sweep is measured
+
+Four immediately-invoked closures, each converted with explicit parameters:
+
+- `server.mx`'s timeout-handler scope wrapped a `defer func(){ recover() }` and
+  signalled a panic on a local channel. It is now `serveWithPanic(handler, tw, r,
+  done, panicChan)` plus `sendPanic(panicChan)`, which must be the function
+  deferred DIRECTLY because that is what `recover` applies to.
+- `fs.mx`'s multipart range writer captured pw, mw, ranges, content, ctype and
+  size; it is `writeMultiRange(...)` with all six as parameters.
+- `h2_bundle.mx`'s ping writer assigned pingError and returned out of the IIFE
+  twice; it needs no function at all - `WritePing`, then `Flush` only if that
+  succeeded, then close errc if either failed.
+- `transport.mx`'s CONNECT write+read captured resp, erC, connectReq and con5; it
+  is `writeConnectRequest(connectReq, c)` and the caller closes didReadResponse
+  itself (the only exits between write and close are its returns). Its first
+  parameter was named `conn`, which shadows net/http's package-level `conn` type
+  - the compiler caught it, and it is `c` now.
+
+Measured: net/http+httptrace 132 -> **127**, and **zero `func() { ... }()`
+immediately-invoked literals left** in the package.
+
+**The rest of the sweep, measured in the same pass: 29 captures, ALL of them in
+`net`** - the resolver (`internetAddrList`, `lookupIPAddr`), the dialers
+(`dialIP`, `dialUDP`, `dialUnix`, `doDialTCPProto`), the listeners (`listenIP`,
+`listenTCPProto`, `listenUDP`, `listenUnix`, `listenUnixgram`,
+`listenMulticastUDP`), `pipeDeadline.set`, `resolverConf.addrLookupOrder`/
+`hostLookupOrder`, `sendFile`. Everything else the sweep covers - crypto/x509,
+crypto/ecdsa/rsa/elliptic, math/big, os/exec, internal/trace(+tracev1),
+internal/profile, index/suffixarray, mime/multipart, compress/*, encoding/*,
+debug/gosym, runtime/trace - reports ZERO.

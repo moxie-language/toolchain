@@ -3727,6 +3727,24 @@ func (h *timeoutHandler) errorBody() (rs string) {
 	return "<html><head><title>Timeout</title></head><body><h1>Timeout</h1></body></html>"
 }
 
+// serveWithPanic runs the handler under the timeout wrapper, reporting a panic
+// on panicChan rather than letting it unwind. It is a named function with
+// explicit parameters because the deferred recover needs a scope, and a closure
+// over panicChan would be a capture.
+func serveWithPanic(handler Handler, tw *timeoutWriter, r *Request, done chan struct{}, panicChan chan string) {
+	defer sendPanic(panicChan)
+	handler.ServeHTTP(tw, r)
+	close(done)
+}
+
+// sendPanic must be the function deferred directly: recover only applies to the
+// function the defer calls.
+func sendPanic(panicChan chan string) {
+	if p := recover(); p != "" {
+		panicChan <- p
+	}
+}
+
 func (h *timeoutHandler) ServeHTTP(w ResponseWriter, r *Request) {
 	ctx := h.testContext
 	if ctx == nil {
@@ -3742,15 +3760,7 @@ func (h *timeoutHandler) ServeHTTP(w ResponseWriter, r *Request) {
 		req: r,
 	}
 	panicChan := chan string{1}
-	func() {
-		defer func() {
-			if p := recover(); p != "" {
-				panicChan <- p
-			}
-		}()
-		h.handler.ServeHTTP(tw, r)
-		close(done)
-	}()
+	serveWithPanic(h.handler, tw, r, done, panicChan)
 	select {
 	case p := <-panicChan:
 		panic(p)

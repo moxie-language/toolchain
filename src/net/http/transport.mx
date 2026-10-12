@@ -1662,6 +1662,22 @@ type erringRoundTripper interface {
 	RoundTripErr() error
 }
 
+// writeConnectRequest writes the CONNECT request and reads its response. It was
+// a closure over resp, erC, connectReq and con5; a named function with explicit
+// parameters carries the same state without an environment. The caller closes
+// didReadResponse itself, which the closure did with a defer - the only exits
+// between the write and the close are these returns.
+func writeConnectRequest(connectReq *Request, c net.Conn) (resp *Response, err error) {
+	err = connectReq.Write(c)
+	if err != nil {
+		return nil, err
+	}
+	// Okay to use and discard buffered reader here, because
+	// TLS server will not speak until spoken to.
+	br := bufio.NewReader(c)
+	return ReadResponse(br, connectReq)
+}
+
 func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httptrace.ClientTrace) (pconn *persistConn, err error) {
 	pconn = &persistConn{
 		t:             t,
@@ -1789,17 +1805,8 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 			erC  error // write or read error
 		)
 		// Write the CONNECT request & read the response.
-		func() {
-			defer close(didReadResponse)
-			erC = connectReq.Write(con5)
-			if erC != nil {
-				return
-			}
-			// Okay to use and discard buffered reader here, because
-			// TLS server will not speak until spoken to.
-			br := bufio.NewReader(con5)
-			resp, erC = ReadResponse(br, connectReq)
-		}()
+		resp, erC = writeConnectRequest(connectReq, con5)
+		close(didReadResponse)
 		select {
 		case <-connectCtx.Done():
 			con5.Close()
