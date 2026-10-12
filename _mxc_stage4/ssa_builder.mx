@@ -2812,6 +2812,7 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *syntax.AssignStmt) {
 		return
 	}
 
+	errsBefore := compileErrorCount()
 	rhs := fb.buildExpr(s.Rhs)
 
 
@@ -2833,23 +2834,28 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *syntax.AssignStmt) {
 			}
 		}
 		if typ == nil {
-			// Fail loud: a short var whose rhs type cannot be resolved
-			// would silently compile as Int32 and corrupt the IR.
-			// Every known class (generic methods, func-field calls, push,
-			// iota consts) is fixed in the builder - a nil here is a new
-			// builder bug, not a fallback case.
-			rhsInfo := "nil"
-			if rhs != nil {
-				if rhs.SSAType() == nil {
-					rhsInfo = "ssatype=nil"
+			// A short var whose value could not be built is an error, not a
+			// fallback. Int32 stands in only so the pass can go on collecting
+			// diagnostics; the registered error is what fails the build. This
+			// used to print to stderr and continue, so the compiler exited 0
+			// with a working binary and `x := []chan int32 + 1` was accepted,
+			// producing a nil slice with the `+ 1` silently discarded.
+			if compileErrorCount() == errsBefore {
+				k := nodeKind(s.Rhs)
+				// Every kind nodeKind names for a type ends in " type"; a call,
+				// an operation or an unknown node gets the general message, so
+				// the diagnostic says which value it could not build.
+				isTypeKind := len(k) >= 5 && k[len(k)-5:] == " type"
+				if isTypeKind {
+					reportCompileError("cannot use a " | k | " as a value")
 				} else {
-					rhsInfo = "non-tuple"
+					fnName := ""
+					if fb.fn != nil {
+						fnName = " in " | fb.fn.name
+					}
+					reportCompileError("cannot resolve the type of " | name.Value | fnName |
+						" - the right-hand side is not a value")
 				}
-			}
-			if fb.fn != nil {
-				mxutil.WriteStr(2, "compile error: cannot resolve type of short var " | name.Value | " in " | fb.fn.name | " (rhs=" | rhsInfo | ")\n")
-			} else {
-				mxutil.WriteStr(2, "compile error: cannot resolve type of short var " | name.Value | " (rhs=" | rhsInfo | ")\n")
 			}
 			typ = Typ[Int32]
 		}
@@ -4612,6 +4618,58 @@ func (fb *ssaFuncBuilder) buildDeferThunk(mfn *SSAFunction, iface *TCInterface, 
 
 // Expression builders.
 
+// nodeKind names the syntax node kind for diagnostics. Moxie has no
+// reflection, so the switch is explicit.
+func nodeKind(e syntax.Expr) (k string) {
+	switch e.(type) {
+	case *syntax.Name:
+		return "name"
+	case *syntax.BasicLit:
+		return "literal"
+	case *syntax.Operation:
+		return "operation"
+	case *syntax.CallExpr:
+		return "call"
+	case *syntax.SelectorExpr:
+		return "selector"
+	case *syntax.IndexExpr:
+		return "index"
+	case *syntax.SliceExpr:
+		return "slice_expr"
+	case *syntax.AssertExpr:
+		return "type_assert"
+	case *syntax.CompositeLit:
+		return "composite_lit"
+	case *syntax.FuncLit:
+		return "func_lit"
+	case *syntax.ParenExpr:
+		return "paren"
+	case *syntax.ListExpr:
+		return "list"
+	case *syntax.KeyValueExpr:
+		return "key_value"
+	case *syntax.SliceType:
+		return "slice type"
+	case *syntax.ArrayType:
+		return "array type"
+	case *syntax.ChanType:
+		return "channel type"
+	case *syntax.MapType:
+		return "map type"
+	case *syntax.FuncType:
+		return "func type"
+	case *syntax.InterfaceType:
+		return "interface type"
+	case *syntax.StructType:
+		return "struct type"
+	case *syntax.DotsType:
+		return "variadic type"
+	case *syntax.BadExpr:
+		return "bad"
+	}
+	return "unknown"
+}
+
 func (fb *ssaFuncBuilder) buildExpr(e syntax.Expr) (s SSAValue) {
 	if e == nil || fb.currentBlock == nil {
 		return nil
@@ -4648,6 +4706,10 @@ func (fb *ssaFuncBuilder) buildExpr(e syntax.Expr) (s SSAValue) {
 	case *syntax.KeyValueExpr:
 		return fb.buildExpr(ev.Value)
 	}
+	// A type node arrives here legitimately - the type of a composite literal,
+	// the target of a conversion - and the caller that owns it reads it from the
+	// syntax, so this stays silent. What must NOT stay silent is a caller that
+	// treats the nil as a value: buildShortVarDecl names it below.
 	return nil
 }
 
@@ -5040,9 +5102,7 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 	}
 	if (op == OpOr || op == OpAdd) && x.SSAType() != nil && y.SSAType() != nil {
 		if IsRuneKind(x.SSAType()) && IsStringKind(y.SSAType()) || IsStringKind(x.SSAType()) && IsRuneKind(y.SSAType()) {
-			mxutil.WriteStr(2, "compile error: cannot concatenate rune with string - convert to UTF-8 first\n")
-			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-			push(cctx.compileErrors, "cannot concatenate rune with string")
+			reportCompileError("cannot concatenate rune with string - convert to UTF-8 first")
 		}
 	}
 	// '|' concatenates when EITHER side is text and is the bitwise OR
@@ -5666,7 +5726,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		typ := fb.resolveType(e.ArgList[0])
 		return fb.emitMake(typ, args)
 	case BuiltinNew:
-		mxutil.WriteStr(2, "compile error: new() is not supported (use &T{})\n")
+		reportCompileError("new() is not supported (use &T{})")
 		return nil
 	case BuiltinPanic:
 		if len(args) > 0 {
@@ -5691,9 +5751,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 				if at != nil {
 					tn = at.String()
 				}
-				mxutil.WriteStr(2, "compile error: unsupported type in clear builtin: " | tn | "\n")
-				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-				push(cctx.compileErrors, "unsupported type in clear builtin: " | tn)
+				reportCompileError("unsupported type in clear builtin: " | tn)
 				return nil
 			}
 		}
