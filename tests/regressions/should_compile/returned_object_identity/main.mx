@@ -1,0 +1,46 @@
+package main
+
+import (
+	"tests/regressions/should_compile/returned_object_identity/lib"
+)
+
+func main() {
+	h := &lib.Holder{tag: 7, data: []byte("hello")}
+	got := lib.Carry(h, 42)
+	if got == nil {
+		panic("Carry returned nil")
+	}
+	if got.n != 42 {
+		panic("Carried.n = " | got.n.String() | ", want 42")
+	}
+	if got.h == nil {
+		panic("Carried.h is nil - the pointer did not survive the return")
+	}
+	if got.h.tag != 7 {
+		panic("Carried.h.tag = " | got.h.tag.String() | ", want 7 (recycled copy?)")
+	}
+	if string(got.h.data) != "hello" {
+		panic("Carried.h.data = " | string(got.h.data) | ", want hello")
+	}
+	// Identity, not contents: a write through the returned pointer must land in
+	// the caller's own object.
+	got.h.tag = 99
+	if h.tag != 99 {
+		panic("write through Carried.h did not reach the caller's Holder: h.tag = " | h.tag.String())
+	}
+	// The recorded failure appeared on the NEXT call: force churn, then re-read
+	// through the pointer the returned object still holds.
+	lib.Churn(64)
+	lib.Carry(h, 1)
+	lib.Churn(64)
+	if got.h.tag != 99 {
+		panic("after churn Carried.h.tag = " | got.h.tag.String() | ", want 99")
+	}
+	if h.tag != 99 {
+		panic("after churn the caller's Holder was clobbered: h.tag = " | h.tag.String())
+	}
+	if string(h.data) != "hello" {
+		panic("after churn the caller's data = " | string(h.data) | ", want hello")
+	}
+	println("returned-object identity ok")
+}

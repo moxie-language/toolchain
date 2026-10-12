@@ -6672,12 +6672,34 @@ stays green) with the analysis in its header, and it moves back the moment that
 bug is fixed. Nothing exercised that parser before this round either way: the
 package compiled and no test called `NewLineTable` or `NewTable`.
 
-## NEW OPEN ITEM (round 103): a returned object keeps a pointer to a COPY of a caller's object, in the callee's frame arena
+## RESOLVED (round 103 found it, round 104 fixed it, round 123 re-verified): a returned object kept a pointer to a COPY of a caller's object
 
-Found while making `debug/gosym` run-verified. **Not fixed** - it is a runtime
-relocation bug and the reproduction is parked at
-`tests/regressions/known_fail/gosym_pclntab.mx` (out of the suite's auto-run
-set, so the suite stays green; move it back when this closes).
+**STATUS: FIXED, and the fixture is back in the auto-run set.** The hypothesis
+recorded below - that the relocation's transience test was classifying a
+caller-arena pointer as callee-transient - was WRONG. The trigger was a CYCLE,
+and the mechanism was in the codec, not the relocation: the encoder's and
+decoder's seen tables drifted out of step, so a back-reference index resolved by
+position to the wrong object. Round 104 reduced it to three probe variants (a
+caller pointer alone: correct; with a plain slice: correct; with a slice whose
+elements point back into it: garbage), instrumented both tables (ENC adds 16,
+DEC adds 24), and fixed the drift. See "FIXED in round 104: the codec's two seen
+tables drifted" below for the mechanism.
+
+Round 123 re-verified it by running, on the round-112 compiler:
+
+- `tests/regressions/should_compile/gosym_pclntab.mx` (the original
+  reproduction, 220 lines, building a pclntab by hand) prints `gosym ok`;
+- a new focused oracle,
+  `tests/regressions/should_compile/returned_object_identity/`, reduces the
+  recorded shape to ~40 lines: a pointer PARAMETER to a caller-arena `Holder` is
+  stored into a local `Carried`, the frame arena is churned (32 x 48-byte
+  allocations) inside the call, `&local` is returned, and the caller then (a)
+  writes through the returned pointer and requires the write to land in its own
+  `Holder`, and (b) re-reads it after 64 more allocation rounds and a second
+  `Carry` call. It prints `returned-object identity ok`, and it passes wasm
+  validation with the same output.
+
+The original entry follows, unchanged apart from this header.
 
 **Shape.** A function stores a POINTER PARAMETER into a local struct and returns
 the address of that local:

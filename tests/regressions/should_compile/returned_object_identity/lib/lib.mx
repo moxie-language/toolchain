@@ -1,0 +1,45 @@
+package lib
+
+// Holder lives in the CALLER's frame arena.
+type Holder struct {
+	tag  int32
+	data []byte
+}
+
+// Carried is returned by address, and carries a pointer to the caller's Holder.
+type Carried struct {
+	h   *Holder
+	n   int32
+	pad []byte
+}
+
+// Carry stores a pointer PARAMETER into a local struct, churns the frame arena
+// hard, and returns the local's address. The returned object must keep pointing
+// at the caller's Holder: an ancestor-arena pointer is stable and identity, not
+// callee-transient state to be copied into a frame about to be released. This
+// is the shape that produced `tbl.PCToLine` pointing at a recycled copy of the
+// caller's LineTable (rounds 103-104).
+func Carry(h *Holder, n int32) (out *Carried) {
+	local := Carried{}
+	local.h = h
+	local.n = n
+	for i := int32(0); i < 32; i++ {
+		filler := []byte{:48}
+		filler[0] = byte(i)
+		filler[47] = byte(i + 1)
+		local.pad = filler
+	}
+	return &local
+}
+
+// Churn allocates and discards a lot in its own frame, so anything the caller
+// is holding that was wrongly copied into a released frame is recycled here.
+func Churn(rounds int32) (n int32) {
+	total := int32(0)
+	for i := int32(0); i < rounds; i++ {
+		buf := []byte{:256}
+		buf[0] = byte(i)
+		total = total + int32(buf[0])
+	}
+	return total
+}
