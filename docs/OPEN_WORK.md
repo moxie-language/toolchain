@@ -7873,3 +7873,37 @@ So this needs a decision, not a patch, and the options are:
 Everything else in the 161 is ordinary work: turn scheduling closures into direct
 calls, give the work a helper with explicit parameters, and drop the `__mval`
 bound-method values.
+
+## FIXED in round 129: vendored packages no longer reach for the network, and a failed clone is fatal
+
+Both parts came out of the same measurement. With a failed clone made FATAL (as
+asked - a quiet "carry on" was how this stayed invisible), the suite went red
+immediately and named the reason:
+
+    mxc: auto-fetch failed: git clone https://golang.org for
+         golang.org/x/crypto/cryptobyte - the package is not vendored and the
+         network did not answer
+    mxc: auto-fetch failed: git clone https://golang.org for
+         golang.org/x/net/dns/dnsmessage
+
+Both of those packages ARE in the tree, under `src/vendor/`. The bug was the
+ORDER in `resolveRemotePkg`: for a `golang.org/...` path it called
+`autoFetchRepo` first and only fell back to `src/<pkg>` / `src/vendor/<pkg>`
+afterwards (main.mx:2872). So every build cloned a repository it already had -
+slow, network-dependent, and fatal once a failure stopped being ignored. A
+MANIFEST pin still resolves first: a pinned build must read exactly that ref.
+
+Order is now: manifest pin -> `src/vendor/<pkg>` -> fetch (fatal on failure).
+
+Verified with the network taken away on purpose (`PATH` pointing at a `git` that
+exits 1): a COLD (`-a`) build of the 31-package probe succeeds, produces its
+binary, and reports **0 auto-fetch attempts** - the vendored tree answers every
+`golang.org/...` import. The fatal path itself is what the pre-fix run above
+demonstrates; it now only fires for a package that is genuinely absent.
+
+Gates: phase 0 123 passed / 0 failed / 0 skipped, phase 1b 45 packages, bootstrap
+fixpoint r129d == r129e == r129f.
+
+STILL OPEN from this family: the repo lock has no stale-PID reclaim
+(`waitRepoLock` waits forever on `$HOME/moxie/<repo>.lock`), which is how a killed
+clone blocked the next build indefinitely.

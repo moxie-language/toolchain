@@ -841,7 +841,13 @@ func autoFetchRepo(pkgPath, version string) (s string) {
 		mxutil.WriteStr(2, "  auto-fetch " | repoPath | "\n")
 		if run([]string{"git", "clone", url, dest}) != 0 {
 			releaseRepoLock(mpath, repoPath)
-			return ""
+			// A fetch that fails must not be a quiet "carry on": the caller
+			// turns an empty result into a later, unrelated-looking error, and
+			// the build keeps going with a package it never resolved. Flaky
+			// networks and an offline machine are exactly when this fires, so
+			// say what happened and stop.
+			fatal("auto-fetch failed: git clone " | url | " for " | pkgPath |
+				" - the package is not vendored and the network did not answer")
 		}
 	}
 
@@ -1119,6 +1125,16 @@ func resolveRemotePkg(pkgPath string) (dir string) {
 			return dir
 		}
 		fatal("MANIFEST: " | repo | " " | ref | " has no package " | pkgPath)
+	}
+	// A VENDORED COPY WINS OVER THE NETWORK. The tree ships golang.org/x/...
+	// under src/vendor, and resolving those paths as remote FIRST made the
+	// build clone a repository it already had: it needed the network, it was
+	// slow, and once a failed clone became fatal it killed builds for packages
+	// that were sitting in the tree. A manifest pin still comes first, above -
+	// a pinned build must read exactly that ref.
+	vend := mxutil.JoinPath(moxieRoot(), mxutil.JoinPath("src/vendor", pkgPath))
+	if len(listFiles(vend, ".mx")) > 0 {
+		return vend
 	}
 	fetched := autoFetchRepo(pkgPath, "")
 	if fetched != "" && len(listFiles(fetched, ".mx")) > 0 {
