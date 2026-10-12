@@ -7979,3 +7979,29 @@ modified" treatment the httptrace hooks got.
 Verified: net/http+httptrace builds, the probe runs, and the closure report drops
 from 145 to 138. Gates: phase 0 123 passed / 0 failed / 0 skipped, phase 1b 45
 packages.
+
+## Round 132: setRequestCancel is a holder with methods, not three closures (net/http 138 -> 132)
+
+The cluster's shape: `setRequestCancel` returned `stopTimer func()` and
+`didTimeout func() bool`, built a `doCancel` closure, and ran an
+immediately-invoked closure over all of them. Six captures, and no way to fix
+them one at a time - the state has to live somewhere a function value cannot
+carry.
+
+It is now a `cancelState` struct with methods: `doCancel`, `stop`, `didTimeout`
+and `run(initialReqCancel)`; `setRequestCancel` returns the state. The widening
+cascaded exactly as the httptrace hooks did: `send` and `Client.send` hand the
+state back instead of a `func() bool`, `do` holds it, and `cancelTimerBody`'s two
+function fields (`stop func()`, `reqDidTimeout func() bool`) became one
+`cs *cancelState`. `nop` and `alwaysFalse` became dead and were removed.
+
+Two self-inflicted wounds worth recording: the cleanup that removed those dead
+helpers also swallowed `ErrUseLastResponse` and `(*Client).checkRedirect` (the
+comment-block boundary search walked too far), and `run` first took `chan
+struct{}` where `req.Cancel` is receive-only. Both were caught by the compiler
+and fixed - the declarations restored from a copy of the file, the parameter
+widened to `<-chan struct{}` - before anything was committed.
+
+Measured: net/http+httptrace 138 -> 132 capturing closures, with no
+`setRequestCancel`/`doCancel`/`cancelState` entry left in the report. Gates:
+phase 0 123 passed / 0 failed / 0 skipped, phase 1b 45 packages.
