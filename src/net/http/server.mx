@@ -1228,7 +1228,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	}
 	for _, v := range cw.header["Trailer"] {
 		trailers = true
-		foreachHeaderElement(v, cw.res.declareTrailer)
+		foreachHeaderElement(v, cw.res)
 	}
 
 	te := headerGet(header, "Transfer-Encoding")
@@ -1459,18 +1459,27 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 
 // foreachHeaderElement splits v according to the "#rule" construction
 // in RFC 7230 section 7 and calls fn for each non-empty element.
-func foreachHeaderElement(v string, fn func(string)) {
+// headerSink receives each element of a comma-separated header value. The
+// helpers below used to take func(string): a caller with a method to call handed
+// them a bound method value (the receiver IS the environment) and a caller with
+// state to modify handed them a closure over it. Taking the OWNER needs neither,
+// which is why the parameter is an interface and not a func.
+type headerSink interface {
+	declareTrailer(key string)
+}
+
+func foreachHeaderElement(v string, sink headerSink) {
 	v = textproto.TrimString(v)
 	if v == "" {
 		return
 	}
 	if !bytes.Contains(v, ",") {
-		fn(v)
+		sink.declareTrailer(v)
 		return
 	}
 	for _, f := range bytes.Split(v, ",") {
 		if f = textproto.TrimString(f); f != "" {
-			fn(f)
+			sink.declareTrailer(f)
 		}
 	}
 }
@@ -1982,7 +1991,7 @@ func (c *conn) serve(ctx context.Context) {
 		c.curReq = w
 
 		if requestBodyRemains(req.Body) {
-			registerOnHitEOF(req.Body, w.conn.r.startBackgroundRead)
+			registerOnHitEOF(req.Body, w.conn.r)
 		} else {
 			w.conn.r.startBackgroundRead()
 		}
@@ -2167,12 +2176,19 @@ func (w *response) closeNotify() {
 	}
 }
 
-func registerOnHitEOF(rc io.ReadCloser, fn func()) {
+// eofSink is what a body runs when it hits EOF. The only implementation is
+// connReader.startBackgroundRead, so the interface is named for that method.
+// Passing the owner replaced a bound method value here.
+type eofSink interface {
+	startBackgroundRead()
+}
+
+func registerOnHitEOF(rc io.ReadCloser, sink eofSink) {
 	switch v := rc.(type) {
 	case *expectContinueReader:
-		registerOnHitEOF(v.readCloser, fn)
+		registerOnHitEOF(v.readCloser, sink)
 	case *body:
-		v.registerOnHitEOF(fn)
+		v.registerOnHitEOF(sink)
 	default:
 		panic("unexpected type " + fmt.Sprintf("%T", rc))
 	}

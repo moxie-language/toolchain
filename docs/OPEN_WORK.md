@@ -8157,3 +8157,38 @@ and a KIND -
 - and the owner switches on the kind. That is the "simpler structure to enable
   capturing the parameters that actually get modified" shape, applied to timers,
   and it needs a decision because it changes an exported configuration field.
+
+## Round 136: family A converted - the helpers take the OWNER (net/http 127 -> 106)
+
+The insight that made this one batch: the helper that receives a method value does
+not need a func at all. `foreachHeaderElement(v, rws.declareTrailer)` becomes
+`foreachHeaderElement(v, rws)` with
+
+    type headerSink interface{ declareTrailer(key string) }
+
+which removes the bound method value AND turns the other callers' closures into
+owners as well - so the count drops by more than the number of `__mval`s.
+
+Converted, with every caller:
+
+- `foreachHeaderElement` and `http2foreachHeaderElement` now take a
+  `headerSink`. `(*response)` and `(*http2responseWriterState)` already have
+  `declareTrailer`, so two call sites pass the receiver; the two callers that had
+  closures got owners: transfer.mx's `trailerSink` (it captured AND modified the
+  trailer map and the error, both now fields) and h2's `headerKeySink` (captured
+  the trailer map).
+- `registerOnHitEOF` and `(*body).registerOnHitEOF` take an `eofSink`
+  (`startBackgroundRead()`, the only implementation being `*connReader`), and
+  `body.onHitEOF` is that interface instead of `func()`.
+- `http2splitHeaderBlock` takes a `headerBlockSink`; both
+  `http2writeResHeaders.writeHeaderBlock` and
+  `http2writePushPromise.writeHeaderBlock` match it exactly, so both call sites
+  pass the writer.
+
+Measured: net/http+httptrace **127 -> 106** capturing closures, package compiles.
+
+Still family A, next pass: `ForeachSetting` (4 callers, 2 of them closures wanting
+owners), `closeWithErrorAndCode`/`closeWithError` (whose two receivers have
+different method names, so it needs a common `onPipeEOF` method on each), and the
+two lookups (`(*Config).ProxyFunc`, `(*Transport).dialConn`'s `Authenticate`).
+Family B (the twelve timer callbacks) still wants the `afterFunc` decision.

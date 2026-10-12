@@ -6544,7 +6544,7 @@ func (rws *http2responseWriterState) writeChunk(p []byte) (n int32, err error) {
 		}
 
 		for _, v := range rws.snapHeader["Trailer"] {
-			http2foreachHeaderElement(v, rws.declareTrailer)
+			http2foreachHeaderElement(v, rws)
 		}
 
 		// "Connection" headers aren't allowed in HTTP/2 (RFC 7540, 8.1.2.2),
@@ -7086,20 +7086,30 @@ func (sc *http2serverConn) startPush(msg *http2startPushRequest) {
 
 // foreachHeaderElement splits v according to the "#rule" construction
 // in RFC 7230 section 7 and calls fn for each non-empty element.
-func http2foreachHeaderElement(v string, fn func(string)) {
+func http2foreachHeaderElement(v string, sink headerSink) {
 	v = textproto.TrimString(v)
 	if v == "" {
 		return
 	}
 	if !bytes.Contains(v, ",") {
-		fn(v)
+		sink.declareTrailer(v)
 		return
 	}
 	for _, f := range bytes.Split(v, ",") {
 		if f = textproto.TrimString(f); f != "" {
-			fn(f)
+			sink.declareTrailer(f)
 		}
 	}
+}
+
+// headerKeySink records header keys in a map. It replaces the closure the
+// HTTP/2 trailer path handed http2foreachHeaderElement.
+type headerKeySink struct {
+	t Header
+}
+
+func (s *headerKeySink) declareTrailer(key string) {
+	s.t[httpcommon.CanonicalHeader(key)] = nil
 }
 
 // From http://httpwg.org/specs/rfc7540.html#rfc.section.8.1.2.2
@@ -9412,9 +9422,7 @@ func (rl *http2clientConnReadLoop) handleResponse(cs *http2clientStream, f *http
 				t = Header{}
 				res.Trailer = t
 			}
-			http2foreachHeaderElement(hf.Value, func(v string) {
-				t[httpcommon.CanonicalHeader(v)] = nil
-			})
+			http2foreachHeaderElement(hf.Value, &headerKeySink{t: t})
 		} else {
 			vv := header[key]
 			if vv == nil && len(strs) > 0 {
@@ -10412,7 +10420,14 @@ func (http2writeSettingsAck) staysWithinBuffer(limit int32) (rok bool) { return 
 // splitHeaderBlock splits headerBlock into fragments so that each fragment fits
 // in a single frame, then calls fn for each fragment. firstFrag/lastFrag are true
 // for the first/last fragment, respectively.
-func http2splitHeaderBlock(ctx http2writeContext, headerBlock []byte, fn func(ctx http2writeContext, frag []byte, firstFrag, lastFrag bool) error) (rerr error) {
+// headerBlockSink receives each fragment of a split header block. Both callers
+// are methods on a writer whose signature matches exactly, so the sink is that
+// writer and no bound method value is built.
+type headerBlockSink interface {
+	writeHeaderBlock(ctx http2writeContext, frag []byte, firstFrag, lastFrag bool) (err error)
+}
+
+func http2splitHeaderBlock(ctx http2writeContext, headerBlock []byte, sink headerBlockSink) (rerr error) {
 	// For now we're lazy and just pick the minimum MAX_FRAME_SIZE
 	// that all peers must support (16KB). Later we could care
 	// more and send larger frames if the peer advertised it, but
@@ -10428,7 +10443,7 @@ func http2splitHeaderBlock(ctx http2writeContext, headerBlock []byte, fn func(ct
 			frag = frag[:maxFrameSize]
 		}
 		headerBlock = headerBlock[len(frag):]
-		if err := fn(ctx, frag, first, len(headerBlock) == 0); err != nil {
+		if err := sink.writeHeaderBlock(ctx, frag, first, len(headerBlock) == 0); err != nil {
 			return err
 		}
 		first = false
@@ -10493,7 +10508,7 @@ func (w *http2writeResHeaders) writeFrame(ctx http2writeContext) (rerr error) {
 		panic("unexpected empty hpack")
 	}
 
-	return http2splitHeaderBlock(ctx, headerBlock, w.writeHeaderBlock)
+	return http2splitHeaderBlock(ctx, headerBlock, w)
 }
 
 func (w *http2writeResHeaders) writeHeaderBlock(ctx http2writeContext, frag []byte, firstFrag, lastFrag bool) (rerr error) {
@@ -10542,7 +10557,7 @@ func (w *http2writePushPromise) writeFrame(ctx http2writeContext) (rerr error) {
 		panic("unexpected empty hpack")
 	}
 
-	return http2splitHeaderBlock(ctx, headerBlock, w.writeHeaderBlock)
+	return http2splitHeaderBlock(ctx, headerBlock, w)
 }
 
 func (w *http2writePushPromise) writeHeaderBlock(ctx http2writeContext, frag []byte, firstFrag, lastFrag bool) (rerr error) {

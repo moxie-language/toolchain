@@ -799,21 +799,12 @@ func fixTrailer(header Header, chunke3 bool) (rheader Header, rerr error) {
 	}
 	HeaderDel(header, "Trailer")
 
-	trailer := Header{}
-	var err error
+	sink := &trailerSink{trailer: Header{}}
 	for _, v := range vv {
-		foreachHeaderElement(v, func(key string) {
-			key = CanonicalHeaderKey(key)
-			switch key {
-			case "Transfer-Encoding", "Trailer", "Content-Length":
-				if err == nil {
-					err = badStringError("bad trailer key", key)
-					return
-				}
-			}
-			trailer[key] = nil
-		})
+		foreachHeaderElement(v, sink)
 	}
+	trailer := sink.trailer
+	err := sink.err
 	if err != nil {
 		return nil, err
 	}
@@ -821,6 +812,26 @@ func fixTrailer(header Header, chunke3 bool) (rheader Header, rerr error) {
 		return nil, nil
 	}
 	return trailer, nil
+}
+
+// trailerSink validates and records trailer keys. It replaces the closure
+// parseTrailerValues handed foreachHeaderElement, which captured and modified
+// both the trailer map and the error it reports.
+type trailerSink struct {
+	trailer Header
+	err     error
+}
+
+func (s *trailerSink) declareTrailer(key string) {
+	key = CanonicalHeaderKey(key)
+	switch key {
+	case "Transfer-Encoding", "Trailer", "Content-Length":
+		if s.err == nil {
+			s.err = badStringError("bad trailer key", key)
+			return
+		}
+	}
+	s.trailer[key] = nil
 }
 
 // body turns a Reader into a ReadCloser.
@@ -836,7 +847,7 @@ type body struct {
 	sawEOF     bool
 	closed     bool
 	earlyClose bool   // Close called and we didn't read to the end of src
-	onHitEOF   func() // if non-nil, func to call when EOF is Read
+	onHitEOF   eofSink // if non-nil, the sink to run when EOF is Read
 }
 
 // ErrBodyReadAfterClose is returned when reading a [Request] or [Response]
@@ -895,7 +906,7 @@ func (b *body) readLocked(p []byte) (n int32, err error) {
 	}
 
 	if b.sawEOF && b.onHitEOF != nil {
-		b.onHitEOF()
+		b.onHitEOF.startBackgroundRead()
 	}
 
 	return n, err
@@ -1032,8 +1043,8 @@ func (b *body) bodyRemains() (rok bool) {
 	return !b.sawEOF
 }
 
-func (b *body) registerOnHitEOF(fn func()) {
-	b.onHitEOF = fn
+func (b *body) registerOnHitEOF(sink eofSink) {
+	b.onHitEOF = sink
 }
 
 // bodyLocked is an io.Reader reading from a *body when its mutex is
