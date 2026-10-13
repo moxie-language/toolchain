@@ -8192,3 +8192,51 @@ owners), `closeWithErrorAndCode`/`closeWithError` (whose two receivers have
 different method names, so it needs a common `onPipeEOF` method on each), and the
 two lookups (`(*Config).ProxyFunc`, `(*Transport).dialConn`'s `Authenticate`).
 Family B (the twelve timer callbacks) still wants the `afterFunc` decision.
+
+## Round 137: family A finished and family B done - timers take an OWNER (net/http 106 -> 87)
+
+**Family A remainder.** `ForeachSetting` now takes a `settingSink`
+(`processSetting(s http2Setting) error`): `(*http2serverConn)` already has that
+method, so its two call sites pass the receiver, and the two closure callers got
+owners - `settingsDebugSink` (captured and modified a buffer and a count) and
+`clientSettingsSink` (captured cc and set `seenMaxConcurrentStreams`, both fields
+now). The two `(*Config).ProxyFunc` / `(*Transport).dialConn -> Authenticate`
+sites turned out to be in VENDORED code (`golang.org/x/net/http/httpproxy` and the
+socks bundle), so they are left alone and noted.
+
+**Family B: `time.TimerSink` + `time.AfterFuncOwner`.** `afterFunc`/`time.AfterFunc`
+take `func()`, which has no room for the receiver, so the closure could not be
+removed at the call site - and widening the in-tree `afterFunc` alone would only
+have MOVED the closure into it. The fix is one level down:
+
+    type TimerSink interface{ onTimer(kind int32) }
+    func AfterFuncOwner(d Duration, owner TimerSink, kind int32) *Timer
+
+which boxes `{owner, kind}` in the ROOT arena exactly as `AfterFunc` boxes the
+func (so the box outlives the timer) and trampolines through `goTimerSink`. No
+closure anywhere. `time.AfterFunc` is untouched - it still serves everyone else.
+
+On top of it: `http2Server.afterFunc`/`http2Transport.afterFunc` and the
+test-only group interface take `(d, owner, kind)`; `http2serverConn`,
+`http2stream` and `http2ClientConn` each gained an `onTimer(kind)` dispatcher
+switching to the methods that were previously referenced as values; all ELEVEN
+h2 timer sites pass the owner and a kind, including the two stream-deadline
+re-arms and the mark-dead timer. `net/http`'s own timers use
+`time.AfterFuncOwner` too (`persistConn.closeConnIfStillIdle`, and the TLS
+handshake timeout whose `errc` is now a `handshakeTimerSink` field).
+
+`net/pipe.mx` is the same story and shows why the design is right: `pipeDeadline.set`
+carried a comment about creating its callback with the ROOT arena current, because
+"a closure environment is allocated in the arena current where its func literal is
+written". `AfterFuncOwner` boxes in the root arena itself, so that dance - and the
+closure - are gone; `(*pipeDeadline).onTimer` closes the channel.
+
+Measured: net/http+httptrace 106 -> 87, net 5 -> 4 (only `pipeDeadline` moved;
+`sendFile` and the resolver remain). The package builds and links.
+
+Self-inflicted errors on the way, all caught by the compiler before any commit:
+an index-based splice mangled `processSettings` and the file was reverted and
+re-patched with exact-text replacements; `s.Val`/`s.ID` in the moved sink body had
+to become `setting.Val`/`setting.ID` (the closure's parameter was named `s`);
+`onReadTimeout`/`onWriteTimeout` live on `*http2stream`, not
+`*http2clientStream`; and a named `err` result shadowed the body's `if err :=`.

@@ -1095,7 +1095,7 @@ func (t *Transport) tryPutIdleConn(pconn *persistConn) (rerr error) {
 		if pconn.idleTimer != nil {
 			pconn.idleTimer.Reset(t.IdleConnTimeout)
 		} else {
-			pconn.idleTimer = time.AfterFunc(t.IdleConnTimeout, pconn.closeConnIfStillIdle)
+			pconn.idleTimer = time.AfterFuncOwner(t.IdleConnTimeout, pconn, tcpTimerIdleClose)
 		}
 	}
 	pconn.idleAt = time.Now()
@@ -1625,9 +1625,7 @@ func (pconn *persistConn) addTLS(ctx context.Context, name string, trace *httptr
 	errc := chan error{2}
 	var timer *time.Timer // for canceling TLS handshake
 	if d := pconn.t.TLSHandshakeTimeout; d != 0 {
-		timer = time.AfterFunc(d, func() {
-			errc <- tlsHandshakeTimeoutError{}
-		})
+		timer = time.AfterFuncOwner(d, &handshakeTimerSink{errc: errc}, tcpTimerHandshakeTimeout)
 	}
 	if trace != nil {
 		httptrace.TLSHandshakeStart(trace)
@@ -1676,6 +1674,30 @@ func writeConnectRequest(connectReq *Request, c net.Conn) (resp *Response, err e
 	// TLS server will not speak until spoken to.
 	br := bufio.NewReader(c)
 	return ReadResponse(br, connectReq)
+}
+
+// tcpTimer* are the kinds net/http's own timers use with time.AfterFuncOwner,
+// which calls owner.onTimer(kind) instead of a closure.
+const (
+	tcpTimerIdleClose int32 = iota
+	tcpTimerHandshakeTimeout
+)
+
+func (pconn *persistConn) onTimer(kind int32) {
+	switch kind {
+	case tcpTimerIdleClose:
+		pconn.closeConnIfStillIdle()
+	}
+}
+
+// handshakeTimerSink reports that a TLS handshake timed out. It replaces the
+// closure that captured errc.
+type handshakeTimerSink struct {
+	errc chan error
+}
+
+func (s *handshakeTimerSink) onTimer(kind int32) {
+	s.errc <- tlsHandshakeTimeoutError{}
 }
 
 func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httptrace.ClientTrace) (pconn *persistConn, err error) {

@@ -2373,10 +2373,17 @@ func (f *http2SettingsFrame) HasDuplicates() (rok bool) {
 
 // ForeachSetting runs fn for each setting.
 // It stops and returns the first error.
-func (f *http2SettingsFrame) ForeachSetting(fn func(http2Setting) error) (rerr error) {
+// settingSink receives each SETTINGS entry. The callers had a method to call (a
+// bound method value) or state to modify (a closure); taking the owner needs
+// neither.
+type settingSink interface {
+	processSetting(s http2Setting) (err error)
+}
+
+func (f *http2SettingsFrame) ForeachSetting(sink settingSink) (rerr error) {
 	f.checkValid()
 	for i := 0; i < f.NumSettings(); i++ {
-		if err := fn(f.Setting(i)); err != nil {
+		if err := sink.processSetting(f.Setting(i)); err != nil {
 			return err
 		}
 	}
@@ -3226,14 +3233,9 @@ func http2summarizeFrame(f http2Frame) (rs string) {
 	switch f := f.(type) {
 	case *http2SettingsFrame:
 		n := 0
-		f.ForeachSetting(func(s http2Setting) error {
-			n++
-			if n == 1 {
-				buf.WriteString(", settings:")
-			}
-			fmt.Fprintf(&buf, " %v=%v,", s.ID, s.Val)
-			return nil
-		})
+		dbg := &settingsDebugSink{buf: &buf}
+		f.ForeachSetting(dbg)
+		n = dbg.n
 		if n > 0 {
 			buf.Truncate(buf.Len() - 1) // remove trailing comma
 		}
@@ -3793,7 +3795,7 @@ type http2synctestGroupInterface interface {
 	Join()
 	Now() time.Time
 	NewTimer(d time.Duration) http2timer
-	AfterFunc(d time.Duration, f func()) http2timer
+	AfterFuncOwner(d time.Duration, owner time.TimerSink, kind int32) http2timer
 	ContextWithTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc)
 }
 
@@ -4067,12 +4069,139 @@ func (s *http2Server) newTimer(d time.Duration) (rhttp2timer http2timer) {
 	return http2timeTimer{time.NewTimer(d)}
 }
 
-// afterFunc creates a new time.AfterFunc timer, or a synthetic timer in tests.
-func (s *http2Server) afterFunc(d time.Duration, f func()) (rhttp2timer http2timer) {
-	if s.group != nil {
-		return s.group.AfterFunc(d, f)
+// settingsDebugSink renders a SETTINGS frame for the debug dump. It replaces the
+// closure that captured and modified the buffer and its running count.
+type settingsDebugSink struct {
+	buf *bytes.Buffer
+	n   int32
+}
+
+func (s *settingsDebugSink) processSetting(setting http2Setting) (err error) {
+	s.n++
+	if s.n == 1 {
+		s.buf.WriteString(", settings:")
 	}
-	return http2timeTimer{time.AfterFunc(d, f)}
+	fmt.Fprintf(s.buf, " %v=%v,", setting.ID, setting.Val)
+	return nil
+}
+
+// clientSettingsSink applies a SETTINGS frame to a client connection. It
+// replaces the closure that captured cc and the flag it set; both are fields, so
+// the loop needs no environment.
+type clientSettingsSink struct {
+	cc                       *http2ClientConn
+	seenMaxConcurrentStreams bool
+}
+
+func (s *clientSettingsSink) processSetting(setting http2Setting) error {
+
+		switch setting.ID {
+		case http2SettingMaxFrameSize:
+			s.cc.maxFrameSize = setting.Val
+		case http2SettingMaxConcurrentStreams:
+			s.cc.maxConcurrentStreams = setting.Val
+			s.seenMaxConcurrentStreams = true
+		case http2SettingMaxHeaderListSize:
+			s.cc.peerMaxHeaderListSize = uint64(setting.Val)
+		case http2SettingInitialWindowSize:
+			// Values above the maximum flow-control
+			// window size of 2^31-1 MUST be treated as a
+			// connection error (Section 5.4.1) of type
+			// FLOW_CONTROL_ERROR.
+			if setting.Val > math.MaxInt32 {
+				return http2ConnectionError(http2ErrCodeFlowControl)
+			}
+
+			// Adjust flow control of currently-open
+			// frames by the difference of the old initial
+			// window size and this one.
+			delta := int32(setting.Val) - int32(s.cc.initialWindowSize)
+			for _, cs := range s.cc.streams {
+				cs.flow.add(delta)
+			}
+
+			s.cc.initialWindowSize = setting.Val
+		case http2SettingHeaderTableSize:
+			s.cc.henc.SetMaxDynamicTableSize(setting.Val)
+			s.cc.peerMaxHeaderTableSize = setting.Val
+		case http2SettingEnableConnectProtocol:
+			if err := setting.Valid(); err != nil {
+				return err
+			}
+			// If the peer wants to send us SETTINGS_ENABLE_CONNECT_PROTOCOL,
+			// we require that it do so in the first SETTINGS frame.
+			//
+			// When we attempt to use extended CONNECT, we wait for the first
+			// SETTINGS frame to see if the server supports it. If we let the
+			// server enable the feature with a later SETTINGS frame, then
+			// users will see inconsistent results depending on whether we've
+			// seen that frame or not.
+			if !s.cc.seenSettings {
+				s.cc.extendedConnectAllowed = setting.Val == 1
+			}
+		default:
+			s.cc.vlogf("Unhandled Setting: %v", s)
+		}
+		return nil}
+
+// Timer kinds, so a timer can name the handler it wants without closing over it:
+// time.TimerSink.onTimer(kind) dispatches back to the method. afterFunc takes the
+// OWNER rather than a func for the same reason - a closure over the owner is a
+// capture, and a Moxie function value carries no environment.
+const (
+	http2timerIdle int32 = iota
+	http2timerReadIdle
+	http2timerSettings
+	http2timerShutdown
+	http2timerStreamRead
+	http2timerStreamWrite
+	http2timerClientIdle
+	http2timerClientHealth
+	http2timerClientForceClose
+	http2timerClientMarkDead
+)
+
+func (sc *http2serverConn) onTimer(kind int32) {
+	switch kind {
+	case http2timerIdle:
+		sc.onIdleTimer()
+	case http2timerReadIdle:
+		sc.onReadIdleTimer()
+	case http2timerSettings:
+		sc.onSettingsTimer()
+	case http2timerShutdown:
+		sc.onShutdownTimer()
+	}
+}
+
+func (st *http2stream) onTimer(kind int32) {
+	switch kind {
+	case http2timerStreamRead:
+		st.onReadTimeout()
+	case http2timerStreamWrite:
+		st.onWriteTimeout()
+	}
+}
+
+func (cc *http2ClientConn) onTimer(kind int32) {
+	switch kind {
+	case http2timerClientIdle:
+		cc.onIdleTimeout()
+	case http2timerClientHealth:
+		cc.healthCheck()
+	case http2timerClientForceClose:
+		cc.forceCloseConn()
+	case http2timerClientMarkDead:
+		cc.t.connPool().MarkDead(cc)
+	}
+}
+
+// afterFunc creates a new time.AfterFunc timer, or a synthetic timer in tests.
+func (s *http2Server) afterFunc(d time.Duration, owner time.TimerSink, kind int32) (rhttp2timer http2timer) {
+	if s.group != nil {
+		return s.group.AfterFuncOwner(d, owner, kind)
+	}
+	return http2timeTimer{time.AfterFuncOwner(d, owner, kind)}
 }
 
 type http2serverInternalState struct {
@@ -4405,7 +4534,7 @@ func (s *http2Server) serveConn(c net.Conn, opts *http2ServeConnOpts, newf func(
 			http2FrameHeader: http2FrameHeader{valid: true},
 			p:                opts.Settings,
 		}
-		if err := f3.ForeachSetting(sc.processSetting); err != nil {
+		if err := f3.ForeachSetting(sc); err != nil {
 			sc.rejectConn(http2ErrCodeProtocol, "invalid settings")
 			return
 		}
@@ -4791,19 +4920,19 @@ func (sc *http2serverConn) serve(conf http2http2Config) {
 	sc.setConnState(StateIdle)
 
 	if sc.srv.IdleTimeout > 0 {
-		sc.idleTimer = sc.srv.afterFunc(sc.srv.IdleTimeout, sc.onIdleTimer)
+		sc.idleTimer = sc.srv.afterFunc(sc.srv.IdleTimeout, sc, http2timerIdle)
 		defer sc.idleTimer.Stop()
 	}
 
 	if conf.SendPingTimeout > 0 {
 		sc.readIdleTimeout = conf.SendPingTimeout
-		sc.readIdleTimer = sc.srv.afterFunc(conf.SendPingTimeout, sc.onReadIdleTimer)
+		sc.readIdleTimer = sc.srv.afterFunc(conf.SendPingTimeout, sc, http2timerReadIdle)
 		defer sc.readIdleTimer.Stop()
 	}
 
 	sc.readFrames() // closed by defer sc.conn.Close above
 
-	settingsTimer := sc.srv.afterFunc(http2firstSettingsTimeout, sc.onSettingsTimer)
+	settingsTimer := sc.srv.afterFunc(http2firstSettingsTimeout, sc, http2timerSettings)
 	defer settingsTimer.Stop()
 
 	lastFrameTime := sc.srv.now()
@@ -5352,7 +5481,7 @@ func (sc *http2serverConn) goAway(code http2ErrCode) {
 
 func (sc *http2serverConn) shutDownIn(d time.Duration) {
 	sc.serveG.check()
-	sc.shutdownTimer = sc.srv.afterFunc(d, sc.onShutdownTimer)
+	sc.shutdownTimer = sc.srv.afterFunc(d, sc, http2timerShutdown)
 }
 
 func (sc *http2serverConn) resetStream(se http2StreamError) {
@@ -5616,7 +5745,7 @@ func (sc *http2serverConn) processSettings(f *http2SettingsFrame) (rerr error) {
 		// duplicate entries.
 		return sc.countError("settings_big_or_dups", http2ConnectionError(http2ErrCodeProtocol))
 	}
-	if err := f.ForeachSetting(sc.processSetting); err != nil {
+	if err := f.ForeachSetting(sc); err != nil {
 		return err
 	}
 	// TODO: judging by RFC 7540, Section 6.5.3 each SETTINGS frame should be
@@ -5960,7 +6089,7 @@ func (sc *http2serverConn) processHeaders(f *http2MetaHeadersFrame) (rerr error)
 	// (in Go 1.8), though. That's a more sane option anyway.
 	if sc.hs.ReadTimeout > 0 {
 		sc.conn.SetReadDeadline(time.Time{})
-		st.readDeadline = sc.srv.afterFunc(sc.hs.ReadTimeout, st.onReadTimeout)
+		st.readDeadline = sc.srv.afterFunc(sc.hs.ReadTimeout, st, http2timerStreamRead)
 	}
 
 	return sc.scheduleHandler(id, rw, req, handler)
@@ -6059,7 +6188,7 @@ func (sc *http2serverConn) newStream(id, pusherID uint32, state http2streamState
 	st.flow.add(sc.initialStreamSendWindowSize)
 	st.inflow.init(sc.initialStreamRecvWindowSize)
 	if sc.hs.WriteTimeout > 0 {
-		st.writeDeadline = sc.srv.afterFunc(sc.hs.WriteTimeout, st.onWriteTimeout)
+		st.writeDeadline = sc.srv.afterFunc(sc.hs.WriteTimeout, st, http2timerStreamWrite)
 	}
 
 	sc.streams[id] = st
@@ -6677,7 +6806,7 @@ func (w *http2responseWriter) SetReadDeadline(deadline time.Time) (rerr error) {
 		if deadline.IsZero() {
 			st.readDeadline = nil
 		} else if st.readDeadline == nil {
-			st.readDeadline = sc.srv.afterFunc(deadline.Sub(sc.srv.now()), st.onReadTimeout)
+			st.readDeadline = sc.srv.afterFunc(deadline.Sub(sc.srv.now()), st, http2timerStreamRead)
 		} else {
 			st.readDeadline.Reset(deadline.Sub(sc.srv.now()))
 		}
@@ -6703,7 +6832,7 @@ func (w *http2responseWriter) SetWriteDeadline(deadline time.Time) (rerr error) 
 		if deadline.IsZero() {
 			st.writeDeadline = nil
 		} else if st.writeDeadline == nil {
-			st.writeDeadline = sc.srv.afterFunc(deadline.Sub(sc.srv.now()), st.onWriteTimeout)
+			st.writeDeadline = sc.srv.afterFunc(deadline.Sub(sc.srv.now()), st, http2timerStreamWrite)
 		} else {
 			st.writeDeadline.Reset(deadline.Sub(sc.srv.now()))
 		}
@@ -7384,11 +7513,11 @@ func (t *http2Transport) newTimer(d time.Duration) (rhttp2timer http2timer) {
 }
 
 // afterFunc creates a new time.AfterFunc timer, or a synthetic timer in tests.
-func (t *http2Transport) afterFunc(d time.Duration, f func()) (rhttp2timer http2timer) {
+func (t *http2Transport) afterFunc(d time.Duration, owner time.TimerSink, kind int32) (rhttp2timer http2timer) {
 	if t.http2transportTestHooks != nil {
-		return t.http2transportTestHooks.group.AfterFunc(d, f)
+		return t.http2transportTestHooks.group.AfterFuncOwner(d, owner, kind)
 	}
-	return http2timeTimer{time.AfterFunc(d, f)}
+	return http2timeTimer{time.AfterFuncOwner(d, owner, kind)}
 }
 
 func (t *http2Transport) contextWithTimeout(ctx context.Context, d time.Duration) (rcontext context.Context, rcancelFunc context.CancelFunc) {
@@ -8043,7 +8172,7 @@ func (t *http2Transport) newClientConn(c net.Conn, singleUse bool) (rhttp2Client
 	// Start the idle timer after the connection is fully initialized.
 	if d := t.idleConnTimeout(); d != 0 {
 		cc.idleTimeout = d
-		cc.idleTimer = t.afterFunc(d, cc.onIdleTimeout)
+		cc.idleTimer = t.afterFunc(d, cc, http2timerClientIdle)
 	}
 
 	cc.readLoop()
@@ -8257,7 +8386,7 @@ func (cc *http2ClientConn) onIdleTimeout() {
 }
 
 func (cc *http2ClientConn) closeConn() {
-	t := time.AfterFunc(250*time.Millisecond, cc.forceCloseConn)
+	t := time.AfterFuncOwner(250*time.Millisecond, cc, http2timerClientForceClose)
 	defer t.Stop()
 	cc.tconn.Close()
 }
@@ -9206,9 +9335,7 @@ func (rl *http2clientConnReadLoop) cleanup() {
 	}
 	idleTime := cc.t.now().Sub(cc.lastActive)
 	if cc.atomicReused == 0 && idleTime < unusedWaitTime && !cc.closedOnIdle {
-		cc.idleTimer = cc.t.afterFunc(unusedWaitTime-idleTime, func() {
-			cc.t.connPool().MarkDead(cc)
-		})
+		cc.idleTimer = cc.t.afterFunc(unusedWaitTime-idleTime, cc, http2timerClientMarkDead)
 	} else {
 		cc.t.connPool().MarkDead(cc)
 	}
@@ -9264,7 +9391,7 @@ func (rl *http2clientConnReadLoop) run() (rerr error) {
 	readIdleTimeout := cc.readIdleTimeout
 	var t http2timer
 	if readIdleTimeout != 0 {
-		t = cc.t.afterFunc(readIdleTimeout, cc.healthCheck)
+		t = cc.t.afterFunc(readIdleTimeout, cc, http2timerClientHealth)
 	}
 	for {
 		f, err := cc.fr.ReadFrame()
@@ -9840,57 +9967,9 @@ func (rl *http2clientConnReadLoop) processSettingsNoWrite(f *http2SettingsFrame)
 		return http2ConnectionError(http2ErrCodeProtocol)
 	}
 
-	var seenMaxConcurrentStreams bool
-	err := f.ForeachSetting(func(s http2Setting) error {
-		switch s.ID {
-		case http2SettingMaxFrameSize:
-			cc.maxFrameSize = s.Val
-		case http2SettingMaxConcurrentStreams:
-			cc.maxConcurrentStreams = s.Val
-			seenMaxConcurrentStreams = true
-		case http2SettingMaxHeaderListSize:
-			cc.peerMaxHeaderListSize = uint64(s.Val)
-		case http2SettingInitialWindowSize:
-			// Values above the maximum flow-control
-			// window size of 2^31-1 MUST be treated as a
-			// connection error (Section 5.4.1) of type
-			// FLOW_CONTROL_ERROR.
-			if s.Val > math.MaxInt32 {
-				return http2ConnectionError(http2ErrCodeFlowControl)
-			}
-
-			// Adjust flow control of currently-open
-			// frames by the difference of the old initial
-			// window size and this one.
-			delta := int32(s.Val) - int32(cc.initialWindowSize)
-			for _, cs := range cc.streams {
-				cs.flow.add(delta)
-			}
-
-			cc.initialWindowSize = s.Val
-		case http2SettingHeaderTableSize:
-			cc.henc.SetMaxDynamicTableSize(s.Val)
-			cc.peerMaxHeaderTableSize = s.Val
-		case http2SettingEnableConnectProtocol:
-			if err := s.Valid(); err != nil {
-				return err
-			}
-			// If the peer wants to send us SETTINGS_ENABLE_CONNECT_PROTOCOL,
-			// we require that it do so in the first SETTINGS frame.
-			//
-			// When we attempt to use extended CONNECT, we wait for the first
-			// SETTINGS frame to see if the server supports it. If we let the
-			// server enable the feature with a later SETTINGS frame, then
-			// users will see inconsistent results depending on whether we've
-			// seen that frame or not.
-			if !cc.seenSettings {
-				cc.extendedConnectAllowed = s.Val == 1
-			}
-		default:
-			cc.vlogf("Unhandled Setting: %v", s)
-		}
-		return nil
-	})
+	sink := &clientSettingsSink{cc: cc}
+	err := f.ForeachSetting(sink)
+	seenMaxConcurrentStreams := sink.seenMaxConcurrentStreams
 	if err != nil {
 		return err
 	}

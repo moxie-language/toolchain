@@ -7,7 +7,6 @@ package net
 import (
 	"io"
 	"os"
-	"runtime"
 	"time"
 )
 
@@ -22,6 +21,14 @@ func makePipeDeadline() (rpipeDeadline pipeDeadline) {
 }
 
 // set sets the point in time when the deadline will time out.
+// pipeTimerFire is the only kind pipeDeadline uses with time.AfterFuncOwner.
+const pipeTimerFire int32 = 0
+
+// onTimer fires the deadline: it replaces the closure that captured d.
+func (d *pipeDeadline) onTimer(kind int32) {
+	close(d.cancel)
+}
+
 // A timeout event is signaled by closing the channel returned by waiter.
 // Once a timeout has occurred, the deadline can be refreshed by specifying a
 // t value in the future.
@@ -47,16 +54,10 @@ func (d *pipeDeadline) set(t time.Time) {
 		if closed {
 			d.cancel = chan struct{}{}
 		}
-		// The timer fires after this frame is gone: a closure environment is
-		// allocated in the arena current where its func literal is written, so
-		// creating the callback here would leave the timer calling into unmapped
-		// memory. Create it with the root arena current.
-		prevArena := runtime.CurrentArena()
-		runtime.SetCurrentArena(runtime.RootArena())
-		d.timer = time.AfterFunc(dur, func() {
-			close(d.cancel)
-		})
-		runtime.SetCurrentArena(prevArena)
+		// The timer fires after this frame is gone. AfterFuncOwner boxes the
+		// owner and kind in the ROOT arena for exactly that reason, so no
+		// callback closure is needed here at all.
+		d.timer = time.AfterFuncOwner(dur, d, pipeTimerFire)
 		return
 	}
 

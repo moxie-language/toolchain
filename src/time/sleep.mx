@@ -198,3 +198,33 @@ func AfterFunc(d Duration, f func()) (rtimer *Timer) {
 func goFunc(arg unsafe.Pointer, seq uintptr, delta int64) {
 	(*(*func())(arg))()
 }
+
+// TimerSink receives a timer expiry WITHOUT a closure. A Moxie function value
+// carries no environment, so anything a timer callback needs must be reachable
+// from a receiver; an implementation switches on kind. This is the closure-free
+// counterpart of AfterFunc.
+type TimerSink interface {
+	onTimer(kind int32)
+}
+
+type timerSinkBox struct {
+	owner TimerSink
+	kind  int32
+}
+
+// AfterFuncOwner is AfterFunc for a handler that owns the state it needs. The
+// alternative at every call site was a closure over that state, which is a
+// capture - and one the rule bans. The box lives in the root arena for the same
+// reason AfterFunc's does: it must outlive the timer.
+func AfterFuncOwner(d Duration, owner TimerSink, kind int32) (rtimer *Timer) {
+	prev := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
+	box := []timerSinkBox{{owner: owner, kind: kind}}
+	runtime.SetCurrentArena(prev)
+	return (*Timer)(newTimer(when(d), 0, goTimerSink, unsafe.Pointer(&box[0]), nil))
+}
+
+func goTimerSink(arg unsafe.Pointer, seq uintptr, delta int64) {
+	b := (*timerSinkBox)(arg)
+	b.owner.onTimer(b.kind)
+}
