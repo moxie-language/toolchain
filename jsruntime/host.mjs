@@ -139,6 +139,51 @@ export function dispatchCallback(m) {
 const hookResponses = new Map();
 let hookNextReq = 1;
 
+// The marshalling and callback helpers below are the module boundary itself, so
+// the service-worker host imports them rather than keeping its own: two copies
+// of readStr/writeStr/cb0 is exactly how two hosts start disagreeing about the
+// same module.
+export { readStr, readBytes, writeStr, setOutStr, writeBytes, splitNull,
+         cb0, cbs, cbb, cbi, cbii, cbiii, cb6i, cbss, cbdata };
+
+// buildIdbBridge returns the IndexedDB imports. They are shared: a page module
+// and a service-worker module both link web/idb and both need the same entries,
+// so the service-worker host spreads this into its own bridge instead of keeping
+// a second copy that can drift from this one.
+export function buildIdbBridge() {
+  return {
+idb_set_enc_key(p, l, _c) { idb.SetEncKey(readStr(p, l)); },
+idb_open(cbID) { idb.Open(() => cb0(cbID)); },
+idb_save_event(p, l, _c, cbID) { idb.SaveEvent(readStr(p, l), (v) => cbb(cbID, v)); },
+idb_query_events(p, l, _c, cbID) { idb.QueryEvents(readStr(p, l), (s) => cbs(cbID, s)); },
+idb_save_dm(p, l, _c, cbID) { idb.SaveDM(readStr(p, l), (s) => cbs(cbID, s)); },
+idb_query_dms(pp, pl, _pc, limit, until, cbID) {
+  idb.QueryDMs(readStr(pp, pl), limit, Number(until), (s) => cbs(cbID, s));
+},
+idb_get_conversation_list(cbID) { idb.GetConversationList((s) => cbs(cbID, s)); },
+idb_clear_dms_by_peer(p, l, _c, cbID) { idb.ClearDMsByPeer(readStr(p, l), () => cb0(cbID)); },
+idb_set_version(p, l, _c) { idb.SetVersion(readStr(p, l)); },
+idb_mls_save_group(gp, gl, _gc, sp, sl, _sc, cbID) {
+  idb.MlsSaveGroup(readStr(gp, gl), readStr(sp, sl), () => cb0(cbID));
+},
+idb_mls_load_group(gp, gl, _gc, cbID) {
+  idb.MlsLoadGroup(readStr(gp, gl), (s) => cbs(cbID, s));
+},
+idb_mls_list_groups(cbID) { idb.MlsListGroups((s) => cbs(cbID, s)); },
+idb_mls_save_kpp(p, l, _c, cbID) { idb.MlsSaveKPP(readStr(p, l), () => cb0(cbID)); },
+idb_mls_load_kpp(cbID) { idb.MlsLoadKPP((s) => cbs(cbID, s)); },
+idb_kv_get(sp, sl, _sc, kp, kl, _kc, cbID) {
+  idb.KVGet(readStr(sp, sl), readStr(kp, kl), (s) => cbs(cbID, s));
+},
+idb_kv_put(sp, sl, _sc, kp, kl, _kc, vp, vl, _vc) {
+  idb.KVPut(readStr(sp, sl), readStr(kp, kl), readStr(vp, vl));
+},
+idb_kv_get_all(sp, sl, _sc, fnID, doneID) {
+  idb.KVGetAll(readStr(sp, sl), (k, v) => cbss(fnID, k, v), () => cb0(doneID));
+},
+  };
+}
+
 // buildBridge returns the import object for the "bridge" module. The same
 // shape is used by the page and by a spawned domain's Worker; the two differ
 // only in which end of the channel rings they own, so the channel table and
@@ -517,27 +562,7 @@ export function buildBridge(opts = {}) {
       signer.NwcParseResponse(readStr(ip, il), readStr(cp, cl), readStr(ep, el2), (s) => cbs(cbID, s));
     },
 
-    // --- idb ---
-    idb_set_enc_key(p, l, _c) { idb.SetEncKey(readStr(p, l)); },
-    idb_open(cbID) { idb.Open(() => cb0(cbID)); },
-    idb_save_event(p, l, _c, cbID) { idb.SaveEvent(readStr(p, l), (v) => cbb(cbID, v)); },
-    idb_query_events(p, l, _c, cbID) { idb.QueryEvents(readStr(p, l), (s) => cbs(cbID, s)); },
-    idb_save_dm(p, l, _c, cbID) { idb.SaveDM(readStr(p, l), (s) => cbs(cbID, s)); },
-    idb_query_dms(pp, pl, _pc, limit, until, cbID) {
-      idb.QueryDMs(readStr(pp, pl), limit, Number(until), (s) => cbs(cbID, s));
-    },
-    idb_get_conversation_list(cbID) { idb.GetConversationList((s) => cbs(cbID, s)); },
-    idb_clear_dms_by_peer(p, l, _c, cbID) { idb.ClearDMsByPeer(readStr(p, l), () => cb0(cbID)); },
-    idb_set_version(p, l, _c) { idb.SetVersion(readStr(p, l)); },
-    idb_mls_save_group(gp, gl, _gc, sp, sl, _sc, cbID) {
-      idb.MlsSaveGroup(readStr(gp, gl), readStr(sp, sl), () => cb0(cbID));
-    },
-    idb_mls_load_group(gp, gl, _gc, cbID) {
-      idb.MlsLoadGroup(readStr(gp, gl), (s) => cbs(cbID, s));
-    },
-    idb_mls_list_groups(cbID) { idb.MlsListGroups((s) => cbs(cbID, s)); },
-    idb_mls_save_kpp(p, l, _c, cbID) { idb.MlsSaveKPP(readStr(p, l), () => cb0(cbID)); },
-    idb_mls_load_kpp(cbID) { idb.MlsLoadKPP((s) => cbs(cbID, s)); },
+    ...buildIdbBridge(),
 
     // --- ext ---
     ext_storage_get(kp, kl, _kc, cbID) { ext.StorageGet(readStr(kp, kl), (s) => cbs(cbID, s)); },

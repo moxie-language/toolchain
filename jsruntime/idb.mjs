@@ -40,6 +40,11 @@ function _openDB(onReady) {
     }
     if (!db.objectStoreNames.contains('mls_kpp')) {
       db.createObjectStore('mls_kpp', { keyPath: 'key' });
+      // The KV stores web/idb documents: logical names (profiles, settings,
+      // cache) mapped to physical ones below.
+      db.createObjectStore('kv_profiles');
+      db.createObjectStore('kv_settings');
+      db.createObjectStore('kv_cache');
     }
   };
   req.onsuccess = (e) => {
@@ -332,4 +337,43 @@ export function MlsLoadKPP(fn) {
   const req = tx.objectStore('mls_kpp').get('kpp');
   req.onsuccess = () => { if (fn) fn(req.result ? req.result.data : ''); };
   req.onerror = () => { if (fn) fn(''); };
+}
+
+// KV stores: simple key-value storage under a logical store name. The mapping
+// is the schema's, not the caller's: a program asks for "profiles" and gets
+// kv_profiles, which is what the store was created as.
+const _kvStores = { profiles: 'kv_profiles', settings: 'kv_settings', cache: 'kv_cache' };
+
+function _kvStore(name) { return _kvStores[name] || name; }
+
+export function KVGet(storeName, key, fn) {
+  if (!_db) { if (fn) fn(''); return; }
+  const s = _kvStore(storeName);
+  const req = _db.transaction(s, 'readonly').objectStore(s).get(key);
+  req.onsuccess = () => {
+    const raw = req.result ?? '';
+    fn(_encHasKey() ? openStr(raw) : raw);
+  };
+  req.onerror = () => { if (fn) fn(''); };
+}
+
+export function KVPut(storeName, key, value) {
+  if (!_db) return;
+  const s = _kvStore(storeName);
+  const v = _encHasKey() ? sealStr('' + value) : value;
+  _db.transaction(s, 'readwrite').objectStore(s).put(v, key);
+}
+
+export function KVGetAll(storeName, eachFn, doneFn) {
+  if (!_db) { if (doneFn) doneFn(); return; }
+  const s = _kvStore(storeName);
+  const req = _db.transaction(s, 'readonly').objectStore(s).openCursor();
+  req.onsuccess = (e) => {
+    const cursor = e.target.result;
+    if (!cursor) { if (doneFn) doneFn(); return; }
+    const val = _encHasKey() ? openStr(String(cursor.value)) : String(cursor.value);
+    eachFn(String(cursor.key), val);
+    cursor.continue();
+  };
+  req.onerror = () => { if (doneFn) doneFn(); };
 }

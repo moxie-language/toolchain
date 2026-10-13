@@ -40,27 +40,53 @@ function _storeClient(client) {
 
 let _goInstallHandler = null;
 const _installQueue = [];
+// Set by ModuleReady. Before it, an event that arrives ahead of the module is
+// held (its waitUntil keeps the worker alive while the module boots) because a
+// handler may still register. After it, an event with no handler is simply not
+// this worker's business, and extending it would leave the worker in
+// "activating" until the browser gives up.
+let _moduleReady = false;
 const _lifecycleResolvers = new Map();
 self.addEventListener('install', (event) => {
   if (_goInstallHandler) {
     const id = _storeEvent(event);
     _goInstallHandler(id);
     _events.delete(id);
-  } else {
-    let resolve;
-    event.waitUntil(new Promise((r) => { resolve = r; }));
-    _installQueue.push({ event, resolve });
+    return;
   }
+  if (_moduleReady) return;
+  let resolve;
+  event.waitUntil(new Promise((r) => { resolve = r; }));
+  _installQueue.push({ event, resolve });
 });
+
+// handOver gives a queued event to the module and decides its lifetime.
+//
+// The eager listener above had to call waitUntil before the module existed -
+// the module boots asynchronously and Firefox wants listeners registered during
+// script evaluation - so the promise it created is resolved here, on the next
+// turn, UNLESS the module claimed it by calling WaitUntil. A module that
+// registers no activate hook, or a hook with nothing to extend, must not hold
+// the worker in "activating" forever: the browser sees an install or activate
+// event that never settles and the worker never takes control. That is what the
+// unconditional waitUntil did, and it is why the first service-worker fixture
+// booted its module and then sat in "activating" until the page gave up.
+function handOver(id, resolve, fn) {
+  _lifecycleResolvers.set(id, resolve);
+  fn(id);
+  _events.delete(id);
+  setTimeout(() => {
+    // Still registered means nobody called WaitUntil in this turn, so the
+    // event is not extended and the browser may finish it.
+    if (_lifecycleResolvers.delete(id)) resolve();
+  }, 0);
+}
 
 export function OnInstall(fn) {
   _goInstallHandler = fn;
   while (_installQueue.length > 0) {
     const { event, resolve } = _installQueue.shift();
-    const id = _storeEvent(event);
-    _lifecycleResolvers.set(id, resolve);
-    fn(id);
-    _events.delete(id);
+    handOver(_storeEvent(event), resolve, fn);
   }
 }
 
@@ -71,21 +97,39 @@ self.addEventListener('activate', (event) => {
     const id = _storeEvent(event);
     _goActivateHandler(id);
     _events.delete(id);
-  } else {
-    let resolve;
-    event.waitUntil(new Promise((r) => { resolve = r; }));
-    _activateQueue.push({ event, resolve });
+    return;
   }
+  if (_moduleReady) return;
+  let resolve;
+  event.waitUntil(new Promise((r) => { resolve = r; }));
+  _activateQueue.push({ event, resolve });
 });
 
 export function OnActivate(fn) {
   _goActivateHandler = fn;
   while (_activateQueue.length > 0) {
     const { event, resolve } = _activateQueue.shift();
-    const id = _storeEvent(event);
-    _lifecycleResolvers.set(id, resolve);
-    fn(id);
-    _events.delete(id);
+    handOver(_storeEvent(event), resolve, fn);
+  }
+}
+
+// ModuleReady is called by the host once the module's main has run, and it
+// releases the events that arrived while the module was still booting and were
+// never claimed. A worker whose module has no install or activate hook is
+// perfectly normal - an app may only want fetch and message - and the browser
+// must be allowed to finish those events, or the worker sits in "activating"
+// with its module booted and nothing to do.
+export function ModuleReady() {
+  _moduleReady = true;
+  releaseUnhandled(_installQueue, _goInstallHandler);
+  releaseUnhandled(_activateQueue, _goActivateHandler);
+}
+
+function releaseUnhandled(queue, handler) {
+  if (handler) return; // a handler drains its own queue on registration
+  while (queue.length > 0) {
+    const { resolve } = queue.shift();
+    resolve();
   }
 }
 
