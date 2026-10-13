@@ -9473,3 +9473,40 @@ can host it looks at it: emit_check.sh builds it for wasm, runs it with
 pair's: `//:wasmtest browser-only` plus `//:wasmtest skip` still left phase 0
 compiling a file that cannot compile, which is what the first phase-0 run after
 adding it reported (`ld.lld-22: error: undefined symbol: main.wasmProbe`).
+
+## Round 148: the page's handle on a second bundle
+
+Round 147's app bridge gave a bundle a way to answer imports only its app has.
+It was not enough for a bundle that is a *server*: smesh's store worker answers
+JSON-array requests from the page, and the page had no way to reach it, because
+`startDomain` keeps the Worker handle to itself (the page sees stdout, stderr,
+done and error, nothing else). That is most of what smesh's 1379-line page host
+does by hand for eight bundles.
+
+    const store = startBundle('./store.wasm', { appBridge: './store-bridge.mjs' });
+    store.port.onmessage = (e) => { ... };
+    store.port.postMessage('...');
+    await store.ready;
+
+`startBundle` creates a MessageChannel, starts the bundle as its own Worker with
+the same relay and appBridge plumbing a root bundle gets, and returns the Worker,
+the page's port, and a ready promise. The bundle's bridge factory receives the
+port (`factory({ port })`), which is how a page message becomes a module
+callback: the bridge may import the host's own marshalling helpers
+(readStr/cbs/writeStr) because the host answers the module's imports and the
+bridge decides what they mean.
+
+**Proven in both directions, in Chromium, through the runtime staged beside the
+bundle.** The fixture posts first so the page knows it is up; the page answers
+that message; the module prints what came back:
+
+    bundle: got="hello-from-module"          (what the page received)
+    expected/stdout for the module:
+      module got: hello-from-page
+      PASS: bundle port round trip
+
+A missing port, a dropped message, or a callback that never fires all leave the
+expected output short, so this is a positive claim like the other three checks
+in emit_check.sh - which is now four: the emitted bootstrap runs the DOM fixture,
+the emitted service worker activates having fetched its module, the app bridge
+answers an import no host provides, and a second bundle answers the page.
