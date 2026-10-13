@@ -9144,3 +9144,124 @@ targets still build, load, run and match their native reference.
 The fixture's native build in phase 0 is the strict one: phase 0 copies to a
 manifest-less temp dir, so the tree's `+` leniency does not apply there and the
 fixture is compiled under the rules a user app gets.
+
+## Round 145: the build stages the bundle's other half
+
+The framework's JS half lives in jsruntime/ and is one copy, but until now only
+a hand-copied app could use it: smesh keeps `$runtime/` (9 modules it picked),
+`$sw/`, `bridge-common.mjs` and a `*-wasm-host.mjs` per bundle in its own tree,
+and musiquay does the same. That is the drift (b) is about, and this round
+removes it for the runtime and the page bootstrap.
+
+**`moxie build -target wasm -o dir/app.wasm` now writes, beside the module:**
+
+    dir/$runtime/*.mjs          the whole JS runtime, byte for byte
+    dir/app-wasm-host.mjs       the page bootstrap for this bundle
+
+The bootstrap is deliberately small - it pins the module URL and the loader
+path, and everything else is the shared runtime:
+
+    import { load } from './$runtime/loader.mjs';
+    export const wasm = new URL('./app.wasm', import.meta.url).href;
+    export function start() { return load(wasm); }
+
+So a page needs one import and one call, and an app has no host files of its own
+to keep in sync with the compiler that built it. The staging is done by
+`emitWasmHost` in the stage4 compiler and mirrored in
+`legacy/builder/wasmhost.go`, called from the same point in both link paths, so
+a bundle built by either compiler is loadable by the same page. An output of
+`/dev/null` stages nothing (that is a build that asked for no artifacts).
+
+**Measured, in Chromium, through the emitted files only:**
+
+    $ mxc-r146 build -target wasm -o tests/wasm/tmp/emit/web_dom_roundtrip.wasm ...
+      host tests/wasm/tmp/emit/web_dom_roundtrip-wasm-host.mjs ($runtime: 35 modules)
+    $ python3 tests/wasm/run.py -q --host /tmp/emit/web_dom_roundtrip-wasm-host.mjs
+      ... all 14 sync assertions, then
+      ok: set_timeout callback
+      ok: fetch_text callback carries the file
+      ok: get_bounding_rect callback reports a real box
+      ok: observe_resize callback
+      PASS: stdlib web framework round trip
+
+The page imported only the emitted bootstrap; the loader, the Worker host, the
+relay and every API module it used came from the emitted `$runtime/` copy, and
+`tests/wasm/run.py` grew `--host <url>` (with `host.html?host=`) so the harness
+can load a bundle's own bootstrap instead of the checkout's loader.
+
+**The check is in the gate, not in this paragraph.** `tests/wasm/emit_check.sh`
+builds the fixture, compares every staged module against `jsruntime/` with
+`cmp`, and loads the emitted bootstrap in Chromium; `tests/phase5_wasm.sh`
+reports it as `wasm:emitted-host`. It exists because validate.sh builds through
+the checkout's own jsruntime/, so it cannot see whether the copy beside the
+module is complete or loadable - a bundle that works in the checkout and 404s in
+a deployed directory is exactly the failure this closes.
+
+Still open in (b): the service worker staging. smesh's `$sw/wasm-host-sw.mjs` is
+generic (it imports `$runtime/sw.mjs` and `$runtime/idb.mjs` and defines only the
+service-worker lifecycle bridge), so it becomes `jsruntime/sw-host.mjs` plus the
+registration glue, emitted to `$sw/` beside the runtime. It is deliberately left
+for the round that switches smesh over, because that is where the emitted SW
+gets exercised for real rather than merely written - and an emitted file with no
+proof is the thing this workstream is trying to delete.
+
+### Round 145, the legacy side, and a toolchain correction
+
+The mirror is `legacy/builder/wasmhost.go`, called from the same place in the
+legacy link job (after `link()`, before the size report) with the same
+`/dev/null` rule. Wood law says legacy first: this was written second because
+the stage4 version defined the emitted shape, and the ordering is recorded here
+rather than glossed over.
+
+**Earlier rounds recorded "no Go toolchain here". That was wrong.** Go 1.25.3 is
+installed at `/home/mleku/go/bin` and is simply not on `PATH`:
+
+    $ export PATH=$PATH:/home/mleku/go/bin
+    $ go version
+    go version go1.25.3 linux/amd64
+    $ cd legacy && go build ./builder/
+    (compiles; only LLVM deprecation warnings from cgo)
+
+So a legacy change CAN be checked here: `gofmt -l` (clean for the new file, and
+build.go's only formatting complaint is an import-order nit that predates this
+round) and `go build ./builder/` type-check and compile the package the mirror
+lives in. What still cannot be done is the legacy BINARY: the stack is pinned to
+LLVM 22, `legacy/build.sh` refuses anything else, and this machine has LLVM 23
+headers with `/usr/lib/llvm-20` and no `/usr/lib/llvm-22` - `go vet .` fails
+inside vendored go-llvm on `C.LLVMBr`, a header mismatch unrelated to this
+change. Phase 6 therefore still SKIPs, and that SKIP now means "the legacy
+binary cannot be linked here", not "the legacy source is unchecked".
+
+The emitted bytes are identical on both sides by construction: the same module
+text (`wasmHostModule`) is a string literal in stage4's Moxie and in legacy's
+Go. There is no test that compares them, and that is a real gap: the two
+compilers can drift in wording without any gate noticing. Comparing the two
+string literals is cheap and belongs with the next round's work.
+
+**Known wart, fix with the next emitter change.** The bootstrap's module URL is
+built from the output name with `.wasm` stripped and re-appended, so
+`-o dir/app.wasm` is right but `-o dir/app` (no extension) points the page at
+`dir/app.wasm`, which is not where the linker wrote the module. Every harness
+here and smesh's Makefile pass `.wasm`, so nothing in the tree hits it, and the
+page fails loudly on the fetch rather than silently - but the fix is two lines:
+keep the output basename verbatim for the URL and strip the extension only for
+the bootstrap's own name. It is deferred because it changes both emitters and
+therefore needs a compiler rebuild plus a fresh gate, which is the same cycle
+the service-worker staging needs; doing both in one cycle is cheaper than two.
+
+**Gate, measured, MOXIE=tmp/mxc-r146 (the compiler rebuilt with the emission):**
+
+    phase 0 (--quick)   130 passed / 0 failed / 0 skipped, rc=0
+      regression:web_dom_roundtrip   PASS (native build; browser-only)
+    phase 5              77 passed / 0 failed / 0 skipped, rc=0
+      wasm:web_dom_roundtrip         PASS ((browser only))
+      wasm:emitted-host              PASS (the build staged 35 runtime modules
+                                     and a loadable bootstrap)
+
+    $ mxc-r146 build -target wasm -o /dev/null <pkg>   -> rc=0, stages nothing
+
+r146 was built by r145 with `-a` (bootstrap protocol). What is NOT done here:
+the fixpoint check (r146 building an identical r147). It belongs in the round
+that also carries the next emitter change, so one pair of rebuilds covers both;
+until then the claim is "r146 compiles, runs both gates, and emits a loadable
+bundle", not "the compiler reproduces itself at this revision".

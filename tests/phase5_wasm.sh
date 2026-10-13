@@ -55,5 +55,19 @@ if ! grep -qE '^[A-Za-z_0-9]+ +(PASS|FAIL|SKIP)' "$LOG"; then
 	tail -10 "$LOG"
 fi
 
-echo "  (full log: $LOG)"
+# The bundle a build PRODUCES is checked too: validate.sh builds through the
+# checkout's jsruntime/, so it cannot see whether the staged copy beside the
+# module is complete or loadable. This builds a fixture, compares the staged
+# runtime against jsruntime/ file by file, and runs the emitted bootstrap in
+# Chromium.
+EMITLOG="$TMPROOT/wasm-emit.log"
+if bash "$ROOT/tests/wasm/emit_check.sh" >"$EMITLOG" 2>&1; then
+	log_pass "wasm:emitted-host" "$(tail -1 "$EMITLOG" | sed 's/^ *//')"
+else
+	log_fail "wasm:emitted-host" "$(grep -m1 'FAIL:' "$EMITLOG" | sed 's/^ *FAIL: *//')"
+	tail -4 "$EMITLOG"
+	rc=1
+fi
+
+echo "  (full log: $LOG, emitted bundle: $EMITLOG)"
 exit "$rc"
