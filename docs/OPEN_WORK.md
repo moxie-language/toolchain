@@ -9400,3 +9400,76 @@ runs") is not only about edits: a focused run IS a build, and it carries the
 cache wipe with it. The clean re-run above is the one to believe; the failed
 sweep is not evidence of a regression, and this paragraph is why that is
 knowable rather than guessed.
+
+## Round 147: what a real app bundle needs that the framework did not have
+
+The switchover started where it has to start: point smesh at the stdlib and
+build it. The import rewrite is mechanical and done (36 files, 46 import lines,
+for the eight packages that moved: callback, dom, idb, localstorage, node,
+subtle, sw, ws). Then the compiler answered a different question than expected.
+
+**Measured, every bundle, with mxc-r147:**
+
+    bundle        rc   first blocker
+    store          0   -
+    sw             1   main: package-level var with initializer is not allowed
+    notif/profile/feed/relay-proxy/verify/app
+                   1   git.smesh.lol/smesh/web/common/nostr:
+                       parseStrArray: unnamed return values are not allowed
+    signer         1   web/common/jsbridge/schnorr:
+                       PubKeyFromSecKey: unnamed return values are not allowed
+
+So `store.wasm` - a real smesh bundle - builds against the stdlib today, and the
+build staged its whole bundle beside it ($runtime/, $sw/, sw-register.js,
+store-wasm-host.mjs). Everything else is blocked on APP-side debt, not on the
+framework: unnamed return values, named slice types (`type Tag []string`,
+`type Tags []Tag`), and a package-level var with an initializer. Those are rules
+the current compiler enforces and the app predates, and they are the app's to
+port - the same debt the app's own Makefile already declares for closure
+captures.
+
+**The framework gap the store bundle exposed, and the fix.** `store.wasm` links
+`web/common/jsbridge/store`, which imports five bridge symbols the stdlib host
+has never heard of: `store_worker_on_message`, `store_worker_post`,
+`store_worker_set_timeout`, `store_worker_clear_timeout`,
+`store_worker_now_seconds`. A web application always needs some of its own - a
+store worker's message loop, an extension's storage, a protocol shim - and they
+cannot be handed from the page to the Worker, because a function is not
+structured cloneable. Until now the answer was a hand-written per-bundle host
+file, which is exactly the copy this workstream exists to delete.
+
+The fix is one option on the loader and one import in the Worker host:
+
+    load('./app.wasm', { appBridge: './app-bridge.mjs' })
+
+The Worker imports that module (same origin, so the URL is all that crosses) and
+merges its default export over the stdlib bridge. Hosts stay framework; bridges
+stay app; a bundle with no extras calls load() exactly as before. Proven with a
+fixture that imports a symbol no stdlib host provides and prints what the bridge
+computed - the value crosses wasm -> bridge module -> wasm:
+
+    the app bridge answered an import the host does not provide: probe: 42
+
+**What the store bundle still needs, and it is the next framework piece.** A
+bundle that is a *worker server* - smesh's store answers JSON-array requests from
+the page - needs the page to hold that Worker: to post it messages and receive
+its replies. Today `startDomain` creates the worker for the root domain and keeps
+the handle to itself (the page only sees stdout/stderr/done/error), so an app
+cannot talk to a second bundle at all. smesh's 1379-line page host exists largely
+to do this by hand for eight bundles. The shape of the fix is clear and belongs
+with the routing package the goal names: a page-side `startBundle(wasm, opts)`
+that returns the Worker (or a port pair), with the same relay and appBridge
+plumbing the root domain already has. That is the next round's work, and the
+store port rides on it so the port can be proven end to end rather than written
+and hoped for.
+
+**Where that fixture lives, and why it is not a regression.** The app-bridge
+proof imports a symbol no host provides, so it cannot LINK natively - a wasm
+import has nothing to resolve against off target - and the regression directory
+requires a native build (its markers can skip a native RUN, not a native build).
+It sits in tests/wasm/fixtures/app_bridge/ instead, where only the harness that
+can host it looks at it: emit_check.sh builds it for wasm, runs it with
+`--app /app-bridge-probe.mjs`, and diffs the output. The lesson is the marker
+pair's: `//:wasmtest browser-only` plus `//:wasmtest skip` still left phase 0
+compiling a file that cannot compile, which is what the first phase-0 run after
+adding it reported (`ld.lld-22: error: undefined symbol: main.wasmProbe`).
