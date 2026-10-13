@@ -9641,12 +9641,15 @@ The previous rounds' plan said "struct holders carrying `list []string` /
 decided, and the plan for `web/common/nostr/tags.mx` is:
 
     type Tag struct {
-        parts []string      // was: type Tag []string
+        Parts []string      // was: type Tag []string
     }
 
     type Tags struct {
-        list []Tag          // was: type Tags []Tag
+        List []Tag          // was: type Tags []Tag
     }
+
+Field names are EXPORTED (`Parts`, `List`), so the rest of the app reads and
+writes them directly instead of going through accessors.
 
 `[]string` is the spelling to use, not `[][]byte`: in Moxie they are the same
 type, and `[]string` reads as what a tag is - a sequence of text parts.
@@ -9657,15 +9660,15 @@ What follows from it, for the sweep of the 194 non-test references:
     `Tags.GetFirst/GetAll/GetD/ContainsValue`) move onto the structs unchanged in
     signature, which keeps the 91 `Tags.` call sites intact - that is the point of
     the shape;
-  - literals change: `Tag{"p", "abc"}` becomes a struct literal, so add small
-    constructors (`NewTag("p", "abc")`, `NewTags(...)`) and keep the call sites
-    short rather than spelling `Tag{parts: []string{...}}` everywhere; provide
-    accessors for the places that genuinely need the underlying slice;
+  - literals change: `Tag{"p", "abc"}` becomes `Tag{Parts: []string{"p", "abc"}}`,
+    so add small constructors (`NewTag("p", "abc")`, `NewTags(...)`) for the
+    sites that read better that way and spell the literal where it is already
+    clear; no accessors are needed, the fields are exported;
   - **check first, do not assume:** 37 sites compare with `==` / `!=`. Moxie lets
     slices compare with `==`, but whether a struct CONTAINING a slice is
     comparable is not something this session measured. The first slice of the
     work is to find out - if the struct is not comparable, those sites need an
-    `Equal` method (or compare the `list` field), and that is a piece of the
+    `Equal` method (or compare the `List` field), and that is a piece of the
     sweep, not a surprise in the middle of it;
   - then rebuild ./web/wasm/notif as the checkpoint and commit with the measured
     error count, as rounds 12/16/17/18 did.
