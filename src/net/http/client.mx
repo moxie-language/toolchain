@@ -216,6 +216,15 @@ var ErrSchemeMismatch error
 
 // send issues an HTTP request.
 // Caller should close resp.Body when done reading from it.
+// forkRequest shallow-clones ireq into *reqp the first time it is called.
+func forkRequest(reqp **Request, ireq *Request) {
+	if *reqp == ireq {
+		clone := &Request{}
+		*clone = *ireq // shallow clone
+		*reqp = clone
+	}
+}
+
 func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, cs *cancelState, err error) {
 	req := ireq // req is either the original request, or a modified fork
 
@@ -234,33 +243,29 @@ func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, c
 		return nil, &cancelState{}, errors.New("http: Request.RequestURI can't be set in client requests")
 	}
 
-	// forkReq forks req into a shallow clone of ireq the first
-	// time it's called.
-	forkReq := func() {
-		if ireq == req {
-			req = &Request{}
-			*req = *ireq // shallow clone
-		}
-	}
+	// forkReq forks req into a shallow clone of ireq the first time it is
+	// called. It is a CALL with req by pointer: the helper assigns req, which a
+	// closure could only do by capturing it.
+	// forkRequest(reqp *Request, ireq *Request) below.
 
 	// Most the callers of send (Get, Post, et al) don't need
 	// Headers, leaving it uninitialized. We guarantee to the
 	// Transport that this has been initialized, though.
 	if req.Header == nil {
-		forkReq()
+		forkRequest(&req, ireq)
 		req.Header = Header{}
 	}
 
 	if u := req.URL.User; u != nil && HeaderGet(req.Header, "Authorization") == "" {
 		username := u.Username()
 		password, _ := u.Password()
-		forkReq()
+		forkRequest(&req, ireq)
 		req.Header = cloneOrMakeHeader(ireq.Header)
 		HeaderSet(req.Header, "Authorization", "Basic "+basicAuth(username, password))
 	}
 
 	if !deadline.IsZero() {
-		forkReq()
+		forkRequest(&req, ireq)
 	}
 	cs = setRequestCancel(req, rt, deadline)
 

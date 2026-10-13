@@ -8240,3 +8240,43 @@ re-patched with exact-text replacements; `s.Val`/`s.ID` in the moved sink body h
 to become `setting.Val`/`setting.ID` (the closure's parameter was named `s`);
 `onReadTimeout`/`onWriteTimeout` live on `*http2stream`, not
 `*http2clientStream`; and a named `err` result shadowed the body's `if err :=`.
+
+## Round 138: the two recipes applied at scale (net/http 87 -> 52)
+
+A cold (`-a`) report run gave the authoritative remainder: 87 captures across ~50
+functions, and they are almost all ONE of two shapes. Both now have a worked
+recipe, applied to the biggest clusters in this pass:
+
+**Deferred closures become deferred CALLS with the state as an argument.** A
+deferred closure reads the value it captured when the defer was REGISTERED, which
+is why the ones that print or act on a named result or a mutated local needed a
+pointer:
+
+    defer func() { pc.close(closeErr); pc.t.removeIdleConn(pc) }()
+      ->  defer pc.cleanupAfterReadLoop(&closeErr)
+    defer func() { if err != nil { cancel.Cancel(err) } }()
+      ->  defer cancelRoundTripOnError(cancel, &err)
+    defer func() { if err != nil { w.cancel(t) } }()
+      ->  defer cancelWantOnError(t, w, &err)
+
+**Local closure helpers become methods.** `readLoop`'s `tryPutIdleConn` closure
+(wrote the enclosing `closeErr` too) is `(*persistConn).putIdleConnAfterRead(treq,
+closeErr *error)`; `(*persistConn).roundTrip`'s `handleResponse` closure is
+`(*persistConn).handleResponseFor(req *transportRequest, startBytesWritten,
+debugRoundTrip bool, re)`; `send`'s `forkReq` (which ASSIGNED its enclosing `req`)
+is `forkRequest(reqp **Request, ireq)`.
+
+Removing those three closures took 35 captures with them, because each contained
+nested closures of its own - the count is not the number of edits.
+
+Three compile errors on the way, all mine, all fixed: `handleResponseFor`'s first
+parameter is a `*transportRequest` (not `*Request`), and the extracted method
+could not see `roundTrip`'s LOCAL `const debugRoundTrip`, so it is a parameter now.
+
+Still to convert, same two recipes: the remaining 52 across net/http (readLoop's
+inner closures, `(*Transport).dialConn`, `http2ConfigureServer`,
+`http2configureTransports`, `(*Request).write`, `NewRequestWithContext`,
+`(*http2ClientConn).roundTrip`, `EncodeHeaders`/`DecodeFull` in net/textproto,
+`serveFile`/`ServeContent`/`readRequest`/`(*Server).Shutdown`/the routing index,
+and the rest of the singles), and net's four (`sendFile` - whose callback goes to
+`syscall.RawConn.Write`, the resolver fan-out, and one bound method value).

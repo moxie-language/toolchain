@@ -645,11 +645,7 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 	// and doesn't work on HTTP/2 requests. Perhaps we should drop support for it entirely.
 	cancel = t.prepareTransportCancel(origReq, cancel)
 
-	defer func() {
-		if err != nil {
-			cancel.Cancel(err)
-		}
-	}()
+	defer cancelRoundTripOnError(cancel, &err)
 
 	var treq *transportRequest
 	var cm connectMethod
@@ -1449,11 +1445,7 @@ func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (_ *persis
 		trace:      trace,
 		result:     chan connOrError{1},
 	}
-	defer func() {
-		if err != nil {
-			w.cancel(t)
-		}
-	}()
+	defer cancelWantOnError(t, w, &err)
 
 	// Queue for idle connection.
 	if delivered := t.queueForIdleConn(w); !delivered {
@@ -2176,27 +2168,68 @@ func (pc *persistConn) mapRoundTripError(req *transportRequest, startBytesWritte
 // closing a net.Conn that is now owned by the caller.
 var errCallerOwnsConn error
 
+// cleanupAfterReadLoop releases the connection when readLoop returns. It is a
+// deferred CALL with the state as an argument: a closure here would capture
+// closeErr's value, and the read loop changes it.
+func (pc *persistConn) cleanupAfterReadLoop(closeErr *error) {
+	pc.close(*closeErr)
+	pc.t.removeIdleConn(pc)
+}
+
+// putIdleConnAfterRead is readLoop's local tryPutIdleConn helper as a method. It
+// captured closeErr (and wrote it) before; the pointer carries that.
+func (pc *persistConn) putIdleConnAfterRead(treq *transportRequest, closeErr *error) (ok bool) {
+	trace := treq.trace
+	if err := pc.t.tryPutIdleConn(pc); err != nil {
+		*closeErr = err
+		if trace != nil && err != errKeepAlivesDisabled {
+			httptrace.PutIdleConn(trace, err)
+		}
+		return false
+	}
+	if trace != nil {
+		httptrace.PutIdleConn(trace, nil)
+	}
+	return true
+}
+
+// handleResponseFor is the former handleResponse closure of
+// (*persistConn).roundTrip.
+// debugRoundTrip is a parameter because the original closure read a const local
+// to (*persistConn).roundTrip.
+func (pc *persistConn) handleResponseFor(req *transportRequest, startBytesWritten int64, debugRoundTrip bool, re responseAndError) (resp *Response, err error) {
+	if (re.res == nil) == (re.err == nil) {
+		panic(fmt.Sprintf("internal error: exactly one of res or err should be set; nil=%v", re.res == nil))
+	}
+	if debugRoundTrip {
+		req.logf("resc recv: %p, %T/%#v", re.res, re.err, re.err)
+	}
+	if re.err != nil {
+		return nil, pc.mapRoundTripError(req, startBytesWritten, re.err)
+	}
+	return re.res, nil
+}
+
+// cancelRoundTripOnError cancels the round trip's context with the error, if any.
+func cancelRoundTripOnError(cancel context.CancelCauseFunc, err *error) {
+	if *err != nil {
+		cancel.Cancel(*err)
+	}
+}
+
+// cancelWantOnError releases a queued dial when the call failed.
+func cancelWantOnError(t *Transport, w *wantConn, err *error) {
+	if *err != nil {
+		w.cancel(t)
+	}
+}
+
 func (pc *persistConn) readLoop() {
 	var closeErr error = errReadLoopExiting
-	defer func() {
-		pc.close(closeErr)
-		pc.t.removeIdleConn(pc)
-	}()
-
-	tryPutIdleConn := func(treq *transportRequest) bool {
-		trace := treq.trace
-		if err := pc.t.tryPutIdleConn(pc); err != nil {
-			closeErr = err
-			if trace != nil && err != errKeepAlivesDisabled {
-				httptrace.PutIdleConn(trace, err)
-			}
-			return false
-		}
-		if trace != nil {
-			httptrace.PutIdleConn(trace, nil)
-		}
-		return true
-	}
+	// Deferred CALLS, not deferred closures: a closure over closeErr would read
+	// the value captured when the defer was registered, and the helper below
+	// writes it. The pointer is evaluated now, the value is read when this runs.
+	defer pc.cleanupAfterReadLoop(&closeErr)
 
 	// eofc is used to block caller goroutines reading from Response.Body
 	// at EOF until this goroutines has (potentially) added the connection
@@ -2268,7 +2301,7 @@ func (pc *persistConn) readLoop() {
 			alive = alive &&
 				!pc.sawEOF &&
 				pc.wroteRequest() &&
-				tryPutIdleConn(rc.treq)
+				pc.putIdleConnAfterRead(rc.treq, &closeErr)
 
 			if bodyWritable {
 				closeErr = errCallerOwnsConn
@@ -2335,7 +2368,7 @@ func (pc *persistConn) readLoop() {
 				bodyEOF &&
 				!pc.sawEOF &&
 				pc.wroteRequest() &&
-				tryPutIdleConn(rc.treq)
+				pc.putIdleConnAfterRead(rc.treq, &closeErr)
 			if bodyEOF {
 				eofc <- struct{}{}
 			}
@@ -2734,18 +2767,8 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 		callerGone: gone,
 	}
 
-	handleResponse := func(re responseAndError) (*Response, error) {
-		if (re.res == nil) == (re.err == nil) {
-			panic(fmt.Sprintf("internal error: exactly one of res or err should be set; nil=%v", re.res == nil))
-		}
-		if debugRoundTrip {
-			req.logf("resc recv: %p, %T/%#v", re.res, re.err, re.err)
-		}
-		if re.err != nil {
-			return nil, pc.mapRoundTripError(req, startBytesWritten, re.err)
-		}
-		return re.res, nil
-	}
+	// handleResponse is a method now: it captured pc, req and
+	// startBytesWritten, all of which are parameters.
 
 	var respHeaderTimer <-chan time.Time
 	ctxDoneChan := req.ctx.Done()
@@ -2775,7 +2798,7 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 				// The pconn closing raced with the response to the request,
 				// probably after the server wrote a response and immediately
 				// closed the connection. Use the response.
-				return handleResponse(re)
+				return pc.handleResponseFor(req, startBytesWritten, debugRoundTrip, re)
 			default:
 			}
 			if debugRoundTrip {
@@ -2789,14 +2812,14 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 			pc.close(errTimeout())
 			return nil, errTimeout()
 		case re := <-resc:
-			return handleResponse(re)
+			return pc.handleResponseFor(req, startBytesWritten, debugRoundTrip, re)
 		case <-ctxDoneChan:
 			select {
 			case re := <-resc:
 				// readLoop is responsible for canceling req.ctx after
 				// it reads the response body. Check for a response racing
 				// the context close, and use the response if available.
-				return handleResponse(re)
+				return pc.handleResponseFor(req, startBytesWritten, debugRoundTrip, re)
 			default:
 			}
 			pc.cancelRequest(context.Cause(req.ctx))
