@@ -21,6 +21,7 @@ import * as sw from './sw.mjs';
 import * as markdown from './markdown.mjs';
 import * as node from './node.mjs';
 import * as sabChannel from './sab-channel.mjs';
+import { makeDomProxy, serveRelay } from './relay.mjs';
 
 let memory;
 let instance;
@@ -135,10 +136,21 @@ let hookNextReq = 1;
 //   the handles arrive from the parent and this table is pre-populated so the
 //   child reads the far end of the same rings.
 // opts.isWorker: 1 inside a spawned domain, 0 in the page.
+// opts.dom: the DOM implementation these imports call. Absent on the page,
+//   where the document is here and jsruntime/dom.mjs is it; in a Worker it is
+//   the relay proxy from relay.mjs, because the document is on the page.
 export function buildBridge(opts = {}) {
   const handles = opts.channels || new Map();
   let next = 1;
   const isWorker = opts.isWorker ? 1 : 0;
+  const D = opts.dom || dom;
+  // A Worker can only ask the page for the operations the relay carries. The
+  // rest need the page to call back into the module, which is the other
+  // direction of the boundary and does not exist yet: they fail by name here
+  // rather than reaching for a document that is not on this thread.
+  const pageOnly = (name) => {
+    if (opts.dom) throw new Error(`dom.${name}: the DOM relay does not carry page-to-module callbacks yet`);
+  };
   return {
     // --- localstorage ---
     localstorage_get_item(kp, kl, _kc, op, ol) {
@@ -253,49 +265,106 @@ export function buildBridge(opts = {}) {
     },
 
     // --- dom ---
-    dom_body() { return dom.Body(); },
-    dom_create_element(p, l, _c) { return dom.CreateElement(readStr(p, l)); },
-    dom_create_text_node(p, l, _c) { return dom.CreateTextNode(readStr(p, l)); },
-    dom_get_element_by_id(p, l, _c) { return dom.GetElementById(readStr(p, l)); },
-    dom_query_selector(p, l, _c) { return dom.QuerySelector(readStr(p, l)); },
-    dom_query_selector_from(root, p, l, _c) { return dom.QuerySelectorFrom(root, readStr(p, l)); },
-    dom_append_child(parent, child) { dom.AppendChild(parent, child); },
-    dom_remove_child(parent, child) { dom.RemoveChild(parent, child); },
-    dom_remove(el) { dom.Remove(el); },
-    dom_insert_before(parent, nc, rc) { dom.InsertBefore(parent, nc, rc); },
-    dom_first_child(el) { return dom.FirstChild(el); },
-    dom_first_element_child(el) { return dom.FirstElementChild(el); },
-    dom_next_sibling(el) { return dom.NextSibling(el); },
-    dom_release_element(el) { dom.ReleaseElement(el); },
+    //
+    // The module runs in a Worker and the document is on the page, so D is
+    // either jsruntime/dom.mjs (the page owns the document) or the relay proxy
+    // from relay.mjs (the page answers over SharedArrayBuffer). One shape,
+    // two hosts. Everything D answers returns without calling back into the
+    // module; the operations that do need a call back are marked pageOnly and
+    // fail by name in a Worker instead of reaching for a document that is not
+    // on this thread.
+    dom_body() { return D.Body(); },
+    dom_create_element(p, l, _c) { return D.CreateElement(readStr(p, l)); },
+    dom_create_text_node(p, l, _c) { return D.CreateTextNode(readStr(p, l)); },
+    dom_get_element_by_id(p, l, _c) { return D.GetElementById(readStr(p, l)); },
+    dom_query_selector(p, l, _c) { return D.QuerySelector(readStr(p, l)); },
+    dom_query_selector_from(root, p, l, _c) { return D.QuerySelectorFrom(root, readStr(p, l)); },
+    dom_append_child(parent, child) { D.AppendChild(parent, child); },
+    dom_remove_child(parent, child) { D.RemoveChild(parent, child); },
+    dom_remove(el) { D.Remove(el); },
+    dom_insert_before(parent, nc, rc) { D.InsertBefore(parent, nc, rc); },
+    dom_first_child(el) { return D.FirstChild(el); },
+    dom_first_element_child(el) { return D.FirstElementChild(el); },
+    dom_next_sibling(el) { return D.NextSibling(el); },
+    dom_release_element(el) { D.ReleaseElement(el); },
+    dom_release_children(el) { D.ReleaseChildren(el); },
+    dom_release_all(ptr, len) {
+      const dv = new DataView(memory.buffer);
+      const ids = [];
+      for (let i = 0; i < len; i++) ids.push(dv.getInt32(ptr + i * 4, true));
+      D.ReleaseAll(ids);
+    },
     dom_set_attribute(el, np, nl, _nc, vp, vl, _vc) {
-      dom.SetAttribute(el, readStr(np, nl), readStr(vp, vl));
+      D.SetAttribute(el, readStr(np, nl), readStr(vp, vl));
     },
-    dom_remove_attribute(el, np, nl, _nc) { dom.RemoveAttribute(el, readStr(np, nl)); },
-    dom_get_attribute(el, np, nl, _nc, op, ol) { setOutStr(op, ol, dom.GetAttribute(el, readStr(np, nl))); },
-    dom_set_text_content(el, p, l, _c) { dom.SetTextContent(el, readStr(p, l)); },
-    dom_set_inner_html(el, p, l, _c) { dom.SetInnerHTML(el, readStr(p, l)); },
+    dom_remove_attribute(el, np, nl, _nc) { D.RemoveAttribute(el, readStr(np, nl)); },
+    dom_get_attribute(el, np, nl, _nc, op, ol) { setOutStr(op, ol, D.GetAttribute(el, readStr(np, nl))); },
+    dom_set_text_content(el, p, l, _c) { D.SetTextContent(el, readStr(p, l)); },
+    dom_set_inner_html(el, p, l, _c) { D.SetInnerHTML(el, readStr(p, l)); },
     dom_set_style(el, pp, pl, _pc, vp, vl, _vc) {
-      dom.SetStyle(el, readStr(pp, pl), readStr(vp, vl));
+      D.SetStyle(el, readStr(pp, pl), readStr(vp, vl));
     },
-    dom_add_class(el, p, l, _c) { dom.AddClass(el, readStr(p, l)); },
-    dom_remove_class(el, p, l, _c) { dom.RemoveClass(el, readStr(p, l)); },
-    dom_focus(el) { dom.Focus(el); },
+    dom_add_class(el, p, l, _c) { D.AddClass(el, readStr(p, l)); },
+    dom_remove_class(el, p, l, _c) { D.RemoveClass(el, readStr(p, l)); },
+    dom_focus(el) { D.Focus(el); },
+    dom_insert_mention_chip(el, charCount, np, nl, _nc, nmp, nml, _nmc, pp, pl, _pc) {
+      D.InsertMentionChip(el, charCount, readStr(np, nl), readStr(nmp, nml), readStr(pp, pl));
+    },
     dom_set_property(el, pp, pl, _pc, vp, vl, _vc) {
-      dom.SetProperty(el, readStr(pp, pl), readStr(vp, vl));
+      D.SetProperty(el, readStr(pp, pl), readStr(vp, vl));
     },
     dom_get_property(el, pp, pl, _pc, op, ol) {
-      setOutStr(op, ol, dom.GetProperty(el, readStr(pp, pl)));
+      setOutStr(op, ol, D.GetProperty(el, readStr(pp, pl)));
     },
-    dom_bounding_client_left(el) { return dom.BoundingClientLeft(el); },
+    dom_bounding_client_left(el) { return D.BoundingClientLeft(el); },
+    dom_get_viewport_height() { return D.GetViewportHeight(); },
+    dom_get_viewport_width() { return D.GetViewportWidth(); },
+    dom_prefers_dark() { return D.PrefersDark() ? 1 : 0; },
+    dom_console_log(p, l, _c) { D.ConsoleLog(readStr(p, l)); },
+    dom_confirm(p, l, _c) { return D.Confirm(readStr(p, l)) ? 1 : 0; },
+    dom_now_seconds() { return D.NowSeconds(); },
+    dom_timezone_offset_seconds() { return D.TimezoneOffsetSeconds(); },
+    dom_get_path(op, ol) { setOutStr(op, ol, D.GetPath()); },
+    dom_get_hash(op, ol) { setOutStr(op, ol, D.GetHash()); },
+    dom_hostname(op, ol) { setOutStr(op, ol, D.Hostname()); },
+    dom_port(op, ol) { setOutStr(op, ol, D.Port()); },
+    dom_user_agent(op, ol) { setOutStr(op, ol, D.UserAgent()); },
+    dom_encode_uri_component(p, l, _c, op, ol) { setOutStr(op, ol, D.EncodeURIComponent(readStr(p, l))); },
+    dom_push_state(p, l, _c) { D.PushState(readStr(p, l)); },
+    dom_replace_state(p, l, _c) { D.ReplaceState(readStr(p, l)); },
+    dom_back() { D.Back(); },
+    dom_location_reload() { D.LocationReload(); },
+    dom_location_assign(p, l, _c) { D.LocationAssign(readStr(p, l)); },
+    dom_hard_refresh() { D.HardRefresh(); },
+    dom_clear_storage_prefix(p, l, _c) { D.ClearStoragePrefix(readStr(p, l)); },
+    dom_post_to_sw(p, l, _c) { D.PostToSW(readStr(p, l)); },
+    dom_window_open(p, l, _c) { D.WindowOpen(readStr(p, l)); },
+    dom_download_text(fp, fl, _fc, cp, cl, _cc, mp, ml, _mc) {
+      D.DownloadText(readStr(fp, fl), readStr(cp, cl), readStr(mp, ml));
+    },
+    dom_write_primary_selection(p, l, _c) { D.WritePrimarySelection(readStr(p, l)); },
+    dom_clear_timeout(id) { D.ClearTimeout(id); },
+    dom_idb_set_enc_key(p, l, _c) { D.IDBSetEncKey(readStr(p, l)); },
+    dom_idb_put(sp, sl, _sc, kp, kl, _kc, vp, vl, _vc) {
+      D.IDBPut(readStr(sp, sl), readStr(kp, kl), readStr(vp, vl));
+    },
+
+    // --- dom, needs a page -> module callback ---
     dom_get_bounding_rect(el, cbID) {
-      const r = dom.GetBoundingRect_sync ? dom.GetBoundingRect_sync(el) : null;
-      if (r) { cb6i(cbID, r.left|0, r.top|0, r.right|0, r.bottom|0, r.width|0, r.height|0); }
-      else { dom.GetBoundingRect(el, (l,t,r,b,w,h) => cb6i(cbID, l,t,r,b,w,h)); }
+      pageOnly('get_bounding_rect');
+      D.GetBoundingRect(el, (l, t, r, b, w, h) => cb6i(cbID, l, t, r, b, w, h));
     },
-    dom_get_viewport_height() { return dom.GetViewportHeight(); },
-    dom_get_viewport_width() { return dom.GetViewportWidth(); },
+    dom_request_animation_frame(cbID) {
+      pageOnly('request_animation_frame');
+      D.RequestAnimationFrame(() => cb0(cbID));
+    },
+    dom_set_timeout(cbID, ms) {
+      pageOnly('set_timeout');
+      return D.SetTimeout(() => cb0(cbID), ms);
+    },
     dom_add_event_listener(elId, ep, el2, _ec, cbID) {
-      const el = dom.getElement(elId);
+      pageOnly('add_event_listener');
+      const el = D.getElement(elId);
       if (!el) return;
       const event = readStr(ep, el2);
       const fn = () => cb0(cbID);
@@ -303,7 +372,8 @@ export function buildBridge(opts = {}) {
       jsListeners.set(listenerKey(elId, event, cbID), fn);
     },
     dom_add_self_event_listener(elId, ep, el2, _ec, cbID) {
-      const el = dom.getElement(elId);
+      pageOnly('add_self_event_listener');
+      const el = D.getElement(elId);
       if (!el) return;
       const event = readStr(ep, el2);
       const fn = (e) => { if (e.target === e.currentTarget) cb0(cbID); };
@@ -311,25 +381,25 @@ export function buildBridge(opts = {}) {
       jsListeners.set(listenerKey(elId, event, cbID), fn);
     },
     dom_add_enter_key_listener(elId, cbID) {
-      const el = dom.getElement(elId);
+      pageOnly('add_enter_key_listener');
+      const el = D.getElement(elId);
       if (!el) return;
       const fn = (e) => { if (e.key === 'Enter') { e.preventDefault(); cb0(cbID); } };
       el.addEventListener('keydown', fn);
       jsListeners.set(listenerKey(elId, 'keydown:enter', cbID), fn);
     },
     dom_remove_event_listener(elId, ep, el2, _ec, cbID) {
-      const el = dom.getElement(elId);
+      pageOnly('remove_event_listener');
+      const el = D.getElement(elId);
       if (!el) return;
       const event = readStr(ep, el2);
       const key = listenerKey(elId, event, cbID);
       const fn = jsListeners.get(key);
       if (fn) { el.removeEventListener(event, fn); jsListeners.delete(key); }
     },
-    dom_request_animation_frame(cbID) { requestAnimationFrame(() => cb0(cbID)); },
-    dom_observe_resize(elId, cbID) { dom.ObserveResize(elId, cbID); },
-    dom_unobserve_resize(elId) { dom.UnobserveResize(elId); },
     dom_on_keydown(el, handlerID) {
-      const element = dom.getElement(el);
+      pageOnly('on_keydown');
+      const element = D.getElement(el);
       if (!element) return;
       element.addEventListener('keydown', (e) => {
         const { ptr, len } = writeStr(e.key);
@@ -337,65 +407,78 @@ export function buildBridge(opts = {}) {
         if (prevented) e.preventDefault();
       });
     },
-    dom_insert_mention_chip(el, charCount, np, nl, _nc, nmp, nml, _nmc, pp, pl, _pc) {
-      dom.InsertMentionChip(el, charCount, readStr(np, nl), readStr(nmp, nml), readStr(pp, pl));
+    dom_observe_resize(elId, cbID) {
+      pageOnly('observe_resize');
+      D.ObserveResize(elId, cbID);
     },
-    dom_set_timeout(cbID, ms) {
-      return setTimeout(() => cb0(cbID), ms);
+    dom_unobserve_resize(elId) {
+      pageOnly('unobserve_resize');
+      D.UnobserveResize(elId);
     },
-    dom_clear_timeout(id) { clearTimeout(id); },
     dom_fetch_text(p, l, _c, cbID) {
-      dom.FetchText(readStr(p, l), (s) => cbs(cbID, s));
+      pageOnly('fetch_text');
+      D.FetchText(readStr(p, l), (s) => cbs(cbID, s));
     },
     dom_fetch_relay_info(p, l, _c, cbID) {
-      dom.FetchRelayInfo(readStr(p, l), (s) => cbs(cbID, s));
+      pageOnly('fetch_relay_info');
+      D.FetchRelayInfo(readStr(p, l), (s) => cbs(cbID, s));
     },
     dom_fetch_put_blob_base64(up, ul, _uc, dp, dl, _dc, cp, cl, _cc, ap, al, _ac, cbID) {
-      dom.FetchPutBlobBase64(readStr(up, ul), readStr(dp, dl), readStr(cp, cl), readStr(ap, al), (s) => cbs(cbID, s));
+      pageOnly('fetch_put_blob_base64');
+      D.FetchPutBlobBase64(readStr(up, ul), readStr(dp, dl), readStr(cp, cl), readStr(ap, al), (s) => cbs(cbID, s));
     },
-    dom_idb_set_enc_key(p, l, _c) { dom.IDBSetEncKey(readStr(p, l)); },
     dom_idb_get(sp, sl, _sc, kp, kl, _kc, cbID) {
-      dom.IDBGet(readStr(sp, sl), readStr(kp, kl), (s) => cbs(cbID, s));
-    },
-    dom_idb_put(sp, sl, _sc, kp, kl, _kc, vp, vl, _vc) {
-      dom.IDBPut(readStr(sp, sl), readStr(kp, kl), readStr(vp, vl));
+      pageOnly('idb_get');
+      D.IDBGet(readStr(sp, sl), readStr(kp, kl), (s) => cbs(cbID, s));
     },
     dom_idb_get_all(sp, sl, _sc, fnID, doneID) {
-      dom.IDBGetAll(readStr(sp, sl), (k, v) => cbss(fnID, k, v), () => cb0(doneID));
+      pageOnly('idb_get_all');
+      D.IDBGetAll(readStr(sp, sl), (k, v) => cbss(fnID, k, v), () => cb0(doneID));
     },
-    dom_prefers_dark() { return dom.PrefersDark() ? 1 : 0; },
-    dom_console_log(p, l, _c) { console.log(readStr(p, l)); },
-    dom_confirm(p, l, _c) { return confirm(readStr(p, l)) ? 1 : 0; },
-    dom_post_to_sw(p, l, _c) { dom.PostToSW(readStr(p, l)); },
-    dom_on_sw_message(cbID) { dom.OnSWMessage((s) => cbs(cbID, s)); },
-    dom_push_state(p, l, _c) { dom.PushState(readStr(p, l)); },
-    dom_replace_state(p, l, _c) { dom.ReplaceState(readStr(p, l)); },
-    dom_back() { history.back(); },
-    dom_location_reload() { location.reload(); },
-    dom_hard_refresh() { dom.HardRefresh(); },
-    dom_clear_storage_prefix(p, l, _c) { dom.ClearStoragePrefix(readStr(p, l)); },
-    dom_timezone_offset_seconds() { return -(new Date().getTimezoneOffset()) * 60; },
-    dom_read_clipboard(cbID) { dom.ReadClipboard((s) => cbs(cbID, s)); },
-    dom_write_clipboard(p, l, _c, cbID) { dom.WriteClipboard(readStr(p, l), (ok) => cbb(cbID, ok)); },
-    dom_get_path(op, ol) { setOutStr(op, ol, location.pathname); },
-    dom_get_hash(op, ol) { setOutStr(op, ol, location.hash); },
-    dom_hostname(op, ol) { setOutStr(op, ol, location.hostname); },
-    dom_port(op, ol) { setOutStr(op, ol, location.port); },
-    dom_user_agent(op, ol) { setOutStr(op, ol, navigator.userAgent); },
+    dom_on_sw_message(cbID) {
+      pageOnly('on_sw_message');
+      D.OnSWMessage((s) => cbs(cbID, s));
+    },
+    dom_read_clipboard(cbID) {
+      pageOnly('read_clipboard');
+      D.ReadClipboard((s) => cbs(cbID, s));
+    },
+    dom_write_clipboard(p, l, _c, cbID) {
+      pageOnly('write_clipboard');
+      D.WriteClipboard(readStr(p, l), (ok) => cbb(cbID, ok));
+    },
     dom_on_pop_state(cbID) {
-      window.addEventListener('popstate', () => cbs(cbID, location.pathname));
+      pageOnly('on_pop_state');
+      D.OnPopState((path) => cbs(cbID, path));
     },
-    dom_pick_file_text(p, l, _c, cbID) { dom.PickFileText(readStr(p, l), (s) => cbs(cbID, s)); },
-    dom_download_text(fp, fl, _fc, cp, cl, _cc, mp, ml, _mc) {
-      dom.DownloadText(readStr(fp, fl), readStr(cp, cl), readStr(mp, ml));
+    dom_intercept_internal_links(cbID) {
+      pageOnly('intercept_internal_links');
+      D.InterceptInternalLinks((path) => cbs(cbID, path));
     },
-    dom_on_pull_refresh(el, ind, cbID) { dom.OnPullRefresh(el, ind, () => cb0(cbID)); },
-    dom_now_seconds() { return BigInt(Math.floor(Date.now() / 1000)); },
+    dom_pick_file_text(p, l, _c, cbID) {
+      pageOnly('pick_file_text');
+      D.PickFileText(readStr(p, l), (s) => cbs(cbID, s));
+    },
     dom_pick_file_base64(p, l, _c, cbID) {
-      dom.PickFileBase64(readStr(p, l), (d, m) => cbss(cbID, d, m));
+      pageOnly('pick_file_base64');
+      D.PickFileBase64(readStr(p, l), (d, m) => cbss(cbID, d, m));
     },
-    dom_on_paste_image(el, cbID) { dom.OnPasteImage(el, (d, m) => cbss(cbID, d, m)); },
-    dom_on_drop_image(el, cbID) { dom.OnDropImage(el, (d, m) => cbss(cbID, d, m)); },
+    dom_on_paste_image(el, cbID) {
+      pageOnly('on_paste_image');
+      D.OnPasteImage(el, (d, m) => cbss(cbID, d, m));
+    },
+    dom_on_drop_image(el, cbID) {
+      pageOnly('on_drop_image');
+      D.OnDropImage(el, (d, m) => cbss(cbID, d, m));
+    },
+    dom_on_pull_refresh(el, ind, cbID) {
+      pageOnly('on_pull_refresh');
+      D.OnPullRefresh(el, ind, () => cb0(cbID));
+    },
+    dom_copy_image_to_clipboard(el, cbID) {
+      pageOnly('copy_image_to_clipboard');
+      D.CopyImageToClipboard(el, (ok) => cbb(cbID, ok));
+    },
 
     // --- ws ---
     ws_dial(up, ul, _uc, msgID, openID, closeID, errID) {
@@ -851,10 +934,12 @@ export function buildBridge(opts = {}) {
   };
 }
 
-// buildWorkerBridge returns the bridge for a spawned domain: the same
-// functions as the page, over the channel rings the parent handed over.
-export function buildWorkerBridge(channels) {
-  return buildBridge({ channels, isWorker: true });
+// buildWorkerBridge returns the bridge for a domain in a Worker: the same
+// functions as the page, over the channel rings the parent handed over. dom is
+// the relay proxy when the domain holds a port to the page's document, and null
+// for a spawned domain, which has no page connection of its own.
+export function buildWorkerBridge(channels, dom) {
+  return buildBridge({ channels, isWorker: true, dom });
 }
 
 // buildHostImports returns the non-bridge import object every Moxie wasm
@@ -971,6 +1056,16 @@ function spawnWorker(fnIdx, argBytes, chans) {
 // domain that spawns must itself be able to create a Worker.
 export function startDomain(boot, onSettled, relayUp) {
   const w = new Worker(new URL('./worker-host.mjs', import.meta.url), { type: 'module' });
+  // The document is here; the module is in that Worker. A root domain gets one
+  // end of a MessageChannel to ask this thread for DOM work, and this thread
+  // serves it, because the page is the only place the document exists. A
+  // spawned domain gets none: only the page hands out the page connection.
+  let relayPort = null;
+  if (!relayUp) {
+    const chan = new MessageChannel();
+    serveRelay(chan.port1);
+    relayPort = chan.port2;
+  }
   // A spawned domain reports to the domain that spawned it, not to the page, so
   // its output would otherwise stop one hop short and never be seen. relayUp
   // forwards it along the chain; in the page the same postMessage has no
@@ -998,7 +1093,9 @@ export function startDomain(boot, onSettled, relayUp) {
     if (onSettled) onSettled(new Error(msg));
     else globalThis.postMessage({ kind: 'stderr', text: '[domain] ' + msg + '\n' });
   });
-  w.postMessage({ ...boot, stubs: globalThis.__moxie_test_stubs === true });
+  const msg = { ...boot, stubs: globalThis.__moxie_test_stubs === true };
+  if (relayPort) w.postMessage({ ...msg, relayPort }, [relayPort]);
+  else w.postMessage(msg);
   return w;
 }
 

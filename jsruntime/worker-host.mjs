@@ -11,6 +11,7 @@
 // spawned domain is given the channel handles the parent created so the child
 // owns the far end of the same SPSC rings. Nothing else crosses the boundary.
 import { buildHostImports, buildWorkerBridge, setHostModule } from './host.mjs';
+import { makeDomProxy } from './relay.mjs';
 
 let memory;
 
@@ -29,19 +30,19 @@ function bindChannels(list) {
   return channels;
 }
 
-async function instantiate(wasmPath, channels) {
+async function instantiate(wasmPath, channels, relayPort) {
   const response = await fetch(wasmPath);
   const bytes = await response.arrayBuffer();
   const result = await WebAssembly.instantiate(bytes, {
     ...buildHostImports(() => memory),
-    bridge: buildWorkerBridge(channels),
+    bridge: buildWorkerBridge(channels, makeDomProxy(relayPort)),
   });
   memory = result.instance.exports.memory;
   return result.instance;
 }
 
-function runRoot(wasmPath) {
-  instantiate(wasmPath, new Map()).then((inst) => {
+function runRoot(wasmPath, relayPort) {
+  instantiate(wasmPath, new Map(), relayPort).then((inst) => {
     setHostModule(inst);
     inst.exports._start();
     globalThis.postMessage({ kind: 'done' });
@@ -51,7 +52,9 @@ function runRoot(wasmPath) {
 }
 
 function runEntry(wasmPath, fnIdx, args, chanList) {
-  instantiate(wasmPath, bindChannels(chanList)).then((inst) => {
+  // A spawned domain holds no page connection: the document is reachable only
+  // from the domain the page handed a relay port to.
+  instantiate(wasmPath, bindChannels(chanList), null).then((inst) => {
     setHostModule(inst);
     if (typeof inst.exports.__spawn_entry !== 'function') {
       throw new Error('module has no __spawn_entry export; it was not built with spawn support');
@@ -78,6 +81,6 @@ globalThis.addEventListener('message', (e) => {
   // page never sets this, so a module that needs the real bridge still fails
   // loudly there.
   globalThis.__moxie_test_stubs = m.stubs === true;
-  if (m.kind === 'root') runRoot(m.wasm);
+  if (m.kind === 'root') runRoot(m.wasm, m.relayPort || null);
   else if (m.kind === 'entry') runEntry(m.wasm, m.fnIdx, m.args || new Uint8Array(0), m.chans);
 });

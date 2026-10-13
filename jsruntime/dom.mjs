@@ -1147,6 +1147,34 @@ export function DownloadText(filename, content, mimeType) {
   setTimeout(function() { a.remove(); URL.revokeObjectURL(url); }, 1000);
 }
 
+// EncodeURIComponent is URL encoding for a value, not for a whole URL: the
+// module builds query strings with it, and the browser owns the exact rules.
+export function EncodeURIComponent(s) {
+  return encodeURIComponent(s);
+}
+
+// WindowOpen opens a new tab with no handle back: a Moxie module has no way to
+// keep one, and noopener+noreferrer is the only safe default.
+export function WindowOpen(url) {
+  globalThis.open(url, '_blank', 'noopener,noreferrer');
+}
+
+// InterceptInternalLinks turns clicks on same-origin anchors into client-side
+// navigation: pushState, then fn(path). External links are left to the browser.
+export function InterceptInternalLinks(fn) {
+  if (typeof document === 'undefined') return;
+  document.addEventListener('click', function(e) {
+    let el = e.target;
+    while (el && el.tagName !== 'A') el = el.parentElement;
+    if (!el) return;
+    const href = el.getAttribute('href');
+    if (!href || href[0] !== '/') return;
+    e.preventDefault();
+    history.pushState(null, '', href);
+    if (fn) fn(href);
+  });
+}
+
 // PickFileText opens a file picker and reads the selected file as text.
 export function PickFileText(accept, fn) {
   const input = document.createElement('input');
