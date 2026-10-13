@@ -14,8 +14,19 @@ for f in "$SCRIPT_DIR/should_compile/"*.mx; do
 	name="regression:$(basename "$f" .mx)"
 	td="$(tempdir "reg_$(basename "$f" .mx)")"
 	rm -rf "$td"; mkdir -p "$td"
-	if compile_and_run "$f" "$td" "testbin"; then
-		log_pass "$name" "ok"
+	# A browser-only fixture says so in its header. Its packages are panic stubs
+	# natively, so the run cannot succeed by design; phase 5 runs the wasm
+	# module in Chromium and that is the evidence. The native build still runs
+	# here, because importing those packages into a native binary is exactly
+	# what has to keep compiling.
+	skip_run=0
+	grep -q '//:wasmtest browser-only' "$f" 2>/dev/null && skip_run=1
+	if SKIP_RUN="$skip_run" compile_and_run "$f" "$td" "testbin"; then
+		if [ "$skip_run" = "1" ]; then
+			log_pass "$name" "ok (native build; browser-only fixture runs in phase 5)"
+		else
+			log_pass "$name" "ok"
+		fi
 	else
 		tail -5 "$td/build.log" 2>/dev/null > "$td/err.txt"
 		log_fail "$name" "$(cat "$td/err.txt" 2>/dev/null || echo 'crash')"

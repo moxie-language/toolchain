@@ -1,0 +1,77 @@
+// Regression: the STDLIB web framework must work end-to-end in a browser.
+//
+// web/dom lives in src/ now and the module runs in a Worker, so every DOM call
+// in this file crosses the page<->Worker relay: the request goes over a
+// MessagePort, the page performs it against jsruntime/dom.mjs, and the answer
+// comes back through a SharedArrayBuffer. Nothing here can pass by accident -
+// each step asserts what the document actually holds, and a wrong answer panics
+// (and a panic is fatal), so a green browser run is a positive claim about the
+// round trip rather than the absence of an error.
+//
+// Phase 5 builds this natively and for wasm and runs the wasm one in Chromium
+// through the stdlib host page. There is no native reference to compare
+// against: natively the wasm-only packages are the panic stubs, so a native run
+// panics by design. The marker below says so once - phase 0 still compiles it
+// natively (that is what keeps the stubs compiling into an app) and skips only
+// the run, and phase 5 takes the browser result as the result.
+//:wasmtest browser-only
+package main
+
+import (
+	"web/dom"
+)
+
+func assert(ok bool, what string) {
+	if !ok {
+		panic("dom round trip: " + what)
+	}
+	println("ok:", what)
+}
+
+func main() {
+	// Handle 0 is the body by contract: the page registers document.body there
+	// before any module asks, so an app never has to look it up.
+	body := dom.Body()
+	assert(body == 0, "body is handle 0")
+
+	// Create, mark, and attach.
+	box := dom.CreateElement("div")
+	assert(box != 0, "create_element returns a handle")
+	dom.SetAttribute(box, "id", "moxie-framework-probe")
+	dom.SetTextContent(box, "framework ok")
+	dom.AppendChild(body, box)
+
+	// Find it back through the document, not through our own handle: that is
+	// the round trip through the JS bridge and back.
+	found := dom.GetElementById("moxie-framework-probe")
+	assert(found != 0, "attached element is in the document")
+	assert(dom.GetAttribute(found, "id") == "moxie-framework-probe", "attribute round trip")
+	assert(dom.GetProperty(found, "textContent") == "framework ok", "property round trip")
+
+	// A selector lookup, which runs on the page against the real document.
+	assert(dom.QuerySelectorFrom(body, "#moxie-framework-probe") != 0, "selector finds the element")
+
+	// A child of its own, then a removal that must actually remove.
+	kid := dom.CreateElement("span")
+	dom.SetTextContent(kid, "child")
+	dom.AppendChild(found, kid)
+	assert(dom.FirstElementChild(found) != 0, "appended child is the first element child")
+	assert(dom.GetProperty(kid, "textContent") == "child", "child text round trip")
+	dom.RemoveChild(found, kid)
+	assert(dom.FirstElementChild(found) == 0, "removed child is detached")
+
+	// Calls answered on the page that have nothing to do with the tree.
+	assert(dom.EncodeURIComponent("a b&c") == "a%20b%26c", "encode_uri_component round trip")
+	assert(dom.NowSeconds() > 0, "now_seconds comes back as a positive int64")
+	assert(dom.GetViewportWidth() > 0, "viewport width is readable")
+	assert(dom.GetPath() != "", "page path is readable")
+
+	// The release side: the page drops its references and the document loses
+	// the element.
+	orphan := dom.CreateElement("p")
+	dom.Remove(box)
+	dom.ReleaseAll([]int32{int32(box), int32(kid), int32(orphan)})
+	assert(dom.GetElementById("moxie-framework-probe") == 0, "removed element left the document")
+
+	println("PASS: stdlib web framework round trip")
+}

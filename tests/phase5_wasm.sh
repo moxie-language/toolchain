@@ -44,13 +44,13 @@ fi
 # collapsing the whole phase into a single line.
 while read -r name verdict rest; do
 	case "$verdict" in
-	PASS) log_pass "wasm:$name" "output matches native" ;;
+	PASS) log_pass "wasm:$name" "${rest:-output matches native}" ;;
 	FAIL) log_fail "wasm:$name" "$rest" ;;
 	SKIP) log_skip "wasm:$name" "$rest" ;;
 	esac
-done < <(grep -E '^[a-z_0-9]+ +(PASS|FAIL|SKIP)' "$LOG")
+done < <(grep -E '^[A-Za-z_0-9]+ +(PASS|FAIL|SKIP)' "$LOG")
 
-if ! grep -qE '^[a-z_0-9]+ +(PASS|FAIL|SKIP)' "$LOG"; then
+if ! grep -qE '^[A-Za-z_0-9]+ +(PASS|FAIL|SKIP)' "$LOG"; then
 	log_fail "wasm:validate" "harness produced no per-target results"
 	tail -10 "$LOG"
 fi

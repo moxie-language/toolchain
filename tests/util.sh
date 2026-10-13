@@ -76,6 +76,13 @@ compile_and_run() {
 		# turns a non-linking binary into a pass is a smell, not a tolerance.
 		return 1
 	fi
+	# A fixture can declare that its native run is meaningless (a browser-only
+	# fixture: the wasm-only packages are panic stubs off-target, so calling one
+	# natively panics by design). The native BUILD still has to succeed - that
+	# is compile coverage for the packages the fixture imports - but the run is
+	# the caller's to skip, and only the caller knows the fixture said so.
+	[ "${SKIP_RUN:-0}" = "1" ] && return 0
+
 	"$out/$name" >"$out/run.log" 2>&1 || return 1
 	return 0
 }

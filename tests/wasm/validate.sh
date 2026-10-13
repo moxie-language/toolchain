@@ -14,6 +14,26 @@ WORK="${WORK:-$ROOT/tests/wasm/tmp}"
 PASS=0
 FAIL=0
 
+# The host must be able to answer every DOM call a module can compile.
+# src/web/dom/dom_wasm.mx declares the bridge imports a program links against,
+# and jsruntime/host.mjs provides them. A missing entry is not one fixture's
+# problem: the whole module fails to instantiate, so it is said here once
+# instead of arriving as an unexplained load error per target.
+DOM_IMPORTS="$(grep -o 'wasmimport bridge dom_[a-z_0-9]*' "$ROOT/src/web/dom/dom_wasm.mx" | sed 's/.*dom_//' | sort -u)"
+DOM_BRIDGE="$(grep -oE '^    dom_[a-z_0-9]+\(' "$ROOT/jsruntime/host.mjs" | sed 's/^ *dom_//;s/(//' | sort -u)"
+DOM_MISSING="$(comm -23 <(echo "$DOM_IMPORTS") <(echo "$DOM_BRIDGE"))"
+if [ -n "$DOM_MISSING" ]; then
+    echo "wasm host is missing DOM bridge entries:" "$DOM_MISSING"
+    exit 1
+fi
+# And the relay must not carry operations no Moxie program can ask for.
+DOM_RELAY="$(sed -n 's/^  \([a-z_0-9]*\): [{].*/\1/p; s/^  \([a-z_0-9]*\): PENDING,.*/\1/p' "$ROOT/jsruntime/dom-ops.mjs" | sort -u)"
+DOM_STALE="$(comm -13 <(echo "$DOM_IMPORTS") <(echo "$DOM_RELAY"))"
+if [ -n "$DOM_STALE" ]; then
+    echo "dom relay has operations the stdlib does not import:" "$DOM_STALE"
+    exit 1
+fi
+
 # Programs to validate: each is a directory or .mx file containing a main().
 TARGETS=()
 if [ $# -gt 0 ]; then
@@ -99,6 +119,17 @@ for t in "${TARGETS[@]}"; do
         continue
     fi
     cp "$d/wasm.out" "$d/wasm.clean"
+
+    # A browser-only fixture: it calls the wasm-only packages, which are panic
+    # stubs off-target, so the native binary cannot be the reference. The
+    # browser run above already had to exit clean, and the fixture asserts the
+    # round trip itself - a wrong answer panics inside the module - so the
+    # browser result stands alone rather than being compared to a panic.
+    if grep -q '//:wasmtest browser-only' "$t" 2>/dev/null; then
+        printf '%-32s PASS  (browser only)\n' "$name"
+        PASS=$((PASS+1))
+        continue
+    fi
 
     if [ "$nrc" != "0" ]; then
         printf '%-32s SKIP  (native exited %s)\n' "$name" "$nrc"

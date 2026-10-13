@@ -8834,3 +8834,168 @@ Evidence for each step is the parked fixture
 create/attribute/text/append/query/remove through web/dom. It was pulled from
 tests/regressions/should_compile because the worker-mode test host cannot serve
 it yet, and an unverified fixture there can turn phase 5 red.
+
+## Round 143: the page <-> Worker DOM relay, in the stdlib
+
+Round 142 named the missing half and guessed at its shape. This round built it,
+and the shape is smaller than the guess: no new page-side file, no page setup at
+all. Two new modules and one delegated variable.
+
+**jsruntime/dom-ops.mjs** is the one description of what a DOM operation IS: a
+table of 82 entries (the complete set of `//:wasmimport bridge dom_*` in
+src/web/dom/dom_wasm.mx), each `{ kind, run }` where `run(a)` is the page
+performing the operation against the real jsruntime/dom.mjs and `kind` is what
+the answer carries (void / int32 / string / int64-as-decimal-text). Arguments
+travel in wire order as one array, so the page executes exactly what the Worker
+sent, and both halves of the boundary are built from this table.
+
+**jsruntime/relay.mjs** is the boundary itself. A Worker holding the document's
+port allocates one `SharedArrayBuffer` (16-byte header + 1 MiB payload), posts
+`{relay, seq, op, args, sab}`, and `Atomics.wait`s on the gate. The page runs
+`domOps[op].run(args)`, writes the answer, stores the gate and notifies. Every
+request is answered - including the ones with no value - so a call that returns
+has already happened on the page and DOM order is exact. A failed operation is
+NOT a zero the module might mistake for an answer: the message goes in the
+buffer and the Worker throws, which kills the domain loudly. The same for a
+relayed operation whose answer overflows the buffer, for an op the two halves
+disagree about, and for a Worker that waits `WAIT_MS` with no answer.
+
+**host.mjs** picks the implementation once: `const D = opts.dom || dom`. On the
+page D is jsruntime/dom.mjs; in a Worker it is the relay proxy, whose method
+names are generated from the table. All 56 relayable `dom_*` bridge entries now
+call `D.<Method>(plain values)`, so the bridge has one shape for both hosts, and
+`startDomain` creates a `MessageChannel`, serves one end on the page and
+transfers the other to the root Worker. The bridge needed the port threaded
+through: worker-host's `instantiate()` passes `makeDomProxy(relayPort)` to
+`buildWorkerBridge`.
+
+**The 8 imports that made every web/dom module unloadable.** Host coverage was
+measured, not assumed: `grep -o 'wasmimport bridge dom_[a-z_0-9]*'` lists 82,
+and host.mjs had 74. A wasm module imports every symbol of a package it links,
+not just the ones it calls, so `web/dom` could not INSTANTIATE at all:
+`copy_image_to_clipboard encode_uri_component intercept_internal_links
+location_assign release_all release_children window_open
+write_primary_selection` had no bridge entry. All nine missing pieces (those
+eight plus `encode_uri_component`, which was in neither list) are implemented
+now, and the mismatch cannot come back silently: tests/wasm/validate.sh checks
+the two lists against each other before the sweep, and checks that the relay
+carries no operation the stdlib does not import. Measured after the change:
+82 stdlib imports, 82 bridge entries, 82 relay ops, 0 stale, 0 missing.
+
+**Three functions joined dom.mjs** because the stdlib declares them and nothing
+had them: `EncodeURIComponent` (a value, not a URL - the browser owns the
+rules), `WindowOpen` (always `noopener,noreferrer`: a module cannot hold a
+window handle), and `InterceptInternalLinks` (same-origin anchors become
+pushState + a callback; the version already in smesh's runtime copy).
+
+**What the relay does NOT carry: the other direction.** 26 of the 82 ops need
+the page to call *back* into the module (event listeners, rAF, timers, resize,
+fetch, IDB reads, clipboard, file pickers, popstate, keydown). They are listed
+in the table as `PENDING` rather than omitted, the proxy throws their names, and
+the bridge states the same reason through `pageOnly(name)`. A page->module path
+is the next slice, and its shape is already visible: the page must be able to
+reach module exports (`__cb0`, `__cbs`, `__cb6i`) the way it now reaches
+dom.mjs, and the Worker must be idle in its event loop to receive it - which is
+the same "module returns from _start, the page drives it" model smesh already
+runs (`wasm-app-worker-host.mjs` dispatches `__cb0` by postMessage).
+
+**A spawned domain has no relay** - `spawnWorker` starts a Worker inside a
+Worker, and the page is not a party to that, so the child cannot be given a port
+to the page. DOM calls there fail by name ("this domain has no DOM relay")
+instead of running against a document that does not exist. The fix is for the
+page to hand out a port per spawned domain, or for the root domain to answer
+requests on the page's behalf while it is not itself running - the second is
+unsound (a parent blocked in `channel_recv` cannot answer), so it is the first.
+
+**Proof status.** The page half and the Worker half were first run against each
+other in Node (main thread serves, worker_thread holds only the port:
+tmp/relay_preflight.mjs), which is where the Atomics protocol, the int/str/i64
+decoding and all three error paths were checked before any wasm build, including
+the fixture's own op sequence. The committed proof is the fixture moved back
+into tests/regressions/should_compile/ (`web_dom_roundtrip.mx`): it drives
+create / attribute / text / append / query / child / remove / encode /
+now_seconds / viewport / path / release through `web/dom`, and every step
+asserts what the document holds - a wrong answer panics, so a green browser run
+is a positive claim about the round trip, not the absence of an error.
+
+Measured, in Chromium, in the phase 5 sweep of this round's tree:
+
+    browser stdout (tests/wasm/tmp/web_dom_roundtrip/wasm.clean):
+      ok: body is handle 0
+      ok: create_element returns a handle
+      ok: attached element is in the document
+      ok: attribute round trip
+      ok: property round trip
+      ok: selector finds the element
+      ok: appended child is the first element child
+      ok: child text round trip
+      ok: removed child is detached
+      ok: encode_uri_component round trip
+      ok: now_seconds comes back as a positive int64
+      ok: viewport width is readable
+      ok: page path is readable
+      ok: removed element left the document
+      PASS: stdlib web framework round trip
+
+    native.out:  panic: jsbridge        (the wasm-only package's stub, by design)
+
+**One harness change was needed to place it there.** Natively `web/dom` is a
+panic stub, so the native run cannot be part of a gate that requires a native
+reference - but phase 0's `compile_and_run` requires the binary to RUN, and
+`tests/regressions/should_compile` is also the phase 5 target list. A fixture
+can now say `//:wasmtest browser-only` in its header:
+
+  - phase 0 still builds it natively (that is what keeps the stubs compiling
+    into an app) and skips only the run, reporting "native build; browser-only";
+  - phase 5 runs the wasm module in Chromium, requires that run to exit clean,
+    and takes it as the result instead of diffing it against a panic. It reports
+    `web_dom_roundtrip PASS (browser only)`, verified by a focused re-run of the
+    same harness.
+
+The marker is opt-in and explicit: a fixture that claims it and then fails in
+the browser still fails the phase, and nothing pattern-matches a real failure
+away. `tests/phase5_wasm.sh` reads per-target results with
+`^[a-z_0-9]+ +(PASS|FAIL|SKIP)`, which accepts a name only while it is
+lowercase (every target is today, and all 76 were reported, so nothing was
+being lost); the class is widened to `^[A-Za-z_0-9]+` so a future target with
+an uppercase letter cannot vanish from the report while the phase still fails
+or passes on the exit code underneath.
+
+Gate for the whole tree at this point, `MOXIE=tmp/mxc-r145`:
+phase 0 129/129, 0b restrictions ok, 1 packages ok, 1b 45 stdlib packages ok,
+1c 3 wasm packages ok, 3 IR validate 4/4, 4 smoke 1/1, 6 SKIP (legacy compiler
+older than its source - no Go toolchain here), 5 wasm 76 passed / 0 failed /
+0 skipped.
+
+Correction to round 142's plan: step 2 there proposed a new page-side host file
+(`jsruntime/page-dom.mjs`) and step 3 a new test host page. Neither was needed.
+The page handler lives in relay.mjs and is installed by `startDomain`, so a page
+that loads an app gets the relay for free, and tests/wasm/host.html already
+loads through loader.mjs -> startDomain, so it was always Worker mode.
+
+### Round 143, the next slice: the other direction of the boundary
+
+The 26 `PENDING` ops need the page to call into the module, and the two
+lifetimes that have to change are already visible:
+
+1. **The root Worker must outlive `_start`.** `worker-host.runRoot` posts
+   `done` and `startDomain` then `terminate()`s the Worker, so after the module
+   returns there is nobody left to receive an event. smesh's model is the one to
+   copy: the module returns from `_start`, and from then on the page drives it
+   through exports (`wasm-app-worker-host.mjs` dispatches `__cb0`, `__cbs`,
+   `__cbbi` from its message handler). So `done` becomes "loaded", the Worker
+   stays alive, and only an error or page teardown ends it. Phase 5 is
+   unaffected: `loader.mjs` resolves on `done`, and each fixture run gets a
+   fresh page.
+2. **The relay port is the callback path too.** The page already holds `port1`
+   for requests; the same port carries `{cb, kind, id, args}` back, and
+   worker-host dispatches it to `instance.exports.__cb0/__cbs/__cbbi/__cb6i`
+   (queueMicrotask, as the page-side bridge already does). Then the 26 ops move
+   from `PENDING` to real entries: the page registers the listener/observer/
+   fetch/timer with a page-side id, keeps a map page-callback -> module cbID,
+   and forwards each fire over the port.
+3. **Spawned domains** still need a page port of their own. The page cannot be
+   reached from inside `spawnWorker` (the parent Worker creates the child), so
+   the page must hand out one port per spawned domain, either at boot for a
+   fixed pool or on request while the root domain is idle. Until then a spawned
+   domain's DOM calls fail by name, which is what the relay does today.
