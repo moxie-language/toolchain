@@ -30,7 +30,7 @@ function bindChannels(list) {
   return channels;
 }
 
-async function instantiate(wasmPath, channels, relayPort, appBridgeUrl) {
+async function instantiate(wasmPath, channels, relayPort, appBridgeUrl, appPort) {
   const response = await fetch(wasmPath);
   const bytes = await response.arrayBuffer();
   // The application's own bridge entries, imported here because a function
@@ -40,7 +40,10 @@ async function instantiate(wasmPath, channels, relayPort, appBridgeUrl) {
   let appBridge = {};
   if (appBridgeUrl) {
     const mod = await import(appBridgeUrl);
-    appBridge = mod.default || mod;
+    const factory = mod.default || mod;
+    // A bridge that needs the page port (a worker bundle that answers messages)
+    // is a factory taking it; a bridge that only answers imports is an object.
+    appBridge = typeof factory === 'function' ? factory({ port: appPort || null }) : factory;
   }
   const result = await WebAssembly.instantiate(bytes, {
     ...buildHostImports(() => memory),
@@ -64,8 +67,8 @@ function serveCallbacks(port) {
   port.start();
 }
 
-function runRoot(wasmPath, relayPort, appBridgeUrl) {
-  instantiate(wasmPath, new Map(), relayPort, appBridgeUrl).then((inst) => {
+function runRoot(wasmPath, relayPort, appBridgeUrl, appPort) {
+  instantiate(wasmPath, new Map(), relayPort, appBridgeUrl, appPort).then((inst) => {
     setHostModule(inst);
     serveCallbacks(relayPort);
     inst.exports._start();
@@ -78,7 +81,7 @@ function runRoot(wasmPath, relayPort, appBridgeUrl) {
 function runEntry(wasmPath, fnIdx, args, chanList) {
   // A spawned domain holds no page connection: the document is reachable only
   // from the domain the page handed a relay port to.
-  instantiate(wasmPath, bindChannels(chanList), null, null).then((inst) => {
+  instantiate(wasmPath, bindChannels(chanList), null, null, null).then((inst) => {
     setHostModule(inst);
     if (typeof inst.exports.__spawn_entry !== 'function') {
       throw new Error('module has no __spawn_entry export; it was not built with spawn support');
@@ -105,6 +108,6 @@ globalThis.addEventListener('message', (e) => {
   // page never sets this, so a module that needs the real bridge still fails
   // loudly there.
   globalThis.__moxie_test_stubs = m.stubs === true;
-  if (m.kind === 'root') runRoot(m.wasm, m.relayPort || null, m.appBridge || null);
+  if (m.kind === 'root') runRoot(m.wasm, m.relayPort || null, m.appBridge || null, m.appPort || null);
   else if (m.kind === 'entry') runEntry(m.wasm, m.fnIdx, m.args || new Uint8Array(0), m.chans);
 });

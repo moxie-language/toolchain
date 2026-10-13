@@ -27,18 +27,21 @@
   // import namespaces a fixture may LINK but never call (gojs). A production
   // page does not set it, so the same module fails loudly there instead.
   globalThis.__moxie_test_stubs = true;
+  const params = new URLSearchParams(location.search);
   try {
     // ?host=<url> loads an EMITTED bundle host (the page bootstrap `moxie build
     // -target wasm` writes beside the module, with its own $runtime/ copy), so
     // the harness can run the scaffolding a real app would ship rather than the
     // repository's own jsruntime/. Without it, the repository loader.
-    const params = new URLSearchParams(location.search);
     const host = params.get('host');
     const app = params.get('app');
     if (host) {
       const m = await import(host);
       await m.start();
-    } else {
+    } else if (!params.get('bundle')) {
+      // A page that starts a second bundle is a supervisor, not the host of a
+      // root module: loading /app.wasm as well would run whatever fixture was
+      // copied there last.
       const { load } = await import('/jsruntime/loader.mjs');
       // ?app=<url> names the bundle's own bridge module, for a fixture that
       // imports symbols only its application can answer.
@@ -46,6 +49,25 @@
     }
   } catch (e) {
     window.__error = String((e && e.stack) || e);
+  }
+  // ?bundle=<url> starts a SECOND bundle through the runtime staged beside it,
+  // the way an app starts its store or feed worker: the page keeps the port, the
+  // bundle's bridge answers it, and both directions are checked.
+  const bundleUrl = params.get('bundle');
+  if (bundleUrl) {
+    try {
+      const abs = new URL(bundleUrl, location.href).href;
+      const runtimeHost = new URL('./$runtime/host.mjs', abs).href;
+      const { startBundle } = await import(runtimeHost);
+      const b = startBundle(abs, { appBridge: params.get('bridge') || null });
+      b.port.onmessage = (e) => {
+        window.__bundle = { got: String(e.data) };
+        b.port.postMessage('hello-from-page');
+      };
+      await b.ready;
+    } catch (e) {
+      window.__bundleError = String((e && e.stack) || e);
+    }
   }
   // ?sw=<url> registers the emitted service worker through the bundle's own
   // registration glue, and waits for it to activate before reporting the page

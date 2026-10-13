@@ -992,7 +992,36 @@ function spawnWorker(fnIdx, argBytes, chans) {
 // boot message. A domain always runs in its own Worker: channel receives
 // block in Atomics.wait, which the browser forbids on the page thread, and a
 // domain that spawns must itself be able to create a Worker.
-export function startDomain(boot, onSettled, relayUp) {
+// startBundle starts a SECOND bundle as its own Worker and hands the page the
+// other end of a MessagePort to it.
+//
+// A page is not always one module. An app like smesh runs a store worker, a feed
+// worker, a signer worker: each is a Moxie wasm bundle that answers messages
+// from the page, and each needs the page to hold its Worker to post to it and
+// read its replies. startDomain keeps that handle to itself (the page only sees
+// stdout, stderr, done and error), so a bundle that is a server needs this:
+//
+//   const store = startBundle('./store.wasm', { appBridge: './store-bridge.mjs' });
+//   store.port.onmessage = (e) => { ... };
+//   store.port.postMessage('...');
+//
+// The bundle's DOM calls go through the same relay a root bundle's do, and its
+// app bridge receives the port, which is how a bridge turns a page message into
+// a module callback.
+export function startBundle(wasm, opts = {}) {
+  const chan = new MessageChannel();
+  let settle;
+  const ready = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+  const worker = startDomain(
+    { kind: 'root', wasm, appBridge: opts.appBridge || null },
+    (err) => err ? settle.reject(err) : settle.resolve(),
+    false,
+    chan.port2,
+  );
+  return { worker, port: chan.port1, ready };
+}
+
+export function startDomain(boot, onSettled, relayUp, appPort) {
   const w = new Worker(new URL('./worker-host.mjs', import.meta.url), { type: 'module' });
   // The document is here; the module is in that Worker. A root domain gets one
   // end of a MessageChannel to ask this thread for DOM work, and this thread
@@ -1041,7 +1070,9 @@ export function startDomain(boot, onSettled, relayUp) {
     if (onSettled) onSettled(new Error(msg));
   });
   const msg = { ...boot, stubs: globalThis.__moxie_test_stubs === true };
-  if (relayPort) w.postMessage({ ...msg, relayPort }, [relayPort]);
+  if (relayPort && appPort) w.postMessage({ ...msg, relayPort, appPort }, [relayPort, appPort]);
+  else if (relayPort) w.postMessage({ ...msg, relayPort }, [relayPort]);
+  else if (appPort) w.postMessage({ ...msg, appPort }, [appPort]);
   else w.postMessage(msg);
   return w;
 }

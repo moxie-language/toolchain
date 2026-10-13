@@ -157,5 +157,37 @@ if [ -f "$APPFIX" ]; then
 	echo "  the app bridge answered an import the host does not provide: $(cat "$WORK/app-browser.out")"
 fi
 
+# A SECOND bundle the page holds a port to: built here, started through the
+# runtime staged beside it, and checked in both directions (the page must receive
+# the module's message, and the module's stdout must show the page's reply).
+BFIX="$ROOT/tests/wasm/fixtures/bundle_port/main.mx"
+if [ -f "$BFIX" ]; then
+	mkdir -p "$WORK/bundlepkg"
+	cp "$BFIX" "$WORK/bundlepkg/main.mx"
+	if ! (cd "$ROOT" && MOXIEROOT="$ROOT" "$MOXIE" build -target wasm \
+		-o "$WORK/bundle_port.wasm" "$WORK/bundlepkg") >"$WORK/bundle-build.log" 2>&1; then
+		fail "bundle-port fixture build failed"
+		tail -3 "$WORK/bundle-build.log" | sed 's/^/      /'
+	fi
+	# The bridge is the app's file, placed beside the bundle as an app would.
+	cp "$ROOT/tests/wasm/bundle-port-bridge.mjs" "$WORK/bundle-port-bridge.mjs"
+	timeout "${RUN_TIMEOUT:-60}" python3 "$ROOT/tests/wasm/run.py" -q \
+		--bundle /tmp/emit/bundle_port.wasm --bridge /tmp/emit/bundle-port-bridge.mjs \
+		>"$WORK/bundle-browser.out" 2>"$WORK/bundle-browser.err"
+	rc=$?
+	[ "$rc" -eq 0 ] || {
+		fail "the second bundle did not answer the page (rc=$rc)"
+		tail -3 "$WORK/bundle-browser.err" | sed 's/^/      /'
+	}
+	EXPECTED="$ROOT/tests/wasm/expected/bundle_port.txt"
+	if [ -f "$EXPECTED" ]; then
+		diff -q "$EXPECTED" "$WORK/bundle-browser.out" >/dev/null || {
+			fail "the second bundle produced different output"
+			diff "$EXPECTED" "$WORK/bundle-browser.out" | head -4 | sed 's/^/      /'
+		}
+	fi
+	echo "  the second bundle answered the page: $(head -1 "$WORK/bundle-browser.err")"
+fi
+
 echo "  the build staged $have runtime modules and a loadable bootstrap"
 exit 0

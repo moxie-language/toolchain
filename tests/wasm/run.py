@@ -22,14 +22,17 @@ except ImportError:
 ROOT = pathlib.Path(__file__).resolve().parent
 REPO = ROOT.parent.parent
 raw = sys.argv[1:]
-args = [a for a in raw if a not in ("-q", "--host", "--sw", "--app")]
+args = [a for a in raw if a not in ("-q", "--host", "--sw", "--app", "--bundle", "--bridge")]
 QUIET = "-q" in raw
 # --host <url> loads an emitted bundle host page-side instead of the
 # repository's loader; the module URL it carries is the one that runs.
 HOST = raw[raw.index("--host") + 1] if "--host" in raw else None
 SW = raw[raw.index("--sw") + 1] if "--sw" in raw else None
 APP = raw[raw.index("--app") + 1] if "--app" in raw else None
-WASM = next((a for a in args if a not in ("-q", "--sw", "--app") and a not in (SW, APP)), str(ROOT / "app.wasm"))
+BUNDLE = raw[raw.index("--bundle") + 1] if "--bundle" in raw else None
+BRIDGE = raw[raw.index("--bridge") + 1] if "--bridge" in raw else None
+WASM = next((a for a in args if a not in ("-q", "--sw", "--app", "--bundle", "--bridge")
+             and a not in (SW, APP, BUNDLE, BRIDGE)), str(ROOT / "app.wasm"))
 TIMEOUT = 20000
 SW_TIMEOUT = 45000
 
@@ -92,6 +95,10 @@ def main():
             q.append("sw=" + SW)
         if APP:
             q.append("app=" + APP)
+        if BUNDLE:
+            q.append("bundle=" + BUNDLE)
+        if BRIDGE:
+            q.append("bridge=" + BRIDGE)
         if q:
             url += "?" + "&".join(q)
         if SW:
@@ -116,7 +123,9 @@ def main():
         out = page.evaluate(
             "() => ({logs: window.__logs, error: window.__error,"
             " errs: window.__consoleErrors, sw: window.__sw || null,"
-            " swError: window.__swError || null})"
+            " swError: window.__swError || null,"
+            " bundle: window.__bundle || null,"
+            " bundleError: window.__bundleError || null})"
         )
         browser.close()
     srv.shutdown()
@@ -132,6 +141,17 @@ def main():
     # the module's stdout, and it is a failure: a worker that never activated,
     # or that activated without fetching the module staged for it, has not
     # booted - it has merely not crashed loudly yet.
+    # A second bundle's exchange is judged the same way the service worker's is:
+    # the page must have received the module's message (which is what proves the
+    # port reached it), and the module's own stdout is compared by the caller.
+    if BUNDLE:
+        got = (out["bundle"] or {}).get("got", "")
+        print("bundle: got=" + json.dumps(got), file=sys.stderr)
+        if out["bundleError"]:
+            print("bundle error: " + out["bundleError"], file=sys.stderr)
+            return 1
+        if got != "hello-from-module":
+            return 1
     if SW:
         fetched = any(p.endswith("/$sw/sw.wasm") for p in REQUESTS)
         state = (out["sw"] or {}).get("state", "none")

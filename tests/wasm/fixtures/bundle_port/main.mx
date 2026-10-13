@@ -1,0 +1,49 @@
+// Regression: a second bundle the page holds a port to.
+//
+// A page is not always one module. An app like smesh runs a store worker, a feed
+// worker, a signer worker - each a Moxie wasm bundle that answers messages from
+// the page - and each needs the page to hold its Worker to post to it and read
+// its replies. startBundle gives the page that handle and a MessagePort to it;
+// the bundle's own bridge receives the port and turns page messages into module
+// callbacks.
+//
+// The exchange is deterministic in both directions: the module posts first (so
+// the page knows the bundle is up), the page answers that message, and the
+// module prints what came back. A missing port, a dropped message or a callback
+// that never fires all leave the expected output short, which the harness diffs.
+//
+// It has no native build (a wasm import has nothing to resolve off target), so
+// it lives with the wasm harness: tests/wasm/emit_check.sh builds it, runs it
+// through the emitted runtime, and diffs tests/wasm/expected/bundle_port.txt.
+package main
+
+import (
+	"unsafe"
+
+	"web/callback"
+)
+
+// Not in any stdlib host: these are the bundle's own protocol, answered by
+// tests/wasm/bundle-port-bridge.mjs.
+//
+//:wasmimport bridge bundle_port_on_message
+func portOnMessage(cbID int32)
+
+//:wasmimport bridge bundle_port_post
+func portPost(ptr *byte, length int32, capacity int32)
+
+func main() {
+	portOnMessage(callback.RegisterSOnce(onPageMessage))
+	postMessage("hello-from-module")
+}
+
+// A wasm import takes a pointer and a length, not a string: the bridge reads the
+// bytes straight out of the module's memory.
+func postMessage(s string) {
+	portPost(unsafe.StringData(s), int32(len(s)), int32(len(s)))
+}
+
+func onPageMessage(s string) {
+	println("module got:", s)
+	println("PASS: bundle port round trip")
+}
