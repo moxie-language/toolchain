@@ -8717,3 +8717,44 @@ the setjmp-style checkpoint before every call in a frame-bearing function
 there, so that asm and those blocks are dead weight - removing them is its own
 change with its own verification, and it also removes the last consumer of
 `moxie_longjmp`.
+
+## Round 141, part 2: the framework inventory, measured
+
+The Moxie side of the web bridge is a two-file split per package: a native stub
+(`//:build !wasm`, every function `panic("jsbridge")`) and a wasm body
+(`//:build wasm`) that declares `//:wasmimport bridge <fn>` and calls into the
+matching `jsruntime/*.mjs` module. That shape is what moves into `src/web/`:
+
+    smesh/web/common/jsbridge/dom          929 lines (288 stub + 638 wasm)
+    smesh/web/common/jsbridge/callback     512   the callback registry: this is
+                                                the owner-type pattern DOM
+                                                events need, generic
+    smesh/web/common/jsbridge/sw           486   service worker lifecycle
+    smesh/web/common/jsbridge/idb          193   IndexedDB
+    smesh/web/common/jsbridge/subtle       122   WebCrypto
+    smesh/web/common/jsbridge/ws            73   WebSocket
+    smesh/web/common/jsbridge/node          75
+    smesh/web/common/jsbridge/localstorage  46
+    smesh/web/common/jsbridge/markdown      24   rendering, not a browser API -
+                                                it can stay downstream
+    app-specific, stay downstream: feed, mlsw, notif, profile, relayproxy,
+                                   schnorr, signer, store, verify, x25519, ext
+
+The JS half is ALREADY single-copy in `moxie/jsruntime/*.mjs`; what is duplicated
+is (a) these Moxie packages and (b) the `web/static/` host scaffolding
+(`$runtime/`, `$sw/`, `index.html`, `<bundle>-wasm-host.mjs`, twelve of them in
+smesh). So the move is: packages into `src/web/<name>/`, and the scaffolding
+emitted by `moxie build -target wasm` (or a `moxie web scaffold` subcommand)
+instead of copied per app.
+
+Order that keeps the tree green:
+  1. move `callback` first (dom depends on it), then `dom`, `idb`, `localstorage`,
+     `ws`, `subtle`, `sw`, `node` - one commit, `src/web/...` import paths,
+     native stubs and wasm bodies verbatim;
+  2. a stdlib fixture that uses them, built for wasm and run by phase 5 through
+     the stdlib host page;
+  3. point smesh at `git.smesh.lol/moxie/web/...`, delete its copies, run it in a
+     browser (its Makefile already takes `JSRUNTIME ?= ../moxie/jsruntime`);
+  4. then musiquay;
+  5. then the scaffolding emission, so `$runtime/` and `*-wasm-host.mjs` stop
+     being per-app files.
