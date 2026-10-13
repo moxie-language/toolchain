@@ -130,5 +130,32 @@ if [ -f "$SWFIX" ]; then
 	echo "  the emitted service worker booted: $(tail -1 "$WORK/sw-browser.err")"
 fi
 
+# A bundle whose module imports symbols only its app can answer: built here, run
+# with the app's own bridge module, and diffed against its expected output. The
+# generic phase-5 loop cannot run this one (the plain host has no app bridge by
+# definition), which is why it lives with the emitted-bundle checks.
+APPFIX="$ROOT/tests/wasm/fixtures/app_bridge/main.mx"
+if [ -f "$APPFIX" ]; then
+	mkdir -p "$WORK/apppkg"
+	cp "$APPFIX" "$WORK/apppkg/main.mx"
+	if ! (cd "$ROOT" && MOXIEROOT="$ROOT" "$MOXIE" build -target wasm \
+		-o "$WORK/app_bridge.wasm" "$WORK/apppkg") >"$WORK/app-build.log" 2>&1; then
+		fail "app-bridge fixture build failed"
+		tail -3 "$WORK/app-build.log" | sed 's/^/      /'
+	fi
+	timeout "${RUN_TIMEOUT:-60}" python3 "$ROOT/tests/wasm/run.py" -q \
+		--app /app-bridge-probe.mjs "$WORK/app_bridge.wasm" >"$WORK/app-browser.out" 2>&1
+	rc=$?
+	[ "$rc" -eq 0 ] || { fail "the bundle with an app bridge did not run (rc=$rc)"; tail -3 "$WORK/app-browser.out" | sed 's/^/      /'; }
+	EXPECTED="$ROOT/tests/wasm/expected/web_app_bridge.txt"
+	if [ -f "$EXPECTED" ]; then
+		diff -q "$EXPECTED" "$WORK/app-browser.out" >/dev/null || {
+			fail "the app bridge produced different output"
+			diff "$EXPECTED" "$WORK/app-browser.out" | head -4 | sed 's/^/      /'
+		}
+	fi
+	echo "  the app bridge answered an import the host does not provide: $(cat "$WORK/app-browser.out")"
+fi
+
 echo "  the build staged $have runtime modules and a loadable bootstrap"
 exit 0

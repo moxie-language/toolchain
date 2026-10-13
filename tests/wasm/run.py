@@ -22,13 +22,14 @@ except ImportError:
 ROOT = pathlib.Path(__file__).resolve().parent
 REPO = ROOT.parent.parent
 raw = sys.argv[1:]
-args = [a for a in raw if a not in ("-q", "--host", "--sw")]
+args = [a for a in raw if a not in ("-q", "--host", "--sw", "--app")]
 QUIET = "-q" in raw
 # --host <url> loads an emitted bundle host page-side instead of the
 # repository's loader; the module URL it carries is the one that runs.
 HOST = raw[raw.index("--host") + 1] if "--host" in raw else None
 SW = raw[raw.index("--sw") + 1] if "--sw" in raw else None
-WASM = next((a for a in args if a not in ("-q", "--sw") and a != SW), str(ROOT / "app.wasm"))
+APP = raw[raw.index("--app") + 1] if "--app" in raw else None
+WASM = next((a for a in args if a not in ("-q", "--sw", "--app") and a not in (SW, APP)), str(ROOT / "app.wasm"))
 TIMEOUT = 20000
 SW_TIMEOUT = 45000
 
@@ -89,6 +90,8 @@ def main():
             q.append("host=" + HOST)
         if SW:
             q.append("sw=" + SW)
+        if APP:
+            q.append("app=" + APP)
         if q:
             url += "?" + "&".join(q)
         if SW:
