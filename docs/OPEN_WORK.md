@@ -9608,3 +9608,15 @@ Order for the port: nostr's Tag/Tags -> notif (smallest dependent bundle) ->
 schnorr's unnamed returns -> sw/main.mx's staticFiles -> feed/profile/verify/app
 on the store pattern -> smesh's page (which is where wasm-host.mjs,
 *-wasm-host.mjs, $runtime and $sw finally leave the app tree) -> musiquay.
+
+**Round 151 additions to the port list.** `jsbridge/ext`'s package-level
+initializer is fixed with zero-value + `init()` (a LIBRARY package may have
+`init()`; package main may not, which is why `sw/main.mx` needed a different
+shape for the same rule). `nip44`'s three unnamed returns are named. `sw/main.mx`
+now uses a self-mutating holder for its precache list and **./web/wasm/sw builds
+(rc=0)** - the second bundle against the stdlib after store, and the first whose
+runtime use depends on the emitted `$sw/`.
+
+The signer bundle now walks all the way to `web/common/nostr` and stops only on
+`type Tag []string` / `type Tags []Tag`: those 253 references across 44 files are
+the last thing between three bundles and compiling.
