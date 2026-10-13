@@ -892,6 +892,11 @@ const TimeFormat = "Mon, 02 Jan 2006 15:04:05 GMT"
 var errTooLarge error
 
 // Read next request from connection.
+// setWriteDeadlineAfter is conn.readRequest's deferred deadline as a CALL.
+func setWriteDeadlineAfter(rwc net.Conn, d time.Duration) {
+	rwc.SetWriteDeadline(time.Now().Add(d))
+}
+
 func (c *conn) readRequest(ctx context.Context) (w *response, err error) {
 	if c.hijacked() {
 		return nil, ErrHijacked
@@ -910,9 +915,7 @@ func (c *conn) readRequest(ctx context.Context) (w *response, err error) {
 	}
 	c.rwc.SetReadDeadline(hdrDeadline)
 	if d := c.server.WriteTimeout; d > 0 {
-		defer func() {
-			c.rwc.SetWriteDeadline(time.Now().Add(d))
-		}()
+		defer setWriteDeadlineAfter(c.rwc, d)
 	}
 
 	c.r.setReadLimit(c.server.initialReadLimitSize())
@@ -1824,13 +1827,10 @@ type connectionStater interface {
 }
 
 // Serve a new connection.
-func (c *conn) serve(ctx context.Context) {
-	serverInitOnce()
-	if ra := c.rwc.RemoteAddr(); ra != nil {
-		c.remoteAddr = ra.String()
-	}
-	var inFlightResponse *response
-	defer func() {
+// finishServe is (*conn).serve's deferred cleanup. It has to be the deferred
+// function itself because it calls recover, and inFlightResponse is taken by
+// POINTER: the handler sets it long after the defer is registered.
+func (c *conn) finishServe(inFlightResponse **response, doHooks bool) {
 		if err := recover(); err != "" && err != ErrAbortHandler.Error() {
 			const size = 64 << 10
 			buf := []byte{:size}
@@ -1847,9 +1847,17 @@ func (c *conn) serve(ctx context.Context) {
 				inFlightResponse.reqBody.Close()
 			}
 			c.close()
-			c.setState(c.rwc, StateClosed, runHooks)
+			c.setState(c.rwc, StateClosed, doHooks)
 		}
-	}()
+}
+
+func (c *conn) serve(ctx context.Context) {
+	serverInitOnce()
+	if ra := c.rwc.RemoteAddr(); ra != nil {
+		c.remoteAddr = ra.String()
+	}
+	var inFlightResponse *response
+	defer c.finishServe(&inFlightResponse, runHooks)
 
 	if tlsConn, ok := c.rwc.(*tls.Conn); ok {
 		tlsTO := c.server.tlsHandshakeTimeout()

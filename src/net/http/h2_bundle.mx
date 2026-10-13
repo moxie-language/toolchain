@@ -6377,20 +6377,19 @@ func (sc *http2serverConn) handlerDone() {
 }
 
 // Run on its own goroutine.
-func (sc *http2serverConn) runHandler(rw *http2responseWriter, req *Request, handler Handler) {
-	sc.srv.markNewGoroutine()
-	defer sc.sendServeMsg(http2handlerDoneMsg)
-	didPanic := true
-	defer func() {
-		rw.rws.stream.cancelCtx.Cancel()
+// finishHandler is (*http2serverConn).runHandler's deferred cleanup: it calls
+// recover, so it must BE the deferred function, and didPanic is taken by pointer
+// because the handler sets it after the defer is registered.
+func (sc *http2serverConn) finishHandler(rw **http2responseWriter, req *Request, didPanic *bool) {
+		(*rw).rws.stream.cancelCtx.Cancel()
 		if req.MultipartForm != nil {
 			req.MultipartForm.RemoveAll()
 		}
-		if didPanic {
+		if *didPanic {
 			e := recover()
 			sc.writeFrameFromHandler(http2FrameWriteRequest{
-				write:  http2handlerPanicRST{rw.rws.stream.id},
-				stream: rw.rws.stream,
+				write:  http2handlerPanicRST{(*rw).rws.stream.id},
+				stream: (*rw).rws.stream,
 			})
 			// Same as net/http:
 			if e != "" && e != ErrAbortHandler.Error() {
@@ -6402,7 +6401,13 @@ func (sc *http2serverConn) runHandler(rw *http2responseWriter, req *Request, han
 			return
 		}
 		rw.handlerDone()
-	}()
+}
+
+func (sc *http2serverConn) runHandler(rw *http2responseWriter, req *Request, handler Handler) {
+	sc.srv.markNewGoroutine()
+	defer sc.sendServeMsg(http2handlerDoneMsg)
+	didPanic := true
+	defer sc.finishHandler(&rw, req, &didPanic)
 	handler.ServeHTTP(rw, req)
 	didPanic = false
 }

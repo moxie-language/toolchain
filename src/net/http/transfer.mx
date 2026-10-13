@@ -347,17 +347,20 @@ func (t *transferWriter) writeHeader(w io.Writer, trace *httptrace.ClientTrace) 
 }
 
 // always closes t.BodyCloser
+// closeBodyIfNeeded is transferWriter.writeBody's deferred close.
+func closeBodyIfNeeded(t *transferWriter, closed *bool, err *error) {
+	if *closed || t.BodyCloser == nil {
+		return
+	}
+	if closeErr := t.BodyCloser.Close(); closeErr != nil && *err == nil {
+		*err = closeErr
+	}
+}
+
 func (t *transferWriter) writeBody(w io.Writer) (err error) {
 	var ncopy int64
 	closed := false
-	defer func() {
-		if closed || t.BodyCloser == nil {
-			return
-		}
-		if closeErr := t.BodyCloser.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-	}()
+	defer closeBodyIfNeeded(t, &closed, &err)
 
 	// Write body. We "unwrap" the body first if it was wrapped in a
 	// nopCloser or readTrackingBody. This is to ensure that we can take advantage of

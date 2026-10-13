@@ -8280,3 +8280,49 @@ inner closures, `(*Transport).dialConn`, `http2ConfigureServer`,
 `serveFile`/`ServeContent`/`readRequest`/`(*Server).Shutdown`/the routing index,
 and the rest of the singles), and net's four (`sendFile` - whose callback goes to
 `syscall.RawConn.Write`, the resolver fan-out, and one bound method value).
+
+## Round 139: the deferred-closure family (net/http 52 -> 43) and what the last 43 want
+
+Nine deferred closures became deferred CALLS - and the important detail is that a
+deferred closure reads what it captured when the defer was REGISTERED, so every
+one that acts on a named result or a mutated local takes a pointer:
+
+    request.mx   httptrace.WroteRequest over `err`      -> reportWroteRequest(trace, &err)
+                 the closeBody guard over `closed`/`err` -> closeBodyUnlessClosed(r, &closed, &err)
+    request.mx   readRequest's EOF normalisation         -> normalizeEOFError(&err)
+    server.mx    conn.readRequest's write deadline       -> setWriteDeadlineAfter(c.rwc, d)
+    server.mx    conn.serve's recover/cleanup            -> (*conn).finishServe(&inFlightResponse, runHooks)
+    transfer.mx  writeBody's BodyCloser close            -> closeBodyIfNeeded(t, &closed, &err)
+    pattern.mx   parsePattern's offset annotation        -> annotateParseError(&err, off)
+    socks        connect's finish                        -> finishSocksConnect(done, &ctxErr, errCh)
+    h2_bundle    runHandler's recover/cleanup            -> (*http2serverConn).finishHandler(&rw, req, &didPanic)
+
+Two self-inflicted wounds, both from the same mistake and both caught by the
+compiler: my helper insertions carried the function signature AND were prepended
+to the anchor, so five files got a doubled signature (`func (t *transferWriter)
+writeBody(func (t *transferWriter) writeBody(w io.Writer) (err error) {`), and
+`finishServe`'s first parameter name `runHooks` shadows net/http's package-level
+`runHooks`, so the parameter is `doHooks` and the call site passes the local.
+
+**The last 43, by kind - two of the three are mechanical:**
+
+1. MECHANICAL, the two recipes (about 36 sites): `(*Server).Shutdown`'s
+   `nextPollInterval` helper, `(*Client).do`, `(*chunkWriter).writeHeader`,
+   `serveFile`, `ServeContent`, `(*ioFS).Open` (widen `mapOpenError` to take the
+   FS), `(*transferWriter).probeRequestBody`, `(*Transport).dialConn` (cm, pa,
+   Authenticate), `(*persistConn).readLoop`'s two, `waitForContinue`,
+   `(*http2serverConn).startPush`/`readFrames`, `http2ConfigureServer` (2 anon +
+   1 mval), `http2configureTransports` (3), `(*http2ClientConn).roundTrip` (2),
+   `(*http2clientStream).encodeAndWriteHeaders`, `(*http2Framer).readMetaFrame`,
+   `http2NewFramer`, `http2new400Handler`, `(*http2priorityWriteScheduler).Pop`,
+   `(*http2responseWriter).Set{Read,Write}Deadline`,
+   `(*Client).makeHeadersCopier`, `(*routingIndex).possiblyConflictingPatterns`,
+   `(*routingNode).matchingMethodsPath`, `(*ServeMux).registerErr`,
+   `appendSorted`, `adjustNextProtos`, and `closeWithErrorAndCode` (whose two
+   receivers need a shared `onPipeEOF`).
+2. NEEDS THE PUBLIC FIELD WIDENED, exactly as `afterFunc` got: `ProxyURL` and
+   `defaultTransportDialContext` both return a `func(...)` that is stored in a
+   public field, and `NewRequestWithContext` builds `Request.GetBody` that way.
+   The closure is unavoidable while the field's type is a bare func.
+3. net's four: `sendFile` (the callback belongs to `syscall.RawConn.Write`),
+   `(*Resolver).lookupIPAddr`'s mval and anon, `internetAddrList`'s anon.

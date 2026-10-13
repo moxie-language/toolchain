@@ -23,6 +23,14 @@ import (
 func _socksnoDeadline() (rtime time.Time) { return time.Time{} }
 func _socksaLongTimeAgo() (rtime time.Time) { return time.Unix(1, 0) }
 
+// finishSocksConnect is (*socksDialer).connect's deferred finish.
+func finishSocksConnect(done chan struct{}, ctxErr *error, errCh chan error) {
+	close(done)
+	if *ctxErr == nil {
+		*ctxErr = <-errCh
+	}
+}
+
 func (d *socksDialer) connect(ctx context.Context, c net.Conn, address string) (_ net.Addr, ctxErr error) {
 	host, port, err := sockssplitHostPort(address)
 	if err != nil {
@@ -35,12 +43,7 @@ func (d *socksDialer) connect(ctx context.Context, c net.Conn, address string) (
 	if ctx != context.Background() {
 		errCh := chan error{1}
 		done := chan struct{}{}
-		defer func() {
-			close(done)
-			if ctxErr == nil {
-				ctxErr = <-errCh
-			}
-		}()
+		defer finishSocksConnect(done, &ctxErr, errCh)
 		select {
 		case <-ctx.Done():
 			c.SetDeadline(_socksaLongTimeAgo())

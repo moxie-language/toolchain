@@ -648,24 +648,36 @@ var errMissingHost error
 // extraHeaders may be nil
 // waitForContinue may be nil
 // always closes body
+// reportWroteRequest is request.write's deferred trace hook as a CALL: a closure
+// here captured err's value at registration, and err is the named result.
+func reportWroteRequest(trace *httptrace.ClientTrace, err *error) {
+	httptrace.WroteRequest(trace, httptrace.WroteRequestInfo{Err: *err})
+}
+
+// closeBodyUnlessClosed is request.write's deferred body close.
+func closeBodyUnlessClosed(r *Request, closed *bool, err *error) {
+	if *closed {
+		return
+	}
+	if closeErr := r.closeBody(); closeErr != nil && *err == nil {
+		*err = closeErr
+	}
+}
+
+// normalizeEOFError turns a bare EOF from readRequest into ErrUnexpectedEOF.
+func normalizeEOFError(err *error) {
+	if *err == io.EOF {
+		*err = io.ErrUnexpectedEOF
+	}
+}
+
 func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitForContinue func() bool) (err error) {
 	trace := r.ClientTrace()
 	if trace != nil {
-		defer func() {
-			httptrace.WroteRequest(trace, httptrace.WroteRequestInfo{
-				Err: err,
-			})
-		}()
+		defer reportWroteRequest(trace, &err)
 	}
 	closed := false
-	defer func() {
-		if closed {
-			return
-		}
-		if closeErr := r.closeBody(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-	}()
+	defer closeBodyUnlessClosed(r, &closed, &err)
 
 	// Find the target host. Prefer the Host: header, but if that
 	// is not given, use the host from the request URL.
@@ -1141,11 +1153,7 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
 	if s, err = tp.ReadLine(); err != nil {
 		return nil, err
 	}
-	defer func() {
-		if err == io.EOF {
-			err = io.ErrUnexpectedEOF
-		}
-	}()
+	defer normalizeEOFError(&err)
 
 	var ok bool
 	req.Method, req.RequestURI, req.Proto, ok = parseRequestLine(s)
