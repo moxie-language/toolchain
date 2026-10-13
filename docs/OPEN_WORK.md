@@ -8800,3 +8800,37 @@ Next in this workstream: a stdlib fixture that uses the packages and is run in
 Chromium by phase 5, then smesh switched over (delete its jsbridge copies), then
 musiquay, then the host scaffolding emission ($runtime/, $sw/,
 <bundle>-wasm-host.mjs) so those stop being per-app files.
+
+## Round 142, part 2: what is still MISSING from the stdlib (the real gap)
+
+Moving the packages exposed the actual shape of the framework, and the missing
+piece is not the Moxie packages - it is the **page<->worker relay**.
+
+`smesh/web/static/bridge-common.mjs` (358 lines) is a WORKER bootstrap: it
+builds the wasm import object, and its own comment says the host "merges these
+with its own specific functions (ext_*, dom_* ...)". The page holds
+`jsruntime/dom.mjs` (direct `document.*`) and friends.
+
+`moxie/jsruntime/host.mjs` implements `dom_body`, `dom_create_element`, ... by
+calling `dom.*` DIRECTLY, and `jsruntime/loader.mjs` starts the root domain in a
+Worker (`worker-host.mjs`). In a Worker there is no `document`, so a DOM call
+from a Moxie module running under the stdlib loader cannot work as written. The
+DOM path only works when the two sides are split and the calls are RELAYED:
+worker posts a dom_* request, page executes it against `jsruntime/dom.mjs` and
+posts the handle back.
+
+So the next piece of this workstream is the relay, in the stdlib:
+
+  1. `jsruntime/host.mjs`'s `dom_*` entries become postMessage relays when
+     `is_worker_context()`, and direct calls on the page;
+  2. the page side gains the matching request handler (a new
+     `jsruntime/page-dom.mjs` or an extension of `jsruntime/app.mjs`), so a
+     worker module's DOM calls reach the real document;
+  3. `tests/wasm/` gains a page-side host that a fixture can use, which is what
+     lets phase 5 run a DOM fixture at all (today's host.html is worker mode).
+
+Evidence for each step is the parked fixture
+`tmp/pending/web_dom_roundtrip.mx`: it builds for wasm today (rc=0) and drives
+create/attribute/text/append/query/remove through web/dom. It was pulled from
+tests/regressions/should_compile because the worker-mode test host cannot serve
+it yet, and an unverified fixture there can turn phase 5 red.
