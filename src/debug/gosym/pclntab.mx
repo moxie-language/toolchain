@@ -155,13 +155,13 @@ func NewLineTable(data []byte, text uint64) (out *LineTable) {
 // Go 1.2 symbol table format.
 // See golang.org/s/go12symtab.
 //
-// A general note about the methods here: rather than try to avoid
-// index out of bounds errors, we trust Go to detect them, and then
-// we recover from the panics and treat them as indicative of a malformed
-// or incomplete table.
+// A general note about the methods here: the bounds checks are the runtime's,
+// and a malformed or incomplete table is a FATAL panic. This used to swallow
+// the panic and treat it as a malformed table; Moxie has no recover, so a
+// corrupt pclntab now kills the process loudly instead of parsing to nonsense.
 //
-// The methods called by symtab.go, which begin with "go12" prefixes,
-// are expected to have that recovery logic.
+// The methods called by symtab.go, which begin with "go12" prefixes, are the
+// ones that would have hit it.
 
 // isGo12 reports whether this is a Go 1.2 (or later) symbol table.
 func (t *LineTable) isGo12() (rok bool) {
@@ -208,8 +208,7 @@ func (t *LineTable) parsePclnTab() {
 	// Error paths through this code will default the version to 1.1.
 	t.version = ver11
 
-	defer recoverDiscard()
-
+	
 	// Check header: 4-byte magic, two zeros, pc quantum, pointer size.
 	if len(t.Data) < 16 || t.Data[4] != 0 || t.Data[5] != 0 ||
 		(t.Data[6] != 1 && t.Data[6] != 2 && t.Data[6] != 4) || // pc quantum
@@ -290,8 +289,7 @@ func (t *LineTable) parsePclnTab() {
 // go12Funcs returns a slice of Funcs derived from the Go 1.2+ pcln table.
 func (t *LineTable) go12Funcs() (out []Func) {
 	// Assume it is malformed and return nil on error.
-	defer recoverDiscard()
-
+	
 	ft := t.funcTab()
 	funcs := []Func{:ft.Count()}
 	syms := []Sym{:len(funcs)}
@@ -567,8 +565,7 @@ func (t *LineTable) findFileLine(entry uint64, filetab, linetab uint32, filenum,
 
 // go12PCToLine maps program counter to line number for the Go 1.2+ pcln table.
 func (t *LineTable) go12PCToLine(pc uint64) (line int32) {
-	defer recoverLine(&line)
-
+	
 	f := t.findFunc(pc)
 	if f.IsZero() {
 		return -1
@@ -580,8 +577,7 @@ func (t *LineTable) go12PCToLine(pc uint64) (line int32) {
 
 // go12PCToFile maps program counter to file name for the Go 1.2+ pcln table.
 func (t *LineTable) go12PCToFile(pc uint64) (file string) {
-	defer recoverFile(&file)
-
+	
 	f := t.findFunc(pc)
 	if f.IsZero() {
 		return ""
@@ -608,8 +604,7 @@ func (t *LineTable) go12PCToFile(pc uint64) (file string) {
 
 // go12LineToPC maps a (file, line) pair to a program counter for the Go 1.2+ pcln table.
 func (t *LineTable) go12LineToPC(file string, line int32) (pc uint64) {
-	defer recoverPC(&pc)
-
+	
 	t.initFileMap()
 	filenum, ok := t.fileMap[file]
 	if !ok {
@@ -676,46 +671,10 @@ func (t *LineTable) initFileMap() {
 // Every key maps to obj. That's not a very interesting map, but it provides
 // a way for callers to obtain the list of files in the program.
 func (t *LineTable) go12MapFiles(m map[string]*Obj, obj *Obj) {
-	defer recoverDiscard()
-
+	
 	t.initFileMap()
 	for file := range t.fileMap {
 		m[file] = obj
 	}
 }
 
-// disableRecover causes this package not to swallow panics.
-// This is useful when making changes.
-const disableRecover = false
-
-// The recover helpers are free functions, not deferred closures: a closure
-// that writes a named result would capture the enclosing frame, which Moxie
-// forbids. A deferred call receives the result's address as an argument.
-
-// recoverDiscard swallows a panic.
-func recoverDiscard() {
-	if !disableRecover {
-		recover()
-	}
-}
-
-// recoverLine resets a failed parse to the sentinel line -1.
-func recoverLine(line *int32) {
-	if !disableRecover && recover() != "" {
-		*line = -1
-	}
-}
-
-// recoverFile resets a failed parse to the empty file.
-func recoverFile(file *string) {
-	if !disableRecover && recover() != "" {
-		*file = ""
-	}
-}
-
-// recoverPC resets a failed parse to PC 0.
-func recoverPC(pc *uint64) {
-	if !disableRecover && recover() != "" {
-		*pc = 0
-	}
-}

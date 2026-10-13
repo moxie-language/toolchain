@@ -16,9 +16,6 @@ import (
 // createGo emits code to start a new goroutine (runtime/internal only).
 func (b *builder) createGo(instr *ssa.Go) {
 	if builtin, ok := instr.Call.Value.(*ssa.Builtin); ok {
-		if builtin.Name() == "recover" {
-			return
-		}
 		var argTypes []types.Type
 		var argValues []llvm.Value
 		for _, arg := range instr.Call.Args {

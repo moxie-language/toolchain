@@ -2,7 +2,6 @@ package syntax
 
 import (
 	"unsafe"
-	"errors"
 	"io"
 	"os"
 	"runtime"
@@ -35,12 +34,6 @@ type Pragma unsafe.Pointer
 type PragmaHandler func(pos token.Pos, blank bool, text string, current Pragma) Pragma
 
 func Parse(base *token.PosBase, src io.Reader, errh ErrorHandler, pragh PragmaHandler, mode Mode) (_ *File, first error) {
-	defer func() {
-		if rv := recover(); rv != "" {
-			first = errors.New(rv)
-		}
-	}()
-
 	var p Parser
 	p.init(base, src, errh, pragh, mode)
 	p.Next()
@@ -55,16 +48,13 @@ func ParseBytesArena(base *token.PosBase, src []byte, errh ErrorHandler, pragh P
 	var p Parser
 	p.Arena = arena
 	p.initBytes(base, src, errh, pragh, mode)
-	return parseWithRecover(&p)
+	return parseTop(&p)
 }
 
-func parseWithRecover(p *Parser) (_ *File, first error) {
-	defer func() {
-		if rv := recover(); rv != "" {
-			first = errors.New(rv)
-		}
-	}()
-
+// parseTop runs the parser. It used to be parseWithRecover; with no recover in
+// the language a parser panic is a bug that kills the process, not a parse
+// error, and the ordinary error path is p.First.
+func parseTop(p *Parser) (_ *File, first error) {
 	p.Next()
 	return p.fileOrNil(), p.First
 }

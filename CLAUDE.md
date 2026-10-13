@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-COMPACTION: ;always preserve: moxie is not Go, no stubs - remove dead references instead, no adding GC models to work around bugs, assembler pass required for .S files; slices replace arrays (an array type is leftover Go slice bypass), string and []byte are one MUTABLE type, and there is no aliasing - a subslice is a copy
+COMPACTION: ;always preserve: moxie is not Go, no stubs - remove dead references instead, no adding GC models to work around bugs, assembler pass required for .S files; slices replace arrays (an array type is leftover Go slice bypass), string and []byte are one MUTABLE type, and there is no aliasing - a subslice is a copy; there is NO recover() (a compile error) - panic is death, deferred calls do not run on the way out, error values are what recoverable failure is for
 
 ## WOOD LAW: Bilateral Compiler Sync
 

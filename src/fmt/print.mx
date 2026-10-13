@@ -146,8 +146,6 @@ type pp struct {
 	reordered bool
 	// goodArgNum records whether the most recent reordering directive was valid.
 	goodArgNum bool
-	// panicking is set by catchPanic to avoid infinite panic, recover, panic, ... recursion.
-	panicking bool
 	// erroring is set when printing an error string to guard against calling handleMethods.
 	erroring bool
 	// wrapErrs is set when the format string may contain a %w verb.
@@ -475,40 +473,6 @@ func (p *pp) fmtBytes(v []byte, verb rune, typeString []byte) {
 	p.fmt.fmtBs(v)
 }
 
-func (p *pp) catchPanic(arg Stringer, verb rune, method []byte) {
-	if err := recover(); err != "" {
-		// If it's a nil pointer, just say "<nil>". The likeliest causes are a
-		// Stringer that fails to guard against nil or a nil pointer for a
-		// value receiver, and in either case, "<nil>" is a nice result.
-		if p.arg == nil {
-			p.buf = bufWriteString(p.buf, nilAngleString)
-			return
-		}
-		// Otherwise print a concise panic message. Most of the time the panic
-		// value will print itself nicely.
-		if p.panicking {
-			// Nested panics; the recursion in printArg cannot succeed.
-			panic(err)
-		}
-
-		oldFlags := p.fmt.fmtFlags
-		// For this output we want default behavior.
-		p.fmt.clearflags()
-
-		p.buf = bufWriteString(p.buf, percentBangString)
-		p.buf = bufWriteRune(p.buf, verb)
-		p.buf = bufWriteString(p.buf, panicString)
-		p.buf = bufWriteString(p.buf, method)
-		p.buf = bufWriteString(p.buf, " method: ")
-		p.panicking = true
-		p.printArg(err, 'v')
-		p.panicking = false
-		p.buf = bufWriteByte(p.buf, ')')
-
-		p.fmt.fmtFlags = oldFlags
-	}
-}
-
 func (p *pp) handleMethods(verb rune) (handled bool) {
 	if p.erroring {
 		return
@@ -527,7 +491,6 @@ func (p *pp) handleMethods(verb rune) (handled bool) {
 	// Is it a Formatter?
 	if formatter, ok := p.arg.(Formatter); ok {
 		handled = true
-		defer p.catchPanic(p.arg, verb, "Format")
 		formatter.Format(p, verb)
 		return
 	}
@@ -536,7 +499,6 @@ func (p *pp) handleMethods(verb rune) (handled bool) {
 	if p.fmt.sharpV {
 		if stringer, ok := p.arg.(GoStringer); ok {
 			handled = true
-			defer p.catchPanic(p.arg, verb, "GoString")
 			// Print the result of GoString unadorned.
 			p.fmt.fmtS(stringer.GoString())
 			return
@@ -548,19 +510,16 @@ func (p *pp) handleMethods(verb rune) (handled bool) {
 		switch verb {
 		case 'v', 's', 'x', 'X', 'q':
 			// Is it an error or Stringer?
-			// The duplication in the bodies is necessary:
-			// setting handled and deferring catchPanic
+			// The duplication in the bodies is necessary: setting handled
 			// must happen before calling the method.
 			switch v := p.arg.(type) {
 			case error:
 				handled = true
-				defer p.catchPanic(p.arg, verb, "Error")
 				p.fmtString(v.Error(), verb)
 				return
 
 			case Stringer:
 				handled = true
-				defer p.catchPanic(p.arg, verb, "String")
 				p.fmtString(v.String(), verb)
 				return
 			}

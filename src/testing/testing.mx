@@ -5,57 +5,32 @@ import (
 	"os"
 )
 
-// FailNow and SkipNow abort the current test by panicking, which testing.Main
-// recovers one sentinel per test. The rest of the test body therefore does not
-// run - Go's FailNow/SkipNow semantics - while the remaining tests still do.
-// A string is the only panic value Moxie carries, and a real message cannot
-// start with NUL, so the sentinels cannot collide with a user panic.
-const failNowSentinel = "\x00testing.FailNow"
-const skipNowSentinel = "\x00testing.SkipNow"
-
+// Moxie has no exceptions: panic is fatal and recover does not exist, so
+// testing cannot unwind a test body the way Go's FailNow/SkipNow do.
+//   FailNow marks the test failed and exits the run (a failing run is a failing
+//   run, and it stops loudly instead of continuing on broken state).
+//   SkipNow marks the test skipped and returns, so a test that skips must
+//   `return` right after it.
+// A panicking test body is fatal for the whole run.
 type T struct {
 	name    string
 	failed  bool
 	skipped bool
 }
 
-// currentTest is the recover handler's handle on the running test. A method
-// receiver is a closure context and Moxie has no capture environment, so the
-// deferred handler is a plain function reading this package global instead.
-var currentTest *T
-
-func catchPanic() {
-	t := currentTest
-	if t == nil {
-		return
-	}
-	v := recover()
-	if v == skipNowSentinel {
-		t.skipped = true
-		return
-	}
-	if v == failNowSentinel {
-		// FailNow already set failed; the abort is the whole signal.
-		return
-	}
-	if v != "" {
-		fmt.Println("    panic:", v)
-		t.failed = true
-	}
-}
-
-// run executes one test under a defer frame so a FailNow/SkipNow panic stops
-// the test body instead of the whole run.
+// run executes one test body. A test that panics is FATAL: Moxie has no
+// recover, so FailNow and SkipNow cannot unwind the body the way Go's do.
 func run(f func(*T), t *T) {
-	currentTest = t
-	defer catchPanic()
 	f(t)
-	currentTest = nil
 }
 
+// FailNow marks the test failed and ENDS THE RUN. Without recover there is no
+// way to unwind just this test body, and a failing run is the correct outcome
+// either way, so this is loud rather than silent.
 func (t *T) FailNow() {
 	t.failed = true
-	panic(failNowSentinel)
+	fmt.Println("--- FAIL:", t.name, "(FailNow)")
+	os.Exit(1)
 }
 
 func (t *T) Fatal(args ...fmt.Stringer) {
@@ -103,9 +78,11 @@ func (t *T) Failed() bool {
 	return t.failed
 }
 
+// SkipNow marks the test skipped and RETURNS. Go reaches for a panic here to
+// stop the body; Moxie has no recover, so a test that skips must return after
+// calling this. The runner reports the skip either way.
 func (t *T) SkipNow() {
 	t.skipped = true
-	panic(skipNowSentinel)
 }
 
 func (t *T) Skip(args ...fmt.Stringer) {

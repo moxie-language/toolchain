@@ -52,11 +52,9 @@ import (
 //
 // If ServeHTTP panics, the server (the caller of ServeHTTP) assumes
 // that the effect of the panic was isolated to the active request.
-// It recovers the panic, logs a stack trace to the server error log,
-// and either closes the network connection or sends an HTTP/2
-// RST_STREAM, depending on the HTTP protocol. To abort a handler so
-// the client sees an interrupted response but the server doesn't log
-// an error, panic with the value [ErrAbortHandler].
+// A panic from ServeHTTP is FATAL: Moxie has no recover, so it kills the
+// server domain instead of being turned into a 500. ErrAbortHandler is kept
+// only so ported code that panics with it still compiles.
 type Handler interface {
 	ServeHTTP(ResponseWriter, *Request)
 }
@@ -1804,10 +1802,9 @@ type statusError struct {
 func (e *statusError) Error() (rs string) { return StatusText(e.code) + ": " + e.text }
 func (e *statusError) String() (rs string) { return e.Error() }
 
-// ErrAbortHandler is a sentinel panic value to abort a handler.
-// While any panic from ServeHTTP aborts the response to the client,
-// panicking with ErrAbortHandler also suppresses logging of a stack
-// trace to the server's error log.
+// ErrAbortHandler is a sentinel panic value kept for ported code. It used to
+// suppress the stack-trace logging of a recovered handler panic; with no
+// recover in Moxie a panic is fatal and the value changes nothing.
 var ErrAbortHandler error
 
 // isCommonNetReadError reports whether err is a common error
@@ -1832,16 +1829,11 @@ type connectionStater interface {
 }
 
 // Serve a new connection.
-// finishServe is (*conn).serve's deferred cleanup. It has to be the deferred
-// function itself because it calls recover, and inFlightResponse is taken by
-// POINTER: the handler sets it long after the defer is registered.
+// finishServe is (*conn).serve's deferred cleanup. inFlightResponse is taken by
+// POINTER because the handler sets it long after the defer is registered. A
+// panicking handler is FATAL: Moxie has no recover, so the connection's domain
+// dies with the panic instead of answering 500.
 func (c *conn) finishServe(inFlightResponse **response, doHooks bool) {
-		if err := recover(); err != "" && err != ErrAbortHandler.Error() {
-			const size = 64 << 10
-			buf := []byte{:size}
-			buf = buf[:runtime.Stack(buf, false)]
-			c.server.logf("http: panic serving %v: %v\n%s", c.remoteAddr, err, buf)
-		}
 		if inFlightResponse != nil {
 			inFlightResponse.cancelCtx.Cancel()
 			inFlightResponse.disableWriteContinue()
@@ -3793,22 +3785,12 @@ func (h *timeoutHandler) errorBody() (rs string) {
 	return "<html><head><title>Timeout</title></head><body><h1>Timeout</h1></body></html>"
 }
 
-// serveWithPanic runs the handler under the timeout wrapper, reporting a panic
-// on panicChan rather than letting it unwind. It is a named function with
-// explicit parameters because the deferred recover needs a scope, and a closure
-// over panicChan would be a capture.
-func serveWithPanic(handler Handler, tw *timeoutWriter, r *Request, done chan struct{}, panicChan chan string) {
-	defer sendPanic(panicChan)
+// serveWithPanic runs the handler under the timeout wrapper. The name is kept
+// from the recover era; a panicking handler is FATAL now and the timeout path
+// never sees it.
+func serveWithPanic(handler Handler, tw *timeoutWriter, r *Request, done chan struct{}) {
 	handler.ServeHTTP(tw, r)
 	close(done)
-}
-
-// sendPanic must be the function deferred directly: recover only applies to the
-// function the defer calls.
-func sendPanic(panicChan chan string) {
-	if p := recover(); p != "" {
-		panicChan <- p
-	}
 }
 
 func (h *timeoutHandler) ServeHTTP(w ResponseWriter, r *Request) {
@@ -3825,11 +3807,8 @@ func (h *timeoutHandler) ServeHTTP(w ResponseWriter, r *Request) {
 		h:   Header{},
 		req: r,
 	}
-	panicChan := chan string{1}
-	serveWithPanic(h.handler, tw, r, done, panicChan)
+	serveWithPanic(h.handler, tw, r, done)
 	select {
-	case p := <-panicChan:
-		panic(p)
 	case <-done:
 		dst := w.Header()
 		maps.Copy(dst, tw.h)

@@ -13,7 +13,6 @@ package tabwriter
 
 import (
 	"git.smesh.lol/moxie/pkg/mxutil"
-	"fmt"
 	"io"
 	"unicode/utf8"
 )
@@ -472,21 +471,6 @@ func (b *Writer) terminateCell(htab bool) (n int32) {
 	return len(*line)
 }
 
-func (b *Writer) handlePanic(err *error, op string) {
-	if e := recover(); e != "" {
-		if op == "Flush" {
-			// If Flush ran into a panic, we still need to reset.
-			b.reset()
-		}
-		if b.panicErr != nil {
-			*err = b.panicErr
-			b.panicErr = nil
-			return
-		}
-		panic(fmt.Sprintf("tabwriter: panic during %s (%v)", op, e))
-	}
-}
-
 // Flush should be called after the last call to [Writer.Write] to ensure
 // that any data buffered in the [Writer] is written to output. Any
 // incomplete escape sequence at the end is considered
@@ -498,14 +482,12 @@ func (b *Writer) Flush() (err error) {
 // flush is the internal version of Flush, with a named return value which we
 // don't want to expose.
 func (b *Writer) flush() (err error) {
-	defer b.handlePanic(&err, "Flush")
 	b.flushNoDefers()
 	return nil
 }
 
-// flushNoDefers is like flush, but without a deferred handlePanic call. This
-// can be called from other methods which already have their own deferred
-// handlePanic calls, such as Write, and avoid the extra defer work.
+// flushNoDefers is like flush, without the deferred bookkeeping: the callers
+// that need only the flush itself.
 func (b *Writer) flushNoDefers() {
 	// add current cell if not empty
 	if b.cell.size > 0 {
@@ -527,7 +509,6 @@ const hbar = "---\n"
 // The only errors returned are ones encountered
 // while writing to the underlying output stream.
 func (b *Writer) Write(buf []byte) (n int32, err error) {
-	defer b.handlePanic(&err, "Write")
 
 	// split text into cells
 	n = 0

@@ -260,13 +260,15 @@ for cc in "$MOXIE" "$LEGACY"; do
 	rm -rf "$td" "$cdir"
 done
 
-# 6g: testing.T.Fatal/Skip abort the test body and the run continues with the
-# next test. This is the cross-frame recover path: stage4 never armed the defer
-# frame's JumpPC (call lines are emitted in fragments), and explicit
-# panic("const") went to the abort-only runtime._panicstr.
+# 6g: testing with no recover. Skip marks and returns, Error marks and returns,
+# the run continues; FailNow ends the run with a FAIL line and a non-zero exit.
+# This used to be the cross-frame recover case (Fatal/Skip panicked a sentinel
+# that a deferred handler caught); recover is REMOVED from the language now, so
+# the assertions are the loud version of the same behaviour.
 for cc in "$MOXIE" "$LEGACY"; do
 	label="stage4"
 	if [ "$cc" = "$LEGACY" ]; then label="legacy"; fi
+
 	name="fatal:$label"
 	td="$(tempdir "fatal_$label")"; rm -rf "$td"; mkdir -p "$td"
 	fdir="$(fixture fatal)"
@@ -277,13 +279,34 @@ for cc in "$MOXIE" "$LEGACY"; do
 	else
 		out="$("$td/bin" 2>&1 || true)"
 		msg=""
-		if echo "$out" | grep -q "unreachable after Fatal"; then msg="Fatal did not abort the test body"; fi
-		if [ -z "$msg" ] && echo "$out" | grep -q "unreachable after Skip"; then msg="Skip did not abort the test body"; fi
-		if [ -z "$msg" ] && ! echo "$out" | grep -q "second-ran"; then msg="the run did not continue to the next test"; fi
-		if [ -z "$msg" ] && ! echo "$out" | grep -q -e "--- FAIL: TestStopsAtFatal"; then msg="the Fatal test was not reported as failed"; fi
-		if [ -z "$msg" ] && ! echo "$out" | grep -q -e "--- SKIP: TestStopsAtSkip"; then msg="the Skip test was not reported as skipped"; fi
+		if ! echo "$out" | grep -q "second-ran"; then msg="the run did not continue after Skip"; fi
+		if [ -z "$msg" ] && ! echo "$out" | grep -q "third-ran"; then msg="the run did not continue after Error"; fi
+		if [ -z "$msg" ] && ! echo "$out" | grep -q -- "--- SKIP: TestSkipMarks"; then msg="the Skip test was not reported as skipped"; fi
+		if [ -z "$msg" ] && ! echo "$out" | grep -q -- "--- FAIL: TestErrorMarks"; then msg="the Error test was not reported as failed"; fi
 		if [ -z "$msg" ]; then
-			log_pass "$name" "Fatal/Skip abort and the run continues"
+			log_pass "$name" "Skip/Error mark and the run continues"
+		else
+			log_fail "$name" "$msg"
+		fi
+	fi
+	rm -rf "$td" "$fdir"
+
+	name="fatalexit:$label"
+	td="$(tempdir "fatalexit_$label")"; rm -rf "$td"; mkdir -p "$td"
+	fdir="$(fixture fatalexit)"
+	rc=0
+	MOXIEROOT="$MOXIEROOT" "$cc" build -o "$td/bin" "$fdir" >"$td/build.log" 2>&1 || rc=$?
+	if [ $rc -ne 0 ]; then
+		log_fail "$name" "build failed: $(tail -3 "$td/build.log" | tr '\n' ' ')"
+	else
+		rc=0
+		out="$("$td/bin" 2>&1)" || rc=$?
+		msg=""
+		if [ $rc -eq 0 ]; then msg="FailNow exited 0"; fi
+		if [ -z "$msg" ] && ! echo "$out" | grep -q -- "--- FAIL: TestFatalEndsTheRun"; then msg="no FAIL line from FailNow"; fi
+		if [ -z "$msg" ] && echo "$out" | grep -q "should-not-print"; then msg="the run continued past FailNow"; fi
+		if [ -z "$msg" ]; then
+			log_pass "$name" "FailNow ends the run non-zero"
 		else
 			log_fail "$name" "$msg"
 		fi

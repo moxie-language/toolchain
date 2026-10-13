@@ -8591,3 +8591,129 @@ Next round, in order:
   (`tests/regressions/should_compile/asn1_builder_der.mx`, 18 encodings), but
   the callback API (AddASN1 with a continuation) is not - it dies in recover()
   (see the top item).
+
+# The web app framework belongs in the STDLIB (owner decision, after round 140)
+
+Stated plainly by the owner: *the web app framework is part of the stdlib, and
+everything imports it, so there is one codebase that does the things for
+everything.* Today it is copied per app, which is the wrong shape:
+
+    smesh/web/static/          index.html, favicon, manifest.json, $runtime/
+                               (a COPY of the shim modules), $sw/, and twelve
+                               <bundle>-wasm-host.mjs loaders
+    smesh/web/common/jsbridge  the Moxie side of the DOM/IDB/WS/SW bridge
+    musiquay/web/common/jsbridge   the same thing, forked
+    moxie/jsruntime/*.mjs      the JS side, already one copy - but served by
+                               hand from each app's web/static/
+
+So the target is:
+
+1. The Moxie-side bridge becomes stdlib packages, one per browser surface, next
+   to the other `src/...` packages: `dom`, `idb`, `ws`, `sw`, `store`,
+   `crypto`/`subtle`, `webgl`, plus an `app` package that owns the entry point,
+   routing and asset metadata. Import path shape: whatever the tree settles on
+   for stdlib (`git.smesh.lol/moxie/...`).
+2. The JS side stays `jsruntime/*.mjs` (it is already single-copy) and gains the
+   host scaffolding that every app currently re-copies: the loader, the service
+   worker, the `$runtime`/`$sw` staging, and the wasm-host module template.
+   Those should be emitted/served BY the build (`moxie build -target wasm`)
+   rather than assembled per app.
+3. `smesh` and `musiquay` delete their copies and import the stdlib. The proof
+   is smesh: it must build and run with no local `web/common/jsbridge` and no
+   local `$runtime`/`$sw`/`*-wasm-host.mjs`.
+4. A stdlib-hosted fixture in the suite (not an app): a wasm program that uses
+   the stdlib bridge, built by `moxie build -target wasm`, run in Chromium by
+   phase 5 through the stdlib-emitted host - the framework's own end-to-end test
+   rather than "an app somewhere runs".
+
+Order of work, with the recover removal first because it is a prerequisite in
+the same area and it is small:
+
+  a. Remove recover() tree-wide (19 call sites, listed in the round-140 entry),
+     make the builtin a COMPILE ERROR so it cannot come back, delete the
+     runtime's `_recover` and the `Recover` landing-pad branch, and replace the
+     handler-panic tests with one that asserts a panicking handler kills the
+     domain loudly. The SIGSEGV in the round-140 top item dies with the feature.
+  b. Inventory smesh's `web/common/jsbridge` and `web/wasm/*` imports; that list
+     IS the framework's package set, measured rather than invented.
+  c. Move it into `src/`, keep the JS modules where they are, and add the
+     host-scaffolding emission to `moxie build -target wasm`.
+  d. Point smesh at the stdlib, delete its copies, run it in a browser.
+  e. Then musiquay, then the fixture in step 4.
+
+# Round 141: recover() is gone from the language
+
+Owner decision, stated as a rule: *panic is death. the end. no way back. no
+closure scope capture, no recover. exceptions are the devil.* Nobody writes
+recover() in real Go code - error values are what recoverable failure is for,
+and a panic means the code is broken and must be fixed. So the feature is
+removed rather than repaired, and the SIGSEGV in the round-140 top item goes
+with it: there is no path left to it.
+
+**19 call sites removed**, every one of them a place where a failure was being
+turned into a silent success path:
+
+    net/http/server.mx        handler panic (finishServe) and the timeout
+                              handler's panic channel - both plumbing branches
+                              deleted, not just the recover
+    net/http/h2_bundle.mx     runHandler's panic RST + stack report, and
+                              registerHTTPSProtocol's panic-to-error; the dead
+                              http2handlerPanicRST frame and
+                              http2errHandlerPanicked error went with them
+    fmt/print.mx              catchPanic around Stringer/Formatter/Error methods
+                              (and the `panicking` recursion flag)
+    fmt/scan.mx, internal/dag/parse.mx   errorHandler: a parse panic is a bug
+    debug/gosym/pclntab.mx    four swallow-and-reset helpers plus the
+                              disableRecover flag: a corrupt pclntab now dies
+                              loudly instead of parsing to nonsense
+    iter/iter.mx              Pull/Pull2 no longer carry a panic value between
+                              the coroutine and next()
+    text/tabwriter, internal/runtime/exithook, testing, hmac   handlers removed
+    vendor cryptobyte         finishContinuation no longer converts a panicking
+                              continuation into a builder error
+    pkg/syntax                Parse/parseWithRecover/traceEnd (the compiler's
+                              OWN parser used recover to turn panics into parse
+                              errors - the compiler build caught this, the
+                              linker named runtime._recover first)
+
+**The language side, so it cannot come back:**
+
+  - `_mxc_stage4/ssa_builder.mx`: the `recover` builtin reports
+    "recover() is not available in Moxie: a panic is fatal" and fails the build
+    (ir_call.mx's emission branch and ir_defer.mx's `defer recover()` case are
+    deleted with it; the recover doc block is gone from src/builtin/builtin.mx).
+  - `legacy/compiler/compiler.go`: the same message from the same place
+    (createBuiltin's "recover" case), and goroutine.go's silent `go recover()`
+    exemption is gone. Wood law: both sides. NOTE: the legacy side cannot be
+    COMPILED here (no Go toolchain, no libLLVM-22), so that mirror is written
+    but unverified - record it, do not claim it.
+  - `src/runtime/panic.mx`: `_recover` and `supportsRecover()` are deleted, and
+    `panicOrGoexit` no longer longjmps: panic prints and aborts, and deferred
+    calls do NOT run on the way out (they run only when their function returns
+    normally). The defer frames, `_defer` records and `destroyDeferFrame`
+    re-raise stay - ordinary deferred calls need the frames.
+
+**The bake drift, found by doing this.** `sysroot/runtime_go.bc` is what APP
+builds link, and it still carried `runtime._recover`/`supportsRecover` from an
+older source: that is why fixtures could `recover()` while src/runtime's own
+`supportsRecover()` said false. `mxc-r145 build-runtime` re-baked it (rc=0),
+and the symbol is gone from the blob now. Any round that changes src/runtime
+must re-bake in the same commit or apps keep the old runtime.
+
+**Verified by running** (mxc-r145, native, against the re-baked runtime):
+
+    recover() in a program        -> compile error: "recover() is not available
+                                     in Moxie: a panic is fatal"
+    panic("boom") with a defer    -> "body before panic", "panic: boom",
+                                     Aborted (exit 134); the deferred call did
+                                     NOT run
+    same defer, normal return     -> body, deferred ran, exit 0
+    compiler self-build           -> rc=0 with every pkg/syntax site removed
+
+**Next, and it is the honest tail of this feature:** the compiler still emits
+the setjmp-style checkpoint before every call in a frame-bearing function
+(ir_emit.mx) and a landing pad that branches to the fn.Recover block
+(ir_defer/ir_emit). With no recover and no longjmp nothing can ever arrive
+there, so that asm and those blocks are dead weight - removing them is its own
+change with its own verification, and it also removes the last consumer of
+`moxie_longjmp`.

@@ -1146,10 +1146,9 @@ cleanup:
 | `len` | `len(v) int32` | Length of a string, slice, array, map, or channel |
 | `max` | `max(x, y...) T` | Maximum of comparable values |
 | `min` | `min(x, y...) T` | Minimum of comparable values |
-| `panic` | `panic(v error)` | Stops execution with an error value |
+| `panic` | `panic(v error)` | Stops execution with an error value - FATAL, no recover |
 | `print` | `print(args...)` | Prints to stderr (no newline) |
 | `println` | `println(args...)` | Prints to stderr (with newline) |
-| `recover` | `recover() error` | Catches a panic in a deferred function |
 | `spawn` | `spawn(fn, args...) chan struct{}` | Creates a new isolated domain |
 
 `len` and `cap` return `int32`, not a platform-dependent integer.

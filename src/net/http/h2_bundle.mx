@@ -5373,7 +5373,7 @@ func (sc *http2serverConn) startFrameWrite(wr http2FrameWriteRequest) {
 		switch st.state {
 		case http2stateHalfClosedLocal:
 			switch wr.write.(type) {
-			case http2StreamError, http2handlerPanicRST, http2writeWindowUpdate:
+			case http2StreamError, http2writeWindowUpdate:
 				// RFC 7540 Section 5.1 allows sending RST_STREAM, PRIORITY, and WINDOW_UPDATE
 				// in this state. (We never send PRIORITY from the server, so that is not checked.)
 			default:
@@ -5411,11 +5411,6 @@ func (sc *http2serverConn) startFrameWrite(wr http2FrameWriteRequest) {
 		sc.writeFrameAsync(wr, nil)
 	}
 }
-
-// errHandlerPanicked is the error given to any callers blocked in a read from
-// Request.Body when the main goroutine panics. Since most handlers read in the
-// main ServeHTTP goroutine, this will show up rarely.
-var http2errHandlerPanicked error
 
 // wroteFrame is called on the serve goroutine with the result of
 // whatever happened on writeFrameAsync.
@@ -5466,8 +5461,6 @@ func (sc *http2serverConn) wroteFrame(res http2frameWriteResult) {
 			if st, ok := sc.streams[v.StreamID]; ok {
 				sc.closeStream(st, v)
 			}
-		case http2handlerPanicRST:
-			sc.closeStream(wr.stream, http2errHandlerPanicked)
 		}
 	}
 
@@ -6470,28 +6463,14 @@ func (sc *http2serverConn) handlerDone() {
 }
 
 // Run on its own goroutine.
-// finishHandler is (*http2serverConn).runHandler's deferred cleanup: it calls
-// recover, so it must BE the deferred function, and didPanic is taken by pointer
-// because the handler sets it after the defer is registered.
-func (sc *http2serverConn) finishHandler(rw **http2responseWriter, req *Request, didPanic *bool) {
+// finishHandler is (*http2serverConn).runHandler's deferred cleanup: it cancels
+// the request context, drops the multipart form and reports the handler done. A
+// panicking handler is FATAL: Moxie has no recover, so there is no RST/stack
+// report path here any more.
+func (sc *http2serverConn) finishHandler(rw **http2responseWriter, req *Request) {
 		(*rw).rws.stream.cancelCtx.Cancel()
 		if req.MultipartForm != nil {
 			req.MultipartForm.RemoveAll()
-		}
-		if *didPanic {
-			e := recover()
-			sc.writeFrameFromHandler(http2FrameWriteRequest{
-				write:  http2handlerPanicRST{(*rw).rws.stream.id},
-				stream: (*rw).rws.stream,
-			})
-			// Same as net/http:
-			if e != "" && e != ErrAbortHandler.Error() {
-				const size = 64 << 10
-				buf := []byte{:size}
-				buf = buf[:runtime.Stack(buf, false)]
-				sc.logf("http2: panic serving %v: %v\n%s", sc.conn.RemoteAddr(), e, buf)
-			}
-			return
 		}
 		rw.handlerDone()
 }
@@ -6499,10 +6478,8 @@ func (sc *http2serverConn) finishHandler(rw **http2responseWriter, req *Request,
 func (sc *http2serverConn) runHandler(rw *http2responseWriter, req *Request, handler Handler) {
 	sc.srv.markNewGoroutine()
 	defer sc.sendServeMsg(http2handlerDoneMsg)
-	didPanic := true
-	defer sc.finishHandler(&rw, req, &didPanic)
+	defer sc.finishHandler(&rw, req)
 	handler.ServeHTTP(rw, req)
-	didPanic = false
 }
 
 func http2handleHeaderListTooLong(w ResponseWriter, r *Request) {
@@ -10326,14 +10303,9 @@ func http2isConnectionCloseRequest(req *Request) (rok bool) {
 	return req.Close || httpguts.HeaderValuesContainsToken(req.Header["Connection"], "close")
 }
 
-// registerHTTPSProtocol calls Transport.RegisterProtocol but
-// converting panics into errors.
+// registerHTTPSProtocol calls Transport.RegisterProtocol. A panic in there is
+// fatal now: Moxie has no recover.
 func http2registerHTTPSProtocol(t *Transport, rt http2noDialH2RoundTripper) (err error) {
-	defer func() {
-		if e := recover(); e != "" {
-			err = fmt.Errorf("%v", e)
-		}
-	}()
 	t.RegisterProtocol("https", rt)
 	return nil
 }
@@ -10559,17 +10531,6 @@ func (w *http2writeData) staysWithinBuffer(limit int32) (rok bool) {
 	return http2frameHeaderLen+len(w.p) <= limit
 }
 
-// handlerPanicRST is the message sent from handler goroutines when
-// the handler panics.
-type http2handlerPanicRST struct {
-	StreamID uint32
-}
-
-func (hp *http2handlerPanicRST) writeFrame(ctx http2writeContext) (rerr error) {
-	return ctx.Framer().WriteRSTStream(hp.StreamID, http2ErrCodeInternal)
-}
-
-func (hp *http2handlerPanicRST) staysWithinBuffer(limit int32) (rok bool) { return http2frameHeaderLen+4 <= limit }
 
 func (se *http2StreamError) writeFrame(ctx http2writeContext) (rerr error) {
 	return ctx.Framer().WriteRSTStream(se.StreamID, se.Code)
@@ -11820,7 +11781,6 @@ func init() {
 	http2errHandlerComplete = errors.New("http2: request body closed due to handler exiting")
 	http2errStreamClosed = errors.New("http2: stream closed")
 	http2errPrefaceTimeout = errors.New("timeout waiting for client preface")
-	http2errHandlerPanicked = errors.New("http2: handler panicked")
 	http2ErrRecursivePush = errors.New("http2: recursive push not allowed")
 	http2ErrPushLimitReached = errors.New("http2: push would exceed peer's SETTINGS_MAX_CONCURRENT_STREAMS")
 	http2errClientConnClosed = errors.New("http2: client conn is closed")

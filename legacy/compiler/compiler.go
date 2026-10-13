@@ -2354,13 +2354,12 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		cplx := argValues[0]
 		return b.CreateExtractValue(cplx, 0, "real"), nil
 	case "recover":
-		useParentFrame := uint64(0)
-		if b.hasDeferFrame() {
-			// recover() should return the panic value of the parent function,
-			// not of the current function.
-			useParentFrame = 1
-		}
-		return b.createRuntimeCall("_recover", []llvm.Value{llvm.ConstInt(b.ctx.Int1Type(), useParentFrame, false)}, ""), nil
+		// recover() is REMOVED from Moxie: a panic is fatal, no way back.
+		// Bilateral with stage4's BuiltinRecover case, which reports the same
+		// message. The defer frames and landing pads stay (ordinary deferred
+		// calls need them) but nothing jumps back into them any more.
+		b.addError(pos, "recover() is not available in Moxie: a panic is fatal")
+		return llvm.Value{}, nil
 	case "ssa:wrapnilchk":
 		// TODO: do an actual nil check?
 		return argValues[0], nil

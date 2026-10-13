@@ -1,35 +1,43 @@
-// testing.T.Fatal/Skip must abort the rest of the test body, and the run must
-// continue with the next test.
+// testing has no recover to unwind a test body, so Fatal/Skip semantics are
+// the loud, honest version of Go's:
 //
-// Two stage4 defects met here. First, stage4 never emitted the per-call defer
-// checkpoint: call lines are written in fragments ("  " then "call ..."), and
-// the w() sniffer keyed on a whole-line prefix, so every frame's JumpPC stayed
-// 0 and a moxie_longjmp jumped to 0. Second, explicit panic("const") was
-// lowered to the abort-only runtime._panicstr while legacy used the
-// recoverable runtime._panic. The recover handler is a plain function so the
-// deferred call needs no method thunk.
+//	FailNow ends the whole run (os.Exit(1)) with a FAIL line - it cannot stop
+//	        just this test body, so it stops everything, which is what a
+//	        failing suite deserves.
+//	SkipNow marks the test skipped and returns; a test that skips must return
+//	        right after it. The run continues with the next test.
+//	Error marks the test failed and returns; the run continues.
+//	A panicking test body is fatal for the run.
+//
+// What cannot happen any more, and is asserted below: the test body continuing
+// past a skip, or the run losing the tests after it.
 package main
 
 import "testing"
 
-func TestStopsAtFatal(t *testing.T) {
-	t.Fatal("fatal worked")
-	t.Error("unreachable after Fatal")
+func TestSkipMarks(t *testing.T) {
+	t.Skip("skip worked")
+	println("skip: body returns")
 }
 
 func TestStillRuns(t *testing.T) {
 	println("second-ran")
 }
 
-func TestStopsAtSkip(t *testing.T) {
-	t.Skip("skip worked")
-	t.Error("unreachable after Skip")
+func TestErrorMarks(t *testing.T) {
+	t.Error("error worked")
+	println("error: body returns")
+}
+
+func TestAfterErrorRuns(t *testing.T) {
+	println("third-ran")
 }
 
 func main() {
 	testing.Main([]testing.InternalTest{
-		{Name: "TestStopsAtFatal", F: TestStopsAtFatal},
+		{Name: "TestSkipMarks", F: TestSkipMarks},
 		{Name: "TestStillRuns", F: TestStillRuns},
-		{Name: "TestStopsAtSkip", F: TestStopsAtSkip},
+		{Name: "TestErrorMarks", F: TestErrorMarks},
+		{Name: "TestAfterErrorRuns", F: TestAfterErrorRuns},
 	})
 }

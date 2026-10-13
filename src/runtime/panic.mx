@@ -19,8 +19,6 @@ func trap()
 //export moxie_longjmp
 func moxie_longjmp(frame *deferFrame)
 
-func supportsRecover() bool { return false }
-
 func panicStrategy() uint8 { return 1 }
 
 // DeferFrame is a stack allocated object that stores information for the
@@ -54,17 +52,9 @@ func panicOrGoexit(message string, panicking panicState) {
 	if panicStrategy() == moxie.PanicStrategyTrap {
 		trap()
 	}
-	// Note: recover is not supported inside interrupts.
-	// (This could be supported, like defer, but we currently don't).
-	if supportsRecover() && !interrupt.In() {
-		frame := (*deferFrame)(task.Current().DeferFrame)
-		if frame != nil {
-			frame.PanicValue = message
-			frame.Panicking = panicking
-			moxie_longjmp(frame)
-			// unreachable
-		}
-	}
+	// Panic is FATAL: Moxie has no recover, so there is no unwinding jump to a
+	// deferred function. The defer frames still exist for ordinary deferred
+	// calls, but nothing here longjmps into a landing pad.
 	if panicking == panicGoexit {
 		// Call to Goexit() instead of a panic.
 		// Exit the goroutine instead of printing a panic message.
@@ -142,41 +132,6 @@ func destroyDeferFrame(frame *deferFrame) {
 	}
 }
 
-// _recover is the built-in recover() function. It tries to recover a currently
-// panicking goroutine.
-// useParentFrame is set when the caller of runtime._recover has a defer frame
-// itself. In that case, recover() shouldn't check that frame but one frame up.
-func _recover(useParentFrame bool) string {
-	if !supportsRecover() || interrupt.In() {
-		// Either we're compiling without stack unwinding support, or we're
-		// inside an interrupt where panic/recover is not supported. Either way,
-		// make this a no-op since panic() won't do any long jumps to a deferred
-		// function.
-		return ""
-	}
-	// TODO: somehow check that recover() is called directly by a deferred
-	// function in a panicking goroutine. Maybe this can be done by comparing
-	// the frame pointer?
-	frame := (*deferFrame)(task.Current().DeferFrame)
-	if useParentFrame {
-		// Don't recover panic from the current frame (which can't be panicking
-		// already), but instead from the previous frame.
-		frame = frame.Previous
-	}
-	if frame != nil && frame.Panicking != panicFalse {
-		if frame.Panicking == panicGoexit {
-			// Special value that indicates we're exiting the goroutine using
-			// Goexit(). Therefore, make this recover call a no-op.
-			return ""
-		}
-		// Only the first call to recover returns the panic value. It also stops
-		// the panicking sequence, hence setting panicking to false.
-		frame.Panicking = panicFalse
-		return frame.PanicValue
-	}
-	// Not panicking, so return the empty string.
-	return ""
-}
 
 // Panic when trying to dereference a nil pointer.
 func nilPanic() {
