@@ -9576,3 +9576,35 @@ its module, the app bridge, and the second bundle answering the page. The sweep
 is what closes round 149: the path-resolution change touches the shared loader,
 and the DOM fixture's callback chain had just been made single-shot after the
 expected-output comparison caught it printing its PASS line twice.
+
+### Round 150: the app-side port, measured (handoff state)
+
+The framework work is done and gated; what remains of (c) is smesh's own port,
+and three rounds of measuring it produced these exact facts, so the next round
+starts from numbers rather than a guess:
+
+  - `web/common/nostr/parse.mx`: the five unnamed returns are fixed
+    (parseStrArray, parseKindArray, parseString, parseInt, parseTags), which took
+    the package from 7 compiler errors to 2. Committed in the app repo.
+  - the two that remain are `type Tag []string` and `type Tags []Tag`, and their
+    removal is NOT local: 253 references across 44 files, including
+    web/wasm/app/main.mx, feed, mls, notif and donation. It needs to be done in
+    slices that each compile, smallest first (nostr's own signatures, then notif,
+    then outward), committing each slice with its measured error count.
+  - `web/wasm/sw/main.mx` has one `var staticFiles = []string{...}` with 7
+    references, and BOTH obvious shapes are rejected: `init()` is refused in
+    package main ("use main() for program entry"), and assigning the package
+    global from main() is refused ("package globals are immutable outside init:
+    mutate through the methods of a sovereign self-mutating type"). A regex
+    rewrite to a function did not parse, so it has to be done by hand against the
+    seven call sites - the sovereign-holder shape the compiler names is the one
+    to use. The file was reverted after the attempt, so the bundle fails only on
+    its original rule and nothing is half-converted.
+  - the store pattern is the template for the rest: an app bridge module for the
+    module's own imports plus `startBundle` for the page port, proven by
+    smesh/scripts/store-bundle-test.py (round 149).
+
+Order for the port: nostr's Tag/Tags -> notif (smallest dependent bundle) ->
+schnorr's unnamed returns -> sw/main.mx's staticFiles -> feed/profile/verify/app
+on the store pattern -> smesh's page (which is where wasm-host.mjs,
+*-wasm-host.mjs, $runtime and $sw finally leave the app tree) -> musiquay.
