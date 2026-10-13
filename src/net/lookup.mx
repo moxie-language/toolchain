@@ -301,8 +301,6 @@ func (r *Resolver) lookupIPAddr(ctx context.Context, network, host string) (riPA
 	if ip, err := netip.ParseAddr(host); err == nil {
 		return []IPAddr{{IP: IPTo16(IP(ip.AsSlice())), Zone: ip.Zone()}}, nil
 	}
-	resolverFunc := r.lookupIP
-
 	// We don't want a cancellation of ctx to affect the
 	// lookupGroup operation. Otherwise if our context gets
 	// canceled it might cause an error to be returned to a lookup
@@ -311,13 +309,7 @@ func (r *Resolver) lookupIPAddr(ctx context.Context, network, host string) (riPA
 	lookupGroupCtx, lookupGroupCancel := context.WithCancel(withUnexpiredValuesPreserved(ctx))
 
 	lookupKey := network + "\000" + host
-	ch := r.getLookupGroup().DoChan(lookupKey, func() (unsafe.Pointer, error) {
-		addrs, err := resolverFunc(lookupGroupCtx, network, host)
-		if err != nil {
-			return nil, err
-		}
-		return unsafe.Pointer(&addrs), nil
-	})
+	ch := r.getLookupGroup().DoChan(lookupKey, &lookupIPCall{r: r, ctx: lookupGroupCtx, network: network, host: host})
 
 	select {
 	case <-ctx.Done():
@@ -340,6 +332,24 @@ func (r *Resolver) lookupIPAddr(ctx context.Context, network, host string) (riPA
 		}
 		return lookupIPReturn(r1.Val, err, r1.Shared)
 	}
+}
+
+// lookupIPCall runs the resolver's IP lookup for one singleflight key. The
+// resolver is carried rather than its method value, which would bind the
+// receiver into a function value.
+type lookupIPCall struct {
+	r       *Resolver
+	ctx     context.Context
+	network string
+	host    string
+}
+
+func (l *lookupIPCall) call() (rval unsafe.Pointer, rerr error) {
+	addrs, err := l.r.lookupIP(l.ctx, l.network, l.host)
+	if err != nil {
+		return nil, err
+	}
+	return unsafe.Pointer(&addrs), nil
 }
 
 // lookupIPReturn turns the return values from singleflight.Do into

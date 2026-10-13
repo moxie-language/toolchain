@@ -53,8 +53,33 @@ func ToUnicode(s []byte) ([]byte, error) {
 	return Punycode.process(s, false)
 }
 
-// An Option configures a Profile at creation time.
-type Option func(*options)
+// An Option configures a Profile at creation time. It is an interface rather
+// than a function value because the settings it applies travel with it.
+type Option interface {
+	applyTo(o *options)
+}
+
+// optionBool is an Option that sets one boolean field.
+type optionBool struct {
+	set func(o *options, v bool)
+	v   bool
+}
+
+func (x optionBool) applyTo(o *options) { x.set(o, x.v) }
+
+// optionBidiRule enables the Bidi rule.
+type optionBidiRule struct {
+}
+
+func (optionBidiRule) applyTo(o *options) { o.bidirule = bidirule.ValidString }
+
+// optionValidateForRegistration sets the registration validation set.
+type optionValidateForRegistration struct {
+}
+
+// optionMapForLookup sets the lookup mapping set.
+type optionMapForLookup struct {
+}
 
 // Transitional sets a Profile to use the Transitional mapping as defined in UTS
 // #46. This will cause, for example, "ß" to be mapped to "ss". Using the
@@ -62,22 +87,28 @@ type Option func(*options)
 // compatibility. It is used by some browsers when resolving domain names. This
 // option is only meaningful if combined with MapForLookup.
 func Transitional(transitional bool) Option {
-	return func(o *options) { o.transitional = transitional }
+	return optionBool{set: _setTransitional, v: transitional}
 }
+
+func _setTransitional(o *options, v bool) { o.transitional = v }
 
 // VerifyDNSLength sets whether a Profile should fail if any of the IDN parts
 // are longer than allowed by the RFC.
 //
 // This option corresponds to the VerifyDnsLength flag in UTS #46.
 func VerifyDNSLength(verify bool) Option {
-	return func(o *options) { o.verifyDNSLength = verify }
+	return optionBool{set: _setVerifyDNSLength, v: verify}
 }
+
+func _setVerifyDNSLength(o *options, v bool) { o.verifyDNSLength = v }
 
 // RemoveLeadingDots removes leading label separators. Leading runes that map to
 // dots, such as U+3002 IDEOGRAPHIC FULL STOP, are removed as well.
 func RemoveLeadingDots(remove bool) Option {
-	return func(o *options) { o.removeLeadingDots = remove }
+	return optionBool{set: _setRemoveLeadingDots, v: remove}
 }
+
+func _setRemoveLeadingDots(o *options, v bool) { o.removeLeadingDots = v }
 
 // ValidateLabels sets whether to check the mandatory label validation criteria
 // as defined in Section 5.4 of RFC 5891. This includes testing for correct use
@@ -85,21 +116,28 @@ func RemoveLeadingDots(remove bool) Option {
 // In particular, ValidateLabels also sets the CheckHyphens and CheckJoiners flags
 // in UTS #46.
 func ValidateLabels(enable bool) Option {
-	return func(o *options) {
+	return optionValidateLabels{v: enable}
+}
+
+// optionValidateLabels sets the label validation flags.
+type optionValidateLabels struct {
+	v bool
+}
+
+func (x optionValidateLabels) applyTo(o *options) {
 		// Don't override existing mappings, but set one that at least checks
 		// normalization if it is not set.
-		if o.mapping == nil && enable {
+		if o.mapping == nil && x.v {
 			o.mapping = normalize
 		}
 		o.trie = _trie()
-		o.checkJoiners = enable
-		o.checkHyphens = enable
-		if enable {
+		o.checkJoiners = x.v
+		o.checkHyphens = x.v
+		if x.v {
 			o.fromPuny = validateFromPunycode
 		} else {
 			o.fromPuny = nil
 		}
-	}
 }
 
 // CheckHyphens sets whether to check for correct use of hyphens ('-') in
@@ -108,18 +146,27 @@ func ValidateLabels(enable bool) Option {
 //
 // This option corresponds to the CheckHyphens flag in UTS #46.
 func CheckHyphens(enable bool) Option {
-	return func(o *options) { o.checkHyphens = enable }
+	return optionBool{set: _setCheckHyphens, v: enable}
 }
+
+func _setCheckHyphens(o *options, v bool) { o.checkHyphens = v }
 
 // CheckJoiners sets whether to check the ContextJ rules as defined in Appendix
 // A of RFC 5892, concerning the use of joiner runes.
 //
 // This option corresponds to the CheckJoiners flag in UTS #46.
 func CheckJoiners(enable bool) Option {
-	return func(o *options) {
+	return optionCheckJoiners{v: enable}
+}
+
+// optionCheckJoiners sets the ContextJ checks.
+type optionCheckJoiners struct {
+	v bool
+}
+
+func (x optionCheckJoiners) applyTo(o *options) {
 		o.trie = _trie()
-		o.checkJoiners = enable
-	}
+		o.checkJoiners = x.v
 }
 
 // StrictDomainName limits the set of permissible ASCII characters to those
@@ -133,8 +180,10 @@ func CheckJoiners(enable bool) Option {
 //
 // This option corresponds to the UseSTD3ASCIIRules flag in UTS #46.
 func StrictDomainName(use bool) Option {
-	return func(o *options) { o.useSTD3Rules = use }
+	return optionBool{set: _setStrictDomainName, v: use}
 }
+
+func _setStrictDomainName(o *options, v bool) { o.useSTD3Rules = v }
 
 // NOTE: the following options pull in tables. The tables should not be linked
 // in as long as the options are not used.
@@ -144,19 +193,21 @@ func StrictDomainName(use bool) Option {
 //
 // This option corresponds to the CheckBidi flag in UTS #46.
 func BidiRule() Option {
-	return func(o *options) { o.bidirule = bidirule.ValidString }
+	return optionBidiRule{}
 }
 
 // ValidateForRegistration sets validation options to verify that a given IDN is
 // properly formatted for registration as defined by Section 4 of RFC 5891.
 func ValidateForRegistration() Option {
-	return func(o *options) {
+	return optionValidateForRegistration{}
+}
+
+func (optionValidateForRegistration) applyTo(o *options) {
 		o.mapping = validateRegistration
-		StrictDomainName(true)(o)
-		ValidateLabels(true)(o)
-		VerifyDNSLength(true)(o)
-		BidiRule()(o)
-	}
+		StrictDomainName(true).applyTo(o)
+		ValidateLabels(true).applyTo(o)
+		VerifyDNSLength(true).applyTo(o)
+		BidiRule().applyTo(o)
 }
 
 // MapForLookup sets validation and mapping options such that a given IDN is
@@ -168,11 +219,13 @@ func ValidateForRegistration() Option {
 // The mappings include normalization and mapping case, width and other
 // compatibility mappings.
 func MapForLookup() Option {
-	return func(o *options) {
+	return optionMapForLookup{}
+}
+
+func (optionMapForLookup) applyTo(o *options) {
 		o.mapping = validateAndMap
-		StrictDomainName(true)(o)
-		ValidateLabels(true)(o)
-	}
+		StrictDomainName(true).applyTo(o)
+		ValidateLabels(true).applyTo(o)
 }
 
 type options struct {
@@ -204,7 +257,7 @@ type Profile struct {
 
 func apply(o *options, opts []Option) {
 	for _, f := range opts {
-		f(o)
+		f.applyTo(o)
 	}
 }
 

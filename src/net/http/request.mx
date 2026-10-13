@@ -212,13 +212,17 @@ type Request struct {
 	// for input.
 	Body io.ReadCloser
 
-	// GetBody defines an optional func to return a new copy of
+	// GetBody defines an optional method to return a new copy of
 	// Body. It is used for client requests when a redirect requires
 	// reading the body more than once. Use of GetBody still
 	// requires setting Body.
 	//
+	// It is an interface rather than a function value because the
+	// copy it returns is state the caller supplied (the buffer to
+	// replay), and a function value here carries no state.
+	//
 	// For server requests, it is unused.
-	GetBody func() (io.ReadCloser, error)
+	GetBody GetBodyFunc
 
 	// ContentLength records the length of the associated content.
 	// The value -1 indicates that the length is unknown.
@@ -646,6 +650,14 @@ func (r *Request) WriteProxy(w io.Writer) (rerr error) {
 var errMissingHost error
 
 // extraHeaders may be nil
+// continueWaiter blocks until the server answers an Expect: 100-continue
+// request, the timeout expires, or the connection closes. It is an interface
+// rather than a function value because the connection and the continue channel
+// must travel with it.
+type continueWaiter interface {
+	waitForContinue() bool
+}
+
 // waitForContinue may be nil
 // always closes body
 // reportWroteRequest is request.write's deferred trace hook as a CALL: a closure
@@ -671,7 +683,7 @@ func normalizeEOFError(err *error) {
 	}
 }
 
-func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitForContinue func() bool) (err error) {
+func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitForContinue continueWaiter) (err error) {
 	trace := r.ClientTrace()
 	if trace != nil {
 		defer reportWroteRequest(trace, &err)
@@ -825,7 +837,7 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 		if trace != nil && trace.Wait100Continue != nil {
 			httptrace.Wait100Continue(trace)
 		}
-		if !waitForContinue() {
+		if !waitForContinue.waitForContinue() {
 			closed = true
 			r.closeBody()
 			return nil
@@ -944,6 +956,40 @@ func NewRequest(method, ur2 string, bod2 io.Reader) (rrequest *Request, rerr err
 	return NewRequestWithContext(context.Background(), method, ur2, bod2)
 }
 
+// GetBodyFunc returns a fresh copy of a request body. It is the
+// state-carrying form of [Request.GetBody]: the buffer to replay is state a
+// function value cannot hold.
+type GetBodyFunc interface {
+	getBody() (io.ReadCloser, error)
+}
+
+// bufferGetBody replays the bytes of a *bytes.Buffer.
+type bufferGetBody struct {
+	buf []byte
+}
+
+func (g *bufferGetBody) getBody() (rio io.ReadCloser, rerr error) {
+	return io.NopCloser(bytes.NewReader(g.buf)), nil
+}
+
+// readerGetBody replays a snapshot of a *bytes.Reader from its start.
+type readerGetBody struct {
+	rd bytes.Reader
+}
+
+func (g *readerGetBody) getBody() (rio io.ReadCloser, rerr error) {
+	r := g.rd
+	return io.NopCloser(&r), nil
+}
+
+// emptyGetBody reports the sentinel NoBody for a zero-length request body.
+type emptyGetBody struct {
+}
+
+func (emptyGetBody) getBody() (rio io.ReadCloser, rerr error) {
+	return NoBody, nil
+}
+
 // NewRequestWithContext returns a new [Request] given a method, URL, and
 // optional body.
 //
@@ -1005,18 +1051,10 @@ func NewRequestWithContext(ctx context.Context, method, ur3 string, bod3 io.Read
 		switch v := bod3.(type) {
 		case *bytes.Buffer:
 			req.ContentLength = int64(v.Len())
-			buf := v.Bytes()
-			req.GetBody = func() (io.ReadCloser, error) {
-				r := bytes.NewReader(buf)
-				return io.NopCloser(r), nil
-			}
+			req.GetBody = &bufferGetBody{buf: v.Bytes()}
 		case *bytes.Reader:
 			req.ContentLength = int64(v.Len())
-			snapshot := *v
-			req.GetBody = func() (io.ReadCloser, error) {
-				r := snapshot
-				return io.NopCloser(&r), nil
-			}
+			req.GetBody = &readerGetBody{rd: *v}
 		default:
 			// This is where we'd set it to -1 (at least
 			// if body != NoBody) to mean unknown, but
@@ -1034,7 +1072,7 @@ func NewRequestWithContext(ctx context.Context, method, ur3 string, bod3 io.Read
 		// variable to mean explicitly zero.
 		if req.GetBody != nil && req.ContentLength == 0 {
 			req.Body = NoBody
-			req.GetBody = func() (io.ReadCloser, error) { return NoBody, nil }
+			req.GetBody = emptyGetBody{}
 		}
 	}
 

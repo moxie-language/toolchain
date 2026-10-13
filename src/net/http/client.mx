@@ -648,7 +648,7 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 		deadline      = c.deadline()
 		reqs          []*Request
 		resp          *Response
-		copyHeaders   = c.makeHeadersCopier(req)
+		hcopy         = c.makeHeadersCopier(req)
 		reqBodyClosed = false // have we closed the current req.Body?
 
 		// Redirect behavior:
@@ -656,23 +656,6 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 		includeBody           = true
 		stripSensitiveHeaders = false
 	)
-	uerr := func(err error) error {
-		// the body may have been closed already by c.send()
-		if !reqBodyClosed {
-			req.closeBody()
-		}
-		var urlStr string
-		if resp != nil && resp.Request != nil {
-			urlStr = stripPassword(resp.Request.URL)
-		} else {
-			urlStr = stripPassword(req.URL)
-		}
-		return &url.Error{
-			Op:  urlErrorOp(reqs[0].Method),
-			URL: urlStr,
-			Err: err,
-		}
-	}
 	for {
 		// For all but the first request, create the next
 		// request hop and replace req.
@@ -687,7 +670,7 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 			u, er2 := req.URL.Parse(loc)
 			if er2 != nil {
 				resp.closeBody()
-				return nil, uerr(fmt.Errorf("failed to parse Location header %q: %v", loc, er2))
+				return nil, doURLError(reqBodyClosed, req, resp, reqs, fmt.Errorf("failed to parse Location header %q: %v", loc, er2))
 			}
 			host := ""
 			if req.Host != "" && req.Host != req.URL.Host {
@@ -709,10 +692,10 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 				ctx:      ireq.ctx,
 			}
 			if includeBody && ireq.GetBody != nil {
-				req.Body, er2 = ireq.GetBody()
+				req.Body, er2 = ireq.GetBody.getBody()
 				if er2 != nil {
 					resp.closeBody()
-					return nil, uerr(er2)
+					return nil, doURLError(reqBodyClosed, req, resp, reqs, er2)
 				}
 				req.GetBody = ireq.GetBody
 				req.ContentLength = ireq.ContentLength
@@ -727,7 +710,7 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 					stripSensitiveHeaders = true
 				}
 			}
-			copyHeaders(req, stripSensitiveHeaders)
+			hcopy.copyHeaders(req, stripSensitiveHeaders)
 
 			// Add the Referer header from the most recent
 			// request URL to the new one, if it's not https->http:
@@ -759,7 +742,7 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 				// and an error if the CheckRedirect function failed.
 				// See https://golang.org/issue/3795
 				// The resp.Body has already been closed.
-				ue := uerr(er2)
+				ue := doURLError(reqBodyClosed, req, resp, reqs, er2)
 				ue.(*url.Error).URL = loc
 				return resp, ue
 			}
@@ -775,7 +758,7 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 			if !deadline.IsZero() && cs.didTimeout() {
 				err = &timeoutError{err.String() + " (Client.Timeout exceeded while awaiting headers)"}
 			}
-			return nil, uerr(err)
+			return nil, doURLError(reqBodyClosed, req, resp, reqs, err)
 		}
 
 		var shouldRedirect, includeBodyOnHop bool
@@ -793,70 +776,96 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 	}
 }
 
-// makeHeadersCopier makes a function that copies headers from the
-// initial Request, ireq. For every redirect, this function must be called
-// so that it can copy headers into the upcoming Request.
-func (c *Client) makeHeadersCopier(ireq *Request) (rbool func(req *Request, stripSensitiveHeaders bool)) {
+// doURLError builds the *url.Error handed back for a failed request, closing
+// the request body unless c.send already closed it. The state it reads lives in
+// do's frame, so it arrives as parameters.
+func doURLError(reqBodyClosed bool, req *Request, resp *Response, reqs []*Request, err error) (rerr error) {
+	// the body may have been closed already by c.send()
+	if !reqBodyClosed {
+		req.closeBody()
+	}
+	var urlStr string
+	if resp != nil && resp.Request != nil {
+		urlStr = stripPassword(resp.Request.URL)
+	} else {
+		urlStr = stripPassword(req.URL)
+	}
+	return &url.Error{
+		Op:  urlErrorOp(reqs[0].Method),
+		URL: urlStr,
+		Err: err,
+	}
+}
+
+// headersCopier copies the initial request's headers onto each redirect hop.
+// It is a type rather than a function value because it carries the initial
+// headers, the initial cookies and the Client across calls.
+type headersCopier struct {
+	cl       *Client
+	ireqhdr  Header
+	icookies map[string][]*Cookie
+}
+
+// makeHeadersCopier returns the copier for the initial Request, ireq. For every
+// redirect its copyHeaders must be called so the headers reach the next Request.
+func (c *Client) makeHeadersCopier(ireq *Request) (rhc *headersCopier) {
 	// The headers to copy are from the very initial request.
-	// We use a closured callback to keep a reference to these original headers.
-	var (
-		ireqhdr  = cloneOrMakeHeader(ireq.Header)
-		icookies map[string][]*Cookie
-	)
+	hc := &headersCopier{cl: c, ireqhdr: cloneOrMakeHeader(ireq.Header)}
 	if c.Jar != nil && HeaderGet(ireq.Header, "Cookie") != "" {
-		icookies = map[string][]*Cookie{}
+		hc.icookies = map[string][]*Cookie{}
 		for _, ck := range ireq.Cookies() {
-			icookies[ck.Name] = push(icookies[ck.Name], ck)
+			hc.icookies[ck.Name] = push(hc.icookies[ck.Name], ck)
+		}
+	}
+	return hc
+}
+
+func (hc *headersCopier) copyHeaders(req *Request, stripSensitiveHeaders bool) {
+	// If Jar is present and there was some initial cookies provided
+	// via the request header, then we may need to alter the initial
+	// cookies as we follow redirects since each redirect may end up
+	// modifying a pre-existing cookie.
+	//
+	// Since cookies already set in the request header do not contain
+	// information about the original domain and path, the logic below
+	// assumes any new set cookies override the original cookie
+	// regardless of domain or path.
+	//
+	// See https://golang.org/issue/17494
+	if hc.cl.Jar != nil && hc.icookies != nil {
+		var changed bool
+		resp := req.Response // The response that caused the upcoming redirect
+		for _, ck := range resp.Cookies() {
+			if _, ok := hc.icookies[ck.Name]; ok {
+				delete(hc.icookies, ck.Name)
+				changed = true
+			}
+		}
+		if changed {
+			HeaderDel(hc.ireqhdr, "Cookie")
+			var ss [][]byte
+			for _, cs := range hc.icookies {
+				for _, ck := range cs {
+					ss = mxutil.Ensure(ss, 1)
+					ss = push(ss, ck.Name+"="+ck.Value)
+				}
+			}
+			slices.Sort(ss) // Ensure deterministic headers
+			HeaderSet(hc.ireqhdr, "Cookie", bytes.Join(ss, "; "))
 		}
 	}
 
-	return func(req *Request, stripSensitiveHeaders bool) {
-		// If Jar is present and there was some initial cookies provided
-		// via the request header, then we may need to alter the initial
-		// cookies as we follow redirects since each redirect may end up
-		// modifying a pre-existing cookie.
-		//
-		// Since cookies already set in the request header do not contain
-		// information about the original domain and path, the logic below
-		// assumes any new set cookies override the original cookie
-		// regardless of domain or path.
-		//
-		// See https://golang.org/issue/17494
-		if c.Jar != nil && icookies != nil {
-			var changed bool
-			resp := req.Response // The response that caused the upcoming redirect
-			for _, c := range resp.Cookies() {
-				if _, ok := icookies[c.Name]; ok {
-					delete(icookies, c.Name)
-					changed = true
-				}
-			}
-			if changed {
-				HeaderDel(ireqhdr, "Cookie")
-				var ss [][]byte
-				for _, cs := range icookies {
-					for _, c := range cs {
-						ss = mxutil.Ensure(ss, 1)
-						ss = push(ss, c.Name+"="+c.Value)
-					}
-				}
-				slices.Sort(ss) // Ensure deterministic headers
-				HeaderSet(ireqhdr, "Cookie", bytes.Join(ss, "; "))
-			}
+	// Copy the initial request's Header values
+	// (at least the safe ones).
+	for k, vv := range hc.ireqhdr {
+		sensitive := false
+		switch CanonicalHeaderKey(k) {
+		case "Authorization", "Www-Authenticate", "Cookie", "Cookie2",
+			"Proxy-Authorization", "Proxy-Authenticate":
+			sensitive = true
 		}
-
-		// Copy the initial request's Header values
-		// (at least the safe ones).
-		for k, vv := range ireqhdr {
-			sensitive := false
-			switch CanonicalHeaderKey(k) {
-			case "Authorization", "Www-Authenticate", "Cookie", "Cookie2",
-				"Proxy-Authorization", "Proxy-Authenticate":
-				sensitive = true
-			}
-			if !(sensitive && stripSensitiveHeaders) {
-				req.Header[k] = vv
-			}
+		if !(sensitive && stripSensitiveHeaders) {
+			req.Header[k] = vv
 		}
 	}
 }

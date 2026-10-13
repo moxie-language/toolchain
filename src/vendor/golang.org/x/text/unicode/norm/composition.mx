@@ -111,7 +111,7 @@ type reorderBuffer struct {
 	tmpBytes input
 
 	out    []byte
-	flushF func(*reorderBuffer) bool
+	flushF flushFunc
 }
 
 func (rb *reorderBuffer) init(f Form, src []byte) {
@@ -128,7 +128,21 @@ func (rb *reorderBuffer) initString(f Form, src []byte) {
 	rb.ss = 0
 }
 
-func (rb *reorderBuffer) setFlusher(out []byte, f func(*reorderBuffer) bool) {
+// flushFunc is the flush hook of a reorderBuffer. It is an interface rather
+// than a function value because a flush may carry the input it compares
+// against, which a function value cannot hold.
+type flushFunc interface {
+	flush(rb *reorderBuffer) bool
+}
+
+// plainFlush adapts a stateless flush function to flushFunc.
+type plainFlush struct {
+	f func(rb *reorderBuffer) bool
+}
+
+func (p plainFlush) flush(rb *reorderBuffer) bool { return p.f(rb) }
+
+func (rb *reorderBuffer) setFlusher(out []byte, f flushFunc) {
 	rb.out = out
 	rb.flushF = f
 }
@@ -143,7 +157,7 @@ func (rb *reorderBuffer) doFlush() bool {
 	if rb.f.composing {
 		rb.compose()
 	}
-	res := rb.flushF(rb)
+	res := rb.flushF.flush(rb)
 	rb.reset()
 	return res
 }

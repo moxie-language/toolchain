@@ -43,18 +43,33 @@ func sendFile(c *netFD, r io.Reader) (written int64, err error, handled bool) {
 		return 0, nil, false
 	}
 
-	var werr error
-	err = sc.Read(func(fd uintptr) bool {
-		written, werr, handled = poll.SendFile(&c.pfd, fd, remain)
-		return true
-	})
+	act := &sendFileAction{c: c, remain: remain}
+	err = sc.Read(act)
 	if err == nil {
-		err = werr
+		err = act.werr
 	}
+	written = act.written
+	handled = act.handled
 
 	if lr != nil {
 		lr.N = remain - written
 	}
 
 	return written, wrapSyscallError("sendfile", err), handled
+}
+
+// sendFileAction performs the sendfile syscall inside the connection's
+// syscall.RawConn.Read hook. The netFD, the remaining byte count and the
+// results travel with it because the hook is a method, not a func value.
+type sendFileAction struct {
+	c       *netFD
+	remain  int64
+	written int64
+	werr    error
+	handled bool
+}
+
+func (a *sendFileAction) rawAction(fd uintptr) (rdone bool) {
+	a.written, a.werr, a.handled = poll.SendFile(&a.c.pfd, fd, a.remain)
+	return true
 }

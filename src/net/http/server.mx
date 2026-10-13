@@ -1182,6 +1182,24 @@ func (h *extraHeader) Write(w *bufio.Writer) {
 // set explicitly. It's also used to set the Content-Length, if the
 // total body size was small and the handler has already finished
 // running.
+// delHeaderExcluded removes key from header, or records it in excludeHeader for
+// WriteSubset to skip when the handler owns the map. The header map, the
+// ownership flag and the exclude map belong to writeHeader's frame, so they
+// arrive as parameters.
+func delHeaderExcluded(key string, owned bool, header Header, excludeHeader *map[string]bool) {
+	if owned {
+		HeaderDel(header, key)
+		return
+	}
+	if _, ok := header[key]; !ok {
+		return
+	}
+	if *excludeHeader == nil {
+		*excludeHeader = map[string]bool{}
+	}
+	(*excludeHeader)[key] = true
+}
+
 func (cw *chunkWriter) writeHeader(p []byte) {
 	if cw.wroteHeader {
 		return
@@ -1203,19 +1221,6 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 		header = w.handlerHeader
 	}
 	var excludeHeader map[string]bool
-	delHeader := func(key string) {
-		if owned {
-			HeaderDel(header, key)
-			return
-		}
-		if _, ok := header[key]; !ok {
-			return
-		}
-		if excludeHeader == nil {
-			excludeHeader = map[string]bool{}
-		}
-		excludeHeader[key] = true
-	}
 	var setHeader extraHeader
 
 	// Don't write out the fake "Trailer:foo" keys. See TrailerPrefix.
@@ -1363,7 +1368,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 
 		if tooBig {
 			w.requestTooLarge()
-			delHeader("Connection")
+			delHeaderExcluded("Connection", owned, header, &excludeHeader)
 			setHeader.connection = "close"
 		}
 	}
@@ -1382,7 +1387,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 		}
 	} else {
 		for _, k := range suppressedHeaders(code) {
-			delHeader(k)
+			delHeaderExcluded(k, owned, header, &excludeHeader)
 		}
 	}
 
@@ -1395,16 +1400,16 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 		// For now just ignore the Content-Length.
 		w.conn.server.logf("http: WriteHeader called with both Transfer-Encoding of %q and a Content-Length of %d",
 			te, w.contentLength)
-		delHeader("Content-Length")
+		delHeaderExcluded("Content-Length", owned, header, &excludeHeader)
 		hasCL = false
 	}
 
 	if w.req.Method == "HEAD" || !bodyAllowedForStatus(code) || code == StatusNoContent {
 		// Response has no body.
-		delHeader("Transfer-Encoding")
+		delHeaderExcluded("Transfer-Encoding", owned, header, &excludeHeader)
 	} else if hasCL {
 		// Content-Length has been provided, so no chunking is to be done.
-		delHeader("Transfer-Encoding")
+		delHeaderExcluded("Transfer-Encoding", owned, header, &excludeHeader)
 	} else if w.req.ProtoAtLeast(1, 1) {
 		// HTTP/1.1 or greater: Transfer-Encoding has been set to identity, and no
 		// content-length has been provided. The connection must be closed after the
@@ -1414,7 +1419,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 		if hasTE && te == "identity" {
 			cw.chunking = false
 			w.closeAfterReply = true
-			delHeader("Transfer-Encoding")
+			delHeaderExcluded("Transfer-Encoding", owned, header, &excludeHeader)
 		} else {
 			// HTTP/1.1 or greater: use chunked transfer encoding
 			// to avoid closing the connection at EOF.
@@ -1422,7 +1427,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 			setHeader.transferEncoding = "chunked"
 			if hasTE && te == "chunked" {
 				// We will send the chunked Transfer-Encoding header later.
-				delHeader("Transfer-Encoding")
+				delHeaderExcluded("Transfer-Encoding", owned, header, &excludeHeader)
 			}
 		}
 	} else {
@@ -1430,12 +1435,12 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 		// encoding and we don't know the Content-Length so
 		// signal EOF by closing connection.
 		w.closeAfterReply = true
-		delHeader("Transfer-Encoding") // in case already set
+		delHeaderExcluded("Transfer-Encoding", owned, header, &excludeHeader) // in case already set
 	}
 
 	// Cannot use Content-Length with non-identity Transfer-Encoding.
 	if cw.chunking {
-		delHeader("Content-Length")
+		delHeaderExcluded("Content-Length", owned, header, &excludeHeader)
 	}
 	if !w.req.ProtoAtLeast(1, 0) {
 		return
@@ -1448,7 +1453,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 		(!keepAlivesEnabled || !hasToken(headerGet(cw.header, "Connection"), "close")) &&
 		!isProtocolSwitchResponse(w.status, header)
 	if delConnectionHeader {
-		delHeader("Connection")
+		delHeaderExcluded("Connection", owned, header, &excludeHeader)
 		if w.req.ProtoAtLeast(1, 1) {
 			setHeader.connection = "close"
 		}
@@ -1895,7 +1900,7 @@ func (c *conn) serve(ctx context.Context) {
 				// from being run on these connections. This prevents closeIdleConns from
 				// closing such connections. See issue https://golang.org/issue/39776.
 				c.setState(c.rwc, StateActive, skipHooks)
-				fn(c.server, tlsConn, h)
+				fn.serveTLSNextProto(c.server, tlsConn, h)
 			}
 			return
 		}
@@ -2116,7 +2121,7 @@ func (c *conn) maybeServeUnencryptedHTTP2(ctx context.Context) (rok bool) {
 	}
 	c.setState(c.rwc, StateActive, skipHooks)
 	h := unencryptedHTTP2Request{ctx, c.rwc, serverHandler{c.server}}
-	fn(c.server, unencryptedTLSConn(c.rwc), h)
+	fn.serveTLSNextProto(c.server, unencryptedTLSConn(c.rwc), h)
 	return true
 }
 
@@ -2869,19 +2874,19 @@ func (mux *ServeMux) registerErr(patstr string, handler Handler) (rerr error) {
 	}
 
 	// Check for conflict.
-	if er5 := mux.index.possiblyConflictingPatterns(pat, func(pat2 *pattern) error {
-		if pat.conflictsWith(pat2) {
-			d := describeConflict(pat, pat2)
-			return fmt.Errorf("pattern %q (registered at %s) conflicts with pattern %q (registered at %s):\n%s",
-				pat, pat.loc, pat2, pat2.loc, d)
-		}
-		return nil
-	}); er5 != nil {
+	if er5 := mux.index.possiblyConflictingPatterns(pat, &registerConflict{pat: pat}); er5 != nil {
 		return er5
 	}
 	mux.tree.addPattern(pat, handler)
 	mux.index.addPattern(pat)
 	return nil
+}
+
+// TLSNextProtoHandler takes over a connection whose TLS handshake negotiated a
+// protocol other than HTTP/1.1. It is an interface rather than a function value
+// because the handler carries the protocol implementation it serves with.
+type TLSNextProtoHandler interface {
+	serveTLSNextProto(s *Server, c *tls.Conn, h Handler)
 }
 
 // Serve accepts incoming HTTP connections on the listener l,
@@ -2988,7 +2993,7 @@ type Server struct {
 	// automatically closed when the function returns.
 	// If TLSNextProto is not nil, HTTP/2 support is not enabled
 	// automatically.
-	TLSNextProto map[string]func(*Server, *tls.Conn, Handler)
+	TLSNextProto map[string]TLSNextProtoHandler
 
 	// ConnState specifies an optional callback function that is
 	// called when a client connection changes state. See the
@@ -3040,7 +3045,7 @@ type Server struct {
 
 	listeners  map[*net.Listener]struct{}
 	activeConn map[*conn]struct{}
-	onShutdown []func()
+	onShutdown []ShutdownHook
 }
 
 // Close immediately closes all active net.Listeners and any
@@ -3097,22 +3102,12 @@ func (s *Server) Shutdown(ctx context.Context) (rerr error) {
 
 	lnerr := s.closeListenersLocked()
 	for _, f := range s.onShutdown {
-		f()
+		f.startShutdown()
 	}
 
 	pollIntervalBase := time.Millisecond
-	nextPollInterval := func() time.Duration {
-		// Add 10% jitter.
-		interval := pollIntervalBase + time.Duration(rand.Intn(int32(pollIntervalBase/10)))
-		// Double and clamp for next time.
-		pollIntervalBase *= 2
-		if pollIntervalBase > shutdownPollIntervalMax {
-			pollIntervalBase = shutdownPollIntervalMax
-		}
-		return interval
-	}
 
-	timer := time.NewTimer(nextPollInterval())
+	timer := time.NewTimer(nextPollInterval(&pollIntervalBase))
 	defer timer.Stop()
 	for {
 		if s.closeIdleConns() {
@@ -3122,9 +3117,51 @@ func (s *Server) Shutdown(ctx context.Context) (rerr error) {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-timer.C:
-			timer.Reset(nextPollInterval())
+			timer.Reset(nextPollInterval(&pollIntervalBase))
 		}
 	}
+}
+
+// conflictSink receives each pattern that might conflict with a pattern being
+// registered. It is an interface because the pattern being registered travels
+// with the hook.
+type conflictSink interface {
+	checkConflict(pat2 *pattern) error
+}
+
+// registerConflict is the conflictSink for one registration.
+type registerConflict struct {
+	pat *pattern
+}
+
+func (rc *registerConflict) checkConflict(pat2 *pattern) (rerr error) {
+	if rc.pat.conflictsWith(pat2) {
+		d := describeConflict(rc.pat, pat2)
+		return fmt.Errorf("pattern %q (registered at %s) conflicts with pattern %q (registered at %s):\n%s",
+			rc.pat, rc.pat.loc, pat2, pat2.loc, d)
+	}
+	return nil
+}
+
+// nextPollInterval returns the next shutdown poll interval: the base plus 10%
+// jitter, with the base doubled and clamped for the call after. The base is a
+// pointer because the caller's local is what advances.
+func nextPollInterval(pollIntervalBase *time.Duration) (rinterval time.Duration) {
+	// Add 10% jitter.
+	interval := *pollIntervalBase + time.Duration(rand.Intn(int32(*pollIntervalBase/10)))
+	// Double and clamp for next time.
+	*pollIntervalBase *= 2
+	if *pollIntervalBase > shutdownPollIntervalMax {
+		*pollIntervalBase = shutdownPollIntervalMax
+	}
+	return interval
+}
+
+// ShutdownHook is a function to call on [Server.Shutdown]. It is an interface
+// rather than a function value because the hook may act on the object it
+// belongs to.
+type ShutdownHook interface {
+	startShutdown()
 }
 
 // RegisterOnShutdown registers a function to call on [Server.Shutdown].
@@ -3132,7 +3169,7 @@ func (s *Server) Shutdown(ctx context.Context) (rerr error) {
 // undergone ALPN protocol upgrade or that have been hijacked.
 // This function should start protocol-specific graceful shutdown,
 // but should not wait for shutdown to complete.
-func (s *Server) RegisterOnShutdown(f func()) {
+func (s *Server) RegisterOnShutdown(f ShutdownHook) {
 	s.onShutdown = mxutil.Ensure(s.onShutdown, 1)
 	s.onShutdown = push(s.onShutdown, f)
 }
@@ -3485,21 +3522,26 @@ func adjustNextProtos(nextProtos [][]byte, protos Protocols) (rbyte [][]byte) {
 	// is already in order, but this is just one small allocation per connection.
 	nextProtos = slices.Clone(nextProtos)
 	var have Protocols
-	nextProtos = slices.DeleteFunc(nextProtos, func(s []byte) bool {
+	// One pass, presized and written through a cursor: slices.DeleteFunc's
+	// predicate would have to carry protos and have, which a function value
+	// cannot do.
+	kept := [][]byte{:0: len(nextProtos)}
+	for _, s := range nextProtos {
 		switch s {
 		case "http/1.1":
 			if !protos.HTTP1() {
-				return true
+				continue
 			}
 			have.SetHTTP1(true)
 		case "h2":
 			if !protos.HTTP2() {
-				return true
+				continue
 			}
 			have.SetHTTP2(true)
 		}
-		return false
-	})
+		kept = push(kept, s)
+	}
+	nextProtos = kept
 	if protos.HTTP2() && !have.HTTP2() {
 		nextProtos = mxutil.Ensure(nextProtos, 1)
 		nextProtos = push(nextProtos, "h2")

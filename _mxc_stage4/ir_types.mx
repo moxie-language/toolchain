@@ -5,6 +5,30 @@ import (
 	. "git.smesh.lol/moxie/pkg/types"
 )
 
+// namedTParams returns a Named type's type parameters, falling back to the ones
+// on the generic DECLARATION it came from. An instantiated Named is a shallow
+// copy made where the instantiation is written; when that copy is created
+// before the declaration's own pass attached them (a field in another file
+// naming mapping[string, *T]), it carries TArgs but no TParams, and without the
+// parameters there is nothing to bind the arguments to: the field type stays
+// map[K]V and every use of the field's element type is the parameter V.
+// The declaration object is shared and complete by the time any body is built,
+// so it is the authority for the parameters.
+func namedTParams(n *Named) (tparams []*TypeParam) {
+	if n == nil {
+		return nil
+	}
+	if len(n.TParams) > 0 {
+		return n.TParams
+	}
+	if n.Obj != nil {
+		if base, ok := n.Obj.Typ.(*Named); ok && base != nil && base != n && len(base.TParams) > 0 {
+			return base.TParams
+		}
+	}
+	return n.TParams
+}
+
 func (e *irEmitter) dataLayout() (s string) {
 	if len(e.triple) >= 6 && e.triple[:6] == "x86_64" {
 		return "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
@@ -72,14 +96,15 @@ func (e *irEmitter) llvmTypeInner(t Type) (s string) {
 	// layout string comes out of it. Without this, mapping[string,int64]'s map
 	// slot was `alloca i8` and the entry layout {i8, i8}: llvmType has no case
 	// for a TypeParam and its fallback is "i8".
-	if n, ok := t.(*Named); ok && len(n.TParams) > 0 && len(n.TArgs) > 0 {
+	if n, ok := t.(*Named); ok && len(namedTParams(n)) > 0 && len(n.TArgs) > 0 {
+		tparams := namedTParams(n)
 		bind := map[string]Type{}
-		m := len(n.TParams)
+		m := len(tparams)
 		if len(n.TArgs) < m {
 			m = len(n.TArgs)
 		}
 		for i := int32(0); i < int32(m); i++ {
-			bind[n.TParams[i].String()] = n.TArgs[i]
+			bind[tparams[i].String()] = n.TArgs[i]
 		}
 		if body, okBody := substTypeIn(n.Under, bind).(*TCStruct); okBody {
 			return e.llvmStructType(body)

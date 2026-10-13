@@ -126,7 +126,7 @@ type Transport struct {
 	// in a Proxy-Authorization header.
 	//
 	// If Proxy is nil or returns a nil *URL, no proxy is used.
-	Proxy func(*Request) (*url.URL, error)
+	Proxy ProxyFunc
 
 	// OnProxyConnectResponse is called when the Transport gets an HTTP response from
 	// a proxy for a CONNECT request. It's called before the check for a 200 OK response.
@@ -141,7 +141,7 @@ type Transport struct {
 	// A RoundTrip call that initiates a dial may end up using
 	// a connection dialed previously when the earlier connection
 	// becomes idle before the later DialContext completes.
-	DialContext func(ctx context.Context, network, addr []byte) (net.Conn, error)
+	DialContext DialContextFunc
 
 	// Dial specifies the dial function for creating unencrypted TCP connections.
 	//
@@ -249,7 +249,7 @@ type Transport struct {
 	// must return a RoundTripper that then handles the request.
 	// If TLSNextProto is not nil, HTTP/2 support is not enabled
 	// automatically.
-	TLSNextProto map[string]func(authority string, c *tls.Conn) RoundTripper
+	TLSNextProto map[string]TransportNextProtoHandler
 
 	// ProxyConnectHeader optionally specifies headers to send to
 	// proxies during CONNECT requests.
@@ -366,7 +366,7 @@ func (t *Transport) Clone() (rtransport *Transport) {
 	if !t.tlsNextProtoWasNil {
 		npm := maps.Clone(t.TLSNextProto)
 		if npm == nil {
-			npm = map[string]func(authority string, c *tls.Conn) RoundTripper{}
+			npm = map[string]TransportNextProtoHandler{}
 		}
 		t2.TLSNextProto = npm
 	}
@@ -473,9 +473,31 @@ func (t *Transport) protocols() (rprotocols Protocols) {
 	return p
 }
 
-// ProxyFromEnvironment returns the URL of the proxy to use for a
-// given request, as indicated by the environment variables
-// HTTP_PROXY, HTTPS_PROXY and NO_PROXY (or the lowercase versions
+// ProxyFunc resolves the proxy to use for a request, for [Transport.Proxy].
+// It is an interface rather than a function value because the hook carries the
+// configuration it resolves against, which a function value cannot hold.
+type ProxyFunc interface {
+	proxyFor(req *Request) (*url.URL, error)
+}
+
+// DialContextFunc dials a connection for the transport, for
+// [Transport.DialContext]. It is an interface rather than a function value
+// because the dialer it uses travels with the hook.
+type DialContextFunc interface {
+	dialContext(ctx context.Context, network, addr []byte) (net.Conn, error)
+}
+
+// envProxy resolves against the process environment.
+type envProxy struct {
+}
+
+func (envProxy) proxyFor(req *Request) (ruRL *url.URL, rerr error) {
+	return envProxyFunc().proxyForURL(req.URL)
+}
+
+// ProxyFromEnvironment is the standard [Transport.Proxy] hook. It returns the
+// URL of the proxy to use for a given request, as indicated by the environment
+// variables HTTP_PROXY, HTTPS_PROXY and NO_PROXY (or the lowercase versions
 // thereof). Requests use the proxy from the environment variable
 // matching their scheme, unless excluded by NO_PROXY.
 //
@@ -489,16 +511,28 @@ func (t *Transport) protocols() (rprotocols Protocols) {
 //
 // As a special case, if req.URL.Host is "localhost" (with or without
 // a port number), then a nil URL and nil error will be returned.
-func ProxyFromEnvironment(req *Request) (ruRL *url.URL, rerr error) {
-	return envProxyFunc()(req.URL)
+var ProxyFromEnvironment ProxyFunc = envProxy{}
+
+// fixedProxy always resolves to the same URL.
+type fixedProxy struct {
+	url *url.URL
 }
 
-// ProxyURL returns a proxy function (for use in a [Transport])
+func (p *fixedProxy) proxyFor(req *Request) (ruRL *url.URL, rerr error) {
+	return p.url, nil
+}
+
+// ProxyURL returns a proxy hook (for use in a [Transport])
 // that always returns the same URL.
-func ProxyURL(fixedURL *url.URL) (rerror func(*Request) (*url.URL, error)) {
-	return func(*Request) (*url.URL, error) {
-		return fixedURL, nil
-	}
+func ProxyURL(fixedURL *url.URL) (rproxy ProxyFunc) {
+	return &fixedProxy{url: fixedURL}
+}
+
+// TransportNextProtoHandler switches a Transport to another protocol after the
+// TLS handshake negotiated it. It is an interface rather than a function value
+// because the handler carries the transport it upgrades to.
+type TransportNextProtoHandler interface {
+	upgradeNextProto(authority string, c *tls.Conn) RoundTripper
 }
 
 // transportRequest is a wrapper around a *Request that adds
@@ -781,7 +815,7 @@ func rewindBody(req *Request) (rewound *Request, err error) {
 	if req.GetBody == nil {
 		return nil, errCannotRewind
 	}
-	bod2, err := req.GetBody()
+	bod2, err := req.GetBody.getBody()
 	if err != nil {
 		return nil, err
 	}
@@ -924,12 +958,12 @@ func (t *Transport) CancelRequest(req *Request) {
 
 var (
 	envProxyDone      bool
-	envProxyFuncValue func(*url.URL) (*url.URL, error)
+	envProxyFuncValue httpproxy.ProxyFuncValue
 )
 
 // envProxyFunc returns a function that reads the
 // environment variable to determine the proxy address.
-func envProxyFunc() (rerror func(*url.URL) (*url.URL, error)) {
+func envProxyFunc() (rf httpproxy.ProxyFuncValue) {
 	if !envProxyDone {
 		envProxyDone = true
 		envProxyFuncValue = httpproxy.FromEnvironment().ProxyFunc()
@@ -947,7 +981,7 @@ func (t *Transport) connectMethodForRequest(treq *transportRequest) (cm connectM
 	cm.targetScheme = treq.URL.Scheme
 	cm.targetAddr = canonicalAddr(treq.URL)
 	if t.Proxy != nil {
-		cm.proxyURL, err = t.Proxy(treq.Request)
+		cm.proxyURL, err = t.Proxy.proxyFor(treq.Request)
 	}
 	cm.onlyH1 = treq.requiresHTTP1()
 	return cm, err
@@ -1226,7 +1260,7 @@ func (t *Transport) removeIdleConnLocked(pconn *persistConn) (rok bool) {
 
 func (t *Transport) dial(ctx context.Context, network, addr string) (rconn net.Conn, rerr error) {
 	if t.DialContext != nil {
-		c, err := t.DialContext(ctx, network, addr)
+		c, err := t.DialContext.dialContext(ctx, network, addr)
 		if c == nil && err == nil {
 			err = errors.New("net/http: Transport.DialContext hook returned (nil, nil)")
 		}
@@ -1692,6 +1726,14 @@ func (s *handshakeTimerSink) onTimer(kind int32) {
 	s.errc <- tlsHandshakeTimeoutError{}
 }
 
+// dialConnWrapErr types a failed proxy handshake, per Issue 16997.
+func dialConnWrapErr(cm connectMethod, err error) (rerr error) {
+	if cm.proxyURL != nil {
+		return &net.OpError{Op: "proxyconnect", Net: "tcp", Err: err}
+	}
+	return err
+}
+
 func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httptrace.ClientTrace) (pconn *persistConn, err error) {
 	pconn = &persistConn{
 		t:             t,
@@ -1702,18 +1744,11 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 		writeErrCh:    chan error{1},
 		writeLoopDone: chan struct{}{},
 	}
-	wrapErr := func(err error) error {
-		if cm.proxyURL != nil {
-			// Return a typed error, per Issue 16997
-			return &net.OpError{Op: "proxyconnect", Net: "tcp", Err: err}
-		}
-		return err
-	}
 	if cm.scheme() == "https" && t.hasCustomTLSDialer() {
 		var er8 error
 		pconn.conn, er8 = t.customDialTLS(ctx, "tcp", cm.addr())
 		if er8 != nil {
-			return nil, wrapErr(er8)
+			return nil, dialConnWrapErr(cm, er8)
 		}
 		if tc, ok := pconn.conn.(*tls.Conn); ok {
 			// Handshake here, in case DialTLS didn't. TLSNextProto below
@@ -1737,16 +1772,16 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 	} else {
 		con3, erA := t.dial(ctx, "tcp", cm.addr())
 		if erA != nil {
-			return nil, wrapErr(erA)
+			return nil, dialConnWrapErr(cm, erA)
 		}
 		pconn.conn = con3
 		if cm.scheme() == "https" {
 			var firstTLSHost string
 			if firstTLSHost, _, erA = net.SplitHostPort(cm.addr()); erA != nil {
-				return nil, wrapErr(erA)
+				return nil, dialConnWrapErr(cm, erA)
 			}
 			if erA = pconn.addTLS(ctx, firstTLSHost, trace); erA != nil {
-				return nil, wrapErr(erA)
+				return nil, dialConnWrapErr(cm, erA)
 			}
 		}
 	}
@@ -1767,7 +1802,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 				socksAuthMethodNotRequired,
 				socksAuthMethodUsernamePassword,
 			}
-			d.Authenticate = auth.Authenticate
+			d.Authenticate = auth
 		}
 		if _, erB := d.DialWithConn(ctx, con4, "tcp", cm.targetAddr); erB != nil {
 			con4.Close()
@@ -1776,9 +1811,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 	case cm.targetScheme == "http":
 		pconn.isProxy = true
 		if pa := cm.proxyAuth(); pa != "" {
-			pconn.mutateHeaderFunc = func(h Header) {
-				HeaderSet(h, "Proxy-Authorization", pa)
-			}
+			pconn.mutateHeaderFunc = &proxyAuthHeader{pa: pa}
 		}
 	case cm.targetScheme == "https":
 		con5 := pconn.conn
@@ -1868,7 +1901,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 		if !ok {
 			return nil, errors.New("http: Transport does not support unencrypted HTTP/2")
 		}
-		alt := next(cm.targetAddr, unencryptedTLSConn(pconn.conn))
+		alt := next.upgradeNextProto(cm.targetAddr, unencryptedTLSConn(pconn.conn))
 		if e, o2 := alt.(erringRoundTripper); o2 {
 			// pconn.conn was closed by next (http2configureTransports.upgradeFn).
 			return nil, e.RoundTripErr()
@@ -1878,7 +1911,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod, trace *httpt
 
 	if s := pconn.tlsState; s != nil && s.NegotiatedProtocolIsMutual && s.NegotiatedProtocol != "" {
 		if next, ok := t.TLSNextProto[s.NegotiatedProtocol]; ok {
-			alt := next(cm.targetAddr, pconn.conn.(*tls.Conn))
+			alt := next.upgradeNextProto(cm.targetAddr, pconn.conn.(*tls.Conn))
 			if e, o3 := alt.(erringRoundTripper); o3 {
 				// pconn.conn was closed by next (http2configureTransports.upgradeFn).
 				return nil, e.RoundTripErr()
@@ -2045,10 +2078,25 @@ type persistConn struct {
 	canceledErr          error // set non-nil if conn is canceled
 	broken               bool  // an error has happened on this connection; marked broken so it's not reused.
 	reused               bool  // whether conn has had successful request/response and is being reused.
-	// mutateHeaderFunc is an optional func to modify extra
+	// mutateHeaderFunc is an optional hook to modify extra
 	// headers on each outbound request before it's written. (the
 	// original Request given to RoundTrip is not modified)
-	mutateHeaderFunc func(Header)
+	mutateHeaderFunc headerMutator
+}
+
+// headerMutator adds headers to each outbound request on a connection. It is an
+// interface because the headers to add travel with the hook.
+type headerMutator interface {
+	mutateHeaders(h Header)
+}
+
+// proxyAuthHeader adds the Proxy-Authorization header of a proxied connection.
+type proxyAuthHeader struct {
+	pa []byte
+}
+
+func (p *proxyAuthHeader) mutateHeaders(h Header) {
+	HeaderSet(h, "Proxy-Authorization", p.pa)
 }
 
 func (pc *persistConn) maxHeaderResponseSize() (rn int64) {
@@ -2323,25 +2371,9 @@ func (pc *persistConn) readLoop() {
 
 		waitForBodyRead = chan bool{2}
 		bod3 = &bodyEOFSignal{
-			body: resp.Body,
-			earlyCloseFn: func() error {
-				waitForBodyRead <- false
-				<-eofc // will be closed by deferred call at the end of the function
-				return nil
-
-			},
-			fn: func(err error) error {
-				isEOF := err == io.EOF
-				waitForBodyRead <- isEOF
-				if isEOF {
-					<-eofc // see comment above eofc declaration
-				} else if err != nil {
-					if cerr := pc.canceled(); cerr != nil {
-						return cerr
-					}
-				}
-				return err
-			},
+			body:         resp.Body,
+			earlyCloseFn: &readLoopEarlyClose{waitForBodyRead: waitForBodyRead, eofc: eofc},
+			fn:           &readLoopBodyEOF{pc: pc, waitForBodyRead: waitForBodyRead, eofc: eofc},
 		}
 
 		resp.Body = bod3
@@ -2492,25 +2524,33 @@ func (pc *persistConn) readResponse(rc requestAndChan, trace *httptrace.ClientTr
 	return
 }
 
-// waitForContinue returns the function to block until
+// waitForContinue returns the waiter to block until
 // any response, timeout or connection close. After any of them,
-// the function returns a bool which indicates if the body should be sent.
-func (pc *persistConn) waitForContinue(continueCh <-chan struct{}) (rbool func() bool) {
+// the waiter reports whether the body should be sent.
+func (pc *persistConn) waitForContinue(continueCh <-chan struct{}) (rw continueWaiter) {
 	if continueCh == nil {
 		return nil
 	}
-	return func() bool {
-		timer := time.NewTimer(pc.t.ExpectContinueTimeout)
-		defer timer.Stop()
+	return &connContinueWaiter{pc: pc, continueCh: continueCh}
+}
 
-		select {
-		case _, ok := <-continueCh:
-			return ok
-		case <-timer.C:
-			return true
-		case <-pc.closech:
-			return false
-		}
+// connContinueWaiter is the continueWaiter for one request on a persistConn.
+type connContinueWaiter struct {
+	pc         *persistConn
+	continueCh <-chan struct{}
+}
+
+func (cw *connContinueWaiter) waitForContinue() (rok bool) {
+	timer := time.NewTimer(cw.pc.t.ExpectContinueTimeout)
+	defer timer.Stop()
+
+	select {
+	case _, ok := <-cw.continueCh:
+		return ok
+	case <-timer.C:
+		return true
+	case <-cw.pc.closech:
+		return false
 	}
 }
 
@@ -2707,7 +2747,7 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 	headerFn := pc.mutateHeaderFunc
 
 	if headerFn != nil {
-		headerFn(req.extraHeaders())
+		headerFn.mutateHeaders(req.extraHeaders())
 	}
 
 	// Ask for a compressed version if the caller didn't set their
@@ -2913,10 +2953,54 @@ func canonicalAddr(ur3 *url.URL) (rs string) {
 // the return value from Close.
 type bodyEOFSignal struct {
 	body         io.ReadCloser
-	closed       bool              // whether Close has been called
-	rerr         error             // sticky Read error
-	fn           func(error) error // err will be nil on Read io.EOF
-	earlyCloseFn func() error      // optional alt Close func used if io.EOF not seen
+	closed       bool            // whether Close has been called
+	rerr         error           // sticky Read error
+	fn           bodyEOFFunc     // err will be nil on Read io.EOF
+	earlyCloseFn bodyEarlyCloser // optional alt Close hook used if io.EOF not seen
+}
+
+// bodyEOFFunc is the one-shot hook bodyEOFSignal runs at the end of the body.
+type bodyEOFFunc interface {
+	onBodyEOF(err error) error
+}
+
+// bodyEarlyCloser is bodyEOFSignal's alternative Close hook.
+type bodyEarlyCloser interface {
+	earlyClose() error
+}
+
+// readLoopEarlyClose answers a Close before io.EOF: it reports a non-EOF read
+// and waits for readLoop to release the connection.
+type readLoopEarlyClose struct {
+	waitForBodyRead chan bool
+	eofc            chan struct{}
+}
+
+func (e *readLoopEarlyClose) earlyClose() (rerr error) {
+	e.waitForBodyRead <- false
+	<-e.eofc // will be closed by deferred call at the end of the function
+	return nil
+}
+
+// readLoopBodyEOF reports the body's final read to readLoop so it can decide
+// whether the connection is reusable.
+type readLoopBodyEOF struct {
+	pc              *persistConn
+	waitForBodyRead chan bool
+	eofc            chan struct{}
+}
+
+func (e *readLoopBodyEOF) onBodyEOF(err error) (rerr error) {
+	isEOF := err == io.EOF
+	e.waitForBodyRead <- isEOF
+	if isEOF {
+		<-e.eofc // see comment above eofc declaration
+	} else if err != nil {
+		if cerr := e.pc.canceled(); cerr != nil {
+			return cerr
+		}
+	}
+	return err
 }
 
 var errReadOnClosedResBody error
@@ -2946,7 +3030,7 @@ func (es *bodyEOFSignal) Close() (rerr2 error) {
 	}
 	es.closed = true
 	if es.earlyCloseFn != nil && es.rerr != io.EOF {
-		return es.earlyCloseFn()
+		return es.earlyCloseFn.earlyClose()
 	}
 	err := es.body.Close()
 	return es.condfn(err)
@@ -2957,7 +3041,7 @@ func (es *bodyEOFSignal) condfn(err error) (rerr error) {
 	if es.fn == nil {
 		return err
 	}
-	err = es.fn(err)
+	err = es.fn.onBodyEOF(err)
 	es.fn = nil
 	return err
 }

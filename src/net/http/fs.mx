@@ -45,10 +45,33 @@ type Dir struct {
 	Root []byte
 }
 
+// pathStatter stats one path. It is an interface because the filesystem the
+// stat goes through travels with the hook.
+type pathStatter interface {
+	statPath(p []byte) (fs.FileInfo, error)
+}
+
+// osPathStatter stats paths in the host filesystem.
+type osPathStatter struct {
+}
+
+func (osPathStatter) statPath(p []byte) (rfi fs.FileInfo, rerr error) {
+	return os.Stat(p)
+}
+
+// fsPathStatter stats paths relative to an [fs.FS] root.
+type fsPathStatter struct {
+	fsys fs.FS
+}
+
+func (s *fsPathStatter) statPath(p []byte) (rfi fs.FileInfo, rerr error) {
+	return fs.Stat(s.fsys, p)
+}
+
 // mapOpenError maps the provided non-nil error from opening name
 // to a possibly better non-nil error. In particular, it turns OS-specific errors
 // about opening files in non-directories into fs.ErrNotExist. See Issues 18984 and 49552.
-func mapOpenError(originalErr error, name []byte, sep rune, stat func([]byte) (fs.FileInfo, error)) (rerr error) {
+func mapOpenError(originalErr error, name []byte, sep rune, stat pathStatter) (rerr error) {
 	if errors.Is(originalErr, fs.ErrNotExist) || errors.Is(originalErr, fs.ErrPermission) {
 		return originalErr
 	}
@@ -58,7 +81,7 @@ func mapOpenError(originalErr error, name []byte, sep rune, stat func([]byte) (f
 		if parts[i] == "" {
 			continue
 		}
-		fi, err := stat(bytes.Join(parts[:i+1], []byte{byte(sep)}))
+		fi, err := stat.statPath(bytes.Join(parts[:i+1], []byte{byte(sep)}))
 		if err != nil {
 			return originalErr
 		}
@@ -92,7 +115,7 @@ func (d *Dir) Open(name []byte) (rfile File, rerr error) {
 	fullName := filepath.Join(dir, pat3)
 	f, err := os.Open(fullName)
 	if err != nil {
-		return nil, mapOpenError(err, fullName, filepath.Separator, func(n []byte) (fs.FileInfo, error) { return os.Stat(n) })
+		return nil, mapOpenError(err, fullName, filepath.Separator, osPathStatter{})
 	}
 	return f, nil
 }
@@ -258,23 +281,45 @@ func serveError(w ResponseWriter, text []byte, code int32) {
 // The GODEBUG setting httpservecontentkeepheaders=1 causes ServeContent
 // to preserve these headers.
 func ServeContent(w ResponseWriter, req *Request, name []byte, modtime time.Time, content io.ReadSeeker) {
-	sizeFunc := func() (int64, error) {
-		size, err := content.Seek(0, io.SeekEnd)
-		if err != nil {
-			return 0, errSeeker
-		}
-		_, err = content.Seek(0, io.SeekStart)
-		if err != nil {
-			return 0, errSeeker
-		}
-		return size, nil
-	}
-	serveContent(w, req, name, modtime, sizeFunc, content)
+	serveContent(w, req, name, modtime, &seekSizer{content: content}, content)
 }
 
-// errSeeker is returned by ServeContent's sizeFunc when the content
+// contentSizer reports the content's size to serveContent. It is an interface
+// rather than a function value because the reader or file it measures travels
+// with it.
+type contentSizer interface {
+	contentSize() (int64, error)
+}
+
+// seekSizer sizes an io.ReadSeeker by seeking to its end and back.
+type seekSizer struct {
+	content io.ReadSeeker
+}
+
+func (s *seekSizer) contentSize() (rsize int64, rerr error) {
+	size, err := s.content.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, errSeeker
+	}
+	_, err = s.content.Seek(0, io.SeekStart)
+	if err != nil {
+		return 0, errSeeker
+	}
+	return size, nil
+}
+
+// fileInfoSizer reports the size an [fs.FileInfo] already knows.
+type fileInfoSizer struct {
+	fi fs.FileInfo
+}
+
+func (s fileInfoSizer) contentSize() (rsize int64, rerr error) {
+	return s.fi.Size(), nil
+}
+
+// errSeeker is returned by ServeContent's contentSizer when the content
 // doesn't seek properly. The underlying Seeker's error text isn't
-// included in the sizeFunc reply so it's not sent over HTTP to end
+// included in the size reply so it's not sent over HTTP to end
 // users.
 var errSeeker error
 
@@ -285,7 +330,7 @@ var errNoOverlap error
 // if name is empty, filename is unknown. (used for mime type, before sniffing)
 // if modtime.IsZero(), modtime is unknown.
 // content must be seeked to the beginning of the file.
-// The sizeFunc is called at most once. Its error, if any, is sent in the HTTP response.
+// The size hook is called at most once. Its error, if any, is sent in the HTTP response.
 // writeMultiRange streams each range as a multipart part. A named function with
 // explicit parameters replaced the closure this was, which captured pw, mw,
 // ranges, content, ctype and size.
@@ -311,7 +356,7 @@ func writeMultiRange(pw *io.PipeWriter, mw *multipart.Writer, ranges []httpRange
 	pw.Close()
 }
 
-func serveContent(w ResponseWriter, r *Request, name []byte, modtime time.Time, sizeFunc func() (int64, error), content io.ReadSeeker) {
+func serveContent(w ResponseWriter, r *Request, name []byte, modtime time.Time, sizeFn contentSizer, content io.ReadSeeker) {
 	setLastModified(w, modtime)
 	done, rangeReq := checkPreconditions(w, r, modtime)
 	if done {
@@ -342,7 +387,7 @@ func serveContent(w ResponseWriter, r *Request, name []byte, modtime time.Time, 
 		ctype = ctypes[0]
 	}
 
-	size, err := sizeFunc()
+	size, err := sizeFn.contentSize()
 	if err != nil {
 		serveError(w, err.String(), StatusInternalServerError)
 		return
@@ -780,8 +825,7 @@ func serveFile(w ResponseWriter, r *Request, f2 FileSystem, name []byte, redirec
 	}
 
 	// serveContent will check modification time
-	sizeFunc := func() (int64, error) { return d.Size(), nil }
-	serveContent(w, r, d.Name(), d.ModTime(), sizeFunc, f)
+	serveContent(w, r, d.Name(), d.ModTime(), fileInfoSizer{fi: d}, f)
 }
 
 // toHTTPError returns a non-specific HTTP error message and status code
@@ -915,9 +959,7 @@ func (f *ioFS) Open(name []byte) (rfile File, rerr error) {
 	}
 	file, err := f.fsys.Open(name)
 	if err != nil {
-		return nil, mapOpenError(err, name, '/', func(path []byte) (fs.FileInfo, error) {
-			return fs.Stat(f.fsys, path)
-		})
+		return nil, mapOpenError(err, name, '/', &fsPathStatter{fsys: f.fsys})
 	}
 	return ioFile{file}, nil
 }

@@ -52,7 +52,7 @@ func (f Form) Bytes(b []byte) []byte {
 	}
 	out := []byte{:n:len(b)}
 	copy(out, b[0:n])
-	rb := reorderBuffer{f: *ft, src: src, nsrc: len(b), out: out, flushF: appendFlush}
+	rb := reorderBuffer{f: *ft, src: src, nsrc: len(b), out: out, flushF: plainFlush{f: appendFlush}}
 	return doAppendInner(&rb, n)
 }
 
@@ -66,7 +66,7 @@ func (f Form) String(s string) string {
 	}
 	out := []byte{:n:len(s)}
 	copy(out, s[0:n])
-	rb := reorderBuffer{f: *ft, src: src, nsrc: len(s), out: out, flushF: appendFlush}
+	rb := reorderBuffer{f: *ft, src: src, nsrc: len(s), out: out, flushF: plainFlush{f: appendFlush}}
 	return string(doAppendInner(&rb, n))
 }
 
@@ -79,7 +79,7 @@ func (f Form) IsNormal(b []byte) bool {
 		return true
 	}
 	rb := reorderBuffer{f: *ft, src: src, nsrc: len(b)}
-	rb.setFlusher(nil, cmpNormalBytes)
+	rb.setFlusher(nil, plainFlush{f: cmpNormalBytes})
 	for bp < len(b) {
 		rb.out = b[bp:]
 		if bp = decomposeSegment(&rb, bp, true); bp < 0 {
@@ -118,28 +118,45 @@ func (f Form) IsNormalString(s string) bool {
 		return true
 	}
 	rb := reorderBuffer{f: *ft, src: src, nsrc: len(s)}
-	rb.setFlusher(nil, func(rb *reorderBuffer) bool {
-		for i := 0; i < rb.nrune; i++ {
-			info := rb.rune[i]
-			if bp+int32(info.size) > len(s) {
-				return false
-			}
-			p := info.pos
-			pe := p + info.size
-			for ; p < pe; p++ {
-				if s[bp] != rb.byte[p] {
-					return false
-				}
-				bp++
-			}
-		}
-		return true
-	})
+	rb.setFlusher(nil, &normalStringFlush{s: s, bp: &bp})
 	for bp < len(s) {
 		if bp = decomposeSegment(&rb, bp, true); bp < 0 {
 			return false
 		}
 		bp, _ = rb.f.quickSpan(rb.src, bp, len(s), true)
+	}
+	return true
+}
+
+// normalStringFlush reports whether the text normalized so far is a prefix of s.
+// bp is a POINTER because the caller keeps walking from wherever the flush left
+// off: the closure this replaces mutated the same variable, and a flush that
+// cannot write it back would re-compare from the start and call s normal when
+// it is not.
+type normalStringFlush struct {
+	s  string
+	bp *int32
+}
+
+func (x *normalStringFlush) flush(rb *reorderBuffer) (rok bool) {
+	// Declared outside the loop: this method writes through x.bp, which the
+	// compiler counts as a receiver write, and a self-mutating method may not
+	// declare loop scratch with :=.
+	var info Properties
+	var p, pe uint8
+	for i := 0; i < rb.nrune; i++ {
+		info = rb.rune[i]
+		if *x.bp+int32(info.size) > len(x.s) {
+			return false
+		}
+		p = info.pos
+		pe = p + info.size
+		for ; p < pe; p++ {
+			if x.s[*x.bp] != rb.byte[p] {
+				return false
+			}
+			*x.bp = *x.bp + 1
+		}
 	}
 	return true
 }
@@ -209,7 +226,7 @@ func (f Form) doAppend(out []byte, src input, n int32) []byte {
 		if p == n {
 			return out
 		}
-		rbQuick := reorderBuffer{f: *ft, src: src, nsrc: n, out: out, flushF: appendFlush}
+		rbQuick := reorderBuffer{f: *ft, src: src, nsrc: n, out: out, flushF: plainFlush{f: appendFlush}}
 		return doAppendInner(&rbQuick, p)
 	}
 	rb := reorderBuffer{f: *ft, src: src, nsrc: n}
@@ -217,7 +234,7 @@ func (f Form) doAppend(out []byte, src input, n int32) []byte {
 }
 
 func doAppend(rb *reorderBuffer, out []byte, p int32) []byte {
-	rb.setFlusher(out, appendFlush)
+	rb.setFlusher(out, plainFlush{f: appendFlush})
 	src, n := rb.src, rb.nsrc
 	doMerge := len(out) > 0
 	if q := src.skipContinuationBytes(p); q > p {

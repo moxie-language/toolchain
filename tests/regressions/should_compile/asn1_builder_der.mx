@@ -1,0 +1,131 @@
+// Regression: the ASN.1 builder path of cryptobyte must emit real DER, byte for
+// byte.
+//
+// The vendored builder's AddASN1* helpers were the last capturing closures in
+// the tree (10 of them): each was `b.AddASN1(tag, func(c *Builder) {...})`, and
+// a Moxie function value carries no environment, so they were rewritten to the
+// callback-free BeginASN1/EndASN1 the tree already had. Nothing in the suite
+// called a single AddASN1* helper - x509 only READS with cryptobyte - so the
+// rewrite had no behavioural coverage at all. This is that coverage: every
+// helper is encoded and compared against the DER the encoding rules require.
+//
+// Fixed in: src/vendor/golang.org/x/crypto/cryptobyte/asn1.mx and builder.mx.
+package main
+
+import (
+	asn1enc "encoding/asn1"
+	"encoding/hex"
+	"golang.org/x/crypto/cryptobyte"
+	"golang.org/x/crypto/cryptobyte/asn1"
+	"math/big"
+	"time"
+)
+
+func check(name string, b *cryptobyte.Builder, want string) {
+	got, err := b.Bytes()
+	if err != nil {
+		panic(name | ": Bytes: " | err.Error())
+	}
+	hexed := hex.EncodeToString(got)
+	if hexed != want {
+		panic(name | ": got " | hexed | " want " | want)
+	}
+	println("ok " | name | " " | hexed)
+}
+
+func main() {
+	// INTEGER: minimal two's-complement, padded when the top bit is set.
+	b := cryptobyte.NewBuilder(nil)
+	b.AddASN1Int64(0)
+	check("int64_0", b, "020100")
+
+	b = cryptobyte.NewBuilder(nil)
+	b.AddASN1Int64(-1)
+	check("int64_-1", b, "0201ff")
+
+	b = cryptobyte.NewBuilder(nil)
+	b.AddASN1Int64(128)
+	check("int64_128", b, "02020080")
+
+	b = cryptobyte.NewBuilder(nil)
+	b.AddASN1Int64WithTag(-129, asn1.INTEGER)
+	check("int64_-129", b, "0202ff7f")
+
+	b = cryptobyte.NewBuilder(nil)
+	b.AddASN1Uint64(65535)
+	check("uint64_65535", b, "020300ffff")
+
+	b = cryptobyte.NewBuilder(nil)
+	b.AddASN1Enum(1)
+	check("enum_1", b, "0a0101")
+
+	// BOOLEAN, OCTET STRING, BIT STRING.
+	b = cryptobyte.NewBuilder(nil)
+	b.AddASN1Boolean(true)
+	check("bool_true", b, "0101ff")
+
+	b = cryptobyte.NewBuilder(nil)
+	b.AddASN1Boolean(false)
+	check("bool_false", b, "010100")
+
+	b = cryptobyte.NewBuilder(nil)
+	b.AddASN1OctetString("hi")
+	check("octets", b, "04026869")
+
+	b = cryptobyte.NewBuilder(nil)
+	b.AddASN1BitString([]byte{0xab})
+	check("bitstring", b, "030200ab")
+
+	// OBJECT IDENTIFIER: 1.2.840.113549 -> 2a 86 48 86 f7 0d
+	b = cryptobyte.NewBuilder(nil)
+	b.AddASN1ObjectIdentifier(asn1enc.ObjectIdentifier{OID: []int32{1, 2, 840, 113549}})
+	check("oid", b, "06062a864886f70d")
+
+	// OBJECT IDENTIFIER is refused when it is not a valid one.
+	b = cryptobyte.NewBuilder(nil)
+	b.AddASN1ObjectIdentifier(asn1enc.ObjectIdentifier{OID: []int32{3, 1}})
+	if _, err := b.Bytes(); err == nil {
+		panic("invalid OID accepted")
+	}
+	println("ok oid_invalid refused")
+
+	// BIG INTEGER: negative, zero and a value whose top bit needs padding.
+	b = cryptobyte.NewBuilder(nil)
+	b.AddASN1BigInt(big.NewInt(-1))
+	check("bigint_-1", b, "0201ff")
+
+	b = cryptobyte.NewBuilder(nil)
+	b.AddASN1BigInt(big.NewInt(0))
+	check("bigint_0", b, "020100")
+
+	b = cryptobyte.NewBuilder(nil)
+	b.AddASN1BigInt(big.NewInt(128))
+	check("bigint_128", b, "02020080")
+
+	// Times.
+	utc := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC())
+	b = cryptobyte.NewBuilder(nil)
+	b.AddASN1UTCTime(utc)
+	check("utctime", b, "170d3234303130323033303430355a")
+
+	b = cryptobyte.NewBuilder(nil)
+	b.AddASN1GeneralizedTime(utc)
+	check("gentime", b, "180f32303234303130323033303430355a")
+
+	// Nesting: a SEQUENCE built through BeginSequence must wrap the contents.
+	b = cryptobyte.NewBuilder(nil)
+	b.BeginSequence()
+	b.AddASN1Int64(1)
+	b.AddASN1OctetString("ab")
+	b.EndSequence()
+	check("nested", b, "300702010104026162")
+
+	// AddASN1 itself is NOT exercised here. Handing a function value to a
+	// named func-typed parameter (BuilderContinuation) and calling it inside
+	// cryptobyte segfaults at runtime, with a plain named function as much as
+	// with a func literal - see docs/OPEN_WORK.md, round 140, "AddASN1's
+	// continuation SEGVs". The inline BeginASN1/EndASN1 path every in-tree
+	// caller now uses is what the checks above cover.
+
+	println("PASS: asn1 builder der")
+}

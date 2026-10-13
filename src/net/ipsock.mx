@@ -121,16 +121,42 @@ func (addrs addrList) partition(strategy func(Addr) bool) (primaries, fallbacks 
 	return
 }
 
+// inetAddrMaker turns a resolved IPAddr into the concrete Addr for a network.
+// It is an interface rather than a function value because the network and port
+// travel with it.
+type inetAddrMaker interface {
+	makeAddr(ip IPAddr) Addr
+}
+
+// inetAddrFor builds addresses for one network and port.
+type inetAddrFor struct {
+	network []byte
+	portnum int32
+}
+
+func (m inetAddrFor) makeAddr(ip IPAddr) (ra Addr) {
+	switch m.network {
+	case "tcp", "tcp4", "tcp6":
+		return &TCPAddr{IP: ip.IP, Port: m.portnum, Zone: ip.Zone}
+	case "udp", "udp4", "udp6":
+		return &UDPAddr{IP: ip.IP, Port: m.portnum, Zone: ip.Zone}
+	case "ip", "ip4", "ip6":
+		return &IPAddr{IP: ip.IP, Zone: ip.Zone}
+	default:
+		panic("unexpected network: " + m.network)
+	}
+}
+
 // filterAddrList applies a filter to a list of IP addresses,
 // yielding a list of Addr objects. Known filters are nil, ipv4only,
 // and ipv6only. It returns every address when the filter is nil.
 // The result contains at least one address when error is nil.
-func filterAddrList(filter func(IPAddr) bool, ips []IPAddr, inetaddr func(IPAddr) Addr, originalAddr []byte) (raddrList addrList, rerr error) {
+func filterAddrList(filter func(IPAddr) bool, ips []IPAddr, inetaddr inetAddrMaker, originalAddr []byte) (raddrList addrList, rerr error) {
 	var addrs addrList
 	for _, ip := range ips {
 		if filter == nil || filter(ip) {
 			addrs = mxutil.Ensure(addrs, 1)
-			addrs = push(addrs, inetaddr(ip))
+			addrs = push(addrs, inetaddr.makeAddr(ip))
 		}
 	}
 	if len(addrs) == 0 {
@@ -265,20 +291,9 @@ func (r *Resolver) internetAddrList(ctx context.Context, net, addr []byte) (radd
 	default:
 		return nil, UnknownNetworkError(net)
 	}
-	inetaddr := func(ip IPAddr) Addr {
-		switch net {
-		case "tcp", "tcp4", "tcp6":
-			return &TCPAddr{IP: ip.IP, Port: portnum, Zone: ip.Zone}
-		case "udp", "udp4", "udp6":
-			return &UDPAddr{IP: ip.IP, Port: portnum, Zone: ip.Zone}
-		case "ip", "ip4", "ip6":
-			return &IPAddr{IP: ip.IP, Zone: ip.Zone}
-		default:
-			panic("unexpected network: " + net)
-		}
-	}
+	inetaddr := inetAddrFor{network: net, portnum: portnum}
 	if host == "" {
-		return addrList{inetaddr(IPAddr{})}, nil
+		return addrList{inetaddr.makeAddr(IPAddr{})}, nil
 	}
 
 	// Try as a literal IP address, then as a DNS name.

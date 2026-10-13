@@ -213,16 +213,7 @@ func (t *transferWriter) shouldSendChunkedRequestBody() (rok bool) {
 // are workarounds if it does.
 func (t *transferWriter) probeRequestBody() {
 	t.ByteReadCh = chan readResult{1}
-	func(body io.Reader) {
-		var buf [1]byte
-		var rres readResult
-		rres.n, rres.err = body.Read(buf[:])
-		if rres.n == 1 {
-			rres.b = buf[0]
-		}
-		t.ByteReadCh <- rres
-		close(t.ByteReadCh)
-	}(t.Body)
+	probeRequestBodyRead(t, t.Body)
 	timer := time.NewTimer(200 * time.Millisecond)
 	select {
 	case rres := <-t.ByteReadCh:
@@ -251,6 +242,20 @@ func (t *transferWriter) probeRequestBody() {
 		// become readable until it's seen the response headers.
 		t.FlushHeaders = true
 	}
+}
+
+// probeRequestBodyRead reads the first byte of the body and reports it on
+// t.ByteReadCh. It is a function rather than a func literal because the writer
+// it reports on travels with it.
+func probeRequestBodyRead(t *transferWriter, rdr io.Reader) {
+	var buf [1]byte
+	var rres readResult
+	rres.n, rres.err = rdr.Read(buf[:])
+	if rres.n == 1 {
+		rres.b = buf[0]
+	}
+	t.ByteReadCh <- rres
+	close(t.ByteReadCh)
 }
 
 func noResponseBodyExpected(requestMethod string) (rok bool) {

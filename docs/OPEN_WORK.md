@@ -8326,3 +8326,268 @@ writeBody(func (t *transferWriter) writeBody(w io.Writer) (err error) {`), and
    The closure is unavoidable while the field's type is a bare func.
 3. net's four: `sendFile` (the callback belongs to `syscall.RawConn.Write`),
    `(*Resolver).lookupIPAddr`'s mval and anon, `internetAddrList`'s anon.
+
+## Round 140: the last 47 captures, and the compiler bug that was eating one of them
+
+Every capture in the tracked remainder is gone: the 43 in `net/http`, the 4 in
+`net`, and three more the same sweep turned up in
+`net/http/internal/httpcommon` (that package only entered the census once the
+whole closure was rebuilt with the new compiler). The two recipes did the work
+again - a deferred closure becomes a deferred CALL whose state is an argument,
+a local helper or callback becomes a METHOD on an owner type - and the public
+fields that could not carry state as a bare func were widened the way
+`afterFunc` already was:
+
+    Request.GetBody        -> GetBodyFunc, with bufferGetBody / readerGetBody /
+                              emptyGetBody owners (NewRequestWithContext)
+    Transport.Proxy        -> ProxyFunc (envProxy for ProxyFromEnvironment,
+                              fixedProxy for ProxyURL)
+    Transport.DialContext  -> DialContextFunc (dialerDialContext carries the
+                              *net.Dialer)
+    Server.TLSNextProto    -> map[string]TLSNextProtoHandler (h2TLSNextProto,
+    Transport.TLSNextProto -> map[string]TransportNextProtoHandler
+                              h2UnencryptedTLSNextProto, h2TLSUpgrade,
+                              h2UnencryptedUpgrade)
+    syscall.RawConn        -> Control(RawConnControlAction), Read/Write(
+                              RawConnAction), forwarded through internal/poll
+                              and net.rawConn; net.sendFile's syscall now runs
+                              as sendFileAction
+    Server.onShutdown      -> []ShutdownHook (h2's server state is the hook)
+    singleflight.Do/DoChan -> Call (lookupIPCall carries the *Resolver)
+    hpack.Decoder.emit     -> FieldSink (http2metaHeaderSink, DiscardFields)
+    httpcommon.EncodeHeaders -> HeaderSink (http2ClientConn is the sink)
+    http2serveConnFunc     -> http2serveConnMsg (http2setDeadlineMsg)
+    http2pipe.readFn       -> http2pipeEOF (onPipeEOF copies trailers)
+    http2writePushPromise  -> http2promisedIDAllocator
+    walkReadyInOrder       -> http2priorityVisitor (http2popVisitor)
+    bodyEOFSignal          -> bodyEOFFunc / bodyEarlyCloser
+    mapping.eachPair       -> deleted; its only caller iterates the mapping
+                              directly (a concrete visitor could not be named
+                              through the generic type)
+    appendSorted           -> sort.Search inlined, and the insert rebuilt in one
+                              pass: copy(es[i+1:], es[i:]) was a NO-OP, because
+                              a Moxie subslice is a copy
+    adjustNextProtos       -> slices.DeleteFunc inlined as a presized pass
+
+### The compiler bug underneath `matchingMethodsPath`
+
+`(*routingNode).matchingMethodsPath` refused to compile:
+
+    ; cannot resolve the type of p in (*routingNode).matchingMethodsPath -
+      the right-hand side is not a value
+
+The construct was `for method, c := range n.children.m { if p, _ :=
+c.matchPath(pat7, nil); p != nil { ... } }` and the range value's type was the
+problem. Instrumenting the compiler (four bootstraps) printed the whole story:
+
+    DBG range (*routingNode).matchingMethodsPath iter=map[K]V val=V
+    DBG field kind=named targs=2 tparams=0 t=main.mapping idx=1 ft=map[K]V
+    DBG instfail base=mapping argKind=name:K
+
+`routingNode.children` is `mapping[string, *routingNode]`, but the Named that
+reached the SSA builder had **TArgs and no TParams**. The instantiation copy is
+a shallow `&Named{..., TParams: named.TParams, TArgs: args}` made where the
+instantiation is written; a copy made in another file - before that file's own
+pass attached the parameters - froze an empty TParams, and with no parameters
+there is nothing to bind the arguments to. So the field type stayed `map[K]V`,
+the range value's type stayed the type parameter `V`, method resolution on `V`
+found nothing, and `buildExpr` returned nil WITHOUT registering an error: the
+call was silently dropped. The fix is `namedTParams` (ir_types.mx): the
+declaration object the copy points at is the authority for the parameters, and
+every reader of `TParams` now goes through it (`llvmTypeInner`, `fieldType`,
+`instantiatedUnder`, `substTypeIn`, the descriptor copy). `varObject` in
+ssa_builder.mx is the same rule for the variable binding: a range/short-var
+object is registered with the type the SSA layer allocated for it, not with the
+type the front end recorded.
+
+### The second finding: a bogus type assertion compiled silently
+
+While instrumenting, `n.Obj.(*TypeName)` - where `Named.Obj` is ALREADY
+`*TypeName` - compiled and answered ok=false, so the fallback branch ran and
+the real bug stayed hidden for hours. go/types rejects that ("invalid type
+assertion ... (non-interface type ... on left)"); stage4 accepted it. It no
+longer does: `checkAssertOperand` reports it for both the single and the
+comma-ok form, verified by running:
+
+    $ tmp/mxc-r144 build -o /tmp/at1/bin /tmp/at1
+    ; invalid type assertion: main.T is not an interface
+
+### Wood law
+
+No legacy change is needed for either fix, and the check is positive rather
+than assumed: the legacy compiler consumes `go/types` + `golang.org/x/tools/go/ssa`
+(legacy/header.go, `loader.Load(config, pkgName, types.Config{})`), so it
+substitutes instantiated field types and rejects non-interface assertions
+already. Stage4 was the deviating side; these two changes move it to the same
+behaviour.
+
+### The complete census, and what is left
+
+With the whole closure rebuilt by the fixed compiler, the report is now a census
+of the entire build - not just net/http. It found net/http and net at ZERO, and
+three more sites in `net/http/internal/httpcommon` (EncodeHeaders' local
+`enumerateHeaders` helper and its two callbacks, now `enumerateRequestHeaders` +
+`HeaderEmitter` with `headerSizeCounter` and `requestHeaderWriter`). What
+remains is 20 sites, all in vendored packages:
+
+    golang.org/x/crypto/cryptobyte   10  (*Builder).AddASN1* bodies
+    golang.org/x/net/idna             7  Option-returning closures
+    golang.org/x/text/unicode/bidi    1  DefaultDirection
+    golang.org/x/text/unicode/norm    1  (*Form).IsNormalString
+    golang.org/x/net/http/httpproxy   1  (*Config).ProxyFunc's method value
+
+They are the same two recipes (`Option func(*options)` and
+`AddASN1(tag, func(*Builder))` are both bare func fields), but they are a
+separate tranche: they are vendored copies, and this round's scope was the
+47-capture remainder plus whatever the compiler bug underneath it exposed.
+
+### Verified by running
+
+    gt3 fixture (routing_tree.mx + mapping.mx, isolated):
+      before: "cannot resolve the type of p" x2, did not compile
+      after:  compiles, emits, links
+    net/http + net probe, whole closure rebuilt by the fixed compiler:
+      probe143 (r143): 43 -> 0 for net/http and net; 23 elsewhere (httpcommon 3,
+        vendored 20) - that run is what turned the report into a census
+      probe147 (r144, after every conversion): 0 errors, 0 captures, for the
+        whole closure
+    at1 fixture: invalid type assertion fails the build
+    FIXPOINT: `tmp/mxc-r144 build -o tmp/mxc-r145 ./_mxc_stage4` produces a
+      byte-identical binary (sha256 50a3a16f...), so the compiler with both
+      fixes reproduces itself in one generation
+
+### The vendored tranche, converted too
+
+The census listed 20 sites in five vendored packages; they are converted, each
+with the recipe its shape called for:
+
+    x/crypto/cryptobyte  AddASN1(tag, func(*Builder)) bodies rewritten to the
+                         callback-free BeginASN1/EndASN1 the tree already had
+                         (10 sites); callContinuation's deferred closure became
+                         the deferred CALL (*Builder).finishContinuation
+    x/net/idna           Option func(*options) became an Option INTERFACE;
+                         optionBool carries the boolean factories, and
+                         optionValidateLabels / optionCheckJoiners /
+                         optionBidiRule / optionValidateForRegistration /
+                         optionMapForLookup carry the multi-statement ones
+                         (in BOTH idna9.0.0.mx and idna10.0.0.mx)
+    x/text/unicode/bidi  optionDefaultDirection
+    x/text/unicode/norm  flushFunc interface with plainFlush adapting the three
+                         stateless flushes and normalStringFlush carrying
+                         (*int32) bp - a POINTER because the caller keeps
+                         walking from where the flush left off, which is what
+                         the closure mutated
+    x/net/http/httpproxy ProxyFuncValue interface; (*Config).ProxyFunc returns
+                         the preprocessed *config, and net/http's
+                         envProxyFuncValue is that interface now
+
+Two Moxie rules bit during the conversion and are worth recording, because both
+are the compiler telling the truth:
+
+  - a method that writes through a pointer FIELD counts as self-mutating, so
+    `:=` inside a loop is refused ("move the loop scratch into a helper
+    function"). normalStringFlush.flush hoists info/p/pe, and cryptobyte's
+    addASN1Signed/AddASN1Uint64 are the same shape.
+  - with that, the tree-wide census is ZERO: the compiler, net/http and its
+    internal packages, net, log, and every vendored package the build closure
+    reaches.
+
+
+### Open item found this round: `AddASN1`'s continuation SEGVs
+
+Writing the cryptobyte coverage turned up a runtime crash that is NOT the
+closure rule and NOT this round's rewrite:
+
+    // /tmp/fx2/main.mx
+    func addSeven(c *cryptobyte.Builder) { c.AddUint8(7) }
+
+    b := cryptobyte.NewBuilder(nil)
+    b.AddASN1(asn1.INTEGER, addSeven)
+    got, err := b.Bytes()          // -> panic: caught signal SIGSEGV
+
+A plain NAMED function crashes exactly like a func literal, so it is not the
+closure rule. It is the recover() bug above, and the chain is short:
+`AddASN1` -> `addLengthPrefixed` -> `callContinuation`, whose deferred
+`(*Builder).finishContinuation` calls recover() and writes state - the exact
+shape the matrix shows dying. The pre-round-140 code had the same recover() in
+a deferred CLOSURE with the same writes, so the callback API was crashing
+before this round too; it went unnoticed because nothing in the tree calls it
+any more. Every in-tree caller of the `AddASN1*` family now uses the inline
+`BeginASN1`/`EndASN1` path, and
+`tests/regressions/should_compile/asn1_builder_der.mx` covers that path byte
+for byte (18 encodings, each compared against the DER the rules require).
+
+So the continuation check comes back to that fixture once recover() is fixed,
+and it is one more reason the recover() item is first.
+
+### TOP OPEN ITEM: `recover()` corrupts the domain and it dies with SIGSEGV
+
+Found while giving the cryptobyte builder the coverage it never had. It is NOT
+the closure rule and NOT this round's rewrite - and it is the most serious thing
+in this file, because it means **the HTTP server's handler-panic recovery does
+not work**:
+
+    recover() inside a deferred func literal that does nothing else:
+        works
+    recover() in a deferred function that carries or uses ANY state
+    (arguments, a captured receiver, a call after it, a write):
+        the deferred work runs, then the domain dies with
+        "panic: runtime error at 0x0000000000000004: caught signal SIGSEGV"
+        at exit - with no panic anywhere in the program, too.
+
+The matrix, one binary per case, all built by mxc-r144 (native):
+
+    defer func() { freefin(t) }()          no panic  -> SIGSEGV at exit
+    defer func() { freefin(t) }()          panic     -> recovers, then SIGSEGV
+    defer func(x *T) { x.fin() }(t)        no panic  -> SIGSEGV at exit
+    defer func(x *T) { x.fin() }(t)        panic     -> recovers, then SIGSEGV
+    defer t.fin()                          no panic  -> SIGSEGV at exit
+    defer t.fin()                          panic     -> recovers, then SIGSEGV
+    defer freefin(t)                       no panic  -> SIGSEGV at exit
+    defer freefin(t)                       panic     -> recovers, then SIGSEGV
+    defer func() { recover(); ... }()      no panic  -> clean, exit 0
+
+(`fin`/`freefin` here only call recover() and print; no writes.)
+
+The faulting address is always 4 or 5 - a jump through a pointer holding a
+small integer - which points at `moxie_longjmp` resuming from a clobbered
+`deferFrame.JumpPC`. The thing to look at first is the setjmp-like checkpoint
+`ir_emit.mx` emits before every call in a function that has a defer frame
+("leaq 1f(%rip), %rax; movq %rax, 8($1); xorq %rax, %rax; 1:") together with
+the frame contract it writes into (`deferFrameLLVMType` in ir_defer.mx versus
+the runtime's own GEP offsets in setupDeferFrame/destroyDeferFrame). The
+`recover` call's second `ptr null` argument is the hidden closure-environment
+parameter every Moxie function carries, not a mismatch.
+
+Why it matters here: `(*conn).finishServe` (server.mx) and
+`(*http2serverConn).finishHandler` (h2_bundle.mx) are the deferred calls that
+recover a panicking handler, and round 139 moved recover() into those methods
+(it used to sit in a deferred closure). Round 139 did not create the defect -
+the state-carrying closure form is in the same matrix and dies the same way -
+but it is the code path a panicking handler takes, so nothing recovers a
+handler panic today. No test panics inside a handler, which is why the suite is
+green.
+
+Next round, in order:
+  1. reduce to the smallest IR-level repro (a defer frame + one call + recover),
+     dumping the emitted .ll;
+  2. fix the checkpoint/frame contract in stage4 (and check `_recover`'s arity
+     against the runtime's own signature - they disagree right now);
+  3. mirror in legacy/ if the legacy path has the same shape;
+  4. add a regression fixture that panics in a handler and asserts the server
+     answers 500 instead of dying.
+
+### Coverage gaps left by this round
+
+- The idna/norm conversions are COMPILE-verified (phase 1b builds net/http, which
+  pulls both) but not behaviour-verified: no fixture in the tree exercises idna
+  profiles or norm.IsNormalString. A fixture is drafted and parked at
+  `tmp/pending/idna_norm_hooks.mx` (Lookup vs Punycode vs Transitional, the
+  leading-hyphen rejection, NFC/NFD IsNormalString both ways, NFC/NFD.Bytes).
+  It was pulled from `tests/regressions/should_compile/` because its build did
+  not finish before the gate chain reached phase 5, and an unverified fixture
+  there can turn phase 5 red. It goes back in the moment it is seen to pass.
+- cryptobyte's builder path IS behaviour-verified now
+  (`tests/regressions/should_compile/asn1_builder_der.mx`, 18 encodings), but
+  the callback API (AddASN1 with a continuation) is not - it dies in recover()
+  (see the top item).

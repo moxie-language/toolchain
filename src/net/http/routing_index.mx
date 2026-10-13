@@ -59,29 +59,15 @@ func (idx *routingIndex) addPattern(pat *pattern) {
 // For instance, an implementation that returns all registered patterns is correct.
 // We use this fact throughout, simplifying the implementation by returning more
 // patterns that we might need to.
-func (idx *routingIndex) possiblyConflictingPatterns(pat *pattern, f func(*pattern) error) (err error) {
+func (idx *routingIndex) possiblyConflictingPatterns(pat *pattern, f conflictSink) (err error) {
 	// Terminology:
 	//   dollar pattern: one ending in "{$}"
 	//   multi pattern: one ending in a trailing slash or "{x...}" wildcard
 	//   ordinary pattern: neither of the above
 
-	// apply f to all the pats, stopping on error.
-	apply := func(pats []*pattern) error {
-		if err != nil {
-			return err
-		}
-		for _, p := range pats {
-			err = f(p)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
 	// Our simple indexing scheme doesn't try to prune multi patterns; assume
 	// any of them can match the argument.
-	if er2 := apply(idx.multis); er2 != nil {
+	if er2 := applyConflicts(idx.multis, f); er2 != nil {
 		return er2
 	}
 	if pat.lastSegment().s == "/" {
@@ -89,7 +75,7 @@ func (idx *routingIndex) possiblyConflictingPatterns(pat *pattern, f func(*patte
 		// an ordinary pattern matches do. So only other dollar or multi
 		// patterns can conflict with a dollar pattern. Furthermore, conflicting
 		// dollar patterns must have the {$} in the same position.
-		return apply(idx.segments[routingIndexKey{s: "/", pos: len(pat.segments) - 1}])
+		return applyConflicts(idx.segments[routingIndexKey{s: "/", pos: len(pat.segments) - 1}], f)
 	}
 	// For ordinary and multi patterns, the only conflicts can be with a multi,
 	// or a pattern that has the same literal or a wildcard at some literal
@@ -115,15 +101,29 @@ func (idx *routingIndex) possiblyConflictingPatterns(pat *pattern, f func(*patte
 		}
 	}
 	if hasLit {
-		apply(lmin)
-		apply(wmin)
-		return err
+		if er3 := applyConflicts(lmin, f); er3 != nil {
+			return er3
+		}
+		return applyConflicts(wmin, f)
 	}
 
 	// This pattern is all wildcards.
 	// Check it against everything.
 	for _, pats := range idx.segments {
-		apply(pats)
+		if er4 := applyConflicts(pats, f); er4 != nil {
+			return er4
+		}
 	}
-	return err
+	return nil
+}
+
+// applyConflicts calls f on every candidate pattern, stopping at the first
+// error.
+func applyConflicts(pats []*pattern, f conflictSink) (rerr error) {
+	for _, p := range pats {
+		if rerr = f.checkConflict(p); rerr != nil {
+			return rerr
+		}
+	}
+	return nil
 }

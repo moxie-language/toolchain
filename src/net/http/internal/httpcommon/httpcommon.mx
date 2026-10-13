@@ -204,12 +204,19 @@ type EncodeHeadersResult struct {
 	HasTrailers bool
 }
 
+// HeaderSink receives each header EncodeHeaders validates, in the order in
+// which the headers should be encoded. It is an interface rather than a
+// function value because the writer carries the state it encodes into.
+type HeaderSink interface {
+	writeHeader(name, value string)
+}
+
 // EncodeHeaders constructs request headers common to HTTP/2 and HTTP/3.
-// It validates a request and calls headerf with each pseudo-header and header
-// for the request.
-// The headerf function is called with the validated, canonicalized header name.
+// It validates a request and calls sink.writeHeader with each pseudo-header and
+// header for the request.
+// The sink is called with the validated, canonicalized header name.
 // The client trace is passed concretely: Moxie's context carries no values.
-func EncodeHeaders(trace *httptrace.ClientTrace, param EncodeHeadersParam, headerf func(name, value string)) (res EncodeHeadersResult, _ error) {
+func EncodeHeaders(trace *httptrace.ClientTrace, param EncodeHeadersParam, sink HeaderSink) (res EncodeHeadersResult, _ error) {
 	req := param.Request
 
 	// Check for invalid connection-level headers.
@@ -277,136 +284,160 @@ func EncodeHeaders(trace *httptrace.ClientTrace, param EncodeHeadersParam, heade
 		return res, err
 	}
 
-	enumerateHeaders := func(f func(name, value string)) {
-		// 8.1.2.3 Request Pseudo-Header Fields
-		// The :path pseudo-header field includes the path and query parts of the
-		// target URI (the path-absolute production and optionally a '?' character
-		// followed by the query production, see Sections 3.3 and 3.4 of
-		// [RFC3986]).
-		f(":authority", host)
-		m := req.Method
-		if m == "" {
-			m = "GET"
-		}
-		f(":method", m)
-		if !isNormalConnect {
-			f(":path", path)
-			f(":scheme", req.URL.Scheme)
-		}
-		if protocol != "" {
-			f(":protocol", protocol)
-		}
-		if trailers != "" {
-			f("trailer", trailers)
-		}
-
-		var didUA bool
-		for k, vv := range req.Header {
-			if asciiEqualFold(k, "host") || asciiEqualFold(k, "content-length") {
-				// Host is :authority, already sent.
-				// Content-Length is automatic, set below.
-				continue
-			} else if asciiEqualFold(k, "connection") ||
-				asciiEqualFold(k, "proxy-connection") ||
-				asciiEqualFold(k, "transfer-encoding") ||
-				asciiEqualFold(k, "upgrade") ||
-				asciiEqualFold(k, "keep-alive") {
-				// Per 8.1.2.2 Connection-Specific Header
-				// Fields, don't send connection-specific
-				// fields. We have already checked if any
-				// are error-worthy so just ignore the rest.
-				continue
-			} else if asciiEqualFold(k, "user-agent") {
-				// Match Go's http1 behavior: at most one
-				// User-Agent. If set to nil or empty string,
-				// then omit it. Otherwise if not mentioned,
-				// include the default (below).
-				didUA = true
-				if len(vv) < 1 {
-					continue
-				}
-				vv = vv[:1]
-				if vv[0] == "" {
-					continue
-				}
-			} else if asciiEqualFold(k, "cookie") {
-				// Per 8.1.2.5 To allow for better compression efficiency, the
-				// Cookie header field MAY be split into separate header fields,
-				// each with one or more cookie-pairs.
-				for _, v := range vv {
-					for {
-						p := bytes.IndexByte(v, ';')
-						if p < 0 {
-							break
-						}
-						f("cookie", v[:p])
-						p++
-						// strip space after semicolon if any.
-						for p+1 <= len(v) && v[p] == ' ' {
-							p++
-						}
-						v = v[p:]
-					}
-					if len(v) > 0 {
-						f("cookie", v)
-					}
-				}
-				continue
-			} else if k == ":protocol" {
-				// :protocol pseudo-header was already sent above.
-				continue
-			}
-
-			for _, v := range vv {
-				f(k, v)
-			}
-		}
-		if shouldSendReqContentLength(req.Method, req.ActualContentLength) {
-			f("content-length", strconv.FormatInt(req.ActualContentLength, 10))
-		}
-		if param.AddGzipHeader {
-			f("accept-encoding", "gzip")
-		}
-		if !didUA {
-			f("user-agent", param.DefaultUserAgent)
-		}
-	}
-
 	// Do a first pass over the headers counting bytes to ensure
 	// we don't exceed cc.peerMaxHeaderListSize. This is done as a
 	// separate pass before encoding the headers to prevent
 	// modifying the hpack state.
 	if param.PeerMaxHeaderListSize > 0 {
-		hlSize := uint64(0)
-		enumerateHeaders(func(name, value string) {
-			hf := hpack.HeaderField{Name: name, Value: value}
-			hlSize += uint64(hf.Size())
-		})
+		counter := &headerSizeCounter{}
+		enumerateRequestHeaders(req, host, path, protocol, trailers, isNormalConnect, param, counter)
 
-		if hlSize > param.PeerMaxHeaderListSize {
+		if counter.size > param.PeerMaxHeaderListSize {
 			return res, ErrRequestHeaderListSize
 		}
 	}
 
 	// Header list size is ok. Write the headers.
-	enumerateHeaders(func(name, value string) {
-		name, ascii := LowerHeader(name)
-		if !ascii {
-			// Skip writing invalid headers. Per RFC 7540, Section 8.1.2, header
-			// field names have to be ASCII characters (just as in HTTP/1.x).
-			return
-		}
-
-		headerf(name, value)
-
-		if trace != nil && trace.WroteHeaderField != nil {
-			trace.WroteHeaderField(name, [][]byte{value})
-		}
-	})
+	enumerateRequestHeaders(req, host, path, protocol, trailers, isNormalConnect, param, &requestHeaderWriter{sink: sink, trace: trace})
 
 	res.HasBody = req.ActualContentLength != 0
 	res.HasTrailers = trailers != ""
 	return res, nil
+}
+
+// enumerateRequestHeaders calls em for every header of the request, in the
+// order they are sent. The request state it walks arrives as parameters: a
+// func literal cannot carry it, and this used to be one.
+func enumerateRequestHeaders(req Request, host, path, protocol, trailers string, isNormalConnect bool, param EncodeHeadersParam, em HeaderEmitter) {
+	// 8.1.2.3 Request Pseudo-Header Fields
+	// The :path pseudo-header field includes the path and query parts of the
+	// target URI (the path-absolute production and optionally a '?' character
+	// followed by the query production, see Sections 3.3 and 3.4 of
+	// [RFC3986]).
+	em.emitHeader(":authority", host)
+	m := req.Method
+	if m == "" {
+		m = "GET"
+	}
+	em.emitHeader(":method", m)
+	if !isNormalConnect {
+		em.emitHeader(":path", path)
+		em.emitHeader(":scheme", req.URL.Scheme)
+	}
+	if protocol != "" {
+		em.emitHeader(":protocol", protocol)
+	}
+	if trailers != "" {
+		em.emitHeader("trailer", trailers)
+	}
+
+	var didUA bool
+	for k, vv := range req.Header {
+		if asciiEqualFold(k, "host") || asciiEqualFold(k, "content-length") {
+			// Host is :authority, already sent.
+			// Content-Length is automatic, set below.
+			continue
+		} else if asciiEqualFold(k, "connection") ||
+			asciiEqualFold(k, "proxy-connection") ||
+			asciiEqualFold(k, "transfer-encoding") ||
+			asciiEqualFold(k, "upgrade") ||
+			asciiEqualFold(k, "keep-alive") {
+			// Per 8.1.2.2 Connection-Specific Header
+			// Fields, don't send connection-specific
+			// fields. We have already checked if any
+			// are error-worthy so just ignore the rest.
+			continue
+		} else if asciiEqualFold(k, "user-agent") {
+			// Match Go's http1 behavior: at most one
+			// User-Agent. If set to nil or empty string,
+			// then omit it. Otherwise if not mentioned,
+			// include the default (below).
+			didUA = true
+			if len(vv) < 1 {
+				continue
+			}
+			vv = vv[:1]
+			if vv[0] == "" {
+				continue
+			}
+		} else if asciiEqualFold(k, "cookie") {
+			// Per 8.1.2.5 To allow for better compression efficiency, the
+			// Cookie header field MAY be split into separate header fields,
+			// each with one or more cookie-pairs.
+			for _, v := range vv {
+				for {
+					p := bytes.IndexByte(v, ';')
+					if p < 0 {
+						break
+					}
+					em.emitHeader("cookie", v[:p])
+					p++
+					// strip space after semicolon if any.
+					for p+1 <= len(v) && v[p] == ' ' {
+						p++
+					}
+					v = v[p:]
+				}
+				if len(v) > 0 {
+					em.emitHeader("cookie", v)
+				}
+			}
+			continue
+		} else if k == ":protocol" {
+			// :protocol pseudo-header was already sent above.
+			continue
+		}
+
+		for _, v := range vv {
+			em.emitHeader(k, v)
+		}
+	}
+	if shouldSendReqContentLength(req.Method, req.ActualContentLength) {
+		em.emitHeader("content-length", strconv.FormatInt(req.ActualContentLength, 10))
+	}
+	if param.AddGzipHeader {
+		em.emitHeader("accept-encoding", "gzip")
+	}
+	if !didUA {
+		em.emitHeader("user-agent", param.DefaultUserAgent)
+	}
+}
+
+// HeaderEmitter receives each header name and value of a request.
+type HeaderEmitter interface {
+	emitHeader(name, value string)
+}
+
+// headerSizeCounter measures the hpack size of a header list.
+type headerSizeCounter struct {
+	size uint64
+}
+
+func (c *headerSizeCounter) emitHeader(name, value string) {
+	hf := hpack.HeaderField{Name: name, Value: value}
+	c.size += uint64(hf.Size())
+}
+
+// requestHeaderWriter writes each header through the sink and reports it to the
+// client trace.
+type requestHeaderWriter struct {
+	sink  HeaderSink
+	trace *httptrace.ClientTrace
+}
+
+func (w *requestHeaderWriter) emitHeader(name, value string) {
+	name, ascii := LowerHeader(name)
+	if !ascii {
+		// Skip writing invalid headers. Per RFC 7540, Section 8.1.2, header
+		// field names have to be ASCII characters (just as in HTTP/1.x).
+		return
+	}
+
+	w.sink.writeHeader(name, value)
+
+	if w.trace != nil && w.trace.WroteHeaderField != nil {
+		w.trace.WroteHeaderField(name, [][]byte{value})
+	}
 }
 
 // IsRequestGzip reports whether we should add an Accept-Encoding: gzip header

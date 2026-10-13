@@ -236,19 +236,23 @@ func (b *Builder) EndLengthPrefixed() {
 	c.flushChild()
 }
 
+// finishContinuation clears the in-continuation flag and turns a panic raised
+// by a continuation into an error on the builder. It is a deferred CALL rather
+// than a deferred closure, because a func value cannot carry the builder.
+func (b *Builder) finishContinuation() {
+	*b.inContinuation = false
+
+	r := recover()
+	if r == "" {
+		return
+	}
+	b.err = errors.New(r)
+}
+
 func (b *Builder) callContinuation(f BuilderContinuation, arg *Builder) {
 	if !*b.inContinuation {
 		*b.inContinuation = true
-
-		defer func() {
-			*b.inContinuation = false
-
-			r := recover()
-			if r == "" {
-				return
-			}
-			b.err = errors.New(r)
-		}()
+		defer b.finishContinuation()
 	}
 
 	f(arg)

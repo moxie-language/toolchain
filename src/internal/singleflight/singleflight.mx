@@ -34,12 +34,18 @@ type Result struct {
 	Shared bool
 }
 
+// Call is the work a Group runs once per key. It is an interface rather than a
+// function value because the work carries the arguments of the lookup it runs.
+type Call interface {
+	call() (unsafe.Pointer, error)
+}
+
 // Do executes and returns the results of the given function, making
 // sure that only one execution is in-flight for a given key at a
 // time. If a duplicate comes in, the duplicate caller waits for the
 // original to complete and receives the same results.
 // The return value shared indicates whether v was given to multiple callers.
-func (g *Group) Do(key []byte, fn func() (unsafe.Pointer, error)) (v unsafe.Pointer, err error, shared bool) {
+func (g *Group) Do(key []byte, fn Call) (v unsafe.Pointer, err error, shared bool) {
 
 	if g.m == nil {
 		g.m = map[string]*call{}
@@ -57,7 +63,7 @@ func (g *Group) Do(key []byte, fn func() (unsafe.Pointer, error)) (v unsafe.Poin
 
 // DoChan is like Do but returns a channel that will receive the
 // results when they are ready.
-func (g *Group) DoChan(key []byte, fn func() (unsafe.Pointer, error)) (out <-chan Result) {
+func (g *Group) DoChan(key []byte, fn Call) (out <-chan Result) {
 	ch := chan Result{1}
 
 	if g.m == nil {
@@ -79,8 +85,8 @@ func (g *Group) DoChan(key []byte, fn func() (unsafe.Pointer, error)) (out <-cha
 }
 
 // doCall handles the single call for a key.
-func (g *Group) doCall(c *call, key []byte, fn func() (unsafe.Pointer, error)) {
-	c.val, c.err = fn()
+func (g *Group) doCall(c *call, key []byte, fn Call) {
+	c.val, c.err = fn.call()
 
 	if g.m[key] == c {
 		delete(g.m, key)

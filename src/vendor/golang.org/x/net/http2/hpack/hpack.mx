@@ -12,6 +12,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+
+	"git.smesh.lol/moxie/pkg/mxutil"
 )
 
 // A DecodingError is something the spec defines as a decoding error.
@@ -82,7 +84,7 @@ func (hf HeaderField) Size() uint32 {
 // header blocks.
 type Decoder struct {
 	dynTab dynamicTable
-	emit   func(f HeaderField)
+	emit   FieldSink
 
 	emitEnabled bool // whether calls to emit are enabled
 	maxStrLen   int32  // 0 means unlimited
@@ -100,12 +102,36 @@ type Decoder struct {
 	firstField bool // processing the first field of the header block
 }
 
+// FieldSink receives each valid header field a Decoder parses. It is an
+// interface rather than a function value because the collector carries the
+// state it accumulates into.
+type FieldSink interface {
+	emitField(f HeaderField)
+}
+
+// DiscardFields is a FieldSink that drops every field.
+type DiscardFields struct {
+}
+
+func (DiscardFields) emitField(f HeaderField) {
+}
+
+// fieldCollector accumulates every field it is handed.
+type fieldCollector struct {
+	fields []HeaderField
+}
+
+func (c *fieldCollector) emitField(f HeaderField) {
+	c.fields = mxutil.Ensure(c.fields, 1)
+	c.fields = push(c.fields, f)
+}
+
 // NewDecoder returns a new decoder with the provided maximum dynamic
-// table size. The emitFunc will be called for each valid field
+// table size. The sink will be called for each valid field
 // parsed, in the same goroutine as calls to Write, before Write returns.
-func NewDecoder(maxDynamicTableSize uint32, emitFunc func(f HeaderField)) *Decoder {
+func NewDecoder(maxDynamicTableSize uint32, sink FieldSink) *Decoder {
 	d := &Decoder{
-		emit:        emitFunc,
+		emit:        sink,
 		emitEnabled: true,
 		firstField:  true,
 	}
@@ -127,11 +153,11 @@ func (d *Decoder) SetMaxStringLength(n int32) {
 	d.maxStrLen = n
 }
 
-// SetEmitFunc changes the callback used when new header fields
+// SetEmitFunc changes the sink used when new header fields
 // are decoded.
 // It must be non-nil. It does not affect EmitEnabled.
-func (d *Decoder) SetEmitFunc(emitFunc func(f HeaderField)) {
-	d.emit = emitFunc
+func (d *Decoder) SetEmitFunc(sink FieldSink) {
+	d.emit = sink
 }
 
 // SetEmitEnabled controls whether the emitFunc provided to NewDecoder
@@ -220,18 +246,20 @@ func (d *Decoder) at(i uint64) (hf HeaderField, ok bool) {
 //
 // TODO: remove this method and make it incremental later? This is
 // easier for debugging now.
-func (d *Decoder) DecodeFull(p []byte) ([]HeaderField, error) {
-	var hf []HeaderField
+func (d *Decoder) DecodeFull(p []byte) (rf []HeaderField, rerr error) {
 	saveFunc := d.emit
-	defer func() { d.emit = saveFunc }()
-	d.emit = func(f HeaderField) { hf = push(hf, f) }
+	collector := &fieldCollector{}
+	d.emit = collector
 	if _, err := d.Write(p); err != nil {
+		d.emit = saveFunc
 		return nil, err
 	}
 	if err := d.Close(); err != nil {
+		d.emit = saveFunc
 		return nil, err
 	}
-	return hf, nil
+	d.emit = saveFunc
+	return collector.fields, nil
 }
 
 // Close declares that the decoding is complete and resets the Decoder
@@ -408,7 +436,7 @@ func (d *Decoder) callEmit(hf HeaderField) error {
 		}
 	}
 	if d.emitEnabled {
-		d.emit(hf)
+		d.emit.emitField(hf)
 	}
 	return nil
 }

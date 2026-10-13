@@ -15,10 +15,8 @@ package http
 // Do not modify this file, it should remain frozen.
 
 import (
-	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"net/url"
-	"sort"
 )
 
 func _use121() (rok bool) {
@@ -65,18 +63,27 @@ func (mux *serveMux121) handle(patter2 []byte, handler Handler) {
 
 func appendSorted(es []muxEntry, e muxEntry) (rmuxEntry []muxEntry) {
 	n := len(es)
-	i := sort.Search(n, func(i int32) bool {
-		return len(es[i].pattern) < len(e.pattern)
-	})
-	if i == n {
-		return push(es, e)
+	// The first i whose pattern is not shorter than e's. This is
+	// sort.Search's binary search written out: its predicate would have to
+	// carry es and e, which a function value cannot do.
+	i := int32(0)
+	j := n
+	for i < j {
+		mid := (i + j) / 2
+		if len(es[mid].pattern) < len(e.pattern) {
+			i = mid + 1
+		} else {
+			j = mid
+		}
 	}
-	// we now know that i points at where we want to insert
-	es = mxutil.Ensure(es, 1)
-	es = push(es, muxEntry{}) // try to grow the slice in place, any entry works.
-	copy(es[i+1:], es[i:])      // Move shorter entries down
-	es[i] = e
-	return es
+	// Insert e at i in one pass. The in-place shift Go's appendSorted did
+	// with copy(es[i+1:], es[i:]) cannot work here: a Moxie subslice is a
+	// copy, so the write would land in a temporary.
+	out := []muxEntry{:0: n + 1}
+	out = push(out, es[:i]...)
+	out = push(out, e)
+	out = push(out, es[i:]...)
+	return out
 }
 
 // Formerly ServeMux.HandleFunc.

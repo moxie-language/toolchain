@@ -2159,16 +2159,17 @@ func (fb *ssaFuncBuilder) errPos() (s string) {
 // two disagree about the same type.
 func instantiatedUnder(t Type) (tv Type) {
 	n, ok := t.(*Named)
-	if !ok || len(n.TParams) == 0 || len(n.TArgs) == 0 {
+	tparams := namedTParams(n)
+	if !ok || len(tparams) == 0 || len(n.TArgs) == 0 {
 		return t
 	}
-	m := len(n.TParams)
+	m := len(tparams)
 	if len(n.TArgs) < m {
 		m = len(n.TArgs)
 	}
 	bind := map[string]Type{}
 	for i := int32(0); i < int32(m); i++ {
-		bind[n.TParams[i].String()] = n.TArgs[i]
+		bind[tparams[i].String()] = n.TArgs[i]
 	}
 	return substTypeIn(n.Under, bind)
 }
@@ -2706,6 +2707,30 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 // shortVarStore assigns one LHS name of a short variable declaration.
 // Go semantics: if the name already denotes a variable in the same scope,
 // := reassigns it (info.Defs is nil); otherwise it declares a new local.
+//
+// varObject returns the Object a new variable is registered under, carrying the
+// type the SSA layer built for it rather than the type the type checker
+// recorded. The two disagree exactly where an instantiation is involved: a
+// range over a field of an instantiated generic (mapping[K,V].m) has the
+// UNSUBSTITUTED parameter type V on the object the checker defines, while the
+// substitution is materialized in the SSA type. A variable loaded or dispatched
+// at V is dropped silently - `for k, v := range g.m { v.matchPath(...) }` lost
+// the call and reported "cannot resolve the type of p". buildLocalDecl already
+// took this ownership for a nil object type (`tv.Typ == nil`); this is the same
+// rule for every other binding.
+func (fb *ssaFuncBuilder) varObject(name *syntax.Name, typ Type) (obj Object) {
+	if fb.info != nil {
+		obj = fb.info.Defs[name]
+	}
+	if obj == nil {
+		return NewTCVar(fb.fn.Pkg.Pkg, name.Value, typ)
+	}
+	if tv, isVar := obj.(*TCVar); isVar && tv.Typ != typ {
+		tv.Typ = typ
+	}
+	return obj
+}
+
 func (fb *ssaFuncBuilder) shortVarStore(name *syntax.Name, val SSAValue, typ Type) {
 	if name == nil || name.Value == "_" {
 		return
@@ -2744,13 +2769,7 @@ func (fb *ssaFuncBuilder) shortVarStore(name *syntax.Name, val SSAValue, typ Typ
 		shadowErr(fb.fn.name, name.Value)
 	}
 	fb.removeVar(name.Value)
-	var obj Object
-	if fb.info != nil {
-		obj = fb.info.Defs[name]
-	}
-	if obj == nil {
-		obj = NewTCVar(fb.fn.Pkg.Pkg, name.Value, typ)
-	}
+	obj := fb.varObject(name, typ)
 	alloc := fb.emitAlloc(typ, 0)
 	fb.vars[obj] = alloc
 	fb.varScope[obj] = fb.scopeID
@@ -2765,6 +2784,9 @@ func (fb *ssaFuncBuilder) buildShortVarDecl(s *syntax.AssignStmt) {
 		if ae, ok := s.Rhs.(*syntax.AssertExpr); ok {
 			x := fb.buildExpr(ae.X)
 			assertedType := fb.resolveType(ae.Type)
+			if !fb.checkAssertOperand(x) {
+				return
+			}
 			if assertedType != nil {
 				if x == nil {
 					x = &SSAConst{typ: NewTCInterface(nil, nil)}
@@ -3603,13 +3625,7 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *syntax.ForStmt, rc *syntax.RangeClau
 			ext.typ = ssaTupleElemType(nxt.typ, i+1)
 			ext.name = fb.nextName()
 			fb.emit(ext)
-			var obj Object
-			if fb.info != nil {
-				obj = fb.info.Defs[name]
-			}
-			if obj == nil {
-				obj = NewTCVar(fb.fn.Pkg.Pkg, name.Value, ext.typ)
-			}
+			obj := fb.varObject(name, ext.typ)
 			fb.removeVar(name.Value)
 			alloc := fb.emitAlloc(ext.typ, 0)
 			fb.vars[obj] = alloc
@@ -6904,10 +6920,38 @@ func (fb *ssaFuncBuilder) buildArrayAddr(x syntax.Expr) (s SSAValue) {
 	return nil
 }
 
+// checkAssertOperand reports a type assertion whose operand is not an
+// interface. On a concrete operand the assertion is impossible, and the
+// emitter's switch had no case for it: `n.Obj.(*TypeName)` - where Named.Obj is
+// already *TypeName - compiled and silently answered ok=false, so the fallback
+// branch ran and the real bug stayed hidden a whole debugging session.
+// go/types rejects this in the legacy pipeline; stage4 must not be laxer.
+func (fb *ssaFuncBuilder) checkAssertOperand(x SSAValue) (ok bool) {
+	if x == nil {
+		return true
+	}
+	xt := x.SSAType()
+	if xt == nil {
+		return true
+	}
+	if _, isIface := SafeUnderlying(xt).(*TCInterface); isIface {
+		return true
+	}
+	if _, isTP := xt.(*TypeParam); isTP {
+		return true
+	}
+	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+	push(cctx.compileErrors, "invalid type assertion: " | xt.String() | " is not an interface")
+	return false
+}
+
 func (fb *ssaFuncBuilder) buildAssert(e *syntax.AssertExpr) (s SSAValue) {
 	x := fb.buildExpr(e.X)
 	assertedType := fb.resolveType(e.Type)
 	if x == nil {
+		return nil
+	}
+	if !fb.checkAssertOperand(x) {
 		return nil
 	}
 	ta := &SSATypeAssert{X: x, AssertedType: assertedType, CommaOk: false}
@@ -8941,17 +8985,18 @@ func (fb *ssaFuncBuilder) fieldType(t Type, idx int32) (tv Type) {
 	// value and printing it printed nothing. src/internal/trace's
 	// `ordering.queue` (a queue[Event]) depends on this to reach
 	// (*queue).pop at all.
-	if gn, okg := t.(*Named); okg && len(gn.TArgs) > 0 && len(gn.TParams) > 0 {
+	if gn, okg := t.(*Named); okg && len(gn.TArgs) > 0 && len(namedTParams(gn)) > 0 {
+		tparams := namedTParams(gn)
 		merged := map[string]Type{}
 		for k, v := range fb.typeSubst {
 			merged[k] = v
 		}
-		n := len(gn.TParams)
+		n := len(tparams)
 		if len(gn.TArgs) < n {
 			n = len(gn.TArgs)
 		}
 		for i := int32(0); i < int32(n); i++ {
-			merged[gn.TParams[i].String()] = gn.TArgs[i]
+			merged[tparams[i].String()] = gn.TArgs[i]
 		}
 		saved := fb.typeSubst
 		fb.typeSubst = merged
@@ -9039,13 +9084,14 @@ func substTypeIn(t Type, sub map[string]Type) (tv Type) {
 			return NewTCStruct(fields, tt.Tags)
 		}
 	case *Named:
-		if len(tt.TParams) == 0 {
+		tparams := namedTParams(tt)
+		if len(tparams) == 0 {
 			return t
 		}
 		inner := map[string]Type{}
 		changed := false
 		if len(tt.TArgs) > 0 {
-			n := len(tt.TParams)
+			n := len(tparams)
 			if len(tt.TArgs) < n {
 				n = len(tt.TArgs)
 			}
@@ -9054,7 +9100,7 @@ func substTypeIn(t Type, sub map[string]Type) (tv Type) {
 				if a != tt.TArgs[i] {
 					changed = true
 				}
-				inner[tt.TParams[i].String()] = a
+				inner[tparams[i].String()] = a
 			}
 		} else {
 			// A generic type written inside a generic declaration carries no
@@ -9064,9 +9110,9 @@ func substTypeIn(t Type, sub map[string]Type) (tv Type) {
 			// element stayed the generic entry and the push/range temporaries
 			// were alloca {i8, i8} while the value stored into them was the
 			// substituted struct.
-			for i := int32(0); i < int32(len(tt.TParams)); i++ {
-				if r, ok := sub[tt.TParams[i].String()]; ok {
-					inner[tt.TParams[i].String()] = r
+			for i := int32(0); i < int32(len(tparams)); i++ {
+				if r, ok := sub[tparams[i].String()]; ok {
+					inner[tparams[i].String()] = r
 					changed = true
 				}
 			}

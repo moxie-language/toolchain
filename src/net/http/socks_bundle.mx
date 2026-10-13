@@ -86,7 +86,7 @@ func (d *socksDialer) connect(ctx context.Context, c net.Conn, address string) (
 		return nil, errors.New("no acceptable authentication methods")
 	}
 	if d.Authenticate != nil {
-		if ctxErr = d.Authenticate(ctx, c, am); ctxErr != nil {
+		if ctxErr = d.Authenticate.authenticate(ctx, c, am); ctxErr != nil {
 			return
 		}
 	}
@@ -301,10 +301,16 @@ type socksDialer struct {
 	// If empty, SOCKS client requests only AuthMethodNotRequired.
 	AuthMethods []socksAuthMethod
 
-	// Authenticate specifies the optional authentication
-	// function. It must be non-nil when AuthMethods is not empty.
+	// Authenticate specifies the optional authentication hook.
+	// It must be non-nil when AuthMethods is not empty.
 	// It must return an error when the authentication is failed.
-	Authenticate func(context.Context, io.ReadWriter, socksAuthMethod) error
+	Authenticate socksAuthenticator
+}
+
+// socksAuthenticator performs the authentication method the proxy selected. It
+// is an interface because the credentials travel with the hook.
+type socksAuthenticator interface {
+	authenticate(ctx context.Context, rw io.ReadWriter, method socksAuthMethod) error
 }
 
 // DialContext connects to the provided address on the provided
@@ -451,9 +457,9 @@ type socksUsernamePassword struct {
 	Password string
 }
 
-// Authenticate authenticates a pair of username and password with the
+// authenticate authenticates a pair of username and password with the
 // proxy server.
-func (up *socksUsernamePassword) Authenticate(ctx context.Context, rw io.ReadWriter, auth socksAuthMethod) (rerr error) {
+func (up *socksUsernamePassword) authenticate(ctx context.Context, rw io.ReadWriter, auth socksAuthMethod) (rerr error) {
 	switch auth {
 	case socksAuthMethodNotRequired:
 		return nil
