@@ -1,19 +1,25 @@
 // Regression: the STDLIB web framework must work end-to-end in a browser.
 //
 // web/dom lives in src/ now and the module runs in a Worker, so every DOM call
-// in this file crosses the page<->Worker relay: the request goes over a
-// MessagePort, the page performs it against jsruntime/dom.mjs, and the answer
-// comes back through a SharedArrayBuffer. Nothing here can pass by accident -
-// each step asserts what the document actually holds, and a wrong answer panics
-// (and a panic is fatal), so a green browser run is a positive claim about the
-// round trip rather than the absence of an error.
+// in this file crosses the page<->Worker relay: requests go over a MessagePort
+// and answers come back through a SharedArrayBuffer. Nothing here can pass by
+// accident - each step asserts what the document actually holds, and a wrong
+// answer panics (and a panic is fatal), so a green browser run is a positive
+// claim about the round trip rather than the absence of an error.
 //
-// Phase 5 builds this natively and for wasm and runs the wasm one in Chromium
-// through the stdlib host page. There is no native reference to compare
-// against: natively the wasm-only packages are the panic stubs, so a native run
-// panics by design. The marker below says so once - phase 0 still compiles it
-// natively (that is what keeps the stubs compiling into an app) and skips only
-// the run, and phase 5 takes the browser result as the result.
+// The second half of the file is the OTHER direction: the page calls INTO the
+// module. main returns after asking for a timer, and from then on the module is
+// passive - the page produces a timer tick, a fetch reply, a bounding box and a
+// resize observation, and the relay delivers each one to code that registered
+// for it. The chain ends in the PASS line, so a callback that never arrives
+// leaves the expected output short and phase 5 fails on the difference: without
+// that, "the callback never fired" would look exactly like success.
+//
+// There is no native reference to compare against - natively the wasm-only
+// packages are panic stubs, so a native run panics by design. The marker below
+// says so once: phase 0 still compiles it natively (that is what keeps the
+// stubs compiling into an app) and skips only the run, while phase 5 takes the
+// browser run against tests/wasm/expected/web_dom_roundtrip.txt as the result.
 //:wasmtest browser-only
 package main
 
@@ -21,9 +27,11 @@ import (
 	"web/dom"
 )
 
+const boxID = "moxie-framework-probe"
+
 func assert(ok bool, what string) {
 	if !ok {
-		panic("dom round trip: " + what)
+		panic("dom round trip: " | what)
 	}
 	println("ok:", what)
 }
@@ -37,19 +45,19 @@ func main() {
 	// Create, mark, and attach.
 	box := dom.CreateElement("div")
 	assert(box != 0, "create_element returns a handle")
-	dom.SetAttribute(box, "id", "moxie-framework-probe")
+	dom.SetAttribute(box, "id", boxID)
 	dom.SetTextContent(box, "framework ok")
 	dom.AppendChild(body, box)
 
 	// Find it back through the document, not through our own handle: that is
 	// the round trip through the JS bridge and back.
-	found := dom.GetElementById("moxie-framework-probe")
+	found := dom.GetElementById(boxID)
 	assert(found != 0, "attached element is in the document")
-	assert(dom.GetAttribute(found, "id") == "moxie-framework-probe", "attribute round trip")
+	assert(dom.GetAttribute(found, "id") == boxID, "attribute round trip")
 	assert(dom.GetProperty(found, "textContent") == "framework ok", "property round trip")
 
 	// A selector lookup, which runs on the page against the real document.
-	assert(dom.QuerySelectorFrom(body, "#moxie-framework-probe") != 0, "selector finds the element")
+	assert(dom.QuerySelectorFrom(body, "#" | boxID) != 0, "selector finds the element")
 
 	// A child of its own, then a removal that must actually remove.
 	kid := dom.CreateElement("span")
@@ -66,12 +74,45 @@ func main() {
 	assert(dom.GetViewportWidth() > 0, "viewport width is readable")
 	assert(dom.GetPath() != "", "page path is readable")
 
-	// The release side: the page drops its references and the document loses
-	// the element.
-	orphan := dom.CreateElement("p")
-	dom.Remove(box)
-	dom.ReleaseAll([]int32{int32(box), int32(kid), int32(orphan)})
-	assert(dom.GetElementById("moxie-framework-probe") == 0, "removed element left the document")
+	// The release side: the page drops its references and the document loses the
+	// element. The probe box stays attached - the callbacks below need it.
+	gone := dom.CreateElement("p")
+	dom.SetAttribute(gone, "id", "moxie-gone")
+	dom.AppendChild(body, gone)
+	dom.Remove(gone)
+	assert(dom.GetElementById("moxie-gone") == 0, "removed element left the document")
+	dom.ReleaseAll([]int32{int32(kid), int32(gone)})
 
+	// The last act of main. Everything after this is the page calling back into
+	// a module that has already returned.
+	dom.SetTimeout(onTimer, 0)
+}
+
+// The callbacks below must not capture a local - a Moxie closure takes only its
+// parameters and globals - so each one finds the element again through the
+// document, which is also a second round trip through the relay.
+
+func onTimer() {
+	println("ok: set_timeout callback")
+	dom.FetchText("/jsruntime/dom-ops.mjs", onFetchText)
+}
+
+func onFetchText(text string) {
+	assert(len(text) > 1000, "fetch_text callback carries the file")
+	dom.GetBoundingRect(dom.GetElementById(boxID), onBoundingRect)
+}
+
+func onBoundingRect(l, t, r, b, w, h int32) {
+	assert(w > 0 && h > 0, "get_bounding_rect callback reports a real box")
+	dom.ObserveResize(dom.GetElementById(boxID), dom.RegisterCallback(onResize))
+	dom.SetStyle(dom.GetElementById(boxID), "width", "40px")
+}
+
+func onResize() {
+	println("ok: observe_resize callback")
+	dom.RequestAnimationFrame(onFrame)
+}
+
+func onFrame() {
 	println("PASS: stdlib web framework round trip")
 }

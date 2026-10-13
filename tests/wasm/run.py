@@ -68,7 +68,10 @@ def main():
             browser.close()
             srv.shutdown()
             return 1
-        page.wait_for_timeout(200)
+        # The module is passive after _start: the page drives it through the
+        # relay, so its last output can arrive after __done. Give the callbacks
+        # room to land before reading the log.
+        page.wait_for_timeout(600)
         out = page.evaluate("() => ({logs: window.__logs, error: window.__error, errs: window.__consoleErrors})")
         browser.close()
     srv.shutdown()

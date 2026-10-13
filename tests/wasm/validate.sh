@@ -124,10 +124,25 @@ for t in "${TARGETS[@]}"; do
     # stubs off-target, so the native binary cannot be the reference. The
     # browser run above already had to exit clean, and the fixture asserts the
     # round trip itself - a wrong answer panics inside the module - so the
-    # browser result stands alone rather than being compared to a panic.
+    # browser result stands alone rather than being compared to a panic. It
+    # states its own expected output instead, because "no error" is not enough:
+    # a callback the page never delivered leaves a clean run with output
+    # missing, and only a comparison can see that.
     if grep -q '//:wasmtest browser-only' "$t" 2>/dev/null; then
-        printf '%-32s PASS  (browser only)\n' "$name"
-        PASS=$((PASS+1))
+        EXPECTED="$ROOT/tests/wasm/expected/$name.txt"
+        if [ ! -f "$EXPECTED" ]; then
+            printf '%-32s FAIL  (browser-only fixture has no %s)\n' "$name" "tests/wasm/expected/$name.txt"
+            FAIL=$((FAIL+1))
+            continue
+        fi
+        if diff -q "$EXPECTED" "$d/wasm.clean" >/dev/null; then
+            printf '%-32s PASS  (browser only)\n' "$name"
+            PASS=$((PASS+1))
+        else
+            printf '%-32s FAIL  (browser output differs from expected)\n' "$name"
+            diff "$EXPECTED" "$d/wasm.clean" | head -6 | sed 's/^/      /'
+            FAIL=$((FAIL+1))
+        fi
         continue
     fi
 

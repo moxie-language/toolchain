@@ -8999,3 +8999,148 @@ lifetimes that have to change are already visible:
    the page must hand out one port per spawned domain, either at boot for a
    fixed pool or on request while the root domain is idle. Until then a spawned
    domain's DOM calls fail by name, which is what the relay does today.
+
+## Round 144: the other direction - the page calls into the module
+
+Round 143 carried requests one way. This round carries the answers back, which
+is what the 26 `PENDING` operations were waiting for, and it took three changes
+in the hosts plus one in the fixture model.
+
+**The root Worker now outlives `_start`.** `worker-host.runRoot` still posts
+`done` when the module returns, and `loader.mjs` still resolves on it, but
+`startDomain` no longer terminates the root Worker: from that moment the page
+owns the module and drives it through the relay. A spawned domain still
+terminates when its entry function returns - it holds no port, so nothing can
+call into it afterwards.
+
+**The relay port carries callbacks back.** `serveRelay` builds the forwarders
+the table asks for (`cb.void`, `cb.str`, `cb.bool`, `cb.i6`, `cb.ss`) and posts
+`{cb, id, ...}` over the same port the requests arrive on; `worker-host` listens
+on its end and calls `dispatchCallback`, which maps the kind onto the module's
+own `web/callback` handle and queues the call (`__cb0`, `__cbs`, `__cbb`,
+`__cb6i`, `__cbss`). The ids are the module's handles, so the code that
+registered the callback is the code that runs, and each callback is a fresh
+entry into wasm from a clean stack rather than from inside the Worker's message
+handler.
+
+**25 of the 26 operations are now real entries in the table**: timers, event
+listeners (plain, self, enter-key, removal), resize observers, animation
+frames, bounding rect, fetch text / relay info / blob PUT, IDB get and get-all,
+service-worker messages, popstate, internal-link interception, clipboard read
+and write, file pickers, paste/drop images, pull-to-refresh, copy-image. The
+table also lost its second implementation: `host.mjs`'s 120 lines of hand-written
+async bridge bodies and the `pageOnly` half-measure are gone, the page-side DOM
+path (D = dom.mjs) is deleted because a module always runs in a Worker, and
+`buildBridge` now says once, by name, that it needs a relay proxy instead of
+failing per call with a TypeError. The 82 bridge entries are still the wasm ABI
+and nothing more: pointers and lengths in, plain values to D.
+
+**One operation has no answer path anywhere: `on_keydown`.** The module must
+decide before the page can `preventDefault`, so the page would have to call into
+the Worker and WAIT, and the page thread cannot block on a Worker. It fails by
+name with that reason. smesh's own worker host has the same hole: it calls
+`__hook_keydown` and drops the return value, so its OnKeydown cannot prevent
+anything either. A real fix is an API change, not a host change - the module
+would register a key policy up front and the page would apply it synchronously -
+and it is not needed by anything in the tree today.
+
+**Late failures are no longer swallowed.** With the root Worker alive after
+`done`, a callback that panics has no caller left: `onSettled` belongs to a
+promise that settled long ago. A domain error now goes to `console.error` as
+well as to the caller, so a failing callback cannot look like success.
+
+**Evidence, both directions, before any wasm build.** The Node pre-flight
+(tmp/relay_preflight.mjs) runs the real table on a page-side thread and the real
+proxy on a `worker_thread` over a real MessagePort and SharedArrayBuffer: 27
+checks, including the fixture's exact sync sequence and eight callback kinds
+produced by the page - a fired timer, a real `fetch` of a `data:` URL, an
+animation frame, an element click, a bounding box, a fired ResizeObserver, a
+dispatched popstate - each one arriving at the Worker with the right id and
+payload, plus the two error paths (the named `on_keydown` refusal and an unknown
+op).
+
+**Then in Chromium, and the fixture now proves the callbacks too.** main ends by
+asking for a timer; from there the chain is page-driven: timer -> `fetch_text`
+of /jsruntime/dom-ops.mjs -> `get_bounding_rect` -> observe a resize after a
+relayed style change -> `request_animation_frame` -> the PASS line. A callback
+that never arrives leaves the output short, and the fixture's expected output is
+now a file the gate compares against, because "the run was clean" cannot tell a
+missing callback from a working one. Measured:
+
+    web_dom_roundtrip                PASS  (browser only)
+    diff tests/wasm/expected/web_dom_roundtrip.txt \
+         tests/wasm/tmp/web_dom_roundtrip/wasm.clean   -> identical
+      ... ok: set_timeout callback
+      ok: fetch_text callback carries the file
+      ok: get_bounding_rect callback reports a real box
+      ok: observe_resize callback
+      PASS: stdlib web framework round trip
+
+**Three harness changes came with it**, each because the old shape could not see
+the new thing:
+
+  - a browser-only fixture states its expected output in
+    `tests/wasm/expected/<name>.txt` and the gate diffs the browser run against
+    it (a missing file is a FAIL, not a skip);
+  - `tests/wasm/host.html` flushes complete stdout lines as they arrive. It used
+    to accumulate one blob and push it when `load()` resolved, so every line a
+    page-driven callback printed after that was written into a buffer nobody
+    ever read;
+  - `run.py`'s grace after `__done` went from 200ms to 600ms, because the last
+    output of a passive module now arrives after the load promise settles.
+
+**A finding from placing the fixture in phase 0's path: the `+`-on-text rule is
+location-dependent.** The fixture's first version wrote
+`panic("dom round trip: " + what)`, which phase 5 built and ran happily - and
+phase 0 rejected with `'+' is not allowed for text concatenation, use |
+operator`. Both are right, for different reasons:
+
+  - the rule is a MAIN-MODULE rule. In the compiler
+    (_mxc_stage4/ssa_builder.mx, the Add case, mirroring legacy's
+    restrict.go/CheckPlusOnText) it fires only when `targetIsMainModule()` and
+    the function belongs to the target package and that path is a user package
+    path. A manifest-less target and a dependency package inside the moxie
+    checkout both keep `+`;
+  - phase 0 copies a fixture to `$TMPROOT/reg_<name>/pkg`
+    (`$HOME/moxie-tests-$$/...`), which is outside the checkout, so the fixture
+    IS the manifest-less target and the rule fires;
+  - phase 5 copies it to `$ROOT/tests/wasm/tmp/<name>/pkg`, inside the moxie
+    module, so it is a package of that module and the rule does not fire.
+
+Measured, same 5-line program (`s := "a"; println(s + "x")`):
+
+    inside the checkout   tests/wasm/tmp/probe144/pkg      -> rc=0
+    checkout tmp/ dir     tmp/probe144/pkg                 -> rc=0
+    sibling of checkout   ../probe144/pkg                  -> rc=1  (+ error)
+    /tmp                  /tmp/probe144/pkg                -> rc=1  (+ error)
+    both cache roots cleared, inside the checkout          -> rc=0  (not a cache)
+
+So a fixture can pass phase 5 and fail phase 0 for a reason that has nothing to
+do with the target: the two harnesses compile it in different places, and only
+one of them is manifest-less. The rule itself is deliberate, but the
+consequence is not: the language's own text-concatenation ban is enforced on
+in-tree fixtures only by accident of where `compile_and_run` copies them. The
+fixture now uses `|`, which is the language's operator in both places, and the
+probe above is the evidence for the asymmetry. Worth deciding deliberately:
+either build fixtures where the user-code rules apply (a manifest-less dir)
+in BOTH harnesses, or accept that in-tree fixtures are exempt.
+
+**Gate, measured, MOXIE=tmp/mxc-r145:**
+
+    phase 0 (--quick)         130 passed / 0 failed / 0 skipped, rc=0
+      regression:web_dom_roundtrip  PASS (native build; browser-only fixture
+                                    runs in phase 5)
+    phase 5, focused target   web_dom_roundtrip PASS (browser only)
+      diff tests/wasm/expected/web_dom_roundtrip.txt \
+           tests/wasm/tmp/web_dom_roundtrip/wasm.clean   -> identical
+    phase 5, full sweep       76 passed / 0 failed / 0 skipped, rc=0
+      wasm:web_dom_roundtrip   PASS ((browser only))
+
+The full sweep is also the evidence for the three host changes that touch every
+fixture rather than just this one: the root Worker outliving `_start`, the page
+flushing stdout lines as they arrive, and the longer grace in run.py. All 76
+targets still build, load, run and match their native reference.
+
+The fixture's native build in phase 0 is the strict one: phase 0 copies to a
+manifest-less temp dir, so the tree's `+` leniency does not apply there and the
+fixture is compiled under the rules a user app gets.
