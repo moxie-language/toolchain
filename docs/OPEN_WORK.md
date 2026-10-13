@@ -9510,3 +9510,16 @@ expected output short, so this is a positive claim like the other three checks
 in emit_check.sh - which is now four: the emitted bootstrap runs the DOM fixture,
 the emitted service worker activates having fetched its module, the app bridge
 answers an import no host provides, and a second bundle answers the page.
+
+**Gate, measured, MOXIE=tmp/mxc-r147:**
+
+    phase 5   78 passed / 0 failed / 0 skipped, rc=0
+      wasm:emitted-host   PASS (all four checks: emitted bootstrap + DOM relay,
+                          service worker activate + module fetch, app bridge,
+                          second bundle answering the page)
+
+The sweep matters here because round 148 changed the shared host path every
+fixture loads through (`startDomain`'s boot message now can carry an application
+port, and the Worker host takes one more argument). All 77 targets still build,
+load, run and match their native reference, and the check that exercises the new
+path passes inside the same run.
