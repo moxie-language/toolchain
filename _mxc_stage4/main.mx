@@ -448,6 +448,66 @@ func getMoxiePath() (s string) {
 // cache). Falling back to the current directory made an unset MOXIEROOT read
 // whatever checkout happened to be the cwd, which is how a stale installed
 // tree silently became the stdlib.
+// emitWasmHost stages the page-side half of a wasm bundle beside the module.
+//
+// A Moxie wasm module is half an application. The other half is the JS runtime
+// that instantiates it in a Worker, answers its DOM calls through the relay and
+// dispatches the callbacks it registered - jsruntime/ in this repository, one
+// copy, versioned with the compiler that built the module. The build copies it
+// to $runtime/ next to the .wasm and writes the bundle's page bootstrap,
+// <name>-wasm-host.mjs, so an app has no host files of its own to keep in sync
+// with the framework. That is what every app used to copy by hand.
+func emitWasmHost(outpath string) {
+	if outpath == "/dev/null" {
+		return
+	}
+	jsdir := mxutil.JoinPath(moxieRoot(), "jsruntime")
+	names := mxutil.ListFiles(jsdir, ".mjs")
+	if len(names) == 0 {
+		fatal("no JS runtime modules under " | jsdir)
+	}
+	dir := mxutil.PathDir(outpath)
+	runtimeDir := mxutil.JoinPath(dir, "$runtime")
+	mxutil.MkdirAll(runtimeDir, 493)
+	for _, n := range names {
+		data, ok := mxutil.ReadFile(mxutil.JoinPath(jsdir, n))
+		if !ok {
+			fatal("cannot read JS runtime module " | n)
+		}
+		mxutil.WriteFile(mxutil.JoinPath(runtimeDir, n), data, 420)
+	}
+	base := mxutil.PathBase(outpath)
+	if mxutil.HasSuffix(base, ".wasm") {
+		base = base[:len(base)-5]
+	}
+	host := mxutil.JoinPath(dir, base | "-wasm-host.mjs")
+	mxutil.WriteFile(host, []byte(wasmHostModule(base)), 420)
+	mxutil.WriteStr(2, "  host " | host | " ($runtime: " | mxutil.SimpleItoa(int32(len(names))) | " modules)\n")
+}
+
+// wasmHostModule is the page bootstrap for one bundle. It is deliberately
+// small: everything a page needs beyond it - the loader, the Worker host, the
+// DOM relay - is in $runtime/ and is the same code for every app.
+func wasmHostModule(base string) (s string) {
+	return "// " | base | "-wasm-host.mjs - written by `moxie build -target wasm`.\n" |
+		"//\n" |
+		"// The page-side half of a Moxie wasm bundle. The module runs in a Worker\n" |
+		"// (channel receives block in Atomics.wait, which the page thread forbids)\n" |
+		"// and the page answers its DOM calls through $runtime/relay.mjs, so a page\n" |
+		"// only has to import this file and start it:\n" |
+		"//\n" |
+		"//   import { start } from './" | base | "-wasm-host.mjs';\n" |
+		"//   await start();\n" |
+		"\n" |
+		"import { load } from './$runtime/loader.mjs';\n" |
+		"\n" |
+		"export const wasm = new URL('./" | base | ".wasm', import.meta.url).href;\n" |
+		"\n" |
+		"export function start() { return load(wasm); }\n" |
+		"\n" |
+		"export default start;\n"
+}
+
 func moxieRoot() (s string) {
 	root := getenv("MOXIEROOT")
 	if root == "" {
@@ -6727,6 +6787,7 @@ func main() {
 		if rc != 0 {
 			fatal("linker failed")
 		}
+		emitWasmHost(outpath)
 	} else {
 		// native: compile each .bc to .o, then ld.lld
 		mxutil.WriteStr(2, "  compile objects\n")

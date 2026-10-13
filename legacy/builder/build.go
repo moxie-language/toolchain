@@ -894,6 +894,18 @@ func Build(
 				}
 			}
 
+			// Stage the page-side half of the bundle beside the module. The
+			// wasm module is half an application: the page needs the JS
+			// runtime that instantiates it in a Worker and answers its DOM
+			// calls. Stage4 emits the same files from the same jsruntime/
+			// directory, so a bundle built by either compiler loads in the
+			// same page.
+			if arch := strings.Split(config.Triple(), "-")[0]; arch == "wasm32" {
+				if err := emitWasmHost(root, outpath); err != nil {
+					return err
+				}
+			}
+
 			// Print code size if requested.
 			if config.Options.PrintSizes != "" {
 				sizes, err := loadProgramSize(
