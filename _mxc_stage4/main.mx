@@ -476,32 +476,53 @@ func emitWasmHost(outpath string) {
 		}
 		mxutil.WriteFile(mxutil.JoinPath(runtimeDir, n), data, 420)
 	}
-	base := mxutil.PathBase(outpath)
-	if mxutil.HasSuffix(base, ".wasm") {
-		base = base[:len(base)-5]
+	// The module keeps the name it was given - an -o without .wasm is a real
+	// file - while the bootstrap's own name drops the extension. Deriving the
+	// module URL from a re-appended .wasm used to point the page at a file the
+	// linker never wrote.
+	moduleName := mxutil.PathBase(outpath)
+	stem := moduleName
+	if mxutil.HasSuffix(stem, ".wasm") {
+		stem = stem[:len(stem)-5]
 	}
-	host := mxutil.JoinPath(dir, base | "-wasm-host.mjs")
-	mxutil.WriteFile(host, []byte(wasmHostModule(base)), 420)
-	mxutil.WriteStr(2, "  host " | host | " ($runtime: " | mxutil.SimpleItoa(int32(len(names))) | " modules)\n")
+	host := mxutil.JoinPath(dir, stem | "-wasm-host.mjs")
+	mxutil.WriteFile(host, []byte(wasmHostModule(stem, moduleName)), 420)
+	// The service worker's half: its host is the same file for every app, and
+	// the registration glue works out the bundle's own directory at runtime,
+	// so neither is copied per app any more.
+	swDir := mxutil.JoinPath(dir, "$sw")
+	mxutil.MkdirAll(swDir, 493)
+	swHost, hostOK := mxutil.ReadFile(mxutil.JoinPath(jsdir, "sw-host.mjs"))
+	if !hostOK {
+		fatal("jsruntime/sw-host.mjs is missing, so the service worker cannot be staged")
+	}
+	mxutil.WriteFile(mxutil.JoinPath(swDir, "wasm-host-sw.mjs"), swHost, 420)
+	swReg, regOK := mxutil.ReadFile(mxutil.JoinPath(jsdir, "sw-register.js"))
+	if !regOK {
+		fatal("jsruntime/sw-register.js is missing, so service worker registration cannot be staged")
+	}
+	mxutil.WriteFile(mxutil.JoinPath(dir, "sw-register.js"), swReg, 420)
+	mxutil.WriteStr(2, "  host " | host | " ($runtime: " | mxutil.SimpleItoa(int32(len(names))) | " modules, $sw + sw-register.js)\n")
 }
 
 // wasmHostModule is the page bootstrap for one bundle. It is deliberately
 // small: everything a page needs beyond it - the loader, the Worker host, the
-// DOM relay - is in $runtime/ and is the same code for every app.
-func wasmHostModule(base string) (s string) {
-	return "// " | base | "-wasm-host.mjs - written by `moxie build -target wasm`.\n" |
+// DOM relay - is in $runtime/ and is the same code for every app. stem names
+// the bootstrap itself, moduleName is the file the linker wrote.
+func wasmHostModule(stem, moduleName string) (s string) {
+	return "// " | stem | "-wasm-host.mjs - written by `moxie build -target wasm`.\n" |
 		"//\n" |
 		"// The page-side half of a Moxie wasm bundle. The module runs in a Worker\n" |
 		"// (channel receives block in Atomics.wait, which the page thread forbids)\n" |
 		"// and the page answers its DOM calls through $runtime/relay.mjs, so a page\n" |
 		"// only has to import this file and start it:\n" |
 		"//\n" |
-		"//   import { start } from './" | base | "-wasm-host.mjs';\n" |
+		"//   import { start } from './" | stem | "-wasm-host.mjs';\n" |
 		"//   await start();\n" |
 		"\n" |
 		"import { load } from './$runtime/loader.mjs';\n" |
 		"\n" |
-		"export const wasm = new URL('./" | base | ".wasm', import.meta.url).href;\n" |
+		"export const wasm = new URL('./" | moduleName | "', import.meta.url).href;\n" |
 		"\n" |
 		"export function start() { return load(wasm); }\n" |
 		"\n" |
