@@ -10,7 +10,7 @@
 // Either way the module is instantiated with is_worker_context() = 1, and a
 // spawned domain is given the channel handles the parent created so the child
 // owns the far end of the same SPSC rings. Nothing else crosses the boundary.
-import { buildHostImports, buildWorkerBridge, setHostModule } from './host.mjs';
+import { buildHostImports, buildWorkerBridge, setHostModule, dispatchCallback } from './host.mjs';
 import { makeDomProxy } from './relay.mjs';
 
 let memory;
@@ -41,9 +41,24 @@ async function instantiate(wasmPath, channels, relayPort) {
   return result.instance;
 }
 
+// serveCallbacks delivers the answers the page produces after a call returned:
+// an event, a timer, a fetch reply. The module is idle in its event loop by
+// then - it returned from _start and the page owns it - so each callback is a
+// fresh entry into wasm, which is why they are queued rather than called from
+// this handler's stack.
+function serveCallbacks(port) {
+  if (!port) return;
+  port.addEventListener('message', (e) => {
+    const m = e.data;
+    if (m && typeof m.cb === 'string') dispatchCallback(m);
+  });
+  port.start();
+}
+
 function runRoot(wasmPath, relayPort) {
   instantiate(wasmPath, new Map(), relayPort).then((inst) => {
     setHostModule(inst);
+    serveCallbacks(relayPort);
     inst.exports._start();
     globalThis.postMessage({ kind: 'done' });
   }).catch((e) => {

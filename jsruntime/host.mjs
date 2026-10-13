@@ -1,7 +1,6 @@
 // WASM Loader — instantiates a Moxie WASM binary with all bridge imports.
 // Reuses existing jsruntime modules for browser API surface.
 
-import * as dom from './dom.mjs';
 import * as webgl from './webgl.mjs';
 import * as app from './app.mjs';
 import * as text from './text.mjs';
@@ -118,11 +117,25 @@ function splitNull(ptr, len, count) {
   return s.split('\0');
 }
 
-// Track JS wrappers for WASM event listeners so RemoveEventListener works.
-const jsListeners = new Map();
-function listenerKey(elId, event, cbID) { return `${elId}:${event}:${cbID}`; }
+// dispatchCallback runs one callback the page produced inside the module. The
+// ids are the module's own web/callback handles, so the callback reaches the
+// code that registered it even though the module returned from _start long
+// before the event happened - that is the whole point of the Worker being
+// passive after startup. The __cb* helpers queue the call so it reaches wasm
+// from a clean stack rather than from inside the Worker's message handler.
+export function dispatchCallback(m) {
+  switch (m.cb) {
+    case 'void': cb0(m.id); break;
+    case 'str': cbs(m.id, m.s); break;
+    case 'bool': cbb(m.id, m.b); break;
+    case 'i6': cb6i(m.id, m.a[0], m.a[1], m.a[2], m.a[3], m.a[4], m.a[5]); break;
+    case 'ss': cbss(m.id, m.s, m.t); break;
+    default: throw new Error(`unknown DOM callback kind: ${String(m.cb)}`);
+  }
+}
 
-// Hook response tracking for nested callbacks.
+// Hook response tracking for nested callbacks: the signer/ext entries post a
+// request and resolve it later when the answer arrives, keyed by request id.
 const hookResponses = new Map();
 let hookNextReq = 1;
 
@@ -136,21 +149,17 @@ let hookNextReq = 1;
 //   the handles arrive from the parent and this table is pre-populated so the
 //   child reads the far end of the same rings.
 // opts.isWorker: 1 inside a spawned domain, 0 in the page.
-// opts.dom: the DOM implementation these imports call. Absent on the page,
-//   where the document is here and jsruntime/dom.mjs is it; in a Worker it is
-//   the relay proxy from relay.mjs, because the document is on the page.
+// opts.dom: the DOM implementation these imports call - the relay proxy from
+//   relay.mjs. A module runs in a Worker, so the document is never on this
+//   thread and there is no direct path to fall back on; a bridge built without
+//   a proxy cannot answer a single DOM call, which is worth saying once here
+//   rather than as a TypeError per call.
 export function buildBridge(opts = {}) {
   const handles = opts.channels || new Map();
   let next = 1;
   const isWorker = opts.isWorker ? 1 : 0;
-  const D = opts.dom || dom;
-  // A Worker can only ask the page for the operations the relay carries. The
-  // rest need the page to call back into the module, which is the other
-  // direction of the boundary and does not exist yet: they fail by name here
-  // rather than reaching for a document that is not on this thread.
-  const pageOnly = (name) => {
-    if (opts.dom) throw new Error(`dom.${name}: the DOM relay does not carry page-to-module callbacks yet`);
-  };
+  const D = opts.dom;
+  if (!D) throw new Error('buildBridge: no DOM implementation; a module runs in a Worker, so pass the relay proxy from relay.mjs');
   return {
     // --- localstorage ---
     localstorage_get_item(kp, kl, _kc, op, ol) {
@@ -266,13 +275,12 @@ export function buildBridge(opts = {}) {
 
     // --- dom ---
     //
-    // The module runs in a Worker and the document is on the page, so D is
-    // either jsruntime/dom.mjs (the page owns the document) or the relay proxy
-    // from relay.mjs (the page answers over SharedArrayBuffer). One shape,
-    // two hosts. Everything D answers returns without calling back into the
-    // module; the operations that do need a call back are marked pageOnly and
-    // fail by name in a Worker instead of reaching for a document that is not
-    // on this thread.
+    // Thin ABI shims: wasm pointers and lengths become plain values, and the
+    // operation itself is D, the relay proxy built from jsruntime/dom-ops.mjs.
+    // The document is on the page, so there is no direct path here and no
+    // second implementation to drift from the table. Answers the page produces
+    // later - events, timers, fetch replies - arrive as messages on the relay
+    // port and go through dispatchCallback.
     dom_body() { return D.Body(); },
     dom_create_element(p, l, _c) { return D.CreateElement(readStr(p, l)); },
     dom_create_text_node(p, l, _c) { return D.CreateTextNode(readStr(p, l)); },
@@ -317,6 +325,7 @@ export function buildBridge(opts = {}) {
       setOutStr(op, ol, D.GetProperty(el, readStr(pp, pl)));
     },
     dom_bounding_client_left(el) { return D.BoundingClientLeft(el); },
+    dom_get_bounding_rect(el, cbID) { D.GetBoundingRect(el, cbID); },
     dom_get_viewport_height() { return D.GetViewportHeight(); },
     dom_get_viewport_width() { return D.GetViewportWidth(); },
     dom_prefers_dark() { return D.PrefersDark() ? 1 : 0; },
@@ -343,142 +352,46 @@ export function buildBridge(opts = {}) {
       D.DownloadText(readStr(fp, fl), readStr(cp, cl), readStr(mp, ml));
     },
     dom_write_primary_selection(p, l, _c) { D.WritePrimarySelection(readStr(p, l)); },
+
+    // --- dom, answers the page produces after the call returns ---
+    dom_set_timeout(cbID, ms) { return D.SetTimeout(cbID, ms); },
     dom_clear_timeout(id) { D.ClearTimeout(id); },
+    dom_request_animation_frame(cbID) { D.RequestAnimationFrame(cbID); },
+    dom_add_event_listener(el, ep, el2, _ec, cbID) { D.AddEventListener(el, readStr(ep, el2), cbID); },
+    dom_add_self_event_listener(el, ep, el2, _ec, cbID) { D.AddSelfEventListener(el, readStr(ep, el2), cbID); },
+    dom_add_enter_key_listener(el, cbID) { D.AddEnterKeyListener(el, cbID); },
+    dom_remove_event_listener(el, ep, el2, _ec, cbID) { D.RemoveEventListener(el, readStr(ep, el2), cbID); },
+    dom_on_keydown(el, handlerID) {
+      // Nothing serves this: the page would have to call into the module and
+      // WAIT for the answer so it can preventDefault, and the page thread
+      // cannot block on a Worker. The proxy throws with that reason; see the
+      // note on on_keydown in jsruntime/dom-ops.mjs.
+      D.OnKeydown(el, handlerID);
+    },
+    dom_observe_resize(el, cbID) { D.ObserveResize(el, cbID); },
+    dom_unobserve_resize(el) { D.UnobserveResize(el); },
+    dom_on_pull_refresh(el, ind, cbID) { D.OnPullRefresh(el, ind, cbID); },
+    dom_on_paste_image(el, cbID) { D.OnPasteImage(el, cbID); },
+    dom_on_drop_image(el, cbID) { D.OnDropImage(el, cbID); },
+    dom_on_pop_state(cbID) { D.OnPopState(cbID); },
+    dom_intercept_internal_links(cbID) { D.InterceptInternalLinks(cbID); },
+    dom_on_sw_message(cbID) { D.OnSWMessage(cbID); },
+    dom_fetch_text(p, l, _c, cbID) { D.FetchText(readStr(p, l), cbID); },
+    dom_fetch_relay_info(p, l, _c, cbID) { D.FetchRelayInfo(readStr(p, l), cbID); },
+    dom_fetch_put_blob_base64(up, ul, _uc, dp, dl, _dc, cp, cl, _cc, ap, al, _ac, cbID) {
+      D.FetchPutBlobBase64(readStr(up, ul), readStr(dp, dl), readStr(cp, cl), readStr(ap, al), cbID);
+    },
     dom_idb_set_enc_key(p, l, _c) { D.IDBSetEncKey(readStr(p, l)); },
+    dom_idb_get(sp, sl, _sc, kp, kl, _kc, cbID) { D.IDBGet(readStr(sp, sl), readStr(kp, kl), cbID); },
     dom_idb_put(sp, sl, _sc, kp, kl, _kc, vp, vl, _vc) {
       D.IDBPut(readStr(sp, sl), readStr(kp, kl), readStr(vp, vl));
     },
-
-    // --- dom, needs a page -> module callback ---
-    dom_get_bounding_rect(el, cbID) {
-      pageOnly('get_bounding_rect');
-      D.GetBoundingRect(el, (l, t, r, b, w, h) => cb6i(cbID, l, t, r, b, w, h));
-    },
-    dom_request_animation_frame(cbID) {
-      pageOnly('request_animation_frame');
-      D.RequestAnimationFrame(() => cb0(cbID));
-    },
-    dom_set_timeout(cbID, ms) {
-      pageOnly('set_timeout');
-      return D.SetTimeout(() => cb0(cbID), ms);
-    },
-    dom_add_event_listener(elId, ep, el2, _ec, cbID) {
-      pageOnly('add_event_listener');
-      const el = D.getElement(elId);
-      if (!el) return;
-      const event = readStr(ep, el2);
-      const fn = () => cb0(cbID);
-      el.addEventListener(event, fn);
-      jsListeners.set(listenerKey(elId, event, cbID), fn);
-    },
-    dom_add_self_event_listener(elId, ep, el2, _ec, cbID) {
-      pageOnly('add_self_event_listener');
-      const el = D.getElement(elId);
-      if (!el) return;
-      const event = readStr(ep, el2);
-      const fn = (e) => { if (e.target === e.currentTarget) cb0(cbID); };
-      el.addEventListener(event, fn);
-      jsListeners.set(listenerKey(elId, event, cbID), fn);
-    },
-    dom_add_enter_key_listener(elId, cbID) {
-      pageOnly('add_enter_key_listener');
-      const el = D.getElement(elId);
-      if (!el) return;
-      const fn = (e) => { if (e.key === 'Enter') { e.preventDefault(); cb0(cbID); } };
-      el.addEventListener('keydown', fn);
-      jsListeners.set(listenerKey(elId, 'keydown:enter', cbID), fn);
-    },
-    dom_remove_event_listener(elId, ep, el2, _ec, cbID) {
-      pageOnly('remove_event_listener');
-      const el = D.getElement(elId);
-      if (!el) return;
-      const event = readStr(ep, el2);
-      const key = listenerKey(elId, event, cbID);
-      const fn = jsListeners.get(key);
-      if (fn) { el.removeEventListener(event, fn); jsListeners.delete(key); }
-    },
-    dom_on_keydown(el, handlerID) {
-      pageOnly('on_keydown');
-      const element = D.getElement(el);
-      if (!element) return;
-      element.addEventListener('keydown', (e) => {
-        const { ptr, len } = writeStr(e.key);
-        const prevented = instance.exports.__hook_keydown(handlerID, ptr, len);
-        if (prevented) e.preventDefault();
-      });
-    },
-    dom_observe_resize(elId, cbID) {
-      pageOnly('observe_resize');
-      D.ObserveResize(elId, cbID);
-    },
-    dom_unobserve_resize(elId) {
-      pageOnly('unobserve_resize');
-      D.UnobserveResize(elId);
-    },
-    dom_fetch_text(p, l, _c, cbID) {
-      pageOnly('fetch_text');
-      D.FetchText(readStr(p, l), (s) => cbs(cbID, s));
-    },
-    dom_fetch_relay_info(p, l, _c, cbID) {
-      pageOnly('fetch_relay_info');
-      D.FetchRelayInfo(readStr(p, l), (s) => cbs(cbID, s));
-    },
-    dom_fetch_put_blob_base64(up, ul, _uc, dp, dl, _dc, cp, cl, _cc, ap, al, _ac, cbID) {
-      pageOnly('fetch_put_blob_base64');
-      D.FetchPutBlobBase64(readStr(up, ul), readStr(dp, dl), readStr(cp, cl), readStr(ap, al), (s) => cbs(cbID, s));
-    },
-    dom_idb_get(sp, sl, _sc, kp, kl, _kc, cbID) {
-      pageOnly('idb_get');
-      D.IDBGet(readStr(sp, sl), readStr(kp, kl), (s) => cbs(cbID, s));
-    },
-    dom_idb_get_all(sp, sl, _sc, fnID, doneID) {
-      pageOnly('idb_get_all');
-      D.IDBGetAll(readStr(sp, sl), (k, v) => cbss(fnID, k, v), () => cb0(doneID));
-    },
-    dom_on_sw_message(cbID) {
-      pageOnly('on_sw_message');
-      D.OnSWMessage((s) => cbs(cbID, s));
-    },
-    dom_read_clipboard(cbID) {
-      pageOnly('read_clipboard');
-      D.ReadClipboard((s) => cbs(cbID, s));
-    },
-    dom_write_clipboard(p, l, _c, cbID) {
-      pageOnly('write_clipboard');
-      D.WriteClipboard(readStr(p, l), (ok) => cbb(cbID, ok));
-    },
-    dom_on_pop_state(cbID) {
-      pageOnly('on_pop_state');
-      D.OnPopState((path) => cbs(cbID, path));
-    },
-    dom_intercept_internal_links(cbID) {
-      pageOnly('intercept_internal_links');
-      D.InterceptInternalLinks((path) => cbs(cbID, path));
-    },
-    dom_pick_file_text(p, l, _c, cbID) {
-      pageOnly('pick_file_text');
-      D.PickFileText(readStr(p, l), (s) => cbs(cbID, s));
-    },
-    dom_pick_file_base64(p, l, _c, cbID) {
-      pageOnly('pick_file_base64');
-      D.PickFileBase64(readStr(p, l), (d, m) => cbss(cbID, d, m));
-    },
-    dom_on_paste_image(el, cbID) {
-      pageOnly('on_paste_image');
-      D.OnPasteImage(el, (d, m) => cbss(cbID, d, m));
-    },
-    dom_on_drop_image(el, cbID) {
-      pageOnly('on_drop_image');
-      D.OnDropImage(el, (d, m) => cbss(cbID, d, m));
-    },
-    dom_on_pull_refresh(el, ind, cbID) {
-      pageOnly('on_pull_refresh');
-      D.OnPullRefresh(el, ind, () => cb0(cbID));
-    },
-    dom_copy_image_to_clipboard(el, cbID) {
-      pageOnly('copy_image_to_clipboard');
-      D.CopyImageToClipboard(el, (ok) => cbb(cbID, ok));
-    },
+    dom_idb_get_all(sp, sl, _sc, fnID, doneID) { D.IDBGetAll(readStr(sp, sl), fnID, doneID); },
+    dom_read_clipboard(cbID) { D.ReadClipboard(cbID); },
+    dom_write_clipboard(p, l, _c, cbID) { D.WriteClipboard(readStr(p, l), cbID); },
+    dom_copy_image_to_clipboard(el, cbID) { D.CopyImageToClipboard(el, cbID); },
+    dom_pick_file_text(p, l, _c, cbID) { D.PickFileText(readStr(p, l), cbID); },
+    dom_pick_file_base64(p, l, _c, cbID) { D.PickFileBase64(readStr(p, l), cbID); },
 
     // --- ws ---
     ws_dial(up, ul, _uc, msgID, openID, closeID, errID) {
@@ -1078,20 +991,29 @@ export function startDomain(boot, onSettled, relayUp) {
     if (!m) return;
     if (m.kind === 'stdout') { console.log(m.text); up('stdout', m.text); }
     else if (m.kind === 'stderr') { console.error(m.text); up('stderr', m.text); }
-    else if (m.kind === 'done') { w.terminate(); onSettled && onSettled(null); }
+    else if (m.kind === 'done') {
+      // A spawned domain is finished when its entry function returns: it holds
+      // no port, so nothing can call into it afterwards. The root domain is the
+      // page's counterpart for the life of the app - the page drives it through
+      // the relay after _start returns - so its Worker stays alive, and only an
+      // error or the page going away ends it.
+      if (relayUp) w.terminate();
+      onSettled && onSettled(null);
+    }
     else if (m.kind === 'error') {
       w.terminate();
+      // Every domain failure reaches the page, whether or not a caller is still
+      // waiting. A callback that panics after _start returns has no caller left
+      // - the loader's promise settled long ago - and a failure that only went
+      // to a settled promise would look exactly like success.
+      console.error('[domain] ' + m.error + '\n');
       if (onSettled) onSettled(new Error(m.error));
-      // A spawned domain has no caller to reject: the parent reaches it only
-      // through channels. Relay the failure to the page rather than dropping
-      // it, or a domain that dies on startup just leaves the parent waiting.
-      else globalThis.postMessage({ kind: 'stderr', text: '[domain] ' + m.error + '\n' });
     }
   });
   w.addEventListener('error', (e) => {
     const msg = String(e.message || e.error || e);
+    console.error('[domain] ' + msg + '\n');
     if (onSettled) onSettled(new Error(msg));
-    else globalThis.postMessage({ kind: 'stderr', text: '[domain] ' + msg + '\n' });
   });
   const msg = { ...boot, stubs: globalThis.__moxie_test_stubs === true };
   if (relayPort) w.postMessage({ ...msg, relayPort }, [relayPort]);

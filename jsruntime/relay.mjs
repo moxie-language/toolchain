@@ -44,11 +44,7 @@ export function makeDomProxy(port) {
         // hand it a port; until then this is loud rather than silent.
         throw new Error(`dom.${op}: this domain has no DOM relay (only the root domain is connected to the page)`);
       }
-      if (!domOps[op].run) {
-        // The page would have to call back into the module to complete this
-        // one, and that direction of the boundary does not exist yet.
-        throw new Error(`dom.${op}: the DOM relay does not carry page-to-module callbacks yet`);
-      }
+      if (!domOps[op].run) throw new Error(`dom.${op}: ${domOps[op].why}`);
       return client.call(op, args, domOps[op].kind);
     };
   }
@@ -106,6 +102,17 @@ class RelayClient {
 // startDomain installs one per root domain, so a page needs no setup of its
 // own to host an app.
 export function serveRelay(port) {
+  // A callback the page produces later - an event, a timer, a fetch reply -
+  // travels back over the same port and is dispatched into the module's exports
+  // by worker-host. The ids are the module's own web/callback handles, so the
+  // code that registered the callback is the code that runs.
+  const cb = {
+    void: (id) => port.postMessage({ cb: 'void', id }),
+    str: (id, s) => port.postMessage({ cb: 'str', id, s }),
+    bool: (id, b) => port.postMessage({ cb: 'bool', id, b }),
+    i6: (id, a) => port.postMessage({ cb: 'i6', id, a }),
+    ss: (id, s, t) => port.postMessage({ cb: 'ss', id, s, t }),
+  };
   port.addEventListener('message', (e) => {
     const m = e.data;
     if (!m || m.relay !== RELAY) return;
@@ -130,11 +137,9 @@ export function serveRelay(port) {
     // set; answering with an error makes that visible instead of hanging the
     // Worker on a request nobody will serve.
     if (!op) return answer(-1, `no such operation (${m.op})`);
-    if (!op.run) {
-      return answer(-1, `operation ${m.op} needs a page-to-module callback, which the relay does not carry yet`);
-    }
+    if (!op.run) return answer(-1, op.why);
     try {
-      const v = op.run(m.args);
+      const v = op.run(m.args, cb);
       if (op.kind === INT) gate[1] = v;
       if (op.kind === STR || op.kind === I64) return answer(1, String(v));
       answer(1, undefined);
