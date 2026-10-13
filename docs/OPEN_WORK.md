@@ -9568,3 +9568,11 @@ bundle.
 Gate: wasm:emitted-host green with all four checks after the fix; the full phase
 5 sweep for this tree is the next round's first action, and the store proof is
 smesh's own script (`python3 scripts/store-bundle-test.py --dir <built bundle>`).
+
+**Round 149's gate, measured** (MOXIE=tmp/mxc-r147): phase 5 **78 passed / 0
+failed / 0 skipped, rc=0**, with `wasm:emitted-host` covering all four checks -
+the emitted bootstrap and DOM relay, the service worker activating having fetched
+its module, the app bridge, and the second bundle answering the page. The sweep
+is what closes round 149: the path-resolution change touches the shared loader,
+and the DOM fixture's callback chain had just been made single-shot after the
+expected-output comparison caught it printing its PASS line twice.
