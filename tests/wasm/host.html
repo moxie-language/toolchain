@@ -43,6 +43,53 @@
   } catch (e) {
     window.__error = String((e && e.stack) || e);
   }
+  // ?sw=<url> registers the emitted service worker through the bundle's own
+  // registration glue, and waits for it to activate before reporting the page
+  // loaded: a worker that never activates is a failed boot, not a slow one.
+  const swUrl = new URLSearchParams(location.search).get('sw');
+  if (swUrl) {
+    try {
+      await new Promise((resolve) => {
+        const s = document.createElement('script');
+        s.src = swUrl;
+        s.onload = resolve;
+        s.onerror = () => { window.__swError = 'registration script did not load'; resolve(); };
+        document.head.appendChild(s);
+      });
+      // Poll the registrations rather than awaiting navigator.serviceWorker.ready:
+      // ready() is scoped to THIS document, and the page lives outside the
+      // worker's scope in this harness, so it would never resolve even with the
+      // worker activated. A worker that never activates must also not hang the
+      // run - the driver waits for __done - so the poll has a deadline and
+      // reports the state it reached.
+      const deadline = Date.now() + 25000;
+      let state = 'timeout';
+      let scope = '';
+      for (;;) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        const r = regs[0];
+        if (r) {
+          scope = r.scope;
+          if (r.active && r.active.state === 'activated') { state = 'activated'; break; }
+        }
+        if (Date.now() >= deadline) break;
+        await new Promise((res) => setTimeout(res, 200));
+      }
+      const regs = await navigator.serviceWorker.getRegistrations();
+      window.__sw = {
+        state: state,
+        scope: scope,
+        regs: regs.map((r) => ({
+          scope: r.scope,
+          installing: r.installing ? r.installing.state : null,
+          waiting: r.waiting ? r.waiting.state : null,
+          active: r.active ? r.active.state : null,
+        })),
+      };
+    } catch (e) {
+      window.__swError = String((e && e.stack) || e);
+    }
+  }
   if (line) log.push(line);
   window.__done = true;
 </script>

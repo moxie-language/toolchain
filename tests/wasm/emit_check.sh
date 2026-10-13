@@ -99,5 +99,36 @@ if len(code(stage4)) == 0:
     raise SystemExit("no bootstrap code found to compare")
 PYEOF
 
+# The service worker's half of the same bundle. Its host is staged by the same
+# build; this builds the module the host instantiates, registers the worker from
+# a page through the emitted glue, and requires activation with the module
+# actually fetched - a worker whose host or module is broken never gets there.
+SWFIX="$ROOT/tests/regressions/should_compile/web_sw_boot.mx"
+if [ -f "$SWFIX" ]; then
+	ls "$WORK/\$sw" >/dev/null 2>&1 || fail "the build staged no \$sw/ beside the module"
+	[ -f "$WORK/\$sw/wasm-host-sw.mjs" ] || fail "the build staged no \$sw/wasm-host-sw.mjs"
+	[ -f "$WORK/sw-register.js" ] || fail "the build wrote no sw-register.js"
+	mkdir -p "$WORK/swpkg"
+	cp "$SWFIX" "$WORK/swpkg/main.mx"
+	if ! (cd "$ROOT" && MOXIEROOT="$ROOT" "$MOXIE" build -target wasm \
+		-o "$WORK/\$sw/sw.wasm" "$WORK/swpkg") >"$WORK/sw-build.log" 2>&1; then
+		fail "service-worker module build failed"
+		tail -3 "$WORK/sw-build.log" | sed 's/^/      /'
+	fi
+	timeout "${RUN_TIMEOUT:-60}" python3 "$ROOT/tests/wasm/run.py" -q \
+		--host "/tmp/emit/$NAME-wasm-host.mjs" --sw /tmp/emit/sw-register.js \
+		>"$WORK/sw-browser.out" 2>"$WORK/sw-browser.err"
+	rc=$?
+	[ "$rc" -eq 0 ] || {
+		fail "the emitted service worker did not boot (rc=$rc)"
+		tail -3 "$WORK/sw-browser.err" | sed 's/^/      /'
+	}
+	grep -q "state=activated module_fetched=true" "$WORK/sw-browser.err" || {
+		fail "the emitted service worker did not activate with its module fetched"
+		tail -3 "$WORK/sw-browser.err" | sed 's/^/      /'
+	}
+	echo "  the emitted service worker booted: $(tail -1 "$WORK/sw-browser.err")"
+fi
+
 echo "  the build staged $have runtime modules and a loadable bootstrap"
 exit 0

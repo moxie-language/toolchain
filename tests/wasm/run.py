@@ -22,16 +22,25 @@ except ImportError:
 ROOT = pathlib.Path(__file__).resolve().parent
 REPO = ROOT.parent.parent
 raw = sys.argv[1:]
-args = [a for a in raw if a not in ("-q", "--host")]
+args = [a for a in raw if a not in ("-q", "--host", "--sw")]
 QUIET = "-q" in raw
 # --host <url> loads an emitted bundle host page-side instead of the
 # repository's loader; the module URL it carries is the one that runs.
 HOST = raw[raw.index("--host") + 1] if "--host" in raw else None
-WASM = next((a for a in args if a != "-q"), str(ROOT / "app.wasm"))
+SW = raw[raw.index("--sw") + 1] if "--sw" in raw else None
+WASM = next((a for a in args if a not in ("-q", "--sw") and a != SW), str(ROOT / "app.wasm"))
 TIMEOUT = 20000
+SW_TIMEOUT = 45000
+
+
+REQUESTS = []
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        REQUESTS.append(self.path.split("?")[0])
+        super().do_GET()
+
     def translate_path(self, path):
         path = path.split("?")[0].split("#")[0]
         if path.startswith("/jsruntime/"):
@@ -47,6 +56,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # undefined and channel_create fails before a domain can start.
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
+        # A bundle's service worker lives in $sw/ but must control the whole
+        # bundle, which the browser refuses unless the server allows the wider
+        # scope. An app's own server has to send this too, so the test server
+        # does - otherwise the gate would only ever test a worker that controls
+        # its own directory and nothing else.
+        self.send_header("Service-Worker-Allowed", "/")
         super().end_headers()
 
     def log_message(self, *args):
@@ -69,11 +84,23 @@ def main():
         browser = pw.chromium.launch()
         page = browser.new_page()
         url = f"http://127.0.0.1:{port}/"
+        q = []
         if HOST:
-            url += "?host=" + HOST
+            q.append("host=" + HOST)
+        if SW:
+            q.append("sw=" + SW)
+        if q:
+            url += "?" + "&".join(q)
+        if SW:
+            # A service worker's console is its own; without this a boot failure
+            # inside the worker is invisible and only "evaluation failed"
+            # reaches the page.
+            def _on_sw(sw):
+                sw.on("console", lambda m: print("sw console: " + m.text, file=sys.stderr))
+            page.context.on("serviceworker", _on_sw)
         page.goto(url, wait_until="load")
         try:
-            page.wait_for_function("window.__done === true", timeout=TIMEOUT)
+            page.wait_for_function("window.__done === true", timeout=SW_TIMEOUT if SW else TIMEOUT)
         except Exception:
             print("TIMEOUT: module did not finish loading")
             browser.close()
@@ -83,7 +110,11 @@ def main():
         # relay, so its last output can arrive after __done. Give the callbacks
         # room to land before reading the log.
         page.wait_for_timeout(600)
-        out = page.evaluate("() => ({logs: window.__logs, error: window.__error, errs: window.__consoleErrors})")
+        out = page.evaluate(
+            "() => ({logs: window.__logs, error: window.__error,"
+            " errs: window.__consoleErrors, sw: window.__sw || null,"
+            " swError: window.__swError || null})"
+        )
         browser.close()
     srv.shutdown()
 
@@ -94,6 +125,20 @@ def main():
     if out["error"]:
         print("JS error: " + out["error"])
         return 1
+    # The service worker's boot is reported on stderr so -q keeps printing only
+    # the module's stdout, and it is a failure: a worker that never activated,
+    # or that activated without fetching the module staged for it, has not
+    # booted - it has merely not crashed loudly yet.
+    if SW:
+        fetched = any(p.endswith("/$sw/sw.wasm") for p in REQUESTS)
+        state = (out["sw"] or {}).get("state", "none")
+        print("sw: state=" + state + " module_fetched=" + str(fetched).lower()
+              + " regs=" + json.dumps((out["sw"] or {}).get("regs", [])), file=sys.stderr)
+        if out["swError"]:
+            print("sw error: " + out["swError"], file=sys.stderr)
+            return 1
+        if state != "activated" or not fetched:
+            return 1
     # -q prints only the module's stdout, so callers can diff it against a
     # native run.
     for line in out["logs"]:

@@ -1,0 +1,57 @@
+// Regression: web/idb's key-value stores work end to end in a browser.
+//
+// The stdlib package declares 17 idb_* bridge imports and the host provided 14
+// until this round: a module linking web/idb could not instantiate at all,
+// because a wasm module imports every symbol of a package it links. Grepping the
+// two lists against each other catches that class of bug, but only running it
+// proves the entries are really wired: this opens the database, stores a value,
+// reads it back through the document-less worker context the module runs in, and
+// walks the store with get-all.
+//
+// The assertions run in callbacks, so the module is passive after main returns
+// and a callback that never arrives leaves the expected output short - which the
+// gate compares against tests/wasm/expected/web_idb_kv.txt.
+//:wasmtest browser-only
+package main
+
+import (
+	"web/idb"
+)
+
+func assert(ok bool, what string) {
+	if !ok {
+		panic("idb round trip: " | what)
+	}
+	println("ok:", what)
+}
+
+func main() {
+	idb.Open(onOpen)
+}
+
+func onOpen() {
+	println("ok: idb opened")
+	idb.KVPut("settings", "greeting", "hello kv")
+	idb.KVGet("settings", "greeting", onGet)
+}
+
+func onGet(v string) {
+	assert(v == "hello kv", "kv get returns what kv put stored")
+	idb.KVPut("settings", "second", "two")
+	idb.KVGetAll("settings", onPair, onListed)
+}
+
+// The each callback prints every pair the store walks; if it never runs, the
+// expected output is missing those lines and the gate says so.
+func onPair(k, v string) {
+	println("ok: kv pair", k, "=", v)
+}
+
+func onListed() {
+	idb.KVGet("settings", "second", onSecond)
+}
+
+func onSecond(v string) {
+	assert(v == "two", "second key survived the walk")
+	println("PASS: stdlib idb kv round trip")
+}

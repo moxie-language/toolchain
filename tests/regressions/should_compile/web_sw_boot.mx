@@ -1,0 +1,39 @@
+// Regression: the service worker's half of a Moxie wasm bundle boots.
+//
+// A service worker is a third execution context - no document, no Worker - and
+// `moxie build -target wasm` stages its host as $sw/wasm-host-sw.mjs beside the
+// runtime. This fixture is the module that host instantiates: it registers the
+// install hook and logs, which is all a boot proof needs.
+//
+// The proof is not this file's stdout (a service worker's console is its own):
+// tests/wasm/emit_check.sh builds it to $sw/sw.wasm, registers the emitted
+// $sw/wasm-host-sw.mjs from a page through the emitted sw-register.js, and
+// fails unless the worker reaches `activated` AND the server saw the worker
+// fetch its module. A worker whose host or module is broken never gets there.
+//
+// Two markers, for two harnesses. browser-only: phase 0 builds it natively
+// (the wasm-only packages are panic stubs) and skips the run. skip: phase 5's
+// generic target list loads every fixture through the page/Worker host, and a
+// service-worker module has no meaning there - this one is built and booted by
+// tests/wasm/emit_check.sh, in the context it is written for.
+//:wasmtest browser-only
+//:wasmtest skip
+package main
+
+import (
+	"web/sw"
+)
+
+func onInstall(event sw.Event) {
+	// Nothing to precache in a boot proof; the hook exists so the host's
+	// sw_on_install path is exercised and the module is not trivially empty.
+	// WaitUntil hands the handler a continuation, and the worker stays alive
+	// until it is called - which is the one thing a service worker must get
+	// right, since the browser kills it the moment the event settles.
+	sw.WaitUntil(event, func(done func()) { done() })
+}
+
+func main() {
+	sw.OnInstall(onInstall)
+	sw.Log("sw fixture: hooks registered")
+}

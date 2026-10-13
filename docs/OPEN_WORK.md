@@ -9265,3 +9265,138 @@ the fixpoint check (r146 building an identical r147). It belongs in the round
 that also carries the next emitter change, so one pair of rebuilds covers both;
 until then the claim is "r146 compiles, runs both gates, and emits a loadable
 bundle", not "the compiler reproduces itself at this revision".
+
+## Round 146: the service worker's half, and three more missing entries
+
+**(b) is nearly done: the build now stages the whole bundle.** Beside the module
+and `$runtime/`, `moxie build -target wasm` writes:
+
+    dir/$sw/wasm-host-sw.mjs   the service worker's host (jsruntime/sw-host.mjs)
+    dir/sw-register.js         page-side registration glue
+
+`jsruntime/sw-host.mjs` is the third execution context's half: no document, no
+Worker, its own lifecycle. It is the Worker host plus the `sw_*` entries - the
+WASI/env import object, the channel and spawn bridge, the string and callback
+marshalling and the IndexedDB imports are all imported from host.mjs rather than
+duplicated, and the DOM relay is passed a portless proxy so a DOM call from a
+service worker fails by name. It reaches the runtime through `../$runtime/…`,
+which resolves correctly both from `$sw/` and from inside `$runtime/` itself,
+where the same file also lands (one staging rule, no special cases).
+
+`jsruntime/sw-register.js` differs from the glue apps wrote by hand in one way
+that matters: it derives the bundle's directory from `document.currentScript.src`
+and registers with that as the scope, so a site at the root and a bundle under a
+subdirectory both work. The hand-written version hardcodes `/$sw/…` and scope
+`/`, which only ever works at a root.
+
+**The `-o` wart from round 145 is fixed**: the module URL uses the output name
+verbatim and only the bootstrap's own name drops `.wasm`, so `-o dir/app` now
+points the page at `dir/app` instead of a file that was never written.
+
+**web/idb was missing three entries in the host, exactly like web/dom was.**
+`src/web/idb/idb_wasm.mx` declares 17 `idb_*` imports, including
+`idb_kv_get`/`idb_kv_put`/`idb_kv_get_all`, and jsruntime/host.mjs provided 14:
+a module linking web/idb could not instantiate at all. The three are implemented
+now (`jsruntime/idb.mjs` gained the KV functions and the kv_profiles/kv_settings/
+kv_cache stores the package documents; the entries live in a new
+`buildIdbBridge()` so the service-worker host spreads the same object instead of
+keeping a second copy).
+
+**The coverage invariant is now checked for every namespace**, not just the DOM
+one where it first bit: tests/wasm/validate.sh walks `dom`, `idb` and `sw`,
+extracting the imports from each package's wasm half and the entries from the
+host that serves it (host.mjs for dom and idb, sw-host.mjs for sw). Measured:
+82/82, 17 imports against 21 entries (the extras are the dom package's own
+idb wrappers), 39/39.
+
+**The service worker's boot is proven, not assumed.** A fixture
+(`web_sw_boot.mx`) registers an install hook and logs; emit_check.sh builds it to
+`$sw/sw.wasm`, and then a page loads the emitted bundle through the emitted
+bootstrap, registers the worker through the emitted `sw-register.js`, and the
+run must end with the worker `activated` AND the server having seen the worker
+fetch `$sw/sw.wasm`. Run.py reports that on stderr so `-q` still prints only the
+module's stdout, and it exits non-zero otherwise: a worker whose host or module
+is broken must not be able to "activate successfully" by doing nothing.
+
+**A framework bug the proof found, in the service-worker lifecycle.** The first
+boot attempt logged `sw fixture: hooks registered` and then sat in `activating`
+until the page gave up. sw.mjs's eager listeners (they must be registered during
+script evaluation, for Firefox) create a `waitUntil` promise for any install or
+activate event that arrives before the module registers a handler, and hand the
+resolver to `WaitUntil` when it does. Nothing ever resolved that promise if the
+module had no hook for that event, so:
+
+    [swdbg] install event handler=false      <- queued with an unresolved waitUntil
+    sw fixture: hooks registered             <- module ran and registered OnInstall
+    [swdbg] ModuleReady installQ=0 activateQ=0
+    [swdbg] activate event handler=false     <- arrived AFTER the module was ready
+    state=activating ... forever
+
+Measured, not guessed: the logging above is what the service worker's own
+console said. Two changes fix it, and they are the correct semantics rather than
+a timeout: an event handed to the module is released on the next turn unless the
+module claimed it by calling `WaitUntil` (`handOver`), and once the host has
+called `sw.ModuleReady()` an event with no handler is simply not extended - a
+worker whose module only serves fetch and message is normal, and the browser
+must be allowed to finish install and activate. Measured after: `state=activated`
+with `module_fetched=true`.
+
+The page-side wait had the same kind of error and got the same treatment:
+`navigator.serviceWorker.ready` is scoped to the *document*, and in this harness
+the page lives outside the worker's scope, so it can never resolve no matter how
+healthy the worker is. The check polls `getRegistrations()` against a deadline
+and reports the state it reached.
+
+**The idb entries are proven by running them, not by grepping.** A grep can see
+that host.mjs mentions `idb_kv_get`; it cannot see whether the object the bridge
+actually returns contains it, which is exactly what a mis-placed spread would
+break. `web_idb_kv.mx` opens the database, puts a value, reads it back, walks the
+store with get-all and re-reads a key, all through callbacks, and the gate diffs
+the browser output against tests/wasm/expected/web_idb_kv.txt. Measured:
+
+    web_idb_kv                       PASS  (browser only)
+      ok: idb opened
+      ok: kv get returns what kv put stored
+      ok: kv pair greeting = hello kv
+      ok: kv pair second = two
+      ok: second key survived the walk
+      PASS: stdlib idb kv round trip
+
+The get-all walk is what makes this more than a put/get smoke test: its two pair
+lines come from the each-callback, so a `cbss` that silently did nothing would
+leave them out and fail the diff.
+
+**Gate, measured, MOXIE=tmp/mxc-r147 (the compiler that also stages $sw/), with
+nothing else building at the same time:**
+
+    phase 0 (--quick)   132 passed / 0 failed / 0 skipped, rc=0
+      regression:web_dom_roundtrip   PASS (native build; browser-only)
+      regression:web_idb_kv          PASS (native build; browser-only)
+      regression:web_sw_boot         PASS (native build; browser-only; phase 5
+                                     skips it - a service-worker module has no
+                                     meaning in the page/Worker host)
+    phase 5              78 passed / 0 failed / 0 skipped, rc=0
+      wasm:web_dom_roundtrip         PASS ((browser only))
+      wasm:web_idb_kv                PASS ((browser only))
+      wasm:emitted-host              PASS (the build staged 36 runtime modules
+                                     and a loadable bootstrap, and the emitted
+                                     service worker booted)
+
+    fixpoint: mxc-r147 == mxc-r148 (sha256 615ee4a9...) - a generation that
+    reproduces itself byte for byte, which is the strongest bootstrap claim and
+    the one round 145 deferred.
+
+    $ mxc-r147 build -target wasm -o dir/app <pkg>    -> module at dir/app and
+      the bootstrap says new URL('./app', import.meta.url): the -o wart is gone,
+      checked with an output that has no .wasm extension.
+
+**A process note with evidence, because it cost a full sweep.** Two focused
+validate.sh runs were started while a full phase-5 sweep was already running.
+validate.sh wipes the shared build cache at its start, so the sweep's later
+targets lost their cache mid-flight and `array_elem_addr` failed with "wasm
+build failed" - a target that had passed in every earlier sweep and passed again
+in the clean one. The rule recorded in round 140 ("no other builds while a gate
+runs") is not only about edits: a focused run IS a build, and it carries the
+cache wipe with it. The clean re-run above is the one to believe; the failed
+sweep is not evidence of a regression, and this paragraph is why that is
+knowable rather than guessed.

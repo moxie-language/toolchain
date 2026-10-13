@@ -19,14 +19,28 @@ FAIL=0
 # and jsruntime/host.mjs provides them. A missing entry is not one fixture's
 # problem: the whole module fails to instantiate, so it is said here once
 # instead of arriving as an unexplained load error per target.
-DOM_IMPORTS="$(grep -o 'wasmimport bridge dom_[a-z_0-9]*' "$ROOT/src/web/dom/dom_wasm.mx" | sed 's/.*dom_//' | sort -u)"
-DOM_BRIDGE="$(grep -oE '^    dom_[a-z_0-9]+\(' "$ROOT/jsruntime/host.mjs" | sed 's/^ *dom_//;s/(//' | sort -u)"
-DOM_MISSING="$(comm -23 <(echo "$DOM_IMPORTS") <(echo "$DOM_BRIDGE"))"
-if [ -n "$DOM_MISSING" ]; then
-    echo "wasm host is missing DOM bridge entries:" "$DOM_MISSING"
-    exit 1
-fi
+# Each entry is <namespace> <package wasm half> <host file>. The invariant is
+# the same for all three: a wasm module imports EVERY symbol of a package it
+# links, not only the ones it calls, so one missing entry makes the whole module
+# fail to instantiate. The DOM namespace was checked first because that is where
+# it bit (round 143, eight entries); web/idb was missing three (round 146) and
+# the service worker's sw_* entries had no host at all.
+while read -r ns wasmfile hostfile; do
+    [ -n "$ns" ] || continue
+    imports="$(grep -o "wasmimport bridge ${ns}_[a-z_0-9]*" "$ROOT/$wasmfile" | sed "s/.*${ns}_//" | sort -u)"
+    entries="$(grep -oE "^ *(dom_|idb_|sw_)?${ns}_[a-z_0-9]+\(" "$ROOT/$hostfile" | sed "s/^ *//;s/(//" | sed "s/^${ns}_//" | sort -u)"
+    missing="$(comm -23 <(echo "$imports") <(echo "$entries"))"
+    if [ -n "$missing" ]; then
+        echo "wasm host $hostfile is missing ${ns}_* bridge entries:" $missing
+        exit 1
+    fi
+done <<'BRIDGES'
+dom src/web/dom/dom_wasm.mx jsruntime/host.mjs
+idb src/web/idb/idb_wasm.mx jsruntime/host.mjs
+sw src/web/sw/sw_wasm.mx jsruntime/sw-host.mjs
+BRIDGES
 # And the relay must not carry operations no Moxie program can ask for.
+DOM_IMPORTS="$(grep -o 'wasmimport bridge dom_[a-z_0-9]*' "$ROOT/src/web/dom/dom_wasm.mx" | sed 's/.*dom_//' | sort -u)"
 DOM_RELAY="$(sed -n 's/^  \([a-z_0-9]*\): [{].*/\1/p; s/^  \([a-z_0-9]*\): PENDING,.*/\1/p' "$ROOT/jsruntime/dom-ops.mjs" | sort -u)"
 DOM_STALE="$(comm -13 <(echo "$DOM_IMPORTS") <(echo "$DOM_RELAY"))"
 if [ -n "$DOM_STALE" ]; then
