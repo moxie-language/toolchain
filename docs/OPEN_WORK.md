@@ -9523,3 +9523,48 @@ fixture loads through (`startDomain`'s boot message now can carry an application
 port, and the Worker host takes one more argument). All 77 targets still build,
 load, run and match their native reference, and the check that exercises the new
 path passes inside the same run.
+
+## Round 149: the store bundle answers the page
+
+The first real app bundle runs on the stdlib framework. smesh's store worker -
+which owns the app's IndexedDB, answers JSON-array requests and is what the feed
+and profile bundles talk to - was built against the stdlib (round 147) and now
+talks to a page through `startBundle`:
+
+    store bundle said: {"replies": ["SR_READY","SR_KV_GET","SR_KV_GETALL_ITEM",
+                        "SR_KV_GETALL_DONE"],
+                        "kv": "hello-from-page",
+                        "kvAll": [["probe","hello-from-page"]], "ok": true}
+    PASS: the store bundle answers the page through the stdlib framework
+
+Both directions are proven: the page received the worker's ready reply and its
+KV answers, and the module received the page's requests. The app's half is now
+`web/static/store-bridge.mjs` (the five `store_worker_*` imports and nothing
+else, ~40 lines) plus `scripts/store-bundle-test.py` in the app repo; the host
+that used to carry them, `store-wasm-host.mjs`, is no longer needed by this
+bundle.
+
+**Three fixes came out of making it real**, each found by running:
+
+  - a relative `appBridge` (and a relative module path) given to `startBundle`
+    was resolved by the WORKER, so it asked for `/$runtime/store-bridge.mjs` and
+    then for `/$runtime/store.wasm` (the second failing as `expected magic word
+    00 61 73 6d, found 3c 21 44 4f` - it had fetched the 404 page). Both are
+    resolved against the page now, where the caller's relative path means what it
+    says: beside the bundle;
+  - the store opens IndexedDB asynchronously and posts `SR_READY` when it is
+    ready, which is LATER than `startBundle`'s ready promise (that resolves when
+    main returns). The proof now waits for the app's own ready signal - the first
+    version sent a put before it and the value vanished, which is the app's
+    contract being raced rather than a framework bug;
+  - **the DOM fixture was flaky, and the gate would have failed intermittently.**
+    Its ResizeObserver callback is registered for good, so a second layout
+    notification ran the whole callback tail again and printed the PASS line
+    twice - measured in the emitted-bundle check as duplicated output. The
+    callback now unobserves first: one notification, one chain, one PASS line.
+    That is a gate bug fixed before it could waste a sweep, and it is only
+    visible because the expected-output comparison exists.
+
+Gate: wasm:emitted-host green with all four checks after the fix; the full phase
+5 sweep for this tree is the next round's first action, and the store proof is
+smesh's own script (`python3 scripts/store-bundle-test.py --dir <built bundle>`).

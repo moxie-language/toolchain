@@ -15,8 +15,13 @@ import { startDomain } from './host.mjs';
 // the Worker imports the module itself. Hosts stay framework; bridges stay app.
 export function load(wasmPath, opts = {}) {
   globalThis.__moxie_wasm_url = wasmPath;
+  // A relative bridge path means "beside the bundle": resolve it here, because
+  // the Worker is what imports it and the Worker's own URL is in $runtime/.
+  const appBridge = opts.appBridge
+    ? new URL(opts.appBridge, new URL(wasmPath, globalThis.location.href)).href
+    : null;
   return new Promise((resolve, reject) => {
-    startDomain({ kind: 'root', wasm: wasmPath, appBridge: opts.appBridge || null },
+    startDomain({ kind: 'root', wasm: wasmPath, appBridge },
       (err) => err ? reject(err) : resolve());
   });
 }

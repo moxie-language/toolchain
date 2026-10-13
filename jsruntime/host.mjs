@@ -1010,10 +1010,20 @@ function spawnWorker(fnIdx, argBytes, chans) {
 // a module callback.
 export function startBundle(wasm, opts = {}) {
   const chan = new MessageChannel();
+  // A relative bridge path means "beside the bundle", and it has to be resolved
+  // HERE: the Worker imports it, so a relative URL left as-is would be resolved
+  // against worker-host.mjs in $runtime/ - which is how the first store-bundle
+  // proof failed, with the worker asking for /$runtime/store-bridge.mjs.
+  // Same for the module itself: the Worker fetches it, so a relative path has to
+  // become absolute here or the Worker looks for the module in $runtime/.
+  const wasmUrl = new URL(wasm, globalThis.location.href).href;
+  const appBridge = opts.appBridge
+    ? new URL(opts.appBridge, wasmUrl).href
+    : null;
   let settle;
   const ready = new Promise((resolve, reject) => { settle = { resolve, reject }; });
   const worker = startDomain(
-    { kind: 'root', wasm, appBridge: opts.appBridge || null },
+    { kind: 'root', wasm: wasmUrl, appBridge },
     (err) => err ? settle.reject(err) : settle.resolve(),
     false,
     chan.port2,
