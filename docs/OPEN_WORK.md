@@ -9620,3 +9620,16 @@ runtime use depends on the emitted `$sw/`.
 The signer bundle now walks all the way to `web/common/nostr` and stops only on
 `type Tag []string` / `type Tags []Tag`: those 253 references across 44 files are
 the last thing between three bundles and compiling.
+
+**A finding that explains why the app's port is app-shaped.** `grep '^type X []'`
+finds named slice types in the STDLIB too (`src/builtin/builtin.mx`,
+`src/net/ipsock.mx`) and the stdlib compiles - phase 1b builds 45 packages with
+mxc-r147. The rule that rejects smesh's `type Tag []string` therefore does not
+reach stdlib packages, which is the same location-dependence round 145 measured
+for the `+` operator: the strict rules are a MAIN-MODULE rule, so a dependency
+package inside the checkout keeps what a manifest-less or main-module target is
+refused. It does not change the port - smesh IS a main module, so it must comply -
+but it does mean the compiler's rule boundary is worth stating plainly somewhere:
+"what the compiler accepts" depends on where the package lives, and that is why
+the same tree can hold both a rejected `type Tag []string` and an accepted
+`type ... []...` in the standard library.
