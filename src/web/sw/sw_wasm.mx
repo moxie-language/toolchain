@@ -1,0 +1,329 @@
+//:build wasm
+
+package sw
+
+import (
+	"web/callback"
+	"unsafe"
+)
+
+// --- Lifecycle ---
+
+//:wasmimport bridge sw_on_install
+func wasmOnInstall(cbID int32)
+
+//:wasmimport bridge sw_on_activate
+func wasmOnActivate(cbID int32)
+
+//:wasmimport bridge sw_on_fetch
+func wasmOnFetch(cbID int32)
+
+//:wasmimport bridge sw_on_message
+func wasmOnMessage(cbID int32)
+
+func OnInstall(fn func(Event))  { wasmOnInstall(callback.RegisterI(func(e int32) { fn(Event(e)) })) }
+func OnActivate(fn func(Event)) { wasmOnActivate(callback.RegisterI(func(e int32) { fn(Event(e)) })) }
+func OnFetch(fn func(Event))    { wasmOnFetch(callback.RegisterI(func(e int32) { fn(Event(e)) })) }
+func OnMessage(fn func(Event))  { wasmOnMessage(callback.RegisterI(func(e int32) { fn(Event(e)) })) }
+
+// --- Event methods ---
+
+//:wasmimport bridge sw_wait_until
+func wasmWaitUntil(event int32, cbID int32)
+
+//:wasmimport bridge sw_respond_with
+func wasmRespondWith(event int32, resp int32)
+
+//:wasmimport bridge sw_respond_with_network
+func wasmRespondWithNetwork(event int32)
+
+//:wasmimport bridge sw_respond_with_cache_first
+func wasmRespondWithCacheFirst(event int32)
+
+//:wasmimport bridge sw_respond_with_network_first
+func wasmRespondWithNetworkFirst(event int32)
+
+//:wasmimport bridge sw_respond_with_proxy_cache
+func wasmRespondWithProxyCache(event int32)
+
+//:wasmimport bridge sw_prune_proxy_cache
+func wasmPruneProxyCache(maxAgeMs int64, cbID int32)
+
+//:wasmimport bridge sw_get_request_url
+func wasmGetRequestURL(event int32, outPtr *int32, outLen *int32)
+
+//:wasmimport bridge sw_get_request_path
+func wasmGetRequestPath(event int32, outPtr *int32, outLen *int32)
+
+//:wasmimport bridge sw_get_message_data
+func wasmGetMessageData(event int32, outPtr *int32, outLen *int32)
+
+//:wasmimport bridge sw_get_message_client_id
+func wasmGetMessageClientID(event int32, outPtr *int32, outLen *int32)
+
+func WaitUntil(event Event, fn func(done func())) {
+	doneID := callback.Register0Once(func() {})
+	wasmWaitUntil(int32(event), doneID)
+	fn(func() {
+		callback.Release(doneID)
+	})
+}
+
+func RespondWith(event Event, resp Response)    { wasmRespondWith(int32(event), int32(resp)) }
+func RespondWithNetwork(event Event)            { wasmRespondWithNetwork(int32(event)) }
+func RespondWithCacheFirst(event Event)         { wasmRespondWithCacheFirst(int32(event)) }
+func RespondWithNetworkFirst(event Event)       { wasmRespondWithNetworkFirst(int32(event)) }
+func RespondWithProxyCache(event Event)         { wasmRespondWithProxyCache(int32(event)) }
+
+func PruneProxyCache(maxAgeMs int64, fn func()) {
+	wasmPruneProxyCache(maxAgeMs, callback.Register0Once(fn))
+}
+
+func GetRequestURL(event Event) (s string) {
+	var rPtr, rLen int32
+	wasmGetRequestURL(int32(event), &rPtr, &rLen)
+	return ptrToString(rPtr, rLen)
+}
+
+func GetRequestPath(event Event) (s string) {
+	var rPtr, rLen int32
+	wasmGetRequestPath(int32(event), &rPtr, &rLen)
+	return ptrToString(rPtr, rLen)
+}
+
+func GetMessageData(event Event) (s string) {
+	var rPtr, rLen int32
+	wasmGetMessageData(int32(event), &rPtr, &rLen)
+	return ptrToString(rPtr, rLen)
+}
+
+func GetMessageClientID(event Event) (s string) {
+	var rPtr, rLen int32
+	wasmGetMessageClientID(int32(event), &rPtr, &rLen)
+	return ptrToString(rPtr, rLen)
+}
+
+// --- SW globals ---
+
+//:wasmimport bridge sw_origin
+func wasmOrigin(outPtr *int32, outLen *int32)
+
+//:wasmimport bridge sw_skip_waiting
+func wasmSkipWaiting()
+
+//:wasmimport bridge sw_claim_clients
+func wasmClaimClients(cbID int32)
+
+//:wasmimport bridge sw_match_clients
+func wasmMatchClients(cbID int32)
+
+//:wasmimport bridge sw_post_message
+func wasmPostMessage(client int32, ptr *byte, length int32, capacity int32)
+
+//:wasmimport bridge sw_post_message_json
+func wasmPostMessageJSON(client int32, ptr *byte, length int32, capacity int32)
+
+//:wasmimport bridge sw_get_client_by_id
+func wasmGetClientByID(ptr *byte, length int32, capacity int32, cbID int32)
+
+//:wasmimport bridge sw_navigate
+func wasmNavigate(client int32, ptr *byte, length int32, capacity int32)
+
+func Origin() (s string) {
+	var rPtr, rLen int32
+	wasmOrigin(&rPtr, &rLen)
+	return ptrToString(rPtr, rLen)
+}
+
+func SkipWaiting() { wasmSkipWaiting() }
+
+func ClaimClients(done func()) {
+	wasmClaimClients(callback.Register0Once(done))
+}
+
+func MatchClients(fn func(Client)) {
+	wasmMatchClients(callback.RegisterI(func(c int32) { fn(Client(c)) }))
+}
+
+func PostMessage(client Client, msg string) {
+	wasmPostMessage(int32(client), unsafe.StringData(msg), int32(len(msg)), int32(len(msg)))
+}
+
+func PostMessageJSON(client Client, json string) {
+	wasmPostMessageJSON(int32(client), unsafe.StringData(json), int32(len(json)), int32(len(json)))
+}
+
+func GetClientByID(id string, fn func(Client, bool)) {
+	cbID := callback.RegisterIIOnce(func(c int32, found int32) {
+		fn(Client(c), found != 0)
+	})
+	wasmGetClientByID(unsafe.StringData(id), int32(len(id)), int32(len(id)), cbID)
+}
+
+func Navigate(client Client, url string) {
+	wasmNavigate(int32(client), unsafe.StringData(url), int32(len(url)), int32(len(url)))
+}
+
+// --- Cache ---
+
+//:wasmimport bridge sw_cache_open
+func wasmCacheOpen(ptr *byte, length int32, capacity int32, cbID int32)
+
+//:wasmimport bridge sw_cache_add_all
+func wasmCacheAddAll(cache int32, urlsPtr *byte, urlsLen int32, urlsCap int32, count int32, cbID int32)
+
+//:wasmimport bridge sw_cache_from_manifests
+func wasmCacheFromManifests(cache int32, filesPtr *byte, filesLen int32, filesCap int32, count int32, cbID int32)
+
+//:wasmimport bridge sw_cache_put
+func wasmCachePut(cache int32, urlPtr *byte, urlLen int32, urlCap int32, resp int32, cbID int32)
+
+//:wasmimport bridge sw_cache_match
+func wasmCacheMatch(ptr *byte, length int32, capacity int32, cbID int32)
+
+//:wasmimport bridge sw_cache_delete
+func wasmCacheDelete(ptr *byte, length int32, capacity int32, cbID int32)
+
+func CacheOpen(name string, fn func(Cache)) {
+	wasmCacheOpen(unsafe.StringData(name), int32(len(name)), int32(len(name)),
+		callback.RegisterIOnce(func(c int32) { fn(Cache(c)) }))
+}
+
+func CacheAddAll(cache Cache, urls []string, done func()) {
+	joined, count := joinNullSep(urls)
+	wasmCacheAddAll(int32(cache),
+		unsafe.StringData(joined), int32(len(joined)), int32(len(joined)),
+		count, callback.Register0Once(done))
+}
+
+func CacheFromManifests(cache Cache, staticFiles []string, done func()) {
+	joined, count := joinNullSep(staticFiles)
+	wasmCacheFromManifests(int32(cache),
+		unsafe.StringData(joined), int32(len(joined)), int32(len(joined)),
+		count, callback.Register0Once(done))
+}
+
+func CachePut(cache Cache, url string, resp Response, done func()) {
+	wasmCachePut(int32(cache), unsafe.StringData(url), int32(len(url)), int32(len(url)),
+		int32(resp), callback.Register0Once(done))
+}
+
+func CacheMatch(url string, fn func(Response)) {
+	wasmCacheMatch(unsafe.StringData(url), int32(len(url)), int32(len(url)),
+		callback.RegisterIOnce(func(r int32) { fn(Response(r)) }))
+}
+
+func CacheDelete(name string, done func()) {
+	wasmCacheDelete(unsafe.StringData(name), int32(len(name)), int32(len(name)),
+		callback.Register0Once(done))
+}
+
+// --- Fetch ---
+
+//:wasmimport bridge sw_fetch
+func wasmFetch(ptr *byte, length int32, capacity int32, cbID int32)
+
+//:wasmimport bridge sw_fetch_all
+func wasmFetchAll(urlsPtr *byte, urlsLen int32, urlsCap int32, count int32, onEachID int32, onDoneID int32)
+
+//:wasmimport bridge sw_response_ok
+func wasmResponseOK(resp int32) (n int32)
+
+func Fetch(url string, fn func(Response, bool)) {
+	cbID := callback.RegisterIIOnce(func(r int32, ok int32) {
+		fn(Response(r), ok != 0)
+	})
+	wasmFetch(unsafe.StringData(url), int32(len(url)), int32(len(url)), cbID)
+}
+
+func FetchAll(urls []string, onEach func(int32, Response, bool), onDone func()) {
+	eachID := callback.RegisterIII(func(idx, resp, ok int32) {
+		onEach(idx, Response(resp), ok != 0)
+	})
+	doneID := callback.Register0Once(func() {
+		callback.Release(eachID)
+		onDone()
+	})
+	joined, count := joinNullSep(urls)
+	wasmFetchAll(unsafe.StringData(joined), int32(len(joined)), int32(len(joined)),
+		count, eachID, doneID)
+}
+
+func ResponseOK(resp Response) (ok bool) {
+	return wasmResponseOK(int32(resp)) != 0
+}
+
+// --- SSE ---
+
+//:wasmimport bridge sw_sse_connect
+func wasmSSEConnect(ptr *byte, length int32, capacity int32, cbID int32) (n int32)
+
+//:wasmimport bridge sw_sse_close
+func wasmSSEClose(id int32)
+
+func SSEConnect(url string, onMessage func(string)) (s SSE) {
+	cbID := callback.RegisterS(onMessage)
+	return SSE(wasmSSEConnect(unsafe.StringData(url), int32(len(url)), int32(len(url)), cbID))
+}
+
+func SSEClose(id SSE) { wasmSSEClose(int32(id)) }
+
+// --- Timers ---
+
+//:wasmimport bridge sw_set_timeout
+func wasmSetTimeout(ms int32, cbID int32) (n int32)
+
+//:wasmimport bridge sw_clear_timeout
+func wasmClearTimeout(t int32)
+
+func SetTimeout(ms int32, fn func()) (t Timer) {
+	return Timer(wasmSetTimeout(ms, callback.Register0Once(fn)))
+}
+
+func ClearTimeout(t Timer) { wasmClearTimeout(int32(t)) }
+
+// --- Time ---
+
+//:wasmimport bridge sw_now_seconds
+func wasmNowSeconds() (n int64)
+
+//:wasmimport bridge sw_now_millis
+func wasmNowMillis() (n int64)
+
+func NowSeconds() (n int64) { return wasmNowSeconds() }
+func NowMillis() (n int64) { return wasmNowMillis() }
+
+// --- Logging ---
+
+//:wasmimport bridge sw_log
+func wasmLog(ptr *byte, length int32, capacity int32)
+
+func Log(msg string) {
+	wasmLog(unsafe.StringData(msg), int32(len(msg)), int32(len(msg)))
+}
+
+// joinNullSep joins strings with null byte separator for passing []string to JS.
+func joinNullSep(ss []string) ([]byte, int32) {
+	if len(ss) == 0 {
+		return nil, 0
+	}
+	total := 0
+	for _, s := range ss {
+		total += len(s) + 1
+	}
+	buf := []byte{:0:total}
+	for i, s := range ss {
+		buf = buf | s
+		if i < len(ss)-1 {
+			buf = push(buf, 0)
+		}
+	}
+	return buf, int32(len(ss))
+}
+
+func ptrToString(ptr int32, length int32) (s string) {
+	if length <= 0 {
+		return ""
+	}
+	return unsafe.String((*byte)(unsafe.Pointer(uintptr(ptr))), length)
+}

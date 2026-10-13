@@ -1,0 +1,162 @@
+//:build wasm
+
+package callback
+
+import (
+	"runtime"
+	"unsafe"
+)
+
+// drainCompactions runs at every JS->wasm entry point. On wasm there is no
+// event loop of our own - each browser callback is a separate wasm export
+// invocation, and returning to JS is the only point at which no Moxie frame is
+// live. That makes this the wasm counterpart of the relay's epoll yield: the
+// one safe place to compact sovereign arenas that have reached their pressure
+// ratchet. One group per entry, so a compaction cannot stall a callback.
+func drainCompactions() {
+	runtime.SovDrainCompactions(1)
+}
+
+//:wasmexport __cb0
+func Dispatch0(id int32) {
+	drainCompactions()
+	f, ok := table.Lookup0(id)
+	if !ok {
+		return
+	}
+	f()
+}
+
+//:wasmexport __cbs
+func DispatchS(id int32, ptr *byte, length int32) {
+	drainCompactions()
+	s := ptrToString(ptr, length)
+	f, ok := table.LookupS(id)
+	if !ok {
+		return
+	}
+	f(s)
+}
+
+//:wasmexport __cbb
+func DispatchB(id int32, val int32) {
+	drainCompactions()
+	f, ok := table.LookupB(id)
+	if !ok {
+		return
+	}
+	f(val != 0)
+}
+
+//:wasmexport __cbi
+func DispatchI(id int32, val int32) {
+	drainCompactions()
+	f, ok := table.LookupI(id)
+	if !ok {
+		return
+	}
+	f(val)
+}
+
+//:wasmexport __cbis
+func DispatchIS(id int32, ival int32, ptr *byte, length int32) {
+	drainCompactions()
+	s := ptrToString(ptr, length)
+	f, ok := table.LookupIS(id)
+	if !ok {
+		return
+	}
+	f(ival, s)
+}
+
+//:wasmexport __cbiis
+func DispatchIIS(id int32, a int32, b int32, ptr *byte, length int32) {
+	drainCompactions()
+	s := ptrToString(ptr, length)
+	f, ok := table.LookupIIS(id)
+	if !ok {
+		return
+	}
+	f(a, b, s)
+}
+
+//:wasmexport __cbss
+func DispatchSS(id int32, ptr1 *byte, len1 int32, ptr2 *byte, len2 int32) {
+	drainCompactions()
+	s1 := ptrToString(ptr1, len1)
+	s2 := ptrToString(ptr2, len2)
+	f, ok := table.LookupSS(id)
+	if !ok {
+		return
+	}
+	f(s1, s2)
+}
+
+//:wasmexport __cb6i
+func Dispatch6I(id int32, a int32, b int32, c int32, d int32, e int32, f int32) {
+	drainCompactions()
+	cb, ok := table.Lookup6I(id)
+	if !ok {
+		return
+	}
+	cb(a, b, c, d, e, f)
+}
+
+//:wasmexport __cbii
+func DispatchII(id int32, a int32, b int32) {
+	drainCompactions()
+	f, ok := table.LookupII(id)
+	if !ok {
+		return
+	}
+	f(a, b)
+}
+
+//:wasmexport __cbiii
+func DispatchIII(id int32, a int32, b int32, c int32) {
+	drainCompactions()
+	f, ok := table.LookupIII(id)
+	if !ok {
+		return
+	}
+	f(a, b, c)
+}
+
+//:wasmexport __cbdata
+func DispatchBytes(id int32, ptr *byte, length int32) {
+	drainCompactions()
+	if length <= 0 {
+		f, ok := table.LookupBytes(id)
+		if !ok {
+			return
+		}
+		f(nil)
+		return
+	}
+	b := ptrToBytes(ptr, length)
+	f2, ok2 := table.LookupBytes(id)
+	if !ok2 {
+		return
+	}
+	f2(b)
+}
+
+//:wasmexport __cb_release
+func DispatchRelease(id int32) {
+	drainCompactions()
+	table.Release(id)
+}
+
+func ptrToBytes(ptr *byte, length int32) (buf []byte) {
+	if ptr == nil || length <= 0 {
+		return nil
+	}
+	return unsafe.Slice(ptr, length)
+}
+
+func ptrToString(ptr *byte, length int32) (s string) {
+	if ptr == nil || length <= 0 {
+		return ""
+	}
+	return unsafe.String(ptr, length)
+}

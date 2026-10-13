@@ -8758,3 +8758,45 @@ Order that keeps the tree green:
   4. then musiquay;
   5. then the scaffolding emission, so `$runtime/` and `*-wasm-host.mjs` stop
      being per-app files.
+
+# Round 142: the web framework's generic half is stdlib now
+
+First slice of the owner decision (round 141, part 2). The Moxie side of the
+browser bridge moved out of the app and into the stdlib, verbatim except for
+import paths:
+
+    src/web/callback     512 lines  the callback registry (wasm) + a native stub
+    src/web/dom          929        elements, events, clipboard, files, history
+    src/web/idb          193        IndexedDB
+    src/web/sw           486        service worker lifecycle
+    src/web/ws            73        WebSocket
+    src/web/subtle       122        WebCrypto
+    src/web/node          75
+    src/web/localstorage  46
+    src/crypto/aes256gcm  40        generic AES-256-GCM wrapper (was app-local
+                                    under web/common/crypto)
+
+Each keeps the tree's stub/wasm split (`//:build !wasm` stub, `//:build wasm`
+body with `//:wasmimport bridge ...`). The JS half was already single-copy in
+`jsruntime/*.mjs`, so nothing there moved.
+
+Two things this found in the app-local copies:
+
+  - `web/idb` had `limit int` in QueryDMs - `int` is UNDEFINED in Moxie, so
+    smesh's own idb package cannot have been compiling for wasm. Fixed to int32
+    in the stdlib copy; smesh gets the fix when it switches over.
+  - `callback` was wasm-only (no native file at all), which would break any
+    native build that imports the framework. It has a stub now
+    (callback_native.mx), like every other package in the set.
+
+Verified by running, both targets, with mxc-r145:
+
+    wasm:  crypto/aes256gcm web/callback web/dom web/idb web/localstorage
+           web/ws web/subtle web/sw web/node -> rc=0 (linked .wasm)
+    native: the same set compiles with 0 compile errors; rc=1 is the linker's
+           missing main.main, which is what a library package does
+
+Next in this workstream: a stdlib fixture that uses the packages and is run in
+Chromium by phase 5, then smesh switched over (delete its jsbridge copies), then
+musiquay, then the host scaffolding emission ($runtime/, $sw/,
+<bundle>-wasm-host.mjs) so those stop being per-app files.

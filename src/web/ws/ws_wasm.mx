@@ -1,0 +1,51 @@
+//:build wasm
+
+package ws
+
+import (
+	"web/callback"
+	"unsafe"
+)
+
+//:wasmimport bridge ws_dial
+func wasmDial(urlPtr *byte, urlLen int32, urlCap int32, onMsgID int32, onOpenID int32, onCloseID int32, onErrID int32) (n int32)
+
+//:wasmimport bridge ws_send
+func wasmSend(conn int32, msgPtr *byte, msgLen int32, msgCap int32) (n int32)
+
+//:wasmimport bridge ws_close
+func wasmClose(conn int32)
+
+//:wasmimport bridge ws_ready_state
+func wasmReadyState(conn int32) (n int32)
+
+func Dial(url string, onMessage func(int32, string), onOpen func(int32), onClose func(int32, int32, string), onError func(int32)) (c Conn) {
+	msgID := callback.RegisterIS(onMessage)
+	openID := callback.RegisterI(onOpen)
+	errID := callback.RegisterI(onError)
+	var closeID int32
+	closeID = callback.RegisterIIS(func(a int32, b int32, c string) {
+		callback.Release(msgID)
+		callback.Release(openID)
+		callback.Release(errID)
+		callback.Release(closeID)
+		onClose(a, b, c)
+	})
+	h := wasmDial(
+		unsafe.StringData(url), int32(len(url)), int32(len(url)),
+		msgID, openID, closeID, errID,
+	)
+	return Conn(h)
+}
+
+func Send(conn Conn, msg string) (ok bool) {
+	return wasmSend(int32(conn), unsafe.StringData(msg), int32(len(msg)), int32(len(msg))) != 0
+}
+
+func Close(conn Conn) {
+	wasmClose(int32(conn))
+}
+
+func ReadyState(conn Conn) (n int32) {
+	return wasmReadyState(int32(conn))
+}
