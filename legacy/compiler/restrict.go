@@ -275,8 +275,46 @@ func scanSovLoopDecls(b *builder, stmts []ast.Stmt, inLoop bool) {
 	}
 }
 
+// isIndexableType reports whether a type can be indexed: slice, array, string,
+// map, pointer-to-array, or a type parameter. Mirrors stage4's isIndexable.
+//
+// Neither compiler used to check the operand at all: `t[0] = x` where t is a
+// struct was accepted and reached LLVM, which rejected the module with
+// "'%t23' defined with type '{ { ptr, i32, i32 } }' but expected
+// '{ ptr, i32, i32 }'". go/ssa does not enforce indexability, so the check has
+// to be here. stage4 got it first (a562f5ec); this is the bootstrap mirror.
+func isIndexableType(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Slice, *types.Array, *types.Map:
+		return true
+	case *types.Basic:
+		return u.Info()&types.IsString != 0
+	case *types.Pointer:
+		return isIndexableType(u.Elem())
+	case *types.TypeParam:
+		return true
+	}
+	return false
+}
+
 func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 	switch v := instr.(type) {
+	case *ssa.IndexAddr:
+		// v.X is the indexed operand. For a pointer-to-array go/ssa reports the
+		// operand as the array, so only a genuinely non-indexable operand lands
+		// here - which is the case this check exists for.
+		//
+		// This runs under checkMoxieRestrictions, which returns early for a
+		// non-user package, and that is the right gate: the compiler's own tree
+		// contains a handful of `len(*[N]T)`/index patterns that the toolchain
+		// is allowed to write, and the app repos are where the mistake was
+		// (marmot's `newTree[i]`).
+		if v.X != nil && !isIndexableType(v.X.Type()) {
+			b.addError(v.Pos(), "moxie: invalid operation: cannot index "+v.X.Type().String())
+		}
 	case *ssa.BinOp:
 		// Reject + on non-numeric types (strings use | for concatenation).
 		if v.Op == token.ADD {
