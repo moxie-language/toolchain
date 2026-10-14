@@ -10967,6 +10967,26 @@ link set where nothing else calls `Write`, it carries fewer arms, and reusing it
 in a link set that does call `Write` through an interface would miss them at
 runtime. The key is load-bearing, not conservative.
 
+**How much the key costs, measured.** Of 454 cached packages sampled, **440 carry
+no dispatch arms at all** - and three `math` objects built in three different link
+sets are byte-identical once `ModuleID`/`source_filename` are stripped
+(`sha256` of the disassembly: `5c8c5db759cb9d33` three times). A package with no
+interface-invoke site has link-set-INDEPENDENT bitcode today; the key is what
+stops it being shared. `io` (94 cached copies) is the opposite case: its arms
+differ per link set by construction.
+
+So the shape of the fix is a **per-package dispatch fingerprint** instead of the
+whole link set in `pkgHash`:
+
+  - fingerprint = hash over, for each interface method the package invokes, the
+    sorted list of impl identities the scan finds (empty for 440 of 454 packages,
+    giving them one cache entry for the whole suite);
+  - it needs the invoked-method names *before* emission, which the SSA builder
+    has after `CreatePackage` - so the fingerprint pass is "build SSA for this
+    package, collect `SSAInvoke.MethodName`, discard", run only for the cache-key
+    computation. That is the part that has not been written yet, and the reason
+    this change is not the two-line key edit it looked like.
+
 Two ways out, both bigger than the key change looked:
 
   - **Emit the arms once per link set** instead of per calling package (a
