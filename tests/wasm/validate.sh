@@ -75,7 +75,11 @@ else
     done
 fi
 
-rm -rf "$WORK"; mkdir -p "$WORK"
+# NOT `rm -rf $WORK`: the phase runs one fixture per driver job, and those jobs
+# are concurrent - a wipe in each of them deletes the results the others are
+# writing. Per-target directories are recreated as needed, so the only effect of
+# keeping WORK is that the previous run's output stays readable.
+mkdir -p "$WORK"
 
 # This used to start from an empty package cache, on the theory that each run
 # should measure a cold compile. It does not measure that - one wasm fixture's

@@ -215,6 +215,14 @@ for p in "${PHASE_LIST[@]}"; do
 		PHASE_OF+=("$p")
 		idx=$((idx + 1))
 	done < <(phase_run "$p" --list)
+	# A phase that can split itself must actually declare its units. Measured:
+	# phase 1b listed nothing, so the driver reported "nothing to do" for it and
+	# the 45-package stdlib compile sweep counted as a pass without compiling
+	# anything. A phase that names no units is an error, not a skip.
+	if [ "$idx" -eq 0 ]; then
+		echo "unitrun: phase $p declared no units; it would be reported as passing without running" >&2
+		exit 1
+	fi
 done
 rm -f "$RUNDIR"/status-*-$$
 
@@ -304,6 +312,11 @@ launch_unit() {
 	# The phase script needs TMPROOT before it can name its unit dir, so the
 	# path is derived here once from the unit id and exported.
 	UNIT_SAFE="$(echo "$unit" | tr -c 'A-Za-z0-9_.-' '_')"
+	# The flock is on fd 9 of the driver. This function runs in a subshell, so
+	# it inherits the OPEN file description: without closing it here every unit
+	# holds the lock open and a second driver never starts - the run looks like
+	# it is working while its state directories are being clobbered.
+	exec 9>&-
 	rm -rf "$d" "$WORKROOT/$UNIT_SAFE"
 	mkdir -p "$d"
 	date +%s%N >"$d/start"

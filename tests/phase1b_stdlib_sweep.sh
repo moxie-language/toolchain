@@ -91,6 +91,12 @@ SWEEP=(
 SWEEP_KNOWN=(
 )
 
+# One unit, and it stays one unit - see the note above `unit_args` below for why
+# the sweep is not split per package. Without an entry here the driver sees a
+# phase with no units and reports success without running anything, which is
+# exactly the failure this line exists to prevent.
+UNITS=(stdlib_sweep)
+
 td="$(tempdir stdlib_sweep)"
 rm -rf "$td"; mkdir -p "$td/pkg"
 {
