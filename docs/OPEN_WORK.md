@@ -11357,3 +11357,43 @@ framework change with both apps' boots as the only detector.
 That decision is what the earlier "store is generic and duplicated" note was
 missing: the Moxie half IS generic, the JS half is not, and the JS half is six
 lines of port plumbing that belongs where the port is.
+
+## Round 53: the objective's state, closed
+
+Every claim in the objective is now either demonstrated or resolved to a
+decision, and this is the summary a reader should start from:
+
+**(a) recover() removal - done.** `grep -rn 'recover()' src/ pkg/ cmd/` finds
+nothing; the only mentions are the two lines in `ssa_builder.mx` that REJECT it
+("recover() is not available in Moxie: a panic is fatal"). The runtime has no
+`_recover`. The recovery-dependent tests are the loud replacements in phase 6
+`6g` (`fatal:stage4`, `fatalexit:stage4` PASS): Skip/Error mark and the run
+continues, FailNow ends it.
+
+**(b) the framework in the stdlib - done for the packages whose bridge the
+runtime can serve.** `src/web/` holds dom, idb, sw, ws, subtle, localstorage,
+callback and node; both apps import them and neither has a local copy. The
+runtime is the single JS copy (`jsruntime/`), and `moxie build -target wasm`
+stages `$runtime/` (36 modules), `$sw/` and the loader per bundle. What stays
+app-side is what CANNOT be served by the runtime: `store` (its bridge needs the
+page's MessagePort, see the note above), `webgl` (JS-only; its Moxie consumer is
+the separate `gio` tree), and routing (app UI state, not framework code).
+
+**(c) proof by running - done.**
+  - smesh in Chromium from build output only: "S.M.E.S.H. v0.6.38", login
+    screen, language and theme controls, "verify ok / store ok / rproxy".
+  - musiquay: `test_smoke.py` 12/12 with the login page branded and translated
+    and every worker ok.
+  - phase 5 `wasm:emitted-host`: service worker `state=activated
+    module_fetched=true`, app-bridge probe answered, 36 runtime modules staged.
+  - Gate on the shipped compiler: phases 0a/0b/1 131/131 (with the heavy
+    `http_header_api` given its own ceiling), phase 3 six modules PASS, phase 4
+    PASS, phase 5 78/78 at `-j 1`, phase 6 stage4 PASS - and phase 6's legacy
+    variants plus phase 2 remain environmental (no libLLVM-22).
+
+**Carried forward as separate work, not part of this objective:** the remaining
+five type-checker forms (`push` element type, comparison operands, `len`/`range`
+on non-slices, slice-element assignment, `nil` against a non-pointer) with the
+index form already fixed on both sides; verifying the legacy mirror on a machine
+with LLVM 22; and emitting per-bundle protocol hosts so the seven
+`*-wasm-host.mjs` can leave the apps.
