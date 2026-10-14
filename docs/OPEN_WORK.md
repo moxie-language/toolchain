@@ -11597,3 +11597,16 @@ index form differ, and only one of them is wrong. That is a codegen smell, not
 just a bad decoder - the same shape is everywhere in this tree. It deserves its
 own probe: a 32-byte output built through `push` on a `[]byte{:32}[:0]` cursor
 versus written by index, compared byte for byte under `-target wasm`.
+
+### The heavy unit, measured
+
+`0a/http_header_api` is not a failure and not a hang - it is one very slow
+compile. Run alone with a 1800s ceiling it **PASSES in 1129 seconds** (~19 min)
+while compiling its ~250-package closure; at the default 900s ceiling it is
+killed and reported as the one red unit. `clang-22` on this host is a symlink to
+clang-23, and a single `golang.org/x/text/unicode/norm` object took over three
+minutes of wall clock. So phases **0a + 0b + 1 are 131 of 131 green** once the
+heavy unit is given its own ceiling:
+
+    MOXIE=$PWD/tmp/mxc-bc bash tests/unitrun.sh --phases 0a --only http_header_api \
+      --force --timeout 1800 -j 1     #  82 of 82 PASS, 1129468ms for the one unit
