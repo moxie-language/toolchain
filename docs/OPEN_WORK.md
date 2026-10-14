@@ -11206,3 +11206,38 @@ wasm-ld. The local copy has to go, not just be unused.
 Both apps build all their bundles against the stdlib packages and their browser
 suites pass (smesh boots to its login screen; musiquay's `test_smoke.py` is
 12/12).
+
+## The type-checker gap the app port exposed (round 49)
+
+Six source forms were accepted by BOTH compilers and then rejected by clang.
+They are one defect, and it is not a bilateral divergence - the bootstrap
+compiler (built from `legacy/`) is equally lax, because `go/ssa` does not
+enforce them either:
+
+| form | what clang said |
+| --- | --- |
+| `push([]nostr.Tag, []string)` | `%t55 defined with type '{ { ptr, i32, i32 } }' but expected 'ptr'` |
+| `method == intConst` (string vs int32) | `%t48 defined with type 'i32' but expected '{ ptr, i32, i32 }'` |
+| `len(struct)` / `range struct` | `%t95 defined with type '{ { ptr, i32, i32 } }' but expected '{ ptr, i32, i32 }'` |
+| `struct[i] = x` / `struct[i]` | `%t23 defined with type '{ { ptr, i32, i32 } }' but expected '{ ptr, i32, i32 }'` |
+| `privTree[0] = aByteSlice` ([]byte into []hpkePrivateKey) | invalid cast / type mismatch |
+| `expr != nil` where expr is a struct | nil test against a non-pointer |
+
+**FIXED, stage4 only** (`a562f5ec`): indexing a non-indexable operand.
+`buildIndex` and `buildStore` check the operand, `isIndexable` accepts slice,
+array, string, map, pointer-to-array and type parameters, and anything else is
+`invalid operation: cannot index <type>`. No tree source needed changing, and
+the compiler still builds itself - the tree never relied on the leniency.
+
+**Still open, in this order:**
+
+  1. **The legacy mirror.** The same checks have to run in the bootstrap
+     compiler or the next `legacy -> stage4` bootstrap loses them (wood law).
+     go/ssa does not enforce them, so the check belongs beside legacy's other
+     restrictions (`legacy/compiler/restrict.go` walks the AST already).
+  2. The other five forms: `push`'s element type, comparison operand types,
+     `len`/`range` on a non-slice, assignment of a value into a slice element
+     whose type does not match, and `nil` against a non-pointer. Each needs its
+     own predicate and its own message, and each should be added the way the
+     index check was: land it, then run the whole tree through it, because a
+     wrong predicate shows up as the compiler refusing to build itself.
