@@ -10948,6 +10948,34 @@ the checkout it came from: `moxie build -target wasm` must stage `$runtime/` (al
 `sw-register.js`; the emitted bootstrap then has to LOAD in Chromium, and the
 service worker has to reach `state=activated module_fetched=true`. It passes.
 
+### Why `linkSetKey` cannot simply be dropped from the cache key
+
+The obvious next fix - stop folding `bst.linkSetKey` into every package's
+`pkgHash`, so two fixtures that import the same packages share their objects - is
+**not safe as it stands**, and the reason is now located:
+
+    ir_iface.mx:505   for rPath := range cctx.universe.Registry {
+    ir_iface.mx:514       if m := cctx.dispMethodsByPkg[rPath]; m != nil && !m[methodName] { continue }
+    ir_iface.mx:518       push(regPaths, rPath)
+                      }
+                      // arms for every impl of methodName in the LINK SET
+
+Interface dispatch arms are emitted **into the package that contains the call
+site**, from the set of packages in the current link set that implement the
+method. So a package's `.bc` genuinely differs between link sets: compiled in a
+link set where nothing else calls `Write`, it carries fewer arms, and reusing it
+in a link set that does call `Write` through an interface would miss them at
+runtime. The key is load-bearing, not conservative.
+
+Two ways out, both bigger than the key change looked:
+
+  - **Emit the arms once per link set** instead of per calling package (a
+    generated module keyed by link set), making the per-package `.bc` link-set
+    independent and therefore shareable. This is the fix that removes the cost.
+  - **Keep the key as is** and accept that every distinct link set compiles its
+    own copy of the shared closure - 177 packages for the stdlib sweep,
+    ~250 for `http_header_api`, each ~20 minutes cold.
+
 **Open, found by running phase 5 at `-j 4`:** the same 78 units that pass at
 `-j 1` come back with ~17 spurious `FAIL (no output)` when four run at once -
 the fixture directories show a native binary that prints nothing while its wasm
