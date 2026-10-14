@@ -10987,6 +10987,34 @@ whole link set in `pkgHash`:
     computation. That is the part that has not been written yet, and the reason
     this change is not the two-line key edit it looked like.
 
+**Attempted in round 173 and reverted: the measurement must own no arena.**
+The fingerprint pass was written (source scan for `x.Method(` call sites plus an
+impl-set walk reusing `findIfaceImpls`, stored as `disp.fp` beside the cached
+objects so a warm build reads them instead of measuring) and it does work on
+small fixtures - `fpA`-style builds report the expected values and a repeat build
+hits 5 of 6 packages. It was **reverted** because it aborts the compiler's own
+self-build:
+
+    fp math/big = 'f1673d4c'
+    panic: runtime error at 0x2752e4: alloc: nil arena      (runtime.runtimePanic)
+
+Diagnosis, for whoever picks this up:
+
+  - `alloc: nil arena` means `domainRoot.fnStack[fnTop] == nil`, i.e. the arena
+    stack top was cleared while allocations were still being made. The
+    measurement arena is the suspect: `newIREmitter` captures
+    `runtime.CurrentArena()` into `e.compileArena`, and the measurement freed its
+    arena at the end of the package (`runtime.ArenaFree`), leaving the emitter -
+    and anything the arm walk allocated in it - pointing into unmapped memory.
+  - The faithful fix is to run the measurement on an arena whose lifetime is the
+    BUILD, not the package: allocate it once before the loop in
+    `measureDispFingerprints`, never `ArenaFree` it, and let the build's own
+    cleanup reclaim it. The crash then has no arena to outlive.
+  - What is already known-good and reusable: `disp.fp` read/write beside the
+    cache objects, the `pkgHash` fold (`|A<fp>` when measured, `|L<linkSetKey>`
+    when not), and the source scan - all of it is in the stash
+    `wip-fingerprint-attempt` and its shape is described above.
+
 Two ways out, both bigger than the key change looked:
 
   - **Emit the arms once per link set** instead of per calling package (a
