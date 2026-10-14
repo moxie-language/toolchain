@@ -10626,3 +10626,49 @@ same family as the `&s[i]` wasm32 malformed-IR finding from round 152 and the
 `{{ptr, i32, i32}}` in the notif build then - **a single-field struct holding a
 slice is being given a nested LLVM type in some path**. It needs isolating with a
 small fixture against the exact expression, and it is compiler work, not app work.
+
+### Round 169: the mls codegen bug is PRE-EXISTING, isolated to one function
+
+The bad cast is not a regression from this session's comparison work - **`tmp/mxc-r147`,
+which predates all of it, fails identically**:
+
+    ./tmp/mxc-build-830479/git.smesh.lol_smesh_web_common_mls.ll:1877:18: error:
+    invalid cast opcode for cast from '{ { ptr, i32, i32 } }' to '{ ptr, i32, i32 }'
+
+**Isolated to `(*CipherSuite).generateSignatureKeyPair`** in
+`web/common/mls/ciphersuite.mx`:
+
+    func (cs *CipherSuite) generateSignatureKeyPair() (v signaturePublicKey, v1 signaturePrivateKey, err error) {
+        cs.assertSupported()
+        seed := []byte{:32}
+        subtle.RandomBytes(seed)
+        privkey := ed25519.NewKeyFromSeed(seed)
+        pub := []byte{:32}
+        copy(pub, []byte(privkey)[32:])
+        return signaturePublicKey(pub), signaturePrivateKey(seed), nil
+    }
+
+Every type in that function is an alias for `[]byte` (`signaturePublicKey` and
+`signaturePrivateKey` became aliases in this session, and `ed25519` was touched by
+the stdlib import rewrite), so the emitter has two same-shaped values and inserts a
+`bitcast` between a type it believes is a **single-field struct wrapping a slice**
+and the bare slice.
+
+**What has been ruled out by measurement:**
+
+  - not the comparison rewrite (r147 fails the same way);
+  - not the array-return-then-slice pattern: a fixture doing
+    `h := sum(data); return h[:]` with `sum` returning `[32]byte` builds and runs
+    for wasm and native;
+  - not `sha256.Sum` specifically: a fixture calling the real
+    `crypto/sha256.Sum` and returning `h[:]` builds and runs.
+
+**The next step is a fixture that imports `web/common/mls` and calls
+`generateSignatureKeyPair`**, because the remaining candidate is an interaction
+between the alias conversions and `ed25519.NewKeyFromSeed`'s return type - i.e. it
+may need `[]byte(privkey)`'s conversion path rather than the slice-of-array one. The
+`{{ptr, i32, i32}}` shape has now been seen three times (rounds 152, 168, 169),
+always around a single-field struct holding a slice, and each time in code that
+converts between a named slice type and `[]byte` - **so the pattern to look for in
+`ir_types.mx`/`ir_binop.mx` is where a conversion's source and destination types are
+compared, and whether an alias is being treated as a distinct struct type.**
