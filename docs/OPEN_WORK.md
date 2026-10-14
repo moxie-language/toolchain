@@ -11312,3 +11312,24 @@ A stdlib `web/store` therefore needs a `bridge.store_worker_*` surface in
 `jsruntime/` plus a host that serves it - a runtime-side change with a browser
 test on both apps, not a file move. That is the next piece of framework work,
 and it is the last named package that is both generic and duplicated.
+
+**Where the work actually is** (measured, so the next round starts moving):
+`jsruntime/buildBridge` already serves the generic web surface - 226 import
+entries covering localstorage, crypto, schnorr, dom, idb, ws - and
+`is_worker_context()` already reports whether the module runs in a Worker. What
+it does NOT have is any `worker_*` entry, and the five operations `store` needs
+are not all thin wrappers:
+
+    worker_on_message(fn)      registers a Moxie callback; needs the host to
+                               call it when a message arrives
+    worker_post(msg)           self.postMessage - thin
+    worker_set_timeout(ms,fn)  setTimeout + a Moxie callback; host-side
+    worker_clear_timeout(h)    clearTimeout - thin
+    worker_now_seconds()       Date.now()/1000 - thin
+
+The three callback entries need `dispatchCallback` wiring in worker-host.mjs
+(already used for DOM callbacks on the page side), and the design question is
+which side owns the callback id space when the module is itself a Worker: the
+page-side supervisor (`web/static/store-wasm-host.mjs`) maps js ids to wasm ids
+today, and a generic runtime cannot assume that supervisor exists. Deciding that
+is the task; the three thin entries and the package move are then mechanical.
