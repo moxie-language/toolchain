@@ -10403,3 +10403,42 @@ Every rule encountered, and the fix that works:
 | package-global stores | never seed a sink from the caller; keep the slice local |
 | loop-local declarations in self-mutating methods | hoist above the loop |
 | byte equality | `==`, not `bytes.Equal` - the operator promotes to constant time |
+
+### Round 164: the bundle layer's rule is "named function + package-level slot"
+
+The mls bundle's `main.mx` has its own capturing closures - 11 raw, 9 distinct
+sites - and they are a different problem from the library ones, because
+`jsruntime`'s app-facing calls take callbacks with no context argument:
+
+    mlsw.WorkerSetTimeout(ms int32, fn func())
+    mlsw.WorkerOnMessage(fn func(msg string))
+    storeReq(op, args string, fn func(string, string))
+
+**Two sites cleared this round (9 -> 5 distinct), and the pattern is now
+stated:**
+
+  1. **a callback whose signature has no room for its state takes that state from
+     a package-level slot**, and the callback itself must be a **named function**.
+     Extracting the body into a helper that still closes over its own parameters
+     **moves the capture rather than removing it** - that mistake was made with
+     `onCryptoTimeout` and caught by the compiler in the same build
+     (`onCryptoTimeout [cbID, fn]`).
+  2. **a multi-step asynchronous run becomes a state machine.** `loadGroups` held
+     an id list, a position and a `done` func across several
+     `S_MLS_LOAD_GROUP` replies. It now loads **sequentially** - one request in
+     flight, advancing a position - with the state in `loadState` and
+     `onGroupList`/`loadNextGroup`/`onGroupState` as package-level functions. The
+     old shape fired every request at once and counted a captured counter down;
+     sequential is what a single-slot state allows and it is the same total work.
+
+**Remaining in the mls bundle** - 5 distinct sites, all needing shape 1 or 2:
+
+    createGroupAndSend   [urls, peer, content, gs, groupIDHex]   (nested, twice)
+    handleInit           [urls]                                  (nested, three deep)
+    processIncoming      [ev]
+    publishKeyPackage    [urls, done]
+    startKPFetch         [p]
+
+`createGroupAndSend` and `handleInit` are the hard ones: they are nested several
+closures deep, so the outer callback must park its state before the inner one can
+read it, and the inner one has to know which outer run it belongs to.
