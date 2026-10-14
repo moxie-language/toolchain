@@ -10934,7 +10934,7 @@ The first run of `http_header_api` is still ~20 minutes: see below.
 | 0a regressions | **82/82 PASS** (including `http_header_api`, 18.3 min alone) |
 | 0b restrictions | **45/45 PASS** |
 | 1 package smoke | **4/4 PASS** |
-| 1b stdlib sweep | 177 packages, first run compiles all of them (`linkSetKey`, below) |
+| 1b stdlib sweep | **PASS**, 177 packages, 16.0 min; the re-run took 176 from the cache |
 | 1c wasm sweep | **3/3 PASS** |
 | 2 selfhost | ENVIRONMENTAL FAIL (no libLLVM-22; unchanged, see round 103) |
 | 3 IR validate | **PASS** |
