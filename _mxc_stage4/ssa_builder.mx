@@ -2685,6 +2685,10 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 				return
 			}
 		}
+		if !isIndexable(base.SSAType()) {
+			fb.reportNotIndexable(base.SSAType())
+			return
+		}
 		ia := &SSAIndexAddr{X: base, Index: idx}
 		ia.typ = NewPointer(ssaElemType(base.SSAType()))
 		ia.name = fb.nextName()
@@ -6776,6 +6780,14 @@ func (fb *ssaFuncBuilder) buildIndex(e *syntax.IndexExpr) (s SSAValue) {
 		l.name = fb.nextName()
 		fb.emit(l)
 		return l
+	case *Slice, *Array, *Basic:
+		// A string is a Basic with IsString; ssaElemType answers its byte.
+		et := ssaElemType(x.SSAType())
+		ia := &SSAIndexAddr{X: x, Index: idx}
+		ia.typ = NewPointer(et)
+		ia.name = fb.nextName()
+		fb.emit(ia)
+		return fb.emitLoad(ia, et)
 	case *Pointer:
 		if arr, ok2 := SafeUnderlying(t.Base).(*Array); ok2 {
 			ia2 := &SSAIndexAddr{X: x, Index: idx}
@@ -6784,6 +6796,10 @@ func (fb *ssaFuncBuilder) buildIndex(e *syntax.IndexExpr) (s SSAValue) {
 			fb.emit(ia2)
 			return fb.emitLoad(ia2, arr.Elem)
 		}
+		if !isIndexable(t.Base) {
+			fb.reportNotIndexable(x.SSAType())
+			return nil
+		}
 		et := ssaElemType(x.SSAType())
 		ia := &SSAIndexAddr{X: x, Index: idx}
 		ia.typ = NewPointer(et)
@@ -6791,13 +6807,56 @@ func (fb *ssaFuncBuilder) buildIndex(e *syntax.IndexExpr) (s SSAValue) {
 		fb.emit(ia)
 		return fb.emitLoad(ia, et)
 	default:
-		et := ssaElemType(x.SSAType())
-		ia := &SSAIndexAddr{X: x, Index: idx}
-		ia.typ = NewPointer(et)
-		ia.name = fb.nextName()
-		fb.emit(ia)
-		return fb.emitLoad(ia, et)
+		fb.reportNotIndexable(x.SSAType())
+		return nil
 	}
+}
+
+// isIndexable reports whether a type can be indexed: slice, array, string, map,
+// or a type parameter (whose bound decides).
+func isIndexable(t Type) (ok bool) {
+	if t == nil {
+		return false
+	}
+	switch u := SafeUnderlying(t).(type) {
+	case *Slice, *Array, *TCMap:
+		return true
+	case *Basic:
+		return u.Info&IsString != 0
+	case *TypeParam:
+		return true
+	case *Pointer:
+		// Every pointer-to-array is indexable (syscall writes through *[2]byte).
+		// The first version of this predicate forgot the case; the failure that
+		// exposed it was reported by an OLD compiler binary rather than the
+		// patched one, which is worth remembering: when a new rule seems to
+		// reject the tree, check which compiler actually ran before believing
+		// the rule is wrong.
+		if _, isArr := SafeUnderlying(u.Base).(*Array); isArr {
+			return true
+		}
+
+		return isIndexable(u.Base)
+	}
+	return false
+}
+
+// reportNotIndexable is the loud stop for `x[i]` where x cannot be indexed.
+//
+// Both compilers used to accept the operand and leave it to codegen: indexing a
+// STRUCT emitted `getelementptr inbounds {{ptr,i32,i32}}, ptr %sp` (the struct's
+// field type in place of the operand) and clang rejected the module with
+// "'%t23' defined with type '{ { ptr, i32, i32 } }' but expected
+// '{ ptr, i32, i32 }'". Measured on both the legacy-built ./moxie and stage4
+// with the six-line reproducer in docs/ROUND-174-emitted-scaffolding.md, so this
+// is a shared gap, not a divergence - and a wrong index must be a compile error.
+func (fb *ssaFuncBuilder) reportNotIndexable(t Type) {
+	name := "?"
+	if t != nil {
+		name = t.String()
+	}
+	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+	push(cctx.compileErrors, "invalid operation: cannot index " | name)
 }
 
 func (fb *ssaFuncBuilder) buildSlice(e *syntax.SliceExpr) (s SSAValue) {
