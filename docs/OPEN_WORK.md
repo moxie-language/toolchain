@@ -10315,3 +10315,43 @@ sink-plus-trampoline that must become a loop-owning free function:
 The four round-158/159 helpers (`writeU16Vector`/`u16Sink`,
 `extSink`/`extVectorAt`) are the templates that must be rewritten first, since
 they are the ones already in the tree.
+
+### Round 162: the pattern is proven, and three shapes cover every remaining site
+
+**mls: captures 0, package-global-store errors 48 -> 40.** The `capabilities` pair
+- the first conversion - now **compiles**, which is what makes this a proven
+template rather than a proposal.
+
+The two helpers that make it a small change per site, both in `encoding.mx`:
+
+    func readVectorBody(r *Reader) (sub Reader, ok bool)      // walk it yourself
+    func writeVectorBody(w *Writer, body []byte)              // wrap your own bytes
+
+and the three shapes they enable, which between them cover every remaining site:
+
+  1. **a scalar vector** - local `var child Writer`, loop `child.addUint16(...)`,
+     then `writeOpaqueVec(child.buf)`; read side is `readVectorBody` plus a loop.
+     (`writeU16Vector`, the five `capabilities` vectors.)
+  2. **a vector of structs with their own marshal** - identical, with the element
+     work inline in the loop (`marshalExtensionVec`/`unmarshalExtensionVec`).
+  3. **a vector whose element work needs the enclosing struct** - `readVectorBody`
+     into a loop that writes `nd.field = push(nd.field, v)` directly
+     (`parentNode`).
+
+**What is left: 40 errors in 17 functions**, every one an instance of those three
+shapes - `(*commit)`, `(*Credential)`, `(*groupSecrets)`, `(*ratchetTree)`,
+`(*updatePath)`, `(*updatePathNode)`, `(*Welcome)` (marshal + unmarshal each),
+`(*Group).Marshal` and `UnmarshalGroup`. The dead sinks and trampolines from
+rounds 158-160 (`extSink`, `parentLeafSink`, `nodeSink`, `pskSink`, `certSink`,
+`secSink`, `porSink`, `ctSink`, `upnSink`, `privSink` and their `xVectorAt`
+functions) are still in the tree and must be deleted as each site converts - the
+`parentLeafSink` deletion in this round is the model.
+
+**A note on how long this has taken, because the cost was predictable in
+hindsight.** Rounds 158-160 built a sink-and-trampoline apparatus that had to be
+torn out again: the apparatus was designed before the two refusal rules were
+known, and one full round went into proving the apparatus could not work. The
+lesson worth carrying: **when a construct is refused, read the rule before
+designing around it.** `checkGlobalStores` in `_mxc_stage4/ir_scope.mx` was four
+lines of reading, and it says plainly that a store whose address root is a package
+global is rejected - which is exactly what "seed the sink from the caller" is.
