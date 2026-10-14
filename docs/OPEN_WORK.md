@@ -10757,3 +10757,43 @@ slice.
 
 This is the last thing between the mls bundle and a build; the bundle itself
 reports 0 global-store errors and 0 capturing closures.
+
+## Round 172: the codec bug was a stray space, and ed25519 was two more app bugs
+
+**The compiler bug is fixed** (`8c189af2`). `ir_deepcopy.mx` built the codec
+buffer's layout by hand:
+
+    codecBufType := "{ " | st | ", i32 }"       // space after the opening brace
+
+Every other struct in the emitted IR comes from `llvmStructType`, which writes `{`
+with **no** space and `", "` between fields. So the buffer's local was a different
+LLVM type from the one the descriptor, the `extractvalue` and the `insertvalue`
+around it used:
+
+    store { {ptr, i32, i32}, i32 } zeroinitializer, ptr %cb6
+    %csd13 = extractvalue { {ptr, i32, i32}, i32 } %cbl12, 0
+
+and clang reported the mismatch as `invalid cast opcode for cast from
+'{ {ptr, i32, i32}, i32 }' to '{ptr, i32, i32}'` - **an extra struct layer that was
+nothing but whitespace in a type string.** Both sites fixed; fixpoint verified
+with the change in (`tmp/mxc-fix2 == tmp/mxc-fix3`).
+
+The lesson is worth as much as the fix: the `{{ptr, i32, i32}}` shape that has
+appeared in rounds 152, 168, 169, 171 and 172 was never a type-system defect. It
+is what a **hand-spelled** LLVM type looks like when it drifts from
+`llvmStructType`'s spelling. Any IR text built by hand rather than through the
+struct renderer is a candidate, and the grep that finds them is `'"{ "'`.
+
+**Two more `ed25519` conversions were app bugs of the same kind** (`6efd427c`).
+`PublicKey` and `PrivateKey` are structs with a `b []byte` field in this tree -
+Go's slice spelling is a named slice type, which Moxie refuses - so neither
+converts from or to `[]byte`. The constructors are `PublicKeyOf` and
+`PrivateKeyOf`, and the accessor is `Bytes()`. `ciphersuite.mx` had all three
+forms wrong (`[]byte(privkey)`, `ed25519.PublicKey(verifKey)`), each of which
+emitted a bitcast between a slice and a single-field struct.
+
+**mls now advances past both**, and the next stop is a slice-length
+`extractvalue` on a value typed `{ {ptr, i32, i32} }` - the same family, in a
+different hand-spelled or hand-selected type. The method that found the space is
+the one to repeat: get the IR, look at the exact line, and compare the type string
+written there against what `llvmStructType`/`sliceType` would produce.
