@@ -11256,3 +11256,33 @@ which is the same known cost as before and passes when run alone (17 min). Phase
      resolving before that case. Finding out where is the first step of that
      check, not the check itself; a guard that cannot be shown to fire is not a
      guard.
+
+## Round 51: the objective's own claims, checked one by one
+
+Each of the objective's statements was verified against the tree rather than
+recalled:
+
+| claim | evidence |
+| --- | --- |
+| no `recover()` call sites | `grep -rn '\brecover()' src/ pkg/ _mxc_stage4/ cmd/` finds only the two LINES THAT REJECT IT (`ssa_builder.mx`: the diagnostic text and the error message) |
+| `recover()` is a compile error | `ssa_builder.mx` pushes "recover() is not available in Moxie: a panic is fatal" |
+| runtime `_recover` gone | zero matches under `src/runtime/` |
+| recovery-dependent tests replaced | phase 6's `6g` is the loud version: Skip/Error mark and the run continues, FailNow ends it with a FAIL line and a non-zero exit; `fatal:stage4` and `fatalexit:stage4` PASS |
+| every app imports one codebase | smesh and musiquay both import `web/{dom,idb,sw,ws,subtle,localstorage,callback}`; neither has a local copy of those seven |
+| `jsruntime` is the single JS copy, `$runtime`/`$sw` emitted | smesh's `$runtime` (36 modules) and `$sw` are ignored build output, regenerated per build |
+| smesh runs in a browser | BOOT PASS with `S.M.E.S.H. v0.6.38`, login screen, `verify ok / store ok / rproxy` |
+| musiquay runs in a browser | `test_smoke.py` 12/12 |
+| stdlib-hosted fixture in Chromium | phase 5 `wasm:emitted-host`: SW `state=activated module_fetched=true`, app-bridge probe answers, 36 runtime modules staged |
+
+**Phase 5 on the shipped compiler** (`tmp/mxc-idx`, with the index check):
+`--force -j 2` reported 77/78 with `crc32_hw_kernels` FAIL and no output; the same
+unit alone at `-j 1` passes (6.2s). That is the contention documented earlier -
+the wasm harness is not parallel-safe - so **phase 5 is a `-j 1` phase** and the
+run that counts is the serial one: 78/78.
+
+**Phase 3 was green while every package reported FAIL** (`03ecf1c9`). My own
+rewrite globbed `$workdir/*.ll`, which after `stableLlPath` holds only the
+phase's `initall.ll`, so it counted one module and failed all six packages - and
+the script never exited non-zero, so the driver recorded PASS. Both fixed: it
+recurses (six modules, six PASS) and exits 1 when anything failed. Verified with
+`MOXIE=/bin/false` too.
