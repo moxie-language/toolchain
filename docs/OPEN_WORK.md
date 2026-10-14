@@ -10901,6 +10901,14 @@ every build of the same link set, so the bitcode - and therefore the cache key -
 is reproducible. Every one of the six `.ll` emission sites goes through the one
 helper.
 
+**Verified for the compiler change** (`34c0b7e3`): the compiler builds itself and
+the result is self-reproducing - `tmp/mxc-cur` compiled by `tmp/mxc-ll2`, then
+`tmp/mxc-cur2` compiled by `tmp/mxc-cur`, are byte-identical (`cmp` clean), so the
+change does not disturb codegen. Legacy has no counterpart to touch: it has no
+package cache and no `pkgHash`/`linkSetKey`, so wood law has nothing to mirror
+here (checked: `grep -rn 'linkSetKey\|pkgHash' legacy/ --include='*.go'` is
+empty).
+
 **Also this round**: `tests/phase3_ir_validate.sh` derives its per-package
 verdicts from the emitted modules; the four restriction fixtures above are the
 suite's first true negative results for `closure captures outer variable(s)`,
