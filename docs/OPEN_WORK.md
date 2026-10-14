@@ -10049,3 +10049,8 @@ means a holder rather than a function that calls `errors.New` per call.
 
 Fixpoint with the diagnostic in: `mxc-dbg2 == mxc-dbg3`
 (`a730f98c5a137c34c9ad6681cb15a47f0c7dc78743eaf82b10db7dc8ed498b9d`).
+
+**Round 156's gate, measured.** Phase 0 with the diagnostic build
+(`MOXIE=tmp/mxc-dbg3`): **132 passed / 0 failed / 0 skipped, rc=0**, so naming
+the declaration in the error changed nothing about what is accepted - only what
+the message says.
