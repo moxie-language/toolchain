@@ -11157,3 +11157,28 @@ smesh is at that state: ten bundles build, `$runtime`/`$sw` are ignored build
 output, and the app boots ("S.M.E.S.H. v0.6.38", login screen, "verify ok /
 store ok / rproxy"). musiquay still has the copied `$runtime`, `$sw` and
 `*-wasm-host.mjs` and is the next app through the same five steps.
+
+### musiquay, same recipe (round 48)
+
+musiquay went through the five steps and its own smoke suite is the evidence:
+`python3 -m pytest test/test_smoke.py` -> **12 passed** - the relay boots
+`web/static`, the login page is branded and translated, and every worker reports
+ok (`verify, store, rproxy, signer, app, domain, profile, notif`; `feed` is
+`parked` by design).
+
+Its source needed three of the same fixes smesh needed, all forms stage4
+accepted and clang refused:
+
+    idb: limit int -> int32                 int is not a predeclared type
+    ciphersuite generateSignatureKeyPair    []byte(privkey) / []byte(pub) are
+                                            struct-to-slice bitcasts; Bytes() and
+                                            PublicKeyOf (smesh round 172)
+    app qrAlignPositions                    nested slice literal inside an array
+                                            literal -> element assignments
+
+Two bundles are deliberately NOT built: `feed.wasm` and `mls.wasm`. The app's
+supervisor parks both (`_updateBootStatus('feed','parked')`, mls-send dropped),
+nothing subscribes to kind 1, and the smoke suite asserts neither is served. The
+parked comment says mls was waiting on "an invalid type descriptor in the codec"
+- that is fixed now, so un-parking MLS is a product decision for the app, not a
+compiler blocker.
