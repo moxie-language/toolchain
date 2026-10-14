@@ -11109,6 +11109,18 @@ traps in this pass:**
 still misses" were builds measuring a cache that had just been created. When
 testing cache behaviour, reuse one compiler binary.
 
+**Round-174 gate on the committed compiler** (`tmp/mxc-fpB`, `d0d6420a`): phases
+0a/0b/1 **130 of 131 pass** - the one red is `http_header_api`, which crossed the
+unit timeout twice while compiling its ~250-package closure from cold, and passes
+when run alone (18.3 min, measured in round 173). Phases 3, 4 and 5 re-verified
+green. **Phase 1b did not finish inside 3600s**: 177 packages compile (that part is
+now fast) and the run then spends its whole budget in clang's link phase, one
+object at a time - `golang.org_x_text_unicode_bidi.bc` alone took over three
+minutes of wall clock. That is machine speed on table-heavy packages, not
+functional failure, and it is the same closure that made 1b a 16-minute phase
+before this change. Phase 5's own units showed the same shape: 42 of 78 in ~15
+minutes, then one wasm build per minute.
+
 **Still open:** `main`'s own fingerprint is not measured (it carries the test
 files in a test build, and the root's key is never a cache key), so the root is
 compiled every time - 1 of 45 packages. And one synthetic pair of fixtures that
