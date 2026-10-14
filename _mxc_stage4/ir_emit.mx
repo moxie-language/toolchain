@@ -63,6 +63,14 @@ type irEmitter struct {
 	deferLanding string  // landing pad label
 	deferCheckpointOn bool
 	noCheckpoint bool // suppress per-call checkpoints inside a lowered dispatch
+	// fingerprintOnly marks an emitter built only to measure a package's
+	// interface dispatch arms for its cache key (see pkgDispFingerprint). The
+	// measurement calls the same arm scan emission uses, and that scan registers
+	// the type descriptors of the impls it walks; registering them from a
+	// measurement would leak a set computed for a package that is about to be
+	// taken from the cache into the module the build actually emits. In this
+	// mode the collectors record nothing.
+	fingerprintOnly bool
 	blockDead  bool
 	currentEmitBlock *SSABasicBlock
 	sretType    string
@@ -106,6 +114,17 @@ type phiTrunc struct {
 }
 
 func newIREmitter(pkg *SSAPackage, triple string, srcLen int32) (p *irEmitter) {
+	// A nil package is allowed: the dispatch fingerprint measurement builds an
+	// emitter with no package, because it measures the arm set for method names
+	// scanned out of the source rather than for a package's own call sites.
+	// The package's field-access scan (findIfaceImpls) reads e.pkg.Pkg.Scope
+	// unconditionally, so the stand-in carries a real empty TCPackage with an
+	// empty scope - a bare SSAPackage left Pkg nil and the measurement
+	// segfaulted inside findIfaceImpls on the first package that called a
+	// method (measured: main).
+	if pkg == nil {
+		pkg = &SSAPackage{Pkg: NewTCPackage("", ""), Members: map[string]SSAMember{}}
+	}
 	ptrBits := 64
 	if len(triple) >= 4 && triple[:4] == "wasm" {
 		ptrBits = 32

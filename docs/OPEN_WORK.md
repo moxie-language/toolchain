@@ -11062,3 +11062,57 @@ what picks 1 here. Two consequences worth keeping:
     time, ~20-40s per package on the large ones. That is the shape of the
     18-minute `http_header_api`, and no amount of test-runner structure changes
     it - the work is inside one compiler process.
+
+## Round 174: the dispatch fingerprint landed - the link set is out of the cache key
+
+`pkgHash` no longer folds the whole link set into every package's key. It folds
+`|A<fingerprint>` instead, where the fingerprint is the **arm set for the methods
+that package calls**, measured once per build and stored beside the cached
+objects so a warm build reads it instead of measuring it:
+
+    disp.fp        beside pkg/<name>/*.bc, one file, the package's arm set
+    measureDispFingerprints()   called from runBuild before the first pkgHash
+    scanSelectorCalls()         finds `x.Method(` call sites in the package source
+    dispFingerprintForMethods() for each name, the sorted impl identities the arm
+                                scan finds (type-ID + symbol), hashed
+
+**Measured on the compiler's own self-build**, same compiler, same sources:
+
+| | before | after |
+| --- | --- | --- |
+| warm self-build | 45 compiled, 53s | **44 cached, 1 compiled, 12.6s** |
+
+and the fixpoint holds with it in: `tmp/mxc-fpB == tmp/mxc-fpC` (a generation
+reproduces itself byte for byte).
+
+**Four crashes, all my arena plumbing, all in the record because they are the
+traps in this pass:**
+
+  - `alloc: nil arena` after 43 packages - a measurement arena freed per package
+    while the emitter still held it. The emitter captures
+    `runtime.CurrentArena()` at construction, so it must outlive its arena.
+  - `alloc: nil arena` on the first map write - the arena was pushed *after* the
+    scan, so the scan's own `seen` map went to nil.
+  - `alloc: nil arena` for everything after the first measurement - **the real
+    one**: `ManualArenaExit` sets the global `manualArena` to whatever was saved
+    before the push (nil when nothing was), and allocation consults it. Popping a
+    manually entered arena therefore leaves the compiler with no arena at all for
+    everything that follows. **The measurement must not push or pop an arena.**
+  - `arena: region table full` - the scanner materialised a string per call site
+    (`string(src[ms:pos])`), which is hundreds of thousands of allocations across
+    a self-build. It now compares the bytes against the names it already has and
+    allocates only for a new one.
+
+**And one finding that is not a bug:** every rebuild of the compiler gets a fresh
+`compilerBuildID` and therefore a **fresh, empty cache directory**
+(`mxc-<version>-<hash>-<buildid>-<os>-<arch>`). Several rounds of "the cache
+still misses" were builds measuring a cache that had just been created. When
+testing cache behaviour, reuse one compiler binary.
+
+**Still open:** `main`'s own fingerprint is not measured (it carries the test
+files in a test build, and the root's key is never a cache key), so the root is
+compiled every time - 1 of 45 packages. And one synthetic pair of fixtures that
+differ only in their `main` body still misses on the shared closure, where a
+third with the same import set hits; the fingerprints are identical in all three,
+so something in the base hash differs and it is not yet identified. Both are
+receipts that this is measured, not reasoned about.

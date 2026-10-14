@@ -54,6 +54,13 @@ type buildState struct {
 	// the scratch dir - two compiler processes must never write one .ll - and
 	// only the name below it is stable.
 	llSubDir string
+	// pkgDispFingerprint maps a package path to its measured interface-dispatch
+	// arm set (ir_iface.pkgDispFingerprint). This is the cache-key dependency
+	// that replaced the whole link set: a package whose arms do not change
+	// between two links keeps one cached object across both, which the link set
+	// could never allow. Absent entry = not measured = fall back to the link
+	// set (conservative, never a stale hit).
+	pkgDispFingerprint map[string]string
 	tlsProbeVar     int32
 
 	// extraTags are the -tags values, on top of the target and release tags
@@ -1799,10 +1806,23 @@ func pkgHash(p *pkgInfo) (s string) {
 			acc = acc | []byte("|") | dh
 		}
 	}
-	// Interface dispatch tables enumerate impls from the whole link set, so a
-	// cached .bc is only valid for the link set it was built against. Fold a
-	// hash of the link set into every package key.
-	acc = acc | []byte("|L") | []byte(bst.linkSetKey)
+	// Interface dispatch arms are emitted into the package that makes the
+	// call, and they enumerate the impls of each invoked method across the
+	// whole link - so what a cached .bc depends on is not the link set but
+	// pkgDispFingerprint: the measured impl set for exactly the methods this
+	// package invokes. It is "" for a package with no interface call site
+	// (440 of 454), which is what lets those share one object across every
+	// link set.
+	//
+	// A package whose fingerprint has not been measured falls back to the link
+	// set: conservative (the key changes whenever the link does), never a stale
+	// hit. That is the state of cmdDispIndex, which reports on a link without
+	// compiling any package.
+	if fp, hasFP := bst.pkgDispFingerprint[p.path]; hasFP {
+		acc = acc | []byte("|A") | []byte(fp)
+	} else {
+		acc = acc | []byte("|L") | []byte(bst.linkSetKey)
+	}
 	// -print-allocs adds calls to the cached bitcode, so the pattern is part
 	// of the key: without it an uninstrumented .bc compiled earlier would be
 	// reused for an instrumented build and the sites would never fire.
@@ -6162,6 +6182,222 @@ func prepareDispatchIndex(pkgs []*pkgInfo, cacheBase string, skip *pkgInfo) {
 	}
 }
 
+// dispFingerprintPath is where a package's measured arm set is kept. It is
+// written beside the cached objects, one file per package: every object in that
+// directory was compiled with this same arm set (a different arm set is a
+// different pkgHash, which the object's own file name carries), so one file is
+// enough and the newest writer wins - they agree by construction.
+func dispFingerprintPath(cacheBase, pkgPath string) (s string) {
+	return mxutil.JoinPath(mxutil.JoinPath(cacheBase, safeName(pkgPath)), "disp.fp")
+}
+
+func readDispFingerprint(cacheBase, pkgPath, version string) (fp string, ok bool) {
+	data, rok := mxutil.ReadFile(dispFingerprintPath(cacheBase, pkgPath))
+	if !rok {
+		return "", false
+	}
+	return string(data), true
+}
+
+func writeDispFingerprint(cacheBase, pkgPath, fp string) {
+	dir := mxutil.JoinPath(cacheBase, safeName(pkgPath))
+	mkdirAll(dir, 0755)
+	writeFile(dispFingerprintPath(cacheBase, pkgPath), []byte(fp), 0644)
+}
+
+// measureDispFingerprints fills the dispatch fingerprint for every package in
+// a link, reading what is on disk before measuring anything.
+func measureDispFingerprints(pkgs []*pkgInfo, cacheBase string) {
+	// The map's own storage is allocated where this line runs, so it is
+	// allocated HERE, on the arena the build already has, and never inside a
+	// measurement arena: a hashmap that grows while a measurement arena is
+	// current takes its new bucket array from that arena, and the arena is
+	// freed at the end of the measurement - which unmapped the map and made the
+	// next read of it a nil-arena panic (measured: the compiler self-build
+	// aborted after 43 packages, exactly when the map first grew).
+	if bst.pkgDispFingerprint == nil {
+		bst.pkgDispFingerprint = map[string]string{}
+	}
+	for _, dp := range pkgs {
+		if dp.baked {
+			continue
+		}
+		measureDispFingerprint(dp, cacheBase)
+	}
+}
+
+// measureDispFingerprint records a package's interface-dispatch arm set under its
+// cache key, so pkgHash stops folding the whole link set in for it.
+//
+// The measurement is a scan of the package's own source for `x.Method(` call
+// sites. It has to run before the first pkgHash - the key is what the build is
+// about to look up - and it must not type-check or build SSA to do it: an
+// earlier version measured by building SSA in a side pass, and that crashed the
+// compiler mid-self-build with "alloc: nil arena" after 180 packages, i.e. the
+// side pass corrupted the arena stack that the real passes depend on. A scan
+// cannot do that.
+//
+// The name set is deliberately conservative: the scan cannot tell a method call
+// on an interface from any other selector call, so it takes them all, and
+// pkgDispFingerprint then measures the arm set for each. A superset of the
+// invoked methods yields a superset of the arms, so two packages that agree on
+// every name still share an object - and one that merely mentions a name the
+// other does not gets its own key. Over-measuring costs a little sharing;
+// under-measuring would be a stale hit.
+func measureDispFingerprint(dp *pkgInfo, cacheBase string) {
+	if bst.pkgDispFingerprint == nil {
+		bst.pkgDispFingerprint = map[string]string{}
+	}
+	if _, done := bst.pkgDispFingerprint[dp.path]; done {
+		return
+	}
+	if stored, ok := readDispFingerprint(cacheBase, dp.path, dp.version); ok {
+		bst.pkgDispFingerprint[dp.path] = stored
+		return
+	}
+	src := concatSources(dp.dir, dp.files)
+	if len(src) == 0 {
+		return
+	}
+	// No arena of its own. An earlier version pushed a measurement arena and
+	// exited it afterwards, and every build after the first measurement died
+	// with "alloc: nil arena" - the traceback ended in runtime.hashmapMake from
+	// scanSelectorCalls below. The reason is in the runtime: ManualArenaExit
+	// sets the global `manualArena` to whatever was saved before the push (nil,
+	// when there was nothing), and allocation consults that, so popping a
+	// manually entered arena leaves the compiler with no arena at all for
+	// everything that follows. The measurement runs in whatever arena the build
+	// already has; its allocations are small and the build's own cleanup
+	// reclaims them.
+	methods := scanSelectorCalls(src)
+	fp := ""
+	if len(methods) > 0 {
+		e := newIREmitter(nil, "x86_64-unknown-linux-musleabihf", int32(0))
+		e.fingerprintOnly = true
+		fp = e.dispFingerprintForMethods(methods)
+	}
+	bst.pkgDispFingerprint[dp.path] = fp
+	writeDispFingerprint(cacheBase, dp.path, fp)
+}
+
+// scanSelectorCalls returns the distinct method names a source calls through a
+// selector: an identifier, a dot, an identifier, an opening paren. Comments and
+// string literals are skipped, so a name mentioned in prose does not enter the
+// set (it would only cost sharing, but a fingerprint that ignores comments is
+// one less thing to explain when two builds disagree).
+// scanIsIdentStart/scanIsIdentPart are the scanner's own byte classes. main.mx
+// had same-named helpers once; they are gone, and these carry the scan's name so
+// a future helper cannot collide with them again.
+func scanIsIdentStart(c byte) (ok bool) {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func scanIsIdentPart(c byte) (ok bool) {
+	return scanIsIdentStart(c) || (c >= '0' && c <= '9')
+}
+
+func scanSelectorCalls(src []byte) (methods []string) {
+	seen := map[string]bool{}
+	n := int32(len(src))
+	pos := int32(0)
+	for pos < n {
+		c := src[pos]
+		if c == '/' && pos+1 < n && src[pos+1] == '/' {
+			for pos < n && src[pos] != '\n' {
+				pos++
+			}
+			continue
+		}
+		if c == '/' && pos+1 < n && src[pos+1] == '*' {
+			pos += 2
+			for pos+1 < n && !(src[pos] == '*' && src[pos+1] == '/') {
+				pos++
+			}
+			pos += 2
+			continue
+		}
+		if c == '"' || c == '`' || c == '\'' {
+			quote := c
+			pos++
+			for pos < n {
+				if src[pos] == '\\' && quote != '`' {
+					pos += 2
+					continue
+				}
+				if src[pos] == quote {
+					pos++
+					break
+				}
+				pos++
+			}
+			continue
+		}
+		if !scanIsIdentStart(c) {
+			pos++
+			continue
+		}
+		for pos < n && scanIsIdentPart(src[pos]) {
+			pos++
+		}
+		if pos >= n || src[pos] != '.' {
+			continue
+		}
+		pos++
+		if pos >= n || !scanIsIdentStart(src[pos]) {
+			continue
+		}
+		ms := pos
+		for pos < n && scanIsIdentPart(src[pos]) {
+			pos++
+		}
+		if pos >= n || src[pos] != '(' {
+			continue
+		}
+		// ALLOCATION DISCIPLINE: the name bytes are compared against the
+		// already-collected names and only a NEW name is materialised. The
+		// first version did `string(src[ms:pos])` per call site, which is one
+		// allocation per selector call in the package - hundreds of thousands
+		// across a compiler self-build, and it died with "arena: region table
+		// full" (the arena's 64 regions are 16MB each). With this loop the
+		// allocation count is the distinct method count, tens per package, and
+		// an N^2 byte comparison over tens of entries costs nothing.
+		known := false
+		for mi := 0; mi < len(methods); mi++ {
+			m := methods[mi]
+			if int32(len(m)) != pos-ms {
+				continue
+			}
+			same := true
+			for k := int32(0); k < int32(len(m)); k++ {
+				if m[k] != src[ms+k] {
+					same = false
+					break
+				}
+			}
+			if same {
+				known = true
+				break
+			}
+		}
+		if known {
+			continue
+		}
+		name := string(src[ms:pos])
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		methods = mxutil.Ensure(methods, 1)
+		push(methods, name)
+	}
+	for i := 1; i < int32(len(methods)); i++ {
+		for j := i; j > 0 && methods[j] < methods[j-1]; j-- {
+			methods[j], methods[j-1] = methods[j-1], methods[j]
+		}
+	}
+	return methods
+}
+
 func main() {
 	// Root arena is the domain root's arena, set up by the runtime.
 	// 2GB virtual - pages committed on touch by the MMU.
@@ -6576,6 +6812,13 @@ func main() {
 	// The dispatch index must be complete before anything is emitted: see
 	// prepareDispatchIndex.
 	prepareDispatchIndex(pkgs, cacheBase, nil)
+
+	// With the index built, every package's dispatch arms can be measured - and
+	// the measurement has to happen before the first pkgHash, because that is
+	// the key the build is about to look up. A package whose object is already
+	// cached is not going to be compiled, so it needs no measurement: the
+	// fingerprint written beside that object is read instead.
+	measureDispFingerprints(pkgs, cacheBase)
 
 	// Whole-link registry pre-pass: interface dispatch emits a typeID switch
 	// over impls found in cctx.universe.Registry, which is populated in

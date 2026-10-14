@@ -724,6 +724,86 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 	return impls
 }
 
+// pkgDispFingerprint measures a package's interface-dispatch arms: for every
+// interface method the package invokes, the sorted identity of every impl the
+// arm scan finds. It is the cache-key dependency that replaced the whole link
+// set (see pkgHash in main.mx), so it must see exactly what emission sees:
+// cctx.universe.Registry, cctx.dispMethodsByPkg and the package's own members
+// are the same in both passes.
+//
+// Measured: 440 of 454 cached packages invoke no interface method at all, so
+// their fingerprint is "" - which is what lets those packages share one cached
+// object across every link set instead of one per link set (76 copies of `math`
+// before this).
+//
+// The identity of an impl is its type-ID plus its symbol, which is what the
+// emitted arm dispatches on and calls. Symbol alone would miss two impls of one
+// type differing in receiver form; type-ID alone would miss a type whose method
+// comes from an embed while another package supplies a same-named one.
+func (e *irEmitter) pkgDispFingerprint() (s string) {
+	var methods []string
+	seen := map[string]bool{}
+	for _, mname := range e.pkg.Members {
+		fn, ok := mname.(*SSAFunction)
+		if !ok {
+			continue
+		}
+		for bi := 0; bi < len(fn.Blocks); bi++ {
+			instrs := fn.Blocks[bi].Instrs
+			for ii := 0; ii < len(instrs); ii++ {
+				inv, isInv := instrs[ii].(*SSAInvoke)
+				if !isInv || inv.MethodName == "" || seen[inv.MethodName] {
+					continue
+				}
+				seen[inv.MethodName] = true
+				methods = mxutil.Ensure(methods, 1)
+				push(methods, inv.MethodName)
+			}
+		}
+	}
+	return e.dispFingerprintForMethods(methods)
+}
+
+// dispFingerprintForMethods is the measurement itself: for each method name, the
+// sorted identity of every impl the arm scan finds. The names come from a scan
+// of the package's source (see measureDispFingerprint in main.mx); the impls come
+// from the same registries emission reads, so the fingerprint moves exactly when
+// the emitted arms move.
+//
+// The identity of an impl is its type-ID plus its symbol, which is what the
+// emitted arm dispatches on and calls. Symbol alone would miss two impls of one
+// type differing in receiver form; type-ID alone would miss a type whose method
+// comes from an embed while another package supplies a same-named one.
+func (e *irEmitter) dispFingerprintForMethods(methods []string) (s string) {
+	if len(methods) == 0 {
+		return ""
+	}
+	for i := 1; i < len(methods); i++ {
+		for j := i; j > 0 && methods[j] < methods[j-1]; j-- {
+			methods[j], methods[j-1] = methods[j-1], methods[j]
+		}
+	}
+	var acc string
+	for mi := 0; mi < len(methods); mi++ {
+		impls := e.findIfaceImpls(methods[mi])
+		var ids []string
+		for ii := 0; ii < len(impls); ii++ {
+			ids = mxutil.Ensure(ids, 1)
+			push(ids, e.implTypeID(impls[ii]) | " " | e.implFuncSym(impls[ii]))
+		}
+		for i := 1; i < len(ids); i++ {
+			for j := i; j > 0 && ids[j] < ids[j-1]; j-- {
+				ids[j], ids[j-1] = ids[j-1], ids[j]
+			}
+		}
+		acc = acc | "|" | methods[mi] | "="
+		for ii := 0; ii < len(ids); ii++ {
+			acc = acc | ids[ii] | ","
+		}
+	}
+	return fnvHash([]byte(acc))
+}
+
 func (e *irEmitter) findEmbedMethod(t Type, methodName string, depth int32) (chain []int32, fn *SSAFunction, embedT Type) {
 	if depth > 5 {
 		return nil, nil, nil
