@@ -9956,3 +9956,37 @@ in its own package. `mls`, `signer` and `app` are untouched this round.
 `cmd/mxparse` deletion: **132 passed / 0 failed / 0 skipped, rc=0**. Nothing in
 the tree referenced the deleted tool and nothing in the gates noticed it, which
 is what "orphaned" meant - but it is now measured rather than asserted.
+
+## Round 155: mls's return values, and a cost model that keeps being wrong in the same way
+
+The mls package had **93 functions with unnamed results** - a hard compile error -
+and clearing them exposed 5 shadowing conflicts. Both are now zero, measured:
+`build -a -allow-closure-captures -target wasm ./web/wasm/mls` reports **0
+unnamed-return and 0 shadowing errors** for `git.smesh.lol/smesh/web/common/mls`,
+where the first run reported 93 and the second 5. The blocker list has moved to
+the next layer (named slice types, then 31 closure captures), which is what
+progress looks like here.
+
+**Two rules the pass had to learn by being wrong first**, both worth keeping:
+
+  - **pointer and named-type results must be named `v`, never a name derived from
+    the type.** The first attempt named `*groupInfo` as `groupInfo`, `*senderData`
+    as `senderData`, `*privateMessageContent` as `privateMessageContent` - and a
+    result name is a declaration, so each one shadowed the very type it came
+    from: `'groupInfo' shadows declaration in enclosing scope`. Names derived
+    from types are only safe for the builtins (`err`, `ok`, `n`, `out`).
+  - **a function that already declares `err :=` in its body must assign to the
+    named result instead.** `if err := unmarshalRaw(...)` became
+    `if err = unmarshalRaw(...)`. That was all five shadowing errors were.
+
+The change is behaviour-free by construction: the names are unused by the bodies,
+every `return` keeps its expressions, and the only body edits are `:=` -> `=`
+where a declaration collided with a new result name.
+
+**The cost model, corrected again.** Round 153 said the remaining bundles would
+be "a chain of layers"; round 154 corrected relay-proxy from 5 to 17 captures;
+this round corrects mls from "3 closure captures" to **93 unnamed returns + 5
+shadows + N named slice types + 31 closure captures**. The pattern is consistent
+and now stated once: the first error list from a bundle is never the whole job,
+because the compiler stops at the first rule that fires per package, and each fix
+reveals the next rule. Budget a bundle as "several rounds", not "several errors".
