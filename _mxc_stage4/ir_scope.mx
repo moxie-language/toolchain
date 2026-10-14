@@ -190,10 +190,31 @@ func checkPackageDecls(files []*syntax.File, pkgPath string) {
 				if demotedStringConst(t.Values) {
 					continue
 				}
-				declErr("package-level var with initializer is not allowed: use zero-value declaration and init()")
+				// Name the offending declaration. Without it the build says only
+				// "a package-level var has an initializer" and the reader has to
+				// bisect the package to find which one - which is what happened
+				// to mls, where the answer was two `var x = T("lit")` label vars
+				// in a file already edited for other reasons.
+				declErr("package-level var '" | varDeclNames(t) | "' with initializer is not allowed: use zero-value declaration and init()")
 			}
 		}
 	}
+}
+
+// varDeclNames renders a var declaration's names for a diagnostic.
+func varDeclNames(t *syntax.VarDecl) (s string) {
+	if t == nil || len(t.NameList) == 0 {
+		return "?"
+	}
+	for i := 0; i < len(t.NameList); i++ {
+		if i > 0 {
+			s = s | ", "
+		}
+		if t.NameList[i] != nil {
+			s = s | t.NameList[i].Value
+		}
+	}
+	return s
 }
 
 func declErr(msg string) {

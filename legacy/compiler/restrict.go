@@ -662,7 +662,17 @@ func (c *compilerContext) checkPackageRestrictions(pkg *loader.Package) {
 					for _, spec := range d.Specs {
 						vs := spec.(*ast.ValueSpec)
 						if len(vs.Values) > 0 && !isDemotedStringConst(vs) {
-							c.addError(vs.Pos(), "moxie: package-level var with initializer is not allowed: use zero-value declaration and init()")
+							// Name the declaration: without it the reader has to
+							// bisect the package to find which var it means.
+							// stage4 reports the same names.
+							names := ""
+							for i, nm := range vs.Names {
+								if i > 0 {
+									names += ", "
+								}
+								names += nm.Name
+							}
+							c.addError(vs.Pos(), "moxie: package-level var '"+names+"' with initializer is not allowed: use zero-value declaration and init()")
 						}
 					}
 				case token.TYPE:
