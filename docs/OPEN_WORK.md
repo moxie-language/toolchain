@@ -10100,3 +10100,48 @@ pass as explicit parameter(s)` - in `capabilities.marshal/unmarshal` (10),
 `unmarshalExtensionVec` and others. That is the next round, and it is the same
 shape family the relay/conn registry solved: extract the body to a function whose
 parameters are the captures, threading the receiver/owner explicitly.
+
+## Round 158: captures 30 -> 20, and the shape that removes them
+
+mls's remaining blocker is closure captures, and its first family is the biggest:
+**ten in `capabilities.unmarshal`/`capabilities.marshal`**, five vectors each.
+They are gone (`36041f9f`), measured: the build's capture count for mls drops
+**30 -> 20** with no other error introduced.
+
+**Why they could not be fixed by the usual recipe.** The standing advice is "pass
+the capture as an explicit parameter", but `readVector`'s callback is
+`func(r *Reader) error` and `writeVector`'s is `func(w *Writer, i int32)` - neither
+has a parameter that could carry the receiver, and a Moxie closure cannot capture
+it. So the state travels in a **holder** and the callbacks are package-level
+functions, exactly as the ws handle registry did for `relay/conn.mx`.
+
+Two helpers in `encoding.mx`, one per direction:
+
+  - `writeU16Vector(w, vals, n)` parks the slice in a package-level sink and calls
+    `writeVector` with `u16VectorAt`, which reads `sinks.vals[i]`. The singleton is
+    safe because `writeVector` runs its callback to completion before returning and
+    there is one thread of execution per domain - the same argument the sovereign
+    arena model rests on.
+  - `readU16Vector(r)` reads a vector of raw `uint16`. It deliberately does **not**
+    convert: a conversion callback would have to be generic over the element type,
+    and generics are restricted in these packages. The caller converts in a plain
+    loop, so the raw read is shared and the typing is explicit at each field.
+
+**Two mechanical lessons, both from being wrong first:**
+
+  - **a "replace from this header to the next section header" edit silently
+    deleted the sibling function**, because the section comment came after BOTH
+    `unmarshal` and `marshal`. Locate the end by the *next function's header*, not
+    by a comment. The damage was caught by the compiler in one build
+    (`marshal undefined (type capabilities has no field or method marshal)`), and
+    `git checkout` restored it.
+  - **`make` does not exist here.** `[]T{:n}` is the spelling, and
+    `[]uint16{:n}` with a cursor is the presize-and-write form the buffer rules
+    ask for - no growth, no dead intermediates.
+
+**The remaining 20 captures** are the same shape in `Welcome`, `updatePath`,
+`updatePathNode`, `ratchetTree`, `parentNode`, `groupSecrets`, `Credential`,
+`Group.Marshal`, `UnmarshalGroup`, `marshalExtensionVec` and
+`unmarshalExtensionVec` - each a pair (marshal + unmarshal) or a single site. The
+u16-vector helpers cover the ones whose elements are uint16-valued; the rest need
+the same treatment per shape.
