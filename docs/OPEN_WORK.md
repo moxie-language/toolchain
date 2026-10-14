@@ -11128,3 +11128,32 @@ differ only in their `main` body still misses on the shared closure, where a
 third with the same import set hits; the fingerprints are identical in all three,
 so something in the base hash differs and it is not yet identified. Both are
 receipts that this is measured, not reasoned about.
+
+## How to bring a web app onto the emitted scaffold (measured on smesh, round 47)
+
+The app-side moves, in order, all verified by building and booting:
+
+1. **Port the app to the compiler's rules first** - package-level `var` with an
+   initializer (make it a function returning the value), unnamed returns,
+   struct-as-slice (`len(s)`, `range s`, `s[i]` on a struct), `nil` comparisons
+   against structs, and ill-typed `push`/assignments. stage4 accepts most of
+   these and then emits IR clang rejects, so the errors arrive as
+   "defined with type ... but expected ...", one package at a time.
+2. **Build each bundle with `moxie build -allow-closure-captures -target wasm
+   -o <dir>/<bundle>.wasm ./web/wasm/<bundle>/`** into ONE directory. That
+   stages `$runtime/` (the whole jsruntime/, byte for byte), `$sw/`
+   (`wasm-host-sw.mjs`, `sw.wasm`) and `<bundle>-wasm-host.mjs` per bundle.
+3. **Delete the copied `$runtime/` and `$sw/` from git** and add them to
+   `.gitignore`; they are compiler output. Keep the app's own files.
+4. **Keep the per-bundle Worker protocol hosts.** A bundle whose JS boot owns a
+   wire protocol (the supervisor posts messages and waits for READY) cannot use
+   the generated loader. Those files stay in the app; the build keeps what it
+   finds (994231a6) so a rebuild does not silently break the page.
+5. **Serve it from the app's own origin** (the relay serves the static dir), so
+   the page's same-origin assumptions hold, and check the browser renders past
+   the boot spinner.
+
+smesh is at that state: ten bundles build, `$runtime`/`$sw` are ignored build
+output, and the app boots ("S.M.E.S.H. v0.6.38", login screen, "verify ok /
+store ok / rproxy"). musiquay still has the copied `$runtime`, `$sw` and
+`*-wasm-host.mjs` and is the next app through the same five steps.
