@@ -11286,3 +11286,29 @@ phase's `initall.ll`, so it counted one module and failed all six packages - and
 the script never exited non-zero, so the driver recorded PASS. Both fixed: it
 recurses (six modules, six PASS) and exits 1 when anything failed. Verified with
 `MOXIE=/bin/false` too.
+
+### What the objective names that the tree does not have (round 51 audit)
+
+The objective lists the framework as "dom, idb, ws, sw, store, crypto/subtle,
+webgl, and an app/entry+routing package". Audited against `src/web/`:
+
+| named | state |
+| --- | --- |
+| dom, idb, ws, sw, subtle | **in `src/web/`**, both apps import them |
+| store | **NOT moved** - and the objective is right that it should be: `web/common/jsbridge/store/store_wasm.mx` is 38 lines of pure Worker plumbing (`WorkerPost`, `WorkerOnMessage`, `WorkerSetTimeout`, `WorkerClearTimeout`, `WorkerNowSeconds`) with no app references, and the file is BYTE-IDENTICAL in smesh and musiquay - the duplication the objective exists to kill |
+| webgl | the JS half is `jsruntime/webgl.mjs`; there is no Moxie-side `src/web/webgl`, and the only consumer in this workspace is the separate `gio` tree, not either app |
+| app/entry+routing | no `src/web/app`; smesh's `initRouter` is app UI state, not a framework entry point |
+
+**Why `store` is not simply moved.** Its wasm imports are hard-coded to names
+that only the app's worker host provides:
+
+    //:wasmimport bridge store_worker_on_message
+    //:wasmimport bridge store_worker_post
+    //:wasmimport bridge store_worker_set_timeout
+    //:wasmimport bridge store_worker_clear_timeout
+    //:wasmimport bridge store_worker_now_seconds
+
+A stdlib `web/store` therefore needs a `bridge.store_worker_*` surface in
+`jsruntime/` plus a host that serves it - a runtime-side change with a browser
+test on both apps, not a file move. That is the next piece of framework work,
+and it is the last named package that is both generic and duplicated.
