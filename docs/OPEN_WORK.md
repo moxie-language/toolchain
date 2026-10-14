@@ -9990,3 +9990,62 @@ shadows + N named slice types + 31 closure captures**. The pattern is consistent
 and now stated once: the first error list from a bundle is never the whole job,
 because the compiler stops at the first rule that fires per package, and each fix
 reveals the next rule. Budget a bundle as "several rounds", not "several errors".
+
+## Round 156: mls's aliases and labels, and the diagnostic that should have existed
+
+**Eleven of mls's named slice types are aliases now** (`9eaa1de2`). The rule
+fires for dependency packages too - `isUserPackagePath` is true for any path
+containing a dot, which every smesh package is - and the exemption the rule
+itself documents is the answer: "an alias introduces no new named type". So
+`hpkePublicKey`, `hpkePrivateKey`, `signaturePublicKey`, `signaturePrivateKey`,
+`GroupID`, `KeyPackageRef`, `proposalRef` and `ratchetLabel` are all `= []byte`
+now, which is the spelling the stdlib already uses (`src/net/ip.mx`:
+`type IP = []byte`).
+
+Three of them carried an `equal` method, and **a method cannot live on an
+alias**: `GroupID.equal`, `KeyPackageRef.equal` and `proposalRef.equal` are
+deleted and their four call sites use `bytes.Equal`. `GroupID.equal` was a
+hand-written byte loop, so this is a deletion of duplicate logic rather than a
+translation.
+
+**The package-level var rule reaches further than it looked.** Three more
+initializers had to go: the eleven secret labels in `key_schedule.mx`
+(`secretLabelInit = []byte("init")`, ...), `kemSuiteID`, and the two ratchet
+labels. The labels are now a `secretLabels` holder filled on first read with a
+`get(name)` over `label*` string keys, and the two 5-byte constants are plain
+functions. `kemSuiteID` is a function returning its 5-byte literal - it is used
+twice, in two concatenations.
+
+**The finding that matters: `errors.New` package vars are refused too, and mls
+has 33 of them.** After the slice types and the labels, the build still reported
+`package-level var with initializer is not allowed` - with no name attached, so
+the next step was a bisect. Rather than bisect, the diagnostic was fixed first
+(`8f2e98c3`, bilateral: stage4 `varDeclNames` in `ir_scope.mx`, legacy in
+`restrict.go`, legacy type-checks):
+
+    package-level var 'errAEADOpenFailed' with initializer is not allowed: ...
+
+which named the offenders immediately: `errAEADOpenFailed`, `errDupAddKey`,
+`errDupGroupContextExts`, `errDupPSK`, `errDupUpdateOrRemove`,
+`errExcessBytes`, `errExternalInitNotAllowed`, ... i.e. every
+`var errX = errors.New("...")` in the package.
+
+Two things about this are worth stating plainly:
+
+  - **It is pre-existing, not a regression from this session.** `tmp/mxc-r147`
+    reports the same 33 for mls. Nothing in rounds 152-155 introduced it; those
+    rounds were clearing rules that fire EARLIER in the same package.
+  - **A fixture proved it works, and that proof was misleading.** A scratch main
+    with `var errBoom = errors.New("boom")` builds and runs rc=0, because a
+    fixture is not part of the smesh main module. The rule is about where the
+    package lives, which is the same rule boundary round 145 measured for `+` and
+    round 151 for named slice types - and it is why "it compiles in a fixture" is
+    not evidence about an app package.
+
+So mls's next layer is 33 error vars (plus the same shape elsewhere), each
+needing either a lazy accessor or a holder - and because error identity matters
+to `==` comparisons, the accessor must hand back the SAME value each call, which
+means a holder rather than a function that calls `errors.New` per call.
+
+Fixpoint with the diagnostic in: `mxc-dbg2 == mxc-dbg3`
+(`a730f98c5a137c34c9ad6681cb15a47f0c7dc78743eaf82b10db7dc8ed498b9d`).
