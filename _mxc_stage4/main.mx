@@ -503,8 +503,20 @@ func emitWasmHost(outpath string) {
 	if mxutil.HasSuffix(stem, ".wasm") {
 		stem = stem[:len(stem)-5]
 	}
+	// An app may ship its OWN bootstrap for a bundle. The generic one loads the
+	// module in a Worker and answers DOM calls; a bundle that speaks a wire
+	// protocol to its worker (smesh's store, signer and mls bundles do - the
+	// page's supervisor posts S_* messages and waits for SR_READY) needs a host
+	// that owns that protocol, and the generic file does not speak it. Writing
+	// the generic host over such a file silently breaks the app: the worker
+	// loads, never posts ready, and the page waits forever with a clean console.
+	// So the build keeps an app-supplied host and says so.
 	host := mxutil.JoinPath(dir, stem | "-wasm-host.mjs")
-	mxutil.WriteFile(host, []byte(wasmHostModule(stem, moduleName)), 420)
+	if mxutil.FileExists(host) {
+		mxutil.WriteStr(2, "  host " | host | " (kept: the app supplies this bundle's host)\n")
+	} else {
+		mxutil.WriteFile(host, []byte(wasmHostModule(stem, moduleName)), 420)
+	}
 	// The service worker's half: its host is the same file for every app, and
 	// the registration glue works out the bundle's own directory at runtime,
 	// so neither is copied per app any more.
@@ -515,11 +527,18 @@ func emitWasmHost(outpath string) {
 		fatal("jsruntime/sw-host.mjs is missing, so the service worker cannot be staged")
 	}
 	mxutil.WriteFile(mxutil.JoinPath(swDir, "wasm-host-sw.mjs"), swHost, 420)
-	swReg, regOK := mxutil.ReadFile(mxutil.JoinPath(jsdir, "sw-register.js"))
-	if !regOK {
-		fatal("jsruntime/sw-register.js is missing, so service worker registration cannot be staged")
+	// Same rule as the bootstrap above: an app that ships its own registration
+	// glue (smesh's handles SKIP_WAITING and versioned updates) keeps it.
+	swRegPath := mxutil.JoinPath(dir, "sw-register.js")
+	if mxutil.FileExists(swRegPath) {
+		mxutil.WriteStr(2, "  sw-register.js (kept: the app supplies it)\n")
+	} else {
+		swReg, regOK := mxutil.ReadFile(mxutil.JoinPath(jsdir, "sw-register.js"))
+		if !regOK {
+			fatal("jsruntime/sw-register.js is missing, so service worker registration cannot be staged")
+		}
+		mxutil.WriteFile(swRegPath, swReg, 420)
 	}
-	mxutil.WriteFile(mxutil.JoinPath(dir, "sw-register.js"), swReg, 420)
 	mxutil.WriteStr(2, "  host " | host | " ($runtime: " | mxutil.SimpleItoa(int32(len(names))) | " modules, $sw + sw-register.js)\n")
 }
 
