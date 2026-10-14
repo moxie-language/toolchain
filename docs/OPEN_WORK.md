@@ -10672,3 +10672,39 @@ always around a single-field struct holding a slice, and each time in code that
 converts between a named slice type and `[]byte` - **so the pattern to look for in
 `ir_types.mx`/`ir_binop.mx` is where a conversion's source and destination types are
 compared, and whether an alias is being treated as a distinct struct type.**
+
+### Round 170: one cause was an APP bug, the other is a real compiler bug with a name
+
+**Cause 1 - an app bug, fixed.** `ed25519.PrivateKey` is a **struct** with a
+`b []byte` field in this tree (Go's slice spelling is a named slice type, which
+Moxie refuses), so `[]byte(privkey)` *cannot* be right, and it was in
+`ciphersuite.mx`. It is `privkey.Bytes()` - the API the stdlib provides. That is
+the first invalid bitcast gone (`edb93ff5`).
+
+**Cause 2 - a compiler bug, now precisely characterised.** The build advances to:
+
+    mls.ll:3635:18: error: invalid cast opcode for cast from '{ ptr, i32, i32 }'
+                    to '{ { ptr, i32, i32 } }'
+
+and the surrounding IR says what is wrong:
+
+    %dbl35 = load { {ptr, i32, i32}, i32 }, ptr %dcb30
+    %dci36 = insertvalue { {ptr, i32, i32}, i32 } %dbl35, {ptr, i32, i32} %dcg34, 0
+
+The codec is emitting code for a struct whose **field 0 is itself a
+single-field struct wrapping a slice** (`{ {ptr,i32,i32}, i32 }`), while the
+value being inserted is a bare slice (`{ptr,i32,i32}`). The source type is mls's
+
+    type ratchetSecret struct { secret []byte; generation uint32 }
+
+so the defect is in **how the codec's struct field types are built**: for a
+`[]byte` field inside a MULTI-field struct, field 0's type comes out one level too
+deep. Nothing in the source is wrong - this is `ir_descriptors.mx` /
+`codec.mx` territory, and it is the same `{{ptr, i32, i32}}` shape seen in rounds
+152, 168 and 169, now with a type name and a field position attached:
+**`[]byte` as field 0 of a multi-field struct, seen by the codec.**
+
+That is a precise enough description to fix directly, and it is compiler work.
+The session's mls port is otherwise complete: the bundle reports 0 global-store
+errors and 0 capturing closures, and this codec defect is the only thing between
+it and a build.
