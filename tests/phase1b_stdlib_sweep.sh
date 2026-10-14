@@ -18,13 +18,11 @@
 # A package that is known broken today is listed in SWEEP_KNOWN and SKIPs with
 # its reason, so the set of broken packages stays visible and shrinking it is a
 # deliberate act: move the name to SWEEP when it is fixed.
-set -euo pipefail
+set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/util.sh"
-
-echo ""
-echo "=== Phase 1b: Stdlib compile sweep ==="
+source "$SCRIPT_DIR/split-util.sh"
 
 # Packages that must compile. net/http carries the crypto/tls closure, which is
 # what reaches crypto/ecdsa and its fips140 generics.
@@ -108,15 +106,26 @@ rm -rf "$td"; mkdir -p "$td/pkg"
 	echo "}"
 } >"$td/pkg/main.mx"
 
+# One unit, and it stays one unit. The sweep is one build so that the 45
+# packages share the closure they have in common (net/http, crypto/tls, math/big
+# are most of the cost of every package that touches them); splitting it into 45
+# builds would compile that closure 45 times instead of once. What the unit
+# layer buys here is what it buys every phase: its own log, its own timeout, and
+# a result that survives the rest of the run.
+unit_args "$@"
+
+echo ""
+echo "=== Phase 1b: Stdlib compile sweep (${#SWEEP[@]} packages) ==="
+
 log="$td/build.log"
 rc=0
 MOXIEROOT="$ROOT" "$MOXIE" build -o "$td/sweep" "$td/pkg" >"$log" 2>&1 || rc=$?
 if [ $rc -eq 0 ]; then
 	# It compiled AND linked: run it, so a bad entry point cannot pass unrun.
 	if "$td/sweep" >"$td/run.log" 2>&1; then
-		log_pass "stdlib:sweep" "${#SWEEP[@]} packages ok"
+		unit_ok "stdlib:sweep" "${#SWEEP[@]} packages ok"
 	else
-		log_fail "stdlib:sweep" "built but failed to run: $(tail -2 "$td/run.log")"
+		unit_no "stdlib:sweep" "built but failed to run: $(tail -2 "$td/run.log")"
 	fi
 else
 	# Name the package the compiler blamed, not the whole set.
@@ -124,11 +133,10 @@ else
 	if [ -z "$first" ]; then
 		first="$(tail -3 "$log" | head -1)"
 	fi
-	log_fail "stdlib:sweep" "$first"
+	unit_no "stdlib:sweep" "$first"
 	echo "    (full log: $log)"
 	cp "$log" "$TMPROOT/stdlib_sweep.log" 2>/dev/null || true
 fi
-rm -rf "$td"
 
 if [ "${#SWEEP_KNOWN[@]}" -gt 0 ]; then
 	for entry in "${SWEEP_KNOWN[@]}"; do
@@ -137,3 +145,4 @@ if [ "${#SWEEP_KNOWN[@]}" -gt 0 ]; then
 		log_skip "stdlib:$pkg" "$reason"
 	done
 fi
+exit $?

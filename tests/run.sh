@@ -33,50 +33,48 @@ echo "binary: $MOXIE"
 echo "version: $($MOXIE version 2>&1 | head -1)"
 echo "mode: $PHASE"
 
+# Phases now run through the unit driver (tests/unitrun.sh), which runs each
+# fixture as an independent unit with its own temp dir, timeout and result file.
+# That is what makes a red fixture cheap: it is re-run on its own instead of
+# re-running the phase it happened to be in.
+UNIT_PHASES_QUICK="0a,0b,1"
+UNIT_PHASES_FULL="all"
+
 case "$PHASE" in
 --quick)
-	bash "$SCRIPT_DIR/regressions/run.sh"
-	bash "$SCRIPT_DIR/restrictions/run.sh"
-	bash "$SCRIPT_DIR/phase1_packages.sh"
+	exec bash "$SCRIPT_DIR/unitrun.sh" --phases "$UNIT_PHASES_QUICK"
 	;;
 --full)
-	bash "$SCRIPT_DIR/regressions/run.sh"
-	bash "$SCRIPT_DIR/restrictions/run.sh"
-	bash "$SCRIPT_DIR/phase1_packages.sh"
-	bash "$SCRIPT_DIR/phase1b_stdlib_sweep.sh"
-	bash "$SCRIPT_DIR/phase1c_wasm_sweep.sh"
-	bash "$SCRIPT_DIR/phase2_selfhost.sh"
-	bash "$SCRIPT_DIR/phase3_ir_validate.sh"
-	bash "$SCRIPT_DIR/phase4_binary_smoke.sh"
-	bash "$SCRIPT_DIR/phase5_wasm.sh"
-	bash "$SCRIPT_DIR/phase6_instrumentation.sh"
+	exec bash "$SCRIPT_DIR/unitrun.sh" --phases "$UNIT_PHASES_FULL"
+	;;
+--unit)
+	# tests/run.sh --unit ... passes straight through to the driver.
+	shift
+	exec bash "$SCRIPT_DIR/unitrun.sh" "$@"
 	;;
 --phase)
 	if [ -z "${2:-}" ]; then
 		echo "usage: run.sh --phase N"
 		exit 1
 	fi
+	# Historical phase numbers: 0 was regressions+restrictions, 1b/1c were
+	# their own scripts. They are units now (0a, 0b, 1, 1b, 1c).
 	case "$2" in
-		0) bash "$SCRIPT_DIR/regressions/run.sh"; bash "$SCRIPT_DIR/restrictions/run.sh" ;;
-		1) bash "$SCRIPT_DIR/phase1_packages.sh" ;;
-		1b) bash "$SCRIPT_DIR/phase1b_stdlib_sweep.sh" ;;
-		1c) bash "$SCRIPT_DIR/phase1c_wasm_sweep.sh" ;;
-		2) bash "$SCRIPT_DIR/phase2_selfhost.sh" ;;
-		3) bash "$SCRIPT_DIR/phase3_ir_validate.sh" ;;
-		4) bash "$SCRIPT_DIR/phase4_binary_smoke.sh" ;;
-		5) bash "$SCRIPT_DIR/phase5_wasm.sh" ;;
-		6) bash "$SCRIPT_DIR/phase6_instrumentation.sh" ;;
+		0) PHASES="0a,0b" ;;
+		1) PHASES="1" ;;
+		1b) PHASES="1b" ;;
+		1c) PHASES="1c" ;;
+		2) PHASES="2" ;;
+		3) PHASES="3" ;;
+		4) PHASES="4" ;;
+		5) PHASES="5" ;;
+		6) PHASES="6" ;;
 		*) echo "phase $2 not found (0-6)" ; exit 1 ;;
 	esac
+	exec bash "$SCRIPT_DIR/unitrun.sh" --phases "$PHASES"
 	;;
 *)
-	echo "usage: run.sh [--quick|--full|--phase N]"
+	echo "usage: run.sh [--quick|--full|--phase N|--unit ...]"
 	exit 1
 	;;
 esac
-
-print_summary
-failed="$?"
-if [ "$failed" -gt 0 ]; then
-	exit 1
-fi

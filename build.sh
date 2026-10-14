@@ -86,7 +86,7 @@ mv "$MOXIEROOT/moxie-new" "$MOXIEROOT/moxie"
 
 # run regression validation
 echo "=== Regression Check ==="
-if ! bash "$MOXIEROOT/tests/regressions/run.sh"; then
+if ! MOXIE="$MOXIEROOT/moxie" bash "$MOXIEROOT/tests/unitrun.sh" --phases 0a --fail-fast; then
     echo "REGRESSION DETECTED: bootstrap build suspect" >&2
     exit 1
 fi

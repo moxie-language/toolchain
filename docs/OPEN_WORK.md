@@ -1608,8 +1608,9 @@ cctx.universe.DirectImports", and it names the replacements
 exists and is the twin of the global). So this is a deletion plus routing job,
 not a sovereign-holder migration: the callers are `_mxc_stage4/main.mx`
 (`SetUniverseGlobals`), `_mxc_stage4/ir_descriptors.mx` and
-`pkg/types/tc_types.mx` (`ImportRegistry`), and `pkg/rewrite/resolve.mx` has its
-own separate `ImportRegistry` global that the same sweep should cover.
+`pkg/types/tc_types.mx` (`ImportRegistry`). (`pkg/rewrite/resolve.mx` had its own
+separate `ImportRegistry` global, but that whole package was orphaned - no
+importer in the tree - and was deleted in round 173.)
 
 Also this round: `(*Parser).header` read `a.Pos()` on an asserted `*AssignStmt`
 where stage4 resolved the selector against the value type; it reads `a.pos`
@@ -10797,3 +10798,128 @@ emitted a bitcast between a slice and a single-field struct.
 different hand-spelled or hand-selected type. The method that found the space is
 the one to repeat: get the IR, look at the exact line, and compare the type string
 written there against what `llvmStructType`/`sliceType` would produce.
+
+## Round 173: the suite is units now, and the cache key is why it was slow
+
+**The suite is no longer all-or-nothing** (`tests/unitrun.sh`, `tests/split-util.sh`).
+A phase used to be one process that looped over its fixtures: a fixture that hung
+the compiler, crashed the runner, or a ctrl-C after 40 minutes threw away every
+fixture already run, and the next attempt re-ran all of them. A phase now offers
+its fixtures as **units**, and the driver runs them independently:
+
+    tests/unitrun.sh                      every unit of every phase
+    tests/unitrun.sh --phases 0a,0b,1,1b  selected phases
+    tests/unitrun.sh --failed             re-run only what failed
+    tests/unitrun.sh --phases 0a -j 6     six at a time (default 4)
+    tests/unitrun.sh --cold               drop the package cache first
+    tests/unitrun.sh --only 'reject_*'    filter by unit name
+
+Each unit gets its own temp dir, its own timeout (default 900s), its own log and
+its own exit code; results stay in `tmp/unitrun/<phase>/<unit>/{rc,verdict,reason,out,err}`
+and a passing unit is not run again unless `--force`. `tests/run.sh --quick`,
+`--full` and `--phase N` all route through the driver, so the old entry points
+still work. `build.sh`'s post-bootstrap regression check uses `--phases 0a
+--fail-fast`, which keeps its fail-fast meaning while gaining per-fixture
+isolation.
+
+Units also made two defects visible that the phase-as-a-unit shape had hidden:
+
+* **The restriction phase was measuring nothing for four fixtures.**
+  `reject_closure_capture`, `reject_global_mutation_closure`,
+  `reject_method_value` and `reject_slice_to_array_ptr` passed as a phase (the
+  phase only checks that the compiler *rejected*, and the old runner copied
+  fixtures into `$MOXIEROOT/tmp`), but the driver's first run - which put the
+  fixture copies under the tree as well - showed them being **accepted**. The
+  language restrictions fire only for a package outside the toolchain's own
+  module: the same fixture is rejected from `/tmp` and accepted from
+  `$MOXIEROOT/tmp`. The driver now puts every fixture tree outside the checkout
+  (`$XDG_CACHE_HOME/moxie-unitrun`, default `~/.cache/moxie-unitrun`) and keeps
+  only its results in the tree. Measured after the move: all four reject with
+  their expected message.
+* **`pkg/rewrite` was orphaned and uncompilable.** Zero importers in the tree
+  (`pkg/rewrite/{resolve,rewrite}.mx`, 872 lines), and the first per-package
+  phase 1 run failed on it with the global-store error
+  (`EnsureImportRegistry` assigned a package-level map). Deleted rather than
+  migrated: nothing imports it, and legacy's globals are not a contract to
+  preserve. Phase 3 no longer names it either - its IR verdicts are derived from
+  the modules actually emitted, so a deleted package cannot leave a stale list
+  entry behind.
+
+**Phase 5 no longer deletes the shared package cache.** `tests/wasm/validate.sh`
+opened with `rm -rf "$HOME/moxie/cache"`, so whichever phase ran second saw the
+other's cache deleted mid-flight and rebuilt everything - the phases fought each
+other for a resource they share. A genuinely cold measurement is now
+`tests/unitrun.sh --cold`: explicit, and serial (`-j 1`) so nothing repopulates
+the cache under it.
+
+### The reason the suite is slow: the scratch path was inside the cached object
+
+Measured, not inferred, and the first hypothesis (`linkSetKey` keys every package
+per fixture) was **wrong** - the real cause is one layer down.
+
+clang embeds the **path of the `.ll` file it is reading** in the bitcode it
+emits. The compiler named that file `<scratch>/<pkg>.ll` where `<scratch>` is
+`buildScratchDir("./tmp", "mxc-build")` - deliberately pid-bearing so two
+compiler processes never share it - so two builds of byte-identical sources
+produced bitcode differing only in that embedded string:
+
+    $ cc() { clang-22 --target=x86_64-unknown-linux-musleabihf -emit-llvm -c \
+        -Wno-everything -Xclang -disable-O0-optnone "$1" -o "$2"; }
+    $ cp math.ll /tmp/pa/math.ll; cp math.ll /tmp/pb/math.ll
+    $ cc /tmp/pa/math.ll /tmp/pa/math.bc; cc /tmp/pb/math.ll /tmp/pb/math.bc
+    $ cmp /tmp/pa/math.bc /tmp/pb/math.bc
+    differ: byte 760, line 1          # 12 bytes; strings: /tmp/pa vs /tmp/pb
+    $ cc /tmp/pa/math.ll /tmp/pa/math.bc; cc /tmp/pa/math.ll /tmp/pa/other.bc
+    $ cmp ...; echo $?
+    0                                 # the output name is not embedded, the
+                                      # input path is
+
+The `.ll` source itself is deterministic (`sha256sum` of `math.ll` from three
+different scratch dirs: identical), so nothing about the IR changed - only the
+name of the file it was written to. The cache stores the **bitcode**, so every
+build missed and recompiled the whole closure:
+
+    $ ls ~/moxie/cache/mxc-*/pkg/internal_task/*.bc | wc -l
+    93
+    $ ls ~/moxie/cache/mxc-*/pkg/math/*.bc | wc -l
+    75                     # 75 distinct objects, all of them `math`
+    $ ls ~/moxie/cache/mxc-*/pkg/net_http/*.bc | wc -l
+    3                      # only named by the few fixtures that import it
+
+and a warm build log says it in one line: `cached /tmp/lsk1/pkg` (the target) and
+then **`compile internal/task`** - not `cached internal/task` - for a dependency
+whose object was already in the cache. `http_header_api` (net/http + crypto/tls)
+recompiles ~250 packages and emits ~140MB of IR on every run, which is most of
+phase 0's wall clock.
+
+**Fixed** (`setLlSubDir`/`stableLlPath`): the `.ll` files now live in a
+link-set-named subdirectory of the pid-private scratch dir
+(`<scratch>/<linkSetHash16>/<pkg>.ll`). The pid keeps two compiler processes from
+writing one `.ll`; the subdirectory name makes the embedded path the same for
+every build of the same link set, so the bitcode - and therefore the cache key -
+is reproducible. Every one of the six `.ll` emission sites goes through the one
+helper.
+
+**Also this round**: `tests/phase3_ir_validate.sh` derives its per-package
+verdicts from the emitted modules; the four restriction fixtures above are the
+suite's first true negative results for `closure captures outer variable(s)`,
+`reject_method_value` and `reject_slice_to_array_ptr` since the driver started
+placing fixtures outside the tree.
+### The other half of the wall clock: the build ran itself with one worker
+
+`adaptiveJobs` picks `nproc-1` capped by available memory. On this 8-core,
+15.6GB box that cap evaluated to **1**:
+
+    MemTotal: 15618800 kB   MemFree: 3760272 kB   MemAvailable: 6034608 kB
+    jobs = 4GB-budget -> (freeram + bufferram)/2 / 4GB = 1
+
+`mxc_free_mem` (`host.c`) returns `sysinfo.freeram + bufferram`, which counts
+only truly-free pages plus a buffer estimate. The number that says how much a new
+allocation can actually take is `MemAvailable` (free + reclaimable page cache,
+6GB here, and it is what `free` reports). Under-counting it by ~2x turns a
+4-worker build into a serial one: `http_header_api` spent ~18 minutes in
+`compile objects`, one clang at a time, on a machine with 6 idle cores.
+
+Fix is one function: read `MemAvailable` from `/proc/meminfo`, fall back to the
+`sysinfo` sum when it is unreadable. Not done in round 173 - it changes the
+compiler binary, and the suite run in flight was measuring the `.ll`-path fix.

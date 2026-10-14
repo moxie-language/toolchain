@@ -44,7 +44,11 @@ else
 			break
 		fi
 	done
-	for pkg in token mxutil syntax types; do
+	# One verdict per emitted module so a red one names its package. The set is
+	# derived from the modules actually emitted, not from a list written here:
+	# a list would go stale (as it did: it still named pkg/rewrite after that
+	# package was deleted) and a missing module would go unnoticed.
+	for pkg in $(sed -n 's|^  compile .*/pkg/\([a-z0-9_]*\)$|\1|p' "$log" | sort -u); do
 		name="ir:$pkg"
 		if [ -n "$bad" ]; then
 			log_fail "$name" "$bad"

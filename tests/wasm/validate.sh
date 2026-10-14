@@ -77,17 +77,16 @@ fi
 
 rm -rf "$WORK"; mkdir -p "$WORK"
 
-# Start from an empty package cache: each run measures a cold compile, not
-# whatever an earlier run happened to cache. The cross-target corruption this
-# used to also guard against ("Cannot select: intrinsic %llvm.wasm.memory.size"
-# from a native build linking a wasm object) is fixed at the source: a compiler
-# process now owns a private scratch directory (buildScratchDir), so concurrent
-# builds cannot overwrite each other's IR between clang writing it and the read
-# that caches it, and each target has its own cache root.
-rm -rf "$HOME/moxie/cache" 2>/dev/null
-if [ -n "${MOXIEPATH:-}" ]; then
-    rm -rf "$MOXIEPATH/cache" 2>/dev/null
-fi
+# This used to start from an empty package cache, on the theory that each run
+# should measure a cold compile. It does not measure that - one wasm fixture's
+# closure is nothing like the next one's, and a cold native build of the same
+# tree is minutes of work - and it made this harness fight every other phase for
+# the shared cache: whichever phase ran second saw the other's cache deleted
+# mid-flight and rebuilt everything. Cross-target corruption is fixed at the
+# source (a compiler process owns a private scratch directory and each target
+# has its own cache root), so the wipe bought nothing but mutual interference.
+# A genuinely cold measurement is `tests/unitrun.sh --cold`: explicit, and
+# serial so nothing repopulates the cache under it.
 
 for t in "${TARGETS[@]}"; do
     name="$(basename "$t")"; name="${name%.mx}"

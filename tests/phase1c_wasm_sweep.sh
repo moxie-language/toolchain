@@ -1,24 +1,22 @@
 #!/bin/bash
-# Phase 1c: js/wasm compile sweep.
+# Phase 1c: js/wasm compile sweep. Each package is its own unit.
 #
 # The wasm target has its own build tags (`//:build js && wasm`, `//:build unix
 # || (js && wasm)`), so a package can compile natively and not for js - and
-# phase 5 only builds fixtures with a main(), which never pulls in
-# syscall/js or the js arms of internal/poll. Nothing compiled
-# `src/syscall/js` at all until round 77, which is why its ten uses of `any`
-# (a type Moxie does not have) sat unnoticed.
+# phase 5 only builds fixtures with a main(), which never pulls in syscall/js or
+# the js arms of internal/poll. Nothing compiled src/syscall/js at all until
+# round 77, which is why its ten uses of `any` (a type Moxie does not have) sat
+# unnoticed.
 #
 # A wasm library links without a main.main, so rc==0 is the pass condition.
-set -euo pipefail
+set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/util.sh"
-
-echo ""
-echo "=== Phase 1c: js/wasm compile sweep ==="
+source "$SCRIPT_DIR/split-util.sh"
 
 # Packages that must compile for -target wasm.
-SWEEP=(
+UNITS=(
 	net/http
 	path/filepath
 	syscall/js
@@ -30,21 +28,31 @@ SWEEP=(
 SWEEP_KNOWN=(
 )
 
-for pkg in "${SWEEP[@]}"; do
-	td="$(tempdir "wasmsweep_$(echo "$pkg" | tr / _)")"
-	rm -rf "$td"; mkdir -p "$td"
-	log="$td/build.log"
-	rc=0
-	MOXIEROOT="$ROOT" "$MOXIE" build -target wasm -o "$td/out.wasm" "$ROOT/src/$pkg" >"$log" 2>&1 || rc=$?
-	if [ $rc -eq 0 ]; then
-		log_pass "wasm:$pkg" "compiles"
+run_one() {
+	local pkg="$1" rc=0
+	unit_begin
+	MOXIEROOT="$ROOT" "$MOXIE" build -target wasm -o "$UNIT_WORK/out.wasm" "$ROOT/src/$pkg" \
+		>"$UNIT_WORK/build.log" 2>&1 || rc=$?
+	if [ "$rc" -eq 0 ]; then
+		unit_ok "wasm:$pkg" "compiles"
 	else
-		first="$(grep -E '^; |^mxc:|error:' "$log" | grep -v '^  compile errors$' | head -1 || true)"
-		[ -n "$first" ] || first="$(tail -3 "$log" | head -1)"
-		log_fail "wasm:$pkg" "$first"
-		echo "    (full log: $log)"
+		unit_no "wasm:$pkg" "$(first_error "$UNIT_WORK/build.log")"
 	fi
-	rm -rf "$td"
+	unit_exit
+}
+
+unit_args "$@"
+
+echo ""
+echo "=== Phase 1c: js/wasm compile sweep ==="
+
+if [ -n "$UNIT_NAME" ]; then
+	run_one "$UNIT_NAME"
+	exit $?
+fi
+
+for u in "${UNITS[@]}"; do
+	run_one "$u"
 done
 
 if [ "${#SWEEP_KNOWN[@]}" -gt 0 ]; then
