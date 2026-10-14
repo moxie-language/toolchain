@@ -9777,3 +9777,62 @@ corrected Tag plan stands as written above - `Tag{Parts []string}` /
 unchanged - and the sweep of smesh's references can start at
 `web/common/nostr/tags.mx`, rebuild `./web/wasm/notif` as the checkpoint, and
 commit with the measured error count.
+
+## Round 153: the Tag plan, corrected by the language - and notif compiles
+
+The owner's shape (`Tag{Parts []string}`, `Tags{List []Tag}`, exported fields)
+is implemented in smesh's `web/common/nostr/tags.mx` and `./web/wasm/notif`
+builds `-target wasm` **rc=0** (327,908 bytes, host and `$runtime` emitted).
+That is the first bundle past the named-slice-type blocker, and it is commit
+`6a0f4134` in the app repo.
+
+**Two facts about the language changed the plan's details, and both were found
+by compiling rather than by reasoning:**
+
+  1. **Methods must have POINTER receivers.** `value receiver is not allowed:
+     use pointer receiver (*T)` is a hard rule in both compilers
+     (`ssa_builder.mx` and `legacy/compiler/restrict.go`), so the eight methods
+     keep the receivers they had. The plan's "no accessors needed, the fields
+     are exported" still holds for field access, but the method set is unchanged
+     in shape.
+
+  2. **`GetFirst` returns a Tag VALUE, not `*Tag`,** and "not found" is the zero
+     Tag tested with a new `Empty()` method. A `*Tag` return looks natural but
+     cannot be called at the loop sites: ranging a `[]Tag` gives a copy, so
+     `tag.Value()` on the range variable is `Value undefined (type invalid type
+     has no field or method Value)` - and a method call needs an addressable
+     operand. `&ts.List[i]` compiles but **emits malformed IR on wasm32**
+     (`'%ne4' defined with type '{ ptr, i32, i32 }' but expected 'ptr'`), which
+     is a compiler bug worth its own round and not something to build an API on.
+     The value return keeps every call site a one-liner:
+     `tag := ev.Tags.GetFirst("e"); if !tag.Empty() { ... }`.
+
+**What the sweep touched** (the whole 5-file, 194-reference estimate collapsed
+to this because `pkg/nostr/tag` - `tag.T`, `tag.S` - is a SEPARATE, already
+struct-shaped package that most of the list actually used; only the `web/common`
+package owns `nostr.Tag`):
+
+  - `web/common/nostr/tags.mx`: the two structs, `NewTag`/`NewTags`, the eight
+    methods, `Empty`;
+  - `web/common/nostr/parse.mx`: `parseTags` builds `Tags{}` / `Tag.Parts`;
+  - `web/common/nostr/event.mx`: `serializeTagsStr` walks `tags.List` and
+    `tags.List[i].Parts` (a value parameter cannot call a pointer-receiver
+    method, so the loop indexes and keeps the value in a local);
+  - `web/common/nostr/filter.mx`: `eventHasTagValue` iterates `e.Tags.List[i]`;
+  - `web/wasm/notif/main.mx`: the two `GetFirst` call sites use `Empty()`.
+
+**Errors seen, one shape at a time.** The first build failed with the two named
+slice types; after the struct rewrite, each subsequent build surfaced exactly
+one shape - `cannot use value of type invalid type as string` (the range over
+what is now a struct), then `value receiver is not allowed`, then `Value
+undefined` on a range variable, then the wasm32 pointer/aggregate mismatch from
+`&s[i]`. Every one of those is a place where the slice spelling had been doing
+work implicitly, and each is now explicit in the source.
+
+**The remaining port, measured against this one.** The same three shapes recur
+in `web/common/marmot/marmot.mx` (6 construction sites: `nostr.Tags{...}` with
+`nostr.Tag{...}` literals), `web/common/relay/conn.mx` (2 ranges over `ev.Tags`),
+`web/wasm/app/donation.mx` (1), `web/wasm/mls/main.mx` (1), `web/wasm/signer/nwc.mx`
+(1), and `web/wasm/app/main.mx` (several ranges over `ev.Tags` plus
+`var etags []nostr.Tag`). Those are the next slices, each committed with its
+measured error count, then the remaining bundles on the store pattern.
