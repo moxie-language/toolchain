@@ -36,7 +36,13 @@ if [ -z "$workdir" ] || [ ! -d "$workdir" ]; then
 else
 	bad=""
 	verified=0
-	for ll in "$workdir"/*.ll; do
+	# The .ll files live in a link-set-named subdirectory of the scratch dir
+	# (stableLlPath, so the path clang embeds in the cached bitcode is the same
+	# for every build of a link set). Globbing "$workdir"/*.ll directly found
+	# ONE file - the phase's own initall.ll - and reported every package
+	# "FAIL only 1 module(s) emitted" while still exiting 0, so a red log sat
+	# under a green gate. Recurse.
+	for ll in $(find "$workdir" -name '*.ll' | sort); do
 		[ -f "$ll" ] || continue
 		verified=$((verified + 1))
 		if ! opt -passes=verify -disable-output "$ll" >"$td/verify.log" 2>&1; then
@@ -62,4 +68,11 @@ else
 	done
 	rm -rf "$workdir"
 	rm -rf "$td"
+fi
+
+# A phase that cannot go red is not a gate: this script's log showed six FAIL
+# verdicts while the process exited 0 (the driver records the exit status), so a
+# red log sat under a green run. Exit non-zero when anything failed.
+if [ -f "$STATUSFILE" ] && [ "$(grep -c '^FAIL' "$STATUSFILE" 2>/dev/null || echo 0)" -gt 0 ]; then
+	exit 1
 fi
