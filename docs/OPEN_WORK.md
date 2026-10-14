@@ -10355,3 +10355,51 @@ lesson worth carrying: **when a construct is refused, read the rule before
 designing around it.** `checkGlobalStores` in `_mxc_stage4/ir_scope.mx` was four
 lines of reading, and it says plainly that a store whose address root is a package
 global is rejected - which is exactly what "seed the sink from the caller" is.
+
+## Round 163: mls COMPILES, and the whole web/common chain is clean
+
+**mls is past every rule this session has been clearing.** Package-global-store
+errors 48 -> 0, closure captures 30 -> 0, and the build no longer fails in
+`git.smesh.lol/smesh/web/common/mls` at all - it fails further out.
+
+The conversions were the three proven shapes, applied seven more times
+(`commit`, `groupSecrets`, `Welcome`, `Credential`, `updatePath`,
+`updatePathNode`, `ratchetTree`, plus `Group.Marshal`/`UnmarshalGroup`), each
+followed by deleting the now-dead sink and its trampolines.
+
+**Two follow-on rules only became visible once the globals were gone**, and both
+are worth knowing because they will fire on any package converted this way:
+
+  - **a declaration inside a loop in a self-mutating method is refused** -
+    `variable declaration inside a loop in a self-mutating method is not allowed:
+    move the loop scratch into a helper function`. The reason is the sovereign
+    arena: each iteration's scratch would land in the arena that outlives the
+    method and persist. Six sites hoisted their declaration above the loop, which
+    is correct because every one of those types' `unmarshal` resets its receiver
+    (`*x = T{}`) before filling it.
+  - **`writeVectorBody(&w, child.buf)` when `w` is a value**, not a pointer -
+    `Group.Marshal` declares `var w Writer`.
+
+**marmot followed immediately**: 14 unnamed returns named, and
+`MarshalGroupState`'s `writeU16Prefix` closure - which captured the buffer it
+appended to - became `appendU16Prefix(b, data)`, taking the slice and returning
+it. `web/common/marmot` is now past both package-level rules too.
+
+**The mls bundle now fails in its own `main.mx`**, on nested closures
+(`createGroupAndSend`, `handleInit`, `loadGroups`), which is the next layer.
+
+### The session's shape, for whoever reads this next
+
+Every rule encountered, and the fix that works:
+
+| rule | fix |
+| --- | --- |
+| unnamed return values | name them; result names from types shadow the type - use `v` |
+| shadowing declarations | a body `err :=` becomes `err =` when `err` is a named result |
+| named slice/map types | `type X = []T` alias, or a struct holding the slice if it carries methods |
+| package-var initializers | a holder filled on first read, or a function returning the value |
+| closure captures | free function + state as a PARAMETER (a method value is itself a closure) |
+| `readVector`/`writeVector` callbacks | the loop moves into the caller: `readVectorBody`/`writeVectorBody` |
+| package-global stores | never seed a sink from the caller; keep the slice local |
+| loop-local declarations in self-mutating methods | hoist above the loop |
+| byte equality | `==`, not `bytes.Equal` - the operator promotes to constant time |
