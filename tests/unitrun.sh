@@ -11,6 +11,8 @@
 #                                             cached artifacts to share)
 #   tests/unitrun.sh --fail-fast              stop launching after the first
 #                                             failure (build.sh uses this)
+#   tests/unitrun.sh --wait                   wait for a running instance
+#                                             instead of refusing to start
 #
 # Why this exists: the suite used to be one process per phase, so a phase that
 # hung or crashed lost every fixture it had already run, and re-running it meant
@@ -54,6 +56,7 @@ FORCE=0
 VERBOSE=0
 COLD=0
 FAIL_FAST=0
+WAIT_LOCK=0
 
 # Phases that can subdivide themselves into units. A phase not listed here is
 # monolithic: its whole script is one unit, so it still gets its own timeout,
@@ -96,6 +99,7 @@ while [ $# -gt 0 ]; do
 	--failed) FAILED_ONLY=1; shift ;;
 	--force) FORCE=1; shift ;;
 	--fail-fast) FAIL_FAST=1; shift ;;
+	--wait) WAIT_LOCK=1; shift ;;
 	--cold) COLD=1; JOBS=1; shift ;;
 	--verbose | -v) VERBOSE=1; shift ;;
 	-h | --help) usage 0 ;;
@@ -115,8 +119,45 @@ for p in "${PHASE_LIST[@]}"; do
 done
 
 mkdir -p "$RUNDIR"
+
+# One run at a time. Two runs share tmp/unitrun: the second one deletes the
+# first's per-unit state and work dirs and launches the same units again, so
+# each becomes the other's stray writer - measured as three bogus failures
+# ("cannot create .../status: No such file or directory") in a run whose units
+# had all passed. The lock is the whole fix: refuse, name the holder, and let
+# the operator choose between --wait and a different --phases.
+exec 9>"$RUNDIR/lock"
+if ! flock -n 9; then
+	holder="$(cat "$RUNDIR/lock.owner" 2>/dev/null || echo "another run")"
+	if [ "$WAIT_LOCK" = 1 ]; then
+		echo "unitrun: waiting for $holder to finish"
+		flock 9
+	else
+		echo "unitrun: $holder is already running (results would collide);" >&2
+		echo "         wait for it, or re-run with --wait" >&2
+		exit 1
+	fi
+fi
+printf '%s (pid %s, started %s)\n' "$(basename "$0")" "$$" "$(date '+%H:%M:%S')" >"$RUNDIR/lock.owner"
+trap 'rm -f "$RUNDIR/lock.owner"' EXIT
+
 state_dir() { echo "$RUNDIR/$1" | tr -c 'A-Za-z0-9_./-' '_'; }
 unit_rc() { cat "$(state_dir "$1")/rc" 2>/dev/null || echo ""; }
+
+# The verdict, not the exit status, decides pass/skip: the phase script writes it
+# the moment it knows the outcome, while the exit status is whatever the script
+# returned after that. A unit killed between the two would otherwise be reported
+# by a status that no longer matches what it concluded.
+unit_verdict_of() {
+	local v
+	v="$(cat "$(state_dir "$1")/verdict" 2>/dev/null || echo "")"
+	case "$v" in
+	PASS) echo 0 ;;
+	SKIP) echo 2 ;;
+	"") echo "" ;;
+	*) echo 1 ;;
+	esac
+}
 
 if [ ! -x "$MOXIE" ]; then
 	echo "FATAL: $MOXIE not found or not executable" >&2
@@ -187,7 +228,8 @@ for i in "${!UNITS[@]}"; do
 		*) continue ;;
 		esac
 	fi
-	rc="$(unit_rc "$u")"
+	rc="$(unit_verdict_of "$u")"
+	[ -n "$rc" ] || rc="$(unit_rc "$u")"
 	if [ "$FAILED_ONLY" = 1 ]; then
 		# A unit never run is work not done, which is what --failed asks to
 		# make up, so it counts as failed here.
@@ -216,7 +258,8 @@ echo ""
 report_unit() {
 	local unit="$1" d rc status reason
 	d="$(state_dir "$unit")"
-	rc="$(cat "$d/rc" 2>/dev/null || echo 1)"
+	rc="$(unit_verdict_of "$unit")"
+	[ -n "$rc" ] || rc="$(cat "$d/rc" 2>/dev/null || echo 1)"
 	case "$rc" in
 	0) status=PASS ;;
 	2) status=SKIP ;;
@@ -351,7 +394,8 @@ passed=0
 failed=0
 skipped=0
 for unit in "${UNITS[@]}"; do
-	rc="$(unit_rc "$unit")"
+	rc="$(unit_verdict_of "$unit")"
+	[ -n "$rc" ] || rc="$(unit_rc "$unit")"
 	[ -n "$rc" ] || continue
 	total=$((total + 1))
 	case "$rc" in
@@ -368,7 +412,8 @@ if [ "$failed" -gt 0 ]; then
 	echo ""
 	echo "failed units (re-run with: tests/unitrun.sh --phases ${PHASE_LIST[*]} --failed):"
 	for unit in "${UNITS[@]}"; do
-		rc="$(unit_rc "$unit")"
+		rc="$(unit_verdict_of "$unit")"
+		[ -n "$rc" ] || rc="$(unit_rc "$unit")"
 		[ "$rc" = 1 ] || [ "$rc" = 124 ] || [ "$rc" = 137 ] || continue
 		printf '  %s  %s\n' "$unit" "$(sed -n '1p' "$(state_dir "$unit")/err" 2>/dev/null | cut -c1-120)"
 	done
