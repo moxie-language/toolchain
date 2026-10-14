@@ -9672,3 +9672,108 @@ What follows from it, for the sweep of the 194 non-test references:
     sweep, not a surprise in the middle of it;
   - then rebuild ./web/wasm/notif as the checkpoint and commit with the measured
     error count, as rounds 12/16/17/18 did.
+
+## Round 152: the comparability question, answered by running - stage4 could not compare a struct holding a slice
+
+The Tag plan's first step was "check, do not assume" whether a struct containing a
+`[]string` is comparable. It is NOT, and the answer is a compiler bug, not a
+language rule.
+
+**What was measured.** With `tmp/mxc-r147`:
+
+    type Tag struct { Parts []string }
+    a := Tag{Parts: []string{"e", "abc"}}
+    b := Tag{Parts: []string{"e", "abc"}}
+    _ = a == b
+
+    ./tmp/mxc-build-*/._tmp_cmp2.ll:72:19: error: icmp requires integer operands
+        %sf33 = icmp eq {ptr, i64, i64} %sf31, %sf32
+
+A struct of scalars compares; a bare slice compares; a struct holding a slice is
+emitted as ONE `icmp` on the aggregate and clang refuses it. So the answer to the
+plan's question is "not comparable today", and the plan's fallback (an `Equal`
+method) would have been building on a broken floor - the honest fix is the
+compiler.
+
+**The root cause is a wood-law break, and it is stage4-side only.** The legacy
+compiler already does this correctly: `createBinOp` on a `*types.Struct` walks
+the fields and recurses (`legacy/compiler/compiler.go`, the `*types.Struct` case),
+so a slice field lands on the `*types.Slice` case and goes to
+`runtime.sliceEqual(xPtr, yPtr, xLen, yLen, elemSize)`. Stage4 had no such
+recursion for slice fields or slice elements; only strings (via
+`runtime.stringEqual`) and sub-structs/sub-arrays were special-cased, and
+everything else became a bare `icmp` on whatever the LLVM field type was. That
+is invalid LLVM for any aggregate. This round is stage4 catching up to legacy,
+which is the correct direction for wood law: legacy already complied.
+
+**What was implemented** (`_mxc_stage4/ir_binop.mx`, the only file changed):
+
+  - `emitValueCompare(reg, op, t, vt, lv, rv, nullOK)` - one recursive comparison
+    for every shape: text to `runtime.stringEqual`, struct fields and array
+    elements walked with `extractvalue` and recombined (`and` per field for `==`,
+    `or` for `!=`), slices to `runtime.sliceEqual` with the element size as
+    `ptrtoint(getelementptr(T, null, 1))`, floats to `fcmp oeq/une`, pointers and
+    bare integers to `icmp`. `emitStructCompare` and `emitArrayCompare` now
+    delegate to it, and a bare slice comparison in `emitBinOp` routes to it too.
+  - `nullOK` distinguishes the two questions a caller can ask: "is this equal"
+    (slice vs slice is element-wise) from "is this zero" (slice vs nil is the
+    data pointer). A `zeroinitializer` operand is handled at every level, so
+    `x == Tag{}` works as well as `x == y`.
+
+**Three mis-routes had to be found by running, and each one is now pinned.**
+
+  1. **`[]string` was compared as text.** `emitBinOp` decided "this is a string
+     comparison" from `lt == sliceType()`, i.e. from the LLVM shape - and
+     `[]string` IS `{ptr, i64, i64}`. So `a == c` called `stringEqual` on two
+     slice headers and compared 48 bytes of header data as if they were
+     characters: `["abc","xyz"] == ["abc","xyz"]` was true because the headers
+     matched, and the element bytes were never read. The Moxie type now decides
+     (`textSlice`), not the LLVM shape.
+  2. **`[]byte` is not `IsString`.** The obvious discriminator - "the element is
+     the string Basic" - is WRONG for Moxie's own text type: the checker resolves
+     `[]byte` to a slice of a byte element, not to `TCString`
+     (`isStringLike([]byte)` is false, `isStringLike(string)` is true). Using the
+     string flag alone broke `path/filepath`, whose `readDirNames` sorts
+     `[][]byte` with `names[j] < names[j-1]` - that regression surfaced in phase
+     0 as `path_filepath.ll: icmp slt {ptr, i64, i64}` and took the `http_header_api`
+     regression down with it. `textSlice` therefore accepts a string Basic, a
+     slice of a string Basic, OR a slice whose element is byte-shaped
+     (`Kind == Uint8 || Name == "byte"`).
+  3. **`!=` was emitted into a local string and never reached the caller.**
+     `reg` is a plain `string` parameter, so `reg = e.nextReg2(...)` inside a
+     helper renamed a local and the negation was dropped: `a != c` printed
+     `false`. `emitValueCompare` now owns its result register - it computes the
+     equality into a fresh register and writes the `xor i1 ..., true` into `reg`
+     itself. `emitStringCompare` already did this, which is why only the new
+     slice path was affected.
+
+**Verified by running** (all with the round's compiler):
+
+  - the failing shapes now compile and answer correctly: `Tag == Tag` (equal and
+    unequal), `Tag != Tag`, `Tags == Tags`, `[]string == []string`,
+    `[]string != []string`, `Tag{}` against a zero value, `s.Parts == nil`,
+    and text `==` / `<` unchanged;
+  - `filepath.Match` builds and matches again (the `[][]byte` sort);
+  - the fixpoint holds: `mxc-r150 == mxc-r151`
+    (`c6cf8f3993ff1e0d6f21bbd6e57e331b57ca94b7f2c04ce5d69407624e8e04c3`), so a
+    generation reproduces itself with the new comparison path in it;
+  - phase 0 with `MOXIE=tmp/mxc-r151`: **132 passed / 0 failed / 0 skipped,
+    rc=0**, including `regression:http_header_api` - the fixture that caught the
+    `[]byte`-is-not-`IsString` mis-route, which failed with the intermediate
+    compiler and passes with this one;
+  - the legacy mirror needed no change and still type-checks (`cd legacy && go
+    build ./builder/`), because it already recursed.
+
+Runtime instrumentation was used to find this and has been removed: `sliceEqual`
+gained temporary `printstring`/`printuint64` tracing that proved the slice path
+was never being entered (no output at all while the comparison still answered
+true, which is what pointed at the `[]string`-as-text mis-route), and the bake was
+re-run afterwards so `sysroot/runtime_go.bc` is a product of the unmodified
+source.
+
+**Next: the port itself, unchanged.** With structs holding slices comparable, the
+corrected Tag plan stands as written above - `Tag{Parts []string}` /
+`Tags{List []Tag}`, exported fields, no accessors, the eight methods moved
+unchanged - and the sweep of smesh's references can start at
+`web/common/nostr/tags.mx`, rebuild `./web/wasm/notif` as the checkpoint, and
+commit with the measured error count.

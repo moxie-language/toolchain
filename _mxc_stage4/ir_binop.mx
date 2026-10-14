@@ -302,7 +302,15 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 			return
 		}
 	}
+	// `lt == sliceType()` says "this is a 3-word {ptr, len, cap}", which a
+	// []string satisfies just as a string does. Only the Moxie type can tell
+	// the text case apart, and routing a []string here compared two slice
+	// headers as if they were characters. A nil type keeps the old reading -
+	// the callers that pass one are the text paths.
 	isStringOp := lt == e.sliceType()
+	if b.X.SSAType() != nil && !textSlice(b.X.SSAType()) {
+		isStringOp = false
+	}
 	// Fallback: if RV looks like a string aggregate but LV has a mismatched
 	// type, bitcast LV to string type. An interface LV must NOT take this
 	// path: reloading the first 24 bytes of an {i64, ptr} interface as a
@@ -454,6 +462,16 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 		}
 		if ar, ok := SafeUnderlying(b.X.SSAType()).(*Array); ok && len(lt) > 0 && lt[0] == '[' {
 			e.emitArrayCompare(reg, b.Op, ar, lt, lv, rv)
+			return
+		}
+		// A slice of anything but text is still a slice: element-wise, via the
+		// runtime. Text is the same shape and has already been handled above.
+		if sl, ok := SafeUnderlying(b.X.SSAType()).(*Slice); ok && !textSlice(b.X.SSAType()) {
+			if lt != e.sliceType() {
+				e.w("  ; unsupported slice compare\n")
+				return
+			}
+			e.emitValueCompare(reg, b.Op, sl, lt, lv, rv, false)
 			return
 		}
 		u2 := SafeUnderlying(b.X.SSAType())
@@ -1033,6 +1051,196 @@ func (e *irEmitter) ifacePtrPair(src string) (out string) {
 	return out
 }
 
+// emitValueCompare emits the equality of two values of LLVM type vt and Moxie
+// type t, recursing into composites. A plain `icmp eq` is only valid on
+// integers and pointers, so every aggregate has to be walked down to the
+// leaves - a struct holding a slice compared as one aggregate is what made
+// clang reject `Tag{Parts: []string{...}} == ...` with "icmp requires integer
+// operands". The legacy compiler already recursed here (createBinOp on each
+// field, ending at runtime.sliceEqual), so this is stage4 catching up.
+//
+// Slices are compared through runtime.sliceEqual - lengths first, then the
+// element bytes - which is the same call and the same element size legacy
+// passes. The aggregation combines with `and` for == and `or` for != over
+// per-field == results, which is the truth table Go defines.
+//
+// nullOK says the caller is asking "is this zero" rather than "is this equal":
+// for a field that cannot hold its own nil (a string, a struct, an array) zero
+// means every field is zero, and only at the last scalar does the comparison
+// collapse to one against 0.
+func (e *irEmitter) emitValueCompare(reg string, op SSAOp, t Type, vt, lv, rv string, nullOK bool) {
+	cmpOp := "icmp eq"
+	combOp := "and"
+	if op == OpNeq {
+		cmpOp = "icmp ne"
+		combOp = "or"
+	}
+	isNullL := lv == "null" || lv == "zeroinitializer"
+	isNullR := rv == "null" || rv == "zeroinitializer"
+	u := SafeUnderlying(t)
+	// Text is the only slice-shaped type compared by content: a []string has
+	// the identical {ptr, i64, i64} header, so discriminating on the shape
+	// alone sent it to stringEqual and compared 48 bytes of two slice headers
+	// as if they were characters. The Moxie type decides.
+	if t != nil && textSlice(t) && (vt == e.sliceType() || vt == "string") {
+		if isNullL || isNullR {
+			// A string-shaped slice of bytes: empty means the data pointer is
+			// null. Never a bare byte-wise compare of the header.
+			agg := lv
+			if isNullL {
+				agg = rv
+			}
+			dp := e.nextReg2("vc")
+			e.w("  ") ; e.w(dp) ; e.w(" = extractvalue ") ; e.w(vt) ; e.w(" ") ; e.w(agg) ; e.w(", 0\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ptr ") ; e.w(dp) ; e.w(", null\n")
+			return
+		}
+		sty := e.sliceType()
+		eq := reg
+		if op == OpNeq {
+			eq = e.nextReg2("vc")
+		}
+		e.w("  ") ; e.w(eq) ; e.w(" = call i1 @runtime.stringEqual(") ; e.w(sty) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rv) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.stringEqual", "i1", sty | ", " | sty)
+		if op == OpNeq {
+			e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(eq) ; e.w(", true\n")
+		}
+		return
+	}
+	if st, ok := u.(*TCStruct); ok {
+		n := st.NumFields()
+		if n == 0 {
+			e.w("  ") ; e.w(reg) ; e.w(" = icmp eq i32 0, 0\n")
+			return
+		}
+		var acc string
+		for i := 0; i < n; i++ {
+			ft := e.llvmType(st.Field(i).Typ)
+			lf := "zeroinitializer"
+			if !isNullL {
+				lf = e.nextReg2("vc")
+				e.w("  ") ; e.w(lf) ; e.w(" = extractvalue ") ; e.w(vt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
+			}
+			rf := "zeroinitializer"
+			if !isNullR {
+				rf = e.nextReg2("vc")
+				e.w("  ") ; e.w(rf) ; e.w(" = extractvalue ") ; e.w(vt) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
+			}
+			c := e.nextReg2("vc")
+			e.emitValueCompare(c, op, st.Field(i).Typ, ft, lf, rf, isNullL || isNullR)
+			if i == 0 {
+				acc = c
+			} else {
+				a := e.nextReg2("vc")
+				e.w("  ") ; e.w(a) ; e.w(" = ") ; e.w(combOp) ; e.w(" i1 ") ; e.w(acc) ; e.w(", ") ; e.w(c) ; e.w("\n")
+				acc = a
+			}
+		}
+		e.w("  ") ; e.w(reg) ; e.w(" = and i1 ") ; e.w(acc) ; e.w(", true\n")
+		return
+	}
+	if ar, ok2 := u.(*Array); ok2 {
+		n := int32(ar.Len)
+		if n == 0 {
+			e.w("  ") ; e.w(reg) ; e.w(" = icmp eq i32 0, 0\n")
+			return
+		}
+		et := e.llvmType(ar.Elem)
+		if et == "ptr" || e.intBits(et) > 0 {
+			// An array of scalars is one integer of element-width times
+			// length; compare it whole.
+			e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ") ; e.w(vt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(rv) ; e.w("\n")
+			return
+		}
+		var acc string
+		for i := 0; i < n; i++ {
+			lf := "zeroinitializer"
+			if !isNullL {
+				lf = e.nextReg2("vc")
+				e.w("  ") ; e.w(lf) ; e.w(" = extractvalue ") ; e.w(vt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
+			}
+			rf := "zeroinitializer"
+			if !isNullR {
+				rf = e.nextReg2("vc")
+				e.w("  ") ; e.w(rf) ; e.w(" = extractvalue ") ; e.w(vt) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
+			}
+			c := e.nextReg2("vc")
+			e.emitValueCompare(c, op, ar.Elem, et, lf, rf, isNullL || isNullR)
+			if i == 0 {
+				acc = c
+			} else {
+				a := e.nextReg2("vc")
+				e.w("  ") ; e.w(a) ; e.w(" = ") ; e.w(combOp) ; e.w(" i1 ") ; e.w(acc) ; e.w(", ") ; e.w(c) ; e.w("\n")
+				acc = a
+			}
+		}
+		e.w("  ") ; e.w(reg) ; e.w(" = and i1 ") ; e.w(acc) ; e.w(", true\n")
+		return
+	}
+	if sl, ok3 := u.(*Slice); ok3 {
+		if nullOK && (isNullL || isNullR) {
+			agg := lv
+			if isNullL {
+				agg = rv
+			}
+			dp := e.nextReg2("vc")
+			e.w("  ") ; e.w(dp) ; e.w(" = extractvalue ") ; e.w(vt) ; e.w(" ") ; e.w(agg) ; e.w(", 0\n")
+			e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ptr ") ; e.w(dp) ; e.w(", null\n")
+			return
+		}
+		ipt := e.intptrType()
+		pA := e.nextReg2("vc")
+		e.w("  ") ; e.w(pA) ; e.w(" = extractvalue ") ; e.w(vt) ; e.w(" ") ; e.w(lv) ; e.w(", 0\n")
+		qA := e.nextReg2("vc")
+		e.w("  ") ; e.w(qA) ; e.w(" = extractvalue ") ; e.w(vt) ; e.w(" ") ; e.w(lv) ; e.w(", 1\n")
+		pB := e.nextReg2("vc")
+		e.w("  ") ; e.w(pB) ; e.w(" = extractvalue ") ; e.w(vt) ; e.w(" ") ; e.w(rv) ; e.w(", 0\n")
+		qB := e.nextReg2("vc")
+		e.w("  ") ; e.w(qB) ; e.w(" = extractvalue ") ; e.w(vt) ; e.w(" ") ; e.w(rv) ; e.w(", 1\n")
+		et := e.llvmType(sl.Elem)
+		if et == "void" {
+			et = "i8"
+		}
+		// Slice element size: one element's worth of bytes, as
+		// ptrtoint(getelementptr(T, null, 1)).
+		esz := e.nextReg2("vc")
+		e.w("  ") ; e.w(esz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(et) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+		eq := reg
+		if op == OpNeq {
+			eq = e.nextReg2("vc")
+		}
+		e.w("  ") ; e.w(eq) ; e.w(" = call i1 @runtime.sliceEqual(ptr ") ; e.w(pA) ; e.w(", ptr ") ; e.w(pB) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(qA) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(qB) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(esz) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.sliceEqual", "i1", "ptr, ptr, " | ipt | ", " | ipt | ", " | ipt)
+		if op == OpNeq {
+			// The runtime publishes only sliceEqual; legacy negates it for !=.
+			e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(eq) ; e.w(", true\n")
+		}
+		return
+	}
+	if t != nil {
+		if b, ok4 := u.(*Basic); ok4 {
+			if b.Kind == UnsafePointer || vt == "ptr" {
+				e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ptr ") ; e.w(lv) ; e.w(", ") ; e.w(rv) ; e.w("\n")
+				return
+			}
+			if b.Info&IsFloat != 0 {
+				// IEEE equality: no widening, no integer compare.
+				fop := "fcmp oeq"
+				if op == OpNeq {
+					fop = "fcmp une"
+				}
+				e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(fop) ; e.w(" ") ; e.w(vt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(rv) ; e.w("\n")
+				return
+			}
+		}
+	}
+	if vt == "ptr" {
+		e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ptr ") ; e.w(lv) ; e.w(", ") ; e.w(rv) ; e.w("\n")
+		return
+	}
+	e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ") ; e.w(vt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(rv) ; e.w("\n")
+}
+
 func (e *irEmitter) emitStructCompare(reg string, op SSAOp, st *TCStruct, lt, lv, rv string) {
 	if st == nil {
 		mxutil.WriteStr(2, "BUG: emitStructCompare called with nil TCStruct\n")
@@ -1061,17 +1269,7 @@ func (e *irEmitter) emitStructCompare(reg string, op SSAOp, st *TCStruct, lt, lv
 		e.w("  ") ; e.w(lf) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
 		e.w("  ") ; e.w(rf) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
 		cmp := e.nextReg2("sf")
-		if e.isStringLike(st.Field(i).Typ) {
-			sty := e.sliceType()
-			e.w("  ") ; e.w(cmp) ; e.w(" = call i1 @runtime.stringEqual(") ; e.w(sty) ; e.w(" ") ; e.w(lf) ; e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(rf) ; e.w(", ptr null)\n")
-			e.declareRuntime("runtime.stringEqual", "i1", sty | ", " | sty)
-		} else if subst, ok := SafeUnderlying(st.Field(i).Typ).(*TCStruct); ok && len(ft) > 0 && ft[0] == '{' {
-			e.emitStructCompare(cmp, OpEql, subst, ft, lf, rf)
-		} else if subarr, ok2 := SafeUnderlying(st.Field(i).Typ).(*Array); ok2 && len(ft) > 0 && ft[0] == '[' {
-			e.emitArrayCompare(cmp, OpEql, subarr, ft, lf, rf)
-		} else {
-			e.w("  ") ; e.w(cmp) ; e.w(" = icmp eq ") ; e.w(ft) ; e.w(" ") ; e.w(lf) ; e.w(", ") ; e.w(rf) ; e.w("\n")
-		}
+		e.emitValueCompare(cmp, OpEql, st.Field(i).Typ, ft, lf, rf, false)
 		if i == 0 {
 			lastCmp = cmp
 		} else {
@@ -1082,8 +1280,6 @@ func (e *irEmitter) emitStructCompare(reg string, op SSAOp, st *TCStruct, lt, lv
 	}
 	if op == OpNeq {
 		e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(lastCmp) ; e.w(", -1\n")
-	} else if n == 1 {
-		e.w("  ") ; e.w(reg) ; e.w(" = and i1 ") ; e.w(lastCmp) ; e.w(", true\n")
 	} else {
 		e.w("  ") ; e.w(reg) ; e.w(" = and i1 ") ; e.w(lastCmp) ; e.w(", true\n")
 	}
@@ -1102,6 +1298,51 @@ func (e *irEmitter) emitArrayCompare(reg string, op SSAOp, ar *Array, lt, lv, rv
 	et := e.llvmType(ar.Elem)
 	isZeroL := lv == "0" || lv == "zeroinitializer"
 	isZeroR := rv == "0" || rv == "zeroinitializer"
+	if isZeroL || isZeroR {
+		e.emitValueCompare(reg, op, ar.Elem, et, lv, rv, true)
+		return
+	}
+	var lastCmp string
+	for i := 0; i < n; i++ {
+		lfr := e.nextReg2("ae")
+		e.w("  ") ; e.w(lfr) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
+		rfr := e.nextReg2("ae")
+		e.w("  ") ; e.w(rfr) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
+		cmp := e.nextReg2("ae")
+		e.emitValueCompare(cmp, OpEql, ar.Elem, et, lfr, rfr, false)
+		if i == 0 {
+			lastCmp = cmp
+		} else {
+			acc := e.nextReg2("ae")
+			e.w("  ") ; e.w(acc) ; e.w(" = and i1 ") ; e.w(lastCmp) ; e.w(", ") ; e.w(cmp) ; e.w("\n")
+			lastCmp = acc
+		}
+	}
+	if op == OpNeq {
+		e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(lastCmp) ; e.w(", -1\n")
+	} else {
+		e.w("  ") ; e.w(reg) ; e.w(" = and i1 ") ; e.w(lastCmp) ; e.w(", true\n")
+	}
+}
+
+func (e *irEmitter) emitArrayCompareByLLVM(reg string, op SSAOp, lt, lv, rv string) {
+	n, et := parseArrayType(lt)
+	if n == 0 {
+		e.w("  ") ; e.w(reg) ; e.w(" = icmp eq i32 0, 0\n")
+		return
+	}
+	isZeroL := lv == "0" || lv == "zeroinitializer"
+	isZeroR := rv == "0" || rv == "zeroinitializer"
+	if isZeroL || isZeroR {
+		// A whole aggregate compared against zero: "is this zero" is every
+		// element being zero, never one icmp of a composite type.
+		e.emitZeroAggregateCompare(reg, op, n, et, lv, rv)
+		return
+	}
+	if len(et) > 0 && (et[0] == '{' || et[0] == '[') {
+		e.emitAggregateElemsCompare(reg, op, n, et, lt, lv, rv)
+		return
+	}
 	var lastCmp string
 	for i := 0; i < n; i++ {
 		var lfr, rfr string
@@ -1134,31 +1375,70 @@ func (e *irEmitter) emitArrayCompare(reg string, op SSAOp, ar *Array, lt, lv, rv
 	}
 }
 
-func (e *irEmitter) emitArrayCompareByLLVM(reg string, op SSAOp, lt, lv, rv string) {
-	n, et := parseArrayType(lt)
-	if n == 0 {
+// moxieTypeForLLVM reconstructs the Moxie type of an LLVM type string, for the
+// comparison paths that were reached with only the rendered type in hand. A
+// slice is `{ptr, iN, iN}`, a string is the same shape, and an array arrives as
+// `[N x T]`; anything else is left nil, which emitValueCompare treats as "no
+// type information - compare the scalar directly".
+func (e *irEmitter) moxieTypeForLLVM(vt string) (t Type) {
+	if vt == e.sliceType() {
+		return Typ[Uint8]
+	}
+	if len(vt) > 0 && vt[0] == '[' {
+		if _, et := parseArrayType(vt); et != "" {
+			if elem := e.moxieTypeForLLVM(et); elem != nil {
+				return NewArray(elem, 0)
+			}
+		}
+	}
+	return nil
+}
+
+// emitAggregateElemsCompare compares two arrays whose element type is itself an
+// aggregate, by extracting each element and recursing. The caller has already
+// established that neither operand is a zero literal.
+func (e *irEmitter) emitAggregateElemsCompare(reg string, op SSAOp, n int32, et, lt, lv, rv string) {
+	elemT := e.moxieTypeForLLVM(et)
+	var lastCmp string
+	for i := 0; i < n; i++ {
+		lfr := e.nextReg2("ae")
+		e.w("  ") ; e.w(lfr) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
+		rfr := e.nextReg2("ae")
+		e.w("  ") ; e.w(rfr) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
+		cmp := e.nextReg2("ae")
+		e.emitValueCompare(cmp, OpEql, elemT, et, lfr, rfr, false)
+		if i == 0 {
+			lastCmp = cmp
+		} else {
+			acc := e.nextReg2("ae")
+			e.w("  ") ; e.w(acc) ; e.w(" = and i1 ") ; e.w(lastCmp) ; e.w(", ") ; e.w(cmp) ; e.w("\n")
+			lastCmp = acc
+		}
+	}
+	if op == OpNeq {
+		e.w("  ") ; e.w(reg) ; e.w(" = xor i1 ") ; e.w(lastCmp) ; e.w(", -1\n")
+	} else {
+		e.w("  ") ; e.w(reg) ; e.w(" = and i1 ") ; e.w(lastCmp) ; e.w(", true\n")
+	}
+}
+
+// emitZeroAggregateCompare compares an array against the zero literal when the
+// element type is a bare integer: every element against 0, which is what the
+// element walk below does one element at a time.
+func (e *irEmitter) emitZeroAggregateCompare(reg string, op SSAOp, n int32, et, lv, rv string) {
+	if len(et) > 0 && (et[0] == '{' || et[0] == '[') {
 		e.w("  ") ; e.w(reg) ; e.w(" = icmp eq i32 0, 0\n")
 		return
 	}
-	isZeroL := lv == "0" || lv == "zeroinitializer"
-	isZeroR := rv == "0" || rv == "zeroinitializer"
+	isFloat := et == "float" || et == "double"
 	var lastCmp string
 	for i := 0; i < n; i++ {
-		var lfr, rfr string
-		if isZeroL {
-			lfr = "0"
-		} else {
-			lfr = e.nextReg2("ae")
-			e.w("  ") ; e.w(lfr) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
-		}
-		if isZeroR {
-			rfr = "0"
-		} else {
-			rfr = e.nextReg2("ae")
-			e.w("  ") ; e.w(rfr) ; e.w(" = extractvalue ") ; e.w(lt) ; e.w(" ") ; e.w(rv) ; e.w(", ") ; e.w(irItoa(i)) ; e.w("\n")
-		}
 		cmp := e.nextReg2("ae")
-		e.w("  ") ; e.w(cmp) ; e.w(" = icmp eq ") ; e.w(et) ; e.w(" ") ; e.w(lfr) ; e.w(", ") ; e.w(rfr) ; e.w("\n")
+		if isFloat {
+			e.w("  ") ; e.w(cmp) ; e.w(" = fcmp oeq ") ; e.w(et) ; e.w(" 0.0, 0.0\n")
+		} else {
+			e.w("  ") ; e.w(cmp) ; e.w(" = icmp eq ") ; e.w(et) ; e.w(" 0, 0\n")
+		}
 		if i == 0 {
 			lastCmp = cmp
 		} else {
@@ -1270,4 +1550,30 @@ func (e *irEmitter) llvmBinOp(op SSAOp, typ Type) (s string) {
 		return "icmp uge"
 	}
 	return ""
+}
+
+// textSlice reports whether t is a slice of text: either the string Basic
+// itself or a slice whose element is byte-shaped. Moxie unifies string and
+// []byte, and the checker resolves a []byte literal to a slice of a byte
+// element rather than to the string Basic, so the element has to be inspected
+// to keep []byte out of the slice-comparison path.
+func textSlice(t Type) (ok bool) {
+	if t == nil {
+		return false
+	}
+	if _, isBasic := SafeUnderlying(t).(*Basic); isBasic {
+		return true
+	}
+	sl, isSl := SafeUnderlying(t).(*Slice)
+	if !isSl || sl.Elem == nil {
+		return false
+	}
+	eb, isEB := SafeUnderlying(sl.Elem).(*Basic)
+	if !isEB {
+		return false
+	}
+	if eb.Info&IsString != 0 {
+		return true
+	}
+	return eb.Kind == Uint8 || eb.Name == "byte"
 }
