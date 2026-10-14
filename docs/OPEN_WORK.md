@@ -10586,3 +10586,43 @@ global-store errors** across 12 functions - `createGroupAndSend`, `loadGroups`,
 `onGroupState`, `onKeyPackageSigned`, `onKPFetchTimeout`, `processIncoming`,
 `publishKeyPackage`, `startKPFetch`. The three closure sites reported earlier were
 line duplicates of one site's nested message.
+
+## Round 168: the bundle layer is CLEARED, and a codegen bug is what stops it now
+
+**0 global-store errors, 0 capturing closures in the mls bundle.** The rule that
+had been misread as a prohibition for several rounds is the fix:
+
+    a DIRECT FIELD WRITE to a package-level holder   -> refused
+    a METHOD that mutates its receiver (sovereign)   -> ACCEPTED
+
+Every holder written in rounds 158-166 used direct field writes. Converted this
+round: `cryptoWait.arm/take`, `pubState.arm/take`, `loadState.arm/reset/startNext`
+with the step read back through a method, `kpWait.arm/take`, `giftWrap.arm/take`,
+`wrapRun.arm/take`, `initRelays.arm/peek/take`.
+
+`handleInit`'s nested closure went with them: its 45-line body became
+`onStoredKPP`, and its two continuations became `onKeyPackagePublished` and
+`onGroupsLoaded`, so the whole load path is three named functions reading
+`initRelays` - safe because `mlsSt.initStarted` is set before the first await, so
+only one run is ever in flight.
+
+**Two smaller traps, both caught by the compiler or the parser:**
+
+  - **`_` as a parameter NAME is a parse error** - `func f(a, _ string)` gives
+    `unexpected comma, expected )`. Name the parameter (`ignored`).
+  - **a "replace the closure's opening line and its `})` tail" edit deletes the
+    enclosing function's closing brace**, because the two share the line. The
+    result was six syntax errors reporting the *next* function as malformed. Keep
+    the enclosing brace explicitly when lifting a closure out.
+
+**What stops the build now is a compiler codegen bug**, not a rule:
+
+    git.smesh.lol_smesh_web_common_mls.ll:1877:18: error: invalid cast opcode for
+    cast from '{ { ptr, i32, i32 } }' to '{ ptr, i32, i32 }'
+
+A slice that should be `{ptr, i32, i32}` reaches the emitter wrapped in one extra
+single-field struct layer, and a `bitcast` between the two is emitted. This is the
+same family as the `&s[i]` wasm32 malformed-IR finding from round 152 and the
+`{{ptr, i32, i32}}` in the notif build then - **a single-field struct holding a
+slice is being given a nested LLVM type in some path**. It needs isolating with a
+small fixture against the exact expression, and it is compiler work, not app work.
