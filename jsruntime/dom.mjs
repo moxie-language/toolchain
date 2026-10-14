@@ -7,6 +7,16 @@ import { setKey as _setEncKey, sealStr, openStr, hasKey as _encHasKey } from './
 
 const _elements = new Map();
 const _nodeToId = new WeakMap();
+// Callback-release hook. A page that runs the module in a Worker has its own
+// cbId space (the worker's ids), and when this side releases a DOM handle it
+// must tell that side which of ITS callbacks just died - otherwise the worker
+// keeps function values alive for elements the page already dropped, which is
+// a leak that grows with every re-render. The hook is set by the embedding host
+// (see smesh's wasm-host.mjs, which maps js id -> wasm id); with no hook set the
+// release is local only, which is what a single-threaded host wants.
+let _onCallbacksReleased = null;
+export function setCallbackReleaseHook(fn) { _onCallbacksReleased = fn; }
+
 const _elemCallbacks = new Map();
 const _cbEventInfo = new Map(); // cbId -> {el, event, fn}
 const _resizeObservers = new Map(); // elId -> ResizeObserver
@@ -532,6 +542,7 @@ export function ClearTimeout(id) {
 }
 
 function _releaseHandle(id, el) {
+  const _releasedIds = _onCallbacksReleased ? [] : null;
   if (el) {
     _nodeToId.delete(el);
     if (el.tagName === 'IMG' || el.tagName === 'VIDEO') {
@@ -551,8 +562,12 @@ function _releaseHandle(id, el) {
         _cbEventInfo.delete(cbId);
       }
       _callbacks.delete(cbId);
+      if (_releasedIds) _releasedIds.push(cbId);
     });
     _elemCallbacks.delete(id);
+  }
+  if (_releasedIds && _releasedIds.length > 0) {
+    try { _onCallbacksReleased(_releasedIds); } catch (_) {}
   }
 }
 
