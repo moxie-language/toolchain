@@ -11247,3 +11247,12 @@ which is the same known cost as before and passes when run alone (17 min). Phase
      own predicate and its own message, and each should be added the way the
      index check was: land it, then run the whole tree through it, because a
      wrong predicate shows up as the compiler refusing to build itself.
+
+     **A warning from the attempt.** The `push` element check was written
+     (`fb.checkAssignable(args[i], sl.Elem, ...)` plus a spread rule) and
+     REVERTED: the probe that should trip it - `push(etags, parts)` with
+     `etags []Tag` and `parts []string` - compiles clean, and an instrumented
+     build showed the element loop is never reached for it. The call must be
+     resolving before that case. Finding out where is the first step of that
+     check, not the check itself; a guard that cannot be shown to fire is not a
+     guard.
