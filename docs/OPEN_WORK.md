@@ -10879,12 +10879,13 @@ different scratch dirs: identical), so nothing about the IR changed - only the
 name of the file it was written to. The cache stores the **bitcode**, so every
 build missed and recompiled the whole closure:
 
-    $ ls ~/moxie/cache/mxc-*/pkg/internal_task/*.bc | wc -l
-    93
     $ ls ~/moxie/cache/mxc-*/pkg/math/*.bc | wc -l
-    75                     # 75 distinct objects, all of them `math`
+    75                     # 75 builds of math, 75 objects, all the same size,
+                           # differing only in the embedded .ll path
+    $ ls ~/moxie/cache/mxc-*/pkg/internal_task/*.bc | wc -l
+    93                     # every build needs it, so it misses every time
     $ ls ~/moxie/cache/mxc-*/pkg/net_http/*.bc | wc -l
-    3                      # only named by the few fixtures that import it
+    3                      # only the few fixtures that import it pay for it
 
 and a warm build log says it in one line: `cached /tmp/lsk1/pkg` (the target) and
 then **`compile internal/task`** - not `cached internal/task` - for a dependency
@@ -10905,6 +10906,18 @@ verdicts from the emitted modules; the four restriction fixtures above are the
 suite's first true negative results for `closure captures outer variable(s)`,
 `reject_method_value` and `reject_slice_to_array_ptr` since the driver started
 placing fixtures outside the tree.
+
+**Measured effect of the `.ll` fix** (same compiler, same sources; `cached` counts
+packages the build took from the cache, `compile` counts packages it compiled):
+
+| unit | before | after | |
+| --- | --- | --- | --- |
+| `os_user_api` | 25s, 38 compiled | **8s, 37 cached / 1 compiled** | cold vs warm cache |
+| `gosym_pclntab` | 28.4s | **8.5s** | second run, cache hit |
+| `hash_basic` | 35.4s | **10.6s** | second run, cache hit |
+| `http_header_api` | 40m (and 18.5m under a different load) | 2nd run pending | |
+
+The first run of `http_header_api` is still ~20 minutes: see below.
 ### The other half of the wall clock: the build ran itself with one worker
 
 `adaptiveJobs` picks `nproc-1` capped by available memory. On this 8-core,
@@ -10920,6 +10933,19 @@ allocation can actually take is `MemAvailable` (free + reclaimable page cache,
 4-worker build into a serial one: `http_header_api` spent ~18 minutes in
 `compile objects`, one clang at a time, on a machine with 6 idle cores.
 
-Fix is one function: read `MemAvailable` from `/proc/meminfo`, fall back to the
-`sysinfo` sum when it is unreadable. Not done in round 173 - it changes the
-compiler binary, and the suite run in flight was measuring the `.ll`-path fix.
+The undercount is real but **fixing it does not change this box's answer**, which
+is why `host.c` is unchanged: with the correct 5868MB available,
+`(5868/2)/4096` still floors to 0 and clamps to 1. The budget, not the probe, is
+what picks 1 here. Two consequences worth keeping:
+
+  - `-j N` is the lever that matters. The heuristic is a memory guard, not a
+    performance plan, and an operator who knows the machine has 6 idle cores can
+    say `-j 6`; the tool then runs the per-package pipeline in `buildJobs`
+    workers. What is NOT yet measured is whether the parallel path is as fast as
+    it should be - the 4GB-per-worker figure was never re-measured after the
+    compiler's per-package memory changed, and `mem ci-` lines report a few
+    hundred MB, not 4GB. Re-measuring that number is the open item.
+  - The serial path is what this suite runs on by default, one package at a
+    time, ~20-40s per package on the large ones. That is the shape of the
+    18-minute `http_header_api`, and no amount of test-runner structure changes
+    it - the work is inside one compiler process.

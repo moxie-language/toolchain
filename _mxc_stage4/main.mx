@@ -43,6 +43,17 @@ type buildState struct {
 	builtinOnly     []string
 	pkgKeyMemo      map[string]string
 	linkSetKey      string // hash of the whole link set; interface dispatch impls depend on it
+	// llSubDir is a stable subdirectory of the per-process scratch dir, derived
+	// from the link set. The path of a package's .ll file is embedded in the
+	// bitcode clang emits from it (clang names an internal string constant
+	// "<input path>.L.str.0"), and that bitcode is what the package cache
+	// stores. With the pid-bearing scratch dir as the .ll path, identical
+	// sources produced bitcode differing in that one string per build
+	// (measured: 75 cache entries for math, all the same object, none ever
+	// reused), so no cached object was reusable across runs. The pid stays in
+	// the scratch dir - two compiler processes must never write one .ll - and
+	// only the name below it is stable.
+	llSubDir string
 	tlsProbeVar     int32
 
 	// extraTags are the -tags values, on top of the target and release tags
@@ -1837,6 +1848,34 @@ func versionedCacheName(hash, version, ext string) (s string) {
 
 func cachedBcPath(cacheBase, pkgPath, hash, version string) (s string) {
 	return mxutil.JoinPath(mxutil.JoinPath(cacheBase, safeName(pkgPath)), versionedCacheName(hash, version, ".bc"))
+}
+
+// setLlSubDir names the scratch subdirectory that holds this build's .ll files.
+// The link-set hash identifies "the same build" for cache purposes and is
+// already a hex string; the cap guards against a future hash that is not, since
+// a single path component has a length limit.
+func setLlSubDir(key string) {
+	if len(key) > 16 {
+		key = string(key[:16])
+	}
+	if key == "" {
+		key = "build"
+	}
+	bst.llSubDir = key
+}
+
+// stableLlPath returns the .ll path for a package: a pid-private scratch dir
+// (concurrent compiler processes must not share it) with a link-set-stable
+// subdirectory, so that the path clang embeds in the .bc is the same for every
+// build of the same link set. See buildState.llSubDir for why that matters.
+func stableLlPath(tmpdir, pkgPath string) (s string) {
+	sub := bst.llSubDir
+	if sub == "" {
+		sub = "build"
+	}
+	dir := mxutil.JoinPath(tmpdir, sub)
+	mkdirAll(dir, 0755)
+	return mxutil.JoinPath(dir, safeName(pkgPath) | ".ll")
 }
 
 func isStdlib(path string) (ok bool) {
@@ -4436,7 +4475,7 @@ func cmdCacheWarm() {
 		}
 		src := concatSources(pkg.dir, pkg.files)
 		ir := compileSource(src, compilePath, triple, pkg.dir)
-		llFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".ll")
+		llFile := stableLlPath(tmpdir, pkg.path)
 		writeFile(llFile, []byte(ir), 0644)
 		bcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc")
 		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", "-Wno-everything", "-Xclang", "-disable-O0-optnone", llFile, "-o", bcFile})
@@ -5013,6 +5052,7 @@ func cmdDispIndex() {
 	// pkgHash folds the link set key in, and that is only computed during a
 	// build. Without it every mxh path here is a key nobody wrote.
 	bst.linkSetKey = linkSetHash(pkgs)
+	setLlSubDir(bst.linkSetKey)
 	cacheBase := pkgCacheDir()
 	ifaceMethods := map[string]bool{}
 	pkgMethods := map[string]map[string]bool{}
@@ -5233,7 +5273,7 @@ func cmdUpdate(rebuildAll bool) {
 		}
 		src := concatSources(pkg.dir, pkg.files)
 		ir := compileSource(src, compilePath, triple, pkg.dir)
-		llFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".ll")
+		llFile := stableLlPath(tmpdir, pkg.path)
 		writeFile(llFile, []byte(ir), 0644)
 		bcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc")
 		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", "-Wno-everything", "-Xclang", "-disable-O0-optnone", llFile, "-o", bcFile})
@@ -5481,6 +5521,7 @@ func cmdTest(args []string) {
 	// and panicked on the first call through an interface -
 	// "interface dispatch: no impl for Read" from crypto/rand.
 	bst.linkSetKey = linkSetHash(pkgs)
+	setLlSubDir(bst.linkSetKey)
 
 	// A test binary emits dispatch too, so it needs the same index a build
 	// gets. The test package itself is type-checked below, under its generated
@@ -5593,7 +5634,7 @@ func cmdTest(args []string) {
 			src = concatSources(dp.dir, dp.files)
 		}
 		ir := compileSource(src, compilePath, triple, dp.dir)
-		llFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | ".ll")
+		llFile := stableLlPath(tmpdir, dp.path)
 		writeFile(llFile, []byte(ir), 0644)
 		bcFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | ".bc")
 		drc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", "-Wno-everything", "-Xclang", "-disable-O0-optnone", llFile, "-o", bcFile})
@@ -6408,6 +6449,7 @@ func main() {
 	registerBuiltins()
 	pkgs := resolveAll(pkgPath, root)
 	bst.linkSetKey = linkSetHash(pkgs)
+	setLlSubDir(bst.linkSetKey)
 	// Record the target package's compiled path. The resolver's order does not
 	// say which package was asked for, so match on the path it was asked for.
 	for _, tp := range pkgs {
@@ -7142,7 +7184,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		}
 
 		mxutil.WriteStr(2, "  compile " | pkg.path | "\n")
-		llFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".ll")
+		llFile := stableLlPath(tmpdir, pkg.path)
 		// Stream IR directly to .ll file to avoid accumulating entire
 		// package IR in memory (unicode/tables.mx produces ~10MB IR).
 		cctx.irOutputFile = llFile
@@ -7687,7 +7729,7 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 		return "empty IR for " | pkg.path
 	}
 
-	llFile := mxutil.JoinPath(meta.tmpdir, safeName(pkg.path) | ".ll")
+	llFile := stableLlPath(meta.tmpdir, pkg.path)
 	writeFile(llFile, []byte(ir), 0644)
 
 	bcFile := mxutil.JoinPath(meta.tmpdir, safeName(pkg.path) | ".bc")
@@ -8115,7 +8157,7 @@ func cmdBuildRuntime() {
 		}
 		src := concatSources(dp.dir, dp.files)
 		ir := compileSource(src, compilePath, triple, dp.dir)
-		llFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | ".ll")
+		llFile := stableLlPath(tmpdir, dp.path)
 		writeFile(llFile, []byte(ir), 0644)
 		bcFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | ".bc")
 		rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", "-Wno-everything", "-Xclang", "-disable-O0-optnone", llFile, "-o", bcFile})

@@ -488,8 +488,42 @@ int32_t mxc_nproc(void) {
     return (int32_t)n;
 }
 
-/* Available physical memory in bytes (free RAM + reclaimable buffers). */
+/* Available physical memory in bytes.
+ *
+ * MemAvailable, not the sysinfo sum: freeram+bufferram counts only the pages
+ * that are free right now, so it reports roughly half of what a new allocation
+ * can actually obtain - the difference is reclaimable page cache. adaptiveJobs
+ * divides this by a per-worker budget, and the undercount costs real
+ * parallelism: on an 8-core machine with 6.4GB available and 4.4GB of it
+ * already held by the running build, freeram+bufferram said "1 job" and the
+ * object-compilation phase ran one clang at a time (17 minutes for
+ * http_header_api's 151 objects; 10.7 minutes with -j 4, and the peak RSS of
+ * four workers plus the coordinator was under 900MB).
+ *
+ * Falls back to the sysinfo sum when /proc/meminfo cannot be read. No stdio in
+ * this file, so the parse is a scan over a read() buffer. */
 int64_t mxc_free_mem(void) {
+    int fd = open("/proc/meminfo", O_RDONLY);
+    if (fd >= 0) {
+        char buf[4096];
+        ssize_t n = read(fd, buf, sizeof buf - 1);
+        close(fd);
+        if (n > 0) {
+            buf[n] = 0;
+            for (ssize_t i = 0; i + 13 < n; i++) {
+                if (memcmp(buf + i, "MemAvailable:", 13) != 0) continue;
+                int64_t kb = 0;
+                ssize_t j = i + 13;
+                while (j < n && (buf[j] == ' ' || buf[j] == '\t')) j++;
+                while (j < n && buf[j] >= '0' && buf[j] <= '9') {
+                    kb = kb * 10 + (buf[j] - '0');
+                    j++;
+                }
+                if (kb > 0) return kb * 1024;
+                break;
+            }
+        }
+    }
     struct sysinfo si;
     if (sysinfo(&si) != 0) return 0;
     return (int64_t)(si.freeram + si.bufferram) * (int64_t)si.mem_unit;
