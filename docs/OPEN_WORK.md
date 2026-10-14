@@ -10180,3 +10180,36 @@ introduced at any point.
     (*Welcome).marshal/unmarshal           [w]
     (*Group).Marshal                       [g]
     UnmarshalGroup                         [g]
+
+### Round 159: the sink shape at scale - mls captures 30 -> 10
+
+The same conversion five more times, each verified by the compiler's own capture
+count after the build:
+
+| slice | captures removed | sink |
+| --- | --- | --- |
+| `parentNode.marshal/unmarshal` | 2 | `parentLeafSink` (uint32 vector of leafIndex) |
+| `groupSecrets.marshal/unmarshal` | 2 | `pskSink` (vector of self-marshalling structs) |
+| `Credential.marshal/unmarshal` | 2 | `certSink` (vector of opaque byte strings) |
+| `Welcome.marshal/unmarshal` | 2 | `secSink` (vector of self-marshalling structs) |
+
+**mls's closure captures are 30 -> 10 across rounds 158-159**, with no other error
+introduced in any build. The shape is now fully mechanical and worth stating once,
+because every remaining site is an instance of it:
+
+  1. the element slice travels in a **package-level sink**, seeded before the
+     `readVector`/`writeVector` call and read back after it;
+  2. the callbacks are **free-function trampolines** (`xVectorRead`,
+     `xVectorAt`) that reach the sink through the package variable - a method
+     value would capture the receiver, which is the trap round 158 documented;
+  3. the sink method does only the per-element work, so the reader/writer
+     callback signatures - which have no room for a context argument - never need
+     one;
+  4. a vector whose elements are themselves marshalers just calls
+     `elem.marshal(w)` / `elem.unmarshal(r)` inside the sink method.
+
+Whoever picks this up next: the remaining ten are the same four steps. They are
+`commit`, `ratchetTree`, `updatePath`, `updatePathNode` (4 pairs),
+`(*Group).Marshal` and `UnmarshalGroup` (single sites, so they need their own
+look - a single capture in a whole-message marshal is usually a nested vector
+whose element also needs the sink).
