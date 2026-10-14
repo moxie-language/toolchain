@@ -11610,3 +11610,55 @@ heavy unit is given its own ceiling:
 
     MOXIE=$PWD/tmp/mxc-bc bash tests/unitrun.sh --phases 0a --only http_header_api \
       --force --timeout 1800 -j 1     #  82 of 82 PASS, 1129468ms for the one unit
+
+## Round 55 close: every gate on this host, and the sample app
+
+Measured on `tmp/mxc-bc` (HEAD + the push/append and bridge-common commits):
+
+| gate | result |
+| --- | --- |
+| 0a (82 units) | **PASS** - `http_header_api` alone at `--timeout 1800` passes in 1129s |
+| 0b | **PASS** |
+| 1 | **PASS** |
+| 3 IR validate | **PASS** |
+| 4 binary smoke | **PASS** |
+| 5 wasm (78 units, `-j 1`) | **PASS** |
+| 6 instrumentation | **PASS** |
+| 2 self-host | **FAIL, environment** - see below |
+
+So **0a+0b+1 = 131/131**, then 3/3 and 78/78, with phase 2 the only red.
+
+**Phase 2 cannot run on this host, for two independent reasons, both verified.**
+
+1. `legacy/moxie` shells out to `go env -json` for GOPATH/GOROOT/GOVERSION
+   (`legacy/goenv/goenv.go`), and **no Go toolchain is installed** - `go` is not
+   in any of the usual prefixes. A stand-in `go` script that answers the JSON
+   lets the bootstrap proceed, so that is the first wall, not a bug in the tree.
+2. With the stand-in in place, the prebuilt `legacy/moxie` (1.6.1, dated Oct 5)
+   then rejects current source:
+
+       src/os/exec_linux.mx:98:19: cannot convert attr.Files[i]
+       (variable of type *File) to type int32
+
+   `os.ProcAttr.Files` is `[]*File` (`src/os/exec.mx:33`) and `int32(attr.Files[i])`
+   is a legitimate pointer-to-int conversion, so a compiler from Oct 5 does not
+   know the current `os` package. `legacy/` cannot be rebuilt into a newer one
+   without Go, and `legacy/build.sh` also wants an `llvm-config` reporting major
+   22 (this host's reports 23).
+
+**The LLVM half is solved:** a snapshot holds LLVM 22.1.8, so
+
+    MOXIEROOT=$PWD LLVM_LIB_PATH=/.snapshots/412/snapshot/usr/lib/libLLVM.so.22.1 ./legacy/moxie version
+
+works. The Go half is not, and installing a toolchain is not something this
+round should do unasked.
+
+**The sample UI app builds and serves.** smesh: all nine bundles build, the relay
+serves `web/static`, and `python3 -m pytest test/test_app.py` is **5 passed, 1
+xpassed** - page load, `#app-root` rendered, login screen, and `TestFeed`
+signing in and asserting the identity (which the signer decode fix unblocked).
+musiquay: all nine bundles build and `test/test_smoke.py` is **12 passed**. The
+framework packages the apps import - `web/dom`, `web/idb`, `web/ws`, `web/sw`,
+`web/subtle`, `web/localstorage`, `web/callback` - all live in `src/web/`, and
+`jsruntime/` is the single JS copy (`$runtime` is 37 modules, staged per build,
+along with `$sw` and `bridge-common.mjs`).
