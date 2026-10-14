@@ -9951,3 +9951,8 @@ bundle, and do not read the first error list as the whole job.
 **State of the port, measured:** `notif`, `feed`, `profile` and `sw` build
 `-target wasm` rc=0. `relay-proxy` compiles its relay dependency and now fails
 in its own package. `mls`, `signer` and `app` are untouched this round.
+
+**Round 154's gate, measured.** Phase 0 with `MOXIE=tmp/mxc-r151` after the
+`cmd/mxparse` deletion: **132 passed / 0 failed / 0 skipped, rc=0**. Nothing in
+the tree referenced the deleted tool and nothing in the gates noticed it, which
+is what "orphaned" meant - but it is now measured rather than asserted.
