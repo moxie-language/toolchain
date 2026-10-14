@@ -11229,6 +11229,12 @@ array, string, map, pointer-to-array and type parameters, and anything else is
 `invalid operation: cannot index <type>`. No tree source needed changing, and
 the compiler still builds itself - the tree never relied on the leniency.
 
+**Gate evidence for the index check** (`a562f5ec`, compiler `tmp/mxc-tc5`):
+phases 0a/0b/1 = **130 of 131 PASS** - the one red is `http_header_api` timing
+out at the 900s unit ceiling while compiling its ~250-package closure from cold,
+which is the same known cost as before and passes when run alone (17 min). Phase
+0a alone is 82/82 with the heavy unit measured on its own.
+
 **Still open, in this order:**
 
   1. **The legacy mirror.** The same checks have to run in the bootstrap
