@@ -10475,3 +10475,56 @@ shape `storeReq` already uses for its callbacks (`mlsSt.storeCBs[id] = fn`), whe
 the id is allocated by the outer step, parked in the holder, and used by the inner
 step to find its own run. `createGroupAndSend` is the one to start with: five
 captures means five fields, and if it works the other two are smaller versions.
+
+### Round 166: the nested family's pattern, proven in a fixture
+
+`createGroupAndSend` chains two `requestCrypto` calls (nip44.encrypt, then
+signEvent) and its inner closure needs five values from the outer frame:
+`peer`, `urls`, `content`, `gs`, `groupIDHex`. A single slot cannot hold that -
+two runs can overlap, and the inner reply must find its OWN run.
+
+**The pattern was proved in a fixture before touching the app** (the same
+discipline that saved rounds 158-160 from a second dead end). It compiles and
+runs with no captures and no global-store errors:
+
+    type groupState struct { peer string; urls []string; stage int32; ... }
+    var gstates map[int32]*groupState     // keyed by the request id
+
+    func createGroup(peer string, urls []string) {
+        key := st.nextID + 1              // the id request() is about to allocate
+        gstates[key] = &groupState{peer: peer, urls: urls}
+        request("encrypt", onSealed)
+    }
+
+    func onSealed(sealed string) {        // finds its run, advances it, re-keys it
+        key := newestAtStage(0)
+        gs := gstates[key]
+        gs.stage = 1
+        delete(gstates, key)
+        gstates[st.nextID+1] = gs         // the NEXT request's id carries it on
+        request("sign", onSigned)
+    }
+
+    func onSigned(signed string) { ... }  // reads the run, finishes, deletes it
+
+Fixture output:
+
+    encrypt->alice reply:encrypt
+    sign->alice reply:sign urls=n
+
+**Two things to carry into the real transformation:**
+
+  - **the run is re-keyed at each step**, under the id the *next* request will
+    allocate. That is how the next callback finds its own run without a parameter
+    it does not receive. It needs `request` to hand back (or predict) the id it
+    will use - `requestCrypto` already returns nothing, so it must be made to, or
+    the id allocated by the caller as `storeReq` does.
+  - **`newestAtStage` in the fixture is a simplification.** With two overlapping
+    runs it is ambiguous. The real version must key the callback by the id the
+    worker echoes back, which `storeReq`'s `mlsSt.storeCBs[id] = fn` already
+    demonstrates in this same file.
+
+**Status: 3 sites left in the mls bundle** (`createGroupAndSend` x2 nested,
+`handleInit`, `processIncoming`), with the pattern proved and the two caveats
+above recorded. The remaining work is the transformation itself, which needs
+`requestCrypto` to allocate and return the request id.
