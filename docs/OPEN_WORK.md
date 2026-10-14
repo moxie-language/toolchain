@@ -10258,3 +10258,60 @@ from the callback's own arguments.
 Round 160 leaves mls at **0 captures** and **48 package-global-store errors**,
 with the rule's location and the three candidate fixes written down. The next
 session should start with candidate 1.
+
+### Round 161: the ABI has no room for the sink - measured, with a fixture
+
+Last round left three candidates. All three were tested this round with a scratch
+**dependency package** (not a `main` fixture, which is exempt from the rule and
+therefore proves nothing - the same trap as the `errors.New` var two rounds ago).
+The results are unambiguous:
+
+    B: package-level sink,        gs.vals = vals          -> REJECTED (package globals)
+    A: local sink, method value   s.writeAt                -> REJECTED (captures recv)
+    C: local sink, sink as param inside a closure          -> REJECTED (captures s)
+    D: free function owns the loop, sink passed as param   -> COMPILES AND RUNS
+
+and the trampoline form (package-level sink + free function `sinkAt`) is rejected
+too, because seeding the sink is still a global write.
+
+**So candidate 1 and 2 are dead, and the reason is structural:**
+
+  - `readVector(f func(r *Reader) error)` and
+    `writeVector(n int32, f func(w *Writer, i int32))` hand the callback no room
+    for a third argument. Any state the callback needs must arrive by capture
+    (refused) or through a package global (refused).
+  - a **method value is a closure over its receiver** in Moxie, so `s.writeAt` is
+    not a way around it either.
+
+**The fix is to stop using those two callbacks for these vectors.** The form that
+works is a free function that owns BOTH the loop and the per-element work, with
+the sink as an ordinary parameter:
+
+    func writeAll(w *W, vals []byte, s *sink) {
+        for i := int32(0); i < len(vals); i++ { w.add(s.vals[i]) }
+    }
+
+    func WriteOwnLoop(w *W, vals []byte) {
+        var s sink
+        s.vals = vals
+        writeAll(w, vals, &s)
+    }
+
+The sink becomes optional at that point - a local slice variable plus a loop does
+the same job - so the real change is **abandoning `readVector`/`writeVector` for
+the vectors whose element work needs state**, keeping them only where the element
+work is a pure function of the element (`readU16Vector` already reads the count
+and loop itself for exactly this reason).
+
+**Work left in mls: 19 functions, 48 errors**, every one of them a
+sink-plus-trampoline that must become a loop-owning free function:
+
+    (*commit).marshal/unmarshal            (*ratchetTree).marshal/unmarshal
+    (*Credential).marshal/unmarshal        (*updatePath).marshal/unmarshal
+    (*groupSecrets).marshal/unmarshal      (*updatePathNode).marshal/unmarshal
+    (*parentNode).marshal/unmarshal        (*Welcome).marshal/unmarshal
+    (*Group).Marshal  UnmarshalGroup  marshalExtensionVec  unmarshalExtensionVec
+
+The four round-158/159 helpers (`writeU16Vector`/`u16Sink`,
+`extSink`/`extVectorAt`) are the templates that must be rewritten first, since
+they are the ones already in the tree.
