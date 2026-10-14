@@ -11182,3 +11182,27 @@ nothing subscribes to kind 1, and the smoke suite asserts neither is served. The
 parked comment says mls was waiting on "an invalid type descriptor in the codec"
 - that is fixed now, so un-parking MLS is a product decision for the app, not a
 compiler blocker.
+
+### The single-codebase claim, measured (round 48)
+
+The objective is "every app imports one codebase", and that is now true for the
+GENERIC web packages on both apps:
+
+| package | smesh | musiquay |
+| --- | --- | --- |
+| dom, idb, sw, ws, subtle, localstorage, callback | `web/<pkg>` from src/ | `web/<pkg>` from src/ |
+
+musiquay's copies were byte-identical to the stdlib's apart from one import line
+(the test counts `callback` as different only because the stdlib carries a
+`callback_native.mx` stub the app's copy lacked). Moving them was 49 files:
+seven directories deleted, 31 files' imports rewritten. The app keeps its own
+protocol glue (ext, feed, markdown, mlsw, node, notif, profile, relayproxy,
+schnorr, signer, store, verify, x25519), which is the same split smesh has.
+
+One trap: `callback` defines the wasm exports `__cb0/__cbb/__cb6i/__cbdata`, so
+linking the local copy AND the stdlib copy fails with "duplicate symbol" from
+wasm-ld. The local copy has to go, not just be unused.
+
+Both apps build all their bundles against the stdlib packages and their browser
+suites pass (smesh boots to its login screen; musiquay's `test_smoke.py` is
+12/12).
