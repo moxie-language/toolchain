@@ -10145,3 +10145,38 @@ Two helpers in `encoding.mx`, one per direction:
 `unmarshalExtensionVec` - each a pair (marshal + unmarshal) or a single site. The
 u16-vector helpers cover the ones whose elements are uint16-valued; the rest need
 the same treatment per shape.
+
+### Round 158, part 2: a method value is a closure, and the count is 30 -> 18
+
+`unmarshalExtensionVec`/`marshalExtensionVec` had one capture each (`exts`), the
+same shape as the capability vectors: the callbacks receive only the Reader or
+Writer, so the extension slice travels in a package-level `extSink` and the
+callbacks are package-level functions.
+
+**The first attempt replaced one capture with another, and the compiler said so:**
+
+    marshalExtensionVec__mval1 [recv]; pass as explicit parameter(s)
+
+Passing a **method value** (`extVec.writeAt`) is itself a closure over the
+receiver - a method value is not a function value in Moxie. The fix is a
+free-function trampoline (`extVectorAt`, `extVectorRead`) that reaches the sink
+through the package variable. That is what the u16 vector sink in the same round
+already did, and the reason was not noticed until this error: `u16VectorAt` exists
+precisely because `sinks.write` would have captured `sinks`.
+
+Measured: mls's closure captures **30 -> 18** across this round's two slices
+(the ten capability vectors, then the two extension vectors), with no other error
+introduced at any point.
+
+**What remains, precisely** - 9 pairs plus their siblings, all the same shape:
+
+    (*commit).marshal/unmarshal            [c]
+    (*Credential).marshal/unmarshal        [cred]
+    (*groupSecrets).marshal/unmarshal      [sec]
+    (*parentNode).marshal/unmarshal        [nd]
+    (*ratchetTree).marshal/unmarshal       [tree]
+    (*updatePath).marshal/unmarshal        [up]
+    (*updatePathNode).marshal/unmarshal    [upn]
+    (*Welcome).marshal/unmarshal           [w]
+    (*Group).Marshal                       [g]
+    UnmarshalGroup                         [g]
