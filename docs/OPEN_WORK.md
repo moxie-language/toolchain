@@ -10213,3 +10213,48 @@ Whoever picks this up next: the remaining ten are the same four steps. They are
 `(*Group).Marshal` and `UnmarshalGroup` (single sites, so they need their own
 look - a single capture in a whole-message marshal is usually a nested vector
 whose element also needs the sink).
+
+### Round 160: mls's captures reach ZERO, and the rule that replaces them
+
+**All 30 of mls's capturing closures are gone.** The count at each verified build:
+30 -> 18 -> 14 -> 12 -> 10 -> 8 -> 4 -> 2 -> 0. The last pair was the Group-level
+one (`Group.Marshal`, `UnmarshalGroup`, both over `privTree`, a vector of
+`hpkePrivateKey`), which took the same `privSink` shape as the rest.
+
+**What replaces them does not compile yet, and the replacement rule is now known
+exactly.** Seeding a package-level sink from a function -
+
+    sink.vals = vals
+
+- is refused with `package globals are immutable outside init: mutate through the
+methods of a sovereign self-mutating type`. The obvious reply, "do the write
+inside a method on the sink", was tried (`u16Sink.writeAll`, `extSink.writeAll`
+take the slice and call `writeVector` themselves) and **does not help**: the error
+count went 52 -> 48 and two captures returned with the method value.
+
+**The rule, read rather than guessed**: `_mxc_stage4/ir_scope.mx`,
+`checkGlobalStores`, walks a function's SSA and rejects any `SSAStore` whose
+address root `ssaGlobalRoot(addr, 0)` is a package global, and any `SSAMapUpdate`
+whose map is. It descends into closures. A store to a fresh local (`var sink
+extSink`) has no global root and passes, which is why `var sink u16Sink` inside a
+function is the promising direction - but the sink is then a local whose address
+must be handed to a callback that cannot capture it, so it has to be reachable
+from the callback's own arguments.
+
+**Three candidate fixes, in the order to try them:**
+
+  1. **the sink as a field of the value being marshalled** - the write becomes a
+     receiver-field write of the enclosing method, not a global write at all.
+     Smallest change if it works, and it fits the shape: each of these types is
+     already a sovereign self-mutating holder.
+  2. **the sinks in the sovereign root arena**, the way `relay/wsRegistry` holds
+     the ws registry - a single package-level holder whose *fields* are the
+     sinks, reached through methods.
+  3. **widen the declaration rule**: if a store to a receiver field of a
+     signature (a `*Writer`) is being attributed to a global root, that is a
+     compiler bug, not a source problem. Check `ssaGlobalRoot` against a case
+     where the address is `(*Writer).x` before assuming it.
+
+Round 160 leaves mls at **0 captures** and **48 package-global-store errors**,
+with the rule's location and the three candidate fixes written down. The next
+session should start with candidate 1.
