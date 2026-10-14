@@ -10054,3 +10054,49 @@ Fixpoint with the diagnostic in: `mxc-dbg2 == mxc-dbg3`
 (`MOXIE=tmp/mxc-dbg3`): **132 passed / 0 failed / 0 skipped, rc=0**, so naming
 the declaration in the error changed nothing about what is accepted - only what
 the message says.
+
+## Round 157: mls has one kind of blocker left - captures
+
+The equality question is settled first, because it changes how the rest is done.
+**Moxie compares slices with `==`; there is no need for bytes.Equal, and no need
+for a hand-written helper.** So the four `bytes.Equal` call sites this session
+had introduced are back to `==`/`!=`, the two `bytes` imports that existed only
+for them are gone, and `tree.mx`'s own `bytesEqual` helper is deleted with its 36
+call sites converted.
+
+**That is not a weakening, and the constant-time question is why.** `[]byte` and
+`string` are one type here, so `==` on byte slices lowers to
+`runtime.stringEqual`, whose body is a byte-by-byte loop with an early exit -
+exactly what `bytesEqual` was and what `bytes.Equal` does. The difference is that
+`stringEqual` promotes to `memequalCT` over the full length when either operand
+`isSecurePtr`, i.e. when the bytes live in a secure arena. Neither the deleted
+helper nor `bytes.Equal` ever did that. The operators are therefore the
+constant-time-aware comparison on this platform, and they are what the crypto
+paths should use; the deleted `GroupID.equal` was the same early-exit loop.
+
+**Then the two types that could not be aliases.** `secretTree` and `ratchetTree`
+carry 29 methods between them, and a method cannot be defined on an alias, so
+they became structs holding their slice (`secrets [][]byte`, `nodes []*node`) with
+the methods unchanged. It stayed contained because both types already reached
+their slice only through their own methods - the slice is touched in three
+shapes: `(*tree)[i]`, `len(*tree)`, `range *tree`, all now `tree.nodes`.
+
+Two traps, both caught by the compiler within one build:
+
+  - **`len(*tree)` must be rewritten before the bare `*tree` form.** The bare
+    pattern's negative lookbehind is satisfied after `(`, so an alternation
+    offering `(*tree)` first matches `(*tree)` *including* len's opening paren and
+    yields `lentree.nodes`. Order in the pattern list is load-bearing.
+  - **the slice access is not all in one file.** `range *tree` also appears in
+    `tree_crypto.mx` (verifyParentHashes) and `len(tree)` in `group.mx`, so a
+    per-file sweep silently misses them.
+
+**Measured state of mls.** Every rule blocker except one kind is gone: 93 unnamed
+returns, 5 shadows, 11 named slice types, 33 package-var initializers, the 11
+label vars, 3 equal methods, the bytesEqual helper. What is left is **30 closure
+captures**, all reported the same way - `closure captures outer variable(s) [x];
+pass as explicit parameter(s)` - in `capabilities.marshal/unmarshal` (10),
+`commit`, `groupInfo`, `updatePathNode`, `UnmarshalGroup`, `marshalExtensionVec`,
+`unmarshalExtensionVec` and others. That is the next round, and it is the same
+shape family the relay/conn registry solved: extract the body to a function whose
+parameters are the captures, threading the receiver/owner explicitly.
