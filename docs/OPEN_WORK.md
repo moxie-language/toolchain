@@ -10708,3 +10708,52 @@ That is a precise enough description to fix directly, and it is compiler work.
 The session's mls port is otherwise complete: the bundle reports 0 global-store
 errors and 0 capturing closures, and this codec defect is the only thing between
 it and a build.
+
+### Round 171: the codec bug is the CodecBuf LOCAL's layout, not the descriptor
+
+The IR names the type and the code path, and it is not the struct descriptor at
+all. In `(*ratchetSecret).deriveNext`'s codec emit:
+
+    store { {ptr, i32, i32}, i32 } zeroinitializer, ptr %cb6      ; the codec buffer
+    ...
+    %csd13 = extractvalue { {ptr, i32, i32}, i32 } %cbl12, 0
+    %csp14 = extractvalue {ptr, i32, i32} %csd13, 1
+
+    %dbl21 = load { {ptr, i32, i32}, i32 }, ptr %dcb16
+    %dci22 = insertvalue { {ptr, i32, i32}, i32 } %dbl21, {ptr, i32, i32} %dcg20, 0
+
+`%cb6` is the codec's own buffer, and its source type is
+
+    type CodecBuf struct {
+        data    []byte
+        pos     int32
+    }
+
+so its layout must be `{{ptr, i32, i32}, i32}`. The emitter writes it as
+`{ {ptr, i32, i32}, i32 }` instead - **a struct whose field 0 is itself a
+single-field struct wrapping a slice** - and then inserts a bare `{ptr,i32,i32}`
+into field 0, which is the invalid cast.
+
+**So the defect is in how a STRUCT-variable's field types are rendered in one
+particular emit path, not in the type descriptor** (the descriptor for
+`ratchetSecret` is built from `llvmStructType`, which is correct). The two forms
+differ by exactly one layer, which is the `{{ptr, i32, i32}}` shape that has now
+appeared in rounds 152, 168, 169 and 171 - always a single-field struct wrapping a
+slice.
+
+**What to look at next, specifically:**
+
+  - `ir_emit.mx`'s zero-init path for a struct LOCAL - the emitted
+    `store { {ptr, i32, i32}, i32 } zeroinitializer, ptr %cb6` is the earliest
+    wrong line and it comes from the local's declaration, not from the codec call;
+  - the difference between `e.llvmStructType(*TCStruct)` walking
+    `t.Field(i).Typ` (correct: `{ptr, i32, i32}`) and whatever produced
+    `{ {ptr, i32, i32}, i32 }` - the inner braces mean the first field's type
+    string was itself a struct, i.e. some path wrapped the slice field in a
+    single-field struct before rendering;
+  - `llvmNamedFallback` and the `Named` handling in `llvmTypeInner`, since a
+    one-field named struct whose field is a slice is exactly the shape that would
+    produce it.
+
+This is the last thing between the mls bundle and a build; the bundle itself
+reports 0 global-store errors and 0 capturing closures.
