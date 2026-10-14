@@ -11498,11 +11498,58 @@ llvm-20 headers are present). The next step is `cd legacy && go build -o moxie .
 on a machine that has both, then the same probe table above run against the
 legacy-built compiler.
 
-**Gate on the shipped compiler (`tmp/mxc-ship`).** The gate run was interrupted
-by an OOM kill, not by a failure: `phase1b`'s 45-package sweep was `Killed` at
-4-way parallelism while a browser held 2.2GB, and the compiler peaks over 600MB
-per package. The unit driver's own verdict file for it carries rc=0 and a
-warning-only reason, which is why the round's summary should read the verdict
-*before* the exit status - `unitrun` does, the shell did not. The sweep passes
-when it runs without the memory pressure; re-run `--phases 1b --only
-stdlib_sweep_` on an idle machine to confirm.
+**Gate on the shipped compiler (`tmp/mxc-bc`), phases 0a+0b+1: 130 of 131.**
+The one red is `0a/http_header_api`, which times out at the 900s unit ceiling
+while compiling its ~250-package closure from cold - the same known cost as
+before, and the reason it is run alone with its own ceiling. Every other unit
+passes, including the whole `reject_*` family phase 0b exists for. The earlier
+"OOM kill" note was a different run: `unitrun` writes a `verdict` file beside
+the unit and reads THAT for the summary, so the exit status of a killed shell is
+not the unit's verdict.
+
+### Round 54, continued: the comparison check, and why it cannot ship yet
+
+`checkCompare` was written, wired into `buildOperation`'s comparison arm, and
+measured. It fires exactly as intended on the documented case:
+
+    method == intConst (string vs int32)  ->  invalid operation: == (mismatched
+                                              types string and int32)
+
+and it does NOT fire on `x != nil` for a struct or `x < y` for two structs -
+those still reach clang (`icmp eq ptr %ne2, null` where %ne2 is the struct,
+`icmp slt {i1,i1}`). The cause is now known: **the nil/struct arm never runs**,
+because `ConcreteAssignTypes` returns false for those pairs, and the struct
+ordering arm is the same story. The probes are `/tmp/cmpB`, `/tmp/cmpJ`,
+`/tmp/cmpK`, `/tmp/cmpN`.
+
+**It also rejects the tree.** The whole-tree run stops at `src/strconv`:
+
+    atof.mx:388: invalid operation: == (mismatched types uint64 and int32)
+    ftoaryu.mx:307: invalid operation: > (mismatched types uint64 and int32)
+
+`mant == 2<<flt.mantbits` with mant a uint64 and the shift an untyped constant,
+and `fracc > 1<<(extra-1)` the same. Go and Moxie both allow it: the constant is
+representable in uint64, so the comparison is legal even though the SSA handed
+the builder an int32-typed constant for the shift. A `constValueOf`-based
+exemption was added for it and did not help, because the operand reaching the
+check is not the constant the source wrote.
+
+That is the SAME shape as the push element check's false positive
+(`push(xs, n)` with xs []int64, n int32): **a rule stated over the operand types
+the builder has, when what the source wrote is a constant with a context.** The
+root cause is one thing, not two - a typed/untyped constant loses its context
+before the check sees it - and it has to be fixed once, in the constant path,
+before either check can ship. `checkCompare` is therefore NOT in the tree; the
+probes and the two failing stdlib lines are the receipt.
+
+**`len`/`range` are in the same position**, with a second dependency: they fire
+correctly on a struct (`has no length`, `cannot range over value of type main.S`)
+and must accept an array and a pointer-to-array before they can ship, because
+`unicode/letter.mx:404` spells `len(*[128]uint16)` and `runtime/poll.mx:93` and
+`runtime/sync.mx:24` spell `len(*[512]pollDesc)` / `len(*[256]semaWaiter)`.
+
+**Shipped instead:** the REAL defects the whole-tree runs found, fixed at the
+source: `runtime/codec.mx`'s `var buf [12]byte` became a `[]byte{:12}` slice
+with a cursor, and `runtime/string.mx`'s `stringToRunes` now widens explicitly
+(`r[n] = int32(e)` instead of relying on an implicit byte-into-[]int32
+assignment).

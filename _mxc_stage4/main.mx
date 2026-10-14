@@ -517,6 +517,23 @@ func emitWasmHost(outpath string) {
 	} else {
 		mxutil.WriteFile(host, []byte(wasmHostModule(stem, moduleName)), 420)
 	}
+	// The Worker hosts' shared half. Every bundle's protocol host imports
+	// `./bridge-common.mjs` for the SAB ring, spawn_domain, the core helpers,
+	// WASI and env, and every app used to carry its own byte-identical 14KB
+	// copy of it (smesh and musiquay agreed to the byte). It is runtime code -
+	// the common bridge is the same for every app - so the build stages it and
+	// the app does not ship it. An app that has its own is kept, the same rule
+	// the bootstrap and the service worker use.
+	bcPath := mxutil.JoinPath(dir, "bridge-common.mjs")
+	if mxutil.FileExists(bcPath) {
+		mxutil.WriteStr(2, "  bridge-common.mjs (kept: the app supplies it)\n")
+	} else {
+		bc, bcOK := mxutil.ReadFile(mxutil.JoinPath(jsdir, "bridge-common.mjs"))
+		if !bcOK {
+			fatal("jsruntime/bridge-common.mjs is missing, so the Worker hosts cannot be staged")
+		}
+		mxutil.WriteFile(bcPath, bc, 420)
+	}
 	// The service worker's half: its host is the same file for every app, and
 	// the registration glue works out the bundle's own directory at runtime,
 	// so neither is copied per app any more.
