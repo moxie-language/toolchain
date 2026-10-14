@@ -11328,8 +11328,32 @@ are not all thin wrappers:
     worker_now_seconds()       Date.now()/1000 - thin
 
 The three callback entries need `dispatchCallback` wiring in worker-host.mjs
-(already used for DOM callbacks on the page side), and the design question is
-which side owns the callback id space when the module is itself a Worker: the
-page-side supervisor (`web/static/store-wasm-host.mjs`) maps js ids to wasm ids
-today, and a generic runtime cannot assume that supervisor exists. Deciding that
-is the task; the three thin entries and the package move are then mechanical.
+(already used for DOM callbacks on the page side).
+
+**The design question is answered, and the answer is that `store` is not the
+same kind of package as the rest.** Everything else in `src/web/` has its bridge
+INSIDE the runtime:
+
+    jsruntime/idb.mjs    served from buildBridge as idb_open / idb_save_event / ...
+    jsruntime/ws.mjs     served from buildBridge as ws_* / node_*
+    jsruntime/host.mjs   imports them and answers the module's imports itself
+
+`store` is not like that. Its five operations cannot be served by the runtime
+alone: `store_worker_post` and `store_worker_on_message` must be attached to the
+page's end of a MessagePort, which the runtime does not own. smesh says so
+itself - `web/static/store-bridge.mjs` (34 lines) is titled "The store worker's
+application bridge ... The host is the framework's; this is the app's half - the
+five imports the store protocol declares and nothing else", and it takes
+`{ port }` from `startBundle`.
+
+So the split the tree already has is the principled one: `dom`, `idb`, `ws`,
+`sw`, `subtle`, `localstorage`, `callback` (bridge internal to the runtime) are
+stdlib, and `store` (bridge needs the supervisor's port) stays with the app that
+starts the worker. Moving `store` into `src/` would either duplicate the bridge
+in `jsruntime/` - a second copy of the five lines, disagreeing with the app's -
+or require rewriting how every worker-context bundle is started, which is a
+framework change with both apps' boots as the only detector.
+
+That decision is what the earlier "store is generic and duplicated" note was
+missing: the Moxie half IS generic, the JS half is not, and the JS half is six
+lines of port plumbing that belongs where the port is.
