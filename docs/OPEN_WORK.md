@@ -9885,3 +9885,69 @@ compiler. The fixpoint is `mxc-r150 == mxc-r151`
      `$sw` from the app tree and let the emitted bootstrap carry them (that is
      what round 149's store proof did for one bundle);
   3. then musiquay.
+
+## Round 154: the prune, and two more bundles' blockers cleared
+
+**The last `recover()` is gone from the tree.** `cmd/mxparse` is deleted
+(`6a58e8b0`): 5,024 lines of a Go-parser port that no package, script or test
+referenced, and that the compiler could not build - it failed on `recover()`
+(now a compile error), on `append`, and on three shadowing violations. Nothing
+was lost by deleting it: recoverable failure is an error value in Moxie, so
+there was no port to make. `grep -rn '\brecover()' --include=*.mx` now returns
+only `_mxc_stage4/ssa_builder.mx` - the compiler's own rejection and the comment
+explaining it. That closes the (a) half of the goal for good: gone, and unable
+to return.
+
+**PROFILE BUILDS (rc=0).** Its blocker was exactly one thing, and the earlier
+estimate ("package-level var with initializer") was right about the shape but
+not about the size: `discoveryRelays` became a `discoverySet` holder filled on
+first read (the `sw/main.mx` precache-list pattern) and its two callers copy
+`discovery.list()`. **The `profSt *profileState` pointer global was NOT a
+problem** - it is declared zero-value and assigned inside a function, which the
+compiler accepts; only an initializer on the declaration is refused. That is
+worth remembering: "no package-level var with an initializer" is narrower than
+"no package-level mutable state".
+
+**RELAY/PROXY's relay layer compiles; its own package is the next round.**
+`relay/conn.mx`'s five `[c]` captures are gone (`05a03cbf`). The reason they
+could not simply be turned into methods is that `ws.Dial`'s callback signatures
+(`func(int32, string)`, `func(int32)`, `func(int32, int32, string)`) carry no
+context argument, so there is no way to hand the receiver to a closure and no
+way to pass it as a parameter. The connection now supplies itself through the ws
+handle: `wsOnMessage`/`wsOnOpen`/`wsOnClose`/`wsOnError` are package-level
+functions that receive the handle the browser reports and resolve the Conn in a
+per-process registry.
+
+Two details that only running would have found:
+
+  - **the race is real from both ends.** `dial()` claims the handle `ws.Dial`
+    returned, and the open callback adopts the handle the browser reports if it
+    fires before `wasmDial` hands the handle back. Either can win, so the
+    registry handles both, and the pending slot is what makes the early case
+    reachable at all.
+  - **the compiler corrected the first version**, and the correction is the
+    shape rule in miniature: `publishConn`/`connFor`/`forgetConn` assigned
+    `wsConns.byHandle` and `wsConns.pending` directly, and the build answered
+    `package globals are immutable outside init: mutate through the methods of a
+    sovereign self-mutating type`. The registry is now a sovereign type with
+    `init/publish/lookup/forget/handOver/claim`.
+
+The redial timer takes a bare `func()` as well, so it gets the same treatment: a
+one-slot hand-over (`handOver`/`claim`), with the comment recording that this
+must become a queue keyed by handle if two connections ever schedule a redial
+before either fires - today the pool has one live reconnect per relay, and an
+overwrite only loses a redundant redial.
+
+**A correction to round 153's estimate.** The "five closure captures in
+relay/conn.mx" was only the layer that failed FIRST. Behind it,
+`relay-proxy/main.mx` has its own captures in `doKPFetchDirect` (five, over
+`done`, `subID`, `fetchPeer`, `reqMsg`), `fetchPeerRelayList` (`fetchPrefix`),
+`handleMLSFetchKP` (`peer`), `handleProxy` (`sid`) and `wireConn` (`url`). So the
+per-bundle cost is a *chain* of layers, not one shape each, and each layer is
+only visible once the one in front of it compiles. That is the honest cost model
+for the remaining four bundles: expect to go around the loop several times per
+bundle, and do not read the first error list as the whole job.
+
+**State of the port, measured:** `notif`, `feed`, `profile` and `sw` build
+`-target wasm` rc=0. `relay-proxy` compiles its relay dependency and now fails
+in its own package. `mls`, `signer` and `app` are untouched this round.
