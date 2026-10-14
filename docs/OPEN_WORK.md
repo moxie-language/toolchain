@@ -10926,6 +10926,35 @@ packages the build took from the cache, `compile` counts packages it compiled):
 | `http_header_api` | 40m (and 18.5m under a different load) | 2nd run pending | |
 
 The first run of `http_header_api` is still ~20 minutes: see below.
+
+### Gate state after round 173 (compiler `tmp/mxc-cur`, built from `34c0b7e3`)
+
+| phase | result |
+| --- | --- |
+| 0a regressions | **82/82 PASS** (including `http_header_api`, 18.3 min alone) |
+| 0b restrictions | **45/45 PASS** |
+| 1 package smoke | **4/4 PASS** |
+| 1b stdlib sweep | 177 packages, first run compiles all of them (`linkSetKey`, below) |
+| 1c wasm sweep | **3/3 PASS** |
+| 2 selfhost | ENVIRONMENTAL FAIL (no libLLVM-22; unchanged, see round 103) |
+| 3 IR validate | **PASS** |
+| 4 binary smoke | **PASS** |
+| 5 wasm target | **78/78 PASS** - one unit per fixture, plus `emitted-host` |
+| 6 instrumentation | SKIP (legacy compiler older than its source; `:legacy` variants need libLLVM-22) |
+
+`wasm:emitted-host` is the browser proof for the bundle a build produces, not for
+the checkout it came from: `moxie build -target wasm` must stage `$runtime/` (all
+36 `jsruntime/*.mjs`, byte for byte), `<name>-wasm-host.mjs`, `$sw/wasm-host-sw.mjs`,
+`sw-register.js`; the emitted bootstrap then has to LOAD in Chromium, and the
+service worker has to reach `state=activated module_fetched=true`. It passes.
+
+**Open, found by running phase 5 at `-j 4`:** the same 78 units that pass at
+`-j 1` come back with ~17 spurious `FAIL (no output)` when four run at once -
+the fixture directories show a native binary that prints nothing while its wasm
+twin prints the right thing, and no verdict file is written. The driver's
+per-unit state is isolated, so the interference is inside the parallel path
+(a shared `tests/wasm/tmp`, or the native build's own scratch). Until that is
+understood, phase 5 is a `-j 1` phase: `tests/unitrun.sh --phases 5`.**
 ### The other half of the wall clock: the build ran itself with one worker
 
 `adaptiveJobs` picks `nproc-1` capped by available memory. On this 8-core,
