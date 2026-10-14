@@ -11553,3 +11553,47 @@ source: `runtime/codec.mx`'s `var buf [12]byte` became a `[]byte{:12}` slice
 with a cursor, and `runtime/string.mx`'s `stringToRunes` now widens explicitly
 (`r[n] = int32(e)` instead of relying on an implicit byte-into-[]int32
 assignment).
+
+## Round 55: the gates on this machine, and the signer decode fix
+
+**The LLVM-22 pin is satisfiable here, but not through `findLLVM`.** The host has
+LLVM 20, 21 and 23 only; `legacy/moxie` wants `libLLVM-22.so` and its
+`findLLVM()` looks in exactly five paths, none of which exists. A snapshot of a
+previous install does have it
+(`/.snapshots/412/snapshot/usr/lib/libLLVM.so.22.1`, LLVM 22.1.8), so the
+bootstrap compiler runs by naming the library:
+
+    MOXIEROOT=$PWD LLVM_LIB_PATH=/.snapshots/412/snapshot/usr/lib/libLLVM.so.22.1 \
+      ./legacy/moxie version     # -> moxie version 1.6.1 linux/amd64
+
+**Building `legacy/` from source needs a Go toolchain, and this machine has
+none** (`which go` finds nothing; `go` is not in any of the usual prefixes). So
+the legacy MIRROR added in round 54 is still unverified: it can be *run* only as
+the prebuilt binary, which does not contain the new checks. `legacy/build.sh`
+also wants an `llvm-config` reporting major 22 and this host's is 23.
+
+**The signer could not log in, and the decoder was the whole of it.**
+`decodeNsec` in `smesh/web/wasm/signer/management.mx` read the bech32 body
+through a slice and wrote bytes through a `[]byte{:32}[:0]` cursor:
+
+    data := nsec[sep+1 : len(nsec)-6]
+    out := []byte{:32}[:0]
+    ... out = push(out, byte(acc>>bits))
+
+That decoded to **32 zero bytes**, so `schnorr.PubKeyFromSecKey` answered false,
+`addIdentity` answered `{"error":"key derivation failed"}`, and the browser could
+never complete a sign-in - `test_feed_notes_appear` failed on
+`identity mismatch: None`. Rewriting it to read the body by index into a fixed
+`[32]byte` and count the bytes written fixes it:
+
+    nsec1qqqq...ps52s3re  ->  0000...0003  ->  BIP-340 TV_PK
+
+Verified: `web/_test/signertest/run.mjs` **108 of 108** (was 105 of 106, with
+`nsecLogin valid nsec` the failure), and smesh `test/test_app.py` **5 passed, 1
+xpassed** where the feed test now signs in and asserts the identity.
+
+**Still open, and it is a compiler question:** the slice/cursor form and the
+index form differ, and only one of them is wrong. That is a codegen smell, not
+just a bad decoder - the same shape is everywhere in this tree. It deserves its
+own probe: a 32-byte output built through `push` on a `[]byte{:32}[:0]` cursor
+versus written by index, compared byte for byte under `-target wasm`.
