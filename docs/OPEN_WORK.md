@@ -10442,3 +10442,36 @@ stated:**
 `createGroupAndSend` and `handleInit` are the hard ones: they are nested several
 closures deep, so the outer callback must park its state before the inner one can
 read it, and the inner one has to know which outer run it belongs to.
+
+### Round 165: the mls bundle's closures 9 -> 3, and the family that is left
+
+Four sites cleared, all shape-1 (named function + package-level slot), verified by
+the compiler's count at each step:
+
+    loadGroups          [gid, remaining, done]   -> loadState + a SEQUENTIAL loader
+    requestCrypto       [cbID, fn]               -> cryptoWait + onCryptoTimeoutFire
+    startKPFetch        [p]                      -> kpWait + onKPFetchTimeout
+    publishKeyPackage   [urls, done]             -> pubState + onKeyPackageSigned
+
+**The pattern, stated once more because it is the whole content of this round:**
+the callback signature has no room for the state (the jsruntime calls take
+`fn func()` or `fn func(string, string)`), so the state goes in a package-level
+slot, is read back by a **named** function, and is cleared at the end of the fire.
+Where a run spans several replies, the slot becomes a small state machine
+(`loadState`), and making the run **sequential** - one request in flight, a
+position advancing - is what a single-slot state buys and costs nothing in total
+work.
+
+**What is left is one family: nested closures.** Three sites, and they cannot use
+a single slot because two runs can overlap or because the inner step must know
+which outer run it belongs to:
+
+    createGroupAndSend   [urls, peer, content, gs, groupIDHex]   nested, two sites
+    handleInit           [urls]                                  nested three deep
+    processIncoming      [ev]
+
+The next session's job is to give those a keyed holder rather than a slot - the
+shape `storeReq` already uses for its callbacks (`mlsSt.storeCBs[id] = fn`), where
+the id is allocated by the outer step, parked in the holder, and used by the inner
+step to find its own run. `createGroupAndSend` is the one to start with: five
+captures means five fields, and if it works the other two are smaller versions.
