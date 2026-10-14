@@ -10528,3 +10528,53 @@ Fixture output:
 `handleInit`, `processIncoming`), with the pattern proved and the two caveats
 above recorded. The remaining work is the transformation itself, which needs
 `requestCrypto` to allocate and return the request id.
+
+## Round 167: the bundle layer's two rules are ONE rule, and the fix is the error message
+
+**I misread the same error twice, and this round found it.**
+
+`package globals are immutable outside init: mutate through the methods of a
+sovereign self-mutating type` was being read as "package globals are immutable",
+full stop. The prescriptive half - *mutate through the methods of a sovereign
+self-mutating type* - is the fix, and it works. Measured in a scratch dependency
+package (a `main` fixture is exempt and proves nothing):
+
+    type holder struct { v string; ids []int32 }
+    var h holder
+
+    func (x *holder) set(v string) { x.v = v }        // method mutates receiver
+    func (x *holder) pushID(id int32) { x.ids = push(x.ids, id) }
+
+    func Store(v string, id int32) { h.set(v); h.pushID(id) }   // ACCEPTED
+    func Read() (v string, n int32) { return h.get(), h.count() }
+
+    $ ./s
+    v: hello n: 1
+
+A **direct field write** (`h.v = v`, `kpWait.peer = peer`) is refused. A **method
+call that mutates the receiver of a package-level sovereign type** is accepted.
+The holders written in rounds 158-166 used direct field writes, which is why every
+one of them was rejected - and the rejection was always there, hidden behind
+whichever error the compiler reported first for that package.
+
+**This makes the bundle layer tractable, and the order is the reverse of what was
+tried.** The closure conversions in rounds 164-166 are not wasted - the callbacks
+still have to be named functions - but each package-level holder must become a
+sovereign self-mutating type whose state is written and read through methods:
+
+  - `cryptoWait`  -> `func (x *cryptoWaitT) arm(id int32, fn func(string,string))`
+                    and `func (x *cryptoWaitT) take() (id int32, fn ...)`
+  - `kpWait`, `pubState`, `wrapRun`, `giftWrap`, `loadState`, `initRelays` likewise
+  - `mlsSt` already IS such a type (its fields are written through methods in some
+    places), which is why `mlsSt.mlsGroups[...] = gs` and
+    `mlsSt.storeCBs[id] = fn` were never reported
+
+**Also corrected: the error counts I reported were line counts, not error counts.**
+`grep -c 'package globals'` counts log LINES, and the compiler puts many errors on
+one line, so "globals: 8" meant "8 lines contain at least one". The mls bundle has
+had ~21 global-store errors since round 164, not zero; the declining numbers I
+tracked were real but they counted the other category. From here, count with
+`grep -o ... | sort -u | wc -l`.
+
+**Current state of the mls bundle: 3 capturing closures and 21 global-store
+errors**, all of them instances of this one rule.
