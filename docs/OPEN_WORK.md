@@ -9836,3 +9836,52 @@ in `web/common/marmot/marmot.mx` (6 construction sites: `nostr.Tags{...}` with
 (1), and `web/wasm/app/main.mx` (several ranges over `ev.Tags` plus
 `var etags []nostr.Tag`). Those are the next slices, each committed with its
 measured error count, then the remaining bundles on the store pattern.
+
+### Round 153, part 2: the sweep is complete, and what is left is not the Tag port
+
+The rest of the app's call sites are converted and committed
+(`77573016`, `c03816cc`, `6a0f4134` in the app repo). Measured with
+`tmp/mxc-r151`:
+
+    ./web/wasm/notif   -target wasm   rc=0
+    ./web/wasm/feed    -target wasm   rc=0
+
+Those two put notif's whole closure plus feed on the new shape. The other four
+bundles still fail, and each failure is a PRE-EXISTING app-side rule violation
+that has nothing to do with Tag/Tags:
+
+  - **profile**: `package-level var with initializer is not allowed` in its own
+    `package main` (the same rule round 151 solved for `sw/main.mx` with a
+    self-mutating holder);
+  - **mls**: three closure captures (`UnmarshalGroup` [g],
+    `marshalExtensionVec` [exts], `unmarshalExtensionVec` [exts]);
+  - **signer**: 30 package-level `string(push(...))` method-name vars in
+    `package main` - and the comment above them records why they are built that
+    way at all ("wasm32 relocations corrupted the data section"), so this one
+    needs the holder plus a reason, not a mechanical rewrite;
+  - **app**: closure captures in `zapRenderNwcPay` (nested five deep);
+  - **relay-proxy**: five closure captures in `relay/conn.mx` `dial` and
+    `maybeReconnect` (`[c]`).
+
+The port itself is done: no file in the tree still writes the old shapes
+(`nostr.Tags{...}` as a slice literal, `range ev.Tags`, `tag[i]` on a Tag), and
+the two conversions that were also needed on the way - `chacha20poly1305.Open`
+and `aes256gcm.Open` had unnamed returns - are named.
+
+**The compiler side of this round is gated.** Phase 5 with `MOXIE=tmp/mxc-r151`:
+**78 passed / 0 failed / 0 skipped, rc=0**, with `wasm:emitted-host` PASS (the
+build staged 36 runtime modules and a loadable bootstrap), so the comparison
+rewrite did not disturb the emitted bundle path. Phase 0 was 132/132 in the same
+compiler. The fixpoint is `mxc-r150 == mxc-r151`
+(`c6cf8f3993ff1e0d6f21bbd6e57e331b57ca94b7f2c04ce5d69407624e8e04c3`).
+
+**Next, in order:**
+
+  1. the five bundles' own blockers above, smallest first (profile's one holder,
+     then mls's three closures, then signer's vars, then app's zap chain, then
+     relay/conn's five) - each is a self-contained app round with its own
+     measured error count;
+  2. then the page: delete `wasm-host.mjs`, `*-wasm-host.mjs`, `$runtime` and
+     `$sw` from the app tree and let the emitted bootstrap carry them (that is
+     what round 149's store proof did for one bundle);
+  3. then musiquay.
