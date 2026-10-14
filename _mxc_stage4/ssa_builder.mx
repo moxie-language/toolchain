@@ -5751,6 +5751,92 @@ func (fb *ssaFuncBuilder) buildArgs(argList []syntax.Expr) (ss []SSAValue) {
 	return args
 }
 
+// coerceSliceArgs reports a spread whose source cannot supply the slice's
+// elements and then gives every pushed/appended argument the ELEMENT type:
+// boxed when the element is an interface, the element type's nil when the
+// argument is an untyped nil. It is the one place push and __moxie_append
+// align their arguments, so the two spellings cannot drift apart again.
+//
+// The spread check exists because nothing had one: `push(etags, parts...)`
+// with etags []Tag and parts []string compiled and then died in clang on the
+// store that writes the element into the slice's storage at the type it was
+// built as ("integer/byte constant must have integer/byte type").
+//
+// The spread text test must accept the UNTYPED string. TextType reads the
+// underlying basic KIND, so an untyped string literal is "UntypedString" there
+// and is not text: `push(buf, "ab"...)` was rejected while a string VARIABLE
+// was accepted, which is how this looked like a check that never ran.
+func (fb *ssaFuncBuilder) coerceSliceArgs(args []SSAValue, hasDots bool, slT, wholeT Type) (out []SSAValue) {
+	if len(args) < 2 || args[0] == nil {
+		return args
+	}
+	sl, ok := SafeUnderlying(slT).(*Slice)
+	if !ok {
+		return args
+	}
+	if hasDots && args[1] != nil && args[1].SSAType() != nil {
+		srcT := args[1].SSAType()
+		spreadOK := false
+		if srcSl, srcIsSl := SafeUnderlying(srcT).(*Slice); srcIsSl {
+			spreadOK = Assignable(srcSl.Elem, sl.Elem)
+		} else if ssaIsText(srcT) && ssaByteElem(sl.Elem) {
+			// string and []byte are one type, so `push(buf, s...)` with buf
+			// []byte pushes s's bytes (mxutil.JoinStrings does).
+			spreadOK = true
+		}
+		if !spreadOK {
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, fb.errPos() | "cannot use " | srcT.String() | " as " | wholeT.String() | " in push (spread element type mismatch)")
+		}
+	}
+	for i := 1; i < len(args); i++ {
+		if hasDots && i == 1 {
+			continue
+		}
+		// Every pushed/appended element is a value of the slice's ELEMENT
+		// type, exactly as a sent value is a value of the channel's element
+		// type. Box it when the element is an interface, and give an argument
+		// that has no type of its own - the untyped nil - the nil of the
+		// element type. Leaving the untyped nil alone made
+		// `push(lines, nil)` (text/tabwriter's addLine) emit
+		// `store []cell null`, and clang rejected the module: "null must be a
+		// pointer type". The zero of a slice is zeroinitializer, not the
+		// pointer literal null. Only the type of the value decides that, which
+		// is why it is the builder's job and not the emitter's.
+		//
+		// NOT checked here: whether a non-spread argument is a value of the
+		// element type. `fb.checkAssignable(args[i], sl.Elem, ...)` was written
+		// and measured to fire on the documented cases
+		// (`push(etags, int32(7))`, `push(etags, parts)`), and it also REJECTS
+		// `push(xs, n)` with xs []int64 and n int32 - a typed pair stage4's own
+		// coercion model accepts and the tree relies on. The check cannot ship
+		// until the coercion rules are settled for it; docs/OPEN_WORK.md round
+		// 54 carries the probe table.
+		args[i] = fb.coerceSendValue(args[i], sl.Elem)
+	}
+	return args
+}
+
+// ssaIsText reports whether T is Moxie text: string or []byte, INCLUDING the
+// untyped string. TextType reads the underlying basic KIND, so an untyped
+// string literal is "UntypedString" there and is not text.
+func ssaIsText(T Type) (ok bool) {
+	if T == nil {
+		return false
+	}
+	if b, isB := SafeUnderlying(T).(*Basic); isB {
+		return b.Info&IsString != 0 || b.Kind == UntypedString
+	}
+	return TextType(T)
+}
+
+// ssaByteElem reports whether E is a single byte, so a string can be spread
+// into a slice of it.
+func ssaByteElem(E Type) (ok bool) {
+	b, isB := SafeUnderlying(E).(*Basic)
+	return isB && b.Kind == Uint8
+}
+
 func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, args []SSAValue) (s SSAValue) {
 	switch b.id {
 	case BuiltinLen, BuiltinCap:
@@ -5767,28 +5853,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		fb.emit(call2)
 		return call2
 	case BuiltinAppend:
-		if len(args) > 1 {
-			if sl, ok := SafeUnderlying(args[0].SSAType()).(*Slice); ok {
-				for i := 1; i < len(args); i++ {
-					if e.HasDots && i == 1 {
-						continue
-					}
-					// Every pushed/appended element is a value of the slice's
-					// ELEMENT type, exactly as a sent value is a value of the
-					// channel's element type. Box it when the element is an
-					// interface, and give an argument that has no type of its
-					// own - the untyped nil - the nil of the element type.
-					// Leaving the untyped nil alone made `push(lines, nil)`
-					// (text/tabwriter's addLine) emit `store []cell null`, and
-					// clang rejected the module: "null must be a pointer type".
-					// The zero of a slice is zeroinitializer, not the pointer
-					// literal null. Only the type of the value decides that,
-					// which is why it is the builder's job and not the
-					// emitter's.
-					args[i] = fb.coerceSendValue(args[i], sl.Elem)
-				}
-			}
-		}
+		args = fb.coerceSliceArgs(args, e.HasDots, args[0].SSAType(), args[0].SSAType())
 		call3 := &SSACall{Call: SSACallCommon{Value: b, Args: args, HasDots: e.HasDots}}
 		if len(args) > 0 {
 			call3.typ = args[0].SSAType()
@@ -5893,28 +5958,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 				return nil
 			}
 		}
-		if len(args) > 1 {
-			if sl, ok := SafeUnderlying(args[0].SSAType()).(*Slice); ok {
-				for i := 1; i < len(args); i++ {
-					if e.HasDots && i == 1 {
-						continue
-					}
-					// Every pushed/appended element is a value of the slice's
-					// ELEMENT type, exactly as a sent value is a value of the
-					// channel's element type. Box it when the element is an
-					// interface, and give an argument that has no type of its
-					// own - the untyped nil - the nil of the element type.
-					// Leaving the untyped nil alone made `push(lines, nil)`
-					// (text/tabwriter's addLine) emit `store []cell null`, and
-					// clang rejected the module: "null must be a pointer type".
-					// The zero of a slice is zeroinitializer, not the pointer
-					// literal null. Only the type of the value decides that,
-					// which is why it is the builder's job and not the
-					// emitter's.
-					args[i] = fb.coerceSendValue(args[i], sl.Elem)
-				}
-			}
-		}
+		args = fb.coerceSliceArgs(args, e.HasDots, args[0].SSAType(), args[0].SSAType())
 		callP := &SSACall{Call: SSACallCommon{Value: b, Args: args, HasDots: e.HasDots}}
 		if len(args) > 0 && args[0] != nil {
 			callP.typ = args[0].SSAType()

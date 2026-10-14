@@ -300,6 +300,351 @@ func isIndexableType(t types.Type) bool {
 	return false
 }
 
+// moxieTextType reports whether T is Moxie text: string or []byte. The two
+// are one MUTABLE type, so a check that compares element types has to accept
+// either spelling.
+func moxieTextType(T types.Type) bool {
+	if T == nil {
+		return false
+	}
+	if b, ok := T.Underlying().(*types.Basic); ok && b.Info()&types.IsString != 0 {
+		return true
+	}
+	if sl, ok := T.Underlying().(*types.Slice); ok {
+		if b, ok := sl.Elem().Underlying().(*types.Basic); ok && b.Kind() == types.Uint8 {
+			return true
+		}
+	}
+	return false
+}
+
+// moxieByteElem reports whether E is a single byte, so a string can be spread
+// into a slice of it.
+func moxieByteElem(E types.Type) bool {
+	b, ok := E.Underlying().(*types.Basic)
+	return ok && b.Kind() == types.Uint8
+}
+
+// moxieOrdered reports whether < <= > >= are defined for T: a number or text.
+func moxieOrdered(T types.Type) bool {
+	if T == nil {
+		return false
+	}
+	if moxieTextType(T) {
+		return true
+	}
+	b, ok := T.Underlying().(*types.Basic)
+	return ok && b.Info()&(types.IsInteger|types.IsFloat) != 0
+}
+
+// moxieComparable reports whether == and != can be emitted for T. A slice, map
+// or function has no comparison; an aggregate is comparable only when every
+// element or field is. Mirrors stage4's ssaComparable.
+func moxieComparable(T types.Type) bool {
+	if T == nil {
+		return false
+	}
+	switch u := T.Underlying().(type) {
+	case *types.Slice, *types.Map, *types.Signature:
+		return false
+	case *types.Array:
+		return moxieComparable(u.Elem())
+	case *types.Struct:
+		for i := 0; i < u.NumFields(); i++ {
+			if !moxieComparable(u.Field(i).Type()) {
+				return false
+			}
+		}
+		return true
+	}
+	return true
+}
+
+// moxieNilable reports whether nil is a value of T.
+func moxieNilable(T types.Type) bool {
+	if T == nil {
+		return false
+	}
+	switch T.Underlying().(type) {
+	case *types.Pointer, *types.Slice, *types.Map, *types.Chan, *types.Signature, *types.Interface:
+		return true
+	}
+	return moxieTextType(T)
+}
+
+// isNilLiteral reports whether a value is the untyped nil literal, with or
+// without a type recorded for it.
+func isNilLiteral(v ssa.Value, T types.Type) bool {
+	if c, ok := v.(*ssa.Const); ok && c.IsNil() {
+		return true
+	}
+	if T == nil {
+		return false
+	}
+	if b, ok := T.Underlying().(*types.Basic); ok {
+		return b.Kind() == types.UntypedNil
+	}
+	return false
+}
+
+// moxieAssignable reports whether a value of type V may be assigned to T under
+// Moxie's rules: go/types' assignability plus the string/[U]int8 unification.
+func moxieAssignable(V, T types.Type) bool {
+	if V == nil || T == nil {
+		return false
+	}
+	if types.AssignableTo(V, T) {
+		return true
+	}
+	if moxieTextType(V) && moxieTextType(T) {
+		return true
+	}
+	if b, ok := V.Underlying().(*types.Basic); ok && b.Kind() == types.UntypedNil {
+		return moxieNilable(T)
+	}
+	return false
+}
+
+// checkLenRestriction rejects len/cap on a type that has no length. A struct
+// operand took the length of the underlying slice header and clang refused the
+// module. Mirrors stage4's len check.
+func (b *builder) checkLenRestriction(instr *ssa.Call) {
+	builtin, ok := instr.Common().Value.(*ssa.Builtin)
+	if !ok || (builtin.Name() != "len" && builtin.Name() != "cap") {
+		return
+	}
+	args := instr.Common().Args
+	if len(args) != 1 || args[0] == nil {
+		return
+	}
+	T := args[0].Type()
+	switch u := T.Underlying().(type) {
+	case *types.Slice, *types.Map, *types.Chan:
+		return
+	case *types.Basic:
+		if u.Info()&types.IsString != 0 {
+			return
+		}
+	case *types.TypeParam:
+		return
+	}
+	if moxieTextType(T) {
+		return
+	}
+	b.addError(instr.Pos(), "moxie: invalid argument: "+T.String()+" has no length")
+}
+
+// checkCompareRestriction rejects a comparison whose operands cannot be
+// compared: nil against a value that has no nil, a mismatched pair, or an
+// ordered operator on a type that has no order. go/ssa emitted the comparison
+// and clang refused the module. Mirrors stage4's checkCompare.
+func (b *builder) checkCompareRestriction(instr *ssa.BinOp) {
+	if !isCompareOp(instr.Op) {
+		return
+	}
+	xt := instr.X.Type()
+	yt := instr.Y.Type()
+	if xt == nil || yt == nil {
+		return
+	}
+	if _, isTP := xt.(*types.TypeParam); isTP {
+		return
+	}
+	if _, isTP := yt.(*types.TypeParam); isTP {
+		return
+	}
+	if _, isIface := xt.Underlying().(*types.Interface); isIface {
+		return
+	}
+	if _, isIface := yt.Underlying().(*types.Interface); isIface {
+		return
+	}
+	ordered := instr.Op != token.EQL && instr.Op != token.NEQ
+	xNil := isNilLiteral(instr.X, xt)
+	yNil := isNilLiteral(instr.Y, yt)
+	if xNil || yNil {
+		other := yt
+		if yNil {
+			other = xt
+		}
+		if ordered || !moxieNilable(other) {
+			b.addError(instr.Pos(), "moxie: invalid operation: "+instr.Op.String()+" with nil (nil cannot be compared with "+other.String()+")")
+		}
+		return
+	}
+	if moxieAssignable(xt, yt) || moxieAssignable(yt, xt) {
+		if !moxieComparable(xt) || !moxieComparable(yt) {
+			b.addError(instr.Pos(), "moxie: invalid operation: "+instr.Op.String()+" ("+xt.String()+" is not comparable)")
+		}
+		return
+	}
+	if ordered && (!moxieOrdered(xt) || !moxieOrdered(yt)) {
+		b.addError(instr.Pos(), "moxie: invalid operation: operator "+instr.Op.String()+" not defined on "+xt.String())
+		return
+	}
+	b.addError(instr.Pos(), "moxie: invalid operation: "+instr.Op.String()+" (mismatched types "+xt.String()+" and "+yt.String()+")")
+}
+
+// isCompareOp reports whether a token is a comparison operator.
+func isCompareOp(op token.Token) bool {
+	switch op {
+	case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ:
+		return true
+	}
+	return false
+}
+
+// checkStoreElemRestriction rejects an assignment of a value into a slice or
+// array element, a struct field or a pointer target whose type does not match.
+// The store went to LLVM at the value's own type and clang refused the module
+// ("invalid cast" / "type mismatch"). Mirrors stage4's store checks.
+func (b *builder) checkStoreElemRestriction(instr *ssa.Store) {
+	T := instr.Addr.Type()
+	if p, ok := T.Underlying().(*types.Pointer); ok {
+		T = p.Elem()
+	} else {
+		return
+	}
+	if instr.Val == nil || instr.Val.Type() == nil {
+		return
+	}
+	if _, isTP := T.(*types.TypeParam); isTP {
+		return
+	}
+	if _, isIface := T.Underlying().(*types.Interface); isIface {
+		return
+	}
+	if moxieAssignable(instr.Val.Type(), T) {
+		return
+	}
+	// An address that is not a slice element, array element, field or pointer
+	// target is a whole-variable store, which the type checker already judges:
+	// only report the shapes this check exists for.
+	switch ax := instr.Addr.(type) {
+	case *ssa.IndexAddr:
+		_ = ax
+	case *ssa.FieldAddr:
+		_ = ax
+	case *ssa.UnOp:
+		if ax.Op != token.MUL {
+			return
+		}
+	default:
+		return
+	}
+	b.addError(instr.Pos(), "moxie: cannot use value of type "+instr.Val.Type().String()+" as "+T.String()+" in assignment")
+}
+
+// checkPushRestriction rejects a push whose argument cannot supply the slice's
+// elements. go/ssa does not enforce the builtin's element type, so
+// `push(etags, parts)` with etags []Tag and parts []string reached LLVM, which
+// refused the module with "integer/byte constant must have integer/byte type"
+// on the store of the element. Uses the AST because SSA cannot tell a spread
+// from a plain push: both are one call with the slice-typed tail. Mirrors
+// stage4's push element check.
+func (b *builder) checkPushRestriction(call *ast.CallExpr) {
+	if call == nil || len(call.Args) < 2 {
+		return
+	}
+	info := b.typeInfo()
+	if info == nil {
+		return
+	}
+	ftv, ok := info.Types[call.Fun]
+	if !ok || ftv.Type == nil {
+		return
+	}
+	sig, ok := ftv.Type.(*types.Signature)
+	if !ok || sig.Params().Len() != 2 || !sig.Variadic() {
+		return
+	}
+	// The variadic parameter's own type is the []E push appends to, so its
+	// element is what each pushed argument must be.
+	elem, ok := sig.Params().At(1).Type().Underlying().(*types.Slice)
+	if !ok {
+		return
+	}
+	for i, arg := range call.Args {
+		if i == 0 {
+			continue
+		}
+		atv, ok := info.Types[arg]
+		if !ok || atv.Type == nil {
+			continue
+		}
+		at := atv.Type
+		if b, isB := at.Underlying().(*types.Basic); isB && b.Kind() == types.UntypedNil {
+			continue
+		}
+		if call.Ellipsis.IsValid() && i == 1 {
+			// A spread supplies elements, so the argument is a slice of them -
+			// or text, since string and []byte are one type.
+			if sl, isSl := at.Underlying().(*types.Slice); isSl {
+				if !moxieAssignable(sl.Elem(), elem.Elem()) {
+					b.addError(call.Pos(), "moxie: cannot use "+at.String()+" as "+sig.Params().At(0).Type().String()+" in push (spread element type mismatch)")
+				}
+				continue
+			}
+			if moxieTextType(at) && moxieByteElem(elem.Elem()) {
+				continue
+			}
+			b.addError(call.Pos(), "moxie: cannot use "+at.String()+" as "+sig.Params().At(0).Type().String()+" in push (spread element type mismatch)")
+			continue
+		}
+		if moxieAssignable(at, elem.Elem()) {
+			continue
+		}
+		b.addError(call.Pos(), "moxie: cannot use value of type "+at.String()+" as "+elem.Elem().String()+" in push to "+sig.Params().At(0).Type().String())
+	}
+}
+
+// checkRangeRestriction rejects `range` over a value that cannot be ranged.
+// The loop fell through every arm to the slice default, took the operand's
+// first field as a slice header, and clang refused the module. Mirrors stage4's
+// range check.
+func (b *builder) checkRangeRestriction(rng *ast.RangeStmt) {
+	if rng == nil || rng.X == nil {
+		return
+	}
+	info := b.typeInfo()
+	if info == nil {
+		return
+	}
+	tv, ok := info.Types[rng.X]
+	if !ok || tv.Type == nil {
+		return
+	}
+	T := tv.Type
+	if _, isTP := T.(*types.TypeParam); isTP {
+		return
+	}
+	switch u := T.Underlying().(type) {
+	case *types.Slice, *types.Map, *types.Array, *types.Chan, *types.Signature, *types.TypeParam:
+		return
+	case *types.Basic:
+		if u.Info()&(types.IsInteger|types.IsString) != 0 {
+			return
+		}
+	case *types.Pointer:
+		if _, isArr := u.Elem().Underlying().(*types.Array); isArr {
+			return
+		}
+	}
+	b.addError(rng.Pos(), "moxie: cannot range over value of type "+T.String())
+}
+
+// typeInfo returns the go/types info for the function's package, or nil when
+// the loader did not record one.
+func (b *builder) typeInfo() *types.Info {
+	if b.fn == nil || b.fn.Pkg == nil || b.fn.Pkg.Pkg == nil {
+		return nil
+	}
+	if b.loaderPkg == nil {
+		return nil
+	}
+	return b.loaderPkg.TypeInfo()
+}
+
 func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 	switch v := instr.(type) {
 	case *ssa.IndexAddr:
@@ -316,6 +661,7 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 			b.addError(v.Pos(), "moxie: invalid operation: cannot index "+v.X.Type().String())
 		}
 	case *ssa.BinOp:
+		b.checkCompareRestriction(v)
 		// Reject + on non-numeric types (strings use | for concatenation).
 		if v.Op == token.ADD {
 			if basic, ok := v.X.Type().Underlying().(*types.Basic); ok {
@@ -326,6 +672,7 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 		}
 
 	case *ssa.Store:
+		b.checkStoreElemRestriction(v)
 		b.checkGlobalStore(v.Addr, v.Pos())
 
 	case *ssa.MapUpdate:
@@ -353,6 +700,10 @@ func (b *builder) checkInstrRestrictions(instr ssa.Instruction) {
 		b.addError(v.Pos(), "moxie: slice-to-array-pointer conversion is not allowed: work in slices")
 
 	case *ssa.Call:
+		// Builtin shapes go/ssa does not judge: push's element type, and
+		// len/cap on a type with no length. Both reached LLVM, which refused
+		// the module.
+		b.checkLenRestriction(v)
 		// os.Exit is legal, but it ends the process without running deferred
 		// cleanup, so whatever the program owns - a scratch tree, a lock, a
 		// socket - is left behind. Warn; do not reject, a short-lived tool may
@@ -382,6 +733,10 @@ func (b *builder) checkASTRestrictions() {
 					b.addError(paren.Pos(), "moxie: parenthesized call target is not allowed: write f(x), not (f)(x)")
 				}
 			}
+		case *ast.RangeStmt:
+			b.checkRangeRestriction(node)
+		case *ast.CallExpr:
+			b.checkPushRestriction(node)
 		case *ast.FuncDecl:
 			// Exempt compiler-generated builtins (__moxie_*).
 			if node.Name != nil && strings.HasPrefix(node.Name.Name, "__moxie_") {

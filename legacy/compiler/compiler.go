@@ -96,6 +96,7 @@ type compilerContext struct {
 	astComments      map[string]*ast.CommentGroup
 	embedGlobals     map[string][]*loader.EmbedFile
 	pkg              *types.Package
+	loaderPkg        *loader.Package // the loader's package, for its go/types info
 	packageDir       string // directory for this package
 	pkgModulePath    string // module path of the package being compiled
 	runtimePkg       *types.Package
@@ -325,6 +326,7 @@ func Sizes(machine llvm.TargetMachine) types.Sizes {
 func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package, machine llvm.TargetMachine, config *Config, dumpSSA bool, printAllocs *regexp.Regexp) (llvm.Module, []error) {
 	c := newCompilerContext(moduleName, machine, config, dumpSSA, printAllocs)
 	defer c.dispose()
+	c.loaderPkg = pkg
 	c.packageDir = pkg.OriginalDir()
 	c.pkgModulePath = pkg.Module.Path
 	c.embedGlobals = pkg.EmbedGlobals

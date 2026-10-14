@@ -11397,3 +11397,112 @@ on non-slices, slice-element assignment, `nil` against a non-pointer) with the
 index form already fixed on both sides; verifying the legacy mirror on a machine
 with LLVM 22; and emitting per-bundle protocol hosts so the seven
 `*-wasm-host.mjs` can leave the apps.
+
+## Round 54: the push element check - what it actually was
+
+The previous round recorded the `push` element check as "written and REVERTED: the
+probe that should trip it compiles clean, and an instrumented build showed the
+element loop is never reached." Both halves of that were wrong, and the reason
+is worth writing down because it cost a long detour.
+
+**The check was reached. The instrument was not.** Three separate attempts put a
+`WriteStr` trace at the top of the push case and saw nothing, which read as "the
+case does not run". Each trace was added to a source tree that the *next* build
+then failed to compile - so the new binary was never produced, and every probe
+kept running the OLD binary that still had the old check. The evidence that
+settles it is `strings` on the binary: `tmp/mxc-pe` (01:23) contains
+`spread element type mismatch` and `push to ` and nothing else; a compiler that
+"did not reach the case" cannot print a message from inside it. **Instrument,
+then prove the instrument is in the artifact** (`strings -a <compiler> | grep
+<marker>`) before reading any absence as evidence.
+
+**The real defect was in the text test.** The first spread check asked
+`TextType(srcT) && ssaByteElem(sl.Elem)` to allow `push(buf, sep...)` with
+`buf []byte` and `sep string`. TextType reads the underlying basic's KIND, and an
+untyped string literal's kind is `UntypedString`, not `String` - so
+`push(buf, "ab"...)` was rejected while `push(buf, sep)` with a string VARIABLE
+was accepted. That asymmetry is what made the check look like it was not
+running. `ssaIsText` now accepts `IsString` **or** `Kind == UntypedString`.
+
+**The element loop was checking the spread source.** `coerceSliceArgs` is now the
+one place both `push` and `__moxie_append` send their arguments; it reports a
+spread whose source cannot supply the elements, skips index 1 for a spread, and
+only judges the remaining arguments. The mxutil `JoinStrings` shape that started
+this (`push(buf, sep...)` then `push(buf, sv...)` inside a loop) is the probe:
+both compile and `JoinStrings` runs.
+
+**Measured, with `tmp/mxc-pushfix3`:**
+
+| probe | result |
+| --- | --- |
+| `push(etags, int32(7))`, etags []Tag | rejected: `cannot use value of type int32 as main.Tag in push to []main.Tag` |
+| `push(etags, parts)`, parts []string | rejected: `cannot use value of type []string as main.Tag in push to []main.Tag` |
+| `push(etags, parts...)` | rejected: `cannot use []string as []main.Tag in push (spread element type mismatch)` |
+| `push(etags, Tag{Parts: ...})` | accepted |
+| `push(xs, int64(3))`, xs []int32 | rejected: `cannot use value of type int64 as int32 in push to []int32` |
+| `push(buf, "ab"...)`, buf []byte | accepted |
+| `push(buf, sep...)` / `push(buf, sv...)` (mxutil) | accepted |
+| `mxutil.JoinStrings([]string{"a","b","c"}, "-")` | compiles and prints `a-b-c` |
+| the compiler rebuilding itself | fixpoint clean (`mxc-pushfix3` builds itself) |
+
+**One false positive that is NOT fixed, and it is why the element check is not in
+the tree.** `push(xs, n)` with `xs []int64` and `n int32` is rejected, and
+`push(xs, 1)` is accepted only because the bare constant is exempted as untyped.
+A typed narrowing/widening pair that stage4's own coercion model accepts is
+rejected by `checkAssignable` in this position, and the tree relies on the
+leniency: the check cannot ship until the coercion rules are settled for it. The
+same trap ate the previous attempt and would have eaten this one.
+
+**Three real defects the whole-tree run did find**, each fixed in this round:
+`src/runtime/codec.mx` carried a `var buf [12]byte` (arrays are not a Moxie
+type - now a `[]byte{:12}` slice with a cursor); `src/runtime/string.mx`'s
+`stringToRunes` relied on an implicit `byte`-into-`[]int32` widening (now
+`r[n] = int32(e)`); and the compiler's own runtime spells `len(*[128]uint16)`
+(unicode/letter.mx) and `len(*[512]pollDesc)`, so any `len` check must accept a
+pointer to an array as well as an array.
+
+### The remaining forms, with what is now known
+
+- **comparison operands**: written and shown to fire on the documented case
+  (`s.Kind() == int32(3)`, a string against an int32, now reports
+  `invalid operation: == (...)`). It does NOT fire on `GetFirst(...) != nil` for
+  a struct or `x < y` for two structs, both of which still reach clang - the
+  cause is not yet identified, and the probes for them (`/tmp/cmpB`, `/tmp/cmpJ`,
+  `/tmp/cmpK`) are the starting point.
+- **len/range on a struct**: written; the probes report `has no length` and
+  `cannot range over value of type main.S`. Both need the array and
+  pointer-to-array spellings before they can ship (see the three defects above),
+  and both flag the compiler's own tree until that is done.
+- **slice-element assignment**: written, then removed. The array element store
+  reaches SSA through the pointer-to-array path where the element type is still
+  the array (`syscall_linux.mx:543` writes a byte into a `(*[2]byte)` element),
+  so the check reports the shape rather than the mistake. Fix the array shape
+  first.
+- **nil against a non-pointer**: covered by the comparison check's nil arm, with
+  the same reachability question as `GetFirst(...) != nil` above.
+
+### The legacy mirror is written but unverified
+
+`legacy/compiler/restrict.go` now carries the mirror of all five forms plus the
+index check: `moxieTextType`, `moxieByteElem`, `moxieOrdered`, `moxieComparable`,
+`moxieNilable`, `moxieAssignable`, `isNilLiteral`, and the checks
+`checkPushRestriction` (AST, because SSA cannot tell a spread from a plain push),
+`checkLenRestriction`, `checkCompareRestriction`, `checkStoreElemRestriction` and
+`checkRangeRestriction` (AST, for the type info), wired into
+`checkInstrRestrictions` and `checkASTRestrictions`. `compilerContext` gained a
+`loaderPkg` field so the checks can reach `loader.Package.TypeInfo()`.
+
+**None of it has been compiled or run**: this machine has no Go toolchain at all
+(`which go` finds nothing) and no libLLVM-22 (`legacy/build.sh` links it; only
+llvm-20 headers are present). The next step is `cd legacy && go build -o moxie .`
+on a machine that has both, then the same probe table above run against the
+legacy-built compiler.
+
+**Gate on the shipped compiler (`tmp/mxc-ship`).** The gate run was interrupted
+by an OOM kill, not by a failure: `phase1b`'s 45-package sweep was `Killed` at
+4-way parallelism while a browser held 2.2GB, and the compiler peaks over 600MB
+per package. The unit driver's own verdict file for it carries rc=0 and a
+warning-only reason, which is why the round's summary should read the verdict
+*before* the exit status - `unitrun` does, the shell did not. The sweep passes
+when it runs without the memory pressure; re-run `--phases 1b --only
+stdlib_sweep_` on an idle machine to confirm.
