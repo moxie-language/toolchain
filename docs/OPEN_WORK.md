@@ -10578,3 +10578,11 @@ tracked were real but they counted the other category. From here, count with
 
 **Current state of the mls bundle: 3 capturing closures and 21 global-store
 errors**, all of them instances of this one rule.
+
+**Corrected counts for the mls bundle, deduplicated** (`grep -o … | sort -u | wc -l`
+on the build log): **1 capturing closure** (`handleInit [urls]`) and **12
+global-store errors** across 12 functions - `createGroupAndSend`, `loadGroups`,
+`onCryptoTimeout`, `onCryptoTimeoutFire`, `onGiftWrapOpened`, `onGroupList`,
+`onGroupState`, `onKeyPackageSigned`, `onKPFetchTimeout`, `processIncoming`,
+`publishKeyPackage`, `startKPFetch`. The three closure sites reported earlier were
+line duplicates of one site's nested message.
