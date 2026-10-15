@@ -45,6 +45,34 @@ the method and the interface, not a runtime test - a correct compiler must
 REJECT the file, so the pin belongs in `tests/restrictions` once the check
 exists.
 
+**The compile check: LANDED.** `checkIfaceSatisfied` in `_mxc_stage4/ssa_builder.mx`,
+called from `coerceToInterface`, rejects a concrete type boxed into a non-empty
+interface when it declares a method with the interface method's exact parameter
+and result types under a DIFFERENT name and does not declare the interface's
+name. Pin: `tests/restrictions/reject_iface_method_name_mismatch.mx`.
+
+Both conditions are load-bearing. The same-shaped-method condition keeps an
+interface the type does not resemble at all out of the check (answering that
+means reproducing go/types' whole method set); the missing-name condition is
+what makes the shape hint sound. A type with an EMBEDDED field is not judged,
+because its promoted methods are invisible here and the shape condition is too
+weak to stand in for them: `*net.TCPConn` promotes `Close` from an embedded
+`conn` while declaring `SetKeepAliveConfig`, which has `Close`'s shape
+(`() error`), and a version without the skip rejected `net` during the relay
+build. The cost of that skip: a type implementing an interface only through
+PROMOTION under a different name is still a silent zero. Closing that needs the
+selector/embed resolution the compiler already has (see `reportUndefinedField`
+and `resolveMethodCallWithRecv`), not a second walker - a shape hint is only
+sound on top of a complete method set.
+
+Two constraints that cost a round each and are easy to re-hit: an untyped
+constant boxed into an interface takes its DEFAULT type (`UntypedToTyped`;
+checking `untyped int32` reported every `fmt.Stringer` boxing in math/big), and
+`[]byte` and `string` are one type, so a byte slice's method set is the string
+type's (otherwise every `[]byte` Stringer in math/big is rejected). An earlier
+prototype that tried to decide the full method set grew three special cases in
+three rounds and was reverted; nothing of it is committed.
+
 `emitKeepIfaceUsed` matches this module's implementations by SHAPE (parameter
 and result types) rather than by name now, so an implementation is kept alive
 under whatever name it carries. That closes a latent hole of the same family -
@@ -58,7 +86,9 @@ own yet.
 
 Phase 7 rebuilds the app's tracked `web/static/*.wasm` and restores the ones the
 compiler reproduced byte for byte; the driver now ends every run with a
-`tree-cleanliness` gate that fails when the checkout has tracked modifications.
+`tree-cleanliness` gate. The gate takes a baseline before the units run and
+reports only what the RUN creates, so a checkout with uncommitted work - the
+normal state of a session - does not fail the suite.
 The remaining item is running the app's smoke suite against a STAGED copy of the
 app tree rather than the checkout, which is what would let the app's own
 arrangement stop being this gate's exception.
