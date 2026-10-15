@@ -11723,3 +11723,24 @@ unit's wall time is its cost divided by how many other units share the CPU, and
 it carries a `UNIT_TIMEOUT` table for units whose cost is a measured constant.
 `0a/http_header_api` is pinned there at **1800s** (60% over the 1129s
 measurement). An explicit `--timeout` or `UNITRUN_TIMEOUT` still wins over both.
+
+## Round 56 close: the gates after the harness change
+
+All measured on `tmp/mxc-bc` with the new per-core default and the
+`UNIT_TIMEOUT` table in place:
+
+| gate | result |
+| --- | --- |
+| 0a + 0b + 1 | **132/132 PASS** - `0a/http_header_api` **PASS at 1250235ms** in the DEFAULT runner (it used to be killed at 900s); the extra unit over the old 131 is the new fixture |
+| 1b stdlib sweep | **PASS** - but only at `-j 1`. At `-j 4` it is `Killed` by the OOM killer while a browser holds 2.2GB; the unit driver records that as rc=0 with a warning-only reason, so the verdict and the shell exit disagree. Run 1b serially. |
+| 3 / 4 / 6 | **PASS** |
+| 5 wasm | **78/78 PASS**, plus `slice_cursor_zero_fill` verified as a wasm unit on its own (PASS, 6981ms) |
+| 2 self-host | still environment-blocked (no Go toolchain) |
+
+**A trap this round walked into:** the phase 5 unit scanner identifies a
+wasm-skipped fixture by grepping the file for the skip directive, so writing
+that directive inside the new fixture's own comment excluded it from phase 5
+while phase 0a still ran it natively - a silent loss of coverage produced by a
+comment, which is the same shape as the bug this round was classifying. The
+fixture's comment now describes the marker without spelling it, and the wasm
+unit is confirmed present and passing.
