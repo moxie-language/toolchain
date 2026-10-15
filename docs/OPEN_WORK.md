@@ -11695,6 +11695,15 @@ The evidence, in the order it was gathered:
 **The sweep.** `[:0]` appears **194 times** across `src/`, `pkg/` and
 `_mxc_stage4/`; 34 of those are the cursor shape (a `[:0]` re-slice followed by
 `push`), and the capacity-exact variant `[]T{:N}[:0]` is the one the signer used.
+**The bounded-risk variant has zero sites.** `[]T{N}[:0]` - the capacity-exact
+form the signer used, where the only thing between a correct decode and a
+zero-tail is the fill count being exactly N - does not appear anywhere in
+`src/`, `pkg/` or `_mxc_stage4/`. The 34 cursor sites all use the grown form
+(`x = x[:0]` on a buffer sized earlier, or an `mxutil.Ensure`/`Reserve` guard),
+which is the shape the arena rules prescribe for a size that is not known in
+advance. So the class has one occurrence in the tree, it was the signer's, it is
+rewritten, and there are no remaining hits to ticket.
+
 No site is itself wrong: every one is exercised by the phases that were already
 green (0a/0b/1 build and run the whole tree, 3 validates the IR, 5 runs 78
 fixtures under wasm), and the fixture above is the direction test for the class.
