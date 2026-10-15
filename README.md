@@ -214,3 +214,11 @@ moxie/
 │   └── ...                  # Stdlib (.mx files)
 └── docs/                    # Language reference, porting guide, architecture
 ```
+
+## License
+
+The moxie toolchain (compiler, linker, tools) is licensed under [GPL-3.0-or-later](LICENSE).
+
+The runtime and standard library (`src/`, `jsruntime/`) are MIT, so that programs you build with moxie are your own; see `src/LICENSE` and `jsruntime/LICENSE`. Vendored third-party code (`lib/musl`, `lib/bdwgc`) keeps its own license.
+
+Commercial licensing available on request.
