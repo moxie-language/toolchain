@@ -12305,3 +12305,41 @@ So `pkg/lol` needs:
 `pkg/lol` is the LAST package in the relay's closure that still violates a rule,
 and its failure is what left `Main.Log` nil and panicked the relay at start-up.
 Fix these three and the relay should both link and run.
+
+### Round 67: pkg/lol is fixed; the nil receiver is in a package init before main
+
+**`pkg/lol` now compiles and runs.** The conversion that worked:
+
+  * `LevelPrinter`'s slots are one interface (`Ops`) holding the five operations,
+    and `LevelPrinter` has five NAMED methods that delegate to `p.Ops`. Probed
+    and necessary: the language does NOT promote methods from an embedded
+    interface (`p.Ln(...)` on a struct embedding an interface with `Ln` is "no
+    field or method Ln"), and a method value is a capture, so a func-typed slot
+    cannot be filled at all. The five methods have POINTER receivers, since value
+    receivers are rejected.
+  * `lp` and `nullPrinter` are the two implementations; a probe importing `lol`
+    and `metrics` prints `INF dbg lol init ok`.
+  * `LevelNames`, `LevelTags` and `Main` were package vars with initializers, so
+    they are zero declarations filled by `init()` (which also folds in the two
+    table builders - one init per package).
+  * `level` is behind `var levelPtr *int32` set in `init()`; `SetLevel` and
+    `SetLevelByName` write through it, which is not a global mutation because
+    `ssaGlobalRoot` returns "" for a global whose declared type is a pointer.
+  * `newPrinters` has named results.
+
+**But the relay still panics, and it is NOT in `lol` any more.** A minimal probe -
+just `println("before PreSpawn")` then `broadcast.PreSpawn()` - crashes with
+`sovereign: nil receiver` and **never prints the first line**. So the nil receiver
+is reached during package initialisation, before `main`'s body, and it is in a
+package that `pkg/broadcast` pulls in: `pkg/relay/wire` and its closure
+(`nostr/envelope`, `nostr/event`, `nostr/kind`, `nostr/filter`, `store`, ...).
+
+**Next step (the probe harness is now cheap and proven):** the same
+kindprobe/broadcast probe, importing one relay package at a time and printing
+before and after a single call, pins it in one build each. Start with
+`pkg/relay/wire` (the first import `broadcast` makes) and then `pkg/nostr/envelope`
+- the package whose `Marshal` methods this port rewrote. `println` printing
+NOTHING is the key signal: the crash is in an `init()`, so the search is for an
+`init()`/`__varinit` that dereferences a global another package's init has not
+filled yet, which is a real ordering hazard now that the port turned several
+lazy initialisers into `init()`s.
