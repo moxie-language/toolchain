@@ -12202,3 +12202,36 @@ The cheap measurement: put the write as the very first statement of `main` and
 again as the first statement of `kind.init()`, rebuild, and see which appears.
 That separates "main's prologue" from "kind's init" without bisecting packages,
 and it is the first thing to do next round.
+
+### Round 66: kind's init is exonerated; the crash is relay-specific
+
+Two facts, measured this round:
+
+  * `initDomain(256MB)` runs in the runtime's `main` (`src/runtime/runtime_unix.mx`)
+    BEFORE `initAll()` and before the program's `main`. So the arena IS ready by
+    the time an injected `init()` runs, which removes the "arena not up yet"
+    hypothesis from round 65.
+  * A standalone binary that imports `pkg/nostr/kind` and reads the table prints
+    the right answers:
+
+        kind.MuteList Mute List
+        kind.GetString(1) Short Text Note
+
+    So `kind`'s converted `init()` - including its
+    `SovereignSetArena(RootArena())` / restore pair - works. Neither the arena nor
+    that conversion is the crash.
+
+**Therefore the nil receiver is relay-specific: a package in the relay's closure
+whose `__varinit`/`init()` leaves a global nil, or a method call on a nil receiver
+inside one of them.** The crash happens after the runtime's `main` and before
+`main`'s body (no stderr from a write placed there).
+
+**Next step, and it is a bisect, not a guess:** the same standalone-probe method
+that exonerated `kind` should be pointed at the relay's own packages one at a
+time - most likely `pkg/lol` (`init()` assigns `Main.Log/Check/Errorf` from
+`newPrinters`, and those are `LevelPrinter` interfaces built from method values
+like `l.F.Chk`, which is exactly the binding the language rejects *elsewhere* and
+may be nil here), then `pkg/metrics` (13 histograms built in `init()`, each
+dereferenced by `Observe`), then `pkg/transport` (`globalSigFD` from
+`moxie_signal_pipe_init`). A probe that imports one package and calls one accessor
+pins it in one build each.
