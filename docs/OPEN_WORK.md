@@ -11970,3 +11970,43 @@ so it is left for the next round with `dnsTTL = 24h` in mind.
 **Then:** `pkg/broadcast/broadcast.mx` (6 sites, the lazy `preSpawn`),
 `pkg/relay/config/config.mx` (1), `pkg/transport/transport.mx` (1). Same shape
 as `kind` and `dns`.
+
+### Round 61: package-level var initializers, and the DNS cache decision
+
+**A package-level `var` may not carry an initializer.** That is a separate rule
+from "globals are init-only", and every instance in the relay's closure is now a
+zero declaration plus an `init()` assignment:
+
+| file | what |
+| --- | --- |
+| `pkg/blossom/blossom.mx` | `corsHeaders` map |
+| `pkg/relay/server/server_workers.mx` | `blossomCORSHeaders` map |
+| `pkg/transport/http.mx` | `botAgents` slice |
+| `main.mx` | `crawlSeeds`, `bootstrapSeeds` slices |
+| `pkg/store/index/keys.mx` | the 21 `Prefix` values, moved as one block |
+| `pkg/metrics/global.mx` | the 13 histograms and `allHistograms` |
+| `pkg/store/wal/wal.mx` | `ErrCheckpointStale` (NOT yet converted - it is the current blocker) |
+
+**The DNS cache is removed, deliberately.** `resolveHost` kept a package-level
+`dnsCache map[string]dnsEntry` filled per lookup with a 24h expiry, and neither
+half is expressible: a `var` may not carry the map literal, and a global map
+update is a global mutation. The choice was a resolver holder threaded through
+this package's two callers (`ws.Dial`, `mediaproxy.Fetch`) or resolving per dial.
+Per dial it is, because the transport re-resolves on reconnect anyway and the
+cache was saving one UDP round trip on a host about to be re-resolved. The
+reasoning is in the function's comment; revisit with a holder if a profile ever
+shows DNS on the hot path.
+
+**`pkg/store/sorted`**: `pickSmallest` and `mergeStep` have multi-line
+signatures, which the line-oriented fixer cannot see and skips silently. They
+were named by hand, and `mergeStep` also declared `var bestKey, rec []byte`,
+which shadowed its own named results.
+
+**Next, at `pkg/store/wal`:**
+1. `var ErrCheckpointStale = errors.New(...)` -> zero declaration + `init()`.
+2. `defer func() { metrics.WALAppendNs.Observe(metrics.Since(appendStart)) }()`
+   captures `appendStart`. A probe confirms the fix compiles:
+   `defer hist.Observe(now() - start)` - a defer whose ARGUMENTS are evaluated at
+   the defer statement and whose call happens at return, which is the same
+   timing without a closure. Note `metrics.WALAppendNs` is also nil until
+   `init()` runs, so a deferred Observe must not fire before then.
