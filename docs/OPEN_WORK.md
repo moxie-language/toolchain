@@ -11843,8 +11843,15 @@ failure is a FAIL with the reason, never a SKIP. Verified by pointing it at a
 nonexistent app (`MOXIE_UI_APP=/nonexistent`) and a nonexistent compiler, both of
 which fail with a named precondition.
 
-Phase 7 raised the unit count to 212 across the suite (0a 83, 0b 45, 1 4, 5 79,
-plus the monolithic units).
+**It is in the QUICK set**, not only `all`: `tests/run.sh` runs
+`UNIT_PHASES_QUICK=0a,0b,1,7` and `run.sh --phase 7` exists. The reasoning is
+that the stdlib web framework's only real consumer is this app, so "the framework
+still works for a real UI" is a basic gate rather than a long-tail one. Measured:
+
+    tests/run.sh --quick  ->  133 of 133 PASS, 7/whole-phase 223266ms
+
+That is the default-run evidence: the phase is green inside the set a default
+`run.sh --quick` uses, and every pre-existing gate is still green beside it.
 
 ### Found, not fixed: the smesh relay does not build from source
 

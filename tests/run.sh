@@ -37,7 +37,12 @@ echo "mode: $PHASE"
 # fixture as an independent unit with its own temp dir, timeout and result file.
 # That is what makes a red fixture cheap: it is re-run on its own instead of
 # re-running the phase it happened to be in.
-UNIT_PHASES_QUICK="0a,0b,1"
+# 7 is the sample UI app. It is in the QUICK set on purpose: the stdlib web
+# framework's only real consumer is that app, so "the framework still works for a
+# real UI" is a basic gate, not a long-tail one. It costs ~3.5 minutes because it
+# builds the nine bundles; a warm package cache brings the app bundle build to
+# seconds and the rest is the browser suite.
+UNIT_PHASES_QUICK="0a,0b,1,7"
 UNIT_PHASES_FULL="all"
 
 case "$PHASE" in
@@ -69,7 +74,8 @@ case "$PHASE" in
 		4) PHASES="4" ;;
 		5) PHASES="5" ;;
 		6) PHASES="6" ;;
-		*) echo "phase $2 not found (0-6)" ; exit 1 ;;
+		7) PHASES="7" ;;
+		*) echo "phase $2 not found (0-7)" ; exit 1 ;;
 	esac
 	exec bash "$SCRIPT_DIR/unitrun.sh" --phases "$PHASES"
 	;;
