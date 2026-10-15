@@ -42,6 +42,14 @@ type signatureInfo struct {
 	name       string
 	methods    []*methodInfo
 	interfaces []*interfaceInfo
+	// shapeMethods holds methods of a concrete type that have this signature's
+	// PARAMETER AND RESULT TYPES but a different method name. Go requires the
+	// names to agree, but Moxie code keeps an unexported helper beside the
+	// exported interface it satisfies (main.(*relayCtx).handleFallback for
+	// server.HTTPServeFunc's HandleHTTP). without this the interface's method
+	// list never gets a function for the type, the dispatch thunk calls a nil
+	// value, and the lowered call silently answers with zero values.
+	shapeMethods []*methodInfo
 }
 
 // methodInfo describes a single method on a concrete type.
@@ -68,6 +76,9 @@ func (t *typeInfo) getMethod(signature *signatureInfo) *methodInfo {
 		if method.signatureInfo == signature {
 			return method
 		}
+	}
+	if shape := t.shapeMethod(signature); shape != nil {
+		return shape
 	}
 	panic("could not find method")
 }
@@ -190,6 +201,10 @@ func (p *lowerInterfacesPass) run() error {
 		}
 	}
 
+	// Give every interface method signature the shape-matched methods of each
+	// type, so a differently-named implementation is found below.
+	p.addShapeMethods()
+
 	// Find all the interfaces that are implemented per type.
 	for _, t := range p.types {
 		// This type has no methods, so don't spend time calculating them.
@@ -202,6 +217,18 @@ func (p *lowerInterfacesPass) run() error {
 		typeSignatureSet := make(map[*signatureInfo]struct{})
 		for _, method := range t.methods {
 			typeSignatureSet[method.signatureInfo] = struct{}{}
+		}
+		// A method whose name differs from the interface method's still
+		// satisfies it when the shapes agree: check membership of every
+		// interface signature this type's methods share a shape with.
+		for _, method := range t.methods {
+			for _, itf := range method.interfaces {
+				for _, itfSignature := range itf.signatures {
+					if methodSignatureBody(itfSignature.name) == methodSignatureBody(method.signatureInfo.name) {
+						typeSignatureSet[itfSignature] = struct{}{}
+					}
+				}
+			}
 		}
 
 		// A set of interfaces, mapped from the name to the info.
@@ -349,6 +376,76 @@ func (p *lowerInterfacesPass) addTypeMethods(t *typeInfo, methodSet llvm.Value) 
 		signature.methods = append(signature.methods, method)
 		t.methods = append(t.methods, method)
 	}
+}
+
+// methodSignatureBody is the "(params) (results)" tail of a method signature
+// name, i.e. everything after the method name. Two methods with the same body
+// have the same shape whatever they are called.
+func methodSignatureBody(name string) string {
+	depth := 0
+	for i := 0; i < len(name); i++ {
+		switch name[i] {
+		case '(':
+			if depth == 0 {
+				return name[i:]
+			}
+			depth++
+		case ')':
+			depth--
+		}
+	}
+	return name
+}
+
+// addShapeMethods appends, for every interface method signature, this type's
+// method with the same shape when it carries a different name. It runs after
+// the interface scan and before the satisfies pass, because the satisfies pass
+// checks membership of these shape signatures and the lowering thunk looks the
+// method up by them.
+func (p *lowerInterfacesPass) addShapeMethods() {
+	for _, t := range p.types {
+		if len(t.methods) == 0 {
+			continue
+		}
+		for _, method := range t.methods {
+			for _, itf := range method.interfaces {
+				for _, itfSignature := range itf.signatures {
+					if methodSignatureBody(itfSignature.name) != methodSignatureBody(method.signatureInfo.name) {
+						continue
+					}
+					if itfSignature == method.signatureInfo {
+						continue
+					}
+					found := false
+					for _, sm := range itfSignature.shapeMethods {
+						if sm.function == method.function {
+							found = true
+							break
+						}
+					}
+					if !found {
+						itfSignature.shapeMethods = append(itfSignature.shapeMethods, method)
+					}
+				}
+			}
+		}
+	}
+}
+
+// shapeMethod returns the method of this type whose signature has the shape of
+// the interface method, or nil when the type has none.
+func (t *typeInfo) shapeMethod(signature *signatureInfo) *methodInfo {
+	if len(signature.shapeMethods) == 0 {
+		return nil
+	}
+	for _, method := range t.methods {
+		for _, sm := range signature.shapeMethods {
+			if method.function == sm.function {
+				return method
+			}
+		}
+	}
+	return nil
 }
 
 // addInterface reads information about an interface, which is the

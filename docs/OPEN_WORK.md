@@ -4,10 +4,68 @@ State carried across context compaction. Ordered queue, the decisions already
 taken, the findings that motivated them, and the two designs in flight
 (module removal, user-code exemption). Update this file when the queue moves.
 
-## REMAINING WORK (as of round 127) - read this first
+## REMAINING WORK (as of round 73) - read this first
 
-Everything below this section is history, evidence and closed items. This is the
-actual queue, in the order to take it.
+### 0. Package initialization order, and cross-package interface dispatch under --gc-sections  [COMPILER, one fixed, one open]
+
+Two separate defects, both hit by the smesh relay port in one afternoon. Both
+were found by running a from-source binary, not by reading code, and both
+produce a SILENT wrong answer rather than a diagnostic: the first killed the
+relay before it served, the second made it serve zero-byte responses.
+
+**(a) Dependency order in `runtime.initAll`. FIXED and verified.**
+Both initAll generators insertion-sorted the package symbols before emitting
+the calls (`cmdTest` in `_mxc_stage4/main.mx` and the build path). The sort
+turned the resolver's topological order (`resolver.walk` appends a package only
+after everything it imports) into lexicographic order on the mangled symbol, so
+every user package - `git.smesh.lol/...` - initialized BEFORE `os`. Inside a
+user `init()`, `os.Stdout` was nil and `os.ReadFile`'s mount table was empty:
+`fmt.Println` in a package init died with SIGSEGV and
+`pkg/nostr/ws`'s resolver init died with `sovereign: nil receiver` on the nil
+`os.Stdout`. Removing both sorts is the fix; the dedup that follows already
+preserves order. Verified: `os.ReadFile` in a user init returns 74 bytes, and
+the relay starts.
+
+**(b) A cross-package implementation is deleted by `--gc-sections`. FIXED and
+verified.** Interface dispatch resolves an implementation by the interface
+method's NAME: `findIfaceImpls` scans the link set for a member whose last
+dot-segment equals that name, and a local method of the invoking package is
+called directly while an implementation in another package is called through an
+`extern_weak` declaration. Nothing strong referenced
+`main.(*relayCtx).HandleHTTP`, so `--gc-sections` deleted its definition from
+main's object; the weak reference resolved null, `emitInvoke`'s null check
+failed, and the arm fell through to its zero-init default. The observable result
+was a serving relay whose every fallback request answered `HTTP/1.1 0 OK` with
+an empty body - no error, no diagnostic.
+
+The keep pass exists for exactly this (`emitKeepIfaceUsed` appends to
+`@llvm.used`), but it matched this-module implementations by interface method
+name only, while the smesh port's implementation was named
+`handleFallback` for an interface method named `HandleHTTP`. The port now names
+the method `HandleHTTP`, and the keep pass matches on SHAPE (parameter and
+result types) instead of name, so an implementation is kept at whatever name a
+future interface-less helper carries. Both changes are verified: the relay
+serves the UI, the 404 path, `/__version` and `/health` from source.
+
+A remaining compiler gap is recorded but NOT fixed: the invoke resolves an
+implementation by the interface method's NAME, so a method whose name differs is
+silently skipped - the arm list is empty, the call returns zero values, and the
+only close call is the keep pass, which is what the relay tripped over. Measured
+with a fixture (package `lib` declaring `Doer`/`Do` and invoking it; `main.Ctx`
+carrying `run` with `Do`'s exact shape plus a control `Do`): both the pre-fix and
+post-fix compilers call the control `Do` and never `run`, so the defect predates
+this round and is unchanged by it. The wanted behaviour is a compile error
+naming the method and the interface, not a runtime test - a correct compiler
+must REJECT the file, so the evidence belongs in `tests/restrictions` once the
+check exists.
+
+The legacy mirror of the keep pass is in
+`legacy/transform/interface-lowering.go` (`shapeMethods`/`addShapeMethods`/
+`shapeMethod` plus a shape fallback in the satisfies pass), and is UNVERIFIED:
+this machine has no Go toolchain to rebuild `legacy/moxie`, and the shipped
+binary is from 2026-10-05 and rejects current `src/os`. Rebuild legacy and run a
+two-package fixture before trusting it. (a) does not exist in legacy, whose
+`lprogram.Sorted()` is already topological.
 
 ### 1. The stdlib's closure captures  [REFACTOR - the standing directive]
 

@@ -5749,8 +5749,16 @@ func cmdTest(args []string) {
 	}
 
 	mxutil.WriteStr(2, "  generate initAll\n")
-	// Build a deduped package list with a sorted slice, not a map:
-	// the map path is sensitive to hashmap state during bootstrap.
+	// One entry per package, in the resolver's order. That order is the whole
+	// point: resolver.walk appends a package only after every package it
+	// imports, so a dependency's initializer runs before its dependent's.
+	// Sorting these symbols destroyed that guarantee - the order became
+	// lexicographic on the mangled name, and every user package (path
+	// "git.smesh.lol/smesh/pkg/...", or any module path starting before "o")
+	// initialized BEFORE os, so os.Stdout was nil and os.ReadFile's mount
+	// table was empty inside a user init(). fmt.Println in a package init
+	// died with SIGSEGV and nostr/ws's resolver init died with "sovereign:
+	// nil receiver" on the nil os.Stdout.
 	var syms []string
 	var initCalls string
 	for _, dp := range pkgs {
@@ -5764,11 +5772,6 @@ func cmdTest(args []string) {
 		initSym := irGlobalSymbol(compilePath, "main")
 		syms = mxutil.Ensure(syms, 1)
 		push(syms, initSym)
-	}
-	for si := int32(1); si < int32(len(syms)); si++ {
-		for sj := si; sj > 0 && syms[sj] < syms[sj-1]; sj-- {
-			syms[sj], syms[sj-1] = syms[sj-1], syms[sj]
-		}
 	}
 	var prevSym string
 	for _, sym := range syms {
@@ -6990,8 +6993,9 @@ func main() {
 	}
 
 	mxutil.WriteStr(2, "  generate initAll\n")
-	// Build a deduped package list with a sorted slice, not a map:
-	// the map path is sensitive to hashmap state during bootstrap.
+	// Dependency order, not lexicographic: see the note on the other initAll
+	// generator. Test packages have the same requirement as program packages -
+	// a library's init() may call into its imports.
 	var syms []string
 	for _, pkg := range pkgs {
 		compilePath := pkg.path
@@ -7004,11 +7008,6 @@ func main() {
 		initSym := irGlobalSymbol(compilePath, "main")
 		syms = mxutil.Ensure(syms, 1)
 		push(syms, initSym)
-	}
-	for ti := int32(1); ti < int32(len(syms)); ti++ {
-		for tj := ti; tj > 0 && syms[tj] < syms[tj-1]; tj-- {
-			syms[tj], syms[tj-1] = syms[tj-1], syms[tj]
-		}
 	}
 	var initCalls string
 	var prevSym string

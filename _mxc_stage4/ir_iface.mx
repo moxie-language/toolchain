@@ -278,14 +278,30 @@ func (e *irEmitter) keepIfaceImpls(ifaceType Type) {
 }
 
 // emitKeepIfaceUsed writes @llvm.used entries (strong relocations that keep
-// sections alive under --gc-sections) for this module's methods that
+// sections alive under --gc-sections) for this module's methods that can
 // implement any recorded non-empty interface. Runs at module tail with the
 // compile arena current, so the map backings are safe.
+//
+// The match is on SHAPE, not on name. A method implements an interface method
+// when it has that method's name AND shape, and the two are independent
+// questions; the name-keyed scan this replaces could only answer the first.
+// The shape scan keeps a method with the interface method's exact parameter
+// and result types whatever it is called.
+//
+// This is deliberately a superset - a same-shaped method is kept whether or
+// not its receiver type is ever boxed into that interface. The cost is a few
+// bytes of llvm.used. The alternative, knowing by name which methods
+// implement an interface, is the question this pass exists to answer, and a
+// missing keep is not a missed optimization: --gc-sections deletes the
+// definition, the invoking module's extern_weak reference resolves null, and
+// its dispatch arm falls through to the zero-init default - a call that
+// silently returns zero values instead of reaching the method.
 func (e *irEmitter) emitKeepIfaceUsed() {
 	if len(e.keepIfaceTypes) == 0 {
 		return
 	}
 	seenIf := map[string]bool{}
+	var sigs []*Signature
 	var syms []string
 	seenSym := map[string]bool{}
 	for _, ift := range e.keepIfaceTypes {
@@ -298,40 +314,43 @@ func (e *irEmitter) emitKeepIfaceUsed() {
 			continue
 		}
 		seenIf[key] = true
-		var mkeys []string
-		for k := range e.pkg.Members {
-			mkeys = mxutil.Ensure(mkeys, 1)
-			push(mkeys, k)
-		}
 		for mi := int32(0); mi < it.NumMethods(); mi++ {
-			mname := it.Method(mi).Name
-			if mname == "" {
+			im := it.Method(mi)
+			if im == nil || im.Sig == nil {
 				continue
 			}
-			for _, k := range mkeys {
-				dotIdx := int32(-1)
-				for i := int32(len(k)) - 1; i >= 0; i-- {
-					if k[i] == '.' {
-						dotIdx = i
-						break
-					}
-				}
-				if dotIdx < 0 || k[dotIdx+1:] != mname {
-					continue
-				}
-				fn, isFn := e.pkg.Members[k].(*SSAFunction)
-				if !isFn || fn == nil {
-					continue
-				}
-				sym := e.funcSymbol(fn)
-				if mxutil.HasPrefix(sym, "@__mxc_nil_func") || seenSym[sym] {
-					continue
-				}
-				seenSym[sym] = true
-				syms = mxutil.Ensure(syms, 1)
-				push(syms, sym)
+			sigs = mxutil.Ensure(sigs, 1)
+			push(sigs, im.Sig)
+		}
+	}
+	if len(sigs) == 0 {
+		return
+	}
+	for _, mv := range e.pkg.Members {
+		fn, isFn := mv.(*SSAFunction)
+		if !isFn || fn == nil || fn.Signature == nil {
+			continue
+		}
+		if fn.object == nil {
+			continue
+		}
+		matched := false
+		for _, sig := range sigs {
+			if e.sigMatchesIfaceMethod(fn.Signature, sig) {
+				matched = true
+				break
 			}
 		}
+		if !matched {
+			continue
+		}
+		sym := e.funcSymbol(fn)
+		if mxutil.HasPrefix(sym, "@__mxc_nil_func") || seenSym[sym] {
+			continue
+		}
+		seenSym[sym] = true
+		syms = mxutil.Ensure(syms, 1)
+		push(syms, sym)
 	}
 	if len(syms) == 0 {
 		return
@@ -344,6 +363,38 @@ func (e *irEmitter) emitKeepIfaceUsed() {
 		e.w("ptr ") ; e.w(s2)
 	}
 	e.w("]\n")
+}
+
+// sigMatchesIfaceMethod reports whether a member's signature has the shape of
+// an interface method's. Parameter counts must agree: the interface method's
+// signature has no receiver, and a method's SSA signature does not carry one
+// either (emitInvoke receives the receiver as a separate argument). A
+// receiver-less function whose parameters happen to match is kept too, which
+// is harmless - llvm.used only stops the linker discarding a definition.
+func (e *irEmitter) sigMatchesIfaceMethod(cand, sig *Signature) (ok bool) {
+	if cand == nil || sig == nil {
+		return false
+	}
+	if e.llvmType(cand.Results) != e.llvmType(sig.Results) {
+		return false
+	}
+	in := int32(0)
+	if sig.Params != nil {
+		in = int32(sig.Params.Len())
+	}
+	cn := int32(0)
+	if cand.Params != nil {
+		cn = int32(cand.Params.Len())
+	}
+	if cn != in {
+		return false
+	}
+	for pi := int32(0); pi < in; pi++ {
+		if e.llvmType(sig.Params.At(pi).Typ) != e.llvmType(cand.Params.At(pi).Typ) {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
