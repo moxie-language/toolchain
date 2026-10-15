@@ -11874,3 +11874,61 @@ The prebuilt `smesh` binary (dated Oct 1) is what serves the app today. Until th
 port is done, the served build under test is the UI bundle build plus that relay,
 which is a weaker claim than "the whole app builds from source" and is why the
 phase prints which of the two it did.
+
+## Round 59: the relay port, in progress
+
+The objective is that the relay builds from source under the compiler under test.
+It does not yet, and the remaining work is now a measured list rather than an
+unknown.
+
+**Done this round** (`a86a03e6` in smesh). The port was scoped to the relay's OWN
+closure - 40 local packages, taken from the compiler's own `discover` lines
+rather than a blanket scan of the repo, which had wrongly included the wasm
+bundles and `tmp/`:
+
+  * **76 unnamed results named across 25 files.** Every result must be named,
+    including a single one: `func New(dir string) (*Server, error)` becomes
+    `(srv *Server, err error)`. The name generation is shape-aware - a list like
+    `(content, rem []byte, err error)` is a NAME plus two types, not three types,
+    and the first attempt at this mangled it into `(r1 content, ...)` and broke
+    every existing named return in the file. A generated name is also never a
+    type the signature mentions: naming a result `KindInfo` made the body unable
+    to resolve the type.
+  * **11 value receivers -> pointer receivers.**
+  * **`pkg/nostr/kind`** had two lazy initialisers (`ensureKinds`,
+    `ensureKindData`) that assigned package globals, which the compiler rejects
+    outside `init()`. `__varinit` could not express them: the allocations must
+    land in the ROOT arena or a global points into a frame arena that is pooled
+    on return. Both are `init()` now, `parseKindsJSON` is a builder that returns
+    the data instead of storing it, and `GetString` reads the metadata table
+    instead of a second global `Map`.
+  * **`pkg/nostr/filter`**: `Tainted` was a package global that every caller
+    reset before parsing. It is a field on the request now.
+
+**What remains, measured.** The build now stops at `pkg/nostr/envelope`.
+
+1. **Closure captures (19 Marshal methods).** `type Marshaller func(dst []byte)
+   (b []byte)` cannot carry a receiver, so every `Marshal` method builds its
+   content in a closure that captures `en` and the compiler rejects it - closures
+   do not capture. The fix is an API change in `pkg/nostr/envelope/envelope.mx`:
+   give `Marshaller` a second parameter for the receiver (`func(dst []byte, self
+   T)`), and change each of the 19 methods to assert `self` locally instead of
+   capturing. This is the largest remaining piece.
+2. **Package globals assigned outside `init()`**, ~19 sites in 5 files:
+   `pkg/broadcast/broadcast.mx` (6 - `preSpawnedIn/Out/Ready/Done/preSpawned`
+   built by a lazy `preSpawn`), `pkg/nostr/ws/dns.mx` (4 - the `dnsAddr`/
+   `dnsAddrInit` lazy cache), `pkg/relay/config/config.mx` (1),
+   `pkg/transport/transport.mx` (1 - `globalSigFD`). Same shape as `kind`: move
+   the first assignment into `init()` and make the lazy path read the globals.
+   The last two may be false positives from the scan (an `init()`-only
+   assignment, or a local sharing a global's name); the compiler decides.
+
+   Note the scan in this file is a heuristic and over-counts: it reported 7
+   further "global assignments" in `pkg/nostr/filter` that the compiler accepts,
+   because the filter's struct fields are named `Ids`, `Kinds`, `Authors`,
+   `Limit` and the pattern cannot tell a field write from a global write. Only
+   the compiler's diagnostics are evidence.
+
+**Still true until the port lands:** phase 7 builds the nine UI bundles from
+source and serves them over the existing prebuilt relay, and says so in its
+output. The served artifact is not yet fully from-source.
