@@ -12103,3 +12103,40 @@ Fixed by balancing the call.
 
 After that the relay should link, and phase 7 can build and serve it from
 source.
+
+### Round 64: the relay builds; a startup regression is open
+
+**The relay now compiles and links from source** with the compiler under test:
+
+    -> /tmp/relay-port   (22010400 bytes)
+
+The last package, `main`, needed three things: the seed relay lists became
+functions (`crawlSeeds()`, `bootstrapSeeds()`) rather than package vars assigned
+from `main`; `runRelay`'s fallback handler became a `relayCtx` method reached
+through a new `server.HTTPServeFunc` interface; and the startup hook became a
+`relayCtx` method reached through `server.ReadyFunc`, forwarding from a new
+transport `ReadySink` interface (`Server.OnReady` is a method now, and the func
+field it used is `readyFn`). `kind`'s `init()` also had a duplicate
+`SovereignRestoreArena` from an earlier fold-in, which panicked with
+"sovereign: restore underflow".
+
+**The structural rule, now fully established.** The language rejects EVERY
+binding that references an outer local - not just a closure over a local, but a
+closure over a PARAMETER, and a method value (`s.onReady`, `state.add`). So a
+callback that needs state cannot be a func value at all; it has to be a method
+reached through an interface, and the interface has to be the field type. That
+is what `HTTPServeFunc`, `ReadyFunc`, `ReadySink`, `Binder` and `EntryHandler`
+are, and why `Server.OnReady` changed from a field to a method.
+
+**OPEN: the built relay does not start.**
+
+    ./smesh version        -> smesh 0.6.11                (the Oct 1 prebuilt, rc=0)
+    /tmp/relay-port version -> panic: sovereign: nil receiver  (rc=134)
+
+This is a REGRESSION introduced by the port, not a pre-existing issue - an
+earlier note in this file said otherwise and the comparison behind it was wrong
+(it ran `./smesh` with no argument, which starts the relay rather than the
+version path). The panic happens before or during `main`, since `case "version"`
+only writes to stdout. The next round's first job is to find the nil receiver;
+phase 7's "rebuild and serve from source" wiring must wait for it, because a
+build that does not run is not a served artifact.
