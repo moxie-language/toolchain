@@ -56,6 +56,13 @@ while the dispatch still returned zeros. The two changes are verified separately
 only in that both compilers pass every gate; the keep pass has no fixture of its
 own yet.
 
+Phase 7 rebuilds the app's tracked `web/static/*.wasm` and restores the ones the
+compiler reproduced byte for byte; the driver now ends every run with a
+`tree-cleanliness` gate that fails when the checkout has tracked modifications.
+The remaining item is running the app's smoke suite against a STAGED copy of the
+app tree rather than the checkout, which is what would let the app's own
+arrangement stop being this gate's exception.
+
 The legacy mirror of the keep pass is in
 `legacy/transform/interface-lowering.go` (`shapeMethods`/`addShapeMethods`/
 `shapeMethod` plus a shape fallback in the satisfies pass), and is UNVERIFIED:
