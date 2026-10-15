@@ -11753,3 +11753,64 @@ while phase 0a still ran it natively - a silent loss of coverage produced by a
 comment, which is the same shape as the bug this round was classifying. The
 fixture's comment now describes the marker without spelling it, and the wasm
 unit is confirmed present and passing.
+
+## Round 57: the smesh UI chapter
+
+**What was already true, and is now verified rather than assumed.** The smesh
+front end is real (20K lines of Moxie across `web/wasm/app/`) and it is built
+entirely on the stdlib framework. The modules it imports are all
+`git.smesh.lol/moxie/src/web/*`:
+
+| imported by the UI | stdlib source |
+| --- | --- |
+| `web/dom` (8 files) | `src/web/dom/{dom,dom_wasm,types}.mx` |
+| `web/localstorage` (4) | `src/web/localstorage/{localstorage,localstorage_wasm}.mx` |
+| `web/ws` (2) | `src/web/ws/{ws,ws_wasm,types}.mx` |
+| `web/subtle` (2) | `src/web/subtle/{subtle,subtle_wasm}.mx` |
+| `web/callback` (1) | `src/web/callback/{callback,dispatch}.mx` |
+
+There is **no app-local copy** of any of them: `web/common/` holds only
+domain code (`nostr`, `mls`, `marmot`, `relay`, `crypto`, `helpers`, `mw`,
+`accum`) and per-API jsbridge declarations (`jsbridge/signer` is the
+`window.nostr` surface, not a framework layer). The audit that established this
+is a directory check plus the import list, both reproducible in one command.
+
+**What was not true: the smoke tests could not address the UI.** They found
+notes with `div[style*="border-bottom"]` and pages by a heading's *translated*
+text, so a restyle or a translation broke a test with nothing wrong. Five hooks
+now say what an element IS, and the suite uses them:
+
+| hook | on | replaces |
+| --- | --- | --- |
+| `data-note` / `data-note-id` | every rendered note (`renderNote`) | a CSS-presentation selector |
+| `data-nav` | each of the four sidebar entries | a class-free button selector |
+| `data-page` | the root, written by `switchPage` | a translated heading |
+| `data-compose-input` | both composer textareas | "the textarea" (the signer panel has one too, and it comes first) |
+
+`data-page` is written even when the route does not change, because a fresh
+sign-in lands on the feed with `activePage` already `"feed"`, so the early
+return left the attribute unset.
+
+**The suite went from 6 cases to 11, and from 1 xfail to 0.** New coverage:
+sign-in lands on the feed with all four tabs; seeded notes render, asserted by
+event id; sidebar navigation across all four pages; publishing from the
+composer and seeing the note appear; the settings page renders its own content.
+The stale `xfail` on the version case is gone - `data-version` has been set for
+a while and the case passes.
+
+**Also removed:** `appendNote`, dead since `renderNote` became the live path. It
+was found by building the `data-note` hook into it and seeing the attribute
+never appear in the bundle - a cheap way to find code the compiler has already
+decided is unreachable.
+
+**Gates after the change** (the compiler is untouched by all of this: the only
+repo with changes is smesh):
+
+| gate | result |
+| --- | --- |
+| 0a | **83/83** - includes the browser-smoke unit, so the UI itself is exercised here |
+| 0b | **45/45** |
+| 1 | **4/4** |
+| 3 / 4 / 6 | **PASS** |
+| 5 | **79/79** - up one: `slice_cursor_zero_fill` is now enumerated |
+| smesh `test_app.py` | **11 passed** |
