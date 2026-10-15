@@ -6,6 +6,53 @@ taken, the findings that motivated them, and the two designs in flight
 
 ## REMAINING WORK (as of round 73) - read this first
 
+### Repository boundaries - read this before the queue
+
+Four trees, and relay work goes in exactly one of them:
+
+| tree | what it is |
+| --- | --- |
+| this checkout | the compiler and its stdlib (`src/`, `_mxc_stage4/`, `legacy/`, `tests/`) |
+| `../nostr` | the shared protocol library: events, filters, tags, kind, crypto, `ws`, `lol` |
+| `../morly` | **the relay** (`git.smesh.lol/morly`) |
+| `../smesh` | **the web app only** (`git.smesh.lol/smesh`) |
+
+The relay was carved out of smesh on 2026-10-01 (`morly b7dba37`, "the relay,
+wired to the shared nostr module") and smesh's copy was never deleted. That is
+what made item 0's port land on the wrong tree: smesh still had `pkg/`, `main.mx`
+and `cmd/`, so on 2026-10-15 the port was done there (`smesh
+a86a03e6..0cf58ea3`) and then redone correctly in morly (`morly
+169bc7e..642db70`). A session that finds a relay in smesh has found a leftover,
+not a second relay.
+
+Fixed, with the evidence that says the removal was safe:
+
+- smesh's relay source is gone (`smesh 3da21297`): `pkg/`, `cmd/`, the three root
+  `main*.mx`, `go.mod`, six tracked relay binaries (one of them a file literally
+  named `smesh`), `test_old`. The app's own closure is the proof nothing here
+  needs them - every entry under `web/` reaches 35 packages, **all** under
+  `web/`, plus the moxie stdlib; nothing under `web/` or `test/` imported
+  `git.smesh.lol/smesh/pkg`. The vendored `smesh/pkg/nostr` went with it: it was
+  a strict subset of `../nostr` (57 files against 73) that only the relay
+  packages consumed, so there was nothing to repoint.
+- smesh's relay was not ahead of morly. No commit touched `smesh/pkg/` between
+  the carve and the port except the port itself, and `morly/pkg` is a superset
+  apart from smesh's `lol` (now in `../nostr/pkg/lol`) and the vendored nostr.
+- phase 7 no longer builds the relay from the app: it takes
+  `MOXIE_RELAY_REPO` (default `../morly`) and stages a **copy** of
+  `web/static` in a temp dir before building the bundles, so a green run leaves
+  the app checkout untouched (`moxie 8874ca31`). Before that, phase 7 wrote nine
+  tracked bundles in place and left smesh dirty on every run.
+
+Residual, deliberately not done yet: the relay's integration and browser tests
+still live in `smesh/test/` (they drive a morly-built relay through
+`SMESH_RELAY_BIN`, which is how phase 7 runs `test_app.py`). morly has the unit
+layer only (`make test-unit`, 26 packages / 370 tests). Moving the
+relay-behaviour half (`test_relay_ingest_workers`, `test_relay_policy`,
+`test_relay_roundtrip`, `stress_metrics`) to morly, and re-measuring
+`morly/docs/relay-test-coverage.md`, is the next step of this cleanup - the
+suite's two halves are now in different repos from the code they test.
+
 ### 0. Package initialization order, and a keep pass that matched implementations by name  [COMPILER, both fixed]
 
 Two defects, both hit by the smesh relay port in one afternoon, both found by
