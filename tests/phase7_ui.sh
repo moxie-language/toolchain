@@ -76,6 +76,18 @@ rm -rf "$BUILD_LOG"
 # exactly the state a broken compiler would keep green.
 RLY="${MOXIE_RELAY_REPO:-$(cd "$ROOT/.." && pwd)/morly}"
 [ -d "$RLY" ] || fail "preconditions" "relay repo not found at $RLY (set MOXIE_RELAY_REPO)"
+
+# The app repo must not carry relay source. The relay was carved out to $RLY and
+# its copy stayed behind in the app for two weeks, which is how a whole relay
+# port landed in the wrong repo: the source was sitting there, so building the
+# relay from the app looked like the right thing. A relay package, main.mx or
+# cmd/ in the app tree is that mistake coming back, and this phase is where it
+# has to show, because this is the phase that builds both sides.
+for f in pkg main.mx cmd; do
+	if [ -e "$APP/$f" ]; then
+		fail "preconditions" "$APP/$f exists - the relay's source belongs in $RLY, not the app repo"
+	fi
+done
 RELAY_BIN="$(tempdir ui)/morly"
 if ! (cd "$RLY" && MOXIEROOT="$ROOT" "$MOXIE" build -o "$RELAY_BIN" . >"$BUILD_LOG" 2>&1); then
 	fail "relay-build" "$(grep -m1 -oE '^; .*|mxc: .*' "$BUILD_LOG" | tail -1 | cut -c1-160)"
