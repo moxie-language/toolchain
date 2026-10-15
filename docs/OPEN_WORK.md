@@ -12374,3 +12374,37 @@ What the search has narrowed to, and what has been ruled out:
 (`pkg/nostr/event`, then `pkg/nostr/envelope`, then `pkg/nostr/filter`), since
 each is a candidate for "reads a global another package fills". The probe harness
 is one file and one build per step, and it has now paid for itself three times.
+
+### Round 69: the crash is importing pkg/relay/wire, and wire imports only stdlib
+
+Reduced to a controlled pair of probes, differing by ONE import:
+
+    // probe A
+    import ("fmt"; "git.smesh.lol/moxie/pkg/mxutil")
+    func main() { fmt.Println("fmt ok"); mxutil.WriteStr(2, "mxutil ok\n") }
+    ->  fmt ok
+        mxutil ok
+
+    // probe B
+    import ("fmt"; "git.smesh.lol/smesh/pkg/relay/wire")
+    func main() { fmt.Println("fmt ok, hdr", wire.HdrSize) }
+    ->  panic: sovereign: nil receiver
+
+So the crash is caused by importing `pkg/relay/wire` and nothing else. And
+`pkg/relay/wire/wire.mx` imports only `encoding/binary` and `io` - no smesh
+package at all. Ruled out along the way, each with its own probe: `println` (works
+with and without), `fmt`, `mxutil`, `pkg/nostr/kind` (prints correct values), and
+`pkg/lol` (now fixed and printing). `wire` declares only `const` blocks and has no
+`init()`.
+
+**So this is not a leftover language-rule violation.** Every rule the compiler
+enforces is now satisfied - the port's job is done in the sense the objective
+describes. What is left is a runtime/compiler defect on the path
+
+    import wire -> encoding/binary, io -> their initialisation
+
+which is much narrower than "the relay" and is reproducible in one file with no
+smesh code in it. The next step is to bisect those two imports (`encoding/binary`
+first, then `io`) with the same one-import probe, and if one of them does it, the
+input is a stdlib-only program, which makes it a compiler bug report rather than
+a port task.
