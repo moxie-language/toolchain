@@ -12060,3 +12060,46 @@ and have `server.New` take it, which is simpler but changes two call sites and
 the "or spawn fresh when not pre-spawned" fallback. Both are small; neither
 should be guessed at, because the fallback exists for test binaries and getting
 it wrong makes the relay spawn twice.
+
+### Round 63: broadcast decided, and the whole library layer ported
+
+**`broadcast.PreSpawn` is an explicit value now.** `PreSpawn()` returns a
+`*PreSpawned` carrying the forked worker's four channels; `server.New(db, cfg,
+pre)` takes it; `startBroadcastWorker` attaches it; a nil or already-used
+`PreSpawned` spawns fresh, which is the test-binary path. The five package
+globals and the `preSpawned` flag are gone. `main` holds the value across
+`config.Load()` and hands it to the server, which is the order the early fork
+needs.
+
+**Ported this round, each verified by the build advancing past it:**
+`pkg/relay/config` (dotenv is a field on `C`, and `estr`/`eint`/`elist`/`ebool`/
+`edursec`/`edurms`/`efloat` are methods, because the dotenv value depends on
+`AppName` which only `Load` knows; `PrintHelp`'s closures became
+`helpSection`/`helpVar`), `pkg/transport` (`globalSigFD` init, `botAgents` a
+function because one init per package, `*runtime.Arena`, and `waitStart`/
+`bodyStart` are `int64` since `metrics.Now` returns UnixNano),
+`pkg/relay/server` (the eight named slice types became `[]chan T`, `tickCount`
+moved onto `Server`, and `filter.S` gained `Tainted` - collected by
+`UnmarshalFilters`, exposed as `Req.Tainted()`/`CountRequest.Tainted()` so the
+undersized-hex signal travels with the parsed value), and `pkg/store/engine`
+(method values and the append-to-captured-local rule; loops moved into
+`ScanWith`/`ForEachDo`).
+
+**A pre-existing syntax error was found in `main.mx`:** line 108 had a stray
+closing paren, and `git show a86a03e6~1:main.mx` has it too - it predates this
+work. The compiler's parser rejects it; whatever built the Oct 1 relay did not.
+Fixed by balancing the call.
+
+**What remains in `main` (the last package):**
+
+1. `seedRelays()` assigns `crawlSeeds` and `bootstrapSeeds`, which is the same
+   global-mutation shape as `broadcast` had. The seeds are read in `runRelay`
+   (line ~981) and one other place (~751). Either make them parameters of the
+   functions that read them, or a holder, exactly as `PreSpawned` was.
+2. `runRelay__anon1` captures `selfHost`, `bsrv`, `cfg`; `runRelay__anon2`
+   captures `cfg`, `listenAddr`. Both are server-callback closures; the fix is
+   the same shape as everything else - pass the values as parameters through a
+   named function, or capture nothing and read from a holder.
+
+After that the relay should link, and phase 7 can build and serve it from
+source.
