@@ -48,7 +48,22 @@ RUNDIR="${UNITRUN_DIR:-$ROOT/tmp/unitrun}"
 # only the throwaway build dirs go outside it.
 WORKROOT="${UNITRUN_WORKROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/moxie-unitrun}"
 JOBS="${UNITRUN_JOBS:-4}"
-TIMEOUT="${UNITRUN_TIMEOUT:-900}"
+# The default is per CORE, not a flat wall-clock number: a unit's wall time is
+# what it costs divided by how many other units are competing for the CPU with
+# it, so the same fixture needs several times as long at -j 4 as at -j 1, and a
+# flat 900s turned a slow-but-fine unit into a red TIMEOUT. Measured:
+# 0a/http_header_api compiles a ~250-package closure and takes 1129s at -j 1
+# against a warm cache; the same unit was killed at 900s when it shared the box.
+TIMEOUT="${UNITRUN_TIMEOUT:-$((1800 * $(nproc 2>/dev/null || echo 1)))}"
+# A unit whose cost is a known constant rather than a function of parallelism.
+# http_header_api is the one: 1129s measured alone, so 1800s is 60% headroom
+# over the measurement, not a guess. Applied only while the caller has not set
+# a timeout of their own - an explicit --timeout is an instruction, not a
+# default to improve on.
+declare -A UNIT_TIMEOUT=(
+	["0a/http_header_api"]=1800
+)
+TIMEOUT_EXPLICIT=0
 PHASES=""
 ONLY=""
 FAILED_ONLY=0
@@ -95,7 +110,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	--jobs | -j) JOBS="${2:-}"; shift 2 ;;
-	--timeout) TIMEOUT="${2:-}"; shift 2 ;;
+	--timeout) TIMEOUT="${2:-}"; TIMEOUT_EXPLICIT=1; shift 2 ;;
 	--failed) FAILED_ONLY=1; shift ;;
 	--force) FORCE=1; shift ;;
 	--fail-fast) FAIL_FAST=1; shift ;;
@@ -307,8 +322,12 @@ report_unit() {
 
 # -------------------------------------------------------------------- running
 launch_unit() {
-	local i="$1" unit="${UNITS[$1]}" phase="${PHASE_OF[$1]}" d rc
+	local i="$1" unit="${UNITS[$1]}" phase="${PHASE_OF[$1]}" d rc ut
 	d="$(state_dir "$unit")"
+	ut="$TIMEOUT"
+	if [ "$TIMEOUT_EXPLICIT" = 0 ] && [ -n "${UNIT_TIMEOUT[$unit]:-}" ]; then
+		ut="${UNIT_TIMEOUT[$unit]}"
+	fi
 	# The phase script needs TMPROOT before it can name its unit dir, so the
 	# path is derived here once from the unit id and exported.
 	UNIT_SAFE="$(echo "$unit" | tr -c 'A-Za-z0-9_.-' '_')"
@@ -323,11 +342,11 @@ launch_unit() {
 	if [ -z "${UNIT_INDEX[$i]}" ]; then
 		MOXIE="$MOXIE" MOXIEROOT="$ROOT" TMPROOT="$WORKROOT/$UNIT_SAFE" \
 			STATUSFILE="$d/status" \
-			timeout -k 30 "$TIMEOUT" bash "$ROOT/tests/${PHASE_MONO[$phase]}" >"$d/out" 2>"$d/err"
+			timeout -k 30 "$ut" bash "$ROOT/tests/${PHASE_MONO[$phase]}" >"$d/out" 2>"$d/err"
 	else
 		MOXIE="$MOXIE" MOXIEROOT="$ROOT" TMPROOT="$WORKROOT/$UNIT_SAFE" \
 			UNIT_NAME="${unit#*/}" STATUSFILE="$d/status" \
-			timeout -k 30 "$TIMEOUT" bash "$ROOT/tests/${PHASE_SCRIPT[$phase]}" --unit "${UNIT_INDEX[$i]}" \
+			timeout -k 30 "$ut" bash "$ROOT/tests/${PHASE_SCRIPT[$phase]}" --unit "${UNIT_INDEX[$i]}" \
 			>"$d/out" 2>"$d/err"
 	fi
 	rc=$?

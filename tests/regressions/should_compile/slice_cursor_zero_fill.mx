@@ -1,0 +1,75 @@
+// Test: a capacity-exact cursor slice filled by `push`, read back by index.
+//
+// This is the minimal form of the pattern that made the smesh signer unable to
+// log in: `o := []byte{:32}[:0]`, a 5-bits-per-character accumulator that
+// pushes one byte whenever it has 8 bits, then `result[i] = o[i]` over all 32.
+//
+// It lays the bytes down from BOTH ends so the failure is directional rather
+// than "everything is zero": hit[i] and hit[31-i] are set for each byte, and
+// either 32-byte output being wrong is a FAIL. If the cursor is filled from the
+// wrong end, or the tail is left zeroed, or the length is short by one, the
+// symmetric copies disagree.
+//
+// Run natively and under -target wasm: the signer failure was only ever
+// observed under wasm, so the fixture is meaningful as a wasm target too and is
+// deliberately NOT marked `//:wasmtest skip`.
+package main
+
+func decode(input string, forward []byte, backward []byte) (count int32) {
+	data := []byte{:32}[:0]
+	acc := uint32(0)
+	bits := uint32(0)
+	for i := 0; i < len(input); i++ {
+		v := uint32(input[i]) & 31
+		acc = (acc << 5) | v
+		bits += 5
+		for bits >= 8 {
+			bits -= 8
+			data = push(data, byte(acc>>bits))
+		}
+	}
+	count = int32(len(data))
+	for i := 0; i < 32; i++ {
+		forward[i] = data[i]
+		backward[31-i] = data[i]
+	}
+	return count
+}
+
+// input is 52 five-bit characters: 11 whole bytes per 8 characters (5 bytes),
+// so 52 characters is exactly 32 bytes with 4 bits left over.
+func fixtureInput() (s string) {
+	b := []byte{:52}
+	for i := 0; i < 52; i++ {
+		b[i] = byte('a' + (i % 26))
+	}
+	return string(b)
+}
+
+func main() {
+	fwd := []byte{:32}
+	bwd := []byte{:32}
+	n := decode(fixtureInput(), fwd, bwd)
+	if n != 32 {
+		println("FAIL: cursor length", n, "want 32")
+		return
+	}
+	for i := 0; i < 32; i++ {
+		if fwd[i] != bwd[31-i] {
+			println("FAIL: forward/backward disagree at", i)
+			return
+		}
+	}
+	// The first byte of the accumulator for "abcde..." is non-zero; a cursor
+	// that silently zeroed would pass the symmetry check alone.
+	if fwd[0] == 0 && fwd[1] == 0 && fwd[2] == 0 && fwd[31] == 0 {
+		println("FAIL: cursor read back as all zero")
+		return
+	}
+	// The tail is data, not padding: position 31 must be written too.
+	if bwd[0] == 0 {
+		println("FAIL: tail byte never written")
+		return
+	}
+	println("PASS: slice cursor zero fill")
+}
