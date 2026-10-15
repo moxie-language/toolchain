@@ -12010,3 +12010,53 @@ which shadowed its own named results.
    the defer statement and whose call happens at return, which is the same
    timing without a closure. Note `metrics.WALAppendNs` is also nil until
    `init()` runs, so a deferred Observe must not fire before then.
+
+### Round 62: method values are captures too, and the broadcast design question
+
+**The finding: a METHOD VALUE is a capture.** The language rejects not only
+`func(){ ...outer... }` but `state.add`, `sink.add` and `en.Event.Marshal` used
+where a function value is wanted - the receiver rides in a hidden closure and the
+diagnostic is the same `closure captures outer variable(s) [recv]`. Three
+structural consequences:
+
+  * `sorted.File.ScanWith(start, end, Binder)` and a `Binder` interface: the scan
+    loop must live in the package that can name the binder, so the consumer
+    passes an accumulator rather than closing over one.
+  * `wal.WAL.ForEachDo(EntryHandler)` / `ForEachFromDo(startSer, EntryHandler)`
+    for the same reason. The func-valued forms stay for callers with a genuine
+    free function.
+  * A scan callback that APPENDS to a captured local slice is rejected too, so
+    `GetReferencingEvents` and `GetETagTargets` accumulate through a
+    `serialSink` - the shape `collectSerials` already used for exactly this
+    reason, which its comment records.
+
+**Also done:** `store/wal`'s `var ErrCheckpointStale` (zero + init) and its two
+defer closures, converted to `defer h.Observe(v)` - arguments evaluate at the
+defer statement, the call happens at return, no closure. `pkg/acl`'s `Open` and
+`ReadOnly` receivers to pointers (`Open`/`ReadOnly` were value receivers, so the
+policy interface needed `&acl.Open{}` at its one construction site).
+`pkg/relay/pipeline`'s two timing defers the same way. `pkg/relay/wire`'s
+`var _ = (*event.E)(nil)` and its now-unused import.
+
+**The blocker is a design question: `broadcast.PreSpawn()`.** It assigns five
+package globals (`preSpawnedIn/Out/Ready/Done`, `preSpawned`) and is called from
+`main` BEFORE `config.Load()`, deliberately, so relay mode does not fork in the
+middle of serving. Three facts pin it:
+
+  * the assignment is a global mutation, so it must happen in `init()` - but it
+    cannot, because `init()` runs before `main` chooses a mode and a non-relay
+    command (sync, crawl, outbox) must not pay for the fork;
+  * `broadcast.New()` runs twice (`server.mx:278` and `:292`) and reads those
+    globals, and `Server.Close` closes the pre-spawned worker;
+  * a `var` may not carry an initializer either, so the globals cannot be built
+    at declaration.
+
+The choices are worth a human decision because they change an API:
+(a) move the pre-spawned channels into a sovereign holder that `PreSpawn`
+returns and `server.New` accepts, threading it through the one call chain
+(`main -> server.New -> Broadcaster`) - the language's own answer for mutable
+package state; or (b) make `PreSpawn` build and return a `Broadcaster` directly
+and have `server.New` take it, which is simpler but changes two call sites and
+the "or spawn fresh when not pre-spawned" fallback. Both are small; neither
+should be guessed at, because the fallback exists for test binaries and getting
+it wrong makes the relay spawn twice.
