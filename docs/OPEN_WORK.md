@@ -12343,3 +12343,34 @@ NOTHING is the key signal: the crash is in an `init()`, so the search is for an
 `init()`/`__varinit` that dereferences a global another package's init has not
 filled yet, which is a real ordering hazard now that the port turned several
 lazy initialisers into `init()`s.
+
+### Round 68: the crash is inside importing pkg/relay/wire, before main
+
+The minimal repro is now one import:
+
+    package main
+    import "git.smesh.lol/smesh/pkg/relay/wire"
+    func main() { println("main reached") }
+
+crashes with `sovereign: nil receiver` and **never prints "main reached"**. So
+the nil method call happens during package initialisation of `wire` or something
+it imports, and it is not `lol` any more (that is fixed and probed working).
+
+What the search has narrowed to, and what has been ruled out:
+
+  * `wire` itself declares only `const` blocks - no `var`, no `init()` - so the
+    call is not in wire's own initialisation code;
+  * `pkg/nostr/kind`'s `init()` is the ONLY `init()` in wire's import closure
+    (`grep -rln '^func init()' pkg/` lists nine; none of the others is reachable
+    from wire), and a standalone probe of `kind` prints correct values;
+  * so the likely shape is an ORDERING hazard: a global that one package's
+    `init()` fills being read by another package's `__varinit` or `init()` that
+    runs first. The port created exactly this risk by turning lazy initialisers
+    (`ensureKinds`, `ensureDNSAddr`, `globalSigFD`, `dotenv`) into `init()`s, and
+    Go-style package init order is dependency order - so a package-level VALUE
+    that needs another package's init to have run can now be nil.
+
+**Next measurement:** bisect wire's imports with the same one-import probe
+(`pkg/nostr/event`, then `pkg/nostr/envelope`, then `pkg/nostr/filter`), since
+each is a candidate for "reads a global another package fills". The probe harness
+is one file and one build per step, and it has now paid for itself three times.
