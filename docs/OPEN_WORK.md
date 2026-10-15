@@ -11932,3 +11932,41 @@ bundles and `tmp/`:
 **Still true until the port lands:** phase 7 builds the nine UI bundles from
 source and serves them over the existing prebuilt relay, and says so in its
 output. The served artifact is not yet fully from-source.
+
+### Round 60: the envelope captures are gone, and the map-cache problem
+
+**Done: every capturing closure in `pkg/nostr/envelope` is converted.** 11
+`Marshal` methods built their payload in `func(bst []byte) (o []byte)` closures
+that referenced `en`. Closures do not capture, so each is now written inline
+between two new helpers:
+
+    AppendEnvelopeHead(dst, label)   // `["<label>",`
+    AppendEnvelopeTail(dst)          // `]`
+
+`Marshal` (the callback form) stays for the callers that pass a real,
+non-capturing function, and is built from the same two helpers. One method value
+was also a capture: `Marshal(b, AuthLabel, en.Event.Marshal)` — a method value
+carries its receiver — and is inlined as `en.Event.Marshal(b)`.
+
+Two fixer defects were found and repaired on the way, both worth remembering:
+`<-chan struct{}` in a result list was rewritten as `(v <-chan struct) {}`
+(double brace, four parse errors), and the first inline pass left stray
+`return`s and lost indentation. The type/name test now treats anything with a
+brace or a channel arrow as a type.
+
+**`pkg/nostr/ws/dns.mx`**: `ensureDNSAddr` is `init()` now (it assigned
+`dnsAddr`, `dnsAddrInit`).
+
+**The open design question: a package-level map cache is not writable.**
+`resolveHost` keeps `dnsCache map[string]dnsEntry` and does
+`dnsCache[host] = ...`, and the compiler rejects that too — `checkGlobalStores`
+treats `SSAMapUpdate` on a global as a global mutation, and a package-level `var`
+may not carry an initializer either. So a lazily-filled package map is not
+expressible in this language at all. The choice is between a resolver struct
+whose cache moves with it (the sovereign-holder shape the language wants) and
+resolving on each dial, and that is a behaviour decision, not a mechanical one,
+so it is left for the next round with `dnsTTL = 24h` in mind.
+
+**Then:** `pkg/broadcast/broadcast.mx` (6 sites, the lazy `preSpawn`),
+`pkg/relay/config/config.mx` (1), `pkg/transport/transport.mx` (1). Same shape
+as `kind` and `dns`.
