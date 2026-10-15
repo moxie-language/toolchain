@@ -45,11 +45,38 @@ the method and the interface, not a runtime test - a correct compiler must
 REJECT the file, so the pin belongs in `tests/restrictions` once the check
 exists.
 
-**The compile check: LANDED.** `checkIfaceSatisfied` in `_mxc_stage4/ssa_builder.mx`,
+**The compile check: status - the shape+name rule landed and was REVERTED the
+same evening; the record below is what three attempts cost.** The check that
+shipped in `eb17ab5f` (shape match AND missing name, embedded types skipped) was
+right on its fixture and on the relay, and then failed the wider gates:
+
+  * `0a/iface_ptr_recv_crosspkg` and every error type: the universe `error`
+    interface carries an implicit `String() string` for fmt, which
+    `emitIfaceAssertOK` already drops from the required set whenever `Error` is
+    present. The check needs the same rule.
+  * `internal/trace/version.Version`: a named type over a builtin inherits the
+    builtin `String()`, so `String` on a basic-underlying type is always
+    satisfied and must not be reported. Neither of those two is a reason to
+    abandon the shape; both are rules the dispatch already encodes.
+  * The third failure is the one to solve first: with those two rules added, the
+    45-package stdlib sweep died with `arena: region table full` inside the
+    compiler's own type-checking phase. The check allocates (type strings, tuple
+    walks) on whatever arena is current while CHECKING, and the sweep is the
+    biggest closure in the tree. Any implementation has to do its work in the
+    compile arena the way the other emit-time checks do, or avoid per-method
+    allocation entirely.
+
+Do not retry this by writing a method-set walker. Use the resolution the compiler
+already has (`reportUndefinedField`'s lookup, or the embed walk inside
+`resolveMethodCallWithRecv`) as the "does this type have this method" predicate.
+A shape hint is only sound on top of a complete method set; a hand-written
+walker was wrong three times before it was wrong about promotion.
+
+**What the first attempt (eb17ab5f) did, before it was reverted.** `checkIfaceSatisfied` in `_mxc_stage4/ssa_builder.mx`,
 called from `coerceToInterface`, rejects a concrete type boxed into a non-empty
 interface when it declares a method with the interface method's exact parameter
 and result types under a DIFFERENT name and does not declare the interface's
-name. Pin: `tests/restrictions/reject_iface_method_name_mismatch.mx`.
+name. Pin (removed with the revert): `tests/restrictions/reject_iface_method_name_mismatch.mx`.
 
 Both conditions are load-bearing. The same-shaped-method condition keeps an
 interface the type does not resemble at all out of the check (answering that
