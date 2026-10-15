@@ -48,6 +48,19 @@ fail() {
 	exit 1
 }
 
+# The app checks in its built bundles under web/static. Building them from the
+# compiler under test is the point of the phase, but a run must not leave the
+# app repo dirty when the artifacts came out byte-identical - which is the
+# normal case. Snapshot before, restore on the way out.
+WASM_SNAPSHOT="$(tempdir ui)/wasm-snapshot"
+mkdir -p "$WASM_SNAPSHOT"
+for w in "$APP"/web/static/*.wasm; do
+	[ -f "$w" ] && cp -p "$w" "$WASM_SNAPSHOT/$(basename "$w")"
+done
+restore_wasm() {
+	rm -rf "$WASM_SNAPSHOT"
+}
+
 [ -d "$APP" ] || fail "preconditions" "app repo not found at $APP (set MOXIE_UI_APP)"
 [ -f "$APP/test/test_app.py" ] || fail "preconditions" "no smoke suite at $APP/test/test_app.py"
 [ -x "$MOXIE" ] || fail "preconditions" "compiler under test not executable: $MOXIE"
@@ -88,6 +101,19 @@ done
 if [ -n "$build_failed" ]; then
 	fail "build" "$build_failed"
 fi
+
+# Put back any bundle the compiler reproduced byte-for-byte, so a green run
+# leaves the app checkout as it found it; one that actually differs stays
+# rebuilt, because that difference is the finding.
+restored=0
+for w in "$WASM_SNAPSHOT"/*.wasm; do
+	[ -f "$w" ] || continue
+	b="$(basename "$w")"
+	if cmp -s "$w" "$APP/web/static/$b"; then
+		cp -p "$w" "$APP/web/static/$b"
+		restored=$((restored+1))
+	fi
+done
 
 # A served build needs the module AND the staged runtime beside it; a build that
 # emitted the module but not $runtime/bridge-common.mjs would serve a page that
