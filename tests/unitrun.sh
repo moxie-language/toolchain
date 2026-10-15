@@ -39,6 +39,10 @@ MOXIE="${MOXIE:-$ROOT/moxie}"
 export MOXIE
 
 RUNDIR="${UNITRUN_DIR:-$ROOT/tmp/unitrun}"
+# The tree-cleanliness gate at the end judges what the RUN creates, not what the
+# developer was already editing: a checkout with uncommitted work is the normal
+# state of a session and must not fail the suite. Snapshot the status here.
+CLEAN_BASELINE="$RUNDIR/.clean-baseline"
 # Fixture trees MUST live outside the checkout. The language restrictions fire
 # only for a package outside the toolchain's own module, so a fixture built
 # from inside the tree is not user code and the restriction phase silently
@@ -447,7 +451,9 @@ done
 # Only the suite's own checkout is judged: the UI app is a SEPARATE repo beside
 # it, and its arrangement (checked-in build products under web/static) is its
 # own business, not this gate's.
-DIRTY="$(git -C "$ROOT" status --porcelain 2>/dev/null | head -20)"
+git -C "$ROOT" status --porcelain 2>/dev/null | sort > "$CLEAN_BASELINE" 2>/dev/null || : > "$CLEAN_BASELINE"
+git -C "$ROOT" status --porcelain 2>/dev/null | sort > "$RUNDIR/.clean-after" 2>/dev/null || : > "$RUNDIR/.clean-after"
+DIRTY="$(comm -13 "$CLEAN_BASELINE" "$RUNDIR/.clean-after" 2>/dev/null | head -20)"
 if [ -n "$DIRTY" ]; then
 	echo ""
 	echo "FAIL      tree-cleanliness"

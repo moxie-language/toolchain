@@ -2017,8 +2017,9 @@ func (fb *ssaFuncBuilder) coerceToInterface(val SSAValue, targetType Type) (s SS
 	if targetType == nil || val == nil || val.SSAType() == nil {
 		return val
 	}
-	if _, isIface := SafeUnderlying(targetType).(*TCInterface); isIface {
+	if iface, isIface := SafeUnderlying(targetType).(*TCInterface); isIface {
 		if _, alreadyIface := SafeUnderlying(val.SSAType()).(*TCInterface); !alreadyIface {
+			fb.checkIfaceSatisfied(val.SSAType(), iface, targetType)
 			mi := &SSAMakeInterface{X: val, IType: targetType}
 			mi.typ = targetType
 			mi.name = fb.nextName()
@@ -2027,6 +2028,224 @@ func (fb *ssaFuncBuilder) coerceToInterface(val SSAValue, targetType Type) (s SS
 		}
 	}
 	return val
+}
+
+// checkIfaceSatisfied rejects the one boxing shape that makes dispatch answer
+// ZERO instead of failing: the type carries a method with the interface
+// method's exact parameter and result types under a DIFFERENT name, and not
+// under the interface's name either.
+//
+// Why this shape: dispatch resolves an implementation by the interface method's
+// NAME. With no candidate the arm list is empty, emitInvoke emits its zero-init
+// default, and the call returns zero values with no diagnostic - no panic, no
+// link error, nothing. The smesh relay port served "HTTP/1.1 0 OK" and an empty
+// body for a day because *relayCtx satisfied server.HTTPServeFunc through a
+// method named handleFallback; the build stayed green throughout.
+//
+// Both conditions are required, and that is what makes the check safe. Requiring
+// the same-shaped method keeps an interface the type does not resemble at all
+// out of it - that is the older, wider silent-zero question, and answering it
+// means reproducing go/types' whole method set. Requiring the NAME to be absent
+// as well is what makes the shape hint sound: a type that declares only the
+// interface's name is judged, and one that declares both names has the method it
+// needs.
+//
+// A type with an EMBEDDED field is not judged at all. Its method set includes
+// promoted methods, which this scan cannot see, and the shape condition is too
+// weak to stand in for them: *net.TCPConn promotes Close from an embedded conn
+// while declaring SetKeepAliveConfig, which has Close's shape (() error), so a
+// version of this check without the skip rejected net. Promotion is
+// undecidable here, so it is skipped rather than patched.
+func (fb *ssaFuncBuilder) checkIfaceSatisfied(concrete Type, iface *TCInterface, ifaceType Type) {
+	if iface == nil || iface.IsEmpty() {
+		return
+	}
+	if _, isIface := SafeUnderlying(concrete).(*TCInterface); isIface {
+		return
+	}
+	if ssaTypeHasEmbeddedField(concrete, 0) {
+		return
+	}
+	for mi := int32(0); mi < iface.NumMethods(); mi++ {
+		m := iface.Method(mi)
+		if m == nil || m.Name == "" || m.Sig == nil {
+			continue
+		}
+		if ssaTypeDeclaresMethod(concrete, m.Name) {
+			continue
+		}
+		shape := ssaTypeShapeMethod(concrete, m.Sig)
+		if shape == "" {
+			continue
+		}
+		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+		push(cctx.compileErrors, fb.errPos() | ssaTypeStr(concrete) | " does not implement " | ssaTypeStr(ifaceType) | ": missing method " | m.Name | " (it has " | shape | " with the same parameter and result types; give it the interface method's name)")
+	}
+}
+
+// ssaTypeHasEmbeddedField reports whether a type's underlying struct embeds
+// another type, directly or through a struct it embeds.
+func ssaTypeHasEmbeddedField(t Type, depth int32) (ok bool) {
+	if t == nil || depth > 8 {
+		return false
+	}
+	switch tt := t.(type) {
+	case *Pointer:
+		return ssaTypeHasEmbeddedField(tt.Base, depth)
+	case *Named:
+		return ssaTypeHasEmbeddedField(tt.Underlying(), depth+1)
+	case *TCStruct:
+		for fi := int32(0); fi < tt.NumFields(); fi++ {
+			f := tt.Field(fi)
+			if f == nil {
+				continue
+			}
+			if f.Anonymous {
+				return true
+			}
+			if ssaTypeHasEmbeddedField(f.Typ, depth+1) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ssaTypeDeclaresMethod reports whether a type declares a method by name. It is
+// not a method set: embedded fields are not followed, which is why the caller
+// skips types that have any.
+func ssaTypeDeclaresMethod(t Type, name string) (ok bool) {
+	if t == nil {
+		return false
+	}
+	switch tt := t.(type) {
+	case *Pointer:
+		return ssaTypeDeclaresMethod(tt.Base, name)
+	case *Named:
+		for i := int32(0); i < tt.NumMethods(); i++ {
+			if tt.Method(i) != nil && tt.Method(i).Name == name {
+				return true
+			}
+		}
+	case *Basic:
+		for i := int32(0); i < tt.NumMethods(); i++ {
+			if tt.Method(i) != nil && tt.Method(i).Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ssaTypeShapeMethod returns the name of a declared method whose signature has
+// the interface method's parameter and result types, or "" when there is none.
+func ssaTypeShapeMethod(t Type, sig *Signature) (name string) {
+	if t == nil || sig == nil {
+		return ""
+	}
+	switch tt := t.(type) {
+	case *Pointer:
+		return ssaTypeShapeMethod(tt.Base, sig)
+	case *Named:
+		for i := int32(0); i < tt.NumMethods(); i++ {
+			m := tt.Method(i)
+			if m == nil || !ssaSameSigShape(ssaFuncSig(m), sig) {
+				continue
+			}
+			return m.Name
+		}
+	case *Basic:
+		for i := int32(0); i < tt.NumMethods(); i++ {
+			m := tt.Method(i)
+			if m == nil || !ssaSameSigShape(ssaFuncSig(m), sig) {
+				continue
+			}
+			return m.Name
+		}
+	}
+	return ""
+}
+
+// ssaFuncSig is a method's *Signature. TCFunc.Typ is a Type - a name is
+// registered before its signature is known, with nil standing in - so the raw
+// Typ is not a *Signature and every shape comparison would fail.
+func ssaFuncSig(fn *TCFunc) (s *Signature) {
+	if fn == nil {
+		return nil
+	}
+	return fn.Signature()
+}
+
+// ssaSameSigShape compares two signatures on parameter and result TYPES only.
+// A method's signature may or may not carry its receiver as the first
+// parameter depending on how the type checker resolved it, so the
+// implementation's parameters are the interface's, optionally receiver-first.
+func ssaSameSigShape(a, b Type) (ok bool) {
+	as, ok1 := a.(*Signature)
+	bs, ok2 := b.(*Signature)
+	if !ok1 || !ok2 || as == nil || bs == nil {
+		return false
+	}
+	if !ssaSameTypeTuple(as.Results, bs.Results) {
+		return false
+	}
+	an := int32(0)
+	if as.Params != nil {
+		an = int32(as.Params.Len())
+	}
+	bn := int32(0)
+	if bs.Params != nil {
+		bn = int32(bs.Params.Len())
+	}
+	var off int32
+	if an == bn+1 {
+		off = 1
+	} else if an != bn {
+		return false
+	}
+	for pi := int32(0); pi < bn; pi++ {
+		if !ssaSameType(as.Params.At(pi+off).Typ, bs.Params.At(pi).Typ) {
+			return false
+		}
+	}
+	return true
+}
+
+func ssaSameTypeTuple(a, b *Tuple) (ok bool) {
+	an := int32(0)
+	if a != nil {
+		an = int32(a.Len())
+	}
+	bn := int32(0)
+	if b != nil {
+		bn = int32(b.Len())
+	}
+	if an != bn {
+		return false
+	}
+	for i := int32(0); i < an; i++ {
+		if !ssaSameType(a.At(i).Typ, b.At(i).Typ) {
+			return false
+		}
+	}
+	return true
+}
+
+// ssaSameType compares two types by their printed form, so a package's own
+// spelling and another package's alias for the same type agree.
+func ssaSameType(a, b Type) (ok bool) {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return ssaTypeStr(a) == ssaTypeStr(b)
+}
+
+// ssaTypeStr renders a type for a diagnostic; "<unresolved>" when it cannot.
+func ssaTypeStr(t Type) (s string) {
+	if t == nil {
+		return "<unresolved>"
+	}
+	return t.String()
 }
 
 // checkCallArgs reports argument-count and argument-type mismatches, mirroring
