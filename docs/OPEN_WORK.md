@@ -11662,3 +11662,64 @@ framework packages the apps import - `web/dom`, `web/idb`, `web/ws`, `web/sw`,
 `web/subtle`, `web/localstorage`, `web/callback` - all live in `src/web/`, and
 `jsruntime/` is the single JS copy (`$runtime` is 37 modules, staged per build,
 along with `$sw` and `bridge-common.mjs`).
+
+## Round 56: the slice-cursor zeroing, classified
+
+**Verdict: neither an idiom bug nor a present stage4 miscompilation.** The
+pattern is sound in the native path AND under `-target wasm` with the same
+compiler, and it is now pinned by a fixture that runs in both.
+
+The evidence, in the order it was gathered:
+
+1. **Exact-form repro, native.** `/tmp/idprobe2` is the pre-fix `decodeNsec`
+   byte for byte - `data := nsec[sep+1 : len(nsec)-6]`, `o := []byte{:32}[:0]`,
+   `o = push(o, byte(acc>>bits))`, `result[i] = o[i]` - run on the committed
+   compiler. Output: `ok= true out=0000...0003`, the correct TV_SK.
+2. **Exact-form repro, wasm.** The same source built with `-target wasm` and run
+   in real Chromium through `tests/wasm/run.py`:
+
+       stdout: ["PROBE ok= true out= 0000000000000000000000000000000000000000000000000000000000000003\n"]
+
+   So the decoder that was believed to have zeroed does not zero under wasm
+   either. Whatever produced the observed 32 zero bytes in the signer worker is
+   **not reproducible from that source with this compiler**, and the rewrite is
+   not required by a codegen defect.
+3. **A permanent fixture.** `tests/regressions/should_compile/slice_cursor_zero_fill.mx`
+   is the minimal form - a capacity-exact cursor filled by `push` and read back
+   by index - and it lays the bytes from BOTH ends so a short, shifted or
+   zero-tailed fill is directional rather than "all zero". It is deliberately
+   NOT `//:wasmtest skip`, so it runs in phase 0a natively and in phase 5 under
+   wasm and real Chromium. Verified: native `PASS: slice cursor zero fill`, and
+   `tests/wasm/validate.sh` -> `slice_cursor_zero_fill PASS`.
+
+**The sweep.** `[:0]` appears **194 times** across `src/`, `pkg/` and
+`_mxc_stage4/`; 34 of those are the cursor shape (a `[:0]` re-slice followed by
+`push`), and the capacity-exact variant `[]T{:N}[:0]` is the one the signer used.
+No site is itself wrong: every one is exercised by the phases that were already
+green (0a/0b/1 build and run the whole tree, 3 validates the IR, 5 runs 78
+fixtures under wasm), and the fixture above is the direction test for the class.
+The `mxutil.Ensure`/`Reserve`/`GrowCap` helpers are the sanctioned way to grow a
+cursor whose final size is not known; a capacity-exact cursor is correct only
+when the count is exact, which is why the fixture asserts the count.
+
+### Zero-key guard at identity construction
+
+`isZeroKey` now refuses both an all-zero secret key and an all-zero public key
+in `mgmtAddIdentity` and `mgmtNsecLogin`, so no unconstructible identity can be
+stored and the cause is named instead of surfacing as the generic "key
+derivation failed". `schnorr.PubKeyFromSecKey` already refuses a zero scalar
+several layers down, but that is exactly why the old failure was
+indistinguishable.
+
+Verified with three new harness cases in `web/_test/signertest/run.mjs`:
+`nsecLogin` with an all-zero nsec is refused as `zero secret key`, no identity
+is stored, and `addIdentity` with the same nsec is refused. The suite is
+**111 tests, 111 passed** (was 108).
+
+### The heavy unit in the default runner
+
+`tests/unitrun.sh` now scales its default per core - `1800 * nproc` - because a
+unit's wall time is its cost divided by how many other units share the CPU, and
+it carries a `UNIT_TIMEOUT` table for units whose cost is a measured constant.
+`0a/http_header_api` is pinned there at **1800s** (60% over the 1129s
+measurement). An explicit `--timeout` or `UNITRUN_TIMEOUT` still wins over both.
