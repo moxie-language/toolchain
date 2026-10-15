@@ -12235,3 +12235,42 @@ may be nil here), then `pkg/metrics` (13 histograms built in `init()`, each
 dereferenced by `Observe`), then `pkg/transport` (`globalSigFD` from
 `moxie_signal_pipe_init`). A probe that imports one package and calls one accessor
 pins it in one build each.
+
+### Round 66 addendum: the nil receiver is `pkg/lol`, and why the relay still linked
+
+The bisect landed. A probe importing `pkg/lol` fails to COMPILE:
+
+    ; getPrinter__anon3: closure captures outer variable(s) [l, ch, skip]
+    ; getPrinter__anon4: closure captures outer variable(s) [l, ch, skip]
+    ; getPrinter__anon5: closure captures outer variable(s) [l, ch, skip]
+
+`getPrinter` builds a `LevelPrinter` out of five closures, and every one of them
+references `l`, `ch` and `skip`:
+
+    return LevelPrinter{
+        Ln: func(a ...fmt.Stringer) { ... level < l ... emit(ch, formatEntry(l, msg, skip)) },
+        F:  func(format []byte, a ...fmt.Stringer) { ... },
+        C:  func(closure func() []byte) { ... },
+        Chk: func(e error) bool { ... },
+        Err: func(format []byte, a ...fmt.Stringer) error { ... },
+    }
+
+**This is the same class as the envelope, the scans and the server callbacks,
+and it is the cause of the startup panic.** `lol.Main.Log` is assigned in
+`lol`'s `init()` from `newPrinters`, which calls `getPrinter`; if that
+initialisation does not run, `Main` is left with a nil `LevelPrinter` and the
+first `Main.Log.I.Ln(...)` is a nil receiver.
+
+**Why the relay still linked** is worth writing down: the relay build reports
+errors per package and I read the LAST failing package each time, so a package
+whose error appears earlier in the same run can be missed. The `;` diagnostics
+for `pkg/lol` were in the build log; the `compile error for ...` line named a
+later package. Reading only that line is what let this through, and the standalone
+probe is what caught it.
+
+**The fix** is the method-over-struct shape used everywhere else: store `l`, `ch`
+and `skip` on a small type (say `lp`) and give it `Ln`, `F`, `C`, `Chk`, `Err`
+methods, then have `getPrinter` return that. The `LevelPrinter` struct embeds the
+five function-typed interfaces, so the call sites (`l.I.Ln(...)`, `l.F.Chk(err)`)
+keep working unchanged - only the construction changes. `pkg/lol/log`'s `Printer`
+is separate and already converted.
