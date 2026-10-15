@@ -87,11 +87,12 @@ declare -A PHASE_SCRIPT=(
 )
 declare -A PHASE_MONO=(
 	[2]="phase2_selfhost.sh"
+	[7]="phase7_ui.sh"
 	[3]="phase3_ir_validate.sh"
 	[4]="phase4_binary_smoke.sh"
 	[6]="phase6_instrumentation.sh"
 )
-ALL_PHASES=(0a 0b 1 1b 1c 2 3 4 5 6)
+ALL_PHASES=(0a 0b 1 1b 1c 2 3 4 5 6 7)
 
 usage() {
 	awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"

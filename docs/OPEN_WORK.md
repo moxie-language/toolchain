@@ -11814,3 +11814,56 @@ repo with changes is smesh):
 | 3 / 4 / 6 | **PASS** |
 | 5 | **79/79** - up one: `slice_cursor_zero_fill` is now enumerated |
 | smesh `test_app.py` | **11 passed**, three consecutive runs |
+
+## Round 58: per-page hooks, and a browser phase that runs the sample app
+
+**Per-page container hooks (smesh).** Every page container is stamped with
+`data-page=<route>` where it is built, and `showPage` marks the revealed one with
+`data-page-active`. `pageContainer` is the single name-to-container table, so the
+page the router names and the page the container names cannot disagree. The smoke
+suite's navigation test now asserts that exactly ONE container is active and that
+it is the one it clicked, and the settings test waits on
+`[data-page-active="settings"]` rather than reading body text - which is what
+made it flaky before.
+
+Routes and their container tags: `feed`, `compose`, `notifications`, `settings`,
+`profile`, `about`, `log`, `search`, `msg`. The `data-page` on `#app-root` (the
+router's view) stays; the two are asserted together in `_wait_for_page`.
+
+**Phase 7: the sample app, from a served build.** `tests/phase7_ui.sh`, one
+monolithic unit, now in `ALL_PHASES` and `PHASE_MONO` so it runs in a default
+`tests/unitrun.sh`. It builds all nine smesh bundles from source with the
+compiler under test, asserts the served build is complete (`app.wasm`, the
+`$runtime` staging, `bridge-common.mjs`), then runs the app's own smoke suite
+against that output. **PASS, 201s.**
+
+It is **fail-closed**: a missing app repo, a non-executable compiler, absent
+python/selenium, a failed bundle build, an incomplete staging, or any smoke
+failure is a FAIL with the reason, never a SKIP. Verified by pointing it at a
+nonexistent app (`MOXIE_UI_APP=/nonexistent`) and a nonexistent compiler, both of
+which fail with a named precondition.
+
+Phase 7 raised the unit count to 212 across the suite (0a 83, 0b 45, 1 4, 5 79,
+plus the monolithic units).
+
+### Found, not fixed: the smesh relay does not build from source
+
+Phase 7 attempts to rebuild the relay and reports the outcome, but does not fail
+on it - the served build it tests is the one it built. The relay **cannot** be
+built from source against this compiler, for two independent reasons:
+
+1. `src/sync` was removed from the stdlib (`ddf47494`) and `pkg/nostr/ws/client.mx`
+   and `dns.mx` still imported it for a `sync.Mutex`. Fixed this round: the
+   mutexes and the field are gone (one thread per domain, no shared memory).
+2. The relay's Moxie source predates several language rules. Measured across
+   `pkg/`, `web/common/`, `cmd/`, `main.mx`: **29 value receivers in 5 files**
+   (`pkg/nostr/types` 12, `pkg/relay/wire` 9, `pkg/nostr/normalize` 5,
+   `pkg/relay/tree` 2, `pkg/lol/log` 1) and **54 unnamed returns in 23 files**
+   (`pkg/store/engine` 7, `pkg/mediaproxy` 6, `pkg/store/sorted` 5,
+   `pkg/blossom` 4, ...). `pkg/nostr/signer/p8k` is converted this round (7
+   returns named).
+
+The prebuilt `smesh` binary (dated Oct 1) is what serves the app today. Until the
+port is done, the served build under test is the UI bundle build plus that relay,
+which is a weaker claim than "the whole app builds from source" and is why the
+phase prints which of the two it did.
