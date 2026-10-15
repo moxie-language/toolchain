@@ -438,6 +438,29 @@ for unit in "${UNITS[@]}"; do
 	esac
 done
 
+# ── tree cleanliness ────────────────────────────────────────────────────────
+# The suite builds into $TMPROOT (outside the tree) and into the tree's own tmp/
+# and cache/, which are gitignored. Anything a gate leaves in a TRACKED path is
+# drift: a phase that writes into a source tree and gets "restored afterwards"
+# is hiding it rather than preventing it. Measure it, do not promise it.
+#
+# Only the suite's own checkout is judged: the UI app is a SEPARATE repo beside
+# it, and its arrangement (checked-in build products under web/static) is its
+# own business, not this gate's.
+DIRTY="$(git -C "$ROOT" status --porcelain 2>/dev/null | head -20)"
+if [ -n "$DIRTY" ]; then
+	echo ""
+	echo "FAIL      tree-cleanliness"
+	printf '  the suite left tracked files modified in %s:\n' "$ROOT"
+	printf '%s\n' "$DIRTY" | sed 's/^/    /'
+	failed=$((failed + 1))
+	total=$((total + 1))
+else
+	echo "PASS      tree-cleanliness"
+	passed=$((passed + 1))
+	total=$((total + 1))
+fi
+
 echo ""
 echo "=== Summary ==="
 printf 'total: %d  passed: %d  failed: %d  skipped: %d\n' "$total" "$passed" "$failed" "$skipped"
