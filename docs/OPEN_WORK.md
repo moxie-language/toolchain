@@ -12179,3 +12179,26 @@ but one of:
 The first branch is the one to test first because it is cheap: if `__varinit`
 runs with a usable arena, `kind`'s table can be built there and everything else
 stays as it is.
+
+### Round 65 addendum: init() runs inside main, so the arena question is narrower
+
+Read `_mxc_stage4/ssa_builder.mx`: `__varinit` and the package `init()` are
+INJECTED AT THE START OF `main`, in that order (the call to `pb.initFn` is pushed
+after the `vinit` call). So `init()` is not a pre-`main` constructor here - it
+runs after whatever set the domain up, which is why `kind`'s first line being a
+stderr write that never appears is the important part: **the crash is between
+entering `main` and that write**, not before `main`.
+
+That narrows it to two candidates, and it is worth one measurement to pick:
+
+  1. something already broken in `main`'s prologue (the injected calls
+     themselves, or a global `main` touches before the switch); or
+  2. `kind`'s `init()` entering and dying inside
+     `runtime.SovereignSetArena(runtime.RootArena())` before the write - the
+     write is the SECOND statement only if the generated order matches the
+     source order, which is worth verifying rather than assuming.
+
+The cheap measurement: put the write as the very first statement of `main` and
+again as the first statement of `kind.init()`, rebuild, and see which appears.
+That separates "main's prologue" from "kind's init" without bisecting packages,
+and it is the first thing to do next round.
