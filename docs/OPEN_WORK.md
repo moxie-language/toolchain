@@ -12474,3 +12474,24 @@ whoever owns the runtime. The honest next step is to bisect `io`'s side (it was
 tested only as a bare import) and then, if nothing there reproduces, to look at
 what `initAll()` emits for a package with no initialisers - since the crash is
 present with an empty `init()` surface to blame.
+
+### Round 72: the source has nothing left to blame, so it is the emitted init sequence
+
+Checked every file in `pkg/relay/wire`: `wire.mx`, `blossom_worker.mx`,
+`broadcast_worker.mx`, `ingest_worker.mx`, `proxy_worker.mx` **all have zero
+package-level `var`s and zero `init()`s** (`grep -c '^var \|^func init'` -> 0 for
+each). The package compiles, links, and its dependency graph is stdlib-only plus
+nothing.
+
+So there is no source construct left that this objective could convert. A package
+with an empty initialisation surface - no globals to fill, no `init()` to run -
+still panics inside the emitted initialisation sequence when imported. That points
+at what the compiler EMITS for `__varinit`/`initAll` (a package with nothing to
+initialise may be getting a call sequence that does not match its shape), not at
+anything in the relay's sources.
+
+**That is the handover.** The next diagnostic is to build the same one-file probe
+against a compiler whose `initAll` emission can be dumped (the build already
+prints `generate initAll`), or to bisect `wire.mx` itself by copying it into a
+probe module file by file - `wire.mx` alone first, since it is the package's only
+non-worker file.
