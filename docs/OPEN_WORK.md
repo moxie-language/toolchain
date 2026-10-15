@@ -12441,3 +12441,36 @@ as a compiler bug with this one-file repro.
 
 The phase-7 wiring ("rebuild and serve the relay from source") still waits,
 because a binary that panics on start-up is not a served artifact.
+
+### Round 71: the reduced bug report, and the boundary of this objective
+
+Every stdlib piece tested alone works:
+
+    import encoding/binary; binary.LittleEndian().PutUint32 / Uint32   -> binary ok 7
+    import io                                                          -> ok
+    import fmt; pkg/mxutil                                             -> fmt ok / mxutil ok
+    import pkg/nostr/kind                                              -> prints correct values
+    import pkg/lol (after this port)                                   -> INF dbg lol init ok
+
+Yet importing `pkg/relay/wire` - a package with **zero package-level vars in all
+six files and no `init()`**, whose own imports are only `encoding/binary` and
+`io` - panics during package initialisation with `sovereign: nil receiver`, before
+`main` runs. That is the reproducer, and it is a compiler/runtime defect, not a
+language-rule violation: there is no rule left for this package to break.
+
+**The port objective is met on its own terms.** The relay compiles and links under
+the compiler under test. Every violation the compiler surfaced was converted:
+131 mechanical sites (unnamed results, value receivers, package-var initializers,
+named slice types), then the four structural classes that followed - closures and
+method values (which forced `ScanWith`/`ForEachDo`/`HTTPServeFunc`/`ReadyFunc`/
+`ReadySink`), globals that could not be assigned outside `init()` (which forced
+`PreSpawned`, `relayCtx`, `filter.Tainted`, `tickCount`, `levelPtr`), named slice
+types, and finally `pkg/lol`'s printer construction.
+
+**What is NOT done, and must not be claimed:** the built relay does not start, so
+there is no served artifact and phase 7 is not wired to rebuild from source. That
+stays blocked on the runtime defect above, which is now a one-file reproducer for
+whoever owns the runtime. The honest next step is to bisect `io`'s side (it was
+tested only as a bare import) and then, if nothing there reproduces, to look at
+what `initAll()` emits for a package with no initialisers - since the crash is
+present with an empty `init()` surface to blame.
