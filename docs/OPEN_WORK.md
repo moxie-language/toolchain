@@ -66,11 +66,49 @@ right on its fixture and on the relay, and then failed the wider gates:
     compile arena the way the other emit-time checks do, or avoid per-method
     allocation entirely.
 
-Do not retry this by writing a method-set walker. Use the resolution the compiler
-already has (`reportUndefinedField`'s lookup, or the embed walk inside
-`resolveMethodCallWithRecv`) as the "does this type have this method" predicate.
-A shape hint is only sound on top of a complete method set; a hand-written
-walker was wrong three times before it was wrong about promotion.
+Do not retry this by writing a method-set walker. A shape hint is only sound on
+top of a complete method set; a hand-written walker was wrong three times before
+it was wrong about promotion.
+
+**Round 2 (this session): `types.Implements` is the predicate to use.** A fourth
+attempt removed the string comparisons (the believed cause of the arena
+exhaustion) and compared with `types.Identical` instead - still no diagnostic
+allocations per method - and the stdlib sweep STILL died with `arena: region
+table full`. Measured explicitly: with `checkIfaceSatisfied` called, panic; with
+the single call removed and nothing else changed, the same sweep links. So the
+cost is the per-boxing walk itself, not the string rendering, and a fifth
+hand-written walk is not the answer.
+
+`pkg/types/tc_assign.mx` already has the machinery the check needs:
+
+    Implements(T Type, I *TCInterface) bool     // exported, line 356
+    methodSet(T Type) map[string]*TCFunc        // internal, line 377
+    collectMethods(T, ms, ptrOk)                // internal, line 383
+
+`Implements` is what the type system uses for interface assignability: it walks
+the named chain, `t.Under`, and pointer-receiver methods, and it short-circuits
+on the first missing name, so it is cheap for the common (satisfying) case and
+needs no per-method loop of its own. The next attempt should:
+
+  1. gate on `Implements(concrete, iface)` first - if true there is nothing to
+     report, and that is nearly every boxing;
+  2. only for the false case, get the method set ONCE per boxing and look for a
+     same-shaped method under a different name (this needs `methodSet`, which is
+     unexported: export it, or add a small exported wrapper such as
+     `ShapeMethod(T Type, name string, sig *Signature) string` so the walk AND
+     its allocation stay inside pkg/types, where the map is already built);
+  3. keep the `error`-implies-String exclusion and the
+     basic-underlying-type-has-String rule, which are rules the dispatch already
+     encodes;
+  4. treat a type whose `Implements` is false but which the SSA builder resolves
+     through an embed (`resolveMethodCallWithRecv`, which emits IR and so cannot
+     be called from a predicate) as undecidable and skip it, rather than
+     guessing - that is the `*net.TCPConn` shape.
+
+Note that `Implements` itself does NOT follow embedded struct fields (that is
+why `*net.TCPConn` would fail it for `net.Conn` while the compiler resolves the
+promoted `Close`), so step 4 is not optional: gating on `Implements` alone would
+report every promoted method as missing.
 
 **What the first attempt (eb17ab5f) did, before it was reverted.** `checkIfaceSatisfied` in `_mxc_stage4/ssa_builder.mx`,
 called from `coerceToInterface`, rejects a concrete type boxed into a non-empty
