@@ -22,6 +22,11 @@
 # the whole point of the phase is that the UI is verified on every default run.
 # This host has the browser stack (selenium + a chromium), so there is no
 # exception to make here.
+#
+# The relay goes to a temp dir, so the app checkout keeps its own binary. The
+# wasm bundles overwrite web/static/*.wasm, which the app TRACKS as build
+# products; that is the app's arrangement, and the phase leaves them rebuilt
+# from the compiler under test rather than restoring them.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
