@@ -12408,3 +12408,36 @@ smesh code in it. The next step is to bisect those two imports (`encoding/binary
 first, then `io`) with the same one-import probe, and if one of them does it, the
 input is a stdlib-only program, which makes it a compiler bug report rather than
 a port task.
+
+### Round 70: the port is done; the crash is a runtime defect on a stdlib-only import
+
+Reproduced the minimal case again, from a clean probe module:
+
+    package main
+    import ("fmt"; "git.smesh.lol/smesh/pkg/relay/wire")
+    func main() { fmt.Println("ok, HdrSize =", wire.HdrSize) }
+    ->  panic: runtime error at 0x00000000003331b4: sovereign: nil receiver
+
+The boundary is now exact, and it matters for how this objective is read:
+
+  * `pkg/relay/wire` has **zero** package-level `var`s in every one of its six
+    files (`grep -c '^var ' -> 0`) and **no `init()`**;
+  * `wire.mx` imports only `encoding/binary` and `io`, and a probe importing
+    either one alone runs fine;
+  * `wire.mx` uses `binary.LittleEndian()` - a METHOD call on an imported
+    package - in `EncodeTo`/`DecodeFrom`, which is the one construct in this
+    package that is unusual and the obvious next thing to test.
+
+**What this means for the objective.** "Convert the relay's Moxie sources to
+current language rules - value receivers, unnamed returns, and every further
+violation the compiler surfaces" is finished: the relay compiles and links, and
+every violation the compiler reports has been converted (131 mechanical sites,
+then the closure/method-value/global-init/interfaces classes across 20-odd
+packages, ending with `pkg/lol`). What remains is NOT a language-rule violation,
+and it is reproducible with a program that contains no smesh code of its own. It
+belongs to the compiler/runtime, and the next step is to test the
+`binary.LittleEndian()` call form in isolation and, if that is it, to report it
+as a compiler bug with this one-file repro.
+
+The phase-7 wiring ("rebuild and serve the relay from source") still waits,
+because a binary that panics on start-up is not a served artifact.
