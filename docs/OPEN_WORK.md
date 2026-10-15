@@ -12140,3 +12140,42 @@ version path). The panic happens before or during `main`, since `case "version"`
 only writes to stdout. The next round's first job is to find the nil receiver;
 phase 7's "rebuild and serve from source" wiring must wait for it, because a
 build that does not run is not a served artifact.
+
+### Round 65: the nil receiver is in kind's init(), and the likely cause
+
+Instrumented the three converted inits with a stderr write on entry and rebuilt.
+With `os` dangling in `transport` (its imports are deliberately stdlib-only and
+had no `os`), the build failed; with the import added the binary **crashes
+earlier**, with `caught signal SIGSEGV` instead of `sovereign: nil receiver`, and
+**neither init's debug line printed**. Two things follow:
+
+  * nothing between program start and those inits gets far enough to write to
+    stderr, so the arena machinery is not yet usable at that point;
+  * which of the two messages appears depends on code layout, which is what you
+    expect from an arena pointer that is not dereferenceable yet.
+
+**The likely cause, and it is mine.** `pkg/nostr/kind`'s table was built lazily
+by `ensureKinds()` and is now built by `init()`, and `init()` calls
+`runtime.SovereignSetArena(runtime.RootArena())`. At program start the domain
+root is not set up (`SovereignSetArena` itself returns early when `domainRoot ==
+nil`, and `SovereignRestoreArena` then panics on the next pop) and `RootArena()`
+is not yet a usable arena. The old lazy call ran after start-up, when both were
+ready - which is exactly why the prebuilt binary starts and this one does not.
+
+**The compiler forbids the lazy form**, because the table's assignments are
+global mutations and those are init-only. So the fix is not "go back to lazy"
+but one of:
+
+  * find the arena the compiler's own `__varinit` runs in (its package-level vars
+    carry no initializers, so it may never allocate - check `__varinit`'s
+    emission in `_mxc_stage4` before assuming), and build the table there; or
+  * keep the table out of package globals: return it from one accessor that
+    builds it once into a sovereign holder, the same "state travels with the
+    value" shape `PreSpawned` and `relayCtx` took; or
+  * have the program call a `kind.Init()` from `main`, after start-up, and make
+    the globals a struct that call fills - `main` assigning a global is still
+    forbidden, so this needs the accessor form too.
+
+The first branch is the one to test first because it is cheap: if `__varinit`
+runs with a usable arena, `kind`'s table can be built there and everything else
+stays as it is.
