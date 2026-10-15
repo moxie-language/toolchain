@@ -11808,9 +11808,9 @@ repo with changes is smesh):
 
 | gate | result |
 | --- | --- |
-| 0a | **83/83** - includes the browser-smoke unit, so the UI itself is exercised here |
+| 0a | **83/83** - fixtures only; the smesh UI is NOT run by any gate unit (there is no browser unit in the phases), so `test_app.py` is the UI's verification and has to be run from the app repo |
 | 0b | **45/45** |
 | 1 | **4/4** |
 | 3 / 4 / 6 | **PASS** |
 | 5 | **79/79** - up one: `slice_cursor_zero_fill` is now enumerated |
-| smesh `test_app.py` | **11 passed** |
+| smesh `test_app.py` | **11 passed**, three consecutive runs |
