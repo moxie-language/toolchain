@@ -6,12 +6,13 @@ taken, the findings that motivated them, and the two designs in flight
 
 ## REMAINING WORK (as of round 73) - read this first
 
-### 0. Package initialization order, and cross-package interface dispatch under --gc-sections  [COMPILER, one fixed, one open]
+### 0. Package initialization order, and a keep pass that matched implementations by name  [COMPILER, both fixed]
 
-Two separate defects, both hit by the smesh relay port in one afternoon. Both
-were found by running a from-source binary, not by reading code, and both
-produce a SILENT wrong answer rather than a diagnostic: the first killed the
-relay before it served, the second made it serve zero-byte responses.
+Two defects, both hit by the smesh relay port in one afternoon, both found by
+running a from-source binary rather than by reading code, and both silent: the
+first killed the relay before it served, the second made it serve zero-byte
+responses. A third, related gap - the invoke itself matching by name - is open
+and recorded under (b).
 
 **(a) Dependency order in `runtime.initAll`. FIXED and verified.**
 Both initAll generators insertion-sorted the package symbols before emitting
@@ -26,38 +27,34 @@ user `init()`, `os.Stdout` was nil and `os.ReadFile`'s mount table was empty:
 preserves order. Verified: `os.ReadFile` in a user init returns 74 bytes, and
 the relay starts.
 
-**(b) A cross-package implementation is deleted by `--gc-sections`. FIXED and
-verified.** Interface dispatch resolves an implementation by the interface
-method's NAME: `findIfaceImpls` scans the link set for a member whose last
-dot-segment equals that name, and a local method of the invoking package is
-called directly while an implementation in another package is called through an
-`extern_weak` declaration. Nothing strong referenced
-`main.(*relayCtx).HandleHTTP`, so `--gc-sections` deleted its definition from
-main's object; the weak reference resolved null, `emitInvoke`'s null check
-failed, and the arm fell through to its zero-init default. The observable result
-was a serving relay whose every fallback request answered `HTTP/1.1 0 OK` with
-an empty body - no error, no diagnostic.
+**(b) Cross-package dispatch answers zero when the implementation's method name
+differs from the interface's. FIXED in the port; the compiler gap is OPEN.**
+`findIfaceImpls` collects candidates by matching the member key's last
+dot-segment against the interface method's NAME, and `emitInvoke` emits its
+zero-init default when that list is empty. The port's implementation was
+`main.(*relayCtx).handleFallback` for an interface method named `HandleHTTP`, so
+the arm list was empty, the call returned zeros, and every request answered
+`HTTP/1.1 0 OK` with an empty body - no error, no diagnostic. Renaming the
+method to the interface's name fixed it, and the relay now serves the UI, the
+404 path, `/__version` and `/health` from source. Measured with a two-package
+fixture (`lib` declaring `Doer`/`Do` and invoking it; `main.Ctx` carrying `run`
+with `Do`'s exact shape plus a control `Do`): both the pre-fix and post-fix
+compilers call the control `Do` and never `run`, so the defect is older than
+this round and unchanged by it. The wanted behaviour is a compile error naming
+the method and the interface, not a runtime test - a correct compiler must
+REJECT the file, so the pin belongs in `tests/restrictions` once the check
+exists.
 
-The keep pass exists for exactly this (`emitKeepIfaceUsed` appends to
-`@llvm.used`), but it matched this-module implementations by interface method
-name only, while the smesh port's implementation was named
-`handleFallback` for an interface method named `HandleHTTP`. The port now names
-the method `HandleHTTP`, and the keep pass matches on SHAPE (parameter and
-result types) instead of name, so an implementation is kept at whatever name a
-future interface-less helper carries. Both changes are verified: the relay
-serves the UI, the 404 path, `/__version` and `/health` from source.
-
-A remaining compiler gap is recorded but NOT fixed: the invoke resolves an
-implementation by the interface method's NAME, so a method whose name differs is
-silently skipped - the arm list is empty, the call returns zero values, and the
-only close call is the keep pass, which is what the relay tripped over. Measured
-with a fixture (package `lib` declaring `Doer`/`Do` and invoking it; `main.Ctx`
-carrying `run` with `Do`'s exact shape plus a control `Do`): both the pre-fix and
-post-fix compilers call the control `Do` and never `run`, so the defect predates
-this round and is unchanged by it. The wanted behaviour is a compile error
-naming the method and the interface, not a runtime test - a correct compiler
-must REJECT the file, so the evidence belongs in `tests/restrictions` once the
-check exists.
+`emitKeepIfaceUsed` matches this module's implementations by SHAPE (parameter
+and result types) rather than by name now, so an implementation is kept alive
+under whatever name it carries. That closes a latent hole of the same family -
+the pass exists because another module's invoke reaches these definitions
+through an `extern_weak` reference, and a missing keep makes `--gc-sections`
+delete the definition and the weak reference resolve null - but it is NOT what
+fixed the relay: `main.(*relayCtx).handleFallback` was present in the binary
+while the dispatch still returned zeros. The two changes are verified separately
+only in that both compilers pass every gate; the keep pass has no fixture of its
+own yet.
 
 The legacy mirror of the keep pass is in
 `legacy/transform/interface-lowering.go` (`shapeMethods`/`addShapeMethods`/

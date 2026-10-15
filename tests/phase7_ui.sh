@@ -5,9 +5,10 @@
 # app, and until this phase nothing in the gate ran it: phases 0a/0b/1/3/5 test
 # the compiler, and 5 drives wasm fixtures through a browser but never the app.
 # So a change that broke the framework's contract with a real UI would have left
-# every gate green. This phase builds the app from source with the compiler
-# under test, starts its relay against that build output, and runs the app's own
-# smoke suite (test/test_app.py) which covers its main flows.
+# every gate green. This phase builds BOTH the relay and the app bundles from
+# source with the compiler under test, serves the app from the relay it just
+# built, and runs the app's own smoke suite (test/test_app.py) which covers its
+# main flows.
 #
 # FAIL-CLOSED. Every precondition below is a FAIL, not a SKIP:
 #
@@ -54,20 +55,17 @@ python3 -c 'import playwright' >/dev/null 2>&1 && : # playwright is for other ph
 BUILD_LOG="$(tempdir ui)/build.log"
 rm -rf "$BUILD_LOG"
 
-# The app BUNDLES are what this phase is about: they are the stdlib web
-# framework's real consumer, and they build from source with the compiler under
-# test. The relay is a different story - it is a native server whose Moxie
-# source still predates several language rules (see the relay port note in
-# docs/OPEN_WORK.md), so a relay build is attempted and its outcome REPORTED,
-# but it does not fail the phase while the prebuilt binary exists: the served
-# build under test is the one built here.
-relay_note=""
-if (cd "$APP" && MOXIEROOT="$ROOT" "$MOXIE" build -o smesh.build . >"$BUILD_LOG" 2>&1); then
-	mv "$APP/smesh.build" "$APP/smesh"
-	relay_note="relay rebuilt"
-else
-	relay_note="relay NOT rebuilt from source ($(grep -m1 -oE '^; .*' "$BUILD_LOG" | cut -c3-60)); using the existing binary"
+# The relay is built from source and the app serves THAT binary. The port is
+# complete (see the relay port entries in docs/OPEN_WORK.md), so a relay build
+# failure is a FAIL like any other: the earlier arrangement tried the build,
+# reported the outcome, and quietly served a prebuilt binary when it failed,
+# which is exactly the state a broken compiler would keep green.
+RELAY_BIN="$(tempdir ui)/smesh"
+if ! (cd "$APP" && MOXIEROOT="$ROOT" "$MOXIE" build -o "$RELAY_BIN" . >"$BUILD_LOG" 2>&1); then
+	fail "relay-build" "$(grep -m1 -oE '^; .*|mxc: .*' "$BUILD_LOG" | tail -1 | cut -c1-160)"
 fi
+[ -x "$RELAY_BIN" ] || fail "relay-build" "the relay build produced no binary"
+relay_note="relay built from source"
 
 bundles=0
 build_failed=""
@@ -85,7 +83,6 @@ done
 if [ -n "$build_failed" ]; then
 	fail "build" "$build_failed"
 fi
-[ -x "$APP/smesh" ] || fail "preconditions" "no relay binary at $APP/smesh and it could not be built"
 
 # A served build needs the module AND the staged runtime beside it; a build that
 # emitted the module but not $runtime/bridge-common.mjs would serve a page that
@@ -98,7 +95,7 @@ log_pass "ui:build" "$bundles bundles + runtime staging; $relay_note"
 # ── run the app's own smoke suite; it starts and stops the relay itself
 PY_LOG="$(tempdir ui)/pytest.log"
 rm -rf "$PY_LOG"
-(cd "$APP" && SMESH_RELAY_BIN="$APP/smesh" timeout "$SUITE_TIMEOUT" \
+(cd "$APP" && SMESH_RELAY_BIN="$RELAY_BIN" timeout "$SUITE_TIMEOUT" \
 	python3 -m pytest test/test_app.py -q) >"$PY_LOG" 2>&1
 rc=$?
 
