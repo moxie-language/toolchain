@@ -101,6 +101,56 @@ rather than half-applied. Repro after the fix: `make cover` in `../morly`
 should print a table under `git.smesh.lol/morly`, and
 `moxie test -cover ./pkg/store` there should name `pkg/store/engine.mx`.
 
+### Compiler: `^` on a sized unsigned constant loses its type  [COMPILER, both, small]
+
+Found by the resolver work below; it is what stopped the Go resolver packing a
+single DNS query. `int32(^uint16(0))` evaluates to **-1**, not 65535, while the
+same value stored into a `uint16` first is correct:
+
+```
+var z uint16
+zu := ^z                    // 65535   correct
+yc := int32(^uint16(0))     // -1      WRONG, expected 65535
+var big uint16 = 65535
+yb := int32(big)            // 65535   correct, so the conversion is fine
+```
+
+So the constant fold of `^` on a typed constant drops the type and produces the
+signed all-ones result; assigning that to a sized variable truncates it back to
+the right value, which is why it hides in every spelling except the direct
+conversion. Repro is the four lines above; a restriction fixture should assert
+`int32(^uint16(0)) == 65535`, and the same shape for uint8/uint32/uint64.
+
+Hit in `src/vendor/golang.org/x/net/dns/dnsmessage`'s `ResourceHeader.fixLen`,
+which tested `conLen > int32(^uint16(0))` - i.e. `conLen > -1`, always true, so
+every resource was "too long" and `newRequest`'s unconditional EDNS0 OPT record
+failed to pack. Worked around there by spelling 65535 out; the compiler defect
+is untouched.
+
+### Moxie semantics: a subslice of an array field is a copy  [STDLIB PORT TRAP]
+
+The same DNS work hit this twice, and it is the class the "slices replace
+arrays" rule is about. `src/vendor/golang.org/x/net/dns/dnsmessage` still has
+`type Name struct { Data [255]byte; Length uint8 }` - an array, which the rule
+says should be a slice - and Go code that builds a name with
+
+```
+name := n.Data[:0]
+name = push(name, ...)
+```
+
+writes into the copy that `n.Data[:0]` made, never into the receiver: `Length`
+came out right, `Data` came out all zeros, and `checkResponse` rejected every
+DNS answer while the query went out and the reply arrived. Measured with a
+hand-built response: built name bytes `116 114 117 110 99 46 116 101 115 116 46`
+("trunc.test."), parsed name `0 x11`.
+
+Fixed by writing the name into `n.Data` by index, which does reach the receiver.
+The array itself is still there and should become a slice; scanning the port for
+`Data[:0]`-style accumulation and for `f(x[i:i], ...)` calls that rely on append
+writing through the zero-length slice (there is a live one in the same file's
+`fixLen`, see the commit that fixed the resolver) is open work.
+
 ### `defer` inside a loop is re-run on return once the loop iterates twice  [COMPILER, both, high]
 
 Found while making `net.Listen` work, and it is why nothing in this workspace
@@ -258,6 +308,34 @@ table full`. Measured explicitly: with `checkIfaceSatisfied` called, panic; with
 the single call removed and nothing else changed, the same sweep links. So the
 cost is the per-boxing walk itself, not the string rendering, and a fifth
 hand-written walk is not the answer.
+
+**Round 3: the panic is NOT an empty impl list, and it depends on the link set.**
+The symptom seen from `net/http.ListenAndServe` is
+`interface dispatch: no impl for Accept (6 impl(s), none matches)` - a
+NON-empty list where the runtime type-ID matched no arm, which is a different
+failure from the empty list (b) was written about. Two measurements narrow it:
+
+  * The minimal repro does NOT fail. `net.Listen("tcp", ...)` then
+    `ln.Accept()` - the same `Listener.Accept` dispatch - blocks in accept as it
+    should, no panic. So the dispatch is sound in a small closure, and whatever
+    goes wrong needs the larger link set (the net/http closure pulls in
+    crypto/tls and the rest).
+  * The stdlib has five `Accept` methods: `*net.TCPListener`, `*net.UnixListener`
+    and `*tls.listener` satisfy `net.Listener`; `*internal/poll.FD.Accept` and
+    `*socktest.Switch.Accept` cannot. The message says six arms, so the list
+    holds one more entry than there are methods, and the arm for
+    `*net.TCPListener` apparently matches none of the runtime type-ID.
+
+That leaves two candidates and one experiment to separate them, which is where
+to start next: build the failing program with `-print-ir` (the flag exists and
+is what emitInvoke's own diagnostics were written against), find the
+`invoke.default` label for `Accept`, and read the `icmp eq` chain - either the
+`*net.TCPListener` arm is absent from the six (an impl-scan bug, shape filtering
+is the fix) or it is present with a type-ID that differs from the one the boxed
+value carries (a type-ID/boxing bug, and shape filtering would not touch it).
+`implTypeID` (`_mxc_stage4/ir_iface.mx`) resolves an arm's ID from
+`impl.recvType` unless `impl.extTypeID` is set, and the dispatch compares it
+against the dynamic ID; that is the pair to compare.
 
 `pkg/types/tc_assign.mx` already has the machinery the check needs:
 
