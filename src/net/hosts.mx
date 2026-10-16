@@ -9,6 +9,7 @@ import (
 	"internal/bytealg"
 	"io/fs"
 	"net/netip"
+	"runtime"
 	"time"
 )
 
@@ -46,7 +47,21 @@ var hosts struct {
 	size   int64
 }
 
+// readHosts refreshes the package-level hosts cache. The cache outlives this
+// call, so the maps and every key, value and address slice they hold are built
+// in the root arena. Built in the caller's frame they died at return:
+// lookupStaticHost then found a non-empty hosts.byName whose buckets had been
+// released and died in hashmapGet on the next lookup - the first thing every
+// net.LookupHost does, which is why no resolver call got as far as DNS. Same
+// defect and same fix as time.initLocal and netip's init.
 func readHosts() {
+	saved := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
+	readHostsInRoot()
+	runtime.SetCurrentArena(saved)
+}
+
+func readHostsInRoot() {
 	now := time.Now()
 	hp := hostsFilePath()
 
