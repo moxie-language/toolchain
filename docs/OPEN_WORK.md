@@ -101,6 +101,65 @@ rather than half-applied. Repro after the fix: `make cover` in `../morly`
 should print a table under `git.smesh.lol/morly`, and
 `moxie test -cover ./pkg/store` there should name `pkg/store/engine.mx`.
 
+### `defer` inside a loop is re-run on return once the loop iterates twice  [COMPILER, both, high]
+
+Found while making `net.Listen` work, and it is why nothing in this workspace
+listened with the stdlib: a defer registered from a loop body is executed
+repeatedly when the function returns, as soon as the loop has iterated more
+than once. The deferred call is re-run forever - the first invocation acts,
+every later one acts again on state it already consumed, and the function
+never returns.
+
+Minimal repro, a function whose body is
+
+```
+	for i := int32(0); i < n; i++ {
+		s, _ := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+		fmt.Printf("  iter %d: fd=%d\n", i, s)
+		defer syscall.Close(s)
+	}
+	fmt.Printf("  leaving f\n")
+```
+
+- `n = 0`: returns normally.
+- `n = 1`: returns normally.
+- `n = 2`: prints after the loop, then spins forever calling `close()`.
+  `strace -c` on that run: 268,636 `close()` in 3 s, 268,635 of them `EBADF`.
+
+Two defers *not* in a loop are fine, so it is the registration site, not the
+count. `runtime/defer.mx` is only `type _defer struct { callback uintptr; next
+*_defer }` and points at `legacy/compiler/defer.go`; what is observed is what
+a defer list that never advances (or a node linked to itself) produces, so the
+return-time runner or the second registration from one body is where to look.
+Fix bilaterally, and add this repro as a restriction fixture.
+
+How it surfaced. `net`'s `ipStackCapabilities.probe()`
+(`src/net/ipsock_posix.mx`) did `defer syscall.Close(s1)` inside
+`for i := range probes`, copied from Go where a defer argument is evaluated
+when the defer is registered. There are exactly two probes, so the loop always
+iterated twice and **every** `net.Listen` became that close spin. The trace:
+IPv4 probe socket closed, then an AF_INET6 socket bound to `::ffff:127.0.0.1`,
+`close(5) = 0`, then `close(5) = EBADF` at ~136k/s forever. It was not `net`
+being unadapted and not the netpoller - `net.Listen` never got as far as
+returning, and the raw `socket/bind/listen` path in the same binary worked
+fine. That is also why `gitweb`, the relay and git-lfs-http all hand-roll an
+accept loop on syscalls.
+
+Worked around in `src/net/ipsock_posix.mx` by closing explicitly on each path,
+which is verified end to end: `net.Listen` returns, `Accept` takes two
+connections, `Read`/`Write`/`Close` work, and the process exits cleanly. Two
+more sites carry the same latent defect and are deliberately NOT touched:
+
+- `src/net/dnsclient_unix.mx:162` - `defer cancel.Cancel()` inside the
+  `udp`/`tcp` loop. Fires when a UDP query gets no answer and the TCP retry
+  runs, i.e. on the second iteration.
+- `src/net/http/transport.mx:2832` - `defer timer.Stop()` inside
+  `persistConn.roundTrip`'s retry loop. Fires on the second attempt.
+
+Both want a restructure rather than a one-line swap: per-iteration deferred
+work belongs in a helper function called once per iteration, which is also
+what makes the defer legal.
+
 ### 0. Package initialization order, and a keep pass that matched implementations by name  [COMPILER, both fixed]
 
 Two defects, both hit by the smesh relay port in one afternoon, both found by

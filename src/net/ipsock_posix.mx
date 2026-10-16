@@ -53,13 +53,21 @@ func (p *ipStackCapabilities) probe() {
 		if err3 != nil {
 			continue
 		}
-		defer syscall.Close(s1)
+		// Close explicitly on every path. This was `defer syscall.Close(s1)`,
+		// which is what Go's net does and is correct there: a defer argument is
+		// evaluated when the defer is registered. In moxie a defer registered
+		// from a loop body is re-run on return once the loop has iterated more
+		// than once, so the second probe left every net.Listen spinning forever
+		// in close() on an already-closed fd (EBADF). Two probes, so it was
+		// every call, not an occasional one. See docs/OPEN_WORK.md.
 		syscall.SetsockoptInt(s1, syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, probes[i].value)
 		sa, err2 := probes[i].laddr.sockaddr(syscall.AF_INET6)
 		if err2 != nil {
+			syscall.Close(s1)
 			continue
 		}
 		if err1 := syscall.Bind(s1, sa); err1 != nil {
+			syscall.Close(s1)
 			continue
 		}
 		if i == 0 {
@@ -67,6 +75,7 @@ func (p *ipStackCapabilities) probe() {
 		} else {
 			p.ipv4MappedIPv6Enabled = true
 		}
+		syscall.Close(s1)
 	}
 }
 
