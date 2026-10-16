@@ -337,6 +337,42 @@ value carries (a type-ID/boxing bug, and shape filtering would not touch it).
 `impl.recvType` unless `impl.extTypeID` is set, and the dispatch compares it
 against the dynamic ID; that is the pair to compare.
 
+**Round 4: the missing arm is PROMOTION, and it is now fixed.** The panic is not
+an empty list, not a wrong type-ID, and not about `*net.TCPListener`.
+`(*Server).Serve` boxes its `net.Listener` parameter correctly - the prologue
+spills the type-ID register straight into field 0 of the box - and then
+reassigns it, as the Go source does, to `&onceCloseListener{Listener: l}`, so
+the value the `l.Accept()` dispatch sees is a `*net/http.onceCloseListener`.
+That type is absent from the six arms (`crypto/tls.listener`,
+`net.TCPListener` and `net.UnixListener` in pointer and value form), and it
+cannot be present as a plain method impl: `onceCloseListener` reaches `Accept`
+only by PROMOTION from the embedded `net.Listener` field, while
+`findEmbedMethod` searches embedded fields only for a concrete method symbol.
+A method promoted from an embedded INTERFACE has no symbol at all - its arm has
+to load that field and dispatch the same method on the interface value it holds.
+
+Reduced to a fixture with no net/http in it (now
+`tests/regressions/should_compile/iface_embed_promoted.mx`):
+
+    type conn interface { Accept() (n int32); Close() (err error) }
+    type wrapper struct { conn; tag int32 }
+    func (w *wrapper) Close() (err error) { ... }   // Accept is promoted
+    func acceptVia(c conn) (n int32) { return c.Accept() }
+    acceptVia(&wrapper{...})  // interface dispatch: no impl for Accept (2 impl(s), none matches)
+
+Fixed in `_mxc_stage4/ir_iface.mx`: `findEmbedIfaceMethod` finds the embedded
+interface and its method signature at both scan sites (local scope and the
+registry scan), an `embedIface` arm loads the embedded interface and re-emits
+the chain on that value (`emitIfaceChain`, extracted from `emitInvoke` so the
+arms compose), and `innerIfaceImpls` drops the outer type so a nested chain
+cannot recurse on itself. The fixture also checks that a DECLARED method of the
+same name still wins over a promoted one.
+
+Both Round 3 candidates were wrong, so do not resurrect them: the
+`*net.TCPListener` arm is present with the right type-ID (the parameter's own
+descriptor, matched against the binary's symbol table), and shape filtering
+fixes nothing here.
+
 `pkg/types/tc_assign.mx` already has the machinery the check needs:
 
     Implements(T Type, I *TCInterface) bool     // exported, line 356

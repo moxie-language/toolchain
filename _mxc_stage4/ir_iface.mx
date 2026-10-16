@@ -517,6 +517,28 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 				embedChain: chain,
 			})
 			hasType[sname] = true
+		} else if chain2, ifaceT2, isig2 := findEmbedIfaceMethod(tn2.Typ, methodName, 0); isig2 != nil {
+			impls = mxutil.Ensure(impls, 1)
+			push(impls, ifaceImpl{
+				recvType:   NewPointer(tn2.Typ),
+				ptrRecv:    true,
+				embedField: chain2[0],
+				embedType:  ifaceT2,
+				embedChain: chain2,
+				embedIface: true,
+				extSig:     isig2,
+			})
+			impls = mxutil.Ensure(impls, 1)
+			push(impls, ifaceImpl{
+				recvType:   tn2.Typ,
+				ptrRecv:    false,
+				embedField: chain2[0],
+				embedType:  ifaceT2,
+				embedChain: chain2,
+				embedIface: true,
+				extSig:     isig2,
+			})
+			hasType[sname] = true
 		}
 	}
 	selfPath := normalizePkgPath(e.pkg.Pkg.Path)
@@ -698,6 +720,35 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 						embedField: chain[0],
 						embedType:  embedT,
 						embedChain: chain,
+					})
+				} else if chain2, ifaceT2, isig2 := findEmbedIfaceMethod(tn3.Typ, methodName, 0); isig2 != nil {
+					// Promoted from an embedded INTERFACE field: no symbol
+					// exists to call, so the arm re-dispatches on the
+					// interface value stored in the field.
+					normDef := normalizePkgPath(defPath)
+					ptid := "reflect/types.type:pointer:named:" | normDef | "." | defName
+					vid := "reflect/types.type:named:" | normDef | "." | defName
+					impls = mxutil.Ensure(impls, 1)
+					push(impls, ifaceImpl{
+						recvType:   NewPointer(tn3.Typ),
+						ptrRecv:    true,
+						extTypeID:  ptid,
+						extSig:     isig2,
+						embedField: chain2[0],
+						embedType:  ifaceT2,
+						embedChain: chain2,
+						embedIface: true,
+					})
+					impls = mxutil.Ensure(impls, 1)
+					push(impls, ifaceImpl{
+						recvType:   tn3.Typ,
+						ptrRecv:    false,
+						extTypeID:  vid,
+						extSig:     isig2,
+						embedField: chain2[0],
+						embedType:  ifaceT2,
+						embedChain: chain2,
+						embedIface: true,
 					})
 				}
 			}
@@ -900,6 +951,78 @@ func (e *irEmitter) findEmbedMethod(t Type, methodName string, depth int32) (cha
 	return nil, nil, nil
 }
 
+// findEmbedIfaceMethod searches a type's anonymous fields for an embedded
+// INTERFACE whose method set carries methodName, returning the field index
+// chain, that interface's type and the method's signature. A method promoted
+// from an embedded interface has no symbol of its own to call - the arm has to
+// re-dispatch on the interface value the field holds - so findEmbedMethod
+// (which looks for a concrete method symbol) cannot find it. Without this arm
+// net/http.onceCloseListener, which reaches Accept only by embedding
+// net.Listener, had no case in the Accept dispatch and every Serve panicked.
+func findEmbedIfaceMethod(t Type, methodName string, depth int32) (chain []int32, ifaceT *TCInterface, sig *Signature) {
+	if depth > 5 {
+		return nil, nil, nil
+	}
+	st, ok := SafeUnderlying(t).(*TCStruct)
+	if !ok {
+		return nil, nil, nil
+	}
+	for fi := 0; fi < st.NumFields(); fi++ {
+		f := st.Field(fi)
+		if !f.Anonymous {
+			continue
+		}
+		base := f.Typ
+		if p, isP := base.(*Pointer); isP && p.Base != nil {
+			base = p.Base
+		}
+		if it, isI := SafeUnderlying(base).(*TCInterface); isI {
+			names, sigs := collectIfaceMethodInfo(it, 0)
+			for ni := 0; ni < len(names); ni++ {
+				if names[ni] == methodName && ni < len(sigs) && sigs[ni] != nil {
+					return []int32{fi}, it, sigs[ni]
+				}
+			}
+			continue
+		}
+		sub, it2, s2 := findEmbedIfaceMethod(base, methodName, depth+1)
+		if s2 != nil {
+			return []int32{fi} | sub, it2, s2
+		}
+	}
+	return nil, nil, nil
+}
+
+// innerIfaceImpls returns the candidate list for a re-dispatch on the
+// interface value an embedded interface field holds: the candidates that have
+// the method themselves, minus every form of the type whose arm is being
+// emitted, so the nested chain cannot recurse on itself.
+//
+// Candidates that are themselves promoted from an interface are left out. Each
+// nesting level inlines a whole chain, so admitting them made the chain's size
+// the product of the levels - net/http's module ran clang out of source
+// locations. One level covers a value that embeds an interface; a promotion
+// reached only through a promotion panics as a missing arm instead of
+// returning a wrong value.
+func (e *irEmitter) innerIfaceImpls(impls []ifaceImpl, outer ifaceImpl) (ss []ifaceImpl) {
+	skip := e.implBaseTypeName(outer)
+	for _, impl := range impls {
+		if impl.embedIface {
+			continue
+		}
+		if skip != "" {
+			if e.implBaseTypeName(impl) == skip {
+				continue
+			}
+		} else if impl.recvType == outer.recvType {
+			continue
+		}
+		ss = mxutil.Ensure(ss, 1)
+		push(ss, impl)
+	}
+	return ss
+}
+
 // findExtEmbedMethod searches embedded fields of a cross-package Named type
 // for a method with the given name. Returns the field index chain, the
 // external symbol for the method, the method signature, and the embed type.
@@ -963,6 +1086,11 @@ type ifaceImpl struct {
 	embedField int32
 	embedType  Type
 	embedChain []int32
+	// embedIface marks a method promoted from an embedded INTERFACE field.
+	// Such a method has no symbol to call: the arm must re-dispatch on the
+	// interface value held in the field (net/http.onceCloseListener embeds
+	// net.Listener and reaches Accept only by promotion).
+	embedIface bool
 	extSymbol  string
 	extTypeID  string
 	extSig     *Signature
@@ -975,6 +1103,21 @@ func (e *irEmitter) implFuncSym(impl ifaceImpl) (s string) {
 			return irQuoteName(impl.extSymbol)
 		}
 		return "@" | impl.extSymbol
+	}
+	if impl.fn == nil {
+		// A method promoted from an embedded interface has no symbol: its arm
+		// re-dispatches on the embedded value. Give the fingerprint a stable
+		// identity for it (the outer type and the field chain walked to the
+		// embedded interface) instead of dereferencing a nil function.
+		mark := "#iface-embed:" | e.implBaseTypeName(impl) | ":"
+		chain := impl.embedChain
+		if len(chain) == 0 {
+			chain = []int32{impl.embedField}
+		}
+		for _, idx := range chain {
+			mark = mark | irItoa(idx) | ","
+		}
+		return mark
 	}
 	return e.funcSymbol(impl.fn)
 }
@@ -1639,7 +1782,29 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 	for _, impl := range impls {
 		e.declareExtInvoke(impl, inv)
 	}
+	// A method promoted from an embedded interface is reached by dispatching
+	// on the interface value the field holds, so its single arm still needs
+	// the chain's merge block to define the result.
+	forceChain := len(impls) == 1 && impls[0].embedIface
+	mergeLabel := e.emitIfaceChain(inv, impls, tidPtr, valPtr, retType, isVoid, reg, forceChain, false)
+	if mergeLabel != "" {
+		if blk := inv.InstrBlock(); blk != nil {
+			e.blockExitLabel[blk.Index] = "%" | mergeLabel
+		}
+	}
+}
 
+// emitIfaceChain emits the type-ID check chain for one interface dispatch and
+// returns the label of the block that defines the result (the merge block), or
+// "" when the emitted path defines it in place - the zero-impl and single-call
+// shapes, which do not branch.
+//
+// impls are candidates for the interface value in tidPtr/valPtr, already
+// filtered by signature. A candidate whose method is promoted from an embedded
+// interface is not called: its value is read for the interface it embeds and
+// the same chain is emitted on that interface value (nested = true), so a
+// promotion is dispatched wherever the promoted method is reached.
+func (e *irEmitter) emitIfaceChain(inv *SSAInvoke, impls []ifaceImpl, tidPtr string, valPtr string, retType string, isVoid bool, reg string, forceChain bool, nested bool) (mergeLabel string) {
 	if len(impls) == 0 {
 		e.w("  ; invoke: no implementations for ") ; e.w(inv.MethodName) ; e.w("\n")
 		if !isVoid {
@@ -1649,10 +1814,10 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 			e.w("  store ") ; e.w(retType) ; e.w(" zeroinitializer, ptr ") ; e.w(zp) ; e.w("\n")
 			e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(retType) ; e.w(", ptr ") ; e.w(zp) ; e.w("\n")
 		}
-		return
+		return ""
 	}
 
-	if len(impls) == 1 {
+	if len(impls) == 1 && !forceChain {
 		impl := impls[0]
 		callRecv := e.materializeIfaceValue(impl.recvType, valPtr)
 		if impl.embedType != nil {
@@ -1674,21 +1839,21 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 			e.emitInvokeArgs(prepArgs)
 			e.w(", ptr null)\n")
 		}
-		return
+		return ""
 	}
 
 	// Arm the defer frame once before the dispatch. A checkpoint inside a case
 	// block would split it from its PHI incoming label at the merge, which LLVM
 	// rejects, so suppress the per-call checkpoint for the whole dispatch; the
 	// one checkpoint here covers every case call.
-	if e.deferCheckpointOn && e.deferFrame != "" {
+	if !nested && e.deferCheckpointOn && e.deferFrame != "" {
 		e.emitCallCheckpoint()
 	}
 	prevNoCheckpoint := e.noCheckpoint
 	e.noCheckpoint = true
 
 	baseID := e.nextReg
-	mergeLabel := "invoke.merge" | irItoa(baseID)
+	mergeLabel = "invoke.merge" | irItoa(baseID)
 	var checkLabels []string
 	var caseLabels []string
 	var callRegs []string
@@ -1728,7 +1893,29 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 		}
 		recvLLVM := "ptr"
 		recv := callRecv
-		if impl.extSymbol != "" && !impl.strong {
+		if impl.embedIface {
+			// The method belongs to the interface embedded in this value, so
+			// there is no symbol to call: read the embedded interface and
+			// dispatch the same method on it. recv points at the interface
+			// slot after the GEP above, not at a receiver.
+			e.nextReg++
+			iv := "%eiv" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(iv) ; e.w(" = load " | e.ifaceType() | ", ptr ") ; e.w(recv) ; e.w("\n")
+			e.nextReg++
+			itid := "%eit" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(itid) ; e.w(" = extractvalue " | e.ifaceType() | " ") ; e.w(iv) ; e.w(", 0\n")
+			e.nextReg++
+			ivp := "%eip" | irItoa(e.nextReg)
+			e.w("  ") ; e.w(ivp) ; e.w(" = extractvalue " | e.ifaceType() | " ") ; e.w(iv) ; e.w(", 1\n")
+			creg := ""
+			if !isVoid {
+				creg = callRegs[i]
+			}
+			sub := e.emitIfaceChain(inv, e.innerIfaceImpls(impls, impl), itid, ivp, retType, isVoid, creg, true, true)
+			if sub != "" {
+				phiLabels[i] = sub
+			}
+		} else if impl.extSymbol != "" && !impl.strong {
 			// For extern_weak symbols, check the function pointer is
 			// non-null before calling. An unresolved weak symbol resolves
 			// to null, which would crash at the call site.
@@ -1782,9 +1969,6 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 	e.w("  unreachable\n")
 
 	e.w(mergeLabel) ; e.w(":\n")
-	if blk := inv.InstrBlock(); blk != nil {
-		e.blockExitLabel[blk.Index] = "%" | mergeLabel
-	}
 	if !isVoid {
 		e.w("  ") ; e.w(reg) ; e.w(" = phi ") ; e.w(retType) ; e.w(" ")
 		for i := range impls {
@@ -1794,6 +1978,7 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 		e.w("\n")
 	}
 	e.noCheckpoint = prevNoCheckpoint
+	return mergeLabel
 }
 
 func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {

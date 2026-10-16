@@ -1,0 +1,66 @@
+// A type that satisfies an interface only by PROMOTION from an embedded
+// interface field has no method symbol of its own, so the dispatch arm for it
+// has to re-dispatch on the interface value the field holds. Without that arm
+// the type-ID matched nothing and every call panicked
+//
+//	interface dispatch: no impl for Accept (2 impl(s), none matches)
+//
+// net/http.(*Server).Serve hit it on every request: onceCloseListener embeds
+// net.Listener, so Accept is promoted while Close is declared.
+//
+// The declared method must still win over the promoted one of the same name.
+package main
+
+import (
+	"fmt"
+)
+
+type conn interface {
+	Accept() (n int32)
+	Close() (err error)
+}
+
+type listener struct {
+	count int32
+}
+
+func (l *listener) Accept() (n int32) {
+	l.count = l.count + 1
+	return l.count
+}
+
+func (l *listener) Close() (err error) {
+	return nil
+}
+
+// wrapper reaches Accept only by embedding conn; Close is declared here and
+// must dispatch to this one, not to the promoted listener.Close.
+type wrapper struct {
+	conn
+	tag int32
+}
+
+func (w *wrapper) Close() (err error) {
+	w.tag = w.tag + 100
+	return nil
+}
+
+func acceptVia(c conn) (n int32) {
+	return c.Accept()
+}
+
+func closeVia(c conn) (err error) {
+	return c.Close()
+}
+
+func main() {
+	inner := &listener{count: 0}
+	w := &wrapper{conn: inner, tag: 7}
+	fmt.Printf("promoted-ptr=%d\n", acceptVia(w))
+	fmt.Printf("promoted-ptr-again=%d\n", acceptVia(w))
+	closeVia(w)
+	fmt.Printf("declared-close-tag=%d\n", w.tag)
+	v := wrapper{conn: inner, tag: 3}
+	fmt.Printf("promoted-value=%d\n", acceptVia(v))
+	fmt.Printf("inner-count=%d\n", inner.count)
+}
