@@ -1828,33 +1828,41 @@ type connectionStater interface {
 	ConnectionState() tls.ConnectionState
 }
 
-// Serve a new connection.
-// finishServe is (*conn).serve's deferred cleanup. inFlightResponse is taken by
-// POINTER because the handler sets it long after the defer is registered. A
-// panicking handler is FATAL: Moxie has no recover, so the connection's domain
-// dies with the panic instead of answering 500.
-func (c *conn) finishServe(inFlightResponse **response, doHooks bool) {
-		if inFlightResponse != nil {
-			inFlightResponse.cancelCtx.Cancel()
-			inFlightResponse.disableWriteContinue()
+// finishServe is (*conn).serve's deferred cleanup. It reads the in-flight
+// response off the connection (c.curReq) rather than through a pointer the
+// caller hands in: the Go original is a deferred closure over the local, and
+// Moxie has no closures, but a `**response` parameter does NOT stand in for
+// one. Field access on a pointer-to-pointer dereferences once, so
+// `if p != nil` tested the ADDRESS of the local (always non-nil) and
+// `p.conn.r` read the local's own bytes - the cleanup ran against a garbage
+// response and a connection that ended with a 400 request SIGSEGVed in
+// abortPendingRead.
+func (c *conn) finishServe(doHooks bool) {
+		res := c.curReq
+		if res != nil {
+			res.cancelCtx.Cancel()
+			res.disableWriteContinue()
 		}
 		if !c.hijacked() {
-			if inFlightResponse != nil {
-				inFlightResponse.conn.r.abortPendingRead()
-				inFlightResponse.reqBody.Close()
+			if res != nil {
+				res.conn.r.abortPendingRead()
+				res.reqBody.Close()
 			}
 			c.close()
 			c.setState(c.rwc, StateClosed, doHooks)
 		}
 }
 
+// Serve a new connection.
+//
+// A panicking handler is FATAL: Moxie has no recover, so the connection's
+// domain dies with the panic instead of answering 500.
 func (c *conn) serve(ctx context.Context) {
 	serverInitOnce()
 	if ra := c.rwc.RemoteAddr(); ra != nil {
 		c.remoteAddr = ra.String()
 	}
-	var inFlightResponse *response
-	defer c.finishServe(&inFlightResponse, runHooks)
+	defer c.finishServe(runHooks)
 
 	if tlsConn, ok := c.rwc.(*tls.Conn); ok {
 		tlsTO := c.server.tlsHandshakeTimeout()
@@ -2008,9 +2016,7 @@ func (c *conn) serve(ctx context.Context) {
 		// in parallel even if their responses need to be serialized.
 		// But we're not going to implement HTTP pipelining because it
 		// was never deployed in the wild and the answer is HTTP/2.
-		inFlightResponse = w
 		serverHandler{c.server}.ServeHTTP(w, w.req)
-		inFlightResponse = nil
 		w.cancelCtx.Cancel()
 		if c.hijacked() {
 			c.r.releaseConn()

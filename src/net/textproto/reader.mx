@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"runtime"
 	"strconv"
 )
 
@@ -812,6 +813,14 @@ var commonHeader map[string]string
 var commonHeaderDone bool
 
 func initCommonHeader() {
+	// The interned names outlive every frame - the first canonicalMIMEHeaderKey
+	// fills the map and every later parse reads it - so it is built in the ROOT
+	// arena. Allocated in the caller's frame arena (a plain assignment here) it
+	// was released when that frame returned and the next parse died in
+	// hashmapGet: the same defect, and the same fix, as the hosts cache in
+	// src/net/hosts.mx.
+	saved := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
 	commonHeader = map[string]string{}
 	for _, v := range [][]byte{
 		"Accept",
@@ -856,6 +865,7 @@ func initCommonHeader() {
 	} {
 		commonHeader[v] = v
 	}
+	runtime.SetCurrentArena(saved)
 }
 
 func init() {
