@@ -165,9 +165,140 @@ what `parsePattern("/")` produces, the `addSegments`/`set` path, and the subtree
 case in `matchOrRedirect` - before touching lifetimes again.
 
 `tests/phase8_netsmoke.sh` is the gate that reports this; it is wired into
-`tests/unitrun.sh` as phase 8 and is red until it is fixed. Its build and
-listen units pass; the curl and Moxie-client units assert the handler's body
-and both fail on the same 404.
+`tests/unitrun.sh` as phase 8. Its build and listen units pass; the curl and
+Moxie-client units assert the handler's body and both fail on the same 404.
+
+**Round 2: it is not the matching logic and not request-time state.** An
+instrumented dump of the tree - once at registration, right after
+`mux.tree.addPattern(p, h)`, and once on every request - shows the same tree in
+both places, and it is empty at the level that matters: the root has its
+emptyChild (the host level, `flags=1`), and THAT node has no emptyChild of its
+own, so the method level and the pattern under it were never stored. Matching
+reads an empty tree, correctly. `rootEmpty=1` at request time also means
+nothing was lost later, so the arena hypothesis is dead in this form: the lost
+writes are the ones `addPattern` makes through `root.addChild(p.host)` ->
+`n.addChild(p.method)` before it returns. A faithful standalone repro (the same
+three methods, a `Handler` interface field, a `*pattern` field, the same arena
+wrap) keeps the whole chain, so the difference is still unidentified. The next
+attempt should bisect INSIDE addPattern (print the levels before it returns)
+rather than after, and compare the pointer values it writes with the ones the
+caller reads back.
+
+The channel path below does not use this tree at all - its router is a plain
+table - which is why phase 8 does not wait on this.
+
+### The channel handler path  [DESIGN, src/net/http/chanpath.mx + chanpool.mx]
+
+The classic path hands a handler a ResponseWriter and a *Request, which is what
+forced the closure shims (`HandlerFunc` called through a pointer to the func
+value; `finishServe` taking `**response` for a deferred closure). The channel
+path splits the two jobs instead:
+
+  * the SHELL owns the socket, the framing, the keep-alive loop, the accept
+    loop and the deadlines. It decodes a request into messages;
+  * a HANDLER is a pure stream function: `Serve(in chan Msg, out chan Msg)`,
+    one message per call, no io, no spawn, no locks, no closures.
+
+Message set: ReqHead (method, path, route, headers), ReqBody (bytes), ReqEnd,
+ReqAbort (error) - and RespHead (status, headers), RespBody (length),
+RespEnd, RespAbort in the other direction. Abort is separate from End because
+a client that disconnects and a handler that fails are not ends of stream.
+
+Two rules the language imposes on the message contents, both learned the hard
+way here:
+
+  * a response body is NOT a slice of the handler's own frame: the shell reads
+    it after Serve has returned and that frame is gone. The shell offers a
+    scratch buffer in every request message and the handler writes into it BY
+    INDEX (a subslice would be a copy) and replies with the length;
+  * channels must be created in the frame that uses them. A channel built in a
+    constructor and stored on the runner is released with the constructor's
+    frame, and the first send panics with "send on closed channel".
+
+Dispatch policy: `DispatchInline` runs the handler in the connection's domain
+(no spawn; per-connection channels and scratch built by the shell, which is the
+deterministic mode), `DispatchSpawned` builds a fixed pool once and hands each
+step to a worker over unbuffered `chan []byte` frames. The frames are the same
+message set, encoded; the worker decodes, looks the route up in the inherited
+table, runs the handler and frames the answer back. The table is a plain slice
+built at startup, and it is complete before the first spawn because spawn forks.
+Spawn cost is measured by tests/netsmoke/spawncost (a spawn is a fork, so it is
+microseconds and a thread), which is why the pool exists and per-request spawn
+does not.
+
+### The Moxie HTTP CLIENT never writes its request  [CLIENT, blocker for phase 8's client unit]
+
+`tests/phase8_netsmoke.sh`'s client unit resolves a host name and then makes a
+real request. The resolver half works - `net.LookupHost("localhost")` returns
+127.0.0.1 and ::1 - and the request half hangs, which is a CLIENT defect, not
+the resolver and not the handler path (curl serves in both dispatch policies).
+
+`net/http.(*Transport).dialConn` ends with:
+
+    pconn.readLoop()
+    pconn.writeLoop()
+
+where Go has `go pconn.readLoop()` and `go pconn.writeLoop()`. Called
+sequentially, readLoop blocks in its first `Peek` forever, so writeLoop never
+runs and no request is ever written. Measured three ways: the client is found
+blocked in `persistConn.readLoop -> bufio.Reader.Peek -> internal/poll.FD.Read`,
+a plain TCP probe on the other side receives zero bytes (`b'<TIMEOUT>'` and no
+data), and the connection is ESTABLISHED with an empty send queue on the
+client's side.
+
+The obvious fix - spawn the write loop - hits the second defect on this path: a
+run of the same client through a plain TCP peer dies with SIGBUS in
+`runtime.codecEncodeValue -> codecWriteRaw -> memcpy` called from the same
+`dialConn`, i.e. whatever the port tries to hand across a domain boundary there
+is encoded by the structural codec and the encode writes out of its mapping.
+That is the same runtime family as the spawn-channel payload defect below, and
+a correct fix is a single-threaded client transport (an event loop over the
+read and write sides), which is its own piece of work.
+
+Reported as its own blocker, per the objective: phase 8's client unit fails
+with a message that says the resolver succeeded and the request never
+completed, and every other phase 8 unit passes in both modes.
+
+### A []byte built at run time does not survive a spawn channel  [RUNTIME, logged]
+
+Measured with a two-domain program: the parent builds eight bytes with push
+(1..8) and sends them on a `chan []byte` that was handed to spawn. The child
+receives len=8 and its content is `[4, 0, 0, ...]` - 4 is the first-batch floor
+the push path starts from, so the child is reading allocator metadata rather
+than the payload. A LITERAL crosses intact (`[]byte("abcdefgh")` arrives with
+sum 804), and the same bytes carried inside a named struct with a []byte field
+arrive zeroed (sum 0), so wrapping the slice does not help.
+
+Scalars are unaffected: `chan int32` echoes back exactly. That is why the pool
+boundary in `src/net/http/chanpool.mx` encodes messages as an int32 stream,
+four bytes packed per word, instead of sending framed byte slices. This is a
+workaround; the honest fix is in the spawn channel's send path or the builtin
+slice codec, and this round did not touch it.
+
+Repro: parent `b := fill(8)` (push 1..8), `jobs <- b`, child prints
+`len(f)`, `int32(f[0])` and the byte sum.
+
+### Compiler: a buffered channel of a slice, and a generic field, do not resolve  [COMPILER, logged]
+
+Two limits hit while building the channel path. Both fail loud, both are worked
+around in the port, neither is fixed:
+
+  * `ch := chan []byte{:8}` -> "cannot resolve the type of ch in main - the
+    right-hand side is not a value". The unbuffered form (`chan []byte{}`) is
+    fine and a buffered channel of a NAMED struct is fine; a buffered channel
+    whose element is a slice does not lower. A named slice type is not an
+    escape either - `type frame []byte` is rejected with "named slice type
+    'frame' is not allowed: use []T directly" - so the pool boundary uses an
+    unbuffered `chan []byte`, which the strict request/response rendezvous
+    wants anyway.
+
+  * `ep, _ := e.value.matchPath(pat7, nil)`, where `e` ranges over
+    `mapping[string, *routingNode].s` (a slice of an instantiated GENERIC
+    struct) -> "cannot resolve the type of ep ... the right-hand side is not a
+    value", and `set[e.key]` fails the same way. Passing the field through a
+    concrete parameter type resolves it (nodeMatchesPath/nodeEntryKey in
+    src/net/http/routing_tree.mx). The map branch of the same function is fine,
+    so it is the generic SLICE element field that has no type.
 
 ### Moxie semantics: a func-typed receiver must be called as `(*f)()`  [STDLIB PORT TRAP]
 

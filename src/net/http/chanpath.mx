@@ -1,0 +1,467 @@
+package http
+
+import (
+	"git.smesh.lol/moxie/pkg/mxutil"
+	"bufio"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"strconv"
+	"time"
+)
+
+// The handler path in messages, not in io.
+//
+// The classic path hands a handler a ResponseWriter and a *Request: the
+// handler then owns the socket for the duration of the call, and the port had
+// to fake what Go does with a closure - HandlerFunc was a pointer to a func
+// value that got called as if it were the function, and (*conn).finishServe
+// took a pointer-to-pointer to stand in for a deferred closure. Both were
+// fragile because they were shims for a design the language does not have.
+//
+// This path splits the two responsibilities instead:
+//
+//   - the SHELL owns the socket, the framing, the deadlines, the keep-alive
+//     loop and the accept loop. It decodes a request into messages and hands
+//     them over; it writes the messages it gets back.
+//   - a HANDLER is a pure stream function. It receives decoded request
+//     messages and sends response messages. It never touches the socket, never
+//     sleeps, never spawns and holds no locks.
+//
+// The stream is explicit because HTTP is a stream: a request is a head, zero
+// or more body chunks and then either end-of-stream or an abort; a response is
+// the same shape in the other direction. One byte slice per request would lose
+// the end-of-stream and abort edges, which are exactly the cases keep-alive and
+// client disconnect turn on.
+//
+// Nothing here needs a second domain. The shell and the handler alternate on
+// one slot each way, which is why single-domain dispatch is the deterministic
+// mode and spawning is only a scheduling choice.
+
+// Message kinds. The request direction is Req*; the response direction is
+// Resp*. Abort is its own kind in both directions: a client that disconnects
+// and a handler that fails are not ends of stream, and a reader that treats
+// them as one leaks the connection.
+const (
+	MsgReqHead   = int32(1)
+	MsgReqBody   = int32(2)
+	MsgReqEnd    = int32(3)
+	MsgReqAbort  = int32(4)
+	MsgRespHead  = int32(5)
+	MsgRespBody  = int32(6)
+	MsgRespEnd   = int32(7)
+	MsgRespAbort = int32(8)
+)
+
+// Dispatch policy. Inline runs the handler in the connection's own domain;
+// spawned hands the exchange to a pool worker. The messages are the same in
+// both, so a handler cannot tell which one it is running under.
+const (
+	DispatchInline  = int32(0)
+	DispatchSpawned = int32(1)
+)
+
+// Msg is one frame of a request or response stream.
+//
+// Kind decides which fields carry meaning:
+//
+//	MsgReqHead    Method, Path, Route, Headers
+//	MsgReqBody    Data
+//	MsgReqEnd     -
+//	MsgReqAbort   Err
+//	MsgRespHead   Status, Headers
+//	MsgRespBody   Len (bytes of Scratch)
+//	MsgRespEnd    -
+//	MsgRespAbort  Err
+//
+// Scratch is a buffer the SHELL owns and offers with every request message.
+// A handler that answers writes its body into Scratch by index and sends back
+// the length: a response must not carry a slice of the handler's own frame,
+// because the shell reads it after Serve has returned and that frame is gone.
+// Writing by index is also the only way to write into a buffer here - a
+// subslice of it is a copy.
+type Msg struct {
+	Kind    int32
+	Method  string
+	Path    string
+	Route   int32
+	Status  int32
+	Headers Header
+	Data    string
+	Scratch []byte
+	Len     int32
+	Err     error
+}
+
+// ChanHandler is a handler that is a function of its stream. It receives
+// decoded request messages on in and sends response messages on out.
+//
+// The contract is one message per call: the shell alternates with the handler,
+// putting one request message on in, calling Serve, then taking whatever
+// response messages are on out before feeding the next request message. That is
+// what lets a single slot on each channel be enough, and what keeps the
+// single-domain mode free of any blocking between two threads. A handler that
+// needs to keep state across the request keeps it in its receiver.
+type ChanHandler interface {
+	Serve(in chan Msg, out chan Msg)
+}
+
+// chanRoute is one row of the router. The router is a plain slice built at
+// startup and only read afterwards: no tree, no pointer graph, no closures.
+type chanRoute struct {
+	pattern string
+	h       ChanHandler
+}
+
+// ChanMux routes a request path to a handler through a plain table.
+type ChanMux struct {
+	routes []chanRoute
+}
+
+func NewChanMux() (mux *ChanMux) {
+	return &ChanMux{}
+}
+
+// Handle registers a handler. A pattern ending in "/" matches that subtree
+// (and "/" matches everything not matched more specifically); any other pattern
+// matches exactly. The longest matching pattern wins.
+func (mux *ChanMux) Handle(pat string, h ChanHandler) {
+	mux.routes = mxutil.Ensure(mux.routes, 1)
+	mux.routes = push(mux.routes, chanRoute{pattern: pat, h: h})
+}
+
+// Match returns the handler for path and its route id, or nil.
+func (mux *ChanMux) Match(reqPath string) (id int32, h ChanHandler) {
+	return chanMatchRoutes(mux.routes, reqPath)
+}
+
+// chanMatchRoutes is a free function because ChanMux is self-mutating and a
+// ':=' inside a loop of one of its methods is rejected: loop scratch belongs in
+// a function with its own frame arena.
+func chanMatchRoutes(routes []chanRoute, reqPath string) (id int32, h ChanHandler) {
+	best := int32(-1)
+	id = -1
+	for i := 0; i < len(routes); i++ {
+		r := routes[i]
+		if !chanRouteMatch(r.pattern, reqPath) {
+			continue
+		}
+		if int32(len(r.pattern)) > best {
+			best = int32(len(r.pattern))
+			id = int32(i)
+			h = r.h
+		}
+	}
+	return id, h
+}
+
+// chanRouteMatch reports whether a registered pattern matches a request path.
+func chanRouteMatch(pat, reqPath string) (ok bool) {
+	if len(pat) == 0 {
+		return false
+	}
+	if pat[len(pat)-1] == '/' {
+		if len(pat) == 1 {
+			return true
+		}
+		return mxutil.HasPrefix(reqPath, pat)
+	}
+	return pat == reqPath
+}
+
+// respBuf accumulates the response messages of one exchange. The shell owns the
+// framing, so it knows the status and the whole body before it writes the head:
+// that is what lets Content-Length be exact without chunked encoding.
+type respBuf struct {
+	status  int32
+	body    []byte
+	headers Header
+	ended   bool
+	aborted bool
+	err     error
+	scratch []byte
+}
+
+// take drains every response message the handler has ready. It never blocks: a
+// handler that produced nothing this step (because it is still reading the
+// request) is a normal state, not a stall.
+func (rb *respBuf) take(out chan Msg) {
+	progress := true
+	for progress {
+		progress = rb.takeOne(out)
+	}
+}
+
+// takeOne moves at most one ready message. respBuf is self-mutating, so the
+// loop's scratch lives here rather than in take.
+func (rb *respBuf) takeOne(out chan Msg) (got bool) {
+	select {
+	case m := <-out:
+		switch m.Kind {
+		case MsgRespHead:
+			rb.status = m.Status
+			rb.headers = m.Headers
+		case MsgRespBody:
+			if m.Len > int32(len(rb.scratch)) {
+				rb.aborted = true
+				rb.err = errors.New("http: response body exceeds the buffer the shell offered")
+			} else if m.Len > 0 {
+				rb.body = appendBytes(rb.body, rb.scratch[:m.Len])
+			}
+		case MsgRespEnd:
+			rb.ended = true
+		case MsgRespAbort:
+			rb.aborted = true
+			rb.err = m.Err
+		}
+		return true
+	default:
+	}
+	return false
+}
+
+func appendBytes(dst, src []byte) (out []byte) {
+	out = mxutil.Ensure(dst, len(src))
+	for i := 0; i < len(src); i++ {
+		out = push(out, src[i])
+	}
+	return out
+}
+
+// chanWriteResponse writes an accumulated response and reports whether the
+// connection can be reused. The head is written last-known-first only after the
+// body is complete, so the length is exact.
+func chanWriteResponse(bw *bufio.Writer, rb *respBuf, keepAlive bool) (ok bool) {
+	if rb.aborted {
+		return false
+	}
+	if rb.status == 0 {
+		rb.status = StatusOK
+	}
+	if !rb.ended {
+		// The handler never finished the response; say so rather than writing a
+		// half response that a client would read as a complete one.
+		return false
+	}
+	text := StatusText(rb.status)
+	bw.WriteString("HTTP/1.1 ")
+	bw.WriteString(strconv.Itoa(rb.status))
+	bw.WriteByte(' ')
+	bw.Write(text)
+	bw.WriteString("\r\n")
+	bw.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+	bw.WriteString("Content-Length: ")
+	bw.WriteString(strconv.Itoa(int32(len(rb.body))))
+	bw.WriteString("\r\n")
+	if keepAlive {
+		bw.WriteString("Connection: keep-alive\r\n")
+	} else {
+		bw.WriteString("Connection: close\r\n")
+	}
+	if rb.headers != nil {
+		for k, vv := range rb.headers {
+			for _, v := range vv {
+				bw.WriteString(k)
+				bw.WriteString(": ")
+				bw.Write(v)
+				bw.WriteString("\r\n")
+			}
+		}
+	}
+	bw.WriteString("\r\n")
+	if len(rb.body) > 0 {
+		bw.Write(rb.body)
+	}
+	return true
+}
+
+// chanKeepAlive decides whether the connection survives this request. A
+// request body that was not fully read makes the framing unknowable, so it
+// always closes.
+func chanKeepAlive(req *Request, bodyDrained bool) (ok bool) {
+	if !bodyDrained {
+		return false
+	}
+	if !req.ProtoAtLeast(1, 1) {
+		return false
+	}
+	if HeaderGet(req.Header, "Connection") == "close" {
+		return false
+	}
+	return true
+}
+
+// chanServeRequest serves one parsed request through the channel path. The
+// runner decides whether the handler runs here or in a pool worker; the
+// messages are the same either way.
+func chanServeRequest(bw *bufio.Writer, req *Request, routeID int32, h ChanHandler, runner chanRunner) (keepAlive bool) {
+	rb := &respBuf{}
+
+	runner.Step(routeID, h, Msg{
+		Kind:    MsgReqHead,
+		Method:  req.Method,
+		Path:    req.URL.Path,
+		Route:   routeID,
+		Headers: req.Header,
+	}, rb)
+
+	buf := []byte{:4096}
+	drained := true
+	for {
+		n, rerr := req.Body.Read(buf)
+		if n > 0 {
+			runner.Step(routeID, h, Msg{Kind: MsgReqBody, Data: buf[:n]}, rb)
+		}
+		if rerr != nil {
+			drained = rerr == io.EOF
+			break
+		}
+	}
+
+	runner.Step(routeID, h, Msg{Kind: MsgReqEnd}, rb)
+
+	if rb.aborted && rb.err != nil {
+		fmt.Fprintf(os.Stderr, "http: channel handler aborted: %v\n", rb.err)
+	}
+
+	keep := chanKeepAlive(req, drained)
+	if !chanWriteResponse(bw, rb, keep) {
+		return false
+	}
+	return keep
+}
+
+// ChanServe accepts connections on addr and serves them one at a time, in this
+// domain: no spawn anywhere. A connection loops requests until it is closed,
+// which is where keep-alive lives.
+func ChanServe(addr string, mux *ChanMux) (err error) {
+	return ChanServeMode(addr, mux, DispatchInline, 0)
+}
+
+// ChanServeMode is ChanServe with the dispatch policy named. DispatchInline
+// runs every handler in the connection's domain (deterministic, no threads);
+// DispatchSpawned builds a pool of `workers` handler routines once and hands
+// each exchange to one of them. Both use the same messages, so the same handler
+// runs under either policy.
+func ChanServeMode(addr string, mux *ChanMux, mode int32, workers int32) (err error) {
+	return ChanServeTimeout(addr, mux, mode, workers, 0)
+}
+
+// ChanServeTimeout is ChanServeMode with an idle deadline: a connection that
+// sends nothing for that long is cancelled. Zero means no deadline, which is
+// what a test wants; a deployment sets one so a silent client cannot hold the
+// single-domain loop forever.
+func ChanServeTimeout(addr string, mux *ChanMux, mode int32, workers int32, idle time.Duration) (err error) {
+	var pool *chanPool
+	if mode == DispatchSpawned {
+		n := workers
+		if n < 1 {
+			n = 1
+		}
+		// The table goes into the package global BEFORE the first spawn: a
+		// worker inherits it by fork. The queues are built here, in the frame
+		// that owns them for the accept loop's life.
+		chanGlobalMux = mux
+		pool = &chanPool{mux: mux}
+		for i := int32(0); i < n; i++ {
+			// int32 streams: a runtime-built []byte does not survive a spawn
+			// channel (see chanpool.mx), and scalars do.
+			j := chan int32{}
+			r := chan int32{}
+			pool.jobs = mxutil.Ensure(pool.jobs, 1)
+			pool.jobs = push(pool.jobs, j)
+			pool.results = mxutil.Ensure(pool.results, 1)
+			pool.results = push(pool.results, r)
+			spawn(chanWorkerLoop, j, r)
+		}
+	}
+	ln, lerr := net.Listen("tcp", addr)
+	if lerr != nil {
+		return lerr
+	}
+	for {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			return aerr
+		}
+		serveChanConn(c, mux, pool, idle)
+	}
+}
+
+// serveChanConn is the shell: it owns the socket for the life of the
+// connection, decodes each request into messages and writes back what the
+// handler sends.
+func serveChanConn(c net.Conn, mux *ChanMux, pool *chanPool, idle time.Duration) {
+	br := bufio.NewReader(c)
+	bw := bufio.NewWriter(c)
+	// The channels and the response scratch are built HERE, in the frame that
+	// owns this connection for its whole life. Built in a constructor they
+	// would be released with the constructor's frame.
+	var runner chanRunner
+	if pool != nil {
+		runner = &chanPoolRunner{pool: pool}
+	} else {
+		in := chan Msg{:1}
+		out := chan Msg{:16}
+		scratch := []byte{:8192}
+		runner = newChanInlineRunner(mux, in, out, scratch)
+	}
+	keep := true
+	lastID := int32(-1)
+	var lastH ChanHandler
+	for keep {
+		if idle > 0 {
+			c.SetReadDeadline(time.Now().Add(idle))
+		}
+		req, rerr := readRequest(br)
+		if rerr != nil {
+			// The cancel path: a client that disconnected, a deadline that
+			// expired or a read that failed ends the request stream, and the
+			// handler is told with MsgReqAbort rather than left to infer it
+			// from silence. Nothing it allocated for the exchange is left
+			// waiting.
+			if rerr != io.EOF && lastH != nil {
+				cancelExchange(runner, lastID, lastH, rerr)
+			}
+			if rerr == io.EOF {
+				break
+			}
+			// A parse failure is the client's, not the handler's: answer 400
+			// and close, because the framing is no longer known to be sound.
+			chanWritePlain(bw, StatusBadRequest)
+			bw.Flush()
+			break
+		}
+		if idle > 0 {
+			c.SetWriteDeadline(time.Now().Add(idle))
+		}
+		id, h := mux.Match(req.URL.Path)
+		if h == nil {
+			chanWritePlain(bw, StatusNotFound)
+			bw.Flush()
+			break
+		}
+		lastID = id
+		lastH = h
+		keep = chanServeRequest(bw, req, id, h, runner)
+		bw.Flush()
+	}
+	c.Close()
+}
+
+// cancelExchange delivers the abort for an exchange the shell could not finish.
+func cancelExchange(runner chanRunner, routeID int32, h ChanHandler, cause error) {
+	rb := &respBuf{}
+	runner.Step(routeID, h, Msg{Kind: MsgReqAbort, Err: cause}, rb)
+}
+
+// chanWritePlain writes a bodyless status response, for the shell's own errors.
+func chanWritePlain(bw *bufio.Writer, status int32) {
+	bw.WriteString("HTTP/1.1 ")
+	bw.WriteString(strconv.Itoa(status))
+	bw.WriteByte(' ')
+	bw.Write(StatusText(status))
+	bw.WriteString("\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+}

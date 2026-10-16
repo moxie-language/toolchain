@@ -1,0 +1,38 @@
+// Measures what a spawn costs on this box, which is the input to the pool
+// decision: if a spawn is a fork (an OS thread with its own domain and arena
+// stack), then one spawn per request is a thread per request, and a fixed pool
+// is the only bound that makes sense. Prints microseconds per spawn.
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func worker(ch chan []byte) {
+	done := false
+	for !done {
+		m := <-ch
+		if m == "stop" {
+			done = true
+		}
+	}
+}
+
+func main() {
+	const n = 16
+	ch := chan []byte{}
+	t0 := time.Now()
+	for i := 0; i < n; i++ {
+		spawn(worker, ch)
+	}
+	el := time.Since(t0)
+	// Plain int64s: a named Duration has no builtin stringer, so %d on it
+	// prints "?" instead of the measurement.
+	us := int64(el / time.Microsecond)
+	per := us / int64(n)
+	fmt.Printf("spawns=%d total_us=%d per_spawn_us=%d\n", n, us, per)
+	for i := 0; i < n; i++ {
+		ch <- []byte("stop")
+	}
+}

@@ -1,0 +1,300 @@
+package http
+
+// Spawned dispatch: the same messages, run by a fixed pool of worker routines
+// instead of in the connection's domain.
+//
+// The pool exists because a spawn is a fork, not a coroutine: a worker is an OS
+// thread with its own domain and its own arenas, so one spawn per request would
+// cost a thread per request (measured by tests/netsmoke/spawncost). The pool is
+// spawned once, workers pull from their own queue, and the connection shell
+// picks a worker for the whole exchange.
+//
+// The boundary carries an int32 STREAM, not framed byte slices, and that is a
+// workaround for a runtime defect: a []byte built at run time does not survive
+// a spawn channel. Measured (docs/OPEN_WORK.md): a literal crosses intact
+// (`[]byte("abcdefgh")` arrives with sum 804), while the same bytes built with
+// push arrive with the right LENGTH and allocator metadata as their content
+// (bytes 1..8 arrive as [4, 0, 0, ...]). Scalars cross correctly, so a message
+// is encoded as its kind and then each field as an int32 - byte strings packed
+// four bytes to a word - and the worker decodes the same way. Four bytes per
+// send instead of one keeps the cost sane; the honest fix is the runtime
+// defect, not this encoding.
+//
+// The router table is a package global read by the workers, which is sound
+// because spawn forks: every worker inherits the table as it stands when the
+// pool starts, and the table is built at startup and only read afterwards.
+
+import (
+	"errors"
+)
+
+// FrameStepDone ends one dispatch step on the wire: a step may produce no
+// response messages at all (a handler that only answers once it has the whole
+// request), so the shell needs a marker to know the worker finished.
+const FrameStepDone = int32(100)
+
+// chanGlobalMux is the table the pool workers read.
+var chanGlobalMux *ChanMux
+
+func chanRouteHandler(id int32) (h ChanHandler) {
+	if chanGlobalMux == nil || id < 0 || id >= int32(len(chanGlobalMux.routes)) {
+		return nil
+	}
+	return chanGlobalMux.routes[id].h
+}
+
+// --- int32 stream framing ---
+
+// packBytes is the words of s: length first, then four bytes to a word,
+// little-endian inside the word.
+func packBytes(s string) (w []int32) {
+	n := int32(len(s))
+	w = []int32{:1 + (n+3)/4}
+	w[0] = n
+	for i := int32(0); i < n; i++ {
+		wi := 1 + i/4
+		w[wi] = w[wi] | (int32(s[i]) << ((i % 4) * 8))
+	}
+	return w
+}
+
+func sendBytes(ch chan int32, s string) {
+	w := packBytes(s)
+	for i := 0; i < len(w); i++ {
+		ch <- w[i]
+	}
+}
+
+func recvBytes(ch chan int32) (s string) {
+	n := <-ch
+	nw := (n + 3) / 4
+	w := []int32{:nw}
+	for i := int32(0); i < nw; i++ {
+		w[i] = <-ch
+	}
+	s = []byte{:n}
+	for i := int32(0); i < n; i++ {
+		s[i] = byte((w[i/4] >> ((i % 4) * 8)) & 0xff)
+	}
+	return s
+}
+
+func sendHeaders(ch chan int32, h Header) {
+	if h == nil {
+		ch <- 0
+		return
+	}
+	ch <- int32(len(h))
+	for k, vv := range h {
+		sendBytes(ch, k)
+		ch <- int32(len(vv))
+		for i := 0; i < len(vv); i++ {
+			sendBytes(ch, vv[i])
+		}
+	}
+}
+
+func recvHeaders(ch chan int32) (h Header) {
+	n := <-ch
+	if n == 0 {
+		return nil
+	}
+	h = Header{}
+	for i := int32(0); i < n; i++ {
+		k := recvBytes(ch)
+		vn := <-ch
+		vv := [][]byte{:vn}
+		for j := int32(0); j < vn; j++ {
+			vv[j] = recvBytes(ch)
+		}
+		h[k] = vv
+	}
+	return h
+}
+
+func msgErrText(err error) (s string) {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func recvErrText(t string) (err error) {
+	if t == "" {
+		return nil
+	}
+	return errors.New(t)
+}
+
+// sendMsg puts one message on the stream: its kind, then the fields that kind
+// carries. recvMsg reads exactly these in this order.
+func sendMsg(ch chan int32, m Msg) {
+	ch <- m.Kind
+	switch m.Kind {
+	case MsgReqHead:
+		sendBytes(ch, m.Method)
+		sendBytes(ch, m.Path)
+		ch <- m.Route
+		sendHeaders(ch, m.Headers)
+	case MsgReqBody:
+		sendBytes(ch, m.Data)
+	case MsgRespHead:
+		ch <- m.Status
+		sendHeaders(ch, m.Headers)
+	case MsgRespBody:
+		sendBytes(ch, m.Data)
+	case MsgReqAbort:
+		sendBytes(ch, msgErrText(m.Err))
+	case MsgRespAbort:
+		sendBytes(ch, msgErrText(m.Err))
+	}
+}
+
+func recvMsg(ch chan int32) (m Msg) {
+	m.Kind = <-ch
+	switch m.Kind {
+	case MsgReqHead:
+		m.Method = recvBytes(ch)
+		m.Path = recvBytes(ch)
+		m.Route = <-ch
+		m.Headers = recvHeaders(ch)
+	case MsgReqBody:
+		m.Data = recvBytes(ch)
+	case MsgRespHead:
+		m.Status = <-ch
+		m.Headers = recvHeaders(ch)
+	case MsgRespBody:
+		m.Data = recvBytes(ch)
+	case MsgReqAbort:
+		m.Err = recvErrText(recvBytes(ch))
+	case MsgRespAbort:
+		m.Err = recvErrText(recvBytes(ch))
+	}
+	return m
+}
+
+// chanWorkerLoop is one pool worker. It owns no socket: it receives request
+// messages off the stream, runs the route's handler in this domain and streams
+// the response back. It never spawns and never blocks on anything but its two
+// channels.
+func chanWorkerLoop(jobs chan int32, results chan int32) {
+	in := chan Msg{:1}
+	out := chan Msg{:16}
+	scratch := []byte{:8192}
+	done := false
+	for !done {
+		m := recvMsg(jobs)
+		if m.Kind == 0 {
+			return
+		}
+		h := chanRouteHandler(m.Route)
+		if h == nil {
+			sendMsg(results, Msg{Kind: MsgRespAbort, Err: errors.New("channel handler: no route")})
+			results <- FrameStepDone
+		} else {
+			m.Scratch = scratch
+			in <- m
+			h.Serve(in, out)
+			for {
+				progress := false
+				select {
+				case rm := <-out:
+					// The handler wrote the body into the buffer it was
+					// offered; materialize it here, because the handler's
+					// frame is gone once Serve returns.
+					if rm.Kind == MsgRespBody && rm.Len > 0 && int32(len(scratch)) >= rm.Len {
+						rm.Data = scratch[:rm.Len]
+					}
+					sendMsg(results, rm)
+					progress = true
+				default:
+				}
+				if !progress {
+					break
+				}
+			}
+			results <- FrameStepDone
+		}
+	}
+}
+
+// chanPool is a fixed set of workers with their own queues. next rotates so a
+// connection does not always land on the same worker.
+type chanPool struct {
+	mux     *ChanMux
+	jobs    []chan int32
+	results []chan int32
+	next    int32
+}
+
+func (p *chanPool) pick() (i int32) {
+	i = p.next % int32(len(p.jobs))
+	p.next = p.next + 1
+	return i
+}
+
+// chanRunner runs one step of an exchange. The shell does not know which
+// implementation it holds: the messages are identical, and this choice IS the
+// dispatch policy.
+type chanRunner interface {
+	Step(routeID int32, h ChanHandler, m Msg, rb *respBuf)
+}
+
+// chanInlineRunner runs the handler in the connection's own domain. No spawn,
+// no queue, no lock: single-domain dispatch is the deterministic mode.
+//
+// Its channels and its scratch come from the CALLER, which builds them in the
+// frame that owns the connection: a channel allocated in a constructor's frame
+// is released when the constructor returns, and the first send on the freed
+// state panics with "send on closed channel".
+type chanInlineRunner struct {
+	mux     *ChanMux
+	in      chan Msg
+	out     chan Msg
+	scratch []byte
+}
+
+func newChanInlineRunner(mux *ChanMux, in chan Msg, out chan Msg, scratch []byte) (r *chanInlineRunner) {
+	return &chanInlineRunner{mux: mux, in: in, out: out, scratch: scratch}
+}
+
+func (r *chanInlineRunner) Step(routeID int32, h ChanHandler, m Msg, rb *respBuf) {
+	if h == nil {
+		rb.aborted = true
+		return
+	}
+	m.Scratch = r.scratch
+	rb.scratch = r.scratch
+	r.in <- m
+	h.Serve(r.in, r.out)
+	rb.take(r.out)
+}
+
+// chanPoolRunner hands the step to a worker and fills the same accumulator the
+// inline runner fills.
+type chanPoolRunner struct {
+	pool *chanPool
+}
+
+func (r *chanPoolRunner) Step(routeID int32, h ChanHandler, m Msg, rb *respBuf) {
+	i := r.pool.pick()
+	sendMsg(r.pool.jobs[i], m)
+	step := false
+	for !step {
+		fm := recvMsg(r.pool.results[i])
+		switch fm.Kind {
+		case FrameStepDone:
+			step = true
+		case MsgRespHead:
+			rb.status = fm.Status
+			rb.headers = fm.Headers
+		case MsgRespBody:
+			rb.body = appendBytes(rb.body, fm.Data)
+		case MsgRespEnd:
+			rb.ended = true
+		case MsgRespAbort:
+			rb.aborted = true
+			rb.err = fm.Err
+		}
+	}
+}
