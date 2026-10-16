@@ -145,6 +145,14 @@ func dnsStreamRoundTrip(c Conn, id uint16, query dnsmessage.Question, b []byte) 
 }
 
 // exchange sends a query on the connection and hopes for a response.
+//
+// The per-attempt work sits in exchangeOne so the cancel for the attempt
+// deadline is deferred in a body that runs once. Registering it here, in the
+// loop, is the moxie defer defect: a defer from a loop body is re-run on
+// return once the loop has iterated twice, and this loop's second iteration is
+// the ordinary TC-flag fallback (UDP answer truncated, retry over TCP), so a
+// lookup that took that path spun forever instead of returning. See
+// docs/OPEN_WORK.md.
 func (r *Resolver) exchange(ctx context.Context, server string, q dnsmessage.Question, timeout time.Duration, useTCP, ad bool) (rparser dnsmessage.Parser, rheader dnsmessage.Header, rerr error) {
 	q.Class = dnsmessage.ClassINET
 	id, udpReq, tcpReq, err3 := newRequest(q, ad)
@@ -158,43 +166,54 @@ func (r *Resolver) exchange(ctx context.Context, server string, q dnsmessage.Que
 		networks = [][]byte{"udp", "tcp"}
 	}
 	for _, network := range networks {
-		ctx1, cancel := context.WithDeadline(ctx, time.Now().Add(timeout))
-		defer cancel.Cancel()
-
-		c, err2 := r.dial(ctx1, network, server)
-		if err2 != nil {
-			return dnsmessage.Parser{}, dnsmessage.Header{}, err2
+		p1, h1, retry, err4 := r.exchangeOne(ctx, server, q, id, udpReq, tcpReq, timeout, network)
+		if err4 != nil {
+			return dnsmessage.Parser{}, dnsmessage.Header{}, err4
 		}
-		if d, ok := ctx1.Deadline(); ok && !d.IsZero() {
-			c.SetDeadline(d)
-		}
-		var p dnsmessage.Parser
-		var h dnsmessage.Header
-		if _, ok := c.(PacketConn); ok {
-			p, h, err2 = dnsPacketRoundTrip(c, id, q, udpReq)
-		} else {
-			p, h, err2 = dnsStreamRoundTrip(c, id, q, tcpReq)
-		}
-		c.Close()
-		if err2 != nil {
-			return dnsmessage.Parser{}, dnsmessage.Header{}, mapErr(err2)
-		}
-		if err1 := p.SkipQuestion(); err1 != dnsmessage.ErrSectionDone {
-			return dnsmessage.Parser{}, dnsmessage.Header{}, errInvalidDNSResponse
-		}
-		// RFC 5966 indicates that when a client receives a UDP response with
-		// the TC flag set, it should take the TC flag as an indication that it
-		// should retry over TCP instead.
-		// The case when the TC flag is set in a TCP response is not well specified,
-		// so this implements the glibc resolver behavior, returning the existing
-		// dns response instead of returning a "errNoAnswerFromDNSServer" error.
-		// See go.dev/issue/64896
-		if h.Truncated && network == "udp" {
+		if retry {
 			continue
 		}
-		return p, h, nil
+		return p1, h1, nil
 	}
 	return dnsmessage.Parser{}, dnsmessage.Header{}, errNoAnswerFromDNSServer
+}
+
+// exchangeOne makes a single attempt, over one network. retry reports the
+// truncated-UDP case, where the caller should try the next network.
+func (r *Resolver) exchangeOne(ctx context.Context, server string, q dnsmessage.Question, id uint16, udpReq, tcpReq []byte, timeout time.Duration, network string) (p dnsmessage.Parser, h dnsmessage.Header, retry bool, rerr error) {
+	ctx1, cancel := context.WithDeadline(ctx, time.Now().Add(timeout))
+	defer cancel.Cancel()
+
+	c, err2 := r.dial(ctx1, network, server)
+	if err2 != nil {
+		return dnsmessage.Parser{}, dnsmessage.Header{}, false, err2
+	}
+	if d, ok := ctx1.Deadline(); ok && !d.IsZero() {
+		c.SetDeadline(d)
+	}
+	if _, ok := c.(PacketConn); ok {
+		p, h, err2 = dnsPacketRoundTrip(c, id, q, udpReq)
+	} else {
+		p, h, err2 = dnsStreamRoundTrip(c, id, q, tcpReq)
+	}
+	c.Close()
+	if err2 != nil {
+		return dnsmessage.Parser{}, dnsmessage.Header{}, false, mapErr(err2)
+	}
+	if err1 := p.SkipQuestion(); err1 != dnsmessage.ErrSectionDone {
+		return dnsmessage.Parser{}, dnsmessage.Header{}, false, errInvalidDNSResponse
+	}
+	// RFC 5966 indicates that when a client receives a UDP response with
+	// the TC flag set, it should take the TC flag as an indication that it
+	// should retry over TCP instead.
+	// The case when the TC flag is set in a TCP response is not well specified,
+	// so this implements the glibc resolver behavior, returning the existing
+	// dns response instead of returning a "errNoAnswerFromDNSServer" error.
+	// See go.dev/issue/64896
+	if h.Truncated && network == "udp" {
+		return dnsmessage.Parser{}, dnsmessage.Header{}, true, nil
+	}
+	return p, h, false, nil
 }
 
 // checkHeader performs basic sanity checks on the header.

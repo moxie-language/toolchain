@@ -147,18 +147,44 @@ accept loop on syscalls.
 
 Worked around in `src/net/ipsock_posix.mx` by closing explicitly on each path,
 which is verified end to end: `net.Listen` returns, `Accept` takes two
-connections, `Read`/`Write`/`Close` work, and the process exits cleanly. Two
-more sites carry the same latent defect and are deliberately NOT touched:
+connections, `Read`/`Write`/`Close` work, and the process exits cleanly.
 
-- `src/net/dnsclient_unix.mx:162` - `defer cancel.Cancel()` inside the
-  `udp`/`tcp` loop. Fires when a UDP query gets no answer and the TCP retry
-  runs, i.e. on the second iteration.
-- `src/net/http/transport.mx:2832` - `defer timer.Stop()` inside
-  `persistConn.roundTrip`'s retry loop. Fires on the second attempt.
+All three sites in `src/` are now clear - a scan for `defer` inside a loop body
+returns nothing:
 
-Both want a restructure rather than a one-line swap: per-iteration deferred
-work belongs in a helper function called once per iteration, which is also
-what makes the defer legal.
+- `src/net/ipsock_posix.mx` - `defer syscall.Close(s1)` in `probe()`, closed
+  explicitly on each path. This was the one that made **every** `net.Listen`
+  spin, because `probe()` always runs its two probes.
+- `src/net/dnsclient_unix.mx` - `defer cancel.Cancel()` in the `udp`/`tcp`
+  loop moved into `exchangeOne`, a helper called once per attempt, which is
+  the shape that stays legal: the defer is registered in a body that runs
+  once. The second iteration is the ordinary TC-flag fallback (truncated UDP
+  answer, retry over TCP).
+- `src/net/http/transport.mx` - `defer timer.Stop()` in
+  `persistConn.roundTrip`'s select loop replaced with a nil-safe `stopTimer`
+  call on each return. A per-iteration helper does not fit here: the timer
+  outlives the iteration that creates it, so the cleanup is function-scope by
+  design. The trigger is also unreachable at that site - the per-request
+  `writeErrCh` is `chan error{1}`, is sent to exactly once, and is never
+  closed, so its select case runs at most once and cannot register twice.
+
+The defect's manifestation depends on the deferred call, which is worth
+knowing when reading a report of it. With `syscall.Close` it was an endless
+spin (407,733 `close()` in 3 s, all but one `EBADF`). With
+`context.WithDeadline`'s cancel plus a counter bump the old shape instead
+**aborts with `index out of range`** at return, and the deferred calls report
+zero executions - silent corruption rather than a spin. The converted shape,
+three loop iterations, reports `deferred calls executed = 3` and returns.
+
+Found while building that verification, and NOT touched here: a plain
+`net.LookupHost` **segfaults** on this host before any DNS I/O. `net.LookupHost`
+on the default resolver and a `&net.Resolver{PreferGo: true}` with a `Dial`
+hook both die with `caught signal SIGSEGV` at the same address; with the hook
+installed, the hook is never called and the scripted server never sees a
+query, so the crash is in the resolver's setup (config/`resolv.conf` path or
+earlier), not in `exchange`. That blocks exercising the DNS site's own trigger
+end to end; the conversion above is verified by shape and by the scan, not by
+a live truncated-UDP lookup.
 
 ### 0. Package initialization order, and a keep pass that matched implementations by name  [COMPILER, both fixed]
 

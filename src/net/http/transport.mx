@@ -2828,8 +2828,12 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 				if debugRoundTrip {
 					req.logf("starting timer for %v", d)
 				}
+				// Not deferred. This select loop re-enters, and a defer
+				// registered from a loop body is re-run on the function's
+				// return once the loop has iterated twice (docs/OPEN_WORK.md).
+				// The timer outlives the iteration that creates it, so it is
+				// stopped at each return below instead.
 				timer = time.NewTimer(d)
-				defer timer.Stop() // prevent leaks
 				respHeaderTimer = timer.C
 			}
 		case <-pcClosed:
@@ -2838,20 +2842,24 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 				// The pconn closing raced with the response to the request,
 				// probably after the server wrote a response and immediately
 				// closed the connection. Use the response.
+				stopTimer(timer)
 				return pc.handleResponseFor(req, startBytesWritten, debugRoundTrip, re)
 			default:
 			}
 			if debugRoundTrip {
 				req.logf("closech recv: %T %#v", pc.closed, pc.closed)
 			}
+			stopTimer(timer)
 			return nil, pc.mapRoundTripError(req, startBytesWritten, pc.closed)
 		case <-respHeaderTimer:
 			if debugRoundTrip {
 				req.logf("timeout waiting for response headers.")
 			}
 			pc.close(errTimeout())
+			stopTimer(timer)
 			return nil, errTimeout()
 		case re := <-resc:
+			stopTimer(timer)
 			return pc.handleResponseFor(req, startBytesWritten, debugRoundTrip, re)
 		case <-ctxDoneChan:
 			select {
@@ -2859,11 +2867,21 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 				// readLoop is responsible for canceling req.ctx after
 				// it reads the response body. Check for a response racing
 				// the context close, and use the response if available.
+				stopTimer(timer)
 				return pc.handleResponseFor(req, startBytesWritten, debugRoundTrip, re)
 			default:
 			}
 			pc.cancelRequest(context.Cause(req.ctx))
 		}
+	}
+}
+
+// stopTimer stops t when it was created. A nil timer means the response-header
+// timeout is unset, and the return that follows a failed write happens before
+// the timer is ever created.
+func stopTimer(t *time.Timer) {
+	if t != nil {
+		t.Stop()
 	}
 }
 
