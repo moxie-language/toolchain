@@ -53,6 +53,50 @@ relay-behaviour half (`test_relay_ingest_workers`, `test_relay_policy`,
 `morly/docs/relay-test-coverage.md`, is the next step of this cleanup - the
 suite's two halves are now in different repos from the code they test.
 
+### Compiler: `-cover` attributes every package to the toolchain's prefix  [BILATERAL, small]
+
+`-cover` names a site `<pkg.Path>/<basename>:<line>` via
+`coverReportFile(pkgPath, modPath, file)`, and `modPath` is `bst.globalModPrefix`.
+`ensureModuleRoot` settles that prefix once per process and **hardcodes the
+toolchain's own path**:
+
+```
+bst.globalModPrefix = "git.smesh.lol/moxie"
+bst.globalModDir    = root                              // MOXIEROOT
+bst.rootModPrefix   = targetImportPath(root, target)     // the TARGET's repo
+```
+
+There is no module file to read instead - the no-modules design removed it, and
+`loadManifest` sets repository pins, not this prefix. So a `-cover` build of any
+tree that is not the toolchain itself misreports:
+
+- **Integration** (`moxie build -cover` of the relay): `coverPkg(path)` accepts
+  `main`, `command-line-arguments`, or anything under `globalModPrefix`. The
+  relay's packages resolve under `rootModPrefix` (`git.smesh.lol/morly`), which
+  is not under the toolchain prefix, so they are **skipped entirely** - not
+  instrumented, absent from the site table. `mxcover` then reports
+  `no sites under git.smesh.lol/morly`. Measured on morly: 1413 sites, all in
+  three toolchain files (`main.mx` 702 - including `main.(*relayCtx)` and
+  `main.(*relayDB)`, which are the relay's own root package, accepted because
+  its path is literally `main` - plus `mxregexp.mx` and `mxutil.mx`).
+- **Unit** (`moxie test -cover ./pkg/store` in morly): the synthetic test
+  package's path is one `coverPkg` accepts, so it *does* instrument and the
+  numbers are real, but every file is attributed to the toolchain directory:
+  `91.8% 661/720 git.smesh.lol/moxie/engine.mx` is
+  `git.smesh.lol/morly/pkg/store/engine.mx`. This also means smesh's pre-carve
+  percentages were measured through the same misattribution - the numbers hold,
+  the reported paths do not.
+
+Fix: attribute by `rootModPrefix` (the repository the target lives in) instead
+of `globalModPrefix` in both `coverPkg` and `coverReportFile`, leaving `main`
+and `command-line-arguments` accepted as they are. Both values are already
+computed in `ensureModuleRoot`. **Legacy computes the same prefix and must
+change in the same commit**; this environment has no Go toolchain, so the
+legacy half cannot be built or tested here, which is why this is recorded
+rather than half-applied. Repro after the fix: `make cover` in `../morly`
+should print a table under `git.smesh.lol/morly`, and
+`moxie test -cover ./pkg/store` there should name `pkg/store/engine.mx`.
+
 ### 0. Package initialization order, and a keep pass that matched implementations by name  [COMPILER, both fixed]
 
 Two defects, both hit by the smesh relay port in one afternoon, both found by
