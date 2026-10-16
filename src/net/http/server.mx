@@ -2227,9 +2227,13 @@ func requestBodyRemains(rc io.ReadCloser) (rok bool) {
 // [Handler] that calls f.
 type HandlerFunc func(ResponseWriter, *Request)
 
-// ServeHTTP calls f(w, r).
+// ServeHTTP calls (*f)(w, r). The receiver is a POINTER to the func value
+// (Moxie bans value receivers, Go's is `func (f HandlerFunc)`), so the body
+// must dereference it: `f(w, r)` called the receiver pointer itself, which is
+// the address of the boxed func value, and every request jumped to that data
+// address and died in HandlerFunc.ServeHTTP.
 func (f *HandlerFunc) ServeHTTP(w ResponseWriter, r *Request) {
-	f(w, r)
+	(*f)(w, r)
 }
 
 // Helper handlers
@@ -2846,7 +2850,21 @@ func (mux *ServeMux) register(patter7 string, handler Handler) {
 	}
 }
 
+// registerErr builds the routing tree and the pattern objects it holds, all of
+// which are read on every request. Built in this frame's arena they were gone
+// by the first request: the mux answered 404 for a route main had registered.
+// The middle function is a METHOD because only a receiver's writes are
+// serialised into the caller's arena at return, and that arena is the root here
+// - the shape src/net/hosts.mx uses for the same reason.
 func (mux *ServeMux) registerErr(patstr string, handler Handler) (rerr error) {
+	saved := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
+	rerr = mux.registerErrInRoot(patstr, handler)
+	runtime.SetCurrentArena(saved)
+	return rerr
+}
+
+func (mux *ServeMux) registerErrInRoot(patstr string, handler Handler) (rerr error) {
 	if patstr == "" {
 		return errors.New("http: invalid pattern")
 	}
@@ -3747,8 +3765,14 @@ func (s *Server) onceSetNextProtoDefaults() {
 		// to add it.
 		return
 	}
+	// conf is stored in the server's TLSNextProto map by http2ConfigureServer
+	// and read for the life of the server, so it is allocated in the root arena
+	// rather than in this frame.
+	savedArena := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
 	conf := &http2Server{}
 	s.nextProtoErr = http2ConfigureServer(s, conf)
+	runtime.SetCurrentArena(savedArena)
 }
 
 // TimeoutHandler returns a [Handler] that runs h with the given time limit.

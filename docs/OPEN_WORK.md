@@ -151,6 +151,58 @@ The array itself is still there and should become a slice; scanning the port for
 writing through the zero-length slice (there is a live one in the same file's
 `fixLen`, see the commit that fixed the resolver) is open work.
 
+### Moxie semantics: a func-typed receiver must be called as `(*f)()`  [STDLIB PORT TRAP]
+
+Moxie bans value receivers, so Go's `func (f HandlerFunc) ServeHTTP(...)` became
+`func (f *HandlerFunc) ServeHTTP(...)`. The body kept Go's call spelling:
+
+```
+func (f *HandlerFunc) ServeHTTP(w ResponseWriter, r *Request) { f(w, r) }
+```
+
+`f` is a pointer to the func value, and `f(w, r)` does not load it: the
+compiler calls the *pointer* - the address of the boxed func value - as if it
+were code. Every request to a registered handler jumped to that arena address
+and died with `SIGSEGV` at `net/http.(*HandlerFunc).ServeHTTP` (in a debugger,
+`call *%rax` with `%rax` = the receiver). The correct spelling is `(*f)(w, r)`,
+which is what `crypto/ec/schnorr`'s `signOptionFunc.apply` already used -
+load, then call.
+
+The compiler should reject `f(w, r)` when `f`'s type is a pointer to a func
+type, the way it rejects a call of any other non-function; it currently
+accepts it and calls the pointer. No restriction fixture exists for it.
+
+### Moxie semantics: field access through a `**T` dereferences once  [STDLIB PORT TRAP]
+
+The net/http port had to replace a deferred closure over a local
+(`defer func() { if inFlightResponse != nil { inFlightResponse.cancelCtx() } }()`)
+with something Moxie can express, and used a pointer-to-pointer parameter:
+`func (c *conn) finishServe(inFlightResponse **response, ...)` called as
+`defer c.finishServe(&inFlightResponse, ...)`, with the body reading
+`inFlightResponse.conn.r`. That does not stand in for a closure. Field access
+on a `**T` dereferences ONCE, so the parameter behaves as if it were the `*T`
+that is the caller's local: `if inFlightResponse != nil` tested the ADDRESS of
+that local (always non-nil, so the guard never fired) and
+`inFlightResponse.conn.r` read the local's own bytes.
+
+Measured, with `func use(p **box) int32 { if p != nil { return p.val }; return -1 }`:
+
+```
+var b *box;            use(&b)  ->  0        (wanted -1)
+c := &box{val: 7};     use(&c)  ->  -1730123552  (wanted 7)
+```
+
+What it cost: `(*conn).finishServe` ran its cleanup against a garbage response
+and every connection that ended without an in-flight response - a 400 is one -
+SIGSEGVed at finishServe+130 in `abortPendingRead`. Fixed by reading the state
+off the receiver instead (`c.curReq`, which is what Go itself uses for this),
+which is the shape to reach for: an existing field on the receiver, not a
+pointer to the caller's local.
+
+The compiler side is worth a look too: `p.val` on a `**box` should be a
+compile error naming the type, not a silent read of the pointee's first bytes.
+No restriction fixture exists for it.
+
 ### `defer` inside a loop is re-run on return once the loop iterates twice  [COMPILER, both, high]
 
 Found while making `net.Listen` work, and it is why nothing in this workspace
