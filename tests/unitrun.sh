@@ -91,8 +91,9 @@ declare -A PHASE_MONO=(
 	[3]="phase3_ir_validate.sh"
 	[4]="phase4_binary_smoke.sh"
 	[6]="phase6_instrumentation.sh"
+	[8]="phase8_netsmoke.sh"
 )
-ALL_PHASES=(0a 0b 1 1b 1c 2 3 4 5 6 7)
+ALL_PHASES=(0a 0b 1 1b 1c 2 3 4 5 6 7 8)
 
 usage() {
 	awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"

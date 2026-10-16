@@ -151,6 +151,24 @@ The array itself is still there and should become a slice; scanning the port for
 writing through the zero-length slice (there is a live one in the same file's
 `fixLen`, see the commit that fixed the resolver) is open work.
 
+### The net stack serves, except that a registered route is not matched  [STDLIB, next]
+
+Measured against a running stdlib server (net/http on 127.0.0.1): ListenAndServe
+listens, accepts, parses the request, dispatches through the handler chain and
+answers a real HTTP response with no crash - the `Accept` dispatch panic and the
+four lifetime bugs below it are fixed - but `http.HandleFunc("/", h)` followed
+by `GET /smoke` answers `404 page not found`. Registration cannot have failed
+silently (`(*ServeMux).register` panics on a bad pattern, and it did not panic),
+and the root-arena wrap for registration is in place, so the tree holds the
+pattern and the MATCH is what fails. Look at `src/net/http/routing_tree.mx` -
+what `parsePattern("/")` produces, the `addSegments`/`set` path, and the subtree
+case in `matchOrRedirect` - before touching lifetimes again.
+
+`tests/phase8_netsmoke.sh` is the gate that reports this; it is wired into
+`tests/unitrun.sh` as phase 8 and is red until it is fixed. Its build and
+listen units pass; the curl and Moxie-client units assert the handler's body
+and both fail on the same 404.
+
 ### Moxie semantics: a func-typed receiver must be called as `(*f)()`  [STDLIB PORT TRAP]
 
 Moxie bans value receivers, so Go's `func (f HandlerFunc) ServeHTTP(...)` became

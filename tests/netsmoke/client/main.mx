@@ -1,0 +1,61 @@
+// The client half of the network smoke phase: resolve a host name, then make a
+// real HTTP request to the server the phase started. Both halves are built by
+// the compiler under test and run on this box.
+//
+// The lookup goes through the hosts file (the static-host path, which used to
+// SIGSEGV before the root-arena fix in src/net/hosts.mx) and the request goes
+// over a real TCP connection to the stdlib http.Server in ../server.
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+)
+
+func main() {
+	url := "http://127.0.0.1:39128/smoke"
+	if len(os.Args) > 1 {
+		url = os.Args[1]
+	}
+
+	addrs, err := net.LookupHost("localhost")
+	if err != nil {
+		fmt.Printf("lookup failed: %v\n", err)
+		os.Exit(1)
+	}
+	if len(addrs) == 0 {
+		fmt.Printf("lookup returned no addresses\n")
+		os.Exit(1)
+	}
+	fmt.Printf("lookup localhost -> %d address(es)\n", len(addrs))
+	for _, a := range addrs {
+		fmt.Printf("  addr=%s\n", a)
+	}
+
+	resp, err := http.Get(url)
+	if err != nil {
+		fmt.Printf("get failed: %v\n", err)
+		os.Exit(1)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("read body failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("status=%d\n", resp.StatusCode)
+	fmt.Printf("body=%s", body)
+	want := "hello path=/smoke\n"
+	if !bytes.Equal(body, want) {
+		fmt.Printf("body mismatch: wanted %s\n", want)
+		os.Exit(1)
+	}
+	if resp.StatusCode != 200 {
+		fmt.Printf("status mismatch: wanted 200\n")
+		os.Exit(1)
+	}
+	fmt.Printf("client ok\n")
+}
