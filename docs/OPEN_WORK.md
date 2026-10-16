@@ -44,14 +44,18 @@ Fixed, with the evidence that says the removal was safe:
   the app checkout untouched (`moxie 8874ca31`). Before that, phase 7 wrote nine
   tracked bundles in place and left smesh dirty on every run.
 
-Residual, deliberately not done yet: the relay's integration and browser tests
-still live in `smesh/test/` (they drive a morly-built relay through
-`SMESH_RELAY_BIN`, which is how phase 7 runs `test_app.py`). morly has the unit
-layer only (`make test-unit`, 26 packages / 370 tests). Moving the
-relay-behaviour half (`test_relay_ingest_workers`, `test_relay_policy`,
-`test_relay_roundtrip`, `stress_metrics`) to morly, and re-measuring
-`morly/docs/relay-test-coverage.md`, is the next step of this cleanup - the
-suite's two halves are now in different repos from the code they test.
+Done since that audit. The relay's tests now split with the code, and the
+coverage doc was rewritten to match: `make test-unit` (26 packages / 370 tests)
+and `make test-integration` (31 tests: the ORLY_* env contract, the WebSocket
+round-trip, the ingest worker pool, the load driver) run in `../morly/test`,
+and `smesh/test` keeps the browser layer - the app flows, the signer, the
+worker shims, MLS, the memory profile, the served-app smoke tests, and the
+feed round-trip that publishes an event and looks for it in the rendered page.
+Three files that were two suites in one (`test_relay_roundtrip`) or named for
+the relay they no longer test were renamed accordingly.
+
+The re-measurement is what the item below is about: it cannot be done yet, and
+the reason is a compiler defect rather than anything about the doc.
 
 ### Compiler: `-cover` attributes every package to the toolchain's prefix  [BILATERAL, small]
 
