@@ -1714,7 +1714,13 @@ func (h *ResourceHeader) unpack(msg []byte, off int32) (int32, error) {
 // preLen is the length that msg was before the ResourceBody was packed.
 func (h *ResourceHeader) fixLen(msg []byte, lenOff int32, preLen int32) error {
 	conLen := len(msg) - preLen
-	if conLen > int32(^uint16(0)) {
+	// 65535 spelled out rather than int32(^uint16(0)): the constant fold of ^
+	// on a sized unsigned type loses the type and yields -1, so that spelling
+	// made this test conLen > -1 and reported every resource as too long.
+	// Every DNS packet hits it, because newRequest always appends an EDNS0 OPT
+	// record, so the Go resolver could not pack a query at all. See
+	// docs/OPEN_WORK.md.
+	if conLen > 65535 {
 		return errResTooLong
 	}
 
@@ -2033,8 +2039,14 @@ func (n *Name) unpack(msg []byte, off int32) (int32, error) {
 	// ptr is the number of pointers followed.
 	var ptr int32
 
-	// Name is a slice representation of the name data.
-	name := n.Data[:0]
+	// di is the write cursor into n.Data. The name is built straight into
+	// n.Data by index because a subslice of an array field is a copy in moxie:
+	// the original `name := n.Data[:0]` plus push accumulated into that copy,
+	// left n.Data zeroed, and every parsed name came back empty while Length
+	// was right. checkResponse then rejected every answer, so the Go resolver
+	// could not resolve anything even though the query went out and the reply
+	// arrived.
+	di := int32(0)
 
 Loop:
 	for {
@@ -2062,10 +2074,15 @@ Loop:
 				}
 			}
 
-			name = mxutil.Ensure(name, len(msg[currOff:endOff]))
-			name = push(name, msg[currOff:endOff]...)
-			name = mxutil.Ensure(name, 1)
-			name = push(name, '.')
+			if di+int32(c)+1 > nonEncodedNameMax {
+				return off, errNameTooLong
+			}
+			for k := currOff; k < endOff; k++ {
+				n.Data[di] = msg[k]
+				di++
+			}
+			n.Data[di] = '.'
+			di++
 			currOff = endOff
 		case 0xC0: // Pointer
 			if currOff >= len(msg) {
@@ -2086,14 +2103,15 @@ Loop:
 			return off, errReserved
 		}
 	}
-	if len(name) == 0 {
-		name = mxutil.Ensure(name, 1)
-		name = push(name, '.')
+	if di == 0 {
+		// A name that is just the root is "." on the wire representation.
+		n.Data[0] = '.'
+		di = 1
 	}
-	if len(name) > nonEncodedNameMax {
+	if di > nonEncodedNameMax {
 		return off, errNameTooLong
 	}
-	n.Length = uint8(len(name))
+	n.Length = uint8(di)
 	if ptr == 0 {
 		newOff = currOff
 	}
