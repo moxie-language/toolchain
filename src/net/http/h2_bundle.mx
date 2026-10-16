@@ -4258,6 +4258,17 @@ func (s *http2serverInternalState) startShutdown() {
 //
 // ConfigureServer must be called before s begins serving.
 func http2ConfigureServer(s *Server, conf *http2Server) (rerr error) {
+	// Everything this function hangs off s must outlive the call. s is a
+	// PARAMETER, and a write through a parameter is not relocated at return
+	// (only receiver and package-global writes are), so the state map and the
+	// TLSNextProto map built here would be released with this frame: the first
+	// request that read s.TLSNextProto died in hashmapGet, from
+	// (*Server).protocols. This function's own frame slot is the root arena for
+	// the duration, so its direct allocations (the activeConns map, the
+	// TLSNextProto map and the h2 wrappers stored in it) live as long as the
+	// program - the same idiom as src/net/hosts.mx.
+	savedArena := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
 	if s == nil {
 		panic("nil *http.Server")
 	}
@@ -4291,6 +4302,7 @@ func http2ConfigureServer(s *Server, conf *http2Server) (rerr error) {
 			}
 		}
 		if !haveRequired {
+			runtime.SetCurrentArena(savedArena)
 			return fmt.Errorf("http2: TLSConfig.CipherSuites is missing an HTTP/2-required AES_128_GCM_SHA256 cipher (need at least one of TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 or TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256)")
 		}
 	}
@@ -4321,6 +4333,7 @@ func http2ConfigureServer(s *Server, conf *http2Server) (rerr error) {
 	//
 	// A connection passed in this method has already had the HTTP/2 preface read from it.
 	s.TLSNextProto[http2nextProtoUnencryptedHTTP2] = &h2UnencryptedTLSNextProto{conf: conf}
+	runtime.SetCurrentArena(savedArena)
 	return nil
 }
 
