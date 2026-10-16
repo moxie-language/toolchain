@@ -141,3 +141,11 @@ run_mode inline
 run_mode spawned
 
 rm -rf "$td"
+
+# A phase that cannot go red is not a gate: this script's log showed two FAIL
+# verdicts (the client transport blocker, which is its own defect) while the
+# process exited 0, so the driver recorded a green phase over a red log. Exit
+# non-zero when anything failed, the same way phase 3 does.
+if [ -f "$STATUSFILE" ] && [ "$(grep -c '^FAIL' "$STATUSFILE" 2>/dev/null || echo 0)" -gt 0 ]; then
+	exit 1
+fi
