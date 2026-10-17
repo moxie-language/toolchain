@@ -235,6 +235,55 @@ Spawn cost is measured by tests/netsmoke/spawncost (a spawn is a fork, so it is
 microseconds and a thread), which is why the pool exists and per-request spawn
 does not.
 
+### Allocation scope must be lexical, not inherited  [RUNTIME PRINCIPLE]
+
+The lesson under the 17.5kB retention, and it is not specific to the queue.
+
+An arena in force is dynamic state: anything that allocates inherits whatever
+arena its caller happened to have entered. When a library function's allocation
+lifetime is shorter than the caller's arena, the allocation is charged to a
+scope that outlives it, and the reset that was supposed to free it is then
+freeing the wrong region - the reset works, the attribution is wrong. That is
+the shape of this leak, and it is the same disease as the checker dying with
+"region table full" during the 45-package sweep, where type-check scratch landed
+in the compile arena because the checker allocates wherever it was called from.
+Two unrelated call sites, one fault: allocation policy inherited dynamically.
+
+**The rule: allocation scope must be lexical, not inherited.** Any function that
+allocates for its own use opens its own scope - the codec, the formatter, the
+error path, the header parser, the checker. The caller's arena is never a valid
+place to put callee scratch.
+
+**Data in flight is not an arena object at all.** An arena frees at a scope
+boundary and a message crosses scopes by definition, so a message buffer belongs
+to a RING OF PREALLOCATED SLOTS owned by the queue, handed off by index, with
+the copy happening ONCE, at a named site, into the receiver's slot. That gives
+zero allocation in the steady state, so there is nothing to leak and nothing to
+mis-attribute. Sizing falls out of Little's law: memory for the queue is arrival
+rate times service time, bounded by channel depth or pool size - NOT connections
+times slots. A per-connection ring is sized by a variable that does not appear in
+the load equation, which is why it cannot cap anything; a first attempt at one
+(4 slots per connection) was measured-in-principle unsound and reverted before
+committing for exactly that reason.
+
+**The instrument to prove any of it** is a per-scope allocation counter: tag each
+arena with the scope that opened it, and one run names the 17.5kB instead of
+testing five hypotheses.
+
+**Form of the retention, measured** (this is the answer to "what is the form of
+it"): it scales with the NUMBER of header entries, not with their bytes.
+
+    1 header  x 4000B : ~7.9kB retained per request (baseline is ~7.0kB)
+    40 headers x 100B : ~141kB retained per request, i.e. ~3.4kB PER HEADER ENTRY
+
+So it is the map entries and their value slices - the `Header` map the parser
+builds (`[][]byte` values) - not the payload bytes. Structs and scalars can be
+overwritten in place; slices and maps need an allocation pool for reuse. The fix
+direction that follows: a reusable header map and reusable body buffers that are
+cleared and refilled per request (steady-state allocation zero), plus the runtime
+side - a hashmap's bucket storage must be charged to an arena with the map's own
+lifetime, not to whatever arena the caller had entered.
+
 ### The handler contract: one call per request, one arena  [DONE, with one blocker]
 
 `src/net/http/chanpath.mx` is the handler path: the shell owns the socket,

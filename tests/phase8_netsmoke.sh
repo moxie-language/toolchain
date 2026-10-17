@@ -155,7 +155,6 @@ hello path=/two"
 			log_fail "netsmoke:no-accumulation-$mode" "no rss (base=[$mid_rss] post=[$post_rss])"
 		else
 			growth=$((post_rss - mid_rss))
-			calls=$((served1 - served0))
 			if [ "$growth" -lt 2048 ]; then
 				log_pass "netsmoke:no-accumulation-$mode" "400 exchanges in 2 runs: rss ${mid_rss}kB -> ${post_rss}kB (+${growth}kB)"
 			else
