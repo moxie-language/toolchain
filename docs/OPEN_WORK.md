@@ -284,6 +284,23 @@ cleared and refilled per request (steady-state allocation zero), plus the runtim
 side - a hashmap's bucket storage must be charged to an arena with the map's own
 lifetime, not to whatever arena the caller had entered.
 
+### The site recorder needs returnAddress, not Caller  [INSTRUMENT, next]
+
+The recorder was retargeted from "the root arena" to "any arena already holding
+more than 8kB" (a long-lived arena that grows per request; short-lived per-call
+frames never reach it). After 1000 requests it STILL produced no rows, so the
+capture itself is the failure, not the predicate: `Caller(1)` from inside
+`alloc()` does not resolve there (no frame-pointer walk available in that
+context), and `ok` comes back false so nothing is recorded. The runtime already
+ships `src/runtime/arch-has-returnaddr.mx`, which is what a per-allocation site
+capture wants - `returnAddress()` costs no stack walk.
+
+So the next instrument change is one line in the recorder: use the return-address
+builtin instead of `Caller`, and the report names the deposit site. The predicate
+("arena already holding more than 8kB") stays as it is; it is what separates the
+long-lived arenas from per-call frames without the fixture having to know any
+arena pointer.
+
 ### Correction: it is not the root arena, it is the connection's frame arena  [INSTRUMENT]
 
 The root-site recorder (committed in the instrument) fires on any allocation
