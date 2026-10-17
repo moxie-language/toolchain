@@ -1967,6 +1967,7 @@ func arenaAllocRaw(a *Arena, size uintptr) unsafe.Pointer {
 		a.regions[a.nregions].base = uintptr(addr)
 		a.regions[a.nregions].off = 0
 		a.regions[a.nregions].cap = newCap
+		RecordRegionAdd(a.scope, newCap)
 		a.nregions++
 		if a.sovereign != 0 {
 			sovRangeRegister(uintptr(addr), newCap, a.owner)
@@ -2034,6 +2035,7 @@ func ArenaAllocTD(a *Arena, size uintptr, td *RawType) unsafe.Pointer {
 		a.regions[a.nregions].base = uintptr(addr)
 		a.regions[a.nregions].off = 0
 		a.regions[a.nregions].cap = newCap
+		RecordRegionAdd(a.scope, newCap)
 		// A sovereign group's data arena is identified by its registered
 		// regions. Registers 0 of g.data is recorded when the group is made,
 		// and every region a compaction makes is recorded too, but a region
@@ -2098,6 +2100,13 @@ func ArenaReset(a *Arena) {
 	}
 	arenaScopeFreed(a.scope, uintptr(a.alloc))
 	a.alloc = 0
+	if a.nregions > 1 {
+		rb := uintptr(0)
+		for i := int32(1); i < a.nregions; i++ {
+			rb += a.regions[i].cap
+		}
+		RecordRegionFree(a.scope, uintptr(a.nregions-1), rb)
+	}
 	for i := a.nregions - 1; i > 0; i-- {
 		sysUnmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
 	}

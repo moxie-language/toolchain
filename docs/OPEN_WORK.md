@@ -284,6 +284,40 @@ cleared and refilled per request (steady-state allocation zero), plus the runtim
 side - a hashmap's bucket storage must be charged to an arena with the map's own
 lifetime, not to whatever arena the caller had entered.
 
+### The per-site tracker already exists: -print-allocs + the alloc_trace tag  [INSTRUMENT, use this]
+
+There was no need to hand-roll a site capture, and the two failures (Caller and
+returnAddress) are beside the point: the compiler already has the seam.
+
+  * `-print-allocs <pattern>` (`_mxc_stage4/main.mx`, `setPrintAllocs`) matches
+    functions by relative name and emits `call void @runtime.logAlloc(i32 siteID,
+    i32 size)` immediately before EVERY arena allocation in a matched function.
+    It forces the build serial (site ids are handed out in compile order) and
+    writes a SITE TABLE beside the output - one entry per site, naming
+    `pkg.Func@file:line`.
+  * `src/runtime/alloc_trace.mx` is the counting side, selected by the
+    `alloc_trace` build tag: per-site counters and sizes in root-arena tables,
+    `PrintAllocCounters()` to dump them, and exported readers
+    (`__moxie_alloc_counters_ptr`, `__moxie_alloc_sizes_ptr`,
+    `__moxie_alloc_n_sites`, `__moxie_total_alloc`, `__moxie_mallocs`).
+    `allocArenaUsed(a)` lives there too. Without the tag, `alloc_trace_off.mx`
+    supplies a no-op `logAlloc`.
+  * The runtime's `totalAlloc`/`mallocs` are documented to match those numbers
+    precisely ("the one entry point every compiler-emitted allocation goes
+    through, so the numbers match what -print-allocs instruments").
+
+So the next run is an instrumented build, not another counter:
+`build -tags alloc_trace -print-allocs 'net/http'` over the fixture, serve, call
+`runtime.PrintAllocCounters()` (or read the exported tables) after 1000 requests,
+and read the site table beside the binary. That names every allocating source
+site with its byte count - including whatever is driving the region growth - and
+it is exact rather than inferred.
+
+The hand-rolled parts that stay: the per-scope allocated/reclaimed counters and
+the region acquire/release counters (they answered the arena-level question and
+found the region leak); the site PC capture in `alloc()` is superseded and can be
+deleted.
+
 ### It is not first-touch: it is arena REGION growth, ~9.6MB acquired per 300 requests  [MEASURED]
 
 The obvious explanation for "RSS grows, arena report flat, same in both modes" is

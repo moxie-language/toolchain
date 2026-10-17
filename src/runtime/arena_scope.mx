@@ -43,6 +43,47 @@ func ArenaScope() (id int32) {
 	return arenaScopeCurrent
 }
 
+// --- region accounting ---
+//
+// A region is the unit an arena grows by. One that is added and never unmapped
+// costs its whole mapping whether or not its bytes are reported as "used", which
+// is why the byte counters can look clean while RSS climbs.
+var regionAddCount [arenaScopeMax]uint64
+var regionAddBytes [arenaScopeMax]uint64
+var regionFreeCount [arenaScopeMax]uint64
+var regionFreeBytes [arenaScopeMax]uint64
+var sysMapCount uint64
+var sysMapBytes uint64
+var sysUnmapCount uint64
+var sysUnmapBytes uint64
+
+// RecordRegionAdd charges one region acquisition to a scope.
+func RecordRegionAdd(id int32, bytes uintptr) {
+	if id >= 0 && id < arenaScopeMax {
+		regionAddCount[id]++
+		regionAddBytes[id] += uint64(bytes)
+	}
+}
+
+// RecordRegionFree charges region releases to a scope.
+func RecordRegionFree(id int32, count uintptr, bytes uintptr) {
+	if id >= 0 && id < arenaScopeMax {
+		regionFreeCount[id] += uint64(count)
+		regionFreeBytes[id] += uint64(bytes)
+	}
+}
+
+// RecordSysMap / RecordSysUnmap count the process-level mappings.
+func RecordSysMap(bytes uintptr) {
+	sysMapCount++
+	sysMapBytes += uint64(bytes)
+}
+
+func RecordSysUnmap(bytes uintptr) {
+	sysUnmapCount++
+	sysUnmapBytes += uint64(bytes)
+}
+
 func arenaScopeAlloc(id int32, size uintptr) {
 	if id >= 0 && id < arenaScopeMax {
 		arenaScopes[id].alloc += uint64(size)
@@ -206,6 +247,32 @@ func ArenaScopeReport() (out []byte) {
 	}
 	for i := int32(0); i < arenaPoolN; i++ {
 		out = emitLiveArena(out, arenaPool[i], "pooled")
+	}
+	out = appendScopeStr(out, "sysmap count=")
+	out = appendScopeUint(out, sysMapCount)
+	out = appendScopeStr(out, " bytes=")
+	out = appendScopeUint(out, sysMapBytes)
+	out = appendScopeStr(out, "\n")
+	out = appendScopeStr(out, "sysunmap count=")
+	out = appendScopeUint(out, sysUnmapCount)
+	out = appendScopeStr(out, " bytes=")
+	out = appendScopeUint(out, sysUnmapBytes)
+	out = appendScopeStr(out, "\n")
+	for i := int32(0); i < arenaScopeMax; i++ {
+		if regionAddCount[i] == 0 && regionFreeCount[i] == 0 {
+			continue
+		}
+		out = appendScopeStr(out, "region scope=")
+		out = appendScopeUint(out, uint64(i))
+		out = appendScopeStr(out, " added=")
+		out = appendScopeUint(out, regionAddCount[i])
+		out = appendScopeStr(out, "/")
+		out = appendScopeUint(out, regionAddBytes[i])
+		out = appendScopeStr(out, " freed=")
+		out = appendScopeUint(out, regionFreeCount[i])
+		out = appendScopeStr(out, "/")
+		out = appendScopeUint(out, regionFreeBytes[i])
+		out = appendScopeStr(out, "\n")
 	}
 	for i := int32(0); i < rootSizeN; i++ {
 		out = appendScopeStr(out, "rootsize=")
