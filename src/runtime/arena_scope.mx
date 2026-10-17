@@ -81,6 +81,45 @@ func SetArenaTrace(on bool) {
 	arenaTraceOn = on
 }
 
+// RecordRootSize charges one DIRECT allocation (ArenaAllocTD, which bypasses
+// alloc() and therefore the site recorder) of size bytes into a long-lived
+// arena, keyed by size. Powers of two are the hashmap bucket signature; variable
+// sizes are codec buffers.
+const rootSizeMax = int32(24)
+
+type rootSizeRec struct {
+	size  uintptr
+	count uint64
+	bytes uint64
+}
+
+var rootSizes [rootSizeMax]rootSizeRec
+var rootSizeN int32
+
+// RecordRootSize records one direct allocation into the root arena.
+func RecordRootSize(size uintptr) {
+	if rootTraceBusy {
+		return
+	}
+	rootTraceBusy = true
+	var i int32 = 0
+	for i = 0; i < rootSizeN; i++ {
+		if rootSizes[i].size == size {
+			rootSizes[i].count++
+			rootSizes[i].bytes += uint64(size)
+			rootTraceBusy = false
+			return
+		}
+	}
+	if rootSizeN < rootSizeMax {
+		rootSizes[rootSizeN].size = size
+		rootSizes[rootSizeN].count = 1
+		rootSizes[rootSizeN].bytes = uint64(size)
+		rootSizeN++
+	}
+	rootTraceBusy = false
+}
+
 // RecordRootSite charges one allocation of size bytes into the root arena to
 // the PC of the code that made it.
 func RecordRootSite(pc uintptr, size uintptr) {
@@ -167,6 +206,15 @@ func ArenaScopeReport() (out []byte) {
 	}
 	for i := int32(0); i < arenaPoolN; i++ {
 		out = emitLiveArena(out, arenaPool[i], "pooled")
+	}
+	for i := int32(0); i < rootSizeN; i++ {
+		out = appendScopeStr(out, "rootsize=")
+		out = appendScopeUint(out, uint64(rootSizes[i].size))
+		out = appendScopeStr(out, " count=")
+		out = appendScopeUint(out, rootSizes[i].count)
+		out = appendScopeStr(out, " bytes=")
+		out = appendScopeUint(out, rootSizes[i].bytes)
+		out = appendScopeStr(out, "\n")
 	}
 	for i := int32(0); i < rootSiteN; i++ {
 		out = appendScopeStr(out, "rootsite_pc=")

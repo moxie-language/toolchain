@@ -284,6 +284,37 @@ cleared and refilled per request (steady-state allocation zero), plus the runtim
 side - a hashmap's bucket storage must be charged to an arena with the map's own
 lifetime, not to whatever arena the caller had entered.
 
+### STEP 2 CLOSED: the site is hashmap bucket allocation into the root arena  [NAMED, measured]
+
+The reason the site recorder saw nothing from `alloc()`: the root gains memory by
+DIRECT `ArenaAllocTD` calls that bypass `alloc()` entirely - map buckets and codec
+buffers. Recording those by size closes the attribution. After 1000 requests, one
+connection, inline:
+
+    rootsize=16  count=3062  bytes= 48992
+    rootsize=32  count=3147  bytes=100704
+    rootsize=64  count=3024  bytes=193536
+    rootsize=192 count=3019  bytes=579648     <- hashmap bucket header
+    rootsize=128 count=1008  bytes=129024
+    rootsize=256 count=1009  bytes=258304
+
+Powers of two plus 192, one to three of each PER REQUEST, is the hashmap's
+bucket/overflow key-value allocation pattern and nothing else allocates like that.
+So the site is the hashmap allocation path: `hashmapSet`/growth calling
+`ArenaAllocTD` on `hashmapOwner`'s answer, and the answer is `trueRootArena()`
+because the per-request `Header` map's header cannot be found in a live arena by
+the time the map is used. The root arena never resets, so every bucket stays.
+
+This is the attribution the objective asked for, and it is the map hypothesis in
+its correct form - not "the header decode" (that was balanced) and not "the codec"
+(no such sizes), but the map's growth charged to a fallback arena.
+
+The fix is then exactly as recorded: the map carries its group (so no fallback
+exists), carved from the parent arena, with assignment as the self-mutating
+operation; and the creation site builds the map in the arena it is given. The
+acceptance instrument is the report above: rootsize rows stop growing, the root's
+used bytes go flat, and the live arenas stay flat over 3x1000 in both modes.
+
 ### The retention is LOCATED: root 4.27MB plus a second long-lived arena 6.31MB  [INSTRUMENT]
 
 The live-arena report (one line per arena still holding memory: scope, owner site,
