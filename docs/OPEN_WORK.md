@@ -557,6 +557,16 @@ per round, both dispatch modes:**
               root arena 71.1k -> 71.6k                    (+176B over 3000)
               sov created=5 released=3 live=2              (constant)
 
+And the number the user asked for specifically - total mapped bytes, not the
+per-scope counters - is *exactly* flat, while the churn keeps moving:
+
+    inline   mapped net=273481728  livecap=277544960   IDENTICAL in all four samples
+             (cumulative sysmap 408MB -> 885MB, sysunmap 135MB -> 611MB)
+    spawned  mapped net=272924672  livecap=272891904   IDENTICAL in all five samples
+
+so the process maps and unmaps the same bytes over and over and retains none of
+them, in both dispatch modes.
+
 The inline column is the acceptance: VmData is *identical* across the three
 rounds, the group count is constant, and no scope retains a rate. Two residuals,
 both measured and both NOT the leak:
