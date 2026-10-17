@@ -284,6 +284,21 @@ cleared and refilled per request (steady-state allocation zero), plus the runtim
 side - a hashmap's bucket storage must be charged to an arena with the map's own
 lifetime, not to whatever arena the caller had entered.
 
+### Excluded: inlining of the per-request function is not the deposit  [INSTRUMENT]
+
+Next cheap hypothesis, measured and excluded: `chanHandleOne` inlined into
+`serveChanConn` would put `readRequest`'s returned graph into the CONNECTION's
+frame (the arena the counters blame) and the `//:noinline` pragma would fix it.
+With the pragma: scope 0 retained 16.2MB after 1k and 32.4MB after 2k, RSS
+16.2 -> 33.1 -> 49.9MB - identical to the leak. Reverted.
+
+So the deposit into the long-lived arena is not this call's inlining. The next
+seam is still the caller-side site capture (port-tagged arena push, or a
+compiler-passed per-function id); the negative results are now three, which is
+itself the argument for paying for the instrument rather than testing more
+hypotheses: creation-site-alone (worse), returnAddress-in-alloc (SIGSEGV), and
+inlining (no change).
+
 ### returnAddress inside alloc is a SIGSEGV, so the site capture needs a different seam  [INSTRUMENT, blocked-ish]
 
 Tried it: `RecordRootSite(uintptr(returnAddress(1)), size)` in `alloc()`, re-baked,
