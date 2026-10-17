@@ -284,6 +284,38 @@ cleared and refilled per request (steady-state allocation zero), plus the runtim
 side - a hashmap's bucket storage must be charged to an arena with the map's own
 lifetime, not to whatever arena the caller had entered.
 
+### What the spawned pool actually is: a copy boundary, not a concurrency one  [DESIGN CONSTRAINTS]
+
+Correcting the frame the pool was described in. Moxie domains share no memory -
+there is no race to guard, because there is nothing to share (the same reason a
+"self-mutating receiver plus a worker pool" is not a race: each worker holds its
+own copy of the app instance, which is why a per-worker counter goes up by that
+worker's share). What the pool really is, is a COPY boundary, and that has
+consequences the phase 8 fixture does not show, because its app has no fields
+and writes nothing back:
+
+  * Nothing can be handed in: every resource a handler touches must be built
+    inside the domain that uses it, from a name carried in the request or a
+    constant. A live socket, an authenticated session, a mapped region cannot
+    run in spawned mode at all. So spawned and inline are NOT interchangeable
+    for a handler that touches the world, and "spawning is only a scheduling
+    choice" is proven only for the stateless case.
+  * State multiplies: W workers each hold a copy of the app struct plus their
+    own request arenas, so the pool has to be sized against memory, not only
+    against the ~165us spawn cost.
+  * Real effects go through the kernel, so the concurrency hazards relocate to
+    the filesystem: two workers appending to one log need O_APPEND or a single
+    writer, and read-modify-write on a file needs a real lock. The arena model
+    cannot help there, because the shared object is the inode.
+  * There is no zero-copy path by construction: request in and response out both
+    cross the codec, so bodies above a few hundred kB need a streaming handler
+    shape, and a shared mapping would break isolation by definition.
+
+The int32 stream on the pool boundary is a workaround for the spawn-channel
+defect (see below), not a design: it is one channel operation per four bytes.
+The shape that replaces it is the queue-owned ring of preallocated slots, handed
+off by index with one copy at a named site.
+
 ### The handler contract: one call per request, one arena  [DONE, with one blocker]
 
 `src/net/http/chanpath.mx` is the handler path: the shell owns the socket,
