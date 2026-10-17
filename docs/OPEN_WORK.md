@@ -284,6 +284,26 @@ cleared and refilled per request (steady-state allocation zero), plus the runtim
 side - a hashmap's bucket storage must be charged to an arena with the map's own
 lifetime, not to whatever arena the caller had entered.
 
+### returnAddress inside alloc is a SIGSEGV, so the site capture needs a different seam  [INSTRUMENT, blocked-ish]
+
+Tried it: `RecordRootSite(uintptr(returnAddress(1)), size)` in `alloc()`, re-baked,
+rebuilt. The fixture dies at startup:
+
+    panic: runtime error at 0x0000000000652f9f: caught signal SIGSEGV
+
+So the intrinsic is not usable from that seam (alloc is `:noinline` and called
+from everywhere, including the paths that set up the very stack a return address
+is read from). The edit is reverted; the committed recorder stays as it is
+(predicate right, capture silent).
+
+The seam that should work, and is a small compiler/port change rather than a
+runtime gamble: let the CALLER say where it is. Either (a) the compiler passes
+its own site identifier to the alloc entry point for the arenas it pushes (the
+same place it already emits FnArenaPush, so the value is a constant per
+function), or (b) the port tags each arena push explicitly - `ArenaPushSite(id)`
+- since the port already knows the phase it is in. (b) needs no compiler change
+and names the phase precisely; it is the smaller step and should be tried first.
+
 ### The site recorder needs returnAddress, not Caller  [INSTRUMENT, next]
 
 The recorder was retargeted from "the root arena" to "any arena already holding
