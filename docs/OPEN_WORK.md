@@ -255,9 +255,15 @@ That is the same runtime family as the spawn-channel payload defect below, and
 a correct fix is a single-threaded client transport (an event loop over the
 read and write sides), which is its own piece of work.
 
-Reported as its own blocker, per the objective: phase 8's client unit fails
-with a message that says the resolver succeeded and the request never
-completed, and every other phase 8 unit passes in both modes.
+The phase's CLIENT UNIT no longer uses the transport. It is now the
+single-domain exchange the objective asks for on the server side too -
+`net.LookupHost`, `net.Dial` to the address the lookup returned,
+`(*Request).Write`, `http.ReadResponse` - and it passes against both dispatch
+policies with status 200 and the handler's body. The transport defect is not
+hidden by that: phase 8 runs `client --get` (the `http.Get` form) as an
+INVERTED CANARY, which expects the timeout and passes while the blocker is
+real. If the transport is ever fixed the canary fails and says to put
+`http.Get` back in the client unit, so the defect cannot heal quietly.
 
 ### A []byte built at run time does not survive a spawn channel  [RUNTIME, logged]
 

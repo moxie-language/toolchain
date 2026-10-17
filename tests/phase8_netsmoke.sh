@@ -133,6 +133,22 @@ hello path=/two"
 		log_fail "netsmoke:client-$mode" "rc=$crc: $(tail -3 "$td/client-$mode.out" 2>/dev/null)"
 	fi
 
+	if [ "$mode" = "inline" ]; then
+		# The transport canary. http.Get is the blocked client path (its
+		# Transport needs two loops at once and dialConn runs them in sequence),
+		# so this asserts the blocker is STILL there: while it is, the canary
+		# passes and names it; the day http.Get works, the canary fails and
+		# says to put the transport back in the client unit. A defect that
+		# heals itself must not do it quietly.
+		grc=0
+		timeout 20 "$td/client" --get "http://127.0.0.1:$port/smoke" >"$td/client-get.out" 2>&1 || grc=$?
+		if [ "$grc" != 0 ]; then
+			log_pass "netsmoke:transport-canary" "http.Get still blocked (rc=$grc): Transport.dialConn runs readLoop before writeLoop"
+		else
+			log_fail "netsmoke:transport-canary" "http.Get SUCCEEDED - the transport blocker is gone; make the client unit use the transport again"
+		fi
+	fi
+
 	kill "$pid" 2>/dev/null || true
 	wait "$pid" 2>/dev/null || true
 }

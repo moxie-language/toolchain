@@ -1,13 +1,28 @@
-// The client half of the network smoke phase: resolve a host name, then make a
-// real HTTP request to the server the phase started. Both halves are built by
-// the compiler under test and run on this box.
+// The client half of the network smoke phase.
+//
+// Two modes, and the difference between them is the point:
+//
+//	client <url>        the single-domain client: resolve a host name, dial the
+//	                    resolved address, write the request, read the response.
+//	                    No transport threads, no channels, no spawn - the same
+//	                    shape the server side is asked for, and the shape this
+//	                    objective calls the deterministic one.
+//	client --get <url>  the same exchange through http.Get, i.e. through
+//	                    net/http's Transport. That path is BLOCKED by a client
+//	                    defect of its own (docs/OPEN_WORK.md): dialConn calls
+//	                    readLoop and only then writeLoop, so it connects and
+//	                    waits forever for a response to a request that is never
+//	                    written. phase8 runs this form as an inverted canary:
+//	                    it must FAIL while the blocker is real, and the canary
+//	                    flips to a failure of its own the day it succeeds.
 //
 // The lookup goes through the hosts file (the static-host path, which used to
-// SIGSEGV before the root-arena fix in src/net/hosts.mx) and the request goes
-// over a real TCP connection to the stdlib http.Server in ../server.
+// SIGSEGV before the root-arena fix in src/net/hosts.mx), and the request goes
+// to the address that lookup returned.
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -16,39 +31,112 @@ import (
 	"os"
 )
 
-func main() {
-	url := "http://127.0.0.1:39128/smoke"
-	if len(os.Args) > 1 {
-		url = os.Args[1]
+// splitURL pulls the authority and the request path out of
+// http://host:port/path without a url round trip; the phase only passes that.
+func splitURL(u string) (authority, path string) {
+	rest := u
+	if bytes.HasPrefix(rest, "http://") {
+		rest = rest[7:]
+	}
+	i := bytes.IndexByte(rest, '/')
+	if i < 0 {
+		return rest, "/"
+	}
+	return rest[:i], rest[i:]
+}
+
+// splitAuthority separates host:port.
+func splitAuthority(a string) (host, port string) {
+	i := int32(-1)
+	for j := int32(len(a)) - 1; j >= 0; j-- {
+		if a[j] == ':' {
+			i = j
+			break
+		}
+	}
+	if i < 0 {
+		return a, "80"
+	}
+	return a[:i], a[i+1:]
+}
+
+// firstIPv4 picks the first dotted address from a lookup result, so the request
+// goes to an address the resolver produced.
+func firstIPv4(addrs [][]byte) (pick string) {
+	for _, a := range addrs {
+		if bytes.IndexByte(a, '.') >= 0 {
+			return a
+		}
+	}
+	if len(addrs) > 0 {
+		return addrs[0]
+	}
+	return ""
+}
+
+// syncGet is the single-domain exchange: resolve, dial, write, read.
+func syncGet(url string) {
+	authority, path := splitURL(url)
+	host, port := splitAuthority(authority)
+	name := host
+	if bytes.IndexByte(name, '.') >= 0 {
+		// The URL names a literal; still resolve a name, so the resolver is
+		// exercised and the request goes to what it returned.
+		name = "localhost"
 	}
 
-	addrs, err := net.LookupHost("localhost")
-	if err != nil {
-		fmt.Printf("lookup failed: %v\n", err)
+	addrs, lerr := net.LookupHost(name)
+	if lerr != nil {
+		fmt.Printf("lookup failed: %v\n", lerr)
 		os.Exit(1)
 	}
 	if len(addrs) == 0 {
 		fmt.Printf("lookup returned no addresses\n")
 		os.Exit(1)
 	}
-	fmt.Printf("lookup localhost -> %d address(es)\n", len(addrs))
+	fmt.Printf("lookup %s -> %d address(es)\n", name, len(addrs))
 	for _, a := range addrs {
 		fmt.Printf("  addr=%s\n", a)
 	}
 
-	resp, err := http.Get(url)
-	if err != nil {
-		fmt.Printf("get failed: %v\n", err)
+	pick := firstIPv4(addrs)
+	if pick == "" {
+		fmt.Printf("no usable address\n")
 		os.Exit(1)
 	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Printf("read body failed: %v\n", err)
+	target := pick | ":" | port
+
+	c, derr := net.Dial("tcp", target)
+	if derr != nil {
+		fmt.Printf("dial %s failed: %v\n", target, derr)
+		os.Exit(1)
+	}
+	defer c.Close()
+
+	req, rerr := http.NewRequest("GET", "http://" | target | path, nil)
+	if rerr != nil {
+		fmt.Printf("new request failed: %v\n", rerr)
+		os.Exit(1)
+	}
+	if werr := req.Write(c); werr != nil {
+		fmt.Printf("write request failed: %v\n", werr)
+		os.Exit(1)
+	}
+
+	resp, sperr := http.ReadResponse(bufio.NewReader(c), req)
+	if sperr != nil {
+		fmt.Printf("read response failed: %v\n", sperr)
+		os.Exit(1)
+	}
+	body, berr := io.ReadAll(resp.Body)
+	if berr != nil {
+		fmt.Printf("read body failed: %v\n", berr)
 		os.Exit(1)
 	}
 	fmt.Printf("status=%d\n", resp.StatusCode)
 	fmt.Printf("body=%s", body)
-	want := "hello path=/smoke\n"
+
+	want := "hello path=" | path | "\n"
 	if !bytes.Equal(body, want) {
 		fmt.Printf("body mismatch: wanted %s\n", want)
 		os.Exit(1)
@@ -58,4 +146,39 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("client ok\n")
+}
+
+// transportGet is the blocked path, kept reachable so the canary can assert it
+// is still blocked rather than letting the defect go quiet.
+func transportGet(url string) {
+	resp, gerr := http.Get(url)
+	if gerr != nil {
+		fmt.Printf("get failed: %v\n", gerr)
+		os.Exit(1)
+	}
+	body, berr := io.ReadAll(resp.Body)
+	if berr != nil {
+		fmt.Printf("read body failed: %v\n", berr)
+		os.Exit(1)
+	}
+	fmt.Printf("status=%d\n", resp.StatusCode)
+	fmt.Printf("body=%s", body)
+	fmt.Printf("transport ok\n")
+}
+
+func main() {
+	url := "http://127.0.0.1:39128/smoke"
+	mode := "sync"
+	for i := 1; i < len(os.Args); i++ {
+		if os.Args[i] == "--get" {
+			mode = "get"
+			continue
+		}
+		url = os.Args[i]
+	}
+	if mode == "get" {
+		transportGet(url)
+		return
+	}
+	syncGet(url)
 }
