@@ -284,6 +284,37 @@ cleared and refilled per request (steady-state allocation zero), plus the runtim
 side - a hashmap's bucket storage must be charged to an arena with the map's own
 lifetime, not to whatever arena the caller had entered.
 
+### The retention is LOCATED: root 4.27MB plus a second long-lived arena 6.31MB  [INSTRUMENT]
+
+The live-arena report (one line per arena still holding memory: scope, owner site,
+used bytes) finally ran - its first version built the lines and then discarded
+them, because `emitLiveArena(out, ...)` was called without assigning the returned
+slice back to `out`. With that fixed, after 1000 requests on one connection:
+
+    root  scope=0 site=0 used=4271200      <- the root arena itself
+    live  scope=0 site=0 used=6311264      <- a second long-lived default-scope arena
+    live  scope=0 site=0 used=3072
+    live  scope=2 site=0 used=10640        <- handler/request arena (fine)
+    pooled scope=1 site=0 used=3072 x3     <- decode frames, reclaimed (fine)
+
+So the 16kB a request is two long-lived default-scope arenas: the ROOT (4.3kB a
+request) and one more (6.3kB a request). That is the named location, at arena
+granularity, and it is measured.
+
+**The owner site is not obtainable from inside the runtime.** `Caller(1)` returns
+`ok == false` in `FnArenaPush` exactly as it did in `alloc`, so `site=0`
+everywhere; combined with the earlier `returnAddress` SIGSEGV, every in-runtime
+capture route is now excluded. The only remaining route to a function name is the
+compiler passing its own per-function identifier at the push (a compiler change),
+or the port naming the arenas it creates (which it can do for the ones it owns,
+but not for the root and not for whichever frame arena the second one is).
+
+Next step is therefore not another capture experiment: with the location reduced
+to two arenas and their byte rates, the fix is the map group (whose bucket
+allocation is what grows in a caller-owned arena) together with the creation
+site, and the live-arena report is the acceptance instrument - root and both
+long-lived arenas must stay flat.
+
 ### Excluded: inlining of the per-request function is not the deposit  [INSTRUMENT]
 
 Next cheap hypothesis, measured and excluded: `chanHandleOne` inlined into

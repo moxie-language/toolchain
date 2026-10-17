@@ -118,6 +118,9 @@ type Arena struct {
 	// feed the per-scope report in arena_scope.mx.
 	scope int32
 	alloc uint64
+	// site is the pc of the function whose prologue pushed this arena, captured
+	// where the stack is valid (FnArenaPush), not in alloc.
+	site uintptr
 }
 
 // Arena pool: bounded freelist of reset arenas for reuse.
@@ -269,6 +272,12 @@ func FnArenaPush(capacity uintptr) (a *Arena) {
 	a = ArenaAcquire(capacity)
 	a.scope = arenaScopeCurrent
 	a.alloc = 0
+	a.site = 0
+	if arenaTraceWanted() {
+		if pc, _, _, ok := Caller(1); ok {
+			a.site = pc
+		}
+	}
 	arenaScopeArena(a.scope)
 	domainRoot.fnStack[domainRoot.fnTop] = a
 	return a

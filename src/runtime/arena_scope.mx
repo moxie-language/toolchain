@@ -159,6 +159,15 @@ func ArenaScopeReport() (out []byte) {
 		out = appendScopeUint(out, uint64(uint32(r.arenas)))
 		out = appendScopeStr(out, "\n")
 	}
+	if domainRoot != nil {
+		for i := int32(0); i <= domainRoot.fnTop; i++ {
+			out = emitLiveArena(out, domainRoot.fnStack[i], "live")
+		}
+		out = emitLiveArena(out, trueRootArena(), "root")
+	}
+	for i := int32(0); i < arenaPoolN; i++ {
+		out = emitLiveArena(out, arenaPool[i], "pooled")
+	}
 	for i := int32(0); i < rootSiteN; i++ {
 		out = appendScopeStr(out, "rootsite_pc=")
 		out = appendScopeUint(out, uint64(rootSites[i].pc))
@@ -169,6 +178,31 @@ func ArenaScopeReport() (out []byte) {
 		out = appendScopeStr(out, "\n")
 	}
 	return out
+}
+
+// emitLiveArena writes one arena that is currently holding memory: its scope,
+// the pc of the function that pushed it, and how many bytes it has used.
+func emitLiveArena(out []byte, a *Arena, tag []byte) (res []byte) {
+	res = out
+	if a == nil {
+		return res
+	}
+	used := uintptr(0)
+	for i := int32(0); i < a.nregions; i++ {
+		used += a.regions[i].off
+	}
+	if used == 0 {
+		return res
+	}
+	res = appendScopeStr(res, tag)
+	res = appendScopeStr(res, " scope=")
+	res = appendScopeUint(res, uint64(uint32(a.scope)))
+	res = appendScopeStr(res, " site=")
+	res = appendScopeUint(res, uint64(a.site))
+	res = appendScopeStr(res, " used=")
+	res = appendScopeUint(res, uint64(used))
+	res = appendScopeStr(res, "\n")
+	return res
 }
 
 func appendScopeStr(b []byte, s []byte) (out []byte) {
