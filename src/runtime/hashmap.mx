@@ -93,6 +93,11 @@ func hashmapMake(keySize, valueSize uintptr, sizeHint uintptr, alg uint8) *hashm
 // (for a data-arena map whose header is not on the frame stack), then to the
 // root arena so an allocation can never target a dead arena.
 func hashmapOwner(m *hashmap) (a *Arena) {
+	// The birth arena wins over archaeology: the map's own answer is the only
+	// one that cannot be wrong about whose lifetime the buckets belong to.
+	if m.owner != nil {
+		return m.owner
+	}
 	p := uintptr(unsafe.Pointer(m))
 	a = sovFindContainingArena(p)
 	if a != nil {
@@ -297,6 +302,16 @@ func hashmapKeyType(t *RawType) (kt *RawType) {
 //
 //:nobounds
 func hashmapSet(m *hashmap, key unsafe.Pointer, value unsafe.Pointer, hash uint32) {
+	// The map remembers the arena it was born in, so its bucket storage follows
+	// the map's own lifetime instead of whatever arena happens to be in force
+	// when it is next written. Without this, a map used after its creating frame
+	// returned cannot be located by the address scan in hashmapOwner, the
+	// fallback charges every bucket to the ROOT arena, and the buckets are
+	// retained for the life of the process (measured: hashmap-sized 16/32/64/
+	// 128/192/256-byte allocations, 1-3 per request, all landing in the root).
+	if m.owner == nil {
+		m.owner = CurrentArena()
+	}
 	if hashmapHasSpaceToGrow(m.bucketBits) && hashmapOverLoadFactor(m.count, m.bucketBits) {
 		hashmapGrow(m)
 		// seed changed when we grew; rehash key with new seed

@@ -284,6 +284,35 @@ cleared and refilled per request (steady-state allocation zero), plus the runtim
 side - a hashmap's bucket storage must be charged to an arena with the map's own
 lifetime, not to whatever arena the caller had entered.
 
+### STEP 3 APPLIED: the map's birth arena wins; buckets stop landing in root  [FIX, partial]
+
+Two halves, committed together as the rule requires:
+
+  1. `hashmapSet` sets `m.owner = CurrentArena()` on the first write, and
+     `hashmapOwner` now returns `m.owner` BEFORE the address scan - the map's own
+     answer about whose lifetime its buckets belong to wins over archaeology, and
+     the `trueRootArena()` fallback is unreachable for any map that has been
+     written once;
+  2. `chanHandleOne` is now an envelope: `ManualArenaEnter(requestArena)` around
+     the WHOLE request (`chanHandleInner`, decode included), then exit + reset.
+     The Header map is therefore born in the arena that resets at the end.
+
+Measured (1000 + 1000 requests, one connection, inline):
+
+    rootsize rows collapse:  16B 3062 -> 74 | 32B 3147 -> 164 | 192B 3019 -> 31
+                             64B 3024 -> 38 | 128B 1008 -> 0  | 256B 1009 -> 0
+
+i.e. the per-request bucket allocation into the root arena is gone (a ~97% drop
+in those rows, and the bucket-header size 192B from ~3/request to 31 per THOUSAND).
+
+**Residual, still open**: the root arena's `used` still grows ~4.4kB a request
+(4.4MB after 1k, 8.7MB after 2k) and RSS reached 78MB, but the size recorder only
+accounts for ~300 small allocations in that run - so the remaining growth reaches
+the root through a path that does not go through the recorded arena branch (or is
+one large allocation rather than the bucket pattern). That is the next
+measurement: record the size of EVERY allocation into the root regardless of
+gate, and count how many are direct vs via alloc.
+
 ### STEP 2 CLOSED: the site is hashmap bucket allocation into the root arena  [NAMED, measured]
 
 The reason the site recorder saw nothing from `alloc()`: the root gains memory by

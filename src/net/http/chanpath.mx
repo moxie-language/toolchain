@@ -363,7 +363,19 @@ func serveChanConn(c net.Conn, mux *ChanMux, pool *chanPool, idle time.Duration)
 // that frame lived as long as the connection, and every request's Request
 // (headers and all) accumulated there at ~13kB a request. A request is one
 // function call, and its memory goes with it.
+// chanHandleOne runs ONE request, decode included, inside the request arena.
+// The Header map is born there, so its owner arena is the arena this call
+// resets at the end - the map's own answer about whose lifetime its buckets
+// belong to is then correct, and the buckets are freed with the request.
 func chanHandleOne(c net.Conn, br *bufio.Reader, bw *bufio.Writer, mux *ChanMux, pool *chanPool, arena *runtime.Arena, idle time.Duration) (keep bool) {
+	runtime.ManualArenaEnter(arena)
+	keep = chanHandleInner(c, br, bw, mux, pool, arena, idle)
+	runtime.ManualArenaExit(arena)
+	runtime.ArenaReset(arena)
+	return keep
+}
+
+func chanHandleInner(c net.Conn, br *bufio.Reader, bw *bufio.Writer, mux *ChanMux, pool *chanPool, arena *runtime.Arena, idle time.Duration) (keep bool) {
 	if idle > 0 {
 		c.SetReadDeadline(time.Now().Add(idle))
 	}
