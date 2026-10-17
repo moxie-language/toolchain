@@ -118,17 +118,25 @@ type Arena struct {
 	// feed the per-scope report in arena_scope.mx.
 	scope int32
 	alloc uint64
-	// site is the pc of the function whose prologue pushed this arena, captured
-	// where the stack is valid (FnArenaPush), not in alloc.
-	site uintptr
 }
 
 // Arena pool: bounded freelist of reset arenas for reuse.
 // Eliminates mmap/munmap syscalls for short-lived function arenas.
+//
+// Bounded by BYTES as well as by count. The pool is a cache of the mmap churn
+// that function arenas would otherwise cause, and a cached arena is resident
+// memory: a reset reclaims the bytes and keeps the pages, so an arena that grew
+// to megabytes while a request used it would sit in the pool, untouched and
+// never unmapped, for the life of the process. Count alone let eight such
+// arenas retire - measured on the http channel path as ~76MB of RSS held by the
+// pool across 3000 keep-alive requests. An arena too large to be worth caching
+// is unmapped instead of kept.
 const arenaPoolMax = int32(8)
+const arenaPoolMaxBytes = uintptr(4 << 20)
 
 var arenaPool []*Arena
 var arenaPoolN int32
+var arenaPoolBytes uintptr
 
 // sovDepth bounds the pointer-following recursion in the sovereign mark and
 // rebase walks when a pointer field targets an object outside the data arena
@@ -175,16 +183,6 @@ func alloc(size uintptr, td unsafe.Pointer) unsafe.Pointer {
 	a := domainRoot.fnStack[fnTop]
 	if a == nil {
 		runtimePanic("alloc: nil arena")
-	}
-	// Name the site of an allocation into an arena that is ALREADY holding real
-	// data (more than the threshold). Short-lived per-call frames never get
-	// there; a long-lived arena that grows per request does, so its depostors
-	// are named. Both the root arena (never reset) and the connection's frame
-	// arena (alive for the whole connection) are caught by the same test.
-	if arenaTraceWanted() && a.alloc > 8192 {
-		if pc, _, _, ok := Caller(1); ok {
-			RecordRootSite(pc, size)
-		}
 	}
 	return ArenaAllocTD(a, align(size), (*RawType)(td))
 }
@@ -245,6 +243,7 @@ func initDomain(capacity uintptr) {
 	dr.root.regions[0].off = p - uintptr(addr) // data starts past carved tables
 	dr.root.regions[0].cap = capacity
 	dr.fnStack[0] = &dr.root
+	dr.root.scope = ArenaScopeRoot
 	dr.fnTop = 0
 	dr.domTop = 0
 	domainRoot = dr // write TLS slot once
@@ -270,14 +269,7 @@ func FnArenaPush(capacity uintptr) (a *Arena) {
 		runtimePanic("function arena stack overflow")
 	}
 	a = ArenaAcquire(capacity)
-	a.scope = arenaScopeCurrent
 	a.alloc = 0
-	a.site = 0
-	if arenaTraceWanted() {
-		if pc, _, _, ok := Caller(1); ok {
-			a.site = pc
-		}
-	}
 	arenaScopeArena(a.scope)
 	domainRoot.fnStack[domainRoot.fnTop] = a
 	return a
@@ -415,6 +407,68 @@ func sovRootAlloc(sz uintptr) unsafe.Pointer {
 	p := alloc(sz, nil)
 	SetCurrentArena(save)
 	return p
+}
+
+// --- group recycling ---
+//
+// A group's struct and its record/batch bookkeeping have to outlive every
+// ownership move a group can make, so they belong to the root arena:
+// sovRekeyRelocated moves a group whose receiver was relocated from the
+// receiver's arena to the group's own data arena, so anything carved in the old
+// arena would be unmapped while the group is still referenced. Carving the
+// struct in the receiver's arena was measured doing exactly that on the classic
+// http CLIENT path: "http: invalid Read on closed Body" and "interface dispatch:
+// no impl for Read", from a body whose group had already moved on.
+//
+// Root-lifetime, however, used to mean root-FOREVER: every request's groups left
+// a struct and two slices behind, ~4.8kB a request. So the struct and its
+// bookkeeping are RECYCLED instead: a released group is pushed onto a bounded
+// free list with its slices truncated but not freed, and the next group reuses
+// them. A group only reaches the list after it has been unlinked from the
+// compaction queue, released from the receiver map and had its arenas freed, so
+// nothing on the list is still referenced.
+const sovGroupFreeMax = int32(32)
+
+var sovGroupFreeHead *sovGroup
+var sovGroupFreeN int32
+var sovGroupRecycled uint64
+
+// sovGroupTake returns a zeroed group, from the recycle list when possible.
+func sovGroupTake() (g *sovGroup) {
+	if sovGroupFreeHead != nil {
+		g = sovGroupFreeHead
+		sovGroupFreeHead = g.pendingNext
+		g.pendingNext = nil
+		if sovGroupFreeN > 0 {
+			sovGroupFreeN--
+		}
+		sovGroupRecycled++
+		return g
+	}
+	return (*sovGroup)(alloc(unsafe.Sizeof(sovGroup{}), nil))
+}
+
+// sovRecycleGroup retires a released group: its arenas are already freed, so
+// only the bookkeeping is kept, truncated, for the next group.
+func sovRecycleGroup(g *sovGroup) {
+	if g == nil || sovGroupFreeN >= sovGroupFreeMax {
+		return
+	}
+	recs := g.recs[:0]
+	batches := g.batchStart[:0]
+	slots := g.slots[:0]
+	memzero(unsafe.Pointer(g), unsafe.Sizeof(sovGroup{}))
+	g.recs = recs
+	g.batchStart = batches
+	g.slots = slots
+	g.pendingNext = sovGroupFreeHead
+	sovGroupFreeHead = g
+	sovGroupFreeN++
+}
+
+// sovGroupRecycleCount reports how many groups were reused rather than allocated.
+func sovGroupRecycleCount() (n uint64) {
+	return sovGroupRecycled
 }
 
 // sovRangeRegister records [base, base+cap) as a live sovereign data-arena
@@ -590,12 +644,11 @@ const sovMapMax = int32(1) << 27
 
 func sovGrowRecs(g *sovGroup) {
 	nc := cap(g.recs) * 2
-	// Small floor: a build creates hundreds of thousands of groups, the record
-	// slice's backing is root-lifetime and never freed, and most groups record
-	// only a handful of allocations. A 64-record floor cost ~2.5KB per group -
-	// ~400MB over one cold relay build, which was the whole parked RSS growth.
-	// Growth is still geometric, so a group that needs thousands of records
-	// reaches them in the same number of steps.
+	// Small floor: a build creates hundreds of thousands of groups and most of
+	// them record only a handful of allocations. A 64-record floor cost ~2.5KB
+	// per group - ~400MB over one cold relay build, which was the whole parked
+	// RSS growth. Growth is still geometric, so a group that needs thousands of
+	// records reaches them in the same number of steps.
 	if nc < 4 {
 		nc = 4
 	}
@@ -736,7 +789,7 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 	home := sovFindContainingArena(uintptr(recv))
 	save := CurrentArena()
 	SetCurrentArena(trueRootArena())
-	g = (*sovGroup)(alloc(unsafe.Sizeof(sovGroup{}), nil))
+	g = sovGroupTake()
 	g.data = sovNewArena(8192)
 	g.data.sovereign = 1
 	sovRangeRegister(g.data.regions[0].base, g.data.regions[0].cap, g)
@@ -754,8 +807,13 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 	}
 	av = unsafe.Pointer(g)
 	SetCurrentArena(save)
+	RecordSovMeta(unsafe.Sizeof(sovGroup{}))
+	if home == nil {
+		RecordSovUntracked()
+	}
 	hashmapSet(m, unsafe.Pointer(&keyv), unsafe.Pointer(&av), h)
 	sovTrackArenaGroup(g)
+	RecordSovCreate()
 	return g
 }
 
@@ -767,7 +825,11 @@ func sovFindContainingArena(addr uintptr) (a *Arena) {
 	if domainRoot == nil {
 		return nil
 	}
-	for i := int32(0); i <= domainRoot.fnTop; i++ {
+	// Innermost first: the arena that most recently took the address is the one
+	// whose lifetime the receiver shares. Scanning outward-first matched the
+	// root's 256MB domain region before any frame arena could, which attributed
+	// a receiver to the process-lifetime arena and made its group immortal.
+	for i := domainRoot.fnTop; i >= 0; i-- {
 		ca := domainRoot.fnStack[i]
 		if ca != nil && sovAddrInArena(ca, addr) {
 			return ca
@@ -1479,18 +1541,17 @@ func codecSovereignCompact(g *sovGroup, needed uintptr) {
 	}
 	// Rewrite the receiver's root fields.
 	sovRebaseRoots(g, nd)
-	// Rebuild the record table in the fresh allocTbl arena. The recs
-	// backing array is root-lifetime: it must never live in g.data,
-	// which is munmapped below.
+	// Rebuild the record table in the backing it already has. The recs
+	// backing array is root-lifetime: it must never live in g.data, which is
+	// munmapped below, and it must not be reallocated per compaction - a receiver that lives as long as a
+	// connection compacts once per request, and charging a fresh backing each
+	// time put that many abandoned arrays in the connection's arena per
+	// request. The live set after a compaction is never larger than the table
+	// that described it, so the existing capacity always fits.
 	oldRecs := g.recs
 	oldTbl := g.allocTbl
 	g.allocTbl = nt
-	ncap := cap(oldRecs)
-	if ncap < 64 {
-		ncap = 64
-	}
-	nb := unsafe.Slice((**sovRecord)(sovRootAlloc(uintptr(ncap)*unsafe.Sizeof(&sovRecord{}))), ncap)
-	g.recs = nb[:0]
+	g.recs = oldRecs[:0]
 	g.recsSorted = true
 	g.batchStart = g.batchStart[:0]
 	g.allocBytes = 0
@@ -1707,10 +1768,13 @@ func codecSovereignFree(recv unsafe.Pointer) {
 	h := m.keyHash(unsafe.Pointer(&keyv), 8, m.seed)
 	var av unsafe.Pointer
 	if !hashmapGet(m, unsafe.Pointer(&keyv), unsafe.Pointer(&av), 8, h) || av == nil {
+		RecordSovReleaseMiss()
 		return
 	}
 	g := (*sovGroup)(av)
+	sovUnqueueCompact(g)
 	g.released = true
+	RecordSovRelease()
 	if g.ctxArena != nil && g.ctxArena.sovGroups > 0 {
 		g.ctxArena.sovGroups--
 	}
@@ -1725,6 +1789,39 @@ func codecSovereignFree(recv unsafe.Pointer) {
 		ArenaFree(g.refTbl)
 	}
 	hashmapDelete(m, unsafe.Pointer(&keyv), h)
+	sovRecycleGroup(g)
+}
+
+// sovUnqueueCompact unlinks g from the pending-compaction list.
+//
+// A queued group is reachable from a global (sovPendingHead/Tail), and a group's
+// struct now lives in the arena that holds its receiver - so a group whose arena
+// is reset would leave the queue pointing at reclaimed memory. The release path
+// therefore has to unlink before the arena goes away.
+func sovUnqueueCompact(g *sovGroup) {
+	if g == nil || !g.queued {
+		return
+	}
+	var prev *sovGroup
+	p := sovPendingHead
+	for p != nil {
+		if p == g {
+			if prev == nil {
+				sovPendingHead = g.pendingNext
+			} else {
+				prev.pendingNext = g.pendingNext
+			}
+			if sovPendingTail == g {
+				sovPendingTail = prev
+			}
+			g.pendingNext = nil
+			g.queued = false
+			return
+		}
+		prev = p
+		p = p.pendingNext
+	}
+	g.queued = false
 }
 
 // sovInvalidateArena releases every sovereign group whose receiver lives
@@ -1738,6 +1835,7 @@ func sovInvalidateArena(a *Arena) {
 	}
 	m := domainRoot.sovereignRoot
 	if m == nil {
+		a.sovGroupList = a.sovGroupList[:0]
 		a.sovGroups = 0
 		return
 	}
@@ -1747,6 +1845,7 @@ func sovInvalidateArena(a *Arena) {
 	// holding thousands of entries.
 	for _, g := range a.sovGroupList {
 		if g == nil || g.released || g.recv == nil || g.ctxArena != a {
+			RecordSovReleaseRefused()
 			continue
 		}
 		codecSovereignFree(g.recv)
@@ -1810,7 +1909,6 @@ func ManualArenaEnter(a *Arena) {
 	}
 	domainRoot.fnTop = i
 	domainRoot.fnStack[i] = a
-	a.scope = arenaScopeCurrent
 	if domainRoot.manualTop < int32(len(domainRoot.manualStack)) {
 		domainRoot.manualStack[domainRoot.manualTop] = manualArena
 		domainRoot.manualTop++
@@ -1968,6 +2066,9 @@ func arenaAllocRaw(a *Arena, size uintptr) unsafe.Pointer {
 		a.regions[a.nregions].off = 0
 		a.regions[a.nregions].cap = newCap
 		RecordRegionAdd(a.scope, newCap)
+		if a.growDouble != 0 {
+			RecordSovRegionAdd(newCap)
+		}
 		a.nregions++
 		if a.sovereign != 0 {
 			sovRangeRegister(uintptr(addr), newCap, a.owner)
@@ -2036,6 +2137,9 @@ func ArenaAllocTD(a *Arena, size uintptr, td *RawType) unsafe.Pointer {
 		a.regions[a.nregions].off = 0
 		a.regions[a.nregions].cap = newCap
 		RecordRegionAdd(a.scope, newCap)
+		if a.growDouble != 0 {
+			RecordSovRegionAdd(newCap)
+		}
 		// A sovereign group's data arena is identified by its registered
 		// regions. Registers 0 of g.data is recorded when the group is made,
 		// and every region a compaction makes is recorded too, but a region
@@ -2084,6 +2188,16 @@ func ArenaFree(a *Arena) {
 			sovRangeUnregister(a.regions[i].base)
 		}
 	}
+	if a.nregions > 1 {
+		rb := uintptr(0)
+		for i := int32(1); i < a.nregions; i++ {
+			rb += a.regions[i].cap
+		}
+		RecordRegionFree(a.scope, uintptr(a.nregions-1), rb)
+		if a.growDouble != 0 {
+			RecordSovRegionFree(uintptr(a.nregions-1), rb)
+		}
+	}
 	for i := a.nregions - 1; i > 0; i-- {
 		sysUnmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
 	}
@@ -2098,6 +2212,33 @@ func ArenaReset(a *Arena) {
 	if a == nil {
 		return
 	}
+	// A reset ends the lifetime of everything in the arena as surely as a free
+	// does, so the binding rule holds here too: every sovereign group whose
+	// receiver lives in this arena dies with it. This used to clear
+	// sovGroupList without releasing the groups, which orphaned each one - its
+	// data and record arenas stayed mapped and kept growing, and its entry
+	// stayed in the root-keyed receiver map, so the next request's receiver at
+	// the same address inherited a group still holding the previous request's
+	// allocations. On the http channel path that was the whole leak: 47 region
+	// grows per 300 requests, every one of them a sovereign doubling, and ~30MB
+	// of RSS per 1000 keep-alive requests.
+	sovInvalidateArena(a)
+	a.sovGroupList = a.sovGroupList[:0]
+	// Fail loud, not silent: after releasing the groups the list names, both the
+	// list and the count must be empty. A reset that leaves a group behind is
+	// exactly the half-free that grew the group arenas without bound, so it must
+	// be a crash at the boundary that broke the rule, not a retention curve
+	// discovered later.
+	if a.sovGroups != 0 || len(a.sovGroupList) != 0 {
+		printstring("arena reset orphaned groups: arena=")
+		printuint64(uint64(uintptr(unsafe.Pointer(a))))
+		printstring(" groups=")
+		printuint64(uint64(uint32(a.sovGroups)))
+		printstring(" list=")
+		printuint64(uint64(uint32(len(a.sovGroupList))))
+		printstring("\n")
+		runtimePanic("arena: reset orphaned sovereign groups")
+	}
 	arenaScopeFreed(a.scope, uintptr(a.alloc))
 	a.alloc = 0
 	if a.nregions > 1 {
@@ -2106,13 +2247,15 @@ func ArenaReset(a *Arena) {
 			rb += a.regions[i].cap
 		}
 		RecordRegionFree(a.scope, uintptr(a.nregions-1), rb)
+		if a.growDouble != 0 {
+			RecordSovRegionFree(uintptr(a.nregions-1), rb)
+		}
 	}
 	for i := a.nregions - 1; i > 0; i-- {
 		sysUnmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
 	}
 	a.nregions = 1
 	a.regions[0].off = arenaDataOffset()
-	a.sovGroupList = a.sovGroupList[:0]
 }
 
 // ArenaAcquire returns a pooled arena with cap >= capacity, or
@@ -2126,13 +2269,17 @@ func ArenaAcquire(capacity uintptr) (a *Arena) {
 	for i := int32(0); i < arenaPoolN; i++ {
 		if arenaPool[i].regions[0].cap >= capacity && arenaPool[i].sovereign == 0 {
 			a = arenaPool[i]
+			arenaPoolBytes -= a.regions[0].cap
 			arenaPoolN--
 			arenaPool[i] = arenaPool[arenaPoolN]
 			arenaPool[arenaPoolN] = nil
+			a.scope = arenaScopeCurrent
 			return a
 		}
 	}
-	return ArenaNew(capacity)
+	a = ArenaNew(capacity)
+	a.scope = arenaScopeCurrent
+	return a
 }
 
 // ArenaRelease resets an arena and returns it to the pool.
@@ -2144,11 +2291,13 @@ func ArenaRelease(a *Arena) {
 	// Binding rule: receivers inside this arena are dead once the function
 	// returns - release their groups after the returns were processed.
 	sovInvalidateArena(a)
-	if arenaPoolN >= arenaPoolMax || a.sovereign != 0 {
+	tooBig := arenaPoolBytes+a.regions[0].cap > arenaPoolMaxBytes
+	if arenaPoolN >= arenaPoolMax || a.sovereign != 0 || tooBig {
 		ArenaFree(a)
 		return
 	}
 	ArenaReset(a)
+	arenaPoolBytes += a.regions[0].cap
 	arenaPool[arenaPoolN] = a
 	arenaPoolN++
 }

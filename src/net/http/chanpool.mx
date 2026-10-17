@@ -110,7 +110,9 @@ func recvHeaders(ch chan int32) (h Header) {
 // call there, streams the response back and resets the arena, so a worker that
 // served a million requests holds no more memory than one that served one.
 func chanWorkerLoop(jobs chan int32, results chan int32) {
+	prevScope := runtime.SetArenaScope(ArenaScopeRequest)
 	arena := runtime.ArenaAcquire(chanRequestArenaBytes)
+	runtime.SetArenaScope(prevScope)
 	done := false
 	for !done {
 		kind := <-jobs
@@ -153,6 +155,10 @@ func chanWorkerLoop(jobs chan int32, results chan int32) {
 		}
 		runtime.ManualArenaExit(arena)
 		runtime.ArenaReset(arena)
+		// The worker is a request-scope server: drain the deferred compaction
+		// of its own long-lived sovereign receivers at the same boundary the
+		// connection loop uses.
+		runtime.SovDrainCompactions(chanSovDrainBudget)
 	}
 	runtime.ArenaRelease(arena)
 }

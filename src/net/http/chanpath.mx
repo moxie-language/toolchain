@@ -70,18 +70,43 @@ const (
 
 // Arena scope ids for the attribution report (src/runtime/arena_scope.mx): a
 // retained byte is charged to the phase of request handling that allocated it.
+//
+// An arena is tagged ONCE, when it enters a lifetime, and its allocations and
+// its reclaim are both charged there - that is what makes allocated minus
+// reclaimed the live bytes of a scope. 0 is deliberately unnamed: anything
+// charged there was never given a scope, which is a diagnostic, not a bucket.
+// The runtime names two of its own: ArenaScopeRoot (5) for the domain root, and
+// this file names 6 for the request arena, whose whole point is that it is
+// entered and reset once per request.
 const (
 	ArenaScopeDefault = int32(0)
 	ArenaScopeDecode  = int32(1)
 	ArenaScopeHandler = int32(2)
 	ArenaScopeWrite   = int32(3)
 	ArenaScopeConn    = int32(4)
+	ArenaScopeRequest = int32(6)
 )
 
 // chanRequestArenaBytes is the arena each connection (and each pool worker)
 // acquires for request processing. It is reused for every request on that
 // connection and reset between them.
 const chanRequestArenaBytes = uintptr(4 << 20)
+
+// chanSovDrainBudget is how many queued sovereign groups the shell compacts at
+// one request boundary.
+//
+// A group whose receiver outlives the request - the connection's bufio.Reader
+// and bufio.Writer are the two on this path - keeps an allocation map that grows
+// with every call made on it, and the map is only pruned by compaction. The
+// runtime queues that compaction at the method boundary where the pressure
+// appears, and something has to DRAIN it, exactly as a relay's event loop does.
+// The request boundary is that safe point: no frame of a connection receiver is
+// live and no sovereign arena is borrowed, because the previous request's call
+// stack is gone and the arena has been reset. Without a drainer the queued group
+// is never revisited, its data arena keeps growing regions, and the connection
+// accumulates memory at a rate that has nothing to do with the request arena -
+// measured at ~9MB over 1000 requests, in the connection's frame arena.
+const chanSovDrainBudget = int32(4)
 
 // Req is one fully decoded request. The shell built it in the request arena;
 // the handler reads it and must not keep it.
@@ -328,12 +353,32 @@ func ChanServeTimeout(addr string, mux *ChanMux, mode int32, workers int32, idle
 		return lerr
 	}
 	for {
-		c, aerr := ln.Accept()
-		if aerr != nil {
+		if aerr := serveNextConn(ln, mux, pool, idle); aerr != nil {
 			return aerr
 		}
-		serveChanConn(c, mux, pool, idle)
 	}
+}
+
+// serveNextConn accepts ONE connection and serves it to the end, in its own
+// frame.
+//
+// This is the same rule as chanHandleOne, one scope up: a connection is one
+// call whose arena dies when the connection does. Accepting inside the accept
+// loop instead put the connection object in the LOOP's frame arena, which lives
+// for the life of the process, and every mutating method on that connection
+// (Read, Write, Close, the deadlines) then created a sovereign group bound to a
+// process-lifetime arena. Nothing releases such a group, so each connection left
+// its groups and their arenas behind: measured as six immortal groups and
+// ~0.4MB per connection, independent of how many requests the connection served.
+// The connection object is also RELOCATED into the accepting frame at every
+// iteration, so the loop's own arena grew per connection as well.
+func serveNextConn(ln net.Listener, mux *ChanMux, pool *chanPool, idle time.Duration) (err error) {
+	c, aerr := ln.Accept()
+	if aerr != nil {
+		return aerr
+	}
+	serveChanConn(c, mux, pool, idle)
+	return nil
 }
 
 // serveChanConn is the shell: it owns the socket for the life of the
@@ -345,11 +390,21 @@ func serveChanConn(c net.Conn, mux *ChanMux, pool *chanPool, idle time.Duration)
 	// One request arena for this connection, reused request after request.
 	// ArenaReset is what makes "requests do not accumulate memory" true: the
 	// arena's offset goes back to the start and its extra regions are unmapped.
+	// Tag the arena BEFORE it is acquired: ArenaAcquire is where an arena's
+	// lifetime starts, so that is where its scope is stamped, and every byte it
+	// ever allocates or reclaims is then charged to the request phase instead of
+	// to whatever scope happened to be current at reset time.
+	prevScope := runtime.SetArenaScope(ArenaScopeRequest)
 	arena := runtime.ArenaAcquire(chanRequestArenaBytes)
+	runtime.SetArenaScope(prevScope)
 	keep := true
 	for keep {
 		keep = chanHandleOne(c, br, bw, mux, pool, arena, idle)
 		bw.Flush()
+		// A scope boundary also ends the per-request garbage of the scopes that
+		// survive it: drain the deferred compaction of the connection's own
+		// sovereign receivers here, where nothing of the request is live.
+		runtime.SovDrainCompactions(chanSovDrainBudget)
 	}
 	runtime.ArenaRelease(arena)
 	c.Close()

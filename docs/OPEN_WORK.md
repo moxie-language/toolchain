@@ -198,6 +198,13 @@ smoke phase serves is the one in `ChanMux`, and it is served.
 
 ### The channel handler path  [DESIGN, src/net/http/chanpath.mx + chanpool.mx]
 
+Status: the one-call-per-request handler path and its arena envelope are in
+(`291a5424`, `b06813b1`, and the round-14 commits below). The retention is
+attributed and closed: inline mode is flat over 3x1000 (VmData constant, RSS
++4-12kB a run) and spawned mode has no arena retention - what is left there is
+the transport's 32MB-per-direction lazily-faulted spawn rings being touched,
+which is the queue-owned slot ring's job (step 6, blocked; see below).
+
 The classic path hands a handler a ResponseWriter and a *Request, which is what
 forced the closure shims (`HandlerFunc` called through a pointer to the func
 value; `finishServe` taking `**response` for a deferred closure). The channel
@@ -353,7 +360,11 @@ unmapped. That is the same shape as the leak the objective describes, one level
 lower: not an allocation charged to the wrong arena, but a REGION charged to the
 right arena and never returned.
 
-### The 3x1000 acceptance test: the map fix works, but it is NOT the dominant retention  [MEASURED]
+### The 3x1000 acceptance test: the map fix works, but it is NOT the dominant retention  [MEASURED, SUPERSEDED]
+
+*(Superseded by "THE LEAK, NAMED" below: the dominant retention was the
+sovereign group leak, and the 3x1000 test is flat after it. Kept for the
+measurements that ruled the map and first-touch out.)*
 
 Ran the objective's own acceptance test on the commit with both halves of the fix
 (netsrv18, one connection per run, 1000 keep-alive requests per run):
@@ -390,6 +401,200 @@ extend the live-arena report to sum ALL arenas ever created minus reclaimed per
 scope AND compare it with RSS - the gap between "arena bytes" and "RSS" is where
 to look, because the arena accounting says nothing is held while RSS says 20kB a
 request is.
+
+### THE LEAK, NAMED: a reset is a scope boundary, and it was only freeing the parent  [FIXED]
+
+The region counters were in place, and the *symbols* answered the question without
+another build: every arena entry point is a real function in the fixture binary,
+so `gdb` breakpoints on the recording functions plus `bt` name the chain that
+made each region, each mapping and each root allocation. 300 keep-alive requests,
+inline, one connection: 47 hits on `RecordRegionAdd`, 69 on `RecordSysMap`, 308 on
+`RecordRootSize`. Aggregated (frame 0 innermost):
+
+    RecordRegionAdd <- ArenaAllocTD <- ArenaAlloc <- sovAddRec
+                    <- ArenaAllocTD <- alloc <- codecDecodeValue|codecEncodeValue
+    RecordSysMap    <- sysMap <- ArenaAllocTD <- ArenaAlloc <- sovAddRec ...
+    RecordSysMap    <- sysMap <- ArenaNew <- sovNewArena <- sovAddRec ...
+    RecordRootSize  <- ArenaAllocTD <- alloc <- sovRootAlloc <- sovGrowRecs <- sovAddRec
+    RecordRootSize  <- ArenaAllocTD <- alloc <- sovRootAlloc <- codecSovereignEnter <-
+                      net/textproto.(*Reader).readLineSlice | net/url.(*URL).setPath |
+                      net/http.(*transferReader).parseTransferEncoding | bufio...
+
+`$rsi` at the region breakpoint gave the sizes: 16384, 32768, 65536, 131072,
+262144, 524288, 1048576 - a doubling chain, which only a `growDouble` arena has
+(`sovNewArena` is the only writer of that field; an ordinary function arena asks
+for one 64MB region, and the three of those in the same run were counted apart).
+So every retained region belonged to a **sovereign group's arena**, and the group
+was never released.
+
+The cause is one missing call. `sovInvalidateArena` - "a sovGroup lives exactly as
+long as its receiver's arena" - ran from `ArenaFree` and `ArenaRelease`, but NOT
+from `ArenaReset`, which instead cleared the list and dropped it:
+
+    a.nregions = 1
+    a.regions[0].off = arenaDataOffset()
+    a.sovGroupList = a.sovGroupList[:0]     // the group is now unreachable
+
+That is a half-free: the parent's regions are reclaimed, the child groups are not,
+and the receiver map (`domainRoot.sovereignRoot`, keyed by receiver address, with
+bucket storage in the root) still holds them. On the request arena - entered and
+reset once per request - the consequence is exact: the next request's receiver is
+allocated at the same address, finds the *previous* request's group, and appends
+its allocations to arenas that are never reclaimed. Measured before the fix:
+RSS +30MB per 1000 requests, VmData +36MB, mapping count climbing, in BOTH
+dispatch modes (inline and spawned differ in which domain owns the request arena,
+not in whether it is reset).
+
+**The fix, in commits, each measured on its own.**
+
+  1. `ArenaReset` calls `sovInvalidateArena` before reclaiming the parent. The
+     binding rule now holds at both boundaries. **A reset is a scope boundary: it
+     must release everything allocated under that scope, child groups included.
+     Freeing the parent's regions and dropping the list is a half-free.**
+  2. The group's own bookkeeping (the `sovGroup` struct, its record slice, its
+     batch stack) stops being root-FOREVER without being carved into the
+     receiver's arena: released groups are RECYCLED through a bounded free list
+     (`sovGroupTake`/`sovRecycleGroup`, 32 slots), so after warm-up a new group
+     reuses a retired one's struct and slices, and the root stops growing at
+     ~4.8kB a request. The carve is what a first attempt did, and it is wrong
+     for a reason worth recording: **a group's ownership moves.**
+     `sovRekeyRelocated` re-homes a group from the receiver's arena to the
+     group's own data arena when a receiver is relocated, so a struct or slice
+     carved in the old arena is unmapped while the receiver map and the new
+     owner's list still point at it. Measured on the classic http CLIENT path
+     (the phase-8 fixture): 2 of 12 requests served, the rest dying with
+     `http: invalid Read on closed Body` or `interface dispatch: no impl for
+     Read` - a response body whose group had already moved on. Root-lifetime is
+     the requirement; recycling is how the cost is bounded.
+  3. The pool is bounded by BYTES (`arenaPoolMaxBytes` = 4MB, was count-only).
+     A reset arena keeps its pages, so eight large ones retired in the pool were
+     ~76MB of resident memory held by a cache whose job is to absorb mmap churn
+     for *small* function arenas.
+  4. Compaction rebuilds the record table in the backing it already has instead
+     of allocating a fresh one, and reuses `sovPendingHead` correctly: a released
+     group is now unlinked from the pending-compaction list (`sovUnqueueCompact`),
+     because with fix 2 a queued group's struct memory dies with its receiver's
+     arena - the queue was holding a pointer into reclaimed memory.
+  5. **A scope boundary must also drain the deferred work of the scopes that
+     survive it.** The connection's own sovereign receivers (`bufio.Reader`,
+     `bufio.Writer`) live as long as the connection, so their allocation maps are
+     per-request garbage for a per-connection scope. The runtime queues that
+     compaction at the method boundary where pressure appears, and *something must
+     drain it* - a relay's event loop does; the http shell did not, so the queue
+     entry was never revisited, the queued group's data arena kept growing
+     regions, and 9MB accumulated in the connection's frame arena over 1000
+     requests. `serveChanConn` and `chanWorkerLoop` now call
+     `runtime.SovDrainCompactions(chanSovDrainBudget)` at the request boundary,
+     where no frame of a connection receiver is live and no sovereign arena is
+     borrowed. The request boundary is that safe point; it is the shell's job
+     because the shell owns the scope.
+
+**Measured, inline, one connection, 1000 keep-alive requests per round:**
+
+    netsrv19  (before)      rss 13444 -> 48760 -> 79656 -> 110532
+                            root 90k -> 4.4M -> 8.7M -> 13.1M     sysmap 48 -> 151 -> 253 -> 355
+                            region added 4 -> 73 -> 141 -> 209, freed 2
+    netsrv20  (fix 1)       rss 16528 -> 36832 -> 52380 -> 67908
+                            sov created=9072 released=9042       root 90k -> 4.9M -> 9.6M -> 14.4M
+    netsrv21  (fix 1+2+3)   rss 12096 -> 29984 -> 43484 -> 59012
+                            root 81968 -> 82992 -> 85424 -> 90368  (FLAT: +8.4kB over 3000)
+                            rootsize rows flat over the three rounds
+                            sov created=9072 released=9042
+                                regionadd=3101/91701248 regionfree=3005/49233920
+                                meta=1669248                 (all of it in receiver arenas)
+    netsrv23  (fix 1..5)    rss 12344 -> 17992 -> 19328 -> 22692
+                            scope=5 (root)  allocated=17824  reclaimed=0
+                            scope=6 (request) allocated=137154160 reclaimed=137106800 retained=47360
+                            scope=0 retained 40.6MB -> 7.2MB
+                            mapped net 383.2MB -> 346.9MB
+
+**And the invariant, which is what the objective is really about.** `ArenaReset`
+now fails loud if it leaves anything behind:
+
+    if a.sovGroups != 0 || len(a.sovGroupList) != 0 {
+            runtimePanic("arena: reset orphaned sovereign groups")
+    }
+
+so the regression is a crash at the boundary that broke the rule, not a retention
+curve found a thousand requests later. The report carries the numbers that must
+stay flat: `livecap=` (every reserved byte of the root, the function stack and the
+pool) and `mapped ... net=` (sysmap minus sysunmap), not just the per-scope byte
+counters - a scope that frees regions but leaves them mapped, or leaves a child
+group alive, shows up in neither byte counter.
+
+**One more scope, found by the residual (6 groups per CONNECTION, not per request).**
+After the drain, inline was flat but `sov created - released` still grew by exactly
+6 per 1000 requests at 1000 and at 200 requests per round - so it was per
+CONNECTION. `sovFindContainingArena` scanned the function-arena stack OUTWARD
+(0..fnTop), so it matched the root's 256MB domain region before the frame arena
+that had actually taken the address, and those groups were bound to a
+process-lifetime arena that nothing invalidates. The accept loop also did the
+`Accept` inside itself, which is the same mistake one scope up: the connection
+object was relocated into the LOOP's frame arena on every iteration, so the
+connection's own mutating methods (Read/Write/Close/deadlines) created groups
+owned by a frame that never dies. Fixed by scanning INNERMOST-first and by
+`serveNextConn`: one call per connection, in its own frame, exactly like
+`chanHandleOne` per request. Measured with 200 and with 1000 requests per round
+before the fix - the slope was the same, which is what proved the connection was
+the scope, not the request.
+
+**Final acceptance, netsrv27, one connection per round, 1000 keep-alive requests
+per round, both dispatch modes:**
+
+    inline    rss 12740 -> 15052 -> 15064 -> 15068 kB     (rounds 2-3: +12kB, +4kB)
+              vmdata 263332 kB, identical across all three rounds
+              maps 16 -> 16 -> 14 -> 15
+              root arena 87.5k -> 816.7k -> 884.5k -> 952.1k
+              sov created=9072 released=9066 live=6        (live CONSTANT, not a rate)
+              sov recycled=9063                            (the recycle list works)
+              scope=5 (root)    allocated=886144   reclaimed=0
+              scope=6 (request) allocated=131536176 reclaimed=131491712 retained=44464
+              scope=0           retained=41440    (was 154MB before the scope fix)
+
+    spawned   rss 12820 -> 16060 -> 16512 -> 16936 kB
+              vmdata 263340 kB, identical (one +65MB VIRTUAL 64MB region, once, ~4k in)
+              maps 37-38, flat
+              root arena 71.1k -> 71.6k                    (+176B over 3000)
+              sov created=5 released=3 live=2              (constant)
+
+The inline column is the acceptance: VmData is *identical* across the three
+rounds, the group count is constant, and no scope retains a rate. Two residuals,
+both measured and both NOT the leak:
+
+  * inline root arena +68B a request (204kB over 3000). It is the bookkeeping of
+    the groups that miss the recycle list (a group is created before the request
+    that created the previous one is released), not request data: 886kB of root
+    allocations over 9072 creations is one ~97B allocation each, and it does not
+    move RSS or VmData.
+  * spawned RSS +440B a request, which lives in the `/dev/zero` spawn-ring
+    mappings (`Rss` per mapping: 80kB -> 496kB -> 2640kB over 6000 requests), i.e.
+    the 32MB-per-direction lazily-faulted ring data areas
+    (`ringDefaultSize = 1<<25`) being touched for the first time. Bounded by the
+    ring size, and it is the transport sizing that step 6 replaces with a
+    queue-owned ring of preallocated slots. The arena/group accounting is flat
+    throughout.
+
+**Step 6 stays blocked, dependency recorded** (not worked around): the queue-owned
+slot ring needs a slot type that crosses a domain boundary, and a `[]byte` built
+at run time does not survive a spawn channel - see "A []byte built at run time
+does not survive a spawn channel" below for the measurement and the repro. Until
+that runtime defect is fixed (or a slot type is proven safe), the pool boundary
+stays an int32 word stream.
+
+**What the instrument had to learn first.** The scope report as built lied in a
+way that hid this finding: `ManualArenaEnter` re-stamped `a.scope` with the scope
+current at ENTER, so an arena's bytes were charged to the scope it had while
+allocating while its reclaim was charged to whatever scope was current at reset.
+Scope 0 appeared to retain 154MB that was in fact being reclaimed under scope 2 -
+"root retention" that was neither root nor retention. An arena is now stamped
+ONCE, at `ArenaAcquire`, which is where its lifetime starts; the runtime gives the
+root its own scope (`ArenaScopeRoot` = 5) and the channel shell gives the request
+arena its own (`ArenaScopeRequest` = 6); 0 means "nobody named this scope", a
+diagnostic rather than a bucket that hides the root. A scope row now satisfies
+`allocated - reclaimed == live bytes of that scope`, and "scope 0 is empty" is a
+usable assertion. The `rootsite_pc` capture is deleted: `Caller` returns `ok=false`
+in `alloc()` and `llvm.returnaddress` segfaulted, so the field was always zero and
+the report showed it anyway.
 
 ### STEP 3 APPLIED: the map's birth arena wins; buckets stop landing in root  [FIX, partial]
 

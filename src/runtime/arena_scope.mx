@@ -18,6 +18,12 @@ package runtime
 
 const arenaScopeMax = int32(64)
 
+// Scopes the runtime itself names. Everything else is the shell's: leaving 0
+// unnamed is deliberate, so that an allocation nobody accounted for is visible
+// as scope 0 instead of hiding inside the root arena's row (which is exactly how
+// the group leak was misread as "root retention" for several rounds).
+const ArenaScopeRoot = int32(5)
+
 type arenaScopeRec struct {
 	alloc  uint64
 	freed  uint64
@@ -84,6 +90,76 @@ func RecordSysUnmap(bytes uintptr) {
 	sysUnmapBytes += uint64(bytes)
 }
 
+// --- sovereign group accounting ---
+//
+// A sovereign group is the arena set that a self-mutating type's receiver owns.
+// Its arenas are the only ones that double (growDouble), so their region adds
+// are counted apart from the ordinary 64MB ones, and created vs released is
+// the direct test of the binding rule: a group lives exactly as long as the
+// arena that holds its receiver. If created climbs and released does not, the
+// groups outlive their receivers, and `regionadd` says how fast the arenas they
+// keep alive are growing.
+var sovCreated uint64
+var sovReleased uint64
+var sovRegionAdd uint64
+var sovRegionAddBytes uint64
+var sovRegionFree uint64
+var sovRegionFreeBytes uint64
+
+func RecordSovCreate() {
+	sovCreated++
+}
+
+func RecordSovRelease() {
+	sovReleased++
+}
+
+// The three ways a group can escape release, counted separately so a residual
+// leak names its own path instead of being inferred:
+//
+//   untracked - created for a receiver that was in no live arena, so no arena
+//               list ever names it (the documented ctxArena == nil case);
+//   miss      - its receiver was not in the receiver map at release time;
+//   refused   - its receiver was nil or attributed to another arena.
+var sovUntracked uint64
+var sovReleaseMiss uint64
+var sovReleaseRefused uint64
+
+func RecordSovUntracked() {
+	sovUntracked++
+}
+
+func RecordSovReleaseMiss() {
+	sovReleaseMiss++
+}
+
+func RecordSovReleaseRefused() {
+	sovReleaseRefused++
+}
+
+// sovMetaBytes is the group bookkeeping (group struct, record slice, batch
+// stack, slot table) charged to the arena that owns the receiver. It is not a
+// retention number: it is the proof that the bookkeeping follows the receiver
+// instead of the process.
+var sovMetaBytes uint64
+
+func RecordSovMeta(size uintptr) {
+	sovMetaBytes += uint64(size)
+}
+
+// RecordSovRegionAdd charges a doubling arena's new region to the group
+// accounting.
+func RecordSovRegionAdd(bytes uintptr) {
+	sovRegionAdd++
+	sovRegionAddBytes += uint64(bytes)
+}
+
+// RecordSovRegionFree charges a doubling arena's released regions.
+func RecordSovRegionFree(count uintptr, bytes uintptr) {
+	sovRegionFree += uint64(count)
+	sovRegionFreeBytes += uint64(bytes)
+}
+
 func arenaScopeAlloc(id int32, size uintptr) {
 	if id >= 0 && id < arenaScopeMax {
 		arenaScopes[id].alloc += uint64(size)
@@ -97,35 +173,24 @@ func arenaScopeFreed(id int32, size uintptr) {
 	}
 }
 
-// --- root-site recorder ---
+// --- trace gate ---
 //
-// The root arena is the only arena nothing resets, so any allocation charged to
-// it is retained for the life of the process. Recording the PC of the code that
-// made such an allocation names the site, once, instead of leaving it to
-// inference. Gated by SetArenaTrace: the PC capture walks the stack.
+// SetArenaTrace turns the DIRECT-allocation size recorder on. Kept because a
+// size histogram is the one thing the scope counters cannot show: a single
+// large allocation (a codec buffer, a bucket array) is one event, not a pattern.
 
-const rootSiteMax = int32(32)
-
-type rootSiteRec struct {
-	pc    uintptr
-	count uint64
-	bytes uint64
-}
-
-var rootSites [rootSiteMax]rootSiteRec
-var rootSiteN int32
 var arenaTraceOn bool
 var rootTraceBusy bool
 
-// SetArenaTrace turns allocating-site capture on or off.
+// SetArenaTrace turns allocation-size capture on or off.
 func SetArenaTrace(on bool) {
 	arenaTraceOn = on
 }
 
-// RecordRootSize charges one DIRECT allocation (ArenaAllocTD, which bypasses
-// alloc() and therefore the site recorder) of size bytes into a long-lived
-// arena, keyed by size. Powers of two are the hashmap bucket signature; variable
-// sizes are codec buffers.
+// RecordRootSize charges one DIRECT allocation into the root arena, keyed by
+// size. Powers of two are the hashmap bucket signature; variable sizes are codec
+// buffers. It answers "is the root taking bytes", not "from where": the scope
+// rows answer that, and the group counters answer "for whom".
 const rootSizeMax = int32(24)
 
 type rootSizeRec struct {
@@ -157,31 +222,6 @@ func RecordRootSize(size uintptr) {
 		rootSizes[rootSizeN].count = 1
 		rootSizes[rootSizeN].bytes = uint64(size)
 		rootSizeN++
-	}
-	rootTraceBusy = false
-}
-
-// RecordRootSite charges one allocation of size bytes into the root arena to
-// the PC of the code that made it.
-func RecordRootSite(pc uintptr, size uintptr) {
-	if rootTraceBusy {
-		return
-	}
-	rootTraceBusy = true
-	var i int32 = 0
-	for i = 0; i < rootSiteN; i++ {
-		if rootSites[i].pc == pc {
-			rootSites[i].count++
-			rootSites[i].bytes += uint64(size)
-			rootTraceBusy = false
-			return
-		}
-	}
-	if rootSiteN < rootSiteMax {
-		rootSites[rootSiteN].pc = pc
-		rootSites[rootSiteN].count = 1
-		rootSites[rootSiteN].bytes = uint64(size)
-		rootSiteN++
 	}
 	rootTraceBusy = false
 }
@@ -258,6 +298,48 @@ func ArenaScopeReport() (out []byte) {
 	out = appendScopeStr(out, " bytes=")
 	out = appendScopeUint(out, sysUnmapBytes)
 	out = appendScopeStr(out, "\n")
+	out = appendScopeStr(out, "mapped sysmap_bytes=")
+	out = appendScopeUint(out, sysMapBytes)
+	out = appendScopeStr(out, " sysunmap_bytes=")
+	out = appendScopeUint(out, sysUnmapBytes)
+	out = appendScopeStr(out, " net=")
+	if sysMapBytes > sysUnmapBytes {
+		out = appendScopeUint(out, sysMapBytes-sysUnmapBytes)
+	} else {
+		out = appendScopeUint(out, 0)
+	}
+	out = appendScopeStr(out, " livecap=")
+	out = appendScopeUint(out, uint64(liveArenaCapBytes()))
+	out = appendScopeStr(out, "\n")
+	out = appendScopeStr(out, "sov created=")
+	out = appendScopeUint(out, sovCreated)
+	out = appendScopeStr(out, " released=")
+	out = appendScopeUint(out, sovReleased)
+	out = appendScopeStr(out, " live=")
+	if sovCreated > sovReleased {
+		out = appendScopeUint(out, sovCreated-sovReleased)
+	} else {
+		out = appendScopeUint(out, 0)
+	}
+	out = appendScopeStr(out, " regionadd=")
+	out = appendScopeUint(out, sovRegionAdd)
+	out = appendScopeStr(out, "/")
+	out = appendScopeUint(out, sovRegionAddBytes)
+	out = appendScopeStr(out, " untracked=")
+	out = appendScopeUint(out, sovUntracked)
+	out = appendScopeStr(out, " miss=")
+	out = appendScopeUint(out, sovReleaseMiss)
+	out = appendScopeStr(out, " refused=")
+	out = appendScopeUint(out, sovReleaseRefused)
+	out = appendScopeStr(out, " meta=")
+	out = appendScopeUint(out, sovMetaBytes)
+	out = appendScopeStr(out, " recycled=")
+	out = appendScopeUint(out, sovGroupRecycleCount())
+	out = appendScopeStr(out, " regionfree=")
+	out = appendScopeUint(out, sovRegionFree)
+	out = appendScopeStr(out, "/")
+	out = appendScopeUint(out, sovRegionFreeBytes)
+	out = appendScopeStr(out, "\n")
 	for i := int32(0); i < arenaScopeMax; i++ {
 		if regionAddCount[i] == 0 && regionFreeCount[i] == 0 {
 			continue
@@ -283,20 +365,12 @@ func ArenaScopeReport() (out []byte) {
 		out = appendScopeUint(out, rootSizes[i].bytes)
 		out = appendScopeStr(out, "\n")
 	}
-	for i := int32(0); i < rootSiteN; i++ {
-		out = appendScopeStr(out, "rootsite_pc=")
-		out = appendScopeUint(out, uint64(rootSites[i].pc))
-		out = appendScopeStr(out, " count=")
-		out = appendScopeUint(out, rootSites[i].count)
-		out = appendScopeStr(out, " bytes=")
-		out = appendScopeUint(out, rootSites[i].bytes)
-		out = appendScopeStr(out, "\n")
-	}
 	return out
 }
 
 // emitLiveArena writes one arena that is currently holding memory: its scope,
-// the pc of the function that pushed it, and how many bytes it has used.
+// what kind of arena it is, how many regions it holds and how many bytes it has
+// used, and how much it has reserved.
 func emitLiveArena(out []byte, a *Arena, tag []byte) (res []byte) {
 	res = out
 	if a == nil {
@@ -312,12 +386,52 @@ func emitLiveArena(out []byte, a *Arena, tag []byte) (res []byte) {
 	res = appendScopeStr(res, tag)
 	res = appendScopeStr(res, " scope=")
 	res = appendScopeUint(res, uint64(uint32(a.scope)))
-	res = appendScopeStr(res, " site=")
-	res = appendScopeUint(res, uint64(a.site))
+	res = appendScopeStr(res, " sovereign=")
+	res = appendScopeUint(res, uint64(uint32(a.sovereign)))
+	res = appendScopeStr(res, " n=")
+	res = appendScopeUint(res, uint64(uint32(a.nregions)))
+	res = appendScopeStr(res, " groups=")
+	res = appendScopeUint(res, uint64(uint32(a.sovGroups)))
 	res = appendScopeStr(res, " used=")
 	res = appendScopeUint(res, uint64(used))
+	reserved := uintptr(0)
+	for i := int32(0); i < a.nregions; i++ {
+		reserved += a.regions[i].cap
+	}
+	res = appendScopeStr(res, " cap=")
+	res = appendScopeUint(res, uint64(reserved))
 	res = appendScopeStr(res, "\n")
 	return res
+}
+
+// liveArenaCapBytes is every byte of arena memory currently reserved: the root,
+// the function stack, and the pool. It is the number that must stay flat when a
+// scope boundary is doing its job - a scope that frees regions but leaves them
+// mapped shows nothing here, and neither does one that leaves a child group
+// alive.
+func liveArenaCapBytes() (n uintptr) {
+	if domainRoot == nil {
+		return 0
+	}
+	for i := int32(0); i <= domainRoot.fnTop; i++ {
+		a := domainRoot.fnStack[i]
+		if a == nil {
+			continue
+		}
+		for j := int32(0); j < a.nregions; j++ {
+			n += a.regions[j].cap
+		}
+	}
+	for i := int32(0); i < arenaPoolN; i++ {
+		a := arenaPool[i]
+		if a == nil {
+			continue
+		}
+		for j := int32(0); j < a.nregions; j++ {
+			n += a.regions[j].cap
+		}
+	}
+	return n
 }
 
 func appendScopeStr(b []byte, s []byte) (out []byte) {
