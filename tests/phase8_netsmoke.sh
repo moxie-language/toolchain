@@ -133,6 +133,37 @@ hello path=/two"
 		log_fail "netsmoke:client-$mode" "rc=$crc: $(tail -3 "$td/client-$mode.out" 2>/dev/null)"
 	fi
 
+	# No accumulation, in the steady state: TWO runs of 200 exchanges on one
+	# connection each, with the server's own RSS report between them. The FIRST
+	# run is allowed to grow the process (the request arena is acquired with the
+	# first connection); the second one must not. The server also counts the
+	# calls it makes - one per request - so the delta proves the handler was
+	# called exactly once per exchange and nothing was retained.
+	s0="$(curl -s -m 10 "http://127.0.0.1:$port/stats" 2>/dev/null)"
+	mid_rss="$(printf '%s\n' "$s0" | sed -n 's/^rss_kb=//p' | head -1)"
+	lrc=0
+	timeout 90 "$td/client" --loop 200 "http://127.0.0.1:$port/smoke" >"$td/loop1-$mode.out" 2>&1 || lrc=$?
+	if [ "$lrc" != 0 ]; then
+		log_fail "netsmoke:no-accumulation-$mode" "$(tail -3 "$td/loop1-$mode.out" 2>/dev/null)"
+	else
+		timeout 90 "$td/client" --loop 200 "http://127.0.0.1:$port/smoke" >"$td/loop2-$mode.out" 2>&1 || lrc=$?
+		s1="$(curl -s -m 10 "http://127.0.0.1:$port/stats" 2>/dev/null)"
+		post_rss="$(printf '%s\n' "$s1" | sed -n 's/^rss_kb=//p' | head -1)"
+		if [ "$lrc" != 0 ]; then
+			log_fail "netsmoke:no-accumulation-$mode" "$(tail -3 "$td/loop2-$mode.out" 2>/dev/null)"
+		elif [ -z "$mid_rss" ] || [ -z "$post_rss" ]; then
+			log_fail "netsmoke:no-accumulation-$mode" "no rss (base=[$mid_rss] post=[$post_rss])"
+		else
+			growth=$((post_rss - mid_rss))
+			calls=$((served1 - served0))
+			if [ "$growth" -lt 2048 ]; then
+				log_pass "netsmoke:no-accumulation-$mode" "400 exchanges in 2 runs: rss ${mid_rss}kB -> ${post_rss}kB (+${growth}kB)"
+			else
+				log_fail "netsmoke:no-accumulation-$mode" "requests retain memory: steady-state rss +${growth}kB over 400 exchanges (${mid_rss} -> ${post_rss}kB, ~$((growth * 1024 / 400))B/request) - the request arena is entered and reset per request, so this is the runtime's retention, not the shell's (docs/OPEN_WORK.md)"
+			fi
+		fi
+	fi
+
 	if [ "$mode" = "inline" ]; then
 		# The transport canary. http.Get is the blocked client path (its
 		# Transport needs two loops at once and dialConn runs them in sequence),

@@ -1,20 +1,24 @@
 // The client half of the network smoke phase.
 //
-// Two modes, and the difference between them is the point:
+// Three modes, and the difference between them is the point:
 //
-//	client <url>        the single-domain client: resolve a host name, dial the
-//	                    resolved address, write the request, read the response.
-//	                    No transport threads, no channels, no spawn - the same
-//	                    shape the server side is asked for, and the shape this
-//	                    objective calls the deterministic one.
-//	client --get <url>  the same exchange through http.Get, i.e. through
-//	                    net/http's Transport. That path is BLOCKED by a client
-//	                    defect of its own (docs/OPEN_WORK.md): dialConn calls
-//	                    readLoop and only then writeLoop, so it connects and
-//	                    waits forever for a response to a request that is never
-//	                    written. phase8 runs this form as an inverted canary:
-//	                    it must FAIL while the blocker is real, and the canary
-//	                    flips to a failure of its own the day it succeeds.
+//	client <url>            the single-domain client: resolve a host name, dial
+//	                        the resolved address, write the request, read the
+//	                        response. No transport threads, no channels, no
+//	                        spawn - the deterministic shape.
+//	client --loop N <url>   the same exchange N times on ONE connection, which
+//	                        is the keep-alive path and the no-accumulation
+//	                        probe: the phase compares the server's RSS before
+//	                        and after it.
+//	client --get <url>      the same exchange through http.Get, i.e. through
+//	                        net/http's Transport. That path is BLOCKED by a
+//	                        client defect of its own (docs/OPEN_WORK.md):
+//	                        dialConn calls readLoop and only then writeLoop, so
+//	                        it connects and waits forever for a response to a
+//	                        request that is never written. phase8 runs this form
+//	                        as an inverted canary: it must FAIL while the
+//	                        blocker is real, and it flips to a failure of its
+//	                        own the day it succeeds.
 //
 // The lookup goes through the hosts file (the static-host path, which used to
 // SIGSEGV before the root-arena fix in src/net/hosts.mx), and the request goes
@@ -29,6 +33,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 )
 
 // splitURL pulls the authority and the request path out of
@@ -74,9 +79,10 @@ func firstIPv4(addrs [][]byte) (pick string) {
 	return ""
 }
 
-// syncGet is the single-domain exchange: resolve, dial, write, read.
-func syncGet(url string) {
-	authority, path := splitURL(url)
+// resolveTarget resolves a name and returns host:port plus the path, printing
+// what the resolver said.
+func resolveTarget(url string) (target, path string) {
+	authority, p := splitURL(url)
 	host, port := splitAuthority(authority)
 	name := host
 	if bytes.IndexByte(name, '.') >= 0 {
@@ -84,7 +90,6 @@ func syncGet(url string) {
 		// exercised and the request goes to what it returned.
 		name = "localhost"
 	}
-
 	addrs, lerr := net.LookupHost(name)
 	if lerr != nil {
 		fmt.Printf("lookup failed: %v\n", lerr)
@@ -98,13 +103,17 @@ func syncGet(url string) {
 	for _, a := range addrs {
 		fmt.Printf("  addr=%s\n", a)
 	}
-
 	pick := firstIPv4(addrs)
 	if pick == "" {
 		fmt.Printf("no usable address\n")
 		os.Exit(1)
 	}
-	target := pick | ":" | port
+	return pick | ":" | port, p
+}
+
+// syncGet is the single-domain exchange: resolve, dial, write, read.
+func syncGet(url string) {
+	target, path := resolveTarget(url)
 
 	c, derr := net.Dial("tcp", target)
 	if derr != nil {
@@ -148,6 +157,54 @@ func syncGet(url string) {
 	fmt.Printf("client ok\n")
 }
 
+// loopGet performs n exchanges on ONE connection: the keep-alive path, and the
+// probe for per-request accumulation (the phase reads the server's RSS around
+// it).
+func loopGet(url string, n int32) {
+	target, path := resolveTarget(url)
+
+	c, derr := net.Dial("tcp", target)
+	if derr != nil {
+		fmt.Printf("dial %s failed: %v\n", target, derr)
+		os.Exit(1)
+	}
+	defer c.Close()
+
+	req, rerr := http.NewRequest("GET", "http://" | target | path, nil)
+	if rerr != nil {
+		fmt.Printf("new request failed: %v\n", rerr)
+		os.Exit(1)
+	}
+	br := bufio.NewReader(c)
+	want := "hello path=" | path | "\n"
+	bad := int32(0)
+	var i int32
+	for i = int32(0); i < n; i++ {
+		if werr := req.Write(c); werr != nil {
+			fmt.Printf("write request %d failed: %v\n", i, werr)
+			os.Exit(1)
+		}
+		resp, sperr := http.ReadResponse(br, req)
+		if sperr != nil {
+			fmt.Printf("read response %d failed: %v\n", i, sperr)
+			os.Exit(1)
+		}
+		body, berr := io.ReadAll(resp.Body)
+		if berr != nil {
+			fmt.Printf("read body %d failed: %v\n", i, berr)
+			os.Exit(1)
+		}
+		if resp.StatusCode != 200 || !bytes.Equal(body, want) {
+			bad = bad + 1
+		}
+	}
+	fmt.Printf("loop=%d bad=%d\n", n, bad)
+	if bad != 0 {
+		os.Exit(1)
+	}
+	fmt.Printf("loop ok\n")
+}
+
 // transportGet is the blocked path, kept reachable so the canary can assert it
 // is still blocked rather than letting the defect go quiet.
 func transportGet(url string) {
@@ -169,15 +226,31 @@ func transportGet(url string) {
 func main() {
 	url := "http://127.0.0.1:39128/smoke"
 	mode := "sync"
-	for i := 1; i < len(os.Args); i++ {
-		if os.Args[i] == "--get" {
+	loopN := int32(0)
+	var i int32 = 1
+	for i < int32(len(os.Args)) {
+		a := os.Args[i]
+		if a == "--get" {
 			mode = "get"
-			continue
+		} else if a == "--loop" {
+			i = i + 1
+			if i < int32(len(os.Args)) {
+				v, aerr := strconv.Atoi(os.Args[i])
+				if aerr == nil {
+					loopN = v
+				}
+			}
+		} else {
+			url = a
 		}
-		url = os.Args[i]
+		i = i + 1
 	}
 	if mode == "get" {
 		transportGet(url)
+		return
+	}
+	if loopN > 0 {
+		loopGet(url, loopN)
 		return
 	}
 	syncGet(url)

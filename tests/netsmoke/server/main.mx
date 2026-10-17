@@ -1,48 +1,79 @@
-// A stdlib net/http server for the network smoke phase, on the channel handler
-// path: the shell owns the socket and the framing, the handler is a pure
-// stream function that receives decoded request messages and sends response
-// messages. No closures, no io in the handler, and the router is a plain table
-// built at startup.
+// A stdlib net/http server on the one-call-per-request handler path.
+//
+// The application's main type IS the handler: it holds whatever data access the
+// app needs, and the shell makes exactly one call per request -
+// `app.Handle(req) (resp)`. The shell owns the socket, the framing, the
+// keep-alive loop and one request arena per connection; the handler does no io
+// and keeps no state between requests.
+//
+// The /stats route reports how many requests this app has served and the
+// process RSS, so the phase can assert that serving requests does not
+// accumulate memory.
 //
 // usage: server [addr] [inline|spawned]
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"os"
+	"runtime"
+	"strconv"
 )
 
-// helloHandler answers every request with the path it was asked for. It reads
-// exactly the message the shell offers (head, then body chunks, then end) and
-// answers on the head, which is the shape keep-alive relies on.
-type helloHandler struct{}
+// app is the application's main type. A real app would hold its database
+// handle, config and caches here. This one is EMPTY and its Handle writes
+// nothing back through the receiver: keeping the handler pure is the design
+// rule, and it is also what keeps per-request memory in the request arena
+// (measured: a handler that mutates its receiver costs ~12kB per request in
+// the inline path, a pure one does not - docs/OPEN_WORK.md).
+type app struct{}
 
-func (h *helloHandler) Serve(in chan http.Msg, out chan http.Msg) {
-	m := <-in
-	if m.Kind != http.MsgReqHead {
-		return
+// Handle is one call per request: request in, response out, no io.
+func (a *app) Handle(req *http.Req) (resp *http.Resp) {
+	headers := http.Header{}
+	headers["Content-Type"] = [][]byte{[]byte("text/plain; charset=utf-8")}
+	resp = &http.Resp{Status: 200, Headers: headers}
+	if req.Path == "/stats" {
+		resp.Body = statsLine()
+		return resp
 	}
-	// The body goes into the buffer the shell offered, by index - a subslice
-	// would be a copy - and the reply carries only its length. Nothing the
-	// handler allocates in its own frame is handed to the shell.
-	n := int32(0)
-	n = putInto(m.Scratch, n, "hello path=")
-	n = putInto(m.Scratch, n, m.Path)
-	n = putInto(m.Scratch, n, "\n")
-	out <- http.Msg{Kind: http.MsgRespHead, Status: 200}
-	out <- http.Msg{Kind: http.MsgRespBody, Len: n}
-	out <- http.Msg{Kind: http.MsgRespEnd}
+	resp.Body = []byte("hello path=" | req.Path | "\n")
+	return resp
 }
 
-// putInto writes s into dst at off and returns the offset after it.
-func putInto(dst []byte, off int32, s string) (n int32) {
-	n = off
-	for i := 0; i < len(s); i++ {
-		dst[n] = s[i]
-		n = n + 1
+// statsLine reports the process RSS and the runtime's cumulative allocation
+// counters. Two snapshots around a loop give bytes-allocated-per-request
+// (churn) separately from RSS (retention): a churn that matches the growth says
+// nothing is being freed, a small churn with a growing RSS says the retention is
+// outside the allocator.
+func statsLine() (s string) {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return "allocs=" | strconv.Itoa(int32(m.Allocs)) | "\ntotalalloc_kb=" | strconv.Itoa(int32(m.TotalAlloc/1024)) | "\n" | rssLine()
+}
+
+// rssLine reads the process RSS so the phase can see whether requests
+// accumulate. That is the fixture's business, not the shell's.
+func rssLine() (s string) {
+	b, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return "rss_kb=?\n"
 	}
-	return n
+	i := bytes.Index(b, []byte("VmRSS:"))
+	if i < 0 {
+		return "rss_kb=?\n"
+	}
+	j := i + 6
+	for j < len(b) && (b[j] == ' ' || b[j] == '\t') {
+		j = j + 1
+	}
+	k := j
+	for k < len(b) && b[k] >= '0' && b[k] <= '9' {
+		k = k + 1
+	}
+	return "rss_kb=" | string(b[j:k]) | "\n"
 }
 
 func main() {
@@ -58,8 +89,9 @@ func main() {
 	if mode == "spawned" {
 		dispatch = http.DispatchSpawned
 	}
+	a := &app{}
 	mux := http.NewChanMux()
-	mux.Handle("/", &helloHandler{})
+	mux.Handle("/", a)
 	fmt.Printf("listening on %s mode=%s\n", addr, mode)
 	err := http.ChanServeMode(addr, mux, dispatch, 4)
 	fmt.Printf("server returned err=%v\n", err)

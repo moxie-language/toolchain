@@ -1,24 +1,21 @@
 package http
 
-// Spawned dispatch: the same messages, run by a fixed pool of worker routines
-// instead of in the connection's domain.
+// Spawned dispatch: the same one-call-per-request handler, run by a fixed pool
+// of worker routines instead of in the connection's domain.
 //
 // The pool exists because a spawn is a fork, not a coroutine: a worker is an OS
 // thread with its own domain and its own arenas, so one spawn per request would
 // cost a thread per request (measured by tests/netsmoke/spawncost). The pool is
 // spawned once, workers pull from their own queue, and the connection shell
-// picks a worker for the whole exchange.
+// picks a worker per request.
 //
 // The boundary carries an int32 STREAM, not framed byte slices, and that is a
 // workaround for a runtime defect: a []byte built at run time does not survive
-// a spawn channel. Measured (docs/OPEN_WORK.md): a literal crosses intact
-// (`[]byte("abcdefgh")` arrives with sum 804), while the same bytes built with
-// push arrive with the right LENGTH and allocator metadata as their content
-// (bytes 1..8 arrive as [4, 0, 0, ...]). Scalars cross correctly, so a message
-// is encoded as its kind and then each field as an int32 - byte strings packed
-// four bytes to a word - and the worker decodes the same way. Four bytes per
-// send instead of one keeps the cost sane; the honest fix is the runtime
-// defect, not this encoding.
+// a spawn channel. Measured (docs/OPEN_WORK.md): a literal crosses intact,
+// while the same bytes built with push arrive with the right LENGTH and
+// allocator metadata as their content. Scalars cross correctly, so a message is
+// encoded as its kind and then each field as int32 values - byte strings packed
+// four bytes to a word. The honest fix is the runtime defect, not this encoding.
 //
 // The router table is a package global read by the workers, which is sound
 // because spawn forks: every worker inherits the table as it stands when the
@@ -26,12 +23,8 @@ package http
 
 import (
 	"errors"
+	"runtime"
 )
-
-// FrameStepDone ends one dispatch step on the wire: a step may produce no
-// response messages at all (a handler that only answers once it has the whole
-// request), so the shell needs a marker to know the worker finished.
-const FrameStepDone = int32(100)
 
 // chanGlobalMux is the table the pool workers read.
 var chanGlobalMux *ChanMux
@@ -112,110 +105,56 @@ func recvHeaders(ch chan int32) (h Header) {
 	return h
 }
 
-func msgErrText(err error) (s string) {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
-}
-
-func recvErrText(t string) (err error) {
-	if t == "" {
-		return nil
-	}
-	return errors.New(t)
-}
-
-// sendMsg puts one message on the stream: its kind, then the fields that kind
-// carries. recvMsg reads exactly these in this order.
-func sendMsg(ch chan int32, m Msg) {
-	ch <- m.Kind
-	switch m.Kind {
-	case MsgReqHead:
-		sendBytes(ch, m.Method)
-		sendBytes(ch, m.Path)
-		ch <- m.Route
-		sendHeaders(ch, m.Headers)
-	case MsgReqBody:
-		sendBytes(ch, m.Data)
-	case MsgRespHead:
-		ch <- m.Status
-		sendHeaders(ch, m.Headers)
-	case MsgRespBody:
-		sendBytes(ch, m.Data)
-	case MsgReqAbort:
-		sendBytes(ch, msgErrText(m.Err))
-	case MsgRespAbort:
-		sendBytes(ch, msgErrText(m.Err))
-	}
-}
-
-func recvMsg(ch chan int32) (m Msg) {
-	m.Kind = <-ch
-	switch m.Kind {
-	case MsgReqHead:
-		m.Method = recvBytes(ch)
-		m.Path = recvBytes(ch)
-		m.Route = <-ch
-		m.Headers = recvHeaders(ch)
-	case MsgReqBody:
-		m.Data = recvBytes(ch)
-	case MsgRespHead:
-		m.Status = <-ch
-		m.Headers = recvHeaders(ch)
-	case MsgRespBody:
-		m.Data = recvBytes(ch)
-	case MsgReqAbort:
-		m.Err = recvErrText(recvBytes(ch))
-	case MsgRespAbort:
-		m.Err = recvErrText(recvBytes(ch))
-	}
-	return m
-}
-
-// chanWorkerLoop is one pool worker. It owns no socket: it receives request
-// messages off the stream, runs the route's handler in this domain and streams
-// the response back. It never spawns and never blocks on anything but its two
-// channels.
+// chanWorkerLoop is one pool worker. It owns no socket and no connection state:
+// it decodes a request into ITS request arena, makes the route's one handler
+// call there, streams the response back and resets the arena, so a worker that
+// served a million requests holds no more memory than one that served one.
 func chanWorkerLoop(jobs chan int32, results chan int32) {
-	in := chan Msg{:1}
-	out := chan Msg{:16}
-	scratch := []byte{:8192}
+	arena := runtime.ArenaAcquire(chanRequestArenaBytes)
 	done := false
 	for !done {
-		m := recvMsg(jobs)
-		if m.Kind == 0 {
-			return
+		kind := <-jobs
+		if kind == 0 {
+			break
 		}
-		h := chanRouteHandler(m.Route)
-		if h == nil {
-			sendMsg(results, Msg{Kind: MsgRespAbort, Err: errors.New("channel handler: no route")})
-			results <- FrameStepDone
+		if kind != MsgReqHead {
+			// A stream that is not at a message boundary cannot be resynced;
+			// the shell only ever sends well-formed requests, so this is a
+			// programming error and stopping is the loud answer.
+			break
+		}
+		runtime.ManualArenaEnter(arena)
+		rq := &Req{}
+		rq.Method = recvBytes(jobs)
+		rq.Path = recvBytes(jobs)
+		rq.Proto = recvBytes(jobs)
+		routeID := <-jobs
+		rq.Headers = recvHeaders(jobs)
+		tail := <-jobs
+		if tail == MsgReqBody {
+			rq.Body = recvBytes(jobs)
+			tail = <-jobs
+		}
+		h := chanRouteHandler(routeID)
+		var resp *Resp
+		if h != nil && tail == MsgReqEnd {
+			resp = h.Handle(rq)
+		}
+		if resp == nil {
+			results <- MsgRespAbort
+			sendBytes(results, "http: channel handler: no route")
 		} else {
-			m.Scratch = scratch
-			in <- m
-			h.Serve(in, out)
-			for {
-				progress := false
-				select {
-				case rm := <-out:
-					// The handler wrote the body into the buffer it was
-					// offered; materialize it here, because the handler's
-					// frame is gone once Serve returns.
-					if rm.Kind == MsgRespBody && rm.Len > 0 && int32(len(scratch)) >= rm.Len {
-						rm.Data = scratch[:rm.Len]
-					}
-					sendMsg(results, rm)
-					progress = true
-				default:
-				}
-				if !progress {
-					break
-				}
-			}
-			results <- FrameStepDone
+			results <- MsgRespHead
+			results <- resp.Status
+			sendHeaders(results, resp.Headers)
+			results <- MsgRespBody
+			sendBytes(results, resp.Body)
+			results <- MsgRespEnd
 		}
+		runtime.ManualArenaExit(arena)
+		runtime.ArenaReset(arena)
 	}
+	runtime.ArenaRelease(arena)
 }
 
 // chanPool is a fixed set of workers with their own queues. next rotates so a
@@ -233,68 +172,48 @@ func (p *chanPool) pick() (i int32) {
 	return i
 }
 
-// chanRunner runs one step of an exchange. The shell does not know which
-// implementation it holds: the messages are identical, and this choice IS the
-// dispatch policy.
-type chanRunner interface {
-	Step(routeID int32, h ChanHandler, m Msg, rb *respBuf)
+// call hands one decoded request to a worker and returns the response it
+// streamed back. The response's slices are allocated in the CALLER's request
+// arena, so the shell can write them and then free the arena.
+func (p *chanPool) call(routeID int32, rq *Req) (resp *Resp) {
+	i := p.pick()
+	j := p.jobs[i]
+	j <- MsgReqHead
+	sendBytes(j, rq.Method)
+	sendBytes(j, rq.Path)
+	sendBytes(j, rq.Proto)
+	j <- routeID
+	sendHeaders(j, rq.Headers)
+	j <- MsgReqBody
+	sendBytes(j, rq.Body)
+	j <- MsgReqEnd
+	return recvResp(p.results[i])
 }
 
-// chanInlineRunner runs the handler in the connection's own domain. No spawn,
-// no queue, no lock: single-domain dispatch is the deterministic mode.
-//
-// Its channels and its scratch come from the CALLER, which builds them in the
-// frame that owns the connection: a channel allocated in a constructor's frame
-// is released when the constructor returns, and the first send on the freed
-// state panics with "send on closed channel".
-type chanInlineRunner struct {
-	mux     *ChanMux
-	in      chan Msg
-	out     chan Msg
-	scratch []byte
-}
-
-func newChanInlineRunner(mux *ChanMux, in chan Msg, out chan Msg, scratch []byte) (r *chanInlineRunner) {
-	return &chanInlineRunner{mux: mux, in: in, out: out, scratch: scratch}
-}
-
-func (r *chanInlineRunner) Step(routeID int32, h ChanHandler, m Msg, rb *respBuf) {
-	if h == nil {
-		rb.aborted = true
-		return
-	}
-	m.Scratch = r.scratch
-	rb.scratch = r.scratch
-	r.in <- m
-	h.Serve(r.in, r.out)
-	rb.take(r.out)
-}
-
-// chanPoolRunner hands the step to a worker and fills the same accumulator the
-// inline runner fills.
-type chanPoolRunner struct {
-	pool *chanPool
-}
-
-func (r *chanPoolRunner) Step(routeID int32, h ChanHandler, m Msg, rb *respBuf) {
-	i := r.pool.pick()
-	sendMsg(r.pool.jobs[i], m)
-	step := false
-	for !step {
-		fm := recvMsg(r.pool.results[i])
-		switch fm.Kind {
-		case FrameStepDone:
-			step = true
+// recvResp reads one response off the stream. It is a free function because
+// chanPool is self-mutating and a ':=' inside a loop of one of its methods is
+// rejected.
+func recvResp(ch chan int32) (resp *Resp) {
+	resp = &Resp{}
+	done := false
+	for !done {
+		kind := <-ch
+		switch kind {
 		case MsgRespHead:
-			rb.status = fm.Status
-			rb.headers = fm.Headers
+			resp.Status = <-ch
+			resp.Headers = recvHeaders(ch)
 		case MsgRespBody:
-			rb.body = appendBytes(rb.body, fm.Data)
+			resp.Body = recvBytes(ch)
 		case MsgRespEnd:
-			rb.ended = true
+			done = true
 		case MsgRespAbort:
-			rb.aborted = true
-			rb.err = fm.Err
+			chanReportAbort(errors.New(recvBytes(ch)))
+			resp = nil
+			done = true
+		default:
+			done = true
+			resp = nil
 		}
 	}
+	return resp
 }

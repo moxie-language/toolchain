@@ -235,6 +235,44 @@ Spawn cost is measured by tests/netsmoke/spawncost (a spawn is a fork, so it is
 microseconds and a thread), which is why the pool exists and per-request spawn
 does not.
 
+### The handler contract: one call per request, one arena  [DONE, with one blocker]
+
+`src/net/http/chanpath.mx` is the handler path: the shell owns the socket,
+framing, accept loop, keep-alive loop and deadlines, and makes exactly ONE call
+per request - `Handle(req *Req) (resp *Resp)` - on the application's main type,
+so the data access lives where the data is. The handler does no io, keeps no
+state between requests, and never sees a goroutine, a channel or an arena.
+
+Each request is one function call (`chanHandleOne`) inside ONE request arena
+that the shell enters, then resets: the decoded request, everything the handler
+allocates and the response it returns are all freed at once. `DispatchInline`
+makes the call in the connection's domain (no spawn; the deterministic mode),
+`DispatchSpawned` hands it to a fixed pool worker that makes the same call in
+its own request arena. Both were measured end to end: 200 keep-alive exchanges
+per run, correct responses in both modes, spawn cost ~165us/fork (the reason the
+pool exists).
+
+Two things this shape fixed that the earlier per-message design had wrong: the
+handler is a function, not a state machine across head/chunk/end, and a request
+that never completes (disconnect, deadline, read error) never calls the handler
+at all, so there is nothing to cancel.
+
+**BLOCKER, measured: requests retain memory.** Over one connection, 1000
+requests: `allocs` +1,223,702 (1223 allocations per request), `totalalloc`
++52,566kB (53kB churn per request), RSS +17,136kB (**17.5kB retained per
+request**), and it is linear across three consecutive 1000-request runs (+19MB,
++16.8MB, +16.8MB). It is the same in both dispatch modes, with a pure handler
+(the fixture's `app` has no fields and writes nothing back through the
+receiver), and after moving the per-request work into its own function so that
+`readRequest`'s relocated `Request` dies with the call. The request arena is
+entered and reset on every request, so what is retained is not the shell's: it
+is the runtime's arena/codec machinery. Two things the fixture can now report
+for the next attempt: `ReadMemStats` gives the cumulative counters (`Alloc`
+aliases `TotalAlloc`, so "in use" is not observable - an in-use or
+per-arena-region counter is the missing instrument), and `/proc/self/status`
+VmRSS/VmData/maps show RSS climbing while the mapping count stays ~17, i.e.
+retention inside existing mmaps rather than new arenas.
+
 ### The Moxie HTTP CLIENT never writes its request  [CLIENT, blocker for phase 8's client unit]
 
 `tests/phase8_netsmoke.sh`'s client unit resolves a host name and then makes a
