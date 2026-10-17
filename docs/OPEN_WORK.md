@@ -185,7 +185,16 @@ rather than after, and compare the pointer values it writes with the ones the
 caller reads back.
 
 The channel path below does not use this tree at all - its router is a plain
-table - which is why phase 8 does not wait on this.
+table - which is why phase 8 does not wait on this. One more trigger was
+tested and excluded: a faithful repro WITH the generic `mapping[string,
+*node]` field (the one structural difference from the package) keeps the chain
+intact, so the generic field is not what is lost. What remains is the
+difference between the package build and every isolated shape tried; bisecting
+inside the real addPattern needs instrumentation, and adding it hit the
+compiler's "cannot resolve the type of p in matchingMethodsPath" inference
+error, so that instrumentation needs a workaround of its own first. This is
+pre-existing classic-path work, not part of the channel rework: the route the
+smoke phase serves is the one in `ChanMux`, and it is served.
 
 ### The channel handler path  [DESIGN, src/net/http/chanpath.mx + chanpool.mx]
 
