@@ -284,6 +284,44 @@ cleared and refilled per request (steady-state allocation zero), plus the runtim
 side - a hashmap's bucket storage must be charged to an arena with the map's own
 lifetime, not to whatever arena the caller had entered.
 
+### The 3x1000 acceptance test: the map fix works, but it is NOT the dominant retention  [MEASURED]
+
+Ran the objective's own acceptance test on the commit with both halves of the fix
+(netsrv18, one connection per run, 1000 keep-alive requests per run):
+
+    inline   after 1k: rss=47524kB root=4405776
+             after 2k: rss=78412kB root=8732560
+             after 3k: rss=109288kB root=13061280      (root +4.4kB/request)
+
+    spawned  after 1k: rss=48104kB root=71328
+             after 2k: rss=79440kB root=71504
+             after 3k: rss=110764kB root=71680         (root FLAT: +176B over 3000)
+
+Two conclusions, both measured:
+
+  * The map fix WORKS: in spawned mode the root arena is flat over 3000 requests
+    (71.3kB -> 71.7kB), where it used to take every bucket. Inline still shows
+    +4.4kB/request of root traffic, so one map path (probably the response header
+    map the fixture builds per request) still lands there, but the per-request
+    bucket pattern is gone.
+  * The dominant retention is NOT the root and NOT the map: RSS grows ~21-31MB
+    per 1000 requests in BOTH modes - the same slope in spawned, where the root
+    is flat to 176 bytes over 3000 requests. Something common to inline and
+    spawned, per request, outside the root arena, holds ~20kB. The instrument's
+    own report is flat, so the bytes are in arenas or memory the report does not
+    cover (per-connection frame, per-worker frame, or non-arena memory).
+
+That relocates the target again, this time with a hard constraint from the data:
+whatever it is, it is identical in both dispatch modes, so it is in the shell's
+per-request path or in the runtime code the shell calls, not in the handler, not
+in the maps, and not in the root.
+
+The 3x1000 test therefore FAILS in both modes and the leak is NOT closed. Next:
+extend the live-arena report to sum ALL arenas ever created minus reclaimed per
+scope AND compare it with RSS - the gap between "arena bytes" and "RSS" is where
+to look, because the arena accounting says nothing is held while RSS says 20kB a
+request is.
+
 ### STEP 3 APPLIED: the map's birth arena wins; buckets stop landing in root  [FIX, partial]
 
 Two halves, committed together as the rule requires:
