@@ -1,0 +1,135 @@
+package runtime
+
+// Per-arena scope attribution.
+//
+// The question this answers, concretely and without guessing: WHICH function's
+// arena is holding the bytes that N requests left behind?
+//
+// An arena is tagged with the scope that was current when it was pushed, and
+// every allocation into it and every reclaim of it is charged to that tag. A
+// scope normally opens and closes with a function: the shell sets one around a
+// phase of request handling so a retained byte is charged to the phase that
+// allocated it. The report then shows, per scope, allocated vs reclaimed - and
+// the difference is exactly the retention, with a name attached.
+//
+// Cost: one int32 store on push, one 64-bit add per allocation, one add plus a
+// reset on reclaim. Nothing here allocates, so the instrument cannot perturb
+// what it measures.
+
+const arenaScopeMax = int32(64)
+
+type arenaScopeRec struct {
+	alloc  uint64
+	freed  uint64
+	resets int32
+	arenas int32
+}
+
+var arenaScopes [arenaScopeMax]arenaScopeRec
+var arenaScopeCurrent int32
+
+// SetArenaScope names the scope that arenas pushed from now on belong to, and
+// returns the previous one so a caller can restore it.
+func SetArenaScope(id int32) (prev int32) {
+	prev = arenaScopeCurrent
+	if id >= 0 && id < arenaScopeMax {
+		arenaScopeCurrent = id
+	}
+	return prev
+}
+
+// ArenaScope reports the current scope.
+func ArenaScope() (id int32) {
+	return arenaScopeCurrent
+}
+
+func arenaScopeAlloc(id int32, size uintptr) {
+	if id >= 0 && id < arenaScopeMax {
+		arenaScopes[id].alloc += uint64(size)
+	}
+}
+
+func arenaScopeFreed(id int32, size uintptr) {
+	if id >= 0 && id < arenaScopeMax {
+		arenaScopes[id].freed += uint64(size)
+		arenaScopes[id].resets++
+	}
+}
+
+func arenaScopeArena(id int32) {
+	if id >= 0 && id < arenaScopeMax {
+		arenaScopes[id].arenas++
+	}
+}
+
+// resetArenaScopeStats clears the counters so a measurement can start from zero.
+func ResetArenaScopeStats() {
+	for i := int32(0); i < arenaScopeMax; i++ {
+		arenaScopes[i].alloc = 0
+		arenaScopes[i].freed = 0
+		arenaScopes[i].resets = 0
+		arenaScopes[i].arenas = 0
+	}
+}
+
+// ArenaScopeReport writes one line per scope that has seen any traffic:
+//
+//	scope=<id> allocated=<bytes> reclaimed=<bytes> retained=<bytes> resets=<n> arenas=<n>
+//
+// retained is the number the whole instrument exists for: bytes this scope's
+// arenas have allocated and no reset or free has reclaimed. A scope that
+// retains across many requests is the leak, and its id says which phase of the
+// port it belongs to (net/http's chanpath.mx assigns the ids).
+func ArenaScopeReport() (out []byte) {
+	for i := int32(0); i < arenaScopeMax; i++ {
+		r := arenaScopes[i]
+		if r.alloc == 0 && r.freed == 0 && r.arenas == 0 {
+			continue
+		}
+		out = appendScopeStr(out, "scope=")
+		out = appendScopeUint(out, uint64(i))
+		out = appendScopeStr(out, " allocated=")
+		out = appendScopeUint(out, r.alloc)
+		out = appendScopeStr(out, " reclaimed=")
+		out = appendScopeUint(out, r.freed)
+		out = appendScopeStr(out, " retained=")
+		if r.alloc > r.freed {
+			out = appendScopeUint(out, r.alloc-r.freed)
+		} else {
+			out = appendScopeUint(out, 0)
+		}
+		out = appendScopeStr(out, " resets=")
+		out = appendScopeUint(out, uint64(uint32(r.resets)))
+		out = appendScopeStr(out, " arenas=")
+		out = appendScopeUint(out, uint64(uint32(r.arenas)))
+		out = appendScopeStr(out, "\n")
+	}
+	return out
+}
+
+func appendScopeStr(b []byte, s []byte) (out []byte) {
+	out = b
+	for i := 0; i < len(s); i++ {
+		out = push(out, s[i])
+	}
+	return out
+}
+
+func appendScopeUint(b []byte, v uint64) (out []byte) {
+	out = b
+	if v == 0 {
+		return push(out, '0')
+	}
+	d := []byte{:24}
+	n := int32(0)
+	for v > 0 {
+		d[n] = byte('0' + v%10)
+		n = n + 1
+		v = v / 10
+	}
+	for n > 0 {
+		n = n - 1
+		out = push(out, d[n])
+	}
+	return out
+}

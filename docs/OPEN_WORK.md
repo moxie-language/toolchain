@@ -284,6 +284,53 @@ cleared and refilled per request (steady-state allocation zero), plus the runtim
 side - a hashmap's bucket storage must be charged to an arena with the map's own
 lifetime, not to whatever arena the caller had entered.
 
+### The scope instrument, and what it attributed  [INSTRUMENT + FIRST ATTRIBUTION]
+
+`src/runtime/arena_scope.mx` tags every arena with the scope that was current
+when it was pushed, charges every allocation and every reclaim to that scope, and
+`ArenaScopeReport()` renders it as
+
+    scope=<id> allocated=<bytes> reclaimed=<bytes> retained=<bytes> resets=<n> arenas=<n>
+
+`retained = allocated - reclaimed` is the number the whole instrument exists
+for: bytes a scope's arenas hold that no reset or free has reclaimed. A scope
+that retains across requests IS the leak, and its id names the phase
+(net/http/chanpath.mx assigns them: 0 Default, 1 Decode, 2 Handler, 3 Write).
+The fixture serves the report at `/arenas`; `ResetArenaScopeStats()` starts a
+measurement from zero. Cost: one int32 store per arena push and one 64-bit add
+per allocation, and the instrument itself allocates nothing.
+
+**First attribution** (one connection, 1000 keep-alive requests, inline):
+
+    scope=0 allocated=24378192 reclaimed=8169408 retained=16208784 resets=19358 arenas=13325
+    scope=1 allocated=36499136 reclaimed=36499136 retained=0        resets=58170 arenas=58170
+    scope=2 allocated= 7647328 reclaimed=7640640 retained=6688      resets=1003  arenas=0
+
+So the answer is NOT the header decode and NOT the request arena: Decode is
+perfectly balanced (allocated == reclaimed, 58k resets) and Handler differs only
+by the fixture's own 6.7kB. The 16.2MB - 16kB a request - is charged to scope 0,
+i.e. to arenas pushed with no scope set, and 16kB a request on a connection whose
+arenas all reset cleanly points at the ROOT arena: only it is never reset.
+
+**The site that follows from that** (read, not yet measured): a map's bucket
+storage follows `hashmapOwner` in src/runtime/hashmap.mx, which resolves the
+arena that contains the map HEADER and, when it cannot find one, falls back to
+`trueRootArena()`. A per-request `Header` map is created inside
+`readRequest`/`readMIMEHeader`; its header lives in that frame arena, so buckets
+grown while the frame is alive are fine - but the shell then keeps and uses the
+map after `readRequest` has returned, the header is no longer in any fn arena,
+the lookup fails, and the fallback charges new bucket storage to the ROOT arena,
+which no request scope ever resets. That is the attribution defect the rule
+predicts: a map allocates for its own use and the allocation lands in an arena
+that outlives the request, invisibly.
+
+Next steps, in order: (a) tag hashmap allocation with the scope in force and
+report the root arena's retained bytes separately from other scope-0 arenas, so
+the fallback site is proven rather than read; (b) then fix it - the map's bucket
+arena must be the arena that owns the map's lifetime, and for a map handed out of
+its creating frame that has to be decided at the hand-off, not guessed at use
+time; (c) re-measure 3x1000 in both modes, then phase 8 green.
+
 ### What the spawned pool actually is: a copy boundary, not a concurrency one  [DESIGN CONSTRAINTS]
 
 Correcting the frame the pool was described in. Moxie domains share no memory -

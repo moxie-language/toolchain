@@ -68,6 +68,16 @@ const (
 	DispatchSpawned = int32(1)
 )
 
+// Arena scope ids for the attribution report (src/runtime/arena_scope.mx): a
+// retained byte is charged to the phase of request handling that allocated it.
+const (
+	ArenaScopeDefault = int32(0)
+	ArenaScopeDecode  = int32(1)
+	ArenaScopeHandler = int32(2)
+	ArenaScopeWrite   = int32(3)
+	ArenaScopeConn    = int32(4)
+)
+
 // chanRequestArenaBytes is the arena each connection (and each pool worker)
 // acquires for request processing. It is reused for every request on that
 // connection and reset between them.
@@ -244,6 +254,7 @@ func chanWriteResponse(bw *bufio.Writer, resp *Resp, keepAlive bool) (ok bool) {
 // chanServeRequest serves one parsed request: decode it, make the one handler
 // call, write the response, free the arena.
 func chanServeRequest(bw *bufio.Writer, req *Request, routeID int32, h ChanHandler, pool *chanPool, arena *runtime.Arena) (keepAlive bool) {
+	prevScope := runtime.SetArenaScope(ArenaScopeHandler)
 	runtime.ManualArenaEnter(arena)
 
 	rq := &Req{
@@ -265,7 +276,9 @@ func chanServeRequest(bw *bufio.Writer, req *Request, routeID int32, h ChanHandl
 	} else {
 		resp = h.Handle(rq)
 	}
+	runtime.SetArenaScope(ArenaScopeWrite)
 	wrote := chanWriteResponse(bw, resp, keep)
+	runtime.SetArenaScope(prevScope)
 
 	runtime.ManualArenaExit(arena)
 	runtime.ArenaReset(arena)
@@ -354,7 +367,9 @@ func chanHandleOne(c net.Conn, br *bufio.Reader, bw *bufio.Writer, mux *ChanMux,
 	if idle > 0 {
 		c.SetReadDeadline(time.Now().Add(idle))
 	}
+	prevScope := runtime.SetArenaScope(ArenaScopeDecode)
 	req, rerr := readRequest(br)
+	runtime.SetArenaScope(prevScope)
 	if rerr != nil {
 		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
 			return false
