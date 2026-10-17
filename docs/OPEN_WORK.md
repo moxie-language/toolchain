@@ -284,6 +284,40 @@ cleared and refilled per request (steady-state allocation zero), plus the runtim
 side - a hashmap's bucket storage must be charged to an arena with the map's own
 lifetime, not to whatever arena the caller had entered.
 
+### Measured: the creation-site half alone makes it worse  [RUNTIME, must land together]
+
+The shell half of the fix was tried first, because it is a few lines: enter the
+request arena BEFORE decoding (`ManualArenaEnter` moved up into
+`chanHandleOne`, so `readRequest` builds the `Header` inside the request arena)
+and reset after the write. Measured with the scope instrument, one connection:
+
+    before (decode outside the arena):  scope 0 retained 16.2MB / 1000 requests
+    after  (decode inside the arena):   scope 0 retained 28.5MB / 1000 requests
+                                        RSS 13.4 -> 48.8 -> 79.6MB over 2000
+
+It is worse, and the reason is the one that put the two halves in one commit:
+the map's bucket arena is still recovered from where its header happens to sit,
+so in manual-arena mode the buckets follow the arena the map is USED in, and the
+reset charges only the arena's own tally - the growth moves rather than
+disappears. Reverted, with the measurement above recorded.
+
+So the order is not negotiable: the map carries its group (carved from the parent
+arena, assignment as the self-mutating operation, rehome explicit) AND the
+creation site builds the map in the arena it is given, together. The shell half
+alone is a measured regression, not a partial fix.
+
+**The order of work after that** (agreed): (1) map sovereignty + creation site,
+re-measure; (2) re-run the ServeMux registration repro unchanged before touching
+its code - a map header born in a frame that dies, whose buckets then land
+wherever, would look exactly like "correct at registration, empty after the
+frame is reused", so the mux may heal for free and the expensive unknown
+disappears; (3) defer-in-loop in the compiler, which is what forces every
+hand-rolled accept loop; (4) a streaming handler shape, or the channel path stays
+a fixture and the classic path stays the only thing that can serve blobs;
+(5) the closure sweep last, because it is mechanical; (6) the single-threaded
+client transport anywhere, since it is independent and gates phase 8's client
+unit.
+
 ### The leak is the map, and the fix is to make the map a sovereign group  [RUNTIME, next commit]
 
 The instrument took it to the root arena; the root arena's only per-request
