@@ -284,6 +284,33 @@ cleared and refilled per request (steady-state allocation zero), plus the runtim
 side - a hashmap's bucket storage must be charged to an arena with the map's own
 lifetime, not to whatever arena the caller had entered.
 
+### Correction: it is not the root arena, it is the connection's frame arena  [INSTRUMENT]
+
+The root-site recorder (committed in the instrument) fires on any allocation
+charged to `trueRootArena()`. After 1000 requests it produced **no rows at all**:
+
+    rootsite_pc = (none)
+
+That eliminates the root arena, and with it the first version of the map
+hypothesis - the `Header` map's buckets are not being pushed into the root. The
+only other long-lived scope-0 arena on a connection is the CONNECTION'S OWN
+FRAME ARENA, pushed by `serveChanConn`'s prologue and alive until the connection
+closes. Everything a request deposits into that frame accumulates for the
+connection's lifetime, which is why scope 0 retained 16kB a request while
+`reset` ran 19k times for that same scope - the resets belong to the short-lived
+arenas, and the retained bytes belong to the one arena that never resets there.
+
+So the next instrument step is the same recorder pointed at the connection frame
+(and at the manual arenas) rather than the root: record the allocating site when
+the arena in force is a chosen arena, not only `trueRootArena()`. One run then
+names the deposit site the same way, and the fix - whatever deposits per-request
+data into a per-connection frame - follows from the name.
+
+Note what this does NOT change: the map still has no home of its own, so its
+bucket arena is still decided by whatever arena is in force (the sovereign-group
+fix above stands on its own merits), and the creation-site half alone is still a
+measured regression.
+
 ### Measured: the creation-site half alone makes it worse  [RUNTIME, must land together]
 
 The shell half of the fix was tried first, because it is a few lines: enter the
