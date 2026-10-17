@@ -284,6 +284,57 @@ cleared and refilled per request (steady-state allocation zero), plus the runtim
 side - a hashmap's bucket storage must be charged to an arena with the map's own
 lifetime, not to whatever arena the caller had entered.
 
+### The leak is the map, and the fix is to make the map a sovereign group  [RUNTIME, next commit]
+
+The instrument took it to the root arena; the root arena's only per-request
+occupant is the `Header` map. It is the one object in the runtime whose
+allocation count is decided by the workload rather than at construction: it
+allocates on every insert, on every grow, and on every key and value copy, from
+inside code that has no idea whose request it is serving - and it is the one
+type that unambiguously needed a sovereign arena and was instead left doing
+pointer archaeology.
+
+`hashmapOwner` recovers a map's home by asking where the header bytes happen to
+sit right now, falling back to `trueRootArena()` when the header is no longer in
+any live fn arena. For the per-request `Header`, the shell keeps using the map
+after `readRequest` returned, the scan fails, and bucket growth is charged to the
+root arena - the one arena no request scope ever resets. That is the 16kB a
+request, exactly.
+
+**The fix, and its sequencing, in ONE commit** (wiring the group handle alone
+turns a leak into a crash, because a group carved from `readRequest`'s frame dies
+on return and the Request then holds a dangling header immediately):
+
+  1. the map carries its own group handle, and add/assign ("assignment") is the
+     self-mutating operation on it - the allocation scope is part of the
+     receiver's identity, so nothing has to be recovered at use time and
+     `trueRootArena` becomes unreachable rather than a fallback;
+  2. the group is a CARVED REGION of the parent arena, not its own mapping - a
+     map per request must not cost an mmap, or the instrument's arenas=13325
+     becomes the whole story;
+  3. `readRequest` builds the `Header` in the arena it is GIVEN, which is the
+     request arena, so the map is born in the scope that owns it;
+  4. a rehome (a move across groups) is an explicit operation that moves or
+     re-parents the group, never something the allocator papers over by
+     guessing.
+
+Machinery already present: `sovNewArena`, `sovTrackArenaGroup`, `sovDataArena`,
+`codecSovereignArena`.
+
+**Acceptance test is the instrument itself**: scope 0 retained goes to zero, the
+root arena gets its own row (and stays flat), the header's bucket history dies
+with the request reset, growth flat over 3x1000 in both dispatch modes, the 2MB
+no-accumulation threshold unchanged, phase 8 green.
+
+**Strategic call for the handlers after that** (agreed, recorded so nobody
+starts both): add a STREAMING handler to the channel path and migrate the three
+hand-rolled accept loops to `ChanServe` - the relay (blobs and websocket
+clients), gitweb (packfiles), git-lfs-http (streaming both ways). `Resp.Body` is
+a materialised []byte today, so none of those can be a channel-path handler as
+it stands. Leave the classic path as the deprecated thing it already is: its
+cost is the 185-closure sweep plus the ServeMux write loss plus defer-in-loop,
+and the channel path needs none of it. Do not finish both.
+
 ### The scope instrument, and what it attributed  [INSTRUMENT + FIRST ATTRIBUTION]
 
 `src/runtime/arena_scope.mx` tags every arena with the scope that was current

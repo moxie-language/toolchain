@@ -56,6 +56,61 @@ func arenaScopeFreed(id int32, size uintptr) {
 	}
 }
 
+// --- root-site recorder ---
+//
+// The root arena is the only arena nothing resets, so any allocation charged to
+// it is retained for the life of the process. Recording the PC of the code that
+// made such an allocation names the site, once, instead of leaving it to
+// inference. Gated by SetArenaTrace: the PC capture walks the stack.
+
+const rootSiteMax = int32(32)
+
+type rootSiteRec struct {
+	pc    uintptr
+	count uint64
+	bytes uint64
+}
+
+var rootSites [rootSiteMax]rootSiteRec
+var rootSiteN int32
+var arenaTraceOn bool
+var rootTraceBusy bool
+
+// SetArenaTrace turns allocating-site capture on or off.
+func SetArenaTrace(on bool) {
+	arenaTraceOn = on
+}
+
+// RecordRootSite charges one allocation of size bytes into the root arena to
+// the PC of the code that made it.
+func RecordRootSite(pc uintptr, size uintptr) {
+	if rootTraceBusy {
+		return
+	}
+	rootTraceBusy = true
+	var i int32 = 0
+	for i = 0; i < rootSiteN; i++ {
+		if rootSites[i].pc == pc {
+			rootSites[i].count++
+			rootSites[i].bytes += uint64(size)
+			rootTraceBusy = false
+			return
+		}
+	}
+	if rootSiteN < rootSiteMax {
+		rootSites[rootSiteN].pc = pc
+		rootSites[rootSiteN].count = 1
+		rootSites[rootSiteN].bytes = uint64(size)
+		rootSiteN++
+	}
+	rootTraceBusy = false
+}
+
+// arenaTraceWanted reports whether site capture is on.
+func arenaTraceWanted() (on bool) {
+	return arenaTraceOn
+}
+
 func arenaScopeArena(id int32) {
 	if id >= 0 && id < arenaScopeMax {
 		arenaScopes[id].arenas++
@@ -102,6 +157,15 @@ func ArenaScopeReport() (out []byte) {
 		out = appendScopeUint(out, uint64(uint32(r.resets)))
 		out = appendScopeStr(out, " arenas=")
 		out = appendScopeUint(out, uint64(uint32(r.arenas)))
+		out = appendScopeStr(out, "\n")
+	}
+	for i := int32(0); i < rootSiteN; i++ {
+		out = appendScopeStr(out, "rootsite_pc=")
+		out = appendScopeUint(out, uint64(rootSites[i].pc))
+		out = appendScopeStr(out, " count=")
+		out = appendScopeUint(out, rootSites[i].count)
+		out = appendScopeStr(out, " bytes=")
+		out = appendScopeUint(out, rootSites[i].bytes)
 		out = appendScopeStr(out, "\n")
 	}
 	return out
