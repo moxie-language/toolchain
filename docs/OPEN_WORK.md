@@ -284,6 +284,41 @@ cleared and refilled per request (steady-state allocation zero), plus the runtim
 side - a hashmap's bucket storage must be charged to an arena with the map's own
 lifetime, not to whatever arena the caller had entered.
 
+### It is not first-touch: it is arena REGION growth, ~9.6MB acquired per 300 requests  [MEASURED]
+
+The obvious explanation for "RSS grows, arena report flat, same in both modes" is
+first-touch inside the root's big mapping - pages accumulate until the region is
+full, then it plateaus. Ran it out to 8x1000 to check (spawned, one connection,
+1000 requests per run):
+
+    1k rss= 48108kB data=364592kB maps=40
+    2k rss= 79352kB data=400304kB maps=48
+    3k rss=110604kB data=436016kB maps=53
+    4k rss=141820kB data=471728kB maps=56
+    5k rss=173052kB data=507440kB maps=59
+    6k rss=204288kB data=543152kB maps=61
+    7k rss=235520kB data=578864kB maps=64
+    8k rss=266736kB data=614576kB maps=66
+
+It does not plateau. It is perfectly linear, and VmData tracks it exactly
+(+31MB per 1000 = 31kB a request of VIRTUAL memory), while the mapping COUNT
+rises 40 -> 66: roughly one ~9.6MB mapping acquired every ~300 requests and never
+released. So this is not page first-touch and not an allocation inside an
+existing arena - it is arena REGION GROWTH that is never unmapped.
+
+That also corrects an earlier premise this work started from: the mapping count is
+NOT flat at 17, it climbs here, and VmData grows with it. The retained thing is a
+region, which is why the per-scope and live-arena reports look clean: they report
+BYTES ALLOCATED into regions, and a freshly acquired region whose bytes were then
+reclaimed on reset is not "used" - but it also was never unmapped, so the mapping
+stays.
+
+Next: instrument region acquire/release (sysMap/sysUnmap counters and the arena
+each region belongs to) and name the arena whose regions are added but never
+unmapped. That is the same shape as the leak the objective describes, one level
+lower: not an allocation charged to the wrong arena, but a REGION charged to the
+right arena and never returned.
+
 ### The 3x1000 acceptance test: the map fix works, but it is NOT the dominant retention  [MEASURED]
 
 Ran the objective's own acceptance test on the commit with both halves of the fix
