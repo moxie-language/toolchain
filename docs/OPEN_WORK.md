@@ -101,7 +101,27 @@ rather than half-applied. Repro after the fix: `make cover` in `../morly`
 should print a table under `git.smesh.lol/morly`, and
 `moxie test -cover ./pkg/store` there should name `pkg/store/engine.mx`.
 
-### Compiler: `^` on a sized unsigned constant loses its type  [COMPILER, both, small]
+### Compiler: `^` on a sized unsigned constant loses its type  [COMPILER, both, MEASURED round 15]
+
+Re-measured on this tree (one probe, four widths plus the variable control):
+
+    ^uint8(0)  -> int32 -1      want 255            WRONG
+    ^uint16(0) -> int32 -1      want 65535          WRONG
+    ^uint32(0) -> uint32 4294967295                 right
+    ^uint64(0) -> uint64 18446744073709551615       right
+    ^int8(0)   -> int32 -1      want -1             right
+    ^z(uint16) -> int32 65535   (z a variable)      right
+
+So the defect is narrower than "the type is lost": the masking of `^` is applied
+in the typed-constant path (MaskConstToBasic) but NOT when the same operation is
+folded as the ARGUMENT of a conversion, so `int32(^uint8(0))` converts the raw
+all-ones (-1) instead of the masked 255. The uint32/uint64 rows above are right
+because they were printed without an enclosing conversion; `int32(^uint32(0))`
+is the row that would show it for 32 bits and it is untested. Fix belongs where
+a conversion folds its argument's constant, in both compilers, and the fixture
+must assert all four widths THROUGH a conversion.
+
+### Compiler: `^` on a sized unsigned constant loses its type  [OLD NOTE]
 
 Found by the resolver work below; it is what stopped the Go resolver packing a
 single DNS query. `int32(^uint16(0))` evaluates to **-1**, not 65535, while the
@@ -1212,7 +1232,19 @@ slice codec, and this round did not touch it.
 Repro: parent `b := fill(8)` (push 1..8), `jobs <- b`, child prints
 `len(f)`, `int32(f[0])` and the byte sum.
 
-### Compiler: a buffered channel of a slice, and a generic field, do not resolve  [COMPILER, logged]
+### Compiler: a buffered channel of a slice, and a generic field, do not resolve  [COMPILER, MEASURED round 15]
+
+Re-measured on this tree: `ch := chan []byte{:8}` still fails with "cannot
+resolve the type of ch in checkX - the right-hand side is not a value" (two
+errors, one per use of ch). A generic field read through an instantiated generic
+slice element was NOT re-measured in isolation this round; the round-73 note
+below is the last measurement. The defer-in-loop probe that ran in the same
+binary died before its own case: "alloc: implausible size 2147483648" - a
+sign-extended capacity request, which is the defer-in-loop defect presenting as a
+2GB allocation rather than as a re-run. Both need their own fixture and a
+compiler change, in both compilers.
+
+### Compiler: a buffered channel of a slice, and a generic field, do not resolve  [OLD NOTE]
 
 Two limits hit while building the channel path. Both fail loud, both are worked
 around in the port, neither is fixed:

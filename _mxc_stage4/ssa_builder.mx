@@ -5086,6 +5086,17 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 		// does not fold (receive among them), which fall through below.
 		if kc, isConst := xv3.(*SSAConst); isConst && kc.val != nil {
 			if folded := EvalUnaryLocal(e.Op, kc.val); folded != nil {
+				// A TYPED operand keeps its width here too. The typed-constant
+				// path masks ^x in the typechecker (MaskConstToBasic), but this
+				// fold runs first when the constant is materialized as an SSA
+				// value, and it used to return the raw all-ones: ^uint8(0) then
+				// became -1 at the default int32 width, so
+				// int32(^uint8(0)) printed -1 instead of 255 and the same for
+				// uint16. Untyped operands pass through MaskConstToBasic
+				// unchanged, which is what an untyped constant needs.
+				if ob, okB := SafeUnderlying(kc.typ).(*Basic); okB {
+					folded = MaskConstToBasic(folded, ob)
+				}
 				return &SSAConst{typ: kc.typ, val: folded}
 			}
 		}

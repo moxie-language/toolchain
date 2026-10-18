@@ -1,0 +1,66 @@
+// ^ on a sized unsigned constant keeps that width, through a conversion.
+//
+// The defect this pins: the typed-constant path masked ^x to the operand's
+// width, but the SSA fold that runs first returned the raw all-ones, so
+// int32(^uint8(0)) was -1 and int32(^uint16(0)) was -1. It only shows THROUGH a
+// conversion: assigned to a sized variable the value truncates back to the right
+// bits, which is why the bug hid everywhere except dnsmessage's
+// `conLen > int32(^uint16(0))` - a comparison that was always true.
+//
+// All four widths are asserted through a conversion, plus the signed controls
+// and the variable form (which was always correct).
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+// want asserts one width and reports whether it held. The counter lives in main
+// as a local: a package global cannot be mutated outside init here.
+func want(label string, got int64, exp int64) (ok bool) {
+	if got != exp {
+		fmt.Printf("FAIL %-22s got %d want %d\n", label, got, exp)
+		return false
+	}
+	fmt.Printf("ok   %-22s %d\n", label, got)
+	return true
+}
+
+func main() {
+	var fails int32
+	if !want("int32(^uint8(0))", int64(int32(^uint8(0))), 255) {
+		fails = fails + 1
+	}
+	if !want("int32(^uint16(0))", int64(int32(^uint16(0))), 65535) {
+		fails = fails + 1
+	}
+	if !want("int64(^uint32(0))", int64(^uint32(0)), 4294967295) {
+		fails = fails + 1
+	}
+	// uint64 through a conversion: the value does not fit int64, so compare its
+	// high half through a shift instead of a signed conversion.
+	if !want("uint64(^uint64(0))>>32", int64((^uint64(0))>>32), 4294967295) {
+		fails = fails + 1
+	}
+	if !want("int32(^int8(0))", int64(int32(^int8(0))), -1) {
+		fails = fails + 1
+	}
+	if !want("int32(^int16(0))", int64(int32(^int16(0))), -1) {
+		fails = fails + 1
+	}
+	var z8 uint8
+	var z16 uint16
+	if !want("int32(^z8)", int64(int32(^z8)), 255) {
+		fails = fails + 1
+	}
+	if !want("int32(^z16)", int64(int32(^z16)), 65535) {
+		fails = fails + 1
+	}
+
+	if fails != 0 {
+		fmt.Printf("const_xor_width: %d wrong\n", fails)
+		os.Exit(1)
+	}
+	fmt.Printf("const_xor_width ok\n")
+}
