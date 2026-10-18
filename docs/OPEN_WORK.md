@@ -291,6 +291,39 @@ error, so that instrumentation needs a workaround of its own first. This is
 pre-existing classic-path work, not part of the channel rework: the route the
 smoke phase serves is the one in `ChanMux`, and it is served.
 
+### The pool transport is a queue-owned ring of preallocated slots  [DONE, round 15]
+
+The pool boundary no longer packs messages into an int32-per-four-bytes stream.
+The shell writes the whole request into a preallocated MAP_SHARED slot and sends
+the SLOT INDEX; the worker answers in the same slot and sends the index back.
+
+  * `runtime.SharedBuffer(n)` maps MAP_SHARED anonymous memory as a []byte. It
+    must be allocated BEFORE the spawn: after fork the child's copy of an
+    ordinary arena is private (copy-on-write), so a slot written after the fork
+    would be invisible to the worker.
+  * one slot per message, one copy at a named site (`chanSlotPutReq` /
+    `chanSlotPutResp`); the worker decodes into its request arena, which it
+    resets, so the steady state allocates nothing.
+  * four slots of 1MB, sized by MEASURED in-flight concurrency, not connections
+    times slots: the shell is serial and blocks on the response, so one request
+    is in flight (`ring_committed_kb=4096` in the fixture's /stats). A frame that
+    does not fit panics by name instead of truncating.
+  * wasm: SharedBuffer panics by name (no shared mapping to hand out as a slice)
+    and the structural channel entries route through the SAB bridge with the same
+    cross-domain encode, so the wasm target still links and still carries values
+    by value.
+
+Measured, spawned, one connection, 1000 keep-alive requests per round (netsrv29):
+rss 15396 -> 17668 -> 17680 -> 17716 kB (rounds 2-3: +12kB, +36kB), vmdata 263344
+kB identical, mapped net identical across samples. That closes the +440B/request
+slope the int32 stream had, which came from the 32MB-per-direction spawn rings
+being touched: an index is four bytes.
+
+Phase-8 units against these binaries: build, mux-match, spawn-bytes, spawn-cost
+(206us), curl, client and keep-alive PASS in BOTH dispatch modes, and
+no-accumulation is +0 kB in each mode (rss 16400->16400 inline, 7960->7960
+spawned), ring_committed_kb=4096.
+
 ### The channel handler path  [DESIGN, src/net/http/chanpath.mx + chanpool.mx]
 
 Status: the one-call-per-request handler path and its arena envelope are in
