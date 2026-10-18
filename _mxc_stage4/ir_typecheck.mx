@@ -391,8 +391,13 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 	pkg := newTCPackageWithUniverse(name, shortName)
 	scope := pkg.Scope
 	src = stripUnusedConsts(src)
-	rw := rewriteSliceMakeLiterals(src)
-	src = rewriteChanMakeLiterals(rw)
+	// Channel literals FIRST: `chan []byte{:n}` contains `[]byte{`, and the
+	// slice rewrite would consume that inner part and leave `chan
+	// __slicealloc([]byte, n)`, which is not a type at all - that was the
+	// "cannot resolve the type of b ... the right-hand side is not a value"
+	// failure for a buffered channel of a slice.
+	rw := rewriteChanMakeLiterals(src)
+	src = rewriteSliceMakeLiterals(rw)
 	src = stripDuplicatePackageClauses2(src)
 
 	if len(src) == 0 {
@@ -803,8 +808,8 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 }
 
 func scanParse(src []byte, name string, arena *runtime.Arena) (file *syntax.File) {
-	rw := rewriteSliceMakeLiterals(src)
-	rw = rewriteChanMakeLiterals(rw)
+	rw := rewriteChanMakeLiterals(src)
+	rw = rewriteSliceMakeLiterals(rw)
 	rw = stripDuplicatePackageClauses2(rw)
 	if len(rw) == 0 {
 		return nil

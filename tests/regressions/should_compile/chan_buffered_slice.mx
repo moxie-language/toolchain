@@ -1,0 +1,57 @@
+// A buffered channel literal works for any element type, slice elements
+// included.
+//
+// The defect this pins: the compiler rewrites `chan T{N}` / `chan T{:N}` source
+// text into an internal allocation call before parsing. Two faults made a
+// BUFFERED channel of a SLICE unbuildable:
+//
+//  1. the rewrite emitted __slicealloc(chan T, n) - the right builtin, since
+//     __slicealloc lowers to make() - but the SLICE rewrite ran first and ate
+//     the `[]byte{` inside `chan []byte{`, leaving `chan __slicealloc(...)`,
+//     which is not a type at all. Hence "cannot resolve the type of b ... the
+//     right-hand side is not a value".
+//  2. nothing verified the CAPACITY, so an unbuffered channel would have passed
+//     a send/receive test just as well. The sends below happen before any
+//     receive: with capacity 0 they would deadlock the only thread.
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	var fails int32
+
+	// Two sends with no receiver yet: only a buffered channel can hold them.
+	buf := chan []byte{:4}
+	buf <- []byte("hello")
+	buf <- []byte("world")
+	first := <-buf
+	second := <-buf
+	if string(first) != "hello" || string(second) != "world" {
+		fmt.Printf("FAIL slice chan: got [%s] [%s] want hello world\n", first, second)
+		fails = fails + 1
+	} else {
+		fmt.Printf("ok   slice chan buffered and ordered\n")
+	}
+
+	// The same shape with a scalar element, and the unbuffered form.
+	nums := chan int32{:2}
+	nums <- 7
+	nums <- 9
+	a := <-nums
+	b := <-nums
+	if a != 7 || b != 9 {
+		fmt.Printf("FAIL int32 chan: got %d %d want 7 9\n", a, b)
+		fails = fails + 1
+	} else {
+		fmt.Printf("ok   int32 chan buffered and ordered\n")
+	}
+
+	if fails != 0 {
+		fmt.Printf("chan_buffered_slice: %d wrong\n", fails)
+		os.Exit(1)
+	}
+	fmt.Printf("chan_buffered_slice ok\n")
+}

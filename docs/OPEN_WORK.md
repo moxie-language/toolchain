@@ -1265,17 +1265,34 @@ slice codec, and this round did not touch it.
 Repro: parent `b := fill(8)` (push 1..8), `jobs <- b`, child prints
 `len(f)`, `int32(f[0])` and the byte sum.
 
-### Compiler: a buffered channel of a slice, and a generic field, do not resolve  [COMPILER, MEASURED round 15]
+### Compiler: a buffered channel of a slice, and a generic field  [COMPILER, FIXED/VERIFIED round 15]
 
-Re-measured on this tree: `ch := chan []byte{:8}` still fails with "cannot
-resolve the type of ch in checkX - the right-hand side is not a value" (two
-errors, one per use of ch). A generic field read through an instantiated generic
-slice element was NOT re-measured in isolation this round; the round-73 note
-below is the last measurement. The defer-in-loop probe that ran in the same
-binary died before its own case: "alloc: implausible size 2147483648" - a
-sign-extended capacity request, which is the defer-in-loop defect presenting as a
-2GB allocation rather than as a re-run. Both need their own fixture and a
-compiler change, in both compilers.
+**Buffered channel of a slice: FIXED.** `chan []byte{:8}` failed with "cannot
+resolve the type of b ... the right-hand side is not a value". Two layers:
+
+  1. the source rewrite emits `__slicealloc(chan T, n)`, which lowers to make()
+     and is the right builtin - verified by writing that call by hand and
+     watching it work;
+  2. but the SLICE rewrite ran first and consumed the `[]byte{` INSIDE
+     `chan []byte{`, leaving `chan __slicealloc([]byte, n)`, which is not a type.
+     The fix is the order: `rewriteChanMakeLiterals` now runs before
+     `rewriteSliceMakeLiterals` in both the typecheck and the parse passes
+     (`_mxc_stage4/ir_typecheck.mx`). legacy/mxtext/rewrite.go already rewrites
+     channel literals to make(), so this restores parity rather than inventing a
+     dialect.
+
+Fixture `tests/regressions/should_compile/chan_buffered_slice.mx`: two sends
+with NO receiver yet (only a buffered channel can hold them) for a slice and a
+scalar element, then receives in order. Before: build error. After: both rows ok.
+
+**Generic field read through an instantiated generic slice: VERIFIED CLOSED.**
+The recorded failure (`e.value.match(...)` over `mapping[string, *routingNode].s`
+inside a method) does not reproduce on this tree - the round-126 generic
+instantiation binding closed it. Fixture
+`tests/regressions/should_compile/generic_field_read.mx` pins the exact shape, so
+the two launders in src/net/http/routing_tree.mx (`nodeMatchesPath`,
+`nodeEntryKey`) can be deleted whenever that file is next opened; they are left in
+place this round because removing them is not part of the fix.
 
 ### Compiler: a buffered channel of a slice, and a generic field, do not resolve  [OLD NOTE]
 

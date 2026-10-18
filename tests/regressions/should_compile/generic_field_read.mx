@@ -1,0 +1,68 @@
+// Reading an instantiated generic type's slice field, and calling through the
+// element's pointer field, resolves.
+//
+// The recorded defect (docs/OPEN_WORK.md, round 73) was that `e.value.match(...)`
+// over `mapping[string, *routingNode].s` did not resolve, which forced two
+// one-line helpers into src/net/http/routing_tree.mx (nodeMatchesPath and
+// nodeEntryKey) to launder the field through concrete parameter types. This pins
+// the shape so the launders can go: a generic struct with a slice of a generic
+// pair, ranged in a method, calling a method through the pair's pointer value.
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+type pair[K comparable, V comparable] struct {
+	key   K
+	value V
+}
+
+type table[K comparable, V comparable] struct {
+	rows []pair[K, V]
+}
+
+type node struct {
+	name string
+	hits int32
+}
+
+func (n *node) match(want string) (got *node, ok bool) {
+	if n.name == want {
+		return n, true
+	}
+	return nil, false
+}
+
+func (n *node) bump() {
+	n.hits = n.hits + 1
+}
+
+// scan is the shape: a method ranging the instantiated generic slice field and
+// calling through the element's pointer field.
+func (t *table[string, *node]) scan(want string) (name string, hits int32) {
+	for _, e := range t.rows {
+		if got, ok := e.value.match(want); ok {
+			got.bump()
+			name = got.name
+			hits = got.hits
+		}
+	}
+	return name, hits
+}
+
+func main() {
+	t := &table[string, *node]{}
+	t.rows = []pair[string, *node]{}
+	t.rows = push(t.rows, pair[string, *node]{key: "a", value: &node{name: "a"}})
+	t.rows = push(t.rows, pair[string, *node]{key: "b", value: &node{name: "b"}})
+
+	name, hits := t.scan("b")
+	if name != "b" || hits != 1 {
+		fmt.Printf("FAIL generic field: name=[%s] hits=%d want b/1\n", name, hits)
+		os.Exit(1)
+	}
+	fmt.Printf("ok   generic field read: %s %d\n", name, hits)
+	fmt.Printf("generic_field_read ok\n")
+}
