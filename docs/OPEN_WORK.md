@@ -1695,7 +1695,8 @@ on Chromium contention: the same fixtures pass serially, which is why the rule i
     phase 3              2/2                                 PASS
     phase 4              2/2                                 PASS
     phase 5 (wasm)       85/85, 0 failed, -j 1               PASS
-    phase 0a/0b          88 + 46 units, run serially, verdict pending at this commit
+    phase 8              official script, both dispatch modes  running at this commit
+    phase 0a/0b          134/134 (88 + 46 units), -j 1        PASS
 
 Phase 2 and the `:legacy` variants stay environmental: no libLLVM-22 on this host,
 so legacy cannot be built. Recorded, not worked around.
