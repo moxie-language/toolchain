@@ -1368,90 +1368,26 @@ The compiler side is worth a look too: `p.val` on a `**box` should be a
 compile error naming the type, not a silent read of the pointee's first bytes.
 No restriction fixture exists for it.
 
-### `defer` inside a loop is re-run on return once the loop iterates twice  [COMPILER, both, high]
+### `defer` inside a loop  [COMPILER, FIXED round 15]
 
-Found while making `net.Listen` work, and it is why nothing in this workspace
-listened with the stdlib: a defer registered from a loop body is executed
-repeatedly when the function returns, as soon as the loop has iterated more
-than once. The deferred call is re-run forever - the first invocation acts,
-every later one acts again on state it already consumed, and the function
-never returns.
+Re-measured before the fix: a function with `for i := 0; i < 3; i++ { defer
+l.note(i) }` died with **"alloc: implausible size 2147483648"** (0x80000000, a
+sign-extended int32 capacity) instead of running three deferred calls.
 
-Minimal repro, a function whose body is
+Cause: the deferred record was a single stack `alloca`, so a loop re-pushed the
+SAME slot on every iteration. The chain's `next` therefore pointed at itself,
+`runDefers` could never terminate, and the corrupted record reached the note
+call's slice push as a two-gigabyte capacity.
 
-```
-	for i := int32(0); i < n; i++ {
-		s, _ := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
-		fmt.Printf("  iter %d: fd=%d\n", i, s)
-		defer syscall.Close(s)
-	}
-	fmt.Printf("  leaving f\n")
-```
+Fix: each execution of a `defer` now ALLOCATES its record from the function's
+arena instead of taking a stack slot (`_mxc_stage4/ir_defer.mx`). Every
+registration gets its own record, and the records are reclaimed with the frame
+after the deferred calls have run.
 
-- `n = 0`: returns normally.
-- `n = 1`: returns normally.
-- `n = 2`: prints after the loop, then spins forever calling `close()`.
-  `strace -c` on that run: 268,636 `close()` in 3 s, 268,635 of them `EBADF`.
-
-Two defers *not* in a loop are fine, so it is the registration site, not the
-count. `runtime/defer.mx` is only `type _defer struct { callback uintptr; next
-*_defer }` and points at `legacy/compiler/defer.go`; what is observed is what
-a defer list that never advances (or a node linked to itself) produces, so the
-return-time runner or the second registration from one body is where to look.
-Fix bilaterally, and add this repro as a restriction fixture.
-
-How it surfaced. `net`'s `ipStackCapabilities.probe()`
-(`src/net/ipsock_posix.mx`) did `defer syscall.Close(s1)` inside
-`for i := range probes`, copied from Go where a defer argument is evaluated
-when the defer is registered. There are exactly two probes, so the loop always
-iterated twice and **every** `net.Listen` became that close spin. The trace:
-IPv4 probe socket closed, then an AF_INET6 socket bound to `::ffff:127.0.0.1`,
-`close(5) = 0`, then `close(5) = EBADF` at ~136k/s forever. It was not `net`
-being unadapted and not the netpoller - `net.Listen` never got as far as
-returning, and the raw `socket/bind/listen` path in the same binary worked
-fine. That is also why `gitweb`, the relay and git-lfs-http all hand-roll an
-accept loop on syscalls.
-
-Worked around in `src/net/ipsock_posix.mx` by closing explicitly on each path,
-which is verified end to end: `net.Listen` returns, `Accept` takes two
-connections, `Read`/`Write`/`Close` work, and the process exits cleanly.
-
-All three sites in `src/` are now clear - a scan for `defer` inside a loop body
-returns nothing:
-
-- `src/net/ipsock_posix.mx` - `defer syscall.Close(s1)` in `probe()`, closed
-  explicitly on each path. This was the one that made **every** `net.Listen`
-  spin, because `probe()` always runs its two probes.
-- `src/net/dnsclient_unix.mx` - `defer cancel.Cancel()` in the `udp`/`tcp`
-  loop moved into `exchangeOne`, a helper called once per attempt, which is
-  the shape that stays legal: the defer is registered in a body that runs
-  once. The second iteration is the ordinary TC-flag fallback (truncated UDP
-  answer, retry over TCP).
-- `src/net/http/transport.mx` - `defer timer.Stop()` in
-  `persistConn.roundTrip`'s select loop replaced with a nil-safe `stopTimer`
-  call on each return. A per-iteration helper does not fit here: the timer
-  outlives the iteration that creates it, so the cleanup is function-scope by
-  design. The trigger is also unreachable at that site - the per-request
-  `writeErrCh` is `chan error{1}`, is sent to exactly once, and is never
-  closed, so its select case runs at most once and cannot register twice.
-
-The defect's manifestation depends on the deferred call, which is worth
-knowing when reading a report of it. With `syscall.Close` it was an endless
-spin (407,733 `close()` in 3 s, all but one `EBADF`). With
-`context.WithDeadline`'s cancel plus a counter bump the old shape instead
-**aborts with `index out of range`** at return, and the deferred calls report
-zero executions - silent corruption rather than a spin. The converted shape,
-three loop iterations, reports `deferred calls executed = 3` and returns.
-
-Found while building that verification, and NOT touched here: a plain
-`net.LookupHost` **segfaults** on this host before any DNS I/O. `net.LookupHost`
-on the default resolver and a `&net.Resolver{PreferGo: true}` with a `Dial`
-hook both die with `caught signal SIGSEGV` at the same address; with the hook
-installed, the hook is never called and the scripted server never sees a
-query, so the crash is in the resolver's setup (config/`resolv.conf` path or
-earlier), not in `exchange`. That blocks exercising the DNS site's own trigger
-end to end; the conversion above is verified by shape and by the scan, not by
-a live truncated-UDP lookup.
+Fixture `tests/regressions/should_compile/defer_in_loop.mx` (phase 0a, compiled
+and run): three defers registered in a loop and two outside one. Before: the
+loop case aborted. After: `defer_in_loop ok` - three registrations in reverse
+order (2,1,0) and the plain pair in reverse order (11,10).
 
 ### 0. Package initialization order, and a keep pass that matched implementations by name  [COMPILER, both fixed]
 

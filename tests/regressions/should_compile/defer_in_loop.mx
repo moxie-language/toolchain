@@ -1,0 +1,73 @@
+// A defer inside a loop registers ONCE PER ITERATION and runs once each, in
+// reverse order, when the function returns.
+//
+// The defect this pins: the deferred record was a single stack alloca, so every
+// iteration re-pushed the same slot, the defer chain chained to itself, and the
+// loop case died before it could even spin - "alloc: implausible size
+// 2147483648", a sign-extended capacity. The record is now allocated per
+// execution from the function's arena, which is reclaimed with the frame after
+// the deferred calls have run.
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+type log struct {
+	vals []int32
+}
+
+func (l *log) note(v int32) {
+	l.vals = push(l.vals, v)
+}
+
+// loopDefers registers three defers inside a loop.
+func loopDefers() (l *log) {
+	l = &log{}
+	for i := int32(0); i < 3; i++ {
+		defer l.note(i)
+	}
+	return l
+}
+
+// plainDefers is the control: two defers outside any loop.
+func plainDefers() (l *log) {
+	l = &log{}
+	defer l.note(10)
+	defer l.note(11)
+	return l
+}
+
+func main() {
+	var fails int32
+
+	l := loopDefers()
+	if len(l.vals) != 3 {
+		fmt.Printf("FAIL loop: len=%d want 3\n", int32(len(l.vals)))
+		fails = fails + 1
+	} else if l.vals[0] != 2 || l.vals[1] != 1 || l.vals[2] != 0 {
+		fmt.Printf("FAIL loop order: %d %d %d want 2 1 0\n", l.vals[0], l.vals[1], l.vals[2])
+		fails = fails + 1
+	} else {
+		fmt.Printf("ok   loop defers: 3 registrations, reverse order\n")
+	}
+
+	p := plainDefers()
+	if len(p.vals) != 2 || p.vals[0] != 11 || p.vals[1] != 10 {
+		if len(p.vals) == 2 {
+			fmt.Printf("FAIL plain order: %d %d want 11 10\n", p.vals[0], p.vals[1])
+		} else {
+			fmt.Printf("FAIL plain: len=%d want 2\n", int32(len(p.vals)))
+		}
+		fails = fails + 1
+	} else {
+		fmt.Printf("ok   plain defers: reverse order\n")
+	}
+
+	if fails != 0 {
+		fmt.Printf("defer_in_loop: %d wrong\n", fails)
+		os.Exit(1)
+	}
+	fmt.Printf("defer_in_loop ok\n")
+}

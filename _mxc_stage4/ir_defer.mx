@@ -103,7 +103,23 @@ func (e *irEmitter) emitDefer(d *SSADefer) {
 	pfx := "%df" | irItoa(id) | "."
 	sty := e.deferStructType(d)
 
-	e.w("  ") ; e.w(pfx) ; e.w("a = alloca ") ; e.w(sty) ; e.w("\n")
+	// The record is ALLOCATED, not a stack alloca. A defer inside a loop runs
+	// this code once per iteration, and a single alloca would be re-pushed each
+	// time: every link in the chain would be the same slot, so %deferPtr
+	// chained to itself and runDefers never terminated (measured: the loop
+	// case died before that with "alloc: implausible size 2147483648", a
+	// sign-extended capacity). An allocation from the function's arena gives
+	// each execution its own record and is reclaimed with the frame, after the
+	// deferred calls have run.
+	e.nextReg++
+	dsz := "%dfsz" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(dsz) ; e.w(" = ptrtoint ptr getelementptr (")
+	e.w(sty) ; e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+	e.nextReg++
+	e.w("  ") ; e.w(pfx) ; e.w("a = call ptr @runtime.alloc(")
+	e.w(ipt) ; e.w(" ") ; e.w(dsz) ; e.w(", ptr null, ptr null)\n")
+	e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
+	e.emitLogAlloc(dsz)
 
 	cbGep := pfx | "cb"
 	e.w("  ") ; e.w(cbGep) ; e.w(" = getelementptr inbounds ") ; e.w(sty)
