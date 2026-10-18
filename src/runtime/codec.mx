@@ -66,6 +66,12 @@ func codecIsStableArenaAddr(p uintptr) (ok bool) {
 	if domainRoot == nil {
 		return true
 	}
+	if codecCrossDomain {
+		// A spawn payload is read by a forked process: an alias is an address
+		// in THIS address space, so the receiver would read its own copy of
+		// that page. Measured as a zeroed payload with the right length.
+		return false
+	}
 	// The ROOT arena never dies, so a pointer into it is never transient, in
 	// any encode mode: not at a return, not in a sovereign store-back, not as
 	// a plain value. The root can only appear ON the fn stack through a
@@ -184,6 +190,12 @@ func codecOnStack(p uintptr) (ok bool) {
 	sp := getCurrentStackPointer()
 	return p >= sp && p < stackTop
 }
+
+// codecCrossDomain: the value is being encoded to cross a DOMAIN boundary (a
+// spawn channel), where the receiver is a forked process and an aliased pointer
+// names memory in the sender's address space. No stable shortcut is legal
+// there: every slice/string/pointer must be written out by value.
+var codecCrossDomain bool
 
 // codecTopOnlyTransient: see codecIsStableAddr.
 var codecTopOnlyTransient bool

@@ -1,0 +1,98 @@
+// A []byte built at RUN TIME must cross a spawn channel byte-exact.
+//
+// The boundary copies raw element bytes into a shared ring, so a slice element
+// used to hand the child an ADDRESS in the sender's arena space. The child is a
+// fork, so it read whatever its copy-on-write view held there: measured as the
+// right length and the bytes [4, 0, 0, ...] - the push allocator's first-batch
+// marker. This fixture is the boundary's regression test: lengths 0, 1, a frame
+// that fills exactly one 8-byte ring slot, one byte past it, and a body spanning
+// many slots, each byte chosen so a shifted or truncated read changes the sum.
+//
+// A scalar control rides the same spawn on a chan int32: if that ever fails, the
+// boundary itself is broken and this fixture is not measuring the slice path.
+//
+// usage: spawnbytes        exit 0 when every case is byte-exact
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+var fails int32
+
+// sum is an order sensitive checksum: a shifted read changes it.
+func sum(b []byte) (s int32) {
+	for i := int32(0); i < int32(len(b)); i++ {
+		s = s*31 + int32(b[i]) + i
+	}
+	return s
+}
+
+// make builds a body of n bytes at run time, through push - the path that puts
+// the payload in the arena rather than in a literal in the image.
+func make(n int32) (b []byte) {
+	b = []byte{}
+	for i := int32(0); i < n; i++ {
+		b = push(b, byte((i*7+3)&0xff))
+	}
+	return b
+}
+
+// child echoes the length and checksum of every body it receives, then the
+// scalar control's value, then exits.
+func child(bodies chan []byte, scalars chan int32, back chan int32) {
+	n := <-scalars
+	s := <-scalars
+	back <- s
+	for i := int32(0); i < n; i++ {
+		b := <-bodies
+		back <- int32(len(b))
+		back <- sum(b)
+	}
+}
+
+func main() {
+	bodies := chan []byte{}
+	scalars := chan int32{}
+	back := chan int32{}
+	spawn(child, bodies, scalars, back)
+
+	// The shapes, smallest first. 4 payload bytes frame to exactly one 8-byte
+	// aligned ring slot (a 4-byte length prefix plus the payload); 5 is one
+	// byte past that slot.
+	sizes := []int32{0, 1, 4, 5, 100000}
+	labels := []string{"empty", "one", "full-slot", "over-slot", "many-slots"}
+	nCases := int32(len(sizes))
+
+	scalars <- nCases
+	scalars <- int32(4242)
+	gotScalar := <-back
+	if gotScalar != 4242 {
+		fmt.Printf("FAIL scalar     got %d want 4242\n", gotScalar)
+		fails = fails + 1
+	} else {
+		fmt.Printf("ok   scalar     %d\n", gotScalar)
+	}
+
+	for c := int32(0); c < nCases; c++ {
+		body := make(sizes[c])
+		wantLen := int32(len(body))
+		wantSum := sum(body)
+		bodies <- body
+		gotLen := <-back
+		gotSum := <-back
+		if gotLen != wantLen || gotSum != wantSum {
+			fmt.Printf("FAIL %-12s len=%d want %d, sum=%d want %d\n", labels[c], gotLen, wantLen, gotSum, wantSum)
+			fails = fails + 1
+		} else {
+			fmt.Printf("ok   %-12s len=%d sum=%d\n", labels[c], gotLen, gotSum)
+		}
+	}
+
+	if fails != 0 {
+		fmt.Printf("spawnbytes: %d case(s) not byte-exact\n", fails)
+		os.Exit(1)
+	}
+	fmt.Printf("spawnbytes ok\n")
+}

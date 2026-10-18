@@ -52,6 +52,10 @@ func (b *builder) createChanSend(instr *ssa.Send) {
 		b.createCodecChanSend(instr)
 		return
 	}
+	if typeNeedsStructural(instr.X.Type().Underlying().(*types.Chan).Elem()) {
+		b.createStructuralChanSend(instr)
+		return
+	}
 
 	ch := b.getValue(instr.Chan, getPos(instr))
 	chanValue := b.getValue(instr.X, getPos(instr))
@@ -96,6 +100,9 @@ func (b *builder) createChanRecv(unop *ssa.UnOp) llvm.Value {
 	chanType := unop.X.Type().Underlying().(*types.Chan)
 	if b.elemTypeImplementsCodec(chanType.Elem()) {
 		return b.createCodecChanRecv(unop)
+	}
+	if typeNeedsStructural(chanType.Elem()) {
+		return b.createStructuralChanRecv(unop)
 	}
 
 	valueType := b.getLLVMType(chanType.Elem())
@@ -457,6 +464,112 @@ func (b *builder) createCodecChanRecv(unop *ssa.UnOp) llvm.Value {
 	args = append(args, b.expandFormalParam(codecIface)...)
 	args = append(args, valAlloca, opAlloca)
 	args = append(args, llvm.Undef(b.dataPtrType))
+	okBool := b.createCall(recvType, recvLLVM, args, "chan.recv.ok")
+
+	received := b.CreateLoad(elemLLVM, valAlloca, "chan.received")
+	b.emitLifetimeEnd(opAlloca, opAllocaSize)
+	b.emitLifetimeEnd(valAlloca, valAllocaSize)
+
+	if unop.CommaOk {
+		tuple := llvm.Undef(b.ctx.StructType([]llvm.Type{elemLLVM, b.ctx.Int1Type()}, false))
+		tuple = b.CreateInsertValue(tuple, received, 0, "")
+		tuple = b.CreateInsertValue(tuple, okBool, 1, "")
+		return tuple
+	}
+	return received
+}
+
+// typeNeedsStructural reports whether a channel element cannot cross a spawn
+// boundary as raw bytes: a slice, string, map, interface or pointer element's
+// raw bytes are an ADDRESS in the sender's arena space, and the receiver is a
+// forked domain, so it would read whatever its own copy-on-write view holds at
+// that address. Measured on a runtime-built []byte: the child got the right
+// length and the bytes [4, 0, 0, ...] - the push allocator's first-batch
+// marker, i.e. allocator metadata, not the payload.
+//
+// Such an element is encoded with the structural codec instead
+// (runtime.ChanSendStructural / ChanRecvStructural). Channels and funcs stay
+// raw: they are handles, not payloads.
+func typeNeedsStructural(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Basic:
+		return u.Kind() == types.UnsafePointer
+	case *types.Pointer:
+		return true
+	case *types.Slice:
+		return true
+	case *types.Map:
+		return true
+	case *types.Interface:
+		return true
+	case *types.Array:
+		return typeNeedsStructural(u.Elem())
+	case *types.Struct:
+		for i := 0; i < u.NumFields(); i++ {
+			if typeNeedsStructural(u.Field(i).Type()) {
+				return true
+			}
+		}
+		return false
+	case *types.Signature:
+		return false
+	case *types.Chan:
+		return false
+	}
+	return true
+}
+
+// createStructuralChanSend emits the dual-path chan send for an element type
+// that holds pointers: runtime.ChanSendStructural(ch, td, &v, &op) encodes the
+// value with the structural codec when the channel is spawn-bound and takes the
+// in-runtime queue path otherwise.
+func (b *builder) createStructuralChanSend(instr *ssa.Send) {
+	ch := b.getValue(instr.Chan, getPos(instr))
+	chanValue := b.getValue(instr.X, getPos(instr))
+	elemType := instr.X.Type()
+	elemLLVM := b.getLLVMType(elemType)
+
+	valAlloca, valAllocaSize := b.createTemporaryAlloca(elemLLVM, "chan.value")
+	b.CreateStore(chanValue, valAlloca)
+	typeDesc := b.getTypeCode(elemType)
+
+	channelOpType := b.getLLVMRuntimeType("channelOp")
+	opAlloca, opAllocaSize := b.createTemporaryAlloca(channelOpType, "chan.op")
+
+	runtimePkg := b.program.ImportedPackage("runtime")
+	sendFn := runtimePkg.Members["ChanSendStructural"].(*ssa.Function)
+	sendType, sendLLVM := b.getFunction(sendFn)
+
+	args := []llvm.Value{ch, typeDesc, valAlloca, opAlloca, llvm.Undef(b.dataPtrType)}
+	b.createCall(sendType, sendLLVM, args, "")
+
+	b.emitLifetimeEnd(opAlloca, opAllocaSize)
+	b.emitLifetimeEnd(valAlloca, valAllocaSize)
+}
+
+// createStructuralChanRecv is the recv counterpart: the runtime decodes the
+// frame into the receiver's own slot, so a slice arrives with a fresh backing in
+// the receiver's arena.
+func (b *builder) createStructuralChanRecv(unop *ssa.UnOp) llvm.Value {
+	elemType := unop.X.Type().Underlying().(*types.Chan).Elem()
+	elemLLVM := b.getLLVMType(elemType)
+	ch := b.getValue(unop.X, getPos(unop))
+
+	valAlloca, valAllocaSize := b.createTemporaryAlloca(elemLLVM, "chan.value")
+	b.CreateStore(llvm.ConstNull(elemLLVM), valAlloca)
+	typeDesc := b.getTypeCode(elemType)
+
+	channelOpType := b.getLLVMRuntimeType("channelOp")
+	opAlloca, opAllocaSize := b.createTemporaryAlloca(channelOpType, "chan.op")
+
+	runtimePkg := b.program.ImportedPackage("runtime")
+	recvFn := runtimePkg.Members["ChanRecvStructural"].(*ssa.Function)
+	recvType, recvLLVM := b.getFunction(recvFn)
+
+	args := []llvm.Value{ch, typeDesc, valAlloca, opAlloca, llvm.Undef(b.dataPtrType)}
 	okBool := b.createCall(recvType, recvLLVM, args, "chan.recv.ok")
 
 	received := b.CreateLoad(elemLLVM, valAlloca, "chan.received")

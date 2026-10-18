@@ -32,13 +32,14 @@ build_ok=1
 "$MOXIE" build -o "$td/client" "$SCRIPT_DIR/netsmoke/client" >"$td/client-build.log" 2>&1 || build_ok=0
 "$MOXIE" build -o "$td/spawncost" "$SCRIPT_DIR/netsmoke/spawncost" >"$td/spawncost-build.log" 2>&1 || build_ok=0
 "$MOXIE" build -o "$td/muxmatch" "$SCRIPT_DIR/netsmoke/muxmatch" >"$td/muxmatch-build.log" 2>&1 || build_ok=0
+"$MOXIE" build -o "$td/spawnbytes" "$SCRIPT_DIR/netsmoke/spawnbytes" >"$td/spawnbytes-build.log" 2>&1 || build_ok=0
 
 if [ "$build_ok" = 0 ]; then
-	log_fail "netsmoke:build" "$(grep -m1 -E 'error|^; ' "$td/server-build.log" "$td/client-build.log" "$td/spawncost-build.log" "$td/muxmatch-build.log" 2>/dev/null | head -1)"
+	log_fail "netsmoke:build" "$(grep -m1 -E 'error|^; ' "$td/server-build.log" "$td/client-build.log" "$td/spawncost-build.log" "$td/muxmatch-build.log" "$td/spawnbytes-build.log" 2>/dev/null | head -1)"
 	rm -rf "$td"
 	exit 0
 fi
-log_pass "netsmoke:build" "server, client, spawn-cost and mux-match fixtures built"
+log_pass "netsmoke:build" "server, client, spawn-cost, mux-match and spawn-bytes fixtures built"
 
 # The classic ServeMux's matching, every registration shape. The smoke server
 # below serves through the CHANNEL path, whose router is a plain table, so this
@@ -49,6 +50,16 @@ if "$td/muxmatch" >"$td/muxmatch.out" 2>&1; then
 	log_pass "netsmoke:mux-match" "$(tail -1 "$td/muxmatch.out")"
 else
 	log_fail "netsmoke:mux-match" "$(tail -3 "$td/muxmatch.out" 2>/dev/null)"
+fi
+
+# A []byte built at run time must cross a spawn channel byte-exact. This is the
+# boundary's own unit: the smoke server below never sends a slice across, it
+# packs an int32 stream, so nothing else here would notice an address being
+# handed to a forked domain.
+if "$td/spawnbytes" >"$td/spawnbytes.out" 2>&1; then
+	log_pass "netsmoke:spawn-bytes" "$(tail -1 "$td/spawnbytes.out")"
+else
+	log_fail "netsmoke:spawn-bytes" "$(tail -3 "$td/spawnbytes.out" 2>/dev/null)"
 fi
 
 # The pool size is a bound, not a guess: this is what a spawn costs here.

@@ -137,6 +137,10 @@ func (e *irEmitter) emitChanRecv(u *SSAUnOp) {
 		e.emitCodecChanRecv(u)
 		return
 	}
+	if elemNeedsStructural(chanElemType(u.X.SSAType())) {
+		e.emitStructuralChanRecv(u)
+		return
+	}
 	reg := e.regName(u)
 	elemType := e.chanElemType(u.X.SSAType())
 	ch := e.operand(u.X)
@@ -172,9 +176,159 @@ func (e *irEmitter) emitChanRecv(u *SSAUnOp) {
 	}
 }
 
+// chanElemType returns the element type of a channel's static type.
+func chanElemType(t Type) Type {
+	if ch, ok := SafeUnderlying(t).(*TCChan); ok {
+		return ch.Elem
+	}
+	return nil
+}
+
+// elemNeedsStructural reports whether a channel element CANNOT cross a spawn
+// boundary as raw bytes.
+//
+// The spawn boundary copies the element's raw bytes into a shared ring, and the
+// receiver is a forked domain: a raw slice/string/map/interface/pointer is an
+// address in the SENDER's arena space, so the child reads whatever its own
+// copy-on-write view holds at that address. Measured on a runtime-built []byte:
+// the child got the right length and the bytes [4, 0, 0, ...] - the push
+// allocator's first-batch marker, i.e. allocator metadata, not the payload.
+//
+// Such an element is encoded with the structural codec instead
+// (runtime.ChanSendStructural / ChanRecvStructural). Types that implement
+// moxie.Codec keep their own EncodeTo/DecodeFrom path, which is checked first.
+// Channels and funcs stay raw: they are handles, not payloads.
+func elemNeedsStructural(t Type) (ok bool) {
+	if t == nil {
+		return false
+	}
+	u := SafeUnderlying(t)
+	if u == nil {
+		return true
+	}
+	switch tt := u.(type) {
+	case *Basic:
+		return tt.Kind == UnsafePointer
+	case *Pointer:
+		return true
+	case *Slice:
+		return true
+	case *TCMap:
+		return true
+	case *TCInterface:
+		return true
+	case *Array:
+		return elemNeedsStructural(tt.Elem)
+	case *TCStruct:
+		for i := 0; i < tt.NumFields(); i++ {
+			if elemNeedsStructural(tt.Field(i).Typ) {
+				return true
+			}
+		}
+		return false
+	case *Signature:
+		return false
+	case *TCChan:
+		return false
+	}
+	return true
+}
+
+// emitTypeDescFor emits the address of t's type-descriptor global, the *RawType
+// the structural codec walks.
+func (e *irEmitter) emitTypeDescFor(t Type) (reg string) {
+	e.collectTypeDesc(t)
+	tn := e.reflectTypeName(t)
+	e.nextReg++
+	reg = "%chtd" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(reg) ; e.w(" = bitcast ptr ") ; e.w(irQuoteName(tn)) ; e.w(" to ptr\n")
+	return reg
+}
+
+// emitStructuralChanSend is the send for an element that holds pointers: the
+// value is handed to the runtime with its type descriptor, and a spawn-bound
+// channel encodes it structurally instead of copying an address across.
+func (e *irEmitter) emitStructuralChanSend(s *SSASend) {
+	elemType := chanElemType(s.Chan.SSAType())
+	elemTType := e.chanElemType(s.Chan.SSAType())
+	ch := e.operand(s.Chan)
+	val := e.operand(s.X)
+	opType := "{ptr, ptr, i32, ptr}"
+
+	e.nextReg++
+	valAlloca := "%chanssv" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(valAlloca) ; e.w(" = alloca ") ; e.w(elemTType) ; e.w("\n")
+
+	valSrcType := e.llvmType(s.X.SSAType())
+	resolved := e.resolvedType(s.X, valSrcType)
+	if resolved != valSrcType {
+		valSrcType = resolved
+	}
+	if valSrcType == elemTType {
+		e.w("  store ") ; e.w(elemTType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+	} else {
+		e.w("  store ") ; e.w(valSrcType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+	}
+
+	td := e.emitTypeDescFor(elemType)
+
+	e.nextReg++
+	opAlloca := "%chanssop" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(opAlloca) ; e.w(" = alloca ") ; e.w(opType) ; e.w("\n")
+	e.w("  store ") ; e.w(opType) ; e.w(" zeroinitializer, ptr ") ; e.w(opAlloca) ; e.w("\n")
+
+	e.w("  call void @runtime.ChanSendStructural(ptr ") ; e.w(ch) ; e.w(", ptr ") ; e.w(td) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w(", ptr ") ; e.w(opAlloca) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.ChanSendStructural", "void", "ptr, ptr, ptr, ptr")
+}
+
+// emitStructuralChanRecv is the recv counterpart: the runtime decodes the frame
+// into the receiver's own slot, so a slice arrives with a fresh backing in the
+// receiver's arena.
+func (e *irEmitter) emitStructuralChanRecv(u *SSAUnOp) {
+	reg := e.regName(u)
+	elemType := chanElemType(u.X.SSAType())
+	elemTType := e.chanElemType(u.X.SSAType())
+	ch := e.operand(u.X)
+	opType := "{ptr, ptr, i32, ptr}"
+
+	e.nextReg++
+	valAlloca := "%chanrsv" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(valAlloca) ; e.w(" = alloca ") ; e.w(elemTType) ; e.w("\n")
+	e.w("  store ") ; e.w(elemTType) ; e.w(" zeroinitializer, ptr ") ; e.w(valAlloca) ; e.w("\n")
+
+	td := e.emitTypeDescFor(elemType)
+
+	e.nextReg++
+	opAlloca := "%chanrsop" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(opAlloca) ; e.w(" = alloca ") ; e.w(opType) ; e.w("\n")
+	e.w("  store ") ; e.w(opType) ; e.w(" zeroinitializer, ptr ") ; e.w(opAlloca) ; e.w("\n")
+
+	e.nextReg++
+	okReg := "%chanrsok" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(okReg) ; e.w(" = call i1 @runtime.ChanRecvStructural(ptr ") ; e.w(ch) ; e.w(", ptr ") ; e.w(td) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w(", ptr ") ; e.w(opAlloca) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.ChanRecvStructural", "i1", "ptr, ptr, ptr, ptr")
+
+	if u.CommaOk {
+		e.nextReg++
+		loadedVal := "%chanrslv" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(loadedVal) ; e.w(" = load ") ; e.w(elemTType) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+		tupleType := "{" | elemTType | ", i1}"
+		e.nextReg++
+		t1 := "%chanrst1_" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(t1) ; e.w(" = insertvalue ") ; e.w(tupleType) ; e.w(" zeroinitializer, ") ; e.w(elemTType) ; e.w(" ") ; e.w(loadedVal) ; e.w(", 0\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(tupleType) ; e.w(" ") ; e.w(t1) ; e.w(", i1 ") ; e.w(okReg) ; e.w(", 1\n")
+	} else {
+		e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(elemTType) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+	}
+}
+
 func (e *irEmitter) emitChanSend(s *SSASend) {
 	if e.elemImplementsCodec(s.Chan.SSAType()) {
 		e.emitCodecChanSend(s)
+		return
+	}
+	if elemNeedsStructural(chanElemType(s.Chan.SSAType())) {
+		e.emitStructuralChanSend(s)
 		return
 	}
 	elemType := e.chanElemType(s.Chan.SSAType())

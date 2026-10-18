@@ -1112,7 +1112,48 @@ INVERTED CANARY, which expects the timeout and passes while the blocker is
 real. If the transport is ever fixed the canary fails and says to put
 `http.Get` back in the client unit, so the defect cannot heal quietly.
 
-### A []byte built at run time does not survive a spawn channel  [RUNTIME, logged]
+### A []byte built at run time does not survive a spawn channel  [RUNTIME, FIXED round 15]
+
+**Fixed**: the boundary now encodes pointer-carrying channel elements with the
+structural codec instead of copying their raw bytes. The old measurement and the
+cause, then what changed:
+
+Before: a two-domain program built eight bytes with push and sent them on a
+`chan []byte`; the child received len=8 and `[4, 0, 0, ...]` - the first-batch
+floor of the push path, i.e. allocator metadata. Scalars were exact.
+
+Cause, in two layers: (1) `chanSend` copies `elementSize` raw bytes into the ring
+for any element, and a slice's raw bytes are a HEADER, i.e. an address in the
+sender's arena space; the receiver is a fork, so it reads its own copy-on-write
+view of that address. (2) even after the compiler routed pointer-carrying
+elements through the structural codec, the payload still arrived zeroed, because
+the codec's STABLE-SLICE shortcut writes the raw header and the decoder aliases
+the pointer - legal within one domain, never across a fork.
+
+Fix, both sides: `runtime.ChanSendStructural` / `ChanRecvStructural` (and the
+Pipe* pair) encode with `codecEncodeValue` and decode with `codecDecodeValue`
+into the receiver's own slot; a new `codecCrossDomain` mode forbids every stable
+shortcut during a spawn encode, so slices and strings are written by value. The
+compiler emits the structural path for element types that hold pointers
+(`elemNeedsStructural` in `_mxc_stage4/ir_chan.mx`, mirrored in
+`legacy/compiler/channel.go`) after the existing moxie.Codec check; channels and
+funcs stay raw (they are handles, not payloads). Local channels are untouched:
+the dual entries dispatch on `spawnBound` exactly like ChanSendDual.
+
+Measured after, `tests/netsmoke/spawnbytes` (phase-8 unit `netsmoke:spawn-bytes`):
+
+    ok   scalar     4242
+    ok   empty        len=0 sum=0
+    ok   one          len=1 sum=3
+    ok   full-slot    len=4 sum=100560
+    ok   over-slot    len=5 sum=3117395
+    ok   many-slots   len=100000 sum=-2124972416
+
+The legacy mirror is written but UNVERIFIED: no libLLVM-22 on this host, so
+legacy cannot be built here (phase 2 and the :legacy variants stay environmental).
+That is recorded rather than presented as tested.
+
+### A []byte built at run time does not survive a spawn channel  [OLD MEASUREMENT, kept]
 
 Measured with a two-domain program: the parent builds eight bytes with push
 (1..8) and sends them on a `chan []byte` that was handed to spawn. The child

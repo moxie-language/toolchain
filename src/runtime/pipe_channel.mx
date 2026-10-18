@@ -228,6 +228,84 @@ func PipeChanRecvRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
 	return true
 }
 
+// --- structural codec at the spawn boundary ---
+//
+// A channel element that holds a slice, map, interface or pointer CANNOT cross
+// the boundary as raw bytes: the raw bytes are an address, and the child's
+// address space is a fork of the parent's taken at spawn, so the child reads
+// whatever happens to be at that address in its own copy-on-write view. Measured
+// on a runtime-built []byte: the child received the right length and the bytes
+// [4, 0, 0, ...] - 4 is the first-batch floor of the push allocator, i.e. the
+// child was reading allocator metadata, not the payload.
+//
+// So such an element is encoded with the STRUCTURAL codec (codecEncodeValue /
+// codecDecodeValue, the same walk spawn's argument codec uses) and decoded into
+// the receiver's arena. This is the codec's slice encode/decode at the boundary,
+// not a caller-side workaround: the payload crosses by value and the child owns
+// the bytes it gets.
+//
+// ChanSendStructural / ChanRecvStructural are the compiler's entries for such
+// elements. They dispatch exactly like ChanSendDual / ChanRecvDual: a local
+// channel keeps the in-runtime queue path, where no encoding is needed.
+
+// PipeChanSendStructural encodes one value structurally onto the send ring.
+func PipeChanSendStructural(ch *channel, td *RawType, value unsafe.Pointer) bool {
+	if ch == nil || !ch.spawnBound || td == nil || value == nil {
+		return false
+	}
+	var cb CodecBuf
+	var ss codecSeenSet
+	codecSeenInit(&ss)
+	// Nothing may be aliased across a domain boundary: the receiver is a fork,
+	// and a stable-slice frame would hand it a pointer into this address space.
+	codecCrossDomain = true
+	codecEncodeValue(&cb, &ss, value, td)
+	codecCrossDomain = false
+	return PipeChanSend(ch, cb.data)
+}
+
+// PipeChanRecvStructural drains one frame and decodes it into value, which is
+// the receiver's own T-sized slot. A slice element therefore arrives with a
+// fresh backing in the receiver's current arena.
+func PipeChanRecvStructural(ch *channel, td *RawType, value unsafe.Pointer) bool {
+	if ch == nil || !ch.spawnBound || td == nil || value == nil {
+		return false
+	}
+	data, ok := PipeChanRecv(ch)
+	if !ok {
+		return false
+	}
+	var cb CodecBuf
+	cb.data = data
+	var ds codecDecodeSeen
+	codecDecodeSeenInit(&ds)
+	p := codecDecodeValue(&cb, &ds, td)
+	if p == nil {
+		return false
+	}
+	memcpy(value, p, td.Size())
+	return true
+}
+
+// ChanSendStructural is ChanSendDual's structural counterpart, emitted for chan
+// elements that hold pointers. A local channel takes the raw in-runtime queue
+// path: only a spawn boundary needs the encode.
+func ChanSendStructural(ch *channel, td *RawType, value unsafe.Pointer, op *channelOp) {
+	if ch != nil && ch.spawnBound {
+		PipeChanSendStructural(ch, td, value)
+		return
+	}
+	chanSend(ch, value, op)
+}
+
+// ChanRecvStructural is ChanRecvDual's structural counterpart.
+func ChanRecvStructural(ch *channel, td *RawType, value unsafe.Pointer, op *channelOp) bool {
+	if ch != nil && ch.spawnBound {
+		return PipeChanRecvStructural(ch, td, value)
+	}
+	return chanRecv(ch, value, op)
+}
+
 // tryPipeSend attempts a NON-blocking send on a spawn-bound channel.
 // Used by trySend / chanSelect on spawn channels - must not block, or
 // the cooperative event loop deadlocks (the parent can't pivot to recv
