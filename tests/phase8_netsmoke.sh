@@ -146,12 +146,17 @@ hello path=/two"
 	# request it never writes. That is a CLIENT defect, not the resolver (which
 	# resolves here) and not this handler path (curl serves in both modes).
 	# The unit says which of the two it is instead of blaming the resolver.
+	# The Moxie client THROUGH net/http's Transport (--get). This is the unit
+	# that exercises the client stack's connection handling, not just the
+	# single-domain exchange: the transport is single-threaded (this domain has
+	# no goroutine and no task primitive), so one call dials, writes, reads and
+	# materialises the body.
 	crc=0
-	timeout 20 "$td/client" "http://127.0.0.1:$port/smoke" >"$td/client-$mode.out" 2>&1 || crc=$?
-	if [ "$crc" = 0 ]; then
-		log_pass "netsmoke:client-$mode" "$(grep -c 'addr=' "$td/client-$mode.out" 2>/dev/null || true) address(es), status 200, body matched"
+	timeout 20 "$td/client" --get "http://127.0.0.1:$port/smoke" >"$td/client-$mode.out" 2>&1 || crc=$?
+	if [ "$crc" = 0 ] && grep -q 'transport ok' "$td/client-$mode.out" 2>/dev/null; then
+		log_pass "netsmoke:client-$mode" "$(grep -c 'addr=' "$td/client-$mode.out" 2>/dev/null || true) address(es), status 200, body matched, transport ok"
 	elif grep -q 'addr=' "$td/client-$mode.out" 2>/dev/null && ! grep -q 'status=' "$td/client-$mode.out" 2>/dev/null; then
-		log_fail "netsmoke:client-$mode" "resolver ok, request never completed (rc=$crc): Transport.dialConn runs readLoop before writeLoop, so the request is never written"
+		log_fail "netsmoke:client-$mode" "resolver ok, request never completed (rc=$crc): the single-threaded transport did not complete the exchange"
 	else
 		log_fail "netsmoke:client-$mode" "rc=$crc: $(tail -3 "$td/client-$mode.out" 2>/dev/null)"
 	fi
@@ -193,12 +198,15 @@ hello path=/two"
 		# passes and names it; the day http.Get works, the canary fails and
 		# says to put the transport back in the client unit. A defect that
 		# heals itself must not do it quietly.
-		grc=0
-		timeout 20 "$td/client" --get "http://127.0.0.1:$port/smoke" >"$td/client-get.out" 2>&1 || grc=$?
-		if [ "$grc" != 0 ]; then
-			log_pass "netsmoke:transport-canary" "http.Get still blocked (rc=$grc): Transport.dialConn runs readLoop before writeLoop"
+		# The unit above IS http.Get now. This one keeps the single-domain
+		# exchange alive beside it, so a transport regression and a socket
+		# regression cannot be mistaken for each other.
+		src=0
+		timeout 20 "$td/client" "http://127.0.0.1:$port/smoke" >"$td/client-sync.out" 2>&1 || src=$?
+		if [ "$src" = 0 ]; then
+			log_pass "netsmoke:client-sync" "single-domain exchange (LookupHost/Dial/Write/ReadResponse) ok"
 		else
-			log_fail "netsmoke:transport-canary" "http.Get SUCCEEDED - the transport blocker is gone; make the client unit use the transport again"
+			log_fail "netsmoke:client-sync" "rc=$src: $(tail -3 "$td/client-sync.out" 2>/dev/null)"
 		fi
 	fi
 

@@ -25,6 +25,8 @@ import (
 	"net/http/internal/ascii"
 	"net/textproto"
 	"net/url"
+	"runtime"
+	"unsafe"
 
 	"bytes"
 	"time"
@@ -602,6 +604,65 @@ func validateHeaders(hdrs Header) (rs string) {
 }
 
 // roundTrip implements a RoundTripper over HTTP.
+// rootBytes copies b into the ROOT arena. The response body outlives the call
+// that read it, and bytes living in that call's frame would dangle on return.
+func rootBytes(b []byte) (out []byte) {
+	n := int32(len(b))
+	if n == 0 {
+		return nil
+	}
+	p := runtime.ArenaAlloc(runtime.RootArena(), uintptr(n))
+	out = unsafe.Slice((*byte)(p), n)
+	copy(out, b)
+	return out
+}
+
+// dialAndExchange performs one whole HTTP/1 exchange in this single call: dial,
+// write the request, read the response and its body, close.
+//
+// Why not dialConn + persistConn + readLoop/writeLoop: those are two goroutines
+// in Go, and this domain has none and no task primitive. dialConn called them in
+// sequence, so readLoop blocked in Peek before anything was written; and the
+// connection record cannot be handed back either, because its bufio pair is
+// allocated in the dialling frame (a root-allocated persistConn got past the
+// codec's graph walk and then died in bufio.Writer.Available on a dangling
+// writer). One function, one frame, one exchange.
+func (t *Transport) dialAndExchange(ctx context.Context, cm connectMethod, treq *transportRequest) (resp *Response, err error) {
+	if cm.scheme() != "http" {
+		return nil, errors.New("http: the single-threaded transport supports http:// only (TLS needs the concurrent transport)")
+	}
+	tc, derr := net.Dial("tcp", cm.addr())
+	if derr != nil {
+		return nil, derr
+	}
+	rq := treq.Request
+	if werr := rq.write(tc, false, treq.extraHeaders(), nil); werr != nil {
+		tc.Close()
+		return nil, werr
+	}
+	br := bufio.NewReader(tc)
+	rsp, rerr := ReadResponse(br, rq)
+	if rerr != nil {
+		tc.Close()
+		return nil, rerr
+	}
+	payload, perr := io.ReadAll(rsp.Body)
+	if perr != nil {
+		rsp.Body.Close()
+		tc.Close()
+		return nil, perr
+	}
+	rsp.Body.Close()
+	tc.Close()
+	// The body is in memory, in the root arena: the connection is closed, so
+	// there is nothing left to stream from. bytes.Reader and io.NopCloser are
+	// stdlib implementations that every linked binary already dispatches, which
+	// matters because a type introduced here would need its Read entry kept in
+	// the interface table from outside the module.
+	rsp.Body = io.NopCloser(bytes.NewReader(rootBytes(payload)))
+	return rsp, nil
+}
+
 func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 	if !t.nextProtoDone { t.nextProtoDone = true; t.onceSetNextProtoDefaults() }
 	ctx := req.Context()
@@ -683,7 +744,6 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 
 	var treq *transportRequest
 	var cm connectMethod
-	var pconn *persistConn
 	var lresp *Response
 	for {
 		select {
@@ -701,63 +761,24 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 			return nil, err
 		}
 
-		// Get the cached or newly-created connection to either the
-		// host (for http or https), the http proxy, or the http proxy
-		// pre-CONNECTed to https server. In any case, we'll be ready
-		// to send it requests.
-		pconn, err = t.getConn(treq, cm)
-		if err != nil {
-			req.closeBody()
-			return nil, err
-		}
-
-		lresp = nil
-		if pconn.alt != nil {
-			// HTTP/2 path.
-			lresp, err = pconn.alt.RoundTrip(req)
-		} else {
-			lresp, err = pconn.roundTrip(treq)
-		}
+		// ONE exchange per call, in this call's frame: see dialAndExchange.
+		lresp, err = t.dialAndExchange(ctx, cm, treq)
 		if err == nil {
-			if pconn.alt != nil {
-				// HTTP/2 requests are not cancelable with CancelRequest,
-				// so we have no further need for the request context.
-				//
-				// On the HTTP/1 path, roundTrip takes responsibility for
-				// canceling the context after the response body is read.
-				cancel.Cancel(errRequestDone)
-			}
+			cancel.Cancel(errRequestDone)
 			lresp.Request = origReq
 			return lresp, nil
 		}
-
-		// Failed. Clean up and determine whether to retry.
-		if http2isNoCachedConnError(err) {
-			if t.removeIdleConn(pconn) {
-				t.decConnsPerHost(pconn.cacheKey)
-			}
-		} else if !pconn.shouldRetryRequest(req, err) {
-			// Issue 16465: return underlying net.Conn.Read error from peek,
-			// as we've historically done.
-			if e, ok := err.(nothingWrittenError); ok {
-				err = e.error
-			}
-			if e, ok := err.(transportReadFromServerError); ok {
-				err = e.err
-			}
-			if b, ok := req.Body.(*readTrackingBody); ok && !b.didClose {
-				// Issue 49621: Close the request body if pconn.roundTrip
-				// didn't do so already. This can happen if the pconn
-				// write loop exits without reading the write request.
-				req.closeBody()
-			}
-			return nil, err
+		// No retry: this path holds no cached connection and no write loop, so
+		// a failure is the answer. Report the underlying cause the way the
+		// concurrent path did, rather than the wrapper.
+		if e, ok := err.(nothingWrittenError); ok {
+			err = e.error
 		}
-		// Rewind the body if we're able to.
-		req, err = rewindBody(req)
-		if err != nil {
-			return nil, err
+		if e, ok := err.(transportReadFromServerError); ok {
+			err = e.err
 		}
+		req.closeBody()
+		return nil, err
 	}
 }
 

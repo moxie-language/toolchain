@@ -1126,16 +1126,7 @@ per-arena-region counter is the missing instrument), and `/proc/self/status`
 VmRSS/VmData/maps show RSS climbing while the mapping count stays ~17, i.e.
 retention inside existing mmaps rather than new arenas.
 
-### The client transport has no task primitive, so it is single-threaded  [DECISION, round 15, IN PROGRESS]
-
-Status: the single-threaded exchange is written and the decision is taken, but the
-path is NOT green yet - a first attempt SIGBUSed in codecWriteRaw because
-dialConn's returned pointer made the codec walk the whole Transport graph (fixed
-by allocating the connection record in the root), and the next attempt fails
-earlier, in getConn's error path (cancelWantOnError). The phase-8 canary stays
-inverted until http.Get works end to end; it passes today because the path
-crashes, which is a green that means nothing and is called out here.
-
+### The client transport is single-threaded, and http.Get works  [DONE, round 15]
 
 `net/http.(*Transport).dialConn` ended with `pconn.readLoop()` then
 `pconn.writeLoop()` where Go starts each as a goroutine, so readLoop blocked in
@@ -1149,22 +1140,31 @@ order:
   * a forked writer cannot stand in for a task: the child inherits a private
     copy-on-write view of the `persistConn`, so the request queue, the buffers
     and `nwrite` diverge from the parent's the moment either side writes;
-  * two blocking loops cannot be interleaved in one thread by scheduling, because
-    both block in syscalls on different fds (`internal/poll`), not on channels -
-    the cooperative channel scheduler never gets a turn.
+  * two blocking loops cannot be interleaved in one thread: both block in
+    syscalls on different fds, not on channels, so the cooperative channel
+    scheduler never gets a turn;
+  * `getConn` queues the dial on the idle/dial machinery whose worker is itself a
+    goroutine, so it is never serviced - that was the SIGSEGV in
+    `cancelWantOnError`.
 
-So `persistConn.roundTrip` writes the request, flushes, and reads the response in
-the same call (`pc.readResponse`, already a helper for readLoop). Keep-alive
-reuse is not attempted: the response body's closing rule closes the connection.
-The two loops stay in the file because every helper around the connection
-(`readResponse`, `closeLocked`, `wroteRequest`, the body wiring) is shared with
-them, but nothing calls them; a concurrent transport would need the task
-primitive above first. That is recorded debt, not a working path.
+Implementation: `Transport.roundTrip` calls `dialAndExchange`, one function that
+dials, writes the request, reads the response and its body, and closes. The body
+is materialised in the ROOT arena and wrapped as
+`io.NopCloser(bytes.NewReader(...))` - stdlib implementations every binary
+already dispatches. A type introduced in net/http for the body would need its
+`Read` entry kept in the interface table from OUTSIDE the module, and the measured
+symptom was `interface dispatch: no impl for Read (150 impls, none matches)` from
+main's `io.ReadAll`.
 
-Verified through `client --get` against the fixture server (a plain TCP peer):
-`status=200` with the handler's body, no SIGBUS in `codecEncodeValue`. The
-phase-8 client unit is switched to the transport (`--get`) and the inverted
-canary becomes an assertion that `http.Get` WORKS.
+Before: `dialConn` deadlock, then SIGBUS in `codecWriteRaw` (the returned
+`persistConn` made the codec walk the whole Transport graph - fixed by rooting the
+record, which then exposed a dangling `bufio.Writer` in `bufio.Writer.Available`),
+then SIGSEGV in `cancelWantOnError`. After: `client --get` prints status=200 with
+the handler's body and `transport ok`.
+
+The phase-8 `netsmoke:client-<mode>` unit now runs `--get` (the transport), and a
+new `netsmoke:client-sync` keeps the single-domain exchange beside it so a
+transport regression and a socket regression cannot be confused.
 
 ### The Moxie HTTP CLIENT never writes its request  [CLIENT, fixed round 15]
 
