@@ -47,21 +47,12 @@ import (
 	"runtime"
 )
 
-// Message kinds. The shell and a pool worker speak this stream: a request is
-// a head (method, path, proto, route, headers), zero or more body chunks and
-// then either end-of-stream or an abort; a response is the same shape in the
-// other direction. Abort is separate from End because a client that disconnects
-// and a handler that fails are not ends of stream.
-const (
-	MsgReqHead   = int32(1)
-	MsgReqBody   = int32(2)
-	MsgReqEnd    = int32(3)
-	MsgReqAbort  = int32(4)
-	MsgRespHead  = int32(5)
-	MsgRespBody  = int32(6)
-	MsgRespEnd   = int32(7)
-	MsgRespAbort = int32(8)
-)
+// The shell and a pool worker exchange one MESSAGE PER SLOT INDEX (chanpool.mx):
+// the shell writes the whole request into a preallocated shared slot and sends
+// the index, the worker answers in the same slot and sends the index back. There
+// is no message-kind stream any more - the int32-per-four-bytes packing that
+// used to carry one was the workaround for a []byte not surviving a spawn
+// channel, and that defect is fixed (docs/OPEN_WORK.md).
 
 const (
 	DispatchInline  = int32(0)
@@ -336,10 +327,12 @@ func ChanServeTimeout(addr string, mux *ChanMux, mode int32, workers int32, idle
 		if n < 1 {
 			n = 1
 		}
-		// The table goes into the package global BEFORE the first spawn: a
-		// worker inherits it by fork. The queues are built here, in the frame
-		// that owns them for the accept loop's life.
+		// The table and the slot ring go into the package globals BEFORE the
+		// first spawn: a worker inherits them by fork. The ring is MAP_SHARED,
+		// so the shell's writes AFTER the fork are visible to the workers - an
+		// ordinary arena cannot do that (the child's copy is private).
 		chanGlobalMux = mux
+		chanSlotBuf = runtime.SharedBuffer(chanSlotCount * chanSlotBytes)
 		pool = &chanPool{mux: mux}
 		for i := int32(0); i < n; i++ {
 			j := chan int32{}

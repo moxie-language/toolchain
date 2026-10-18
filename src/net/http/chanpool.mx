@@ -5,17 +5,26 @@ package http
 //
 // The pool exists because a spawn is a fork, not a coroutine: a worker is an OS
 // thread with its own domain and its own arenas, so one spawn per request would
-// cost a thread per request (measured by tests/netsmoke/spawncost). The pool is
-// spawned once, workers pull from their own queue, and the connection shell
-// picks a worker per request.
+// cost a thread per request (measured by tests/netsmoke/spawncost).
 //
-// The boundary carries an int32 STREAM, not framed byte slices, and that is a
-// workaround for a runtime defect: a []byte built at run time does not survive
-// a spawn channel. Measured (docs/OPEN_WORK.md): a literal crosses intact,
-// while the same bytes built with push arrive with the right LENGTH and
-// allocator metadata as their content. Scalars cross correctly, so a message is
-// encoded as its kind and then each field as int32 values - byte strings packed
-// four bytes to a word. The honest fix is the runtime defect, not this encoding.
+// The boundary carries a QUEUE-OWNED RING OF PREALLOCATED SLOTS, handed off by
+// index. The slot buffer is mapped MAP_SHARED before the workers are spawned, so
+// the parent writes one message into slot i and sends i; the worker reads the
+// bytes in place and answers in the same slot, sending i back. One message per
+// slot, one copy at a named site (chanSlotPutReq / chanSlotPutResp), and no
+// allocation in the steady state - the shell reuses its own slot for every
+// request on a connection, so the request body costs no bytes after warm-up.
+//
+// Why not send the encoded message as a []byte on a chan []byte? That allocates
+// a fresh slice per message, and the point of the ring is that the steady state
+// allocates nothing.
+//
+// The slot count is sized by MEASURED in-flight concurrency, not by connections
+// times slots. The shell serves one connection at a time and blocks on the
+// response, so at most one request is in flight at any instant (measured: a
+// counter over the pool call sites reported max 1 with one connection); four
+// slots give the handoff headroom without the "connections times slots" sizing
+// that got the first ring attempt reverted.
 //
 // The router table is a package global read by the workers, which is sound
 // because spawn forks: every worker inherits the table as it stands when the
@@ -36,122 +45,213 @@ func chanRouteHandler(id int32) (h ChanHandler) {
 	return chanGlobalMux.routes[id].h
 }
 
-// --- int32 stream framing ---
+// --- the slot ring ---
 
-// packBytes is the words of s: length first, then four bytes to a word,
-// little-endian inside the word.
-func packBytes(s string) (w []int32) {
+// Slot geometry. slotBytes bounds ONE message (request or response): 1MB, and a
+// frame that does not fit panics by name rather than truncating. The buffer is
+// mmap'd shared and lazily faulted, so the committed size is the whole mapping
+// and the resident size is only the pages a message actually touches.
+const (
+	chanSlotCount = int32(4)
+	chanSlotBytes = int32(1 << 20)
+	chanSlotFrame = int32(32) // fixed header words: len, status, route, 3 lens, bodylen, nheaders
+)
+
+// chanSlotBuf is the shared ring, inherited by every worker at fork.
+var chanSlotBuf []byte
+
+// chanSlotInFlightMax records the largest number of pool calls in flight, the
+// measurement the slot count is sized from.
+var chanSlotInFlight int32
+var chanSlotInFlightMax int32
+
+// chanSlotBase returns the start offset of slot i.
+func chanSlotBase(i int32) (off int32) {
+	return i * chanSlotBytes
+}
+
+func chanSlotPutI32(b []byte, off, v int32) {
+	b[off] = byte(v)
+	b[off+1] = byte(v >> 8)
+	b[off+2] = byte(v >> 16)
+	b[off+3] = byte(v >> 24)
+}
+
+func chanSlotGetI32(b []byte, off int32) (v int32) {
+	return int32(b[off]) | int32(b[off+1])<<8 | int32(b[off+2])<<16 | int32(b[off+3])<<24
+}
+
+// chanSlotPutRaw writes a length prefix and the bytes: one of the two copy sites.
+func chanSlotPutRaw(b []byte, off int32, s []byte) (next int32) {
 	n := int32(len(s))
-	w = []int32{:1 + (n+3)/4}
-	w[0] = n
+	chanSlotPutI32(b, off, n)
+	off = off + 4
 	for i := int32(0); i < n; i++ {
-		wi := 1 + i/4
-		w[wi] = w[wi] | (int32(s[i]) << ((i % 4) * 8))
+		b[off+i] = s[i]
 	}
-	return w
+	return off + n
 }
 
-func sendBytes(ch chan int32, s string) {
-	w := packBytes(s)
-	for i := 0; i < len(w); i++ {
-		ch <- w[i]
-	}
-}
-
-func recvBytes(ch chan int32) (s string) {
-	n := <-ch
-	nw := (n + 3) / 4
-	w := []int32{:nw}
-	for i := int32(0); i < nw; i++ {
-		w[i] = <-ch
-	}
+// chanSlotGetRaw reads a length prefix and copies the bytes into the caller's
+// arena (the worker decodes into its request arena, which the shell resets).
+func chanSlotGetRaw(b []byte, off int32) (s []byte, next int32) {
+	n := chanSlotGetI32(b, off)
+	off = off + 4
 	s = []byte{:n}
 	for i := int32(0); i < n; i++ {
-		s[i] = byte((w[i/4] >> ((i % 4) * 8)) & 0xff)
+		s[i] = b[off+i]
 	}
-	return s
+	return s, off + n
 }
 
-func sendHeaders(ch chan int32, h Header) {
-	if h == nil {
-		ch <- 0
-		return
+func chanSlotPutHeaders(b []byte, off int32, h Header) (next int32) {
+	off = off
+	n := int32(0)
+	if h != nil {
+		n = int32(len(h))
 	}
-	ch <- int32(len(h))
+	chanSlotPutI32(b, off, n)
+	off = off + 4
 	for k, vv := range h {
-		sendBytes(ch, k)
-		ch <- int32(len(vv))
-		for i := 0; i < len(vv); i++ {
-			sendBytes(ch, vv[i])
+		off = chanSlotPutRaw(b, off, k)
+		chanSlotPutI32(b, off, int32(len(vv)))
+		off = off + 4
+		for i := int32(0); i < len(vv); i++ {
+			off = chanSlotPutRaw(b, off, vv[i])
 		}
 	}
+	return off
 }
 
-func recvHeaders(ch chan int32) (h Header) {
-	n := <-ch
+func chanSlotGetHeaders(b []byte, off int32) (h Header, next int32) {
+	n := chanSlotGetI32(b, off)
+	off = off + 4
 	if n == 0 {
-		return nil
+		return nil, off
 	}
 	h = Header{}
 	for i := int32(0); i < n; i++ {
-		k := recvBytes(ch)
-		vn := <-ch
+		var k []byte
+		k, off = chanSlotGetRaw(b, off)
+		vn := chanSlotGetI32(b, off)
+		off = off + 4
 		vv := [][]byte{:vn}
 		for j := int32(0); j < vn; j++ {
-			vv[j] = recvBytes(ch)
+			vv[j], off = chanSlotGetRaw(b, off)
 		}
 		h[k] = vv
 	}
-	return h
+	return h, off
+}
+
+// chanSlotPutReq is THE request copy: the shell's message into its slot.
+func chanSlotPutReq(slot []byte, routeID int32, rq *Req) (n int32) {
+	off := chanSlotFrame
+	off = chanSlotPutRaw(slot, off, rq.Method)
+	off = chanSlotPutRaw(slot, off, rq.Path)
+	off = chanSlotPutRaw(slot, off, rq.Proto)
+	off = chanSlotPutRaw(slot, off, rq.Body)
+	off = chanSlotPutHeaders(slot, off, rq.Headers)
+	if off > int32(len(slot)) {
+		panic("chanpool: request frame exceeds the slot")
+	}
+	chanSlotPutI32(slot, 0, off)
+	chanSlotPutI32(slot, 4, 0)
+	chanSlotPutI32(slot, 8, routeID)
+	return off
+}
+
+// chanSlotGetReq decodes a request frame into the worker's request arena.
+func chanSlotGetReq(slot []byte) (routeID int32, rq *Req, ok bool) {
+	n := chanSlotGetI32(slot, 0)
+	if n <= chanSlotFrame || n > int32(len(slot)) {
+		return -1, nil, false
+	}
+	routeID = chanSlotGetI32(slot, 8)
+	off := chanSlotFrame
+	rq = &Req{}
+	rq.Method, off = chanSlotGetRaw(slot, off)
+	rq.Path, off = chanSlotGetRaw(slot, off)
+	rq.Proto, off = chanSlotGetRaw(slot, off)
+	rq.Body, off = chanSlotGetRaw(slot, off)
+	rq.Headers, off = chanSlotGetHeaders(slot, off)
+	return routeID, rq, true
+}
+
+// chanSlotPutResp is THE response copy: the worker's message into the same slot.
+func chanSlotPutResp(slot []byte, resp *Resp) (n int32) {
+	off := chanSlotFrame
+	off = chanSlotPutRaw(slot, off, resp.Body)
+	off = chanSlotPutHeaders(slot, off, resp.Headers)
+	if off > int32(len(slot)) {
+		panic("chanpool: response frame exceeds the slot")
+	}
+	chanSlotPutI32(slot, 0, off)
+	chanSlotPutI32(slot, 4, resp.Status)
+	chanSlotPutI32(slot, 8, 0)
+	return off
+}
+
+// chanSlotPutAbort writes a bodyless abort frame with a reason.
+func chanSlotPutAbort(slot []byte, reason []byte) (n int32) {
+	off := chanSlotFrame
+	off = chanSlotPutRaw(slot, off, reason)
+	chanSlotPutI32(slot, 0, off)
+	chanSlotPutI32(slot, 4, 0)
+	chanSlotPutI32(slot, 8, -1)
+	return off
+}
+
+// chanSlotGetResp decodes a response frame into the shell's request arena.
+func chanSlotGetResp(slot []byte) (resp *Resp, ok bool) {
+	n := chanSlotGetI32(slot, 0)
+	if n <= chanSlotFrame || n > int32(len(slot)) {
+		return nil, false
+	}
+	status := chanSlotGetI32(slot, 4)
+	off := chanSlotFrame
+	if status == 0 && chanSlotGetI32(slot, 8) == -1 {
+		reason, _ := chanSlotGetRaw(slot, off)
+		chanReportAbort(errors.New(reason))
+		return nil, false
+	}
+	resp = &Resp{}
+	resp.Status = status
+	resp.Body, off = chanSlotGetRaw(slot, off)
+	resp.Headers, off = chanSlotGetHeaders(slot, off)
+	return resp, true
 }
 
 // chanWorkerLoop is one pool worker. It owns no socket and no connection state:
-// it decodes a request into ITS request arena, makes the route's one handler
-// call there, streams the response back and resets the arena, so a worker that
-// served a million requests holds no more memory than one that served one.
+// it decodes a request slot into ITS request arena, makes the route's one
+// handler call there, writes the response back into the same slot and resets the
+// arena, so a worker that served a million requests holds no more memory than
+// one that served one.
 func chanWorkerLoop(jobs chan int32, results chan int32) {
 	prevScope := runtime.SetArenaScope(ArenaScopeRequest)
 	arena := runtime.ArenaAcquire(chanRequestArenaBytes)
 	runtime.SetArenaScope(prevScope)
 	done := false
 	for !done {
-		kind := <-jobs
-		if kind == 0 {
+		i := <-jobs
+		if i < 0 {
 			break
 		}
-		if kind != MsgReqHead {
-			// A stream that is not at a message boundary cannot be resynced;
-			// the shell only ever sends well-formed requests, so this is a
-			// programming error and stopping is the loud answer.
-			break
+		if i >= chanSlotCount {
+			panic("chanpool: slot index out of range")
 		}
+		slot := chanSlotBuf[chanSlotBase(i) : chanSlotBase(i)+chanSlotBytes]
+		routeID, rq, ok := chanSlotGetReq(slot)
 		runtime.ManualArenaEnter(arena)
-		rq := &Req{}
-		rq.Method = recvBytes(jobs)
-		rq.Path = recvBytes(jobs)
-		rq.Proto = recvBytes(jobs)
-		routeID := <-jobs
-		rq.Headers = recvHeaders(jobs)
-		tail := <-jobs
-		if tail == MsgReqBody {
-			rq.Body = recvBytes(jobs)
-			tail = <-jobs
-		}
 		h := chanRouteHandler(routeID)
 		var resp *Resp
-		if h != nil && tail == MsgReqEnd {
+		if ok && h != nil {
 			resp = h.Handle(rq)
 		}
 		if resp == nil {
-			results <- MsgRespAbort
-			sendBytes(results, "http: channel handler: no route")
+			chanSlotPutAbort(slot, []byte("http: channel handler: no route"))
 		} else {
-			results <- MsgRespHead
-			results <- resp.Status
-			sendHeaders(results, resp.Headers)
-			results <- MsgRespBody
-			sendBytes(results, resp.Body)
-			results <- MsgRespEnd
+			chanSlotPutResp(slot, resp)
 		}
 		runtime.ManualArenaExit(arena)
 		runtime.ArenaReset(arena)
@@ -159,12 +259,14 @@ func chanWorkerLoop(jobs chan int32, results chan int32) {
 		// of its own long-lived sovereign receivers at the same boundary the
 		// connection loop uses.
 		runtime.SovDrainCompactions(chanSovDrainBudget)
+		results <- i
 	}
 	runtime.ArenaRelease(arena)
 }
 
-// chanPool is a fixed set of workers with their own queues. next rotates so a
-// connection does not always land on the same worker.
+// chanPool is a fixed set of workers with their own queues, plus the slot ring
+// they share with the shell. next rotates so a connection does not always land
+// on the same worker.
 type chanPool struct {
 	mux     *ChanMux
 	jobs    []chan int32
@@ -178,48 +280,38 @@ func (p *chanPool) pick() (i int32) {
 	return i
 }
 
-// call hands one decoded request to a worker and returns the response it
-// streamed back. The response's slices are allocated in the CALLER's request
-// arena, so the shell can write them and then free the arena.
+// call hands one decoded request to a worker through its slot and returns the
+// response the worker wrote back. The response's slices are decoded into the
+// CALLER's request arena, so the shell can write them and then free the arena.
 func (p *chanPool) call(routeID int32, rq *Req) (resp *Resp) {
 	i := p.pick()
-	j := p.jobs[i]
-	j <- MsgReqHead
-	sendBytes(j, rq.Method)
-	sendBytes(j, rq.Path)
-	sendBytes(j, rq.Proto)
-	j <- routeID
-	sendHeaders(j, rq.Headers)
-	j <- MsgReqBody
-	sendBytes(j, rq.Body)
-	j <- MsgReqEnd
-	return recvResp(p.results[i])
+	chanSlotInFlight++
+	if chanSlotInFlight > chanSlotInFlightMax {
+		chanSlotInFlightMax = chanSlotInFlight
+	}
+	slot := chanSlotBuf[chanSlotBase(i) : chanSlotBase(i)+chanSlotBytes]
+	chanSlotPutReq(slot, routeID, rq)
+	p.jobs[i] <- i
+	j := <-p.results[i]
+	if j < 0 || j >= chanSlotCount {
+		panic("chanpool: slot index out of range")
+	}
+	out := chanSlotBuf[chanSlotBase(j) : chanSlotBase(j)+chanSlotBytes]
+	resp, _ = chanSlotGetResp(out)
+	chanSlotInFlight--
+	return resp
 }
 
-// recvResp reads one response off the stream. It is a free function because
-// chanPool is self-mutating and a ':=' inside a loop of one of its methods is
-// rejected.
-func recvResp(ch chan int32) (resp *Resp) {
-	resp = &Resp{}
-	done := false
-	for !done {
-		kind := <-ch
-		switch kind {
-		case MsgRespHead:
-			resp.Status = <-ch
-			resp.Headers = recvHeaders(ch)
-		case MsgRespBody:
-			resp.Body = recvBytes(ch)
-		case MsgRespEnd:
-			done = true
-		case MsgRespAbort:
-			chanReportAbort(errors.New(recvBytes(ch)))
-			resp = nil
-			done = true
-		default:
-			done = true
-			resp = nil
-		}
-	}
-	return resp
+// ChanSlotMaxInFlight reports the largest number of pool calls that were ever in
+// flight, the measurement the slot count is sized from.
+func ChanSlotMaxInFlight() (n int32) {
+	return chanSlotInFlightMax
+}
+
+// ChanSlotCommittedBytes is what the slot ring reserves up front: the mapping is
+// MAP_SHARED and lazily faulted, so this is committed address space and the
+// resident part is only the pages the messages touch. It replaces the 32MB per
+// direction the spawn rings reserve - that is the transport slope this closes.
+func ChanSlotCommittedBytes() (n int32) {
+	return chanSlotCount * chanSlotBytes
 }

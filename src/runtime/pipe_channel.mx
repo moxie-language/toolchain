@@ -228,6 +228,27 @@ func PipeChanRecvRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
 	return true
 }
 
+// SharedBuffer maps n bytes of MAP_SHARED anonymous memory and returns it as a
+// slice. Both sides of a fork see the same pages, which is what makes it usable
+// as a queue-owned slot ring: the parent writes a message into slot i and sends
+// the INDEX, and the worker reads the bytes without a second copy and without an
+// allocation. An ordinary arena cannot serve this: after fork the child's copy
+// of the parent's arenas is private (copy-on-write), so a slot written after the
+// fork is invisible to the child.
+//
+// Must be called BEFORE the spawn that will use it: pages mapped afterwards are
+// not inherited.
+func SharedBuffer(n int32) (b []byte) {
+	if n <= 0 {
+		return nil
+	}
+	p := sysMapShared(uintptr(n))
+	if uintptr(p) == 0 || uintptr(p) == ^uintptr(0) {
+		runtimePanic("SharedBuffer: mmap failed")
+	}
+	return unsafe.Slice((*byte)(p), n)
+}
+
 // --- structural codec at the spawn boundary ---
 //
 // A channel element that holds a slice, map, interface or pointer CANNOT cross

@@ -167,6 +167,63 @@ func PipeChanRecvRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
 	return false
 }
 
+// SharedBuffer is native-only. WASM has no anonymous shared mapping it can hand
+// out as a slice (the SAB bridge copies bytes across the boundary itself), and
+// the queue-owned slot ring the spawned pool uses needs memory that the forked
+// worker inherits. Fail loud rather than hand back a private buffer that the
+// other side would read as unrelated bytes.
+func SharedBuffer(n int32) (b []byte) {
+	runtimePanic("runtime.SharedBuffer: no shared mapping on wasm")
+	return nil
+}
+
+// ChanSendStructural / ChanRecvStructural are the structural-codec boundary
+// entries the compiler emits for channel elements that hold pointers (see
+// pipe_channel.mx for why raw bytes cannot cross). The SAB bridge always
+// carries an encoded frame, so these encode with the structural codec and hand
+// the bytes to the bridge.
+func ChanSendStructural(ch *channel, td *RawType, value unsafe.Pointer, op *channelOp) {
+	if ch != nil && ch.spawnBound && ch.sabHandle != 0 {
+		var cb CodecBuf
+		var ss codecSeenSet
+		codecSeenInit(&ss)
+		codecCrossDomain = true
+		codecEncodeValue(&cb, &ss, value, td)
+		codecCrossDomain = false
+		if len(cb.data) == 0 {
+			SpawnChannelSend(ch.sabHandle, nil, 0)
+			return
+		}
+		SpawnChannelSend(ch.sabHandle, unsafe.Pointer(&cb.data[0]), int32(len(cb.data)))
+		return
+	}
+	chanSend(ch, value, op)
+}
+
+func ChanRecvStructural(ch *channel, td *RawType, value unsafe.Pointer, op *channelOp) bool {
+	if ch != nil && ch.spawnBound && ch.sabHandle != 0 {
+		buf := []byte{:sabFrameMax}
+		n := SpawnChannelRecv(ch.sabHandle, unsafe.Pointer(&buf[0]), int32(len(buf)))
+		if n <= 0 {
+			return false
+		}
+		if n > int32(len(buf)) {
+			runtimePanic("moxie/spawn: boundary frame exceeds the receive buffer")
+		}
+		var cb CodecBuf
+		cb.data = buf[:n]
+		var ds codecDecodeSeen
+		codecDecodeSeenInit(&ds)
+		p := codecDecodeValue(&cb, &ds, td)
+		if p == nil {
+			return false
+		}
+		memcpy(value, p, td.Size())
+		return true
+	}
+	return chanRecv(ch, value, op)
+}
+
 // domainReapChildren is native-only (it reaps forked children). The wasm
 // boundary has no child processes, so there is nothing to reap.
 func domainReapChildren() {
