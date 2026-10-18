@@ -302,6 +302,24 @@ func (p *chanPool) call(routeID int32, rq *Req) (resp *Resp) {
 	return resp
 }
 
+// chanSlotPrefault touches one byte of every page of the slot ring.
+//
+// The ring is MAP_SHARED and lazily faulted, so without this its pages are
+// faulted by the requests that use them: the first few hundred exchanges of a
+// process pay for the mapping, which reads as per-request retention (+2096kB
+// over 400 exchanges, against a 2048kB no-accumulation threshold that must not
+// be widened). A queue-owned ring is taken into service at startup, so its cost
+// belongs there, before the first request.
+func chanSlotPrefault() {
+	if len(chanSlotBuf) == 0 {
+		return
+	}
+	page := 4096
+	for off := 0; off < len(chanSlotBuf); off = off + page {
+		chanSlotBuf[off] = 0
+	}
+}
+
 // ChanSlotMaxInFlight reports the largest number of pool calls that were ever in
 // flight, the measurement the slot count is sized from.
 func ChanSlotMaxInFlight() (n int32) {

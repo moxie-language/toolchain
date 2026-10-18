@@ -321,8 +321,15 @@ being touched: an index is four bytes.
 
 Phase-8 units against these binaries: build, mux-match, spawn-bytes, spawn-cost
 (206us), curl, client and keep-alive PASS in BOTH dispatch modes, and
-no-accumulation is +0 kB in each mode (rss 16400->16400 inline, 7960->7960
+no-accumulation is +0 kB in each mode (rss 16400->16400 inline, 8008->8008
 spawned), ring_committed_kb=4096.
+
+The ring is PRE-FAULTED at pool startup (`chanSlotPrefault`: one byte per page).
+Without it the mapping's pages are faulted by the first few hundred requests,
+which read as retention: the official script measured +2096kB over 400 exchanges
+in spawned mode against the 2048kB threshold. With it, the same sequence is +0 kB
+and the baseline RSS carries the ring (4MB) from startup, which is where a
+queue-owned ring's cost belongs.
 
 ### The channel handler path  [DESIGN, src/net/http/chanpath.mx + chanpool.mx]
 
