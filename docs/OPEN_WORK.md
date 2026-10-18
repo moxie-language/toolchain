@@ -191,6 +191,54 @@ relocation question on the classic path, not a lifetime one; the fix shape is to
 stop making tree construction depend on mutating a fresh node's fields (allocate
 the child explicitly, assign it in the caller), and it needs its own round.
 
+**Round 15: FIXED, and it was three faults in a row, none of them the tree.**
+The receiver-relocation hypothesis was tested first with a standalone fixture (a
+mutating method allocates a child in the receiver's own arena and returns a
+pointer to it, then the caller mutates through that pointer): it did NOT hold in
+isolation - the returned child was the stored child, depth 3, in four shapes
+including a package-level tree and a keyed map child. Diagnostics inside
+`addPattern` then showed the real tree's first level stored but the returned
+child a different node, so the write was lost between the levels. Three faults
+in sequence:
+
+  1. `routingNode` is self-mutating, so a composite literal inside its methods
+     (`c := &routingNode{}`) lands in the receiver's SOVEREIGN data arena, and
+     the codec must not alias sovereign data out of a call (a later compaction
+     can move it). The child the caller got back was therefore a COPY of the
+     child the tree stored. Fix: `newNode()` allocates tree nodes explicitly in
+     the ROOT arena (`runtime.ArenaAlloc(runtime.RootArena(), ...)`); a
+     root-arena node is process-lifetime and not sovereign data, so identity is
+     kept.
+  2. The codec treated the root as a callee's transient top frame whenever the
+     root-arena idiom made it current (`SetCurrentArena(RootArena())`), so even
+     root pointers were copied. Fix: a pointer into the root is never transient,
+     in any encode mode (`codecIsStableArenaAddr`), because the root never dies.
+  3. The root-arena idiom only covers values returned DIRECTLY to the frame that
+     swapped. Registration was `registerErr` (swaps) -> `registerErrInRoot`
+     (works), so the `*pattern` objects were decoded into the intermediate frame
+     and died with it; once 1 and 2 stopped hiding it, the first match panicked
+     in `pattern.lastSegment` with an empty segment list. Fix: registration is
+     ONE function whose body runs under the swap, with explicit restores on every
+     return (no defer - deferred calls are unreliable in a loop on this compiler).
+
+Before: all seven registration shapes answered `pattern=[]`. After:
+
+    ok   identity         stored child is the returned child
+    ok   exact            GET /smoke -> [/smoke]
+    ok   exact-miss       GET /other -> []
+    ok   subtree-root     GET /a/b/c -> [/]
+    ok   subtree-api      GET /api/v1/x -> [/api/]
+    ok   method           HEAD /x -> [GET /x]      (and method-miss POST -> [])
+    ok   host             GET /y -> [example.com/y]
+    ok   host-method-path POST /z/deep -> [POST example.com/z/deep]
+    ok   pkg-default      GET /pkg -> [/pkg]
+
+The fixture is `tests/netsmoke/muxmatch` and it runs as the phase-8 unit
+`netsmoke:mux-match`: the smoke server serves through the CHANNEL path, whose
+router is a plain table, so this is the only unit that would notice a routing
+tree that stores nothing. The `identity` check in it is the regression pin for
+fault 2.
+
 `tests/phase8_netsmoke.sh` is the gate that reports this; it is wired into
 `tests/unitrun.sh` as phase 8. Its build and listen units pass; the curl and
 Moxie-client units assert the handler's body and both fail on the same 404.

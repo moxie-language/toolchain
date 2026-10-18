@@ -21,7 +21,28 @@ package http
 import (
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
+	"runtime"
+	"unsafe"
 )
+
+// newNode allocates one routing node with process lifetime, in the ROOT arena.
+//
+// A node written as a composite literal inside a mutating method lands in the
+// receiver's SOVEREIGN data arena, because that is the allocation scope the
+// compiler gives a mutating method's direct allocations - and the codec must
+// not alias sovereign data out of a call, since a later compaction on that
+// receiver can move it. So the child a registration call returned was a COPY of
+// the child the tree stored: the next level was written to the copy, the tree
+// never received it, and every registration shape answered pattern=[] (exact,
+// subtree, method and host alike; measured with diagnostics inside addPattern).
+//
+// A root-arena node is process-lifetime and is not sovereign data, so the codec
+// keeps its identity across the return and the caller mutates the node the tree
+// holds. The tree needs process lifetime anyway - it is read on every request.
+func newNode() (n *routingNode) {
+	p := runtime.ArenaAlloc(runtime.RootArena(), unsafe.Sizeof(routingNode{}))
+	return (*routingNode)(p)
+}
 
 // A routingNode is a node in the decision tree.
 // The same struct is used for leaf and interior nodes.
@@ -64,7 +85,7 @@ func (n *routingNode) addSegments(segs []segment, p *pattern, h Handler) {
 		if len(segs) != 1 {
 			panic("multi wildcard not last")
 		}
-		c := &routingNode{}
+		c := newNode()
 		n.multiChild = c
 		c.set(p, h)
 	} else if seg.wild {
@@ -89,14 +110,14 @@ func (n *routingNode) set(p *pattern, h Handler) {
 func (n *routingNode) addChild(key []byte) (rroutingNode *routingNode) {
 	if key == "" {
 		if n.emptyChild == nil {
-			n.emptyChild = &routingNode{}
+			n.emptyChild = newNode()
 		}
 		return n.emptyChild
 	}
 	if a := n.findChild(key); a != nil {
 		return a
 	}
-	c := &routingNode{}
+	c := newNode()
 	n.children.add(key, c)
 	return c
 }

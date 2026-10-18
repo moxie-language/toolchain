@@ -2851,32 +2851,46 @@ func (mux *ServeMux) register(patter7 string, handler Handler) {
 }
 
 // registerErr builds the routing tree and the pattern objects it holds, all of
-// which are read on every request. Built in this frame's arena they were gone
-// by the first request: the mux answered 404 for a route main had registered.
-// The middle function is a METHOD because only a receiver's writes are
-// serialised into the caller's arena at return, and that arena is the root here
-// - the shape src/net/hosts.mx uses for the same reason.
+// which are read on every request, so all of it must have process lifetime.
+//
+// It is ONE function for that reason. The root-arena idiom (make the root the
+// current arena, build, restore) only gives the root as the decode target for
+// values returned DIRECTLY to the frame that swapped: a call made through
+// another function pushes that function's own arena, and its return is decoded
+// there instead. The previous shape - registerErr swapping, registerErrInRoot
+// doing the work - therefore built the pattern objects in registerErrInRoot's
+// frame, which dies at return, and the tree held pointers into it (measured:
+// "index out of range" in pattern.lastSegment at the first match, once the tree
+// itself stopped losing its nodes).
+//
+// The tree's NODES are allocated separately and explicitly in the root
+// (routing_tree.mx newNode): a composite literal inside a mutating method lands
+// in the receiver's sovereign data arena, which the codec must not alias out of
+// a call.
 func (mux *ServeMux) registerErr(patstr string, handler Handler) (rerr error) {
 	saved := runtime.CurrentArena()
 	runtime.SetCurrentArena(runtime.RootArena())
-	rerr = mux.registerErrInRoot(patstr, handler)
-	runtime.SetCurrentArena(saved)
-	return rerr
-}
 
-func (mux *ServeMux) registerErrInRoot(patstr string, handler Handler) (rerr error) {
+	// Every path restores explicitly. No defer: this compiler's deferred calls
+	// are unreliable inside a loop (a recorded defect), and a restore that does
+	// not run leaves the root as the current arena for the rest of the process,
+	// which is a much worse failure than the verbosity.
 	if patstr == "" {
+		runtime.SetCurrentArena(saved)
 		return errors.New("http: invalid pattern")
 	}
 	if handler == nil {
+		runtime.SetCurrentArena(saved)
 		return errors.New("http: nil handler")
 	}
 	if f, o3 := handler.(HandlerFunc); o3 && f == nil {
+		runtime.SetCurrentArena(saved)
 		return errors.New("http: nil handler")
 	}
 
 	pat, err := parsePattern(patstr)
 	if err != nil {
+		runtime.SetCurrentArena(saved)
 		return fmt.Errorf("parsing %q: %w", patstr, err)
 	}
 
@@ -2891,10 +2905,12 @@ func (mux *ServeMux) registerErrInRoot(patstr string, handler Handler) (rerr err
 
 	// Check for conflict.
 	if er5 := mux.index.possiblyConflictingPatterns(pat, &registerConflict{pat: pat}); er5 != nil {
+		runtime.SetCurrentArena(saved)
 		return er5
 	}
 	mux.tree.addPattern(pat, handler)
 	mux.index.addPattern(pat)
+	runtime.SetCurrentArena(saved)
 	return nil
 }
 

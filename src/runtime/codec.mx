@@ -66,6 +66,20 @@ func codecIsStableArenaAddr(p uintptr) (ok bool) {
 	if domainRoot == nil {
 		return true
 	}
+	// The ROOT arena never dies, so a pointer into it is never transient, in
+	// any encode mode: not at a return, not in a sovereign store-back, not as
+	// a plain value. The root can only appear ON the fn stack through a
+	// temporary SetCurrentArena(RootArena()) switch - the root-arena idiom in
+	// src/net/hosts.mx and net/http's mux registration - and treating it as a
+	// callee's frame made every pointer such a function built get COPIED into
+	// the caller's arena while the receiver stored the original. Measured on
+	// the classic ServeMux: the child registration returned and the child the
+	// tree stored were different nodes, the method level was written to the
+	// copy, and every registration shape (exact, subtree, method, host)
+	// answered pattern=[].
+	if codecArenaContains(trueRootArena(), p) {
+		return true
+	}
 	if codecRetTransient {
 		// Return-value encoding. The callee's working arena is the top of the
 		// fn stack, and it dies at return in both shapes: a plain frame is

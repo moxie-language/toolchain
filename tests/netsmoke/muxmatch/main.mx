@@ -1,0 +1,127 @@
+// The classic ServeMux's matching, one assertion per registration shape.
+//
+// This is its own fixture because the phase-8 smoke server serves through the
+// CHANNEL path, whose router is a plain table: a broken pattern tree could pass
+// every network unit and still answer 404 to every real application. The bug
+// this pins was not in the matching logic but in whether the tree still held
+// what registration wrote: every shape below answered pattern=[] because the
+// node a registration call returned was a COPY of the node the tree stored
+// (src/runtime/codec.mx, return-value stability: the root arena was treated as
+// the callee's transient top frame).
+//
+// usage: muxmatch            exit 0 when every shape matches, 1 otherwise
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"os"
+	"runtime"
+)
+
+// rec is the smallest stand-in for a routing node: a mutating method that
+// allocates a child of its own arena and stores it, with the ROOT arena made
+// current exactly the way mux registration does it.
+type rec struct {
+	key   string
+	child *rec
+}
+
+func (x *rec) add(key string) (c *rec) {
+	c = &rec{key: key}
+	x.child = c
+	return c
+}
+
+var fails int32
+
+func body(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte("ok\n"))
+}
+
+// probe asks the mux to match a request and compares the pattern it reports.
+func probe(label string, mux *http.ServeMux, method, rawurl, wantPat string) {
+	req, err := http.NewRequest(method, rawurl, nil)
+	if err != nil {
+		fmt.Printf("FAIL %-16s request: %v\n", label, err)
+		fails = fails + 1
+		return
+	}
+	h, pat := mux.Handler(req)
+	if h == nil {
+		fmt.Printf("FAIL %-16s %s %s: no handler, pattern=[%s]\n", label, method, req.URL.Path, pat)
+		fails = fails + 1
+		return
+	}
+	if pat != wantPat {
+		fmt.Printf("FAIL %-16s %s %s: pattern=[%s] want [%s]\n", label, method, req.URL.Path, pat, wantPat)
+		fails = fails + 1
+		return
+	}
+	fmt.Printf("ok   %-16s %s %s -> [%s]\n", label, method, req.URL.Path, pat)
+}
+
+// identity pins the property the tree depends on: a child built while the root
+// arena is current is the SAME node the receiver stored, so the node the caller
+// mutates is the node the structure holds. This is what the ServeMux bug was:
+// the two diverged and every route vanished.
+func identity() {
+	a := &rec{key: "a"}
+	saved := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
+	b := a.add("b")
+	runtime.SetCurrentArena(saved)
+	if a.child != b {
+		fmt.Printf("FAIL %-16s stored child and returned child differ\n", "identity")
+		fails = fails + 1
+		return
+	}
+	fmt.Printf("ok   %-16s stored child is the returned child\n", "identity")
+}
+
+func main() {
+	identity()
+
+	// Exact path.
+	exact := http.NewServeMux()
+	exact.HandleFunc("/smoke", body)
+	probe("exact", exact, "GET", "http://host/smoke", "/smoke")
+	probe("exact-miss", exact, "GET", "http://host/other", "")
+
+	// Subtree, both the root subtree and a named one.
+	root := http.NewServeMux()
+	root.HandleFunc("/", body)
+	probe("subtree-root", root, "GET", "http://host/", "/")
+	probe("subtree-root-deep", root, "GET", "http://host/a/b/c", "/")
+
+	api := http.NewServeMux()
+	api.HandleFunc("/api/", body)
+	probe("subtree-api", api, "GET", "http://host/api/v1/x", "/api/")
+
+	// Method pattern, and HEAD falling back to GET.
+	meth := http.NewServeMux()
+	meth.HandleFunc("GET /x", body)
+	probe("method", meth, "GET", "http://host/x", "GET /x")
+	probe("method-head", meth, "HEAD", "http://host/x", "GET /x")
+	probe("method-miss", meth, "POST", "http://host/x", "")
+
+	// Host pattern.
+	host := http.NewServeMux()
+	host.HandleFunc("example.com/y", body)
+	probe("host", host, "GET", "http://example.com/y", "example.com/y")
+
+	// Host + method + exact path, the fully specified shape.
+	all := http.NewServeMux()
+	all.HandleFunc("POST example.com/z/deep", body)
+	probe("host-method-path", all, "POST", "http://example.com/z/deep", "POST example.com/z/deep")
+
+	// The package-level mux, the shape every main() uses.
+	http.HandleFunc("/pkg", body)
+	probe("pkg-default", http.DefaultServeMux, "GET", "http://host/pkg", "/pkg")
+
+	if fails != 0 {
+		fmt.Printf("muxmatch: %d shape(s) did not match\n", fails)
+		os.Exit(1)
+	}
+	fmt.Printf("muxmatch ok\n")
+}
