@@ -164,6 +164,33 @@ pattern and the MATCH is what fails. Look at `src/net/http/routing_tree.mx` -
 what `parsePattern("/")` produces, the `addSegments`/`set` path, and the subtree
 case in `matchOrRedirect` - before touching lifetimes again.
 
+**Round 14: re-run after the leak fix - NOT the same bug, and every shape
+misses.** The unchanged repro (register `"/"`, ask the mux for `/smoke`) answers
+`pattern=[]`, exactly as before, so the orphaned-group leak was not the mux bug.
+A one-build probe of five registration shapes sharpens it a lot:
+
+    exact /smoke           pattern=[]
+    exact /smoke, /other   pattern=[]
+    subtree /              pattern=[]
+    subtree /, /           pattern=[]
+    method "GET /"         pattern=[]
+    host example.com/      pattern=[]
+    pkg HandleFunc /       pattern=[]
+
+An EXACT pattern does not match the same path, and `/` does not match `/`, so
+nothing about the "/" subtree, hosts or methods is involved: the lookup is dead
+for every shape. Registration's first level survives (`root.emptyChild` exists,
+flags=1) and the second level does not, which is a write lost between
+`n = n.addChild(p.method)` and the match. The hypothesis this points at: the
+first `addChild` allocates the host node INSIDE the receiver's sovereign data
+arena (a mutating method's direct allocations go there), the second `addChild`
+then mutates a receiver that lives in that arena, and a mutating receiver's field
+writes are serialised at return and decoded into the CALLER's arena - so the
+write lands on a copy the caller never reads. That is a codegen/receiver
+relocation question on the classic path, not a lifetime one; the fix shape is to
+stop making tree construction depend on mutating a fresh node's fields (allocate
+the child explicitly, assign it in the caller), and it needs its own round.
+
 `tests/phase8_netsmoke.sh` is the gate that reports this; it is wired into
 `tests/unitrun.sh` as phase 8. Its build and listen units pass; the curl and
 Moxie-client units assert the handler's body and both fail on the same 404.
@@ -260,6 +287,19 @@ Two unrelated call sites, one fault: allocation policy inherited dynamically.
 allocates for its own use opens its own scope - the codec, the formatter, the
 error path, the header parser, the checker. The caller's arena is never a valid
 place to put callee scratch.
+
+**The corollary, measured in round 14: an exit is one function, not three.** A
+scope boundary must release everything allocated under it, child groups
+included - and the way that goes wrong is that the three exits (reset, free,
+release) drift: `ArenaFree` and `ArenaRelease` released the sovereign groups and
+`ArenaReset` did not, which was the whole leak. The durable form is therefore not
+the missing call added to the third exit, it is `arenaReleaseGroups`: reset, free
+and release all call it, it carries the fail-loud check (`arena: exit orphaned
+sovereign groups`), and a new exit written later has one thing to call instead of
+one thing to remember. The same rule applies to a handler path: a request has ONE
+arena boundary (enter, work, exit) so the normal return and every abort - parse
+failure, missing route, disconnected client - leave through the same door and the
+same compaction drain.
 
 **Data in flight is not an arena object at all.** An arena frees at a scope
 boundary and a message crosses scopes by definition, so a message buffer belongs
@@ -835,9 +875,16 @@ on return and the Request then holds a dangling header immediately):
      self-mutating operation on it - the allocation scope is part of the
      receiver's identity, so nothing has to be recovered at use time and
      `trueRootArena` becomes unreachable rather than a fallback;
-  2. the group is a CARVED REGION of the parent arena, not its own mapping - a
-     map per request must not cost an mmap, or the instrument's arenas=13325
-     becomes the whole story;
+  2. the group is a ROOT-LIFETIME group from the bounded recycle list, NOT a
+     carved region of the parent arena. Round 14 measured why the carve is
+     wrong: a group's ownership MOVES (`sovRekeyRelocated` re-homes it from the
+     receiver's arena to the group's own data arena when a receiver is
+     relocated), so a group carved in the parent is unmapped while the receiver
+     map still points at it - the classic client died with "invalid Read on
+     closed Body" on 10 of 12 requests when that was tried. The shape that
+     works is the one the sovereign group now uses: root-lifetime storage, a
+     bounded free list (`sovGroupTake`/`sovRecycleGroup`), so the cost is bounded
+     and nothing dangles;
   3. `readRequest` builds the `Header` in the arena it is GIVEN, which is the
      request arena, so the map is born in the scope that owns it;
   4. a rehome (a move across groups) is an explicit operation that moves or
@@ -845,7 +892,7 @@ on return and the Request then holds a dangling header immediately):
      guessing.
 
 Machinery already present: `sovNewArena`, `sovTrackArenaGroup`, `sovDataArena`,
-`codecSovereignArena`.
+`codecSovereignArena`, `sovGroupTake`/`sovRecycleGroup`.
 
 **Acceptance test is the instrument itself**: scope 0 retained goes to zero, the
 root arena gets its own row (and stays flat), the header's bucket history dies

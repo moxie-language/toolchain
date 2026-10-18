@@ -1824,11 +1824,37 @@ func sovUnqueueCompact(g *sovGroup) {
 	g.queued = false
 }
 
+// arenaReleaseGroups is the ONE teardown every arena exit shares: the frame
+// pop (ArenaRelease), the unmap (ArenaFree) and the reuse (ArenaReset) all end
+// the lifetime of everything the arena holds, so all three release the sovereign
+// groups whose receivers live in it, and all three check that the books balance
+// afterwards.
+//
+// One function rather than three copies is the durable form of this fix. The
+// leak was a single exit path (reset) missing the invalidation while the other
+// two had it; a second copy of the sequence is exactly how that happens, and a
+// new exit added later would have needed to remember. It also puts the fail-loud
+// check on every path: a group left behind is a crash at the boundary that broke
+// the rule, not a retention curve three thousand requests later.
+func arenaReleaseGroups(a *Arena) {
+	sovInvalidateArena(a)
+	a.sovGroupList = a.sovGroupList[:0]
+	if a.sovGroups != 0 || len(a.sovGroupList) != 0 {
+		printstring("arena exit orphaned groups: arena=")
+		printuint64(uint64(uintptr(unsafe.Pointer(a))))
+		printstring(" groups=")
+		printuint64(uint64(uint32(a.sovGroups)))
+		printstring(" list=")
+		printuint64(uint64(uint32(len(a.sovGroupList))))
+		printstring("\n")
+		runtimePanic("arena: exit orphaned sovereign groups")
+	}
+}
+
 // sovInvalidateArena releases every sovereign group whose receiver lives
 // inside a's regions. The binding rule: a sovGroup lives exactly as long
-// as its receiver's arena. Called from ArenaFree and ArenaRelease (which
-// runs after the returns are processed in the epilogue). O(1) when no
-// group is tracked in this arena.
+// as its receiver's arena. Every exit reaches it through arenaReleaseGroups.
+// O(1) when no group is tracked in this arena.
 func sovInvalidateArena(a *Arena) {
 	if a == nil || domainRoot == nil || a.sovGroups <= 0 {
 		return
@@ -2178,11 +2204,9 @@ func ArenaFree(a *Arena) {
 	if a == nil {
 		return
 	}
+	arenaReleaseGroups(a)
 	arenaScopeFreed(a.scope, uintptr(a.alloc))
 	a.alloc = 0
-	// Binding rule: sovereign groups whose receivers live in this arena
-	// die with it.
-	sovInvalidateArena(a)
 	for i := int32(0); i < a.nregions; i++ {
 		if a.sovereign != 0 {
 			sovRangeUnregister(a.regions[i].base)
@@ -2213,32 +2237,14 @@ func ArenaReset(a *Arena) {
 		return
 	}
 	// A reset ends the lifetime of everything in the arena as surely as a free
-	// does, so the binding rule holds here too: every sovereign group whose
-	// receiver lives in this arena dies with it. This used to clear
+	// does, so the binding rule holds here too - through the same teardown the
+	// other exits use. This path is where the leak lived: it used to clear
 	// sovGroupList without releasing the groups, which orphaned each one - its
 	// data and record arenas stayed mapped and kept growing, and its entry
 	// stayed in the root-keyed receiver map, so the next request's receiver at
 	// the same address inherited a group still holding the previous request's
-	// allocations. On the http channel path that was the whole leak: 47 region
-	// grows per 300 requests, every one of them a sovereign doubling, and ~30MB
-	// of RSS per 1000 keep-alive requests.
-	sovInvalidateArena(a)
-	a.sovGroupList = a.sovGroupList[:0]
-	// Fail loud, not silent: after releasing the groups the list names, both the
-	// list and the count must be empty. A reset that leaves a group behind is
-	// exactly the half-free that grew the group arenas without bound, so it must
-	// be a crash at the boundary that broke the rule, not a retention curve
-	// discovered later.
-	if a.sovGroups != 0 || len(a.sovGroupList) != 0 {
-		printstring("arena reset orphaned groups: arena=")
-		printuint64(uint64(uintptr(unsafe.Pointer(a))))
-		printstring(" groups=")
-		printuint64(uint64(uint32(a.sovGroups)))
-		printstring(" list=")
-		printuint64(uint64(uint32(len(a.sovGroupList))))
-		printstring("\n")
-		runtimePanic("arena: reset orphaned sovereign groups")
-	}
+	// allocations. 47 region grows per 300 requests, ~30MB of RSS per 1000.
+	arenaReleaseGroups(a)
 	arenaScopeFreed(a.scope, uintptr(a.alloc))
 	a.alloc = 0
 	if a.nregions > 1 {
@@ -2288,9 +2294,9 @@ func ArenaRelease(a *Arena) {
 	if a == nil {
 		return
 	}
-	// Binding rule: receivers inside this arena are dead once the function
-	// returns - release their groups after the returns were processed.
-	sovInvalidateArena(a)
+	// The frame pop is an exit like any other: receivers inside this arena are
+	// dead once the function returns, so their groups go with it.
+	arenaReleaseGroups(a)
 	tooBig := arenaPoolBytes+a.regions[0].cap > arenaPoolMaxBytes
 	if arenaPoolN >= arenaPoolMax || a.sovereign != 0 || tooBig {
 		ArenaFree(a)

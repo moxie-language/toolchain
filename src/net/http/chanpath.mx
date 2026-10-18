@@ -276,11 +276,17 @@ func chanWriteResponse(bw *bufio.Writer, resp *Resp, keepAlive bool) (ok bool) {
 	return true
 }
 
-// chanServeRequest serves one parsed request: decode it, make the one handler
-// call, write the response, free the arena.
-func chanServeRequest(bw *bufio.Writer, req *Request, routeID int32, h ChanHandler, pool *chanPool, arena *runtime.Arena) (keepAlive bool) {
+// chanServeRequest serves one parsed request: make the one handler call and
+// write the response.
+//
+// It does NOT enter or reset the arena. The request arena is opened and closed
+// once per request by chanHandleOne, which is the boundary - a second enter and
+// reset here used to be harmless only because both exits were idempotent. One
+// boundary is what makes the abort paths (a parse failure, a missing route, a
+// client that disconnects) and the normal path take the same exit and the same
+// compaction drain.
+func chanServeRequest(bw *bufio.Writer, req *Request, routeID int32, h ChanHandler, pool *chanPool) (keepAlive bool) {
 	prevScope := runtime.SetArenaScope(ArenaScopeHandler)
-	runtime.ManualArenaEnter(arena)
 
 	rq := &Req{
 		Method:  req.Method,
@@ -304,9 +310,6 @@ func chanServeRequest(bw *bufio.Writer, req *Request, routeID int32, h ChanHandl
 	runtime.SetArenaScope(ArenaScopeWrite)
 	wrote := chanWriteResponse(bw, resp, keep)
 	runtime.SetArenaScope(prevScope)
-
-	runtime.ManualArenaExit(arena)
-	runtime.ArenaReset(arena)
 	return keep && wrote
 }
 
@@ -418,10 +421,14 @@ func serveChanConn(c net.Conn, mux *ChanMux, pool *chanPool, idle time.Duration)
 // that frame lived as long as the connection, and every request's Request
 // (headers and all) accumulated there at ~13kB a request. A request is one
 // function call, and its memory goes with it.
-// chanHandleOne runs ONE request, decode included, inside the request arena.
-// The Header map is born there, so its owner arena is the arena this call
-// resets at the end - the map's own answer about whose lifetime its buckets
-// belong to is then correct, and the buckets are freed with the request.
+// chanHandleOne is the request's ONE arena boundary: decode, handler call,
+// response write, and then the single exit every path shares - the reset, the
+// sovereign-group teardown it performs (src/runtime/alloc.mx arenaReleaseGroups)
+// and, in the caller's loop, the compaction drain.
+//
+// The Header map is born in this arena, so its owner arena is the one this call
+// resets - the map's own answer about whose lifetime its buckets belong to is
+// then correct and the buckets are freed with the request.
 func chanHandleOne(c net.Conn, br *bufio.Reader, bw *bufio.Writer, mux *ChanMux, pool *chanPool, arena *runtime.Arena, idle time.Duration) (keep bool) {
 	runtime.ManualArenaEnter(arena)
 	keep = chanHandleInner(c, br, bw, mux, pool, arena, idle)
@@ -454,7 +461,7 @@ func chanHandleInner(c net.Conn, br *bufio.Reader, bw *bufio.Writer, mux *ChanMu
 		chanWritePlain(bw, StatusNotFound)
 		return false
 	}
-	return chanServeRequest(bw, req, id, h, pool, arena)
+	return chanServeRequest(bw, req, id, h, pool)
 }
 
 // chanWritePlain writes a bodyless status response, for the shell's own errors.
