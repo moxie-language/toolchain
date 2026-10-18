@@ -1,8 +1,8 @@
 # Axioms of Moxie
 
-Two axioms generate this language. Everything else in it is a derivative, not a decision. Nothing in Moxie is a preference, a convention, or a matter of taste, and the reason there is nothing to argue about is that the axioms are strong enough and few enough that the design closes.
+Three axioms generate this language. Everything else in it is a derivative, not a decision. Nothing in Moxie is a preference, a convention, or a matter of taste, and the reason there is nothing to argue about is that the axioms are strong enough and few enough that the design closes.
 
-The operational test that keeps this honest: a proposed feature must name the axiom that forces it. If neither axiom forces it, it is an opinion, and it is deleted.
+The operational test that keeps this honest: a proposed feature must name the axiom that forces it. If no axiom forces it, it is an opinion, and it is deleted.
 
 ---
 
@@ -10,13 +10,15 @@ The operational test that keeps this honest: a proposed feature must name the ax
 
 **Every property that governs execution is declared and statically checkable. Nothing that determines behaviour is inferred, negotiated, or discovered at runtime.**
 
-The declared set is small and closed:
+The declared set is small and explicit:
 
 - the topology (which component is the parent of which)
 - for each product, its consumers
 - for each product, its required lifetime
 - for each pooled task, its expected rate
 - every message type that crosses every edge
+
+A1 is the declaration requirement. It says what must be written down. It does not by itself say that the written set is exhaustive; that is A3.
 
 ## A2 - Total isolation
 
@@ -28,6 +30,21 @@ Two clauses, and both are load-bearing:
 - **property:** single authority. No fact has two canonical holders.
 
 The mechanism clause alone is insufficient. Pure isolation of access still permits two components to hold copies of the same fact and both treat them as canonical. That is replication, and replication is the contested-claim failure that the topology rules exist to eliminate. Isolation supplies the mechanism; single authority supplies the property that matters.
+
+A2 is the memory requirement. It says what cannot be reached in memory. It does not by itself say that the world outside memory is closed off; that is A3.
+
+## A3 - Closure
+
+**Every capability and every input is declared, and the declaration is exhaustive: anything not declared is unreachable. The default is deny.**
+
+Two clauses, and both are load-bearing:
+
+- **capability:** a component can reach only what its interface names. No ambient filesystem, network, clock, environment, signal, or global registry.
+- **input:** every perturbation is a declared message or a declared value. A clock read is an input; if it is not declared, it is not allowed.
+
+The capability clause alone is insufficient. A closed set of handles still permits a component to read the wall clock or an environment variable, which are inputs that govern behaviour without appearing in the interface. The input clause alone is insufficient: a component can be handed a declared value that is a handle to an undeclared resource. Closure requires both the set of reachable things and the set of perturbations to be exhaustive.
+
+A3 is the authority requirement. It says what cannot be reached even though it is not another component's memory. A2 removes the shared address space; A3 removes the ambient world.
 
 ---
 
@@ -50,21 +67,38 @@ The absence of A1 admits only two treatments: conservative over-approximation, o
 
 **Containment is by construction, not by trust.** A wild pointer cannot leave its arena, so there is no capability check on every access, no software sandbox, no reference counting to get right.
 
-**Effects become enumerable.** A component cannot be perturbed by anything except its inputs, so the effects it has are exactly the messages it emits. Nothing else is reachable.
+**Effects become enumerable, once A3 closes the ambient world.** A component cannot be perturbed by anything except its declared inputs, so the effects it has are exactly the messages it emits. Nothing else is reachable. A2 supplies the private arena; A3 supplies the closed input set. Without A3, the component can still be perturbed by a file, a clock, or a signal, and the enumeration is false.
 
-**Purity at the useful granularity.** A component's observable behaviour is a function of its declared inputs and its own arena. That is the kind of purity a type system can enforce, and the kind that makes a component replaceable, testable in isolation, and restartable cold.
+**Purity at the useful granularity.** A component's observable behaviour is a function of its declared inputs and its own arena. A2 supplies the arena; A3 supplies the closure of the inputs. That is the kind of purity a type system can enforce, and the kind that makes a component replaceable, testable in isolation, and restartable cold.
 
-### Why exactly two
+### Why A3
 
-- **Independent.** A1 does not imply A2: a fully declared shared-memory language is possible. A2 does not imply A1: an isolated system with runtime negotiation is possible.
-- **Auditable.** Two axioms fit in a head, which means they can be checked for consistency and redundancy. Every other language also has an axiom set; it is unwritten, larger, partly contradictory, and owned by nobody. Anything unauditable survives by default as an opinion, because you cannot delete what has never been stated.
-- **Absorbing.** Two strong axioms with a mutual intersection close the design. What looks like freedom in other languages is the gap an axiom failed to close.
+Undeclared authority has a bill, and the bill is paid in exactly the failure modes of ambient state:
+
+- hidden inputs, because a clock, an environment variable, a file, a signal, or a random source changes behaviour without appearing in the interface
+- hidden effects, because a log line, a cache write, a temporary file, or a metric changes the world without being a declared message
+- hidden coupling, because a global name, a service registry, or a search path lets a component depend on a deployment it never declared
+- hidden privilege, because an inherited descriptor, a credential, or a process-wide configuration grants authority the interface never named
+
+The absence of A3 admits only two treatments: a runtime sandbox that intercepts every ambient access, or an audit that reconstructs the ambient set after the fact. The sandbox makes the observer a co-owner of every capability, which violates A2. The audit is not a static check and cannot bound behaviour, because the set of ambient facts is open. There is no free repair. So closure is the only path, and once declared, the capability check is decidable: calls are syntactic, names resolve at the boundary, and comparing the declared set with the actual set is a syntax pass.
+
+The handler contract is the proof. The shell owns the socket, the framing, the accept loop, and the deadlines; the handler does no I/O and keeps no state between requests. That is A3 in practice. Naming it makes the purity structural rather than stylistic: the handler is closed because the shell is the only component with ambient authority.
+
+The cost is expressiveness. No ambient clock, no ambient I/O, no ambient identity, no ambient randomness, no ambient configuration. The world is behind the shell. That is the price of enumerable effects, and it is paid at the boundary.
+
+### Why exactly three
+
+- **Independent.** A1 does not imply A2: a fully declared shared-memory language is possible. A1 does not imply A3: a declared topology with an ambient clock is possible. A2 does not imply A1: an isolated system with runtime negotiation is possible. A2 does not imply A3: per-domain memory with a global file is possible. A3 does not imply A1: a closed capability set with undeclared topology is possible. A3 does not imply A2: a closed capability set over shared memory is possible.
+- **Auditable.** Three axioms still fit in a head, which means they can be checked for consistency and redundancy. Every other language also has an axiom set; it is unwritten, larger, partly contradictory, and owned by nobody. Anything unauditable survives by default as an opinion, because you cannot delete what has never been stated.
+- **Absorbing.** Three strong axioms with a triple intersection close the design. A1 closes inference, A2 closes sharing, A3 closes ambient authority. What looks like freedom in other languages is the gap an axiom failed to close. The residue is what physics and the wire format refuse to close.
 
 ---
 
 ## Lemmas
 
-Derivations are marked with the axiom they come from. Some are forced by A1 alone (checkability costs), some by A2 alone (isolation costs), some by their intersection.
+Derivations are marked with the axiom they come from. Some are forced by A1 alone (checkability costs), some by A2 alone (isolation costs), some by A3 alone (closure costs), some by their intersections.
+
+The closure lemmas are numbered from L31, so that every reference already in the tree remains valid. L29 and L30 keep their original numbers but now derive from the triple intersection. The derivation label, not the number, is the authority.
 
 ### From A1 alone
 
@@ -156,23 +190,80 @@ Because a leaf is a function of its declared inputs, a dead worker restarts cold
 **L28. Topology is semantic; transport is mechanical.**
 Because the channel is an entity, the same declared tree lowers to in-process rings, to hardware queues on a network-on-chip, or to sockets across machines, without the topology changing. Topology is invariant across deployment scale, and transport is a lowering decision.
 
+### From A3 alone
+
+**L31. No ambient input.**
+Every perturbation is a declared message or a declared value. A clock read, a file change, a signal, an environment variable, a random source, or a locale is an input; if it is not in the interface, it is unreachable. Corollary: time, entropy, identity, locale, and configuration are capabilities, not globals. The runtime may provide a clock service, but the service is a declared input, not an ambient now().
+
+**L32. No ambient capability.**
+A component can reach only what its interface names. File descriptors, handles, registry entries, service names, and network addresses are granted, not inherited. Corollary: no getenv, no global registry, no service locator, no implicit DNS, no magic paths. Authority is a parameter, not a context.
+
+**L33. The interface is a closed set.**
+The declaration is exhaustive; the default is deny. A behaviour that cannot be attributed to a declared input is a bug in the declaration, not a runtime surprise. Corollary: the reviewer checks the absence, not just the presence. A component that passes every positive test can still violate A3 by reading something it never declared.
+
+**L34. Authority is a parameter, not a context.**
+A capability is passed explicitly across the boundary. It is not read from ambient state. Corollary: no ambient identity, no inherited credentials, no process-wide configuration, no getuid, no getcwd. The shell supplies identity and context as declared values.
+
+**L35. Effects are the declared messages.**
+A component's observable effects are exactly the messages it emits. A file write, a network call, a clock adjustment, a signal, or a log line is an effect and must be a capability. Corollary: no hidden side channels through the filesystem, network, environment, or process table.
+
+**L36. Failure is an input.**
+A crash, signal, timeout, or disconnect of another component reaches this one only as a declared message. Corollary: no ambient failure propagation. The supervisor relationship is declared, and a death is reported to the supervisor rather than observed through a global process table. A2 supplies containment; A3 supplies the input status of the failure.
+
+**L37. Policy is declared, not ambient.**
+Retries, timeouts, backoff, deadlines, and rate limits are declared policy, not hidden defaults. Corollary: the scheduler's clock is not visible to user code except through declared deadlines. A timeout that is not in the interface is an undeclared input.
+
+**L38. Names resolve at the boundary.**
+A component cannot resolve an undeclared name. Naming is a capability. Corollary: no ambient DNS, no global service registry, no magic paths, no implicit search path. The shell resolves names and passes the result as a declared capability.
+
+**L39. Ambient authority is confined to the shell.**
+The component that owns the OS interface is the one place where ambient authority is allowed, because physics puts the syscall boundary there. It exposes the world as declared capabilities; every other component is closed. Corollary: the handler path is pure because the shell is the only component with authority in that path. The syscall surface of the shell is the trust boundary, and its audit is the list of syscalls it can make.
+
+### From A1, A2 and A3 together
+
 **L29. Coarse-grained purity.**
-Fine-grained purity is given up (a leaf mutates its own arena) in exchange for a component whose observable behaviour is fully determined by its declared inputs. This is the purity that a type system can enforce at this granularity, and the only kind that makes replacement and cold restart sound.
+Fine-grained purity is given up (a leaf mutates its own arena) in exchange for a component whose observable behaviour is fully determined by its declared inputs. A2 supplies the private arena; A3 supplies the closure of the declared inputs; A1 supplies the static check. This is the purity that a type system can enforce at this granularity, and the only kind that makes replacement and cold restart sound.
 
 **L30. The axioms in silicon delete coherence and the memory model.**
-A hardware architecture that enforces A2 has no shared address space and therefore no coherence protocol, no directories, no invalidation traffic, and no memory consistency model. The interconnect becomes point-to-point channels with buffering, which removes snoop traffic and scales where a bus does not. Fault containment is by construction. Historical instances of this architecture class (the transputer, the Cell BE local stores) were simpler and more robust than their coherent contemporaries and lost commercially because no compiler made the topology a first-class reviewable artifact, not because of the silicon. The safety-critical domain, where certification demands provable isolation, independently converged on these axioms (ARINC 653 partitioned domains with no shared memory). What hardware cannot remove is the cost of the transfer itself, and the one place the axiom is violated by physics is DMA and MMIO, where the correct response is to minimise the shared window, which is what an IOMMU and SR-IOV already are.
+A hardware architecture that enforces A2 has no shared address space and therefore no coherence protocol, no directories, no invalidation traffic, and no memory consistency model. The interconnect becomes point-to-point channels with buffering, which removes snoop traffic and scales where a bus does not. Fault containment is by construction. Historical instances of this architecture class (the transputer, the Cell BE local stores) were simpler and more robust than their coherent contemporaries and lost commercially because no compiler made the topology a first-class reviewable artifact, not because of the silicon. The safety-critical domain, where certification demands provable isolation, independently converged on these axioms (ARINC 653 partitioned domains with no shared memory). A3 extends the same deletion to ambient authority: a component with no ambient input cannot be perturbed by a device it did not declare. What hardware cannot remove is the cost of the transfer itself, and the one place the axiom is violated by physics is DMA and MMIO, where the correct response is to minimise the shared window, which is what an IOMMU and SR-IOV already are. The shell is the software analogue of that window.
+
+**L40. The capability graph is the topology.**
+A1 declares the topology; A3 declares the capabilities. The two graphs must coincide. A capability that crosses a boundary the topology does not declare is an undeclared edge; a declared edge with no capability is a dead channel. Corollary: capability placement is checkable by the same syntactic diff as topology placement, and the review surface is the pair of declarations.
+
+**L41. The boundary transfers capabilities, not just values.**
+A message crossing a boundary carries values and, where declared, capabilities. The decode is the capability transfer: a handle that survives the decode is a declared capability, and a handle that does not decode is not a capability. Corollary: no ambient handle can be smuggled through a message, because the decode is the only way through.
+
+**L42. A capability cannot be amplified.**
+A component cannot acquire a capability it was not given. It can pass a capability it holds only where the interface declares the delegation. Corollary: no ambient privilege escalation, no forging a handle, no reading a descriptor it was not granted. A2's single authority supplies the ownership; A3's closure supplies the grant.
+
+**L43. The closed interface is testable by absence.**
+The compiler can compare the declared capability set with the actual calls, and the runtime can audit that no ambient handle is open and no undeclared clock or file access occurred. Corollary: the A3 instrument is a capability audit, not a memory report. The negative test is the one that matters: nothing undeclared was reached.
+
+**L44. The world is a capability, not a context.**
+The external world (files, sockets, clocks, devices, identity) enters the system only as a declared capability at the shell. Corollary: the same program lowers to a different world by changing the shell's capability set, not the component's code. This is the A3 analogue of L28: topology is semantic, transport is mechanical; capability is semantic, world is mechanical.
+
+**L45. Ordering is the channel's, not the clock's.**
+A component cannot observe a global clock to order events across boundaries. The only cross-boundary order is the order of declared messages. Corollary: no wall-clock timestamps in user code for ordering; a timestamp is an input, and the channel's sequence is the authority. This eliminates the clock-skew and time-of-check-to-time-of-use classes at the boundary.
+
+**L46. Randomness is an input.**
+A random source is a declared capability, not an ambient rand(). Corollary: a component's behaviour is reproducible from its declared inputs, including the entropy stream. This is what makes replay and cold restart sound. A1's static check supplies the declaration; A3's closure supplies the fact that no other entropy is reachable.
+
+**L47. Configuration is an input, not an environment.**
+Deployment configuration is a declared value, not an environment variable, a global file, or a command-line default. Corollary: the same binary runs in any deployment by changing the input, not the environment. A1's declaration supplies the shape; A3's closure supplies the fact that no other configuration is reachable.
 
 ---
 
 ## The residue
 
-Two things neither axiom settles. They are acknowledged costs, not derived decisions, and denying them would make the axiom claim brittle.
+Three things none of the axioms settles. They are acknowledged costs, not derived decisions, and denying them would make the axiom claim brittle.
 
 **The spin-versus-futex boundary.** A hardware tradeoff present in any design. It is the single place where the language's latency characteristics rest on kernel API semantics rather than on its own type system, which is why it is a tuning parameter and cannot be ruled on by the compiler.
 
 **The universal wire format.** A chosen tax. A bespoke per-pair encoding would be cheaper per byte. Universality of interface is bought against O(n squared) protocol-pair coupling. Note that universality does not require runtime reflection, because the schema is declared once and known statically: the tax is a fixed-rate copy, not a negotiation or a discovery.
 
-Also acknowledged, from A2: the expressiveness that is given up. No in-place mutation of a shared structure, so no lock-free algorithms, no zero-copy shared buffers, no DMA-style sharing, and no cross-component in-place numerics. The single escape is at the physical edge, where the hardware itself shares memory.
+**The syscall boundary.** A3 closes the component, not the machine. The shell must call the OS, and the OS is ambient by physics. The correct response is to minimise the window and audit the list, the same way L30 treats DMA and MMIO. This is a residue, not a violation: the axiom applies to components, and the shell is the designated exception.
+
+Also acknowledged, from A2: the expressiveness that is given up. No in-place mutation of a shared structure, so no lock-free algorithms, no zero-copy shared buffers, no DMA-style sharing, and no cross-component in-place numerics. The single escape is at the physical edge, where the hardware itself shares memory. From A3: the ambient world is given up. No ambient clock, no ambient I/O, no ambient identity, no ambient randomness, no ambient configuration. The single escape is the shell, which owns the world and exposes it as declared capabilities.
 
 ---
 
@@ -187,6 +278,12 @@ Also acknowledged, from A2: the expressiveness that is given up. No in-place mut
 **C4. The profiler produces two separable signals.** Semantic copy is the cost of isolation and cannot be removed by any transport, so it indicates the topology is wrong. Mechanical transfer is the cost of the lowering, so it indicates the transport is wrong. Being able to attribute a profile reading to one of the two is what makes the instrument load-bearing rather than decorative.
 
 **C5. Errors are values at the border, terminated at the cause.** A failing boundary returns a value the other side can act on. The diagnosis stays in the context that produced it.
+
+**C6. The capability set is checkable syntactically.** A3 makes calls and names syntactic. The compiler can compare the declared set with the actual set, and an undeclared ambient call is a compile error. The review surface is the topology declaration plus the capability declaration; both diff as shapes.
+
+**C7. The absence is testable.** The runtime audit asserts that no ambient handle is open, no undeclared clock or file access occurred, and no capability was amplified. The A3 instrument is a capability audit, not a memory report. The negative test is the one that matters.
+
+**C8. Ambient authority is audited at the shell.** Its syscall surface is the trust boundary; the audit is the list of syscalls it can make. Everything below the shell is closed.
 
 ---
 
@@ -216,3 +313,15 @@ Slogans are useful only if each names something refutable. Mapped, so they can b
 | Backpressure is a buffer, not a block. | L12, L21 |
 | Measure it or it is not yours. | C4 |
 | The only free lunch is a leaf. | L23 |
+| If it is not declared, it is not reachable. | A3 |
+| The interface is a closed set. | L33, L43 |
+| Authority is a parameter, not a context. | L34 |
+| Time is an input. | L31, L45 |
+| The shell owns the world. | L39, L44 |
+| A capability is granted, not inherited. | L32, L42 |
+| Effects are messages, or they are bugs. | L35 |
+| Names resolve at the boundary. | L38 |
+| Failure is an input. | L36 |
+| Policy and configuration are inputs. | L37, L47 |
+| Randomness is an input. | L46 |
+| The capability graph is the topology. | L40 |
