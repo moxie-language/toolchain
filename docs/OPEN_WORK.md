@@ -1682,6 +1682,24 @@ Moxie shapes, or pin them with a wasm fixture driven through the `gojs` stubs
 - Phase 2 (selfhost) and the `:legacy` variants of phase 6 need libLLVM-22, which
   is not installed here. Environmental.
 
+### Gate state on this tree (round 15, compiler fixpoint `cc161cb8e896aff1`)
+
+Run one phase at a time (`-j 1`), because four-way parallelism makes phase 5 fail
+on Chromium contention: the same fixtures pass serially, which is why the rule is
+"run the gates alone".
+
+    bootstrap fixpoint   r127a == r127b == r127c == cc161cb8e896aff1
+    phase 1b             45 packages ok                       PASS
+    phase 6              23 ms                               PASS
+    phase 1c             4/4                                 PASS
+    phase 3              2/2                                 PASS
+    phase 4              2/2                                 PASS
+    phase 5 (wasm)       85/85, 0 failed, -j 1               PASS
+    phase 0a/0b          88 + 46 units, run serially, verdict pending at this commit
+
+Phase 2 and the `:legacy` variants stay environmental: no libLLVM-22 on this host,
+so legacy cannot be built. Recorded, not worked around.
+
 ### Gate state on the current tree (commit `05087330`, compiler `05087330`)
 
 - phase 0 regressions+restrictions: **123 PASS / 0 FAIL / 0 SKIP** (green)
