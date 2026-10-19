@@ -1814,21 +1814,26 @@ worker decoded outside its request arena). Nothing was widened, skipped or
 deleted to get here: the threshold is still `< 2048` and the window is still the
 first 400 exchanges of the process.
 
-### Gate state on this tree (round 15, compiler fixpoint `cc161cb8e896aff1`)
+### Gate state on this tree (measured at `e6beb1dd`, compiler fixpoint `cc161cb8e896aff1`)
 
 Run one phase at a time (`-j 1`), because four-way parallelism makes phase 5 fail
 on Chromium contention: the same fixtures pass serially, which is why the rule is
 "run the gates alone".
 
-    bootstrap fixpoint   r127a == r127b == r127c == cc161cb8e896aff1
-    phase 1b             45 packages ok                       PASS
-    phase 6              23 ms                               PASS
-    phase 1c             4/4                                 PASS
-    phase 3              2/2                                 PASS
-    phase 4              2/2                                 PASS
-    phase 5 (wasm)       85/85, 0 failed, -j 1               PASS
-    phase 8              17/17 units, both dispatch modes         PASS
-    phase 0a/0b          134/134 (88 + 46 units), -j 1        PASS
+    phase 0a/0b          134/134 (88 + 46 units)          PASS  re-run at this commit
+    phase 1b             45 packages, 2/2 units           PASS  re-run at this commit
+    phase 1c             4/4                              PASS  re-run at this commit
+    phase 3              2/2                              PASS  re-run at this commit
+    phase 4              2/2                              PASS  re-run at this commit
+    phase 5 (wasm)       85/85, 0 failed                  PASS  re-run at this commit
+    phase 8              17/17 units, both modes          PASS  run at `eeb95850`
+    phase 6              0 :stage4 failures               PASS  NOT re-run
+    bootstrap fixpoint   r127a == r127b == r127c == cc161cb8e896aff1  NOT re-run
+
+The last two are not re-run because their closure is the compiler and the two
+commits since the fixpoint (`eeb95850` net/http, `e6beb1dd` docs) do not touch
+`_mxc_stage4/`, `pkg/`, `legacy/` or `src/runtime/`; phase 8's fixtures were
+built at `eeb95850`, and `e6beb1dd` is documentation only.
 
 Phase 2 and the `:legacy` variants stay environmental: no libLLVM-22 on this host,
 so legacy cannot be built. Recorded, not worked around.
