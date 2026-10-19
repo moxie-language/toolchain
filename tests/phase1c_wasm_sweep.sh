@@ -22,6 +22,14 @@ UNITS=(
 	syscall/js
 )
 
+# Directory fixtures that must compile for wasm but are not stdlib packages.
+# The js bridge's mutator spelling lives here: the four mutators are package
+# functions, and the fixture pins every one of them plus the non-addressable
+# chain shape that a pointer receiver could not serve.
+FIXTURES=(
+	tests/wasmfixtures/jsbridge
+)
+
 # Packages known not to compile for wasm, with the reason. SKIP, never FAIL:
 # the suite must not encode today's breakage as acceptable, but it must not go
 # red for a defect that is already recorded either.
@@ -41,6 +49,19 @@ run_one() {
 	unit_exit
 }
 
+run_fixture() {
+	local dir="$1" rc=0
+	unit_begin
+	MOXIEROOT="$ROOT" "$MOXIE" build -target wasm -o "$UNIT_WORK/out.wasm" "$ROOT/$dir" \
+		>"$UNIT_WORK/build.log" 2>&1 || rc=$?
+	if [ "$rc" -eq 0 ]; then
+		unit_ok "wasm-fixture:$(basename "$dir")" "compiles"
+	else
+		unit_no "wasm-fixture:$(basename "$dir")" "$(first_error "$UNIT_WORK/build.log")"
+	fi
+	unit_exit
+}
+
 unit_args "$@"
 
 echo ""
@@ -53,6 +74,10 @@ fi
 
 for u in "${UNITS[@]}"; do
 	run_one "$u"
+done
+
+for f in "${FIXTURES[@]}"; do
+	run_fixture "$f"
 done
 
 if [ "${#SWEEP_KNOWN[@]}" -gt 0 ]; then

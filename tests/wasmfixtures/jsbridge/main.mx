@@ -1,0 +1,30 @@
+// Compile-only fixture for the js bridge's mutator spelling (phase 1c).
+//
+// Set, Delete, SetIndex and Release are package functions whose first argument
+// is the handle, not methods. A method would need a pointer receiver to mutate,
+// and the dominant spelling in real code is a chain -
+// js.Global().Get("x") - which is not addressable, so a pointer receiver could
+// not be used there. This fixture pins the shapes that must keep compiling:
+// every mutator, and the non-addressable chain as their first argument.
+package main
+
+import "syscall/js"
+
+func main() {
+	obj := js.Global().Get("Object").New()
+
+	js.Set(obj, "method", js.ValueOfString("GET"))
+	js.Delete(obj, "method")
+	js.SetIndex(obj, 0, js.ValueOfInt(1))
+
+	// The shape that motivated package functions: no variable to take the
+	// address of, and no temporary either.
+	js.Set(js.Global().Get("Object").New(), "x", js.ValueOfInt(1))
+	js.SetIndex(js.Global().Get("Array").New(), 0, js.ValueOfInt(2))
+
+	fn := js.FuncOf(func(this js.Value, args []js.Value) (r js.Value) {
+		return js.Undefined()
+	})
+	js.Set(fn.Value, "name", js.ValueOfString("bridge"))
+	js.Release(fn)
+}

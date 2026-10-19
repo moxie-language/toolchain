@@ -76,6 +76,27 @@ func (e Error) Error() string {
 
 func (e Error) String() string { return e.Error() }
 
+// The bridge's mutable state is ONE object. Everything the js package changes
+// after initialization lives here, so the package's global state has a name and
+// a shape instead of being spread across file-level variables:
+//
+//   runtime-mutable  br.funcs, br.nextFuncID  - FuncOf and Release change them
+//                    br.ready, br.eventHandlerSet - idempotent init flags,
+//                    written once, on first use
+//
+// The predefined handles and the two constructors below are NOT in it because
+// they are init-only: jsInit writes each exactly once, before anything reads it,
+// and no other code writes them again. Keeping init-only values as package
+// variables states that; moving them into the bridge would imply they change.
+type bridge struct {
+	ready           bool
+	eventHandlerSet bool
+	funcs           map[uint32]func(Value, []Value) Value
+	nextFuncID      uint32
+}
+
+var br bridge
+
 var (
 	valueUndefined Value
 	valueNaN       Value
@@ -88,13 +109,11 @@ var (
 
 	objectConstructor Value
 	arrayConstructor  Value
-
-	_jsInitDone bool
 )
 
 func jsInit() {
-	if _jsInitDone { return }
-	_jsInitDone = true
+	if br.ready { return }
+	br.ready = true
 	// valueUndefined is zero value - already correct
 	valueNaN    = predefValue(0, typeFlagNone)
 	valueZero   = predefValue(1, typeFlagNone)
@@ -198,7 +217,7 @@ func ValueOfFunc(f Func) (r Value) {
 func ValueOfArray(vs []Value) (r Value) {
 	a := arrayConstructor.New(ValueOfInt(int64(len(vs))))
 	for i, v := range vs {
-		a.SetIndex(i, v)
+		SetIndex(a, i, v)
 	}
 	return a
 }
@@ -207,7 +226,7 @@ func ValueOfArray(vs []Value) (r Value) {
 func ValueOfObject(m map[string]Value) (r Value) {
 	o := objectConstructor.New()
 	for k, v := range m {
-		o.Set(k, v)
+		Set(o, k, v)
 	}
 	return o
 }
@@ -312,7 +331,14 @@ func valueGet(v ref, p string) ref
 
 // Set sets the JavaScript property p of value v to x.
 // It panics if v is not a JavaScript object.
-func (v Value) Set(p string, x Value) {
+//
+// This is a package function, not a method, because setting a property is a
+// JavaScript-side mutation: v is an immutable handle, and the receiver of a
+// method is the wrong shape for an operation that does not touch it. A method
+// with a value receiver is rule debt, and a pointer receiver cannot be used
+// here because the dominant spelling - js.Global().Get("x") - is not
+// addressable. The same reasoning covers Delete, SetIndex and Release.
+func Set(v Value, p string, x Value) {
 	if vType := v.Type(); !vType.isObject() {
 		panic((&ValueError{"Value.Set", vType}).Error())
 	}
@@ -330,7 +356,7 @@ func valueSet(v ref, p string, x ref)
 
 // Delete deletes the JavaScript property p of value v.
 // It panics if v is not a JavaScript object.
-func (v Value) Delete(p string) {
+func Delete(v Value, p string) {
 	if vType := v.Type(); !vType.isObject() {
 		panic((&ValueError{"Value.Delete", vType}).Error())
 	}
@@ -361,7 +387,7 @@ func valueIndex(v ref, i int32) ref
 
 // SetIndex sets the JavaScript index i of value v to x.
 // It panics if v is not a JavaScript object.
-func (v Value) SetIndex(i int32, x Value) {
+func SetIndex(v Value, i int32, x Value) {
 	if vType := v.Type(); !vType.isObject() {
 		panic((&ValueError{"Value.SetIndex", vType}).Error())
 	}

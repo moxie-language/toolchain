@@ -16,6 +16,19 @@ import (
 	"syscall/js"
 )
 
+// The three lazy caches below are a documented bridge exception, not state that
+// could move to init: each holds a JavaScript handle (or a fact read from the
+// JavaScript global object), and the global object does not exist at Go init
+// time - the module is instantiated first, and calling into it from init would
+// read an uninitialized host. So each is a write-once cache, computed on first
+// use and never written again:
+//
+//   _uint8ArrayDone/_uint8ArrayVal      the Uint8Array constructor
+//   _jsFetchMissingDone/_jsFetchMissingVal  whether fetch is absent
+//   _jsFetchDisabledDone/_jsFetchDisabledVal  whether we are under Node
+//
+// Write-once-after-first-use is the weakest of the three bridge categories and
+// is recorded in docs/OPEN_WORK.md with this reason.
 var _uint8ArrayDone bool
 var _uint8ArrayVal js.Value
 
@@ -106,22 +119,22 @@ func (t *Transport) RoundTrip(req *Request) (rresponse *Response, rerr error) {
 	opt := js.Global().Get("Object").New()
 	// See https://developer.mozilla.org/en-US/docs/Web/API/WindowOrWorkerGlobalScope/fetch
 	// for options available.
-	opt.Set("method", js.ValueOfString(req.Method))
-	opt.Set("credentials", js.ValueOfString("same-origin"))
+	js.Set(opt, "method", js.ValueOfString(req.Method))
+	js.Set(opt, "credentials", js.ValueOfString("same-origin"))
 	if h := HeaderGet(req.Header, jsFetchCreds); h != "" {
-		opt.Set("credentials", js.ValueOfString(h))
+		js.Set(opt, "credentials", js.ValueOfString(h))
 		HeaderDel(req.Header, jsFetchCreds)
 	}
 	if h := HeaderGet(req.Header, jsFetchMode); h != "" {
-		opt.Set("mode", js.ValueOfString(h))
+		js.Set(opt, "mode", js.ValueOfString(h))
 		HeaderDel(req.Header, jsFetchMode)
 	}
 	if h := HeaderGet(req.Header, jsFetchRedirect); h != "" {
-		opt.Set("redirect", js.ValueOfString(h))
+		js.Set(opt, "redirect", js.ValueOfString(h))
 		HeaderDel(req.Header, jsFetchRedirect)
 	}
 	if !ac.IsUndefined() {
-		opt.Set("signal", ac.Get("signal"))
+		js.Set(opt, "signal", ac.Get("signal"))
 	}
 	headers := js.Global().Get("Headers").New()
 	for key, values := range req.Header {
@@ -129,7 +142,7 @@ func (t *Transport) RoundTrip(req *Request) (rresponse *Response, rerr error) {
 			headers.Call("append", js.ValueOfString(key), js.ValueOfString(value))
 		}
 	}
-	opt.Set("headers", headers)
+	js.Set(opt, "headers", headers)
 
 	if req.Body != nil {
 		// TODO(johanbrandhorst): Stream request body when possible.
@@ -149,7 +162,7 @@ func (t *Transport) RoundTrip(req *Request) (rresponse *Response, rerr error) {
 		if len(bodyBytes) != 0 {
 			buf := _uint8Array().New(js.ValueOfInt(int64(len(bodyBytes))))
 			js.CopyBytesToJS(buf, bodyBytes)
-			opt.Set("body", buf)
+			js.Set(opt, "body", buf)
 		}
 	}
 
@@ -160,8 +173,8 @@ func (t *Transport) RoundTrip(req *Request) (rresponse *Response, rerr error) {
 		success, failure js.Func
 	)
 	success = js.FuncOf(func(this js.Value, args []js.Value) js.Value {
-		success.Release()
-		failure.Release()
+		js.Release(success)
+		js.Release(failure)
 
 		result := args[0]
 		header := Header{}
@@ -235,8 +248,8 @@ func (t *Transport) RoundTrip(req *Request) (rresponse *Response, rerr error) {
 		return js.ValueOfNull()
 	})
 	failure = js.FuncOf(func(this js.Value, args []js.Value) js.Value {
-		success.Release()
-		failure.Release()
+		js.Release(success)
+		js.Release(failure)
 
 		err := args[0]
 		// The error is a JS Error type
@@ -310,7 +323,7 @@ func (r *streamReader) Read(p []byte) (n int32, err error) {
 			bCh <- value
 			return js.ValueOfNull()
 		})
-		defer success.Release()
+		defer js.Release(success)
 		failure := js.FuncOf(func(this js.Value, args []js.Value) js.Value {
 			// Assumes it's a TypeError. See
 			// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypeError
@@ -320,7 +333,7 @@ func (r *streamReader) Read(p []byte) (n int32, err error) {
 			errCh <- errors.New(args[0].Get("message").String())
 			return js.ValueOfNull()
 		})
-		defer failure.Release()
+		defer js.Release(failure)
 		r.stream.Call("read").Call("then", js.ValueOfFunc(success), js.ValueOfFunc(failure))
 		select {
 		case b := <-bCh:
@@ -373,7 +386,7 @@ func (r *arrayReader) Read(p []byte) (n int32, err error) {
 			bCh <- value
 			return js.ValueOfNull()
 		})
-		defer success.Release()
+		defer js.Release(success)
 		failure := js.FuncOf(func(this js.Value, args []js.Value) js.Value {
 			// Assumes it's a TypeError. See
 			// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypeError
@@ -382,7 +395,7 @@ func (r *arrayReader) Read(p []byte) (n int32, err error) {
 			errCh <- errors.New(args[0].Get("message").String())
 			return js.ValueOfNull()
 		})
-		defer failure.Release()
+		defer js.Release(failure)
 		r.arrayPromise.Call("then", js.ValueOfFunc(success), js.ValueOfFunc(failure))
 		select {
 		case b := <-bCh:

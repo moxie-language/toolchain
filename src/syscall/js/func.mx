@@ -10,15 +10,13 @@ import (
 	"internal/synctest"
 )
 
-var (
-	funcs      map[uint32]func(Value, []Value) Value
-	nextFuncID uint32
-)
-
+// The function table and its counter are runtime-mutable: FuncOf and Release
+// change them, and handleEvent reads them. They live in the bridge object (see
+// js.mx) so that the package's mutable state is one named thing, not globals.
 func funcsInit() {
-	if funcs != nil { return }
-	funcs = map[uint32]func(Value, []Value) Value{}
-	nextFuncID = 1
+	if br.funcs != nil { return }
+	br.funcs = map[uint32]func(Value, []Value) Value{}
+	br.nextFuncID = 1
 }
 
 // Func is a wrapped Go function to be called by JavaScript.
@@ -50,8 +48,8 @@ func FuncOf(fn func(this Value, args []Value) Value) Func {
 	jsInit()
 	funcsInit()
 	ensureEventHandler()
-	id := nextFuncID
-	nextFuncID++
+	id := br.nextFuncID
+	br.nextFuncID++
 	bubble := synctest.Acquire()
 	if bubble != nil {
 		origFn := fn
@@ -63,7 +61,7 @@ func FuncOf(fn func(this Value, args []Value) Value) Func {
 			return r
 		}
 	}
-	funcs[id] = fn
+	br.funcs[id] = fn
 	return Func{
 		id:     id,
 		bubble: bubble,
@@ -74,21 +72,22 @@ func FuncOf(fn func(this Value, args []Value) Value) Func {
 // Release frees up resources allocated for the function.
 // The function must not be invoked after calling Release.
 // It is allowed to call Release while the function is still running.
-func (c Func) Release() {
+//
+// A package function, not a method: it releases a handle and removes an entry
+// from the bridge's table, and the receiver is not the thing being changed.
+func Release(c Func) {
 	c.bubble.Release()
-	delete(funcs, c.id)
+	delete(br.funcs, c.id)
 }
 
 // setEventHandler is defined in the runtime package.
 func setEventHandler(fn func() bool)
 
-var eventHandlerSet bool
-
 func ensureEventHandler() {
-	if eventHandlerSet {
+	if br.eventHandlerSet {
 		return
 	}
-	eventHandlerSet = true
+	br.eventHandlerSet = true
 	setEventHandler(handleEvent)
 }
 
@@ -102,7 +101,7 @@ func handleEvent() bool {
 	if cb.IsNull() {
 		return false
 	}
-	jsGo.Set("_pendingEvent", Null())
+	Set(jsGo, "_pendingEvent", Null())
 
 	id := uint32(cb.Get("id").Int())
 	if id == 0 { // zero indicates deadlock
@@ -110,7 +109,7 @@ func handleEvent() bool {
 	}
 
 	// Retrieve the associated js.Func
-	f, ok := funcs[id]
+	f, ok := br.funcs[id]
 	if !ok {
 		Global().Get("console").Call("error", ValueOfString("call to released function"))
 		return true
@@ -126,6 +125,6 @@ func handleEvent() bool {
 	result := f(this, args)
 
 	// Return the result to js
-	cb.Set("result", result)
+	Set(cb, "result", result)
 	return true
 }

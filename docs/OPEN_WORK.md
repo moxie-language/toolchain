@@ -31,6 +31,52 @@ driver on LLVM 23 and legacy on 22:
 The wasm memory wall is gone with the 23 driver: the unit clang-22 could not
 compile (9.3GB, OOM-killed) is part of phase 1c's 4/4, which takes ~20 minutes.
 
+### The js bridge: mutators are package functions, and its state is one object  [CLOSED]
+
+**Decision.** `Set`, `Delete`, `SetIndex` and `Release` are package functions whose
+first argument is the handle - `js.Set(v, p, x)`, `js.Delete(v, p)`,
+`js.SetIndex(v, i, x)`, `js.Release(f)` - and the four value-receiver methods are
+gone. Setting a JavaScript property is a JavaScript-side mutation; `Value` is an
+immutable handle, so the receiver is the wrong shape for it. A pointer receiver
+was rejected because the dominant spelling is a chain - `js.Global().Get("x")` -
+which is not addressable, and converting call sites to temporaries would be the
+same rename with more lines. A checked exception was rejected because the package
+is inside the toolchain tree, where the restrictions are exempt by design, so an
+"exception" there would be unenforceable theatre; package functions satisfy the
+rule instead of excusing it. 18 call sites migrated (14 in
+`src/net/http/roundtrip_js.mx`, 4 inside `syscall/js`), including the two
+non-addressable chain shapes.
+
+**Globals audit** (`syscall/js`):
+
+    init-only, package-level   the predefined handles (valueUndefined..jsGo), the
+                               Object and Array constructors. jsInit writes each
+                               exactly once, before any use; nothing writes them
+                               again. They stay package variables because that is
+                               what they are - moving them into a mutable object
+                               would claim they change.
+    runtime-mutable, in `br`   br.funcs, br.nextFuncID (FuncOf and Release change
+                               them), br.ready, br.eventHandlerSet (idempotent
+                               init flags, written once on first use). One object,
+                               one name, so the package's mutable state has a
+                               shape and a place.
+    lazy write-once exception  net/http's _uint8Array*, _jsFetchMissing* and
+                               _jsFetchDisabled* cache a JavaScript handle or a
+                               fact read from the global object, which does not
+                               exist at Go init time - the module is instantiated
+                               first. Documented at the declarations in
+                               `roundtrip_js.mx`, and they never change after the
+                               first read.
+
+The remaining value receivers in `syscall/js` (`Equal`, `Type`, `Get`, `Index`,
+`Call`, `Invoke`, `New`, the conversion and predicate methods) are read-only
+accessors on an uncomparable handle: they do not write the receiver and are not
+what this item was about.
+
+**Pin:** `tests/wasmfixtures/jsbridge` is compiled by phase 1c and exercises every
+mutator, including `js.Set(js.Global().Get("Object").New(), ...)` and
+`js.SetIndex(js.Global().Get("Array").New(), ...)`.
+
 **Also closed, by re-measurement:** the `any` sweep in the stdlib generics. It
 is done, not open - `grep` finds no `any` in a generic signature anywhere in
 `src/` (the one hit, `src/iter/iter.mx:34`, is inside a `/* */` doc block
@@ -62,9 +108,9 @@ phase 1b, which is green.
 
 **The queue that is left, in order:**
 
-1. The `syscall/js` and `net/http/roundtrip_js` rule debt (surveyed - no `any`
-   left, four value receivers), and the non-blocking debt listed below. Both are
-   in the section under this one.
+1. ~~The `syscall/js` and `net/http/roundtrip_js` rule debt~~ - closed: the four
+   mutators are package functions and the package's mutable state is one bridge
+   object (see "The js bridge" above).
 
 **Closed since the queue was written**, so nobody re-opens them:
 
