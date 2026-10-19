@@ -304,8 +304,8 @@ the SLOT INDEX; the worker answers in the same slot and sends the index back.
   * one slot per message, one copy at a named site (`chanSlotPutReq` /
     `chanSlotPutResp`); the worker decodes into its request arena, which it
     resets, so the steady state allocates nothing.
-  * four slots of 1MB, sized by MEASURED in-flight concurrency, not connections
-    times slots: the shell is serial and blocks on the response, so one request
+  * four slots of 64KB, sized by MEASURED in-flight concurrency and message
+    size, not connections times slots: the shell is serial and blocks on the response, so one request
     is in flight (`ring_committed_kb=4096` in the fixture's /stats). A frame that
     does not fit panics by name instead of truncating.
   * wasm: SharedBuffer panics by name (no shared mapping to hand out as a slice)
