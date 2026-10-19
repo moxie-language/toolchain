@@ -9,6 +9,7 @@ package os
 import (
 	"errors"
 	"syscall"
+	"unsafe"
 )
 
 // The only signal values guaranteed to be present in the os package on all
@@ -95,7 +96,12 @@ func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int32, err error
 		// EBADF - measured as a child that exited 127 while Output, which uses
 		// a single slot, worked.
 		for i := 0; i < len(attr.Files) && i < 3; i++ {
-			srcFD := int32(attr.Files[i])
+			// Files carries file descriptors in the child: each *File is an fd
+			// through unsafe.Pointer. A pointer converts to an integer only
+			// through unsafe.Pointer - int32(*File) is rejected by legacy and
+			// uintptr(*File) is too, while stage4 accepts both, which is the
+			// bilateral divergence phase 2 surfaced.
+			srcFD := int32(uintptr(unsafe.Pointer(attr.Files[i])))
 			if srcFD == int32(i) {
 				continue
 			}
@@ -104,7 +110,7 @@ func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int32, err error
 			}
 		}
 		for i := 0; i < len(attr.Files) && i < 3; i++ {
-			srcFD := int32(attr.Files[i])
+			srcFD := int32(uintptr(unsafe.Pointer(attr.Files[i])))
 			if srcFD > 2 {
 				syscall.Close(srcFD)
 			}
