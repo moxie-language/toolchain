@@ -192,16 +192,42 @@ func ModulePrefix(startDir string) string {
 		}
 		dir = parent
 	}
+	// No module file anywhere. The repository the directory sits in is the
+	// module, by the same layout rules the loader's readModInfo uses
+	// (moduleFromRoots): MOXIEROOT is the toolchain module, and a directory under
+	// MOXIEPATH belongs to the repository named by its first two components.
+	// Without this the prefix was empty for every tree in the no-modules world,
+	// so the report had nothing to select the module's files with.
 	if root := os.Getenv("MOXIEROOT"); root != "" {
-		for _, name := range []string{"moxie.mod", "go.mod"} {
-			if data, err := os.ReadFile(filepath.Join(root, name)); err == nil {
-				if mp := parseModuleName(string(data)); mp != "" {
-					return mp + "/"
+		if rabs, err := filepath.Abs(root); err == nil && within(dir, rabs) {
+			return "git.smesh.lol/moxie/"
+		}
+	}
+	mpath := os.Getenv("MOXIEPATH")
+	if mpath == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			mpath = filepath.Join(home, "moxie")
+		}
+	}
+	if mpath != "" {
+		if mabs, err := filepath.Abs(mpath); err == nil && within(dir, mabs) {
+			if rel, rerr := filepath.Rel(mabs, dir); rerr == nil {
+				parts := strings.Split(rel, string(filepath.Separator))
+				if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
+					return parts[0] + "/" + parts[1] + "/"
 				}
 			}
 		}
 	}
 	return ""
+}
+
+// within reports whether dir is root or sits under it.
+func within(dir, root string) bool {
+	if dir == root {
+		return true
+	}
+	return strings.HasPrefix(dir, root+string(filepath.Separator))
 }
 
 func parseModuleName(data string) string {
