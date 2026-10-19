@@ -157,7 +157,15 @@ the relay they no longer test were renamed accordingly.
 The re-measurement is what the item below is about: it cannot be done yet, and
 the reason is a compiler defect rather than anything about the doc.
 
-### Compiler: `-cover` attributes every package to the toolchain's prefix  [BILATERAL, small]
+### Compiler: `-cover` attributes every package to the toolchain's prefix  [CLOSED `427bb08d`]
+
+**Fixed.** `coverModPrefix()` returns `bst.rootModPrefix` (the repository the
+TARGET lives in) and is used by `coverPkg`, `coverReportFile` and the report's
+selection prefix; legacy's `cover.ModulePrefix` derives the same thing from the
+layout rules when no module file exists. Verified on an out-of-toolchain tree:
+7 sites under `git.smesh.lol/covertest`, and `moxie test -cover` prints
+`83.3% 5/6 git.smesh.lol/covertest/lib.mx`. The rest of this section is the
+original diagnosis, kept as the record.
 
 `-cover` names a site `<pkg.Path>/<basename>:<line>` via
 `coverReportFile(pkgPath, modPath, file)`, and `modPath` is `bst.globalModPrefix`.
@@ -1797,7 +1805,14 @@ else, which is what fixed the two documented errors and made `maps.Values`/
 why the `iter_apis` fixture returns `iter.Seq[int32]` from a function instead of
 passing the symbol.
 
-### 3. Rule-9 arrays in `syscall` / `os.Pipe`  [DECISION, then maybe a pin]
+### 3. Rule-9 arrays in `syscall` / `os.Pipe`  [CLOSED `410c757c`: KEEP, pinned]
+
+**Decided: keep and pin.** They are the kernel's layout (`int fd[2]`,
+`struct timespec[2]`), written at a fixed address; converting to slices would put
+an allocation and an indirection between the caller and the buffer the kernel
+fills. `tests/regressions/should_compile/abi_arrays_pipe_times.mx` runs os.Pipe,
+syscall.Pipe2 and syscall.UtimesNano end to end (and is `//:wasmtest skip`,
+since those calls do not exist on wasm). The original note follows.
 
 `src/syscall/exec_unix.mx:141` declares `var p [2]int32`, and
 `syscall_linux_amd64.mx` carries `*[2]Timeval` / `*[2]Timespec` in its //sys
@@ -1805,12 +1820,16 @@ directives. Alias/unsafe-bound and correct today; needs a decision (keep and pin
 with a run-verified fixture that exercises `os.Pipe` and a time-setting syscall,
 or convert), not a patch.
 
-### 4. `syscall/js` and `net/http/roundtrip_js` rule debt  [DECISION]
+### 4. `syscall/js` and `net/http/roundtrip_js` rule debt  [STILL OPEN, surveyed]
 
-Inside their `js && wasm` constraint they use value receivers, `any` and mutated
-globals. They compile (phase 1c); nothing runs them. Either convert them to the
-Moxie shapes, or pin them with a wasm fixture driven through the `gojs` stubs
-(the validator host already has those behind `__moxie_test_stubs`).
+Re-surveyed: there is no `any` left in either file. What remains is four value
+receivers - `Value.Set`, `Value.Delete`, `Value.SetIndex`, `Func.Release` - whose
+methods mutate JS state through package-level globals, plus those globals
+themselves (`funcs`, `eventHandlerSet`, `_uint8Array*`). Converting to pointer
+receivers ripples into every `js.Global().Get("x").Set(...)` call site, because
+the receiver there is not addressable, so this is a design decision about the
+bridge's API rather than a cleanup. Nothing runs these paths outside a browser;
+phase 1c proves they compile for js/wasm.
 
 ### Operational rules learned the hard way (not code work)
 
