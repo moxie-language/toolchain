@@ -1,0 +1,85 @@
+// Rule 9: the ABI-layout arrays in syscall survive a run.
+//
+// `var pp [2]_C_int`, `(*[2]Timespec)(unsafe.Pointer(&ts[0]))` and
+// `*[2]Timeval` are not user containers dodging slice bookkeeping - they are the
+// kernel's layout (`int fd[2]`, `struct timespec[2]`), written by the kernel at
+// a fixed address. Converting them to slices would put an allocation and an
+// indirection between the caller and the buffer the kernel writes, so the
+// decision on this item is KEEP, and this fixture is the pin: it runs the three
+// shapes and checks that the values the kernel wrote come back.
+package main
+
+import (
+	"fmt"
+	"os"
+	"syscall"
+)
+
+func fail(msg string) {
+	fmt.Printf("FAIL %s\n", msg)
+	os.Exit(1)
+}
+
+func main() {
+	// os.Pipe -> pipe2(p *[2]_C_int, flags), read back through the files.
+	r, w, perr := os.Pipe()
+	if perr != nil {
+		fail("os.Pipe")
+	}
+	msg := []byte("rule-nine")
+	if n, werr := w.Write(msg); werr != nil || n != 9 {
+		fail("pipe write")
+	}
+	got := []byte{:9}
+	if n, rerr := r.Read(got); rerr != nil || n != 9 {
+		fail("pipe read")
+	}
+	if string(got) != "rule-nine" {
+		fail("pipe bytes")
+	}
+	r.Close()
+	w.Close()
+
+	// syscall.Pipe2 on a []int32{:2}: the slice's first element is the array the
+	// kernel fills through a *[2]_C_int.
+	var fds []int32 = []int32{:2}
+	if err := syscall.Pipe2(fds, 0); err != nil {
+		fail("pipe2")
+	}
+	if fds[0] < 0 || fds[1] < 0 || fds[0] == fds[1] {
+		fail("pipe2 fds")
+	}
+	syscall.Close(fds[0])
+	syscall.Close(fds[1])
+
+	// syscall.UtimesNano -> utimensat(times *[2]Timespec): two timespecs by
+	// pointer, then stat and compare what the kernel stored.
+	f, cerr := os.CreateTemp("", "rule9")
+	if cerr != nil {
+		fail("temp file")
+	}
+	name := f.Name()
+	f.Close()
+
+	const want = int64(1234567890)
+	var ts []syscall.Timespec = []syscall.Timespec{:2}
+	ts[0] = syscall.NsecToTimespec(want * 1e9)
+	ts[1] = syscall.NsecToTimespec(want * 1e9)
+	if err := syscall.UtimesNano(name, ts); err != nil {
+		os.Remove(name)
+		fail("utimesnano")
+	}
+	st, serr := os.Stat(name)
+	if serr != nil {
+		os.Remove(name)
+		fail("stat")
+	}
+	if st.ModTime().Unix() != want {
+		os.Remove(name)
+		fail("mtime")
+	}
+	os.Remove(name)
+
+	fmt.Printf("ok   abi arrays: pipe2 and utimensat through the kernel\n")
+	fmt.Printf("abi_arrays_pipe_times ok\n")
+}
