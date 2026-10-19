@@ -81,7 +81,7 @@ phase 1b, which is green.
   * `moxie update` no longer panics when the cache root passes 256 entries
     (`d80e4aa3`).
 
-Remaining, and both are debt rather than defects:
+Remaining, all debt rather than defects:
 
 1. The `syscall/js` and `net/http/roundtrip_js` rule debt: surveyed, smaller than
    recorded. There is no `any` left in either file; what remains is four value
