@@ -70,8 +70,8 @@ for src in "$GLUE_SRC_DIR/shims.c" \
 	if [ "$src" -nt "$LLVM_GLUE_PATH" ]; then GLUE_STALE=1; fi
 done
 if [ ! -f "$LLVM_GLUE_PATH" ] || [ "$GLUE_STALE" = 1 ]; then
-    echo "Building llvm-glue ..."
-    bash "$GLUE_SRC_DIR/build.sh"
+    echo "Building llvm-glue (LLVM ${LEGACY_LLVM_MAJOR}, the legacy client) ..."
+    LLVM_VER="$LEGACY_LLVM_MAJOR" bash "$GLUE_SRC_DIR/build.sh"
 fi
 
 # find a moxie binary to bootstrap with
