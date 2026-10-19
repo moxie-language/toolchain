@@ -422,6 +422,7 @@ func (h *header) pack(msg []byte) []byte {
 	return packUint16(msg, h.additionals)
 }
 
+
 func (h *header) unpack(msg []byte, off int32) (int32, error) {
 	newOff := off
 	var err error
@@ -1744,7 +1745,7 @@ const (
 //
 // The provided extRCode must be an extended RCode.
 func (h *ResourceHeader) SetEDNS0(udpPayloadLen int32, extRCode RCode, dnssecOK bool) error {
-	h.Name = Name{Data: [255]byte{'.'}, Length: 1} // RFC 6891 section 6.1.2
+	h.Name = Name{Data: []byte{'.'}, Length: 1} // RFC 6891 section 6.1.2
 	h.Type = TypeOPT
 	h.Class = Class(udpPayloadLen)
 	h.TTL = uint32(extRCode) >> 4 << 24
@@ -1797,6 +1798,7 @@ func skipResource(msg []byte, off int32) (int32, error) {
 func packUint16(msg []byte, field uint16) []byte {
 	return push(msg, byte(field>>8), byte(field))
 }
+
 
 func unpackUint16(msg []byte, off int32) (uint16, int32, error) {
 	if off+uint16Len > len(msg) {
@@ -1908,20 +1910,30 @@ func unpackBytes(msg []byte, off int32, field []byte) (int32, error) {
 
 const nonEncodedNameMax = 254
 
-// A Name is a non-encoded and non-escaped domain name. It is used instead of strings to avoid
-// allocations.
+// nameDataMax is the most bytes a non-encoded name can occupy: the length byte
+// of the longest encodable name caps the text at 254, and the storage keeps one
+// spare byte so an off-by-one in a caller is a failed check, not a write past
+// the end.
+const nameDataMax = 255
+
+// A Name is a non-encoded and non-escaped domain name. It is used instead of
+// strings to avoid per-label allocations. Data is a slice, not an array: an
+// array in this tree is a leftover from the Go port, and it is what made
+// `name := n.Data[:0]` write into a copy (a subslice of an array field is a
+// copy in moxie) so every parsed name came back empty while Length looked right.
 type Name struct {
-	Data   [255]byte
+	Data   []byte
 	Length uint8
 }
 
 // NewName creates a new Name from a string.
 func NewName(name string) (Name, error) {
-	n := Name{Length: uint8(len(name))}
-	if len(name) > len(n.Data) {
+	if len(name) > nameDataMax {
 		return Name{}, errCalcLen
 	}
-	copy(n.Data[:], name)
+	n := Name{Length: uint8(len(name))}
+	n.Data = []byte{:len(name)}
+	copy(n.Data, name)
 	return n, nil
 }
 
@@ -1937,13 +1949,20 @@ func MustNewName(name string) Name {
 // String implements fmt.Stringer.String.
 //
 // Note: characters inside the labels are not escaped in any way.
-func (n Name) String() string {
-	return string(n.Data[:n.Length])
+func (n Name) String() (rs string) {
+	l := int32(n.Length)
+	if l > int32(len(n.Data)) {
+		// An invalid Name (Length beyond its storage) has no text. Returning
+		// empty is a defined answer where indexing would panic; pack rejects
+		// the same value with errCalcLen.
+		l = int32(len(n.Data))
+	}
+	return string(n.Data[:l])
 }
 
 // GoString implements fmt.GoStringer.GoString.
 func (n *Name) GoString() string {
-	return `dnsmessage.MustNewName("` + printString(n.Data[:n.Length]) + `")`
+	return `dnsmessage.MustNewName("` + printString(n.String()) + `")`
 }
 
 // pack appends the wire format of the Name to msg.
@@ -1958,6 +1977,12 @@ func (n *Name) pack(msg []byte, compression map[string]uint16, compressionOff in
 
 	if n.Length > nonEncodedNameMax {
 		return nil, errNameTooLong
+	}
+	// A Name whose Length runs past its storage is malformed, not a reason to
+	// index past the slice; the same value reachable from a decoded message is
+	// rejected with errCalcLen.
+	if int32(n.Length) > int32(len(n.Data)) {
+		return oldMsg, errCalcLen
 	}
 
 	// Add a trailing dot to canonicalize name.
@@ -2040,20 +2065,33 @@ func (n *Name) unpack(msg []byte, off int32) (int32, error) {
 	var ptr int32
 
 	// di is the write cursor into n.Data. The name is built straight into
-	// n.Data by index because a subslice of an array field is a copy in moxie:
+	// n.Data by index, because a subslice of a struct field is a copy in moxie:
 	// the original `name := n.Data[:0]` plus push accumulated into that copy,
 	// left n.Data zeroed, and every parsed name came back empty while Length
 	// was right. checkResponse then rejected every answer, so the Go resolver
 	// could not resolve anything even though the query went out and the reply
 	// arrived.
+	//
+	// Data is sized here, before any write, so the index writes below are
+	// bounds-checked against real storage and no write can be past the end.
+	n.Data = []byte{:nameDataMax}
 	di := int32(0)
+
+	// Loop scratch is declared here, not inside the loop: a self-mutating
+	// method (this one assigns n.Data and n.Length) may not declare with :=
+	// inside a loop - the scratch would be re-created per iteration in the
+	// receiver's arena. The compiler enforces it; the rule is in
+	// docs/OPEN_WORK.md.
+	var c int32
+	var endOff int32
+	var c1 byte
 
 Loop:
 	for {
 		if currOff >= len(msg) {
 			return off, errBaseLen
 		}
-		c := int32(msg[currOff])
+		c = int32(msg[currOff])
 		currOff++
 		switch c & 0xC0 {
 		case 0x00: // String segment
@@ -2061,7 +2099,7 @@ Loop:
 				// A zero length signals the end of the name.
 				break Loop
 			}
-			endOff := currOff + c
+			endOff = currOff + c
 			if endOff > len(msg) {
 				return off, errCalcLen
 			}
@@ -2088,7 +2126,7 @@ Loop:
 			if currOff >= len(msg) {
 				return off, errInvalidPtr
 			}
-			c1 := msg[currOff]
+			c1 = msg[currOff]
 			currOff++
 			if ptr == 0 {
 				newOff = currOff

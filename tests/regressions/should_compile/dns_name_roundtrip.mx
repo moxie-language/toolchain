@@ -1,0 +1,211 @@
+// The dnsmessage Name round trip, over the public API only.
+//
+// Name.Data used to be an array field, which is why the port's first version of
+// unpack wrote `name := n.Data[:0]` and pushed into a COPY: every parsed name
+// came back empty while Length looked right, and the resolver rejected every
+// reply. Data is a slice now; this fixture pins the behavior that has to survive
+// that change, including the malformed shapes that must fail rather than panic.
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"golang.org/x/net/dns/dnsmessage"
+)
+
+func fail(msg string) {
+	fmt.Printf("FAIL %s\n", msg)
+	os.Exit(1)
+}
+
+func name(s string) (n dnsmessage.Name) {
+	n, err := dnsmessage.NewName(s)
+	if err != nil {
+		fail("NewName(" | s | ")")
+	}
+	return n
+}
+
+// roundTrip packs one question and unpacks the message again.
+func roundTrip(want string) (got string) {
+	q := dnsmessage.Question{
+		Name:  name(want),
+		Type:  dnsmessage.TypeA,
+		Class: dnsmessage.ClassINET,
+	}
+	m := dnsmessage.Message{
+		Header:    dnsmessage.Header{ID: 1, RecursionDesired: true},
+		Questions: []dnsmessage.Question{q},
+	}
+	buf, err := m.Pack()
+	if err != nil {
+		fail("Pack(" | want | ")")
+	}
+	var out dnsmessage.Message
+	if uerr := out.Unpack(buf); uerr != nil {
+		fail("Unpack(" | want | ")")
+	}
+	if len(out.Questions) != 1 {
+		fail("question count for " | want)
+	}
+	return out.Questions[0].Name.String()
+}
+
+func main() {
+	// A plain name, the root, and a 63-byte label (the maximum a label may be).
+	if got := roundTrip("example.com."); got != "example.com." {
+		fail("example.com. round trip: [" | got | "]")
+	}
+	if got := roundTrip("."); got != "." {
+		fail("root round trip: [" | got | "]")
+	}
+	label63 := ""
+	for i := int32(0); i < 63; i++ {
+		label63 = label63 | "a"
+	}
+	if got := roundTrip(label63 | ".example."); got != label63 | ".example." {
+		fail("63-byte label round trip")
+	}
+
+	// The longest name that fits: 63+1+63+1+63+1+61+1 = 254 bytes.
+	label61 := ""
+	for i := int32(0); i < 61; i++ {
+		label61 = label61 | "d"
+	}
+	longest := label63 | "." | label63 | "." | label63 | "." | label61 | "."
+	if len(longest) != 254 {
+		fail("fixture: longest name should be 254 bytes")
+	}
+	if got := roundTrip(longest); got != longest {
+		fail("maximum-length round trip")
+	}
+
+	// A 64-byte label is not encodable: the two top bits of the length byte are
+	// reserved, so pack must reject it.
+	label64 := label63 | "a"
+	segTooLong := dnsmessage.Message{
+		Header:    dnsmessage.Header{ID: 2},
+		Questions: []dnsmessage.Question{{Name: name(label64 | "."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}},
+	}
+	if _, e1 := segTooLong.Pack(); e1 == nil {
+		fail("64-byte label must not pack")
+	}
+
+	// A non-canonical name (no trailing dot) must not pack.
+	nonCanonical := dnsmessage.Message{
+		Header:    dnsmessage.Header{ID: 3},
+		Questions: []dnsmessage.Question{{Name: name("example.com"), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}},
+	}
+	if _, e2 := nonCanonical.Pack(); e2 == nil {
+		fail("non-canonical name must not pack")
+	}
+
+	// A name whose Length runs past its storage is malformed: pack fails, and
+	// String returns empty rather than indexing past the slice.
+	broken := dnsmessage.Name{Length: 5}
+	brokenMsg := dnsmessage.Message{
+		Header:    dnsmessage.Header{ID: 4},
+		Questions: []dnsmessage.Question{{Name: broken, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}},
+	}
+	if _, e3 := brokenMsg.Pack(); e3 == nil {
+		fail("Length beyond storage must not pack")
+	}
+	if got := broken.String(); got != "" {
+		fail("Length beyond storage String")
+	}
+
+	// Two questions with the same name: the packer compresses the second as a
+	// pointer, so unpack has to follow one. This is the compression path the
+	// resolver depends on.
+	twoNames := dnsmessage.Message{
+		Header: dnsmessage.Header{ID: 5},
+		Questions: []dnsmessage.Question{
+			{Name: name("compressed.example."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET},
+			{Name: name("compressed.example."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET},
+		},
+	}
+	cbuf, cerr := twoNames.Pack()
+	if cerr != nil {
+		fail("compressed Pack")
+	}
+	var cout dnsmessage.Message
+	if uerr := cout.Unpack(cbuf); uerr != nil {
+		fail("compressed Unpack")
+	}
+	if len(cout.Questions) != 2 {
+		fail("compressed question count")
+	}
+	if cout.Questions[0].Name.String() != "compressed.example." || cout.Questions[1].Name.String() != "compressed.example." {
+		fail("compressed names")
+	}
+
+	// A question name with no terminating zero: header + QDCOUNT=1 + a length
+	// byte and label bytes that run out. Unpack must fail cleanly.
+	truncated := []byte{
+		0, 0, // ID
+		0, 0, // flags
+		0, 1, // QDCOUNT
+		0, 0, 0, 0, 0, 0, // NSCOUNT, ARCOUNT, and the last two of the header
+		5, 'e', 'x', 'a', 'm', 'p',
+	}
+	var tmsg dnsmessage.Message
+	if e4 := tmsg.Unpack(truncated); e4 == nil {
+		fail("truncated name must not unpack")
+	}
+
+	// The Builder path: NewBuilder reserves the header slot, Finish fills it in,
+	// and each resource's RDLENGTH is patched after its body is packed. Both
+	// patches write into a slice that a Go implementation would alias; the port
+	// must keep them landing in the message, because a zero header or a zero
+	// RDLENGTH is a query no server answers and an answer no resolver parses.
+	bb := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: 0x4321, Response: true})
+	if serr := bb.StartQuestions(); serr != nil {
+		fail("builder StartQuestions")
+	}
+	if qerr := bb.Question(dnsmessage.Question{Name: name("build.example."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}); qerr != nil {
+		fail("builder Question")
+	}
+	if aerr := bb.StartAnswers(); aerr != nil {
+		fail("builder StartAnswers")
+	}
+	rh := dnsmessage.ResourceHeader{Name: name("build.example."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 60}
+	var ares dnsmessage.AResource
+	ares.A = [4]byte{192, 0, 2, 1}
+	if rerr := bb.AResource(rh, ares); rerr != nil {
+		fail("builder AResource")
+	}
+	built, berr := bb.Finish()
+	if berr != nil {
+		fail("builder Finish")
+	}
+	var bout dnsmessage.Message
+	if uerr := bout.Unpack(built); uerr != nil {
+		fail("builder Unpack")
+	}
+	if bout.Header.ID != 0x4321 {
+		fail("builder header id")
+	}
+	if !bout.Header.Response {
+		fail("builder header Response flag")
+	}
+	if len(bout.Questions) != 1 || len(bout.Answers) != 1 {
+		fail("builder section counts")
+	}
+	if bout.Answers[0].Header.Name.String() != "build.example." {
+		fail("builder answer name")
+	}
+	if ip, ok := bout.Answers[0].Body.(*dnsmessage.AResource); ok {
+		if ip.A[0] != 192 || ip.A[3] != 1 {
+			fail("builder answer address")
+		}
+	} else {
+		fail("builder answer body type")
+	}
+
+	fmt.Printf("ok   dns name round trip: plain, root, 63-byte label, 254-byte name\n")
+	fmt.Printf("ok   dns name rejection: 64-byte label, non-canonical, short storage, truncation\n")
+	fmt.Printf("ok   dns compression pointer: second question round trips\n")
+	fmt.Printf("ok   dns builder: header id, flags, counts, RDLENGTH and A body\n")
+	fmt.Printf("dns_name_roundtrip ok\n")
+}

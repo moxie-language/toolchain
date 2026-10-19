@@ -77,6 +77,61 @@ what this item was about.
 mutator, including `js.Set(js.Global().Get("Object").New(), ...)` and
 `js.SetIndex(js.Global().Get("Array").New(), ...)`.
 
+### dnsmessage: `Name.Data` is a slice, and the trap class is measured  [CLOSED]
+
+**The change.** `Name` is `{ Data []byte; Length uint8 }`. `NewName` allocates
+exactly its length and copies; `unpack` sizes the storage (`[]byte{:255}`) before
+the first write and then writes by index, so the write never goes through a
+subslice; `pack` refuses a `Length` larger than the storage with `errCalcLen`
+instead of indexing past it, and `String` clamps for the same invalid value so a
+malformed name prints empty rather than panicking. The root literal is
+`Name{Data: []byte{'.'}, Length: 1}`. The maximum encoded name (254 bytes) and
+the 63-byte label limit are unchanged.
+
+**Comparability fallout: none.** A slice makes `Name` non-comparable and with it
+`Question`, `Resource` and `Message`; the tree has no `==`/`!=` on any of them and
+no map keyed by one. The one name comparison, `net.equalASCIIName`, is already
+field-by-field (Length plus a case-folded data walk).
+
+**The trap scan, measured rather than assumed.** The class is "a subslice of a
+struct field is a copy, so a write through it is lost":
+
+  * `unpack`'s old `name := n.Data[:0]` plus `push` was the real failure, and it
+    was specific to `Data` being an ARRAY field: `n.Data[:0]` on an array copies
+    the array, so the appends landed in a copy. With a slice field the same
+    spelling would alias again - `unpack` still does not rely on that, it writes
+    by index into storage it sized first.
+  * The two Go-idiom patch sites - `Builder.Finish`'s
+    `b.header.pack(b.msg[b.start:b.start])` and `ResourceHeader.fixLen`'s
+    `packUint16(msg[lenOff:lenOff], ...)` - are NOT live instances. Measured:
+    a zero-length subslice handed to a push-based callee keeps the parent's
+    backing array, and a built message round trips with header ID 0x4321,
+    QDCOUNT 1, RDLENGTH 4 and A body 192.0.2.1 both with and without a
+    by-index rewrite of those two sites. The rewrites were reverted rather than
+    kept: they changed code that is correct, and the fixture now pins the
+    behavior instead.
+  * Across `src`, the remaining `[:0]` uses (`encoding/csv`, `encoding/asn1`)
+    assign the result back to the field they truncated, which is the reset
+    idiom, not the trap. `fixLen`'s `^uint16(0)` spelling stays 65535 spelled
+    out, per the constant-fold fix recorded earlier.
+
+**Pins:** `tests/regressions/should_compile/dns_name_roundtrip.mx` runs, in one
+program: plain (`example.com.`), root (`.`), a 63-byte label, the 254-byte
+maximum, a 64-byte label (must fail), a non-canonical name (must fail), a `Name`
+whose `Length` runs past its storage (pack must fail, String must be empty), a
+compression-pointer message built by packing two identical questions, a truncated
+name (must fail), and a full `Builder` round trip that checks the header id,
+flags, section counts, RDLENGTH and the typed A body. Host and wasm both compile
+it; phase 1b and phase 8 are the stdlib and resolver gates.
+
+**Found by the scan, recorded, NOT fixed in this goal:** the compiler accepts a
+method called through a function-typed package member. `binary.BigEndian` is a
+function (`func BigEndian() *bigEndian`) in this tree, yet
+`binary.BigEndian.Uint16(b)` compiles and returns 0 instead of being rejected;
+the correct spelling is `binary.BigEndian().Uint16(b)`. That is a silent wrong
+answer on an invalid construct and needs its own restriction fixture and
+compiler change.
+
 **Also closed, by re-measurement:** the `any` sweep in the stdlib generics. It
 is done, not open - `grep` finds no `any` in a generic signature anywhere in
 `src/` (the one hit, `src/iter/iter.mx:34`, is inside a `/* */` doc block
@@ -136,11 +191,9 @@ Remaining, all debt rather than defects:
    pointer receivers ripples into every `js.Global().Get("x").Set(...)` call
    site, so this is a design decision about the bridge's API, not a cleanup; and
    nothing runs these paths outside a browser.
-2. The dnsmessage array: `Name.Data` is still `[255]byte`, and the port needs a
-   scan for `Data[:0]`-style accumulation and for `f(x[i:i], ...)` calls that
-   relied on append writing through a zero-length slice (the resolver's `fixLen`
-   was one; the known instance is fixed). An array here is a leftover, per the
-   slices-replace-arrays rule.
+2. ~~The dnsmessage array~~ - closed: `Name.Data` is a slice, the comparability
+   fallout is checked, and the trap scan is recorded (see "dnsmessage Name"
+   below).
 3. Non-blocking debt recorded while closing the round: the classic transport's
    `getConn`/`persistConn`/`readLoop`/`writeLoop` are dead on the client path and
    should be deleted; `routing_tree.mx`'s `nodeMatchesPath`/`nodeEntryKey` are
