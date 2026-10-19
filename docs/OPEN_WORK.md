@@ -13,21 +13,24 @@ block, this block is the re-measured fact. Every claim here has a gate run or a
 committed fixture behind it, and the gate numbers are in "Gate state on this
 tree" (search for `cc161cb8e896aff1`).
 
-**Green on this tree**, one phase at a time (`-j 1`):
+**Green on this tree**, one phase at a time (`-j 1`), under the pinned LLVM 22
+and Go 1.25.3:
 
-    bootstrap fixpoint   r127a == r127b == r127c == cc161cb8e896aff1
-    phase 0a/0b          134/134 (88 + 46 units)
-    phase 1b             45 stdlib packages
-    phase 1c             4/4
-    phase 3              2/2
-    phase 4              2/2
-    phase 5 (wasm)       85/85, 0 failed
-    phase 6              PASS (23 ms), 0 :stage4 failures
-    phase 8              17/17 units PASS in BOTH dispatch modes, 2048kB
-                         no-accumulation threshold UNWIDENED (spawned +0kB)
+    phase 2 (selfhost)   6/6 units, selfhost:fixpoint stage2 == stage3   PASS
+    phase 0a/0b          136/136 (89 + 47 units)                        PASS
+    phase 1b             45 stdlib packages                             PASS
+    phase 1c             path/filepath, syscall/js PASS; net OOMs clang-22
+    phase 3              2/2                                            PASS
+    phase 4              2/2                                            PASS
+    phase 5 (wasm)       85/85, 0 failed                     (not re-run after the pin)
+    phase 6              PASS, 0 :stage4 failures            (not re-run after the pin)
+    phase 8              17/17 units, both dispatch modes    (green at `eeb95850`,
+                         2048kB threshold unwidened)          before the pin)
 
-Phase 2 (selfhost) and the `:legacy` variants of phase 6 need libLLVM-22, which
-is not installed here: **environmental, reported, not worked around**.
+The `:legacy` half of phase 6 is no longer environmental: legacy runs under the
+pin (see the LLVM 22 section below). What stops a full sweep is phase 1c's `net`
+unit, which clang-22 cannot compile on a 14GB host - the measurements and the two
+ways out are in that same section.
 
 **Also closed, by re-measurement:** the `any` sweep in the stdlib generics. It
 is done, not open - `grep` finds no `any` in a generic signature anywhere in
@@ -60,25 +63,40 @@ phase 1b, which is green.
 
 **The queue that is left, in order:**
 
-1. The `-cover` prefix defect (below): bilateral, and legacy cannot be built on
-   this host, so it stays recorded rather than half-applied.
-2. The stage4 type checker accepts two conversions legacy rejects: pointer to
-   an integer directly (`int32(*File)`) and pointer to `uintptr` without the
-   `unsafe.Pointer` step. Phase 2 found it in `src/os/exec_linux.mx` (source
-   fixed, compiler untouched). Needs a restriction fixture in `tests/regressions/
-   should_fail` and the check itself; legacy is the reference and already
-   rejects both, so this is a stage4-only change.
-3. The rule-9 array decision in `syscall` / `os.Pipe` (pin with a run fixture, or
-   convert).
-4. The `syscall/js` and `net/http/roundtrip_js` rule debt (convert, or pin
-   through the `gojs` stubs).
-5. Non-blocking debt recorded while closing the round: the classic transport's
+1. The wasm memory wall under LLVM 22: phase 1c's `net` unit needs more memory
+   from clang-22 than this host has. Measured, with two ways out, in the LLVM 22
+   section. This is the only thing between the pin and a full green sweep.
+**Closed since the queue was written**, so nobody re-opens them:
+
+  * `-cover` now attributes and instruments the target's repository
+    (`427bb08d`), verified on an out-of-toolchain tree: 7 sites under
+    `git.smesh.lol/covertest`, and `moxie test -cover` prints
+    `83.3% 5/6 git.smesh.lol/covertest/lib.mx`.
+  * the pointer-to-integer conversion gap (`85d481ce`): stage4 now rejects
+    `int32(*File)` and `uintptr(*File)` like legacy, with
+    `tests/restrictions/reject_ptr_to_int.mx` as the pin.
+  * rule 9 (`410c757c`): the ABI-layout arrays in `syscall` stay, and
+    `tests/regressions/should_compile/abi_arrays_pipe_times.mx` runs pipe2,
+    os.Pipe and utimensat through the kernel.
+  * `moxie update` no longer panics when the cache root passes 256 entries
+    (`d80e4aa3`).
+
+The queue that is left:
+
+1. The `syscall/js` and `net/http/roundtrip_js` rule debt: surveyed, smaller than
+   recorded. There is no `any` left in either file; what remains is four value
+   receivers (`Value.Set/Delete/SetIndex`, `Func.Release`) whose methods mutate JS
+   state through package globals, plus those globals themselves. Converting to
+   pointer receivers ripples into every `js.Global().Get("x").Set(...)` call
+   site, so this is a design decision about the bridge's API, not a cleanup; and
+   nothing runs these paths outside a browser.
+2. Non-blocking debt recorded while closing the round: the classic transport's
    `getConn`/`persistConn`/`readLoop`/`writeLoop` are dead on the client path and
    should be deleted; `routing_tree.mx`'s `nodeMatchesPath`/`nodeEntryKey` are
    LAUNDERS (they exist only to pass the generic slice's field through a concrete
    parameter type, the round-73 workaround) and can go now that
    `generic_field_read` pins the direct shape; the `sovGroup` recycle list is not
-   pre-faulted; `-cover` is the item above.
+   pre-faulted.
 
 **Do not reopen as "the leak"**: `hashmapOwner` and the root fallback. The
 per-request `Header` map is a sovereign group and its buckets die with the
@@ -2856,6 +2874,38 @@ four things, and each one exposed a real defect:
 environmental.** Phase 2 runs the whole chain - legacy builds stage1, stage1
 re-bakes the runtime and self-hosts stage2, and `selfhost:fixpoint` asserts
 `stage2 == stage3`. That is green.
+
+#### The pin exposes a wasm memory wall, and it is not the compiler  [BLOCKED, needs a decision]
+
+Making the pin true turned phase 1c from "passes" into "one unit cannot finish on
+this host". The unit is js/wasm `net`, and the same 13,249,420-byte bitcode was
+compiled both ways as the control:
+
+    clang-23   completes in under 500s inside a 6GB cgroup cap
+               (13,921,205-byte object, rc=0)
+    clang-22   OOM-killed at 9,315,836kB anon RSS / 28,280,192kB total VM
+               (kernel log names clang-22, not the compiler);
+               under an 8GB cap: killed; under a 10GB cap: still running at
+               10 minutes with the host in swap, so it was stopped
+
+This host has 15,252MB of RAM and its swap was already full (zram 14.9G of 14.9G,
+nvme 8.9G of 16.4G) from unrelated work, so "give clang-22 10GB" is not available
+here. Phase 1c's other two units pass under 22 (`path/filepath`, `syscall/js`).
+
+The Moxie side of the input is large but not pathological for what it is: the
+`net` module is 972,359 IR lines in 730 functions, and the six biggest are
+69,727 to 117,734 lines (`net.(*OpError).Error` alone is 69,727). LLVM 22's wasm
+backend at -O0 is what turns that into 9GB; LLVM 23 does it in one third of the
+memory. Two ways out, both real work and neither one a threshold to widen:
+
+  1. headroom - compile wasm units with nothing else running on a host with
+     ~12GB free, which is an environment fact, not a fix;
+  2. IR reduction - find out why a 40-line `Error()` method is 70k IR lines
+     (concatenation expansion is the first suspect) and make the module smaller,
+     which helps every target and both backends.
+
+Until one of them is done, phase 1c is red on this host under the pin, and phases
+5/6/8 have not been re-run since the OOM. That is recorded, not worked around.
 
 - Build: `MOXIEROOT=/home/mleku/moxie/git.smesh.lol/moxie ./moxie build -a -o out ./_mxc_stage4`;
   full bootstrap `./build.sh` (needs `moxie-new` absent or it bootstraps from a
