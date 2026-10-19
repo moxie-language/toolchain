@@ -29,6 +29,15 @@ tree" (search for `cc161cb8e896aff1`).
 Phase 2 (selfhost) and the `:legacy` variants of phase 6 need libLLVM-22, which
 is not installed here: **environmental, reported, not worked around**.
 
+**Also closed, by re-measurement:** the `any` sweep in the stdlib generics. It
+is done, not open - `grep` finds no `any` in a generic signature anywhere in
+`src/` (the one hit, `src/iter/iter.mx:34`, is inside a `/* */` doc block
+quoting the Go version of `maps.Keys`), `src/weak` no longer exists,
+`crypto/internal/fips140cache` has none, and the loader's skip-list is gone
+(`resolveAll` fails loud with `cannot find package ... (imported by ...)` instead
+of silently dropping a file). `iter`, `maps` and `slices` are sweep entries in
+phase 1b, which is green.
+
 **Closed this round** (each with a fixture that pins it, each its own commit):
 
 | what | commit | pin |
@@ -43,14 +52,22 @@ is not installed here: **environmental, reported, not worked around**.
 | `^` on a sized unsigned constant keeps its type | `f2e91e56` | `const_xor_width` |
 | a buffered `chan []byte` and a generic field read | `22487ecd` | `chan_buffered_slice`, `generic_field_read` |
 | `defer` in a loop registers once per iteration | `a638ec2e` | `defer_in_loop` |
+| the toolchain is pinned to LLVM 22 (it was not) | `d8e0f0a6` | `build.sh` five-tool check; runtime bake |
+| the compiler's own tree is not its own module | `1c58ffd2` | phase 2 `selfhost:stage1` |
+| the reference compiler builds from source again | `2141f195` | `legacy/build.sh` |
+| a channel send's X is the value, not the channel | `777060ab` | phase 2 `selfhost:stage1` |
+| a pointer converts to an integer only via unsafe.Pointer | `3cdda1c6` | phase 2 (legacy) |
 
 **The queue that is left, in order:**
 
 1. The `-cover` prefix defect (below): bilateral, and legacy cannot be built on
    this host, so it stays recorded rather than half-applied.
-2. The `any` sweep in the stdlib generics (`iter`, `weak`,
-   `crypto/internal/fips140cache`, `maps`/`slices`/`bytes`), whose completion
-   condition is deleting the skip-list in `_mxc_stage4/main.mx` (~line 1722).
+2. The stage4 type checker accepts two conversions legacy rejects: pointer to
+   an integer directly (`int32(*File)`) and pointer to `uintptr` without the
+   `unsafe.Pointer` step. Phase 2 found it in `src/os/exec_linux.mx` (source
+   fixed, compiler untouched). Needs a restriction fixture in `tests/regressions/
+   should_fail` and the check itself; legacy is the reference and already
+   rejects both, so this is a stage4-only change.
 3. The rule-9 array decision in `syscall` / `os.Pipe` (pin with a run fixture, or
    convert).
 4. The `syscall/js` and `net/http/roundtrip_js` rule debt (convert, or pin
@@ -2798,6 +2815,47 @@ to use `/pkg/` as a resolution device, which strengthens the case for an
 explicit exemption declaration.
 
 ## Environment facts
+
+### LLVM 22 and Go 1.25.3 are PINNED and installed (round 15)
+
+`build.sh` always claimed LLVM 22 was pinned. It was not: every `-22` name was a
+symlink to the host's LLVM 23 (`clang-22 -> /bin/clang`, `ld.lld-22 ->
+/bin/ld.lld`, `llvm-link-22 -> /bin/llvm-link`), and the check passed only
+because it accepted the unversioned names it found. Making the pin TRUE took
+four things, and each one exposed a real defect:
+
+1. **The packages.** `pacman -S llvm22 llvm22-libs clang22 lld22` (22.1.8), then
+   the `/usr/local/bin` shims repointed at `/usr/lib/llvm22/bin` (Arch does not
+   put `clang-22` in `/usr/bin`). `clang-22`, `clang++-22`, `ld.lld-22`,
+   `llvm-link-22`, `llvm-as-22`, `llvm-dis-22`, `opt-22` and `llvm-extract-22`
+   all report 22.1.8; `build.sh`'s five-tool check passes.
+2. **`opt` was unversioned** (`_mxc_stage4/main.mx`, mem2reg). LLVM 23's opt
+   REWRITES the bitcode it writes: `llvm.returnaddress` became
+   `llvm.returnaddress.p0`, which clang-22 cannot lower, so the link died with
+   `undefined symbol: llvm.returnaddress.p0`. The compiler now invokes `opt-22`
+   like every other tool. Legacy needed no mirror: it runs passes through the
+   LLVM C API in-process, never by spawning opt.
+3. **The runtime bake was 23-pure.** `sysroot/runtime_go.bc` is gitignored and
+   nothing regenerates it on a toolchain change, so the new 22 toolchain linked
+   a blob whose 13 `returnaddress.p0` references it could not resolve. Re-baked
+   with the pinned stack (`moxie build-runtime`): 13 `llvm.returnaddress`, no
+   `.p0`. The package cache was cleared at the same time - a cached `.bc`
+   carries the intrinsic names of whichever opt produced it.
+4. **Legacy needed a Go toolchain and could not be rebuilt.** `legacy/moxie`
+   shells out to `go env` (goenv.go) and refuses a Go other than the one that
+   built it, so Go 1.25.3 is installed at `/opt/go1.25.3` and pinned at
+   `/usr/local/bin/go` (the host's 1.27 stays at `/usr/bin/go`). Rebuilding it
+   then failed three times, each a real defect: a duplicate `*ast.CallExpr` case
+   in `legacy/compiler/restrict.go`, the vendored purego fakecgo missing the
+   `abi_*.h` headers its own assembly includes, and `_mxc_stage4/moxie.mod`
+   making the compiler's own tree "user code". All three are fixed and
+   committed. `GOROOT=/opt/go1.25.3 bash legacy/build.sh` now produces a working
+   reference compiler.
+
+**Consequence: phase 2 (selfhost) and the `:legacy` half of phase 6 are no longer
+environmental.** Phase 2 runs the whole chain - legacy builds stage1, stage1
+re-bakes the runtime and self-hosts stage2, and `selfhost:fixpoint` asserts
+`stage2 == stage3`. That is green.
 
 - Build: `MOXIEROOT=/home/mleku/moxie/git.smesh.lol/moxie ./moxie build -a -o out ./_mxc_stage4`;
   full bootstrap `./build.sh` (needs `moxie-new` absent or it bootstraps from a
