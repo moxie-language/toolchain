@@ -90,7 +90,12 @@ Remaining, and both are debt rather than defects:
    pointer receivers ripples into every `js.Global().Get("x").Set(...)` call
    site, so this is a design decision about the bridge's API, not a cleanup; and
    nothing runs these paths outside a browser.
-2. Non-blocking debt recorded while closing the round: the classic transport's
+2. The dnsmessage array: `Name.Data` is still `[255]byte`, and the port needs a
+   scan for `Data[:0]`-style accumulation and for `f(x[i:i], ...)` calls that
+   relied on append writing through a zero-length slice (the resolver's `fixLen`
+   was one; the known instance is fixed). An array here is a leftover, per the
+   slices-replace-arrays rule.
+3. Non-blocking debt recorded while closing the round: the classic transport's
    `getConn`/`persistConn`/`readLoop`/`writeLoop` are dead on the client path and
    should be deleted; `routing_tree.mx`'s `nodeMatchesPath`/`nodeEntryKey` are
    LAUNDERS (they exist only to pass the generic slice's field through a concrete
@@ -4230,7 +4235,15 @@ any linker failure, with the reason recorded in its comment. A fixture that does
 not link now FAILS, which is what exposed the whole `undefined symbol: main.`
 family in the first place.
 
-## Named public-API types still to dissolve in `src/net/**`
+## Named public-API types in `src/net/**`  [CLOSED: dissolved to aliases]
+
+**Re-measured:** the public named slice/map types are gone. `net.IP`,
+`net.IPMask`, `net.HardwareAddr`, `net/http.Header`, `net/textproto.MIMEHeader`
+and `net/url.Values` are all aliases (`type IP = []byte`, `type Header =
+map[string][][]byte`, ...); the named aggregates that remain are structs (`Dir`,
+`ProtocolError`, `Buffers`, `htmlSig`) plus one unexported `net.addrList []Addr`.
+The `context.Value` half was removed by design (`cbfbe313`). The original list
+follows as the record.
 
 The net agent finished its pass: `net/netip` is wide-clean, `net` and
 `net/internal/socktest` compile clean, value receivers 275 -> 66, `any` debt in
