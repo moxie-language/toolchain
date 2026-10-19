@@ -686,7 +686,10 @@ reject_fixture parencall "parenthesized call target is not allowed"
 # 6x: '+' for text concatenation.
 reject_fixture plustext "'+' is not allowed for text concatenation"
 # 6x.1: a package-level var with an initializer.
-reject_fixture declvar "package-level var with initializer is not allowed"
+# The message names the variable between "var" and "with initializer"
+# ("package-level var 'counter' with initializer is not allowed"), so the pin is
+# the part both compilers share verbatim.
+reject_fixture declvar "with initializer is not allowed"
 # 6x.2: a named slice type.
 reject_fixture namedslice "named slice type 'Names' is not allowed"
 
