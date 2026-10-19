@@ -22,12 +22,14 @@ UNITS=(
 	syscall/js
 )
 
-# Directory fixtures that must compile for wasm but are not stdlib packages.
-# The js bridge's mutator spelling lives here: the four mutators are package
-# functions, and the fixture pins every one of them plus the non-addressable
-# chain shape that a pointer receiver could not serve.
-FIXTURES=(
-	tests/wasmfixtures/jsbridge
+# A directory fixture is a unit too, with a `fixture:` prefix so the dispatch
+# below knows to run it through run_fixture instead of the package path. The js
+# bridge's mutator spelling lives here: the four mutators are package functions,
+# and the fixture pins every one of them plus the non-addressable chain shape
+# that a pointer receiver could not serve. It must be in UNITS, because that
+# array IS the phase's unit list (tests/split-util.sh unit_list).
+UNITS+=(
+	fixture:tests/wasmfixtures/jsbridge
 )
 
 # Packages known not to compile for wasm, with the reason. SKIP, never FAIL:
@@ -68,16 +70,18 @@ echo ""
 echo "=== Phase 1c: js/wasm compile sweep ==="
 
 if [ -n "$UNIT_NAME" ]; then
-	run_one "$UNIT_NAME"
+	case "$UNIT_NAME" in
+	fixture:*) run_fixture "${UNIT_NAME#fixture:}" ;;
+	*) run_one "$UNIT_NAME" ;;
+	esac
 	exit $?
 fi
 
 for u in "${UNITS[@]}"; do
-	run_one "$u"
-done
-
-for f in "${FIXTURES[@]}"; do
-	run_fixture "$f"
+	case "$u" in
+	fixture:*) run_fixture "${u#fixture:}" ;;
+	*) run_one "$u" ;;
+	esac
 done
 
 if [ "${#SWEEP_KNOWN[@]}" -gt 0 ]; then
