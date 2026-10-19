@@ -132,6 +132,68 @@ the correct spelling is `binary.BigEndian().Uint16(b)`. That is a silent wrong
 answer on an invalid construct and needs its own restriction fixture and
 compiler change.
 
+### The transport is the live path only  [CLOSED 3a]
+
+`Transport.RoundTrip` -> `roundTrip` -> `dialAndExchange` is the whole client:
+one function dials, writes, reads, materialises the body and closes, because this
+domain has no goroutines for a read loop and a write loop to run on. Everything
+that existed to pool connections and dial in the background was unreachable from
+that path, and is gone: `getConn`, `dialConn`, `dialConnFor`,
+`startDialConnForLocked`, `decConnsPerHost`, `queueForDial`, `queueForIdleConn`,
+`cancelWantOnError`, `putOrCloseIdleConn`, `tryPutIdleConn`, `removeIdleConn*`,
+`dial`, `customDialTLS`, `addTLS`, `writeConnectRequest`, `dialConnWrapErr`,
+`readLoop`, `writeLoop`, `readResponse`, `waitForContinue`,
+`readLoopPeekFailLocked`, `is408Message`, `handleResponseFor`,
+`mapRoundTripError`, `shouldRetryRequest`, `isReused`, `closeConnIfStillIdle`,
+`markReused`, `wroteRequest`, `onTimer`, `stopTimer`, `logf`, `resetProxyConfig`,
+`maxIdleConnsPerHost`, and the types that only they used (`persistConn`,
+`wantConn`, `wantConnQueue`, `connOrError`, `connLRU`, `responseAndError`,
+`requestAndChan`, `writeRequest`, `bodyEOFSignal`, `bodyEOFFunc`,
+`bodyEarlyCloser`, `readLoopEarlyClose`, `readLoopBodyEOF`, `gzipReader`,
+`readWriteCloserBody`, `persistConnWriter`, `proxyAuthHeader`,
+`connContinueWaiter`, `handshakeTimerSink`, `erringRoundTripper`,
+`tlsHandshakeTimeoutError`), with the `Transport` fields they filled
+(`idleConn`, `idleConnWait`, `idleLRU`, `closeIdle`, `connsPerHost`,
+`connsPerHostWait`, `dialsInProgress`).
+
+**Reachability proof.** The live path is the three functions above; a call-graph
+walk from them (plus the exported API, which must stay) over comment- and
+string-stripped bodies leaves every deleted function unreachable, and each of
+`getConn`, `dialConn`, `readLoop`, `writeLoop` has no reference outside
+`transport.mx` (`grep` across `src/`; the only hits in other files are comments
+and the unrelated `h2_bundle` methods of the same name). Two survivors were kept
+because other files use them: `cloneTLSConfig` (`server.mx` `ServeTLS`) and
+`timeoutError` (`client.mx`), plus `transportReadFromServerError`, which the live
+`roundTrip` type-asserts.
+
+**What the public API does now.** `CloseIdleConnections` has nothing to drain: it
+still initialises the HTTP/2 transport and closes that one, which is a separate
+stack. `Clone`, `RegisterProtocol`, `CancelRequest` and
+`prepareTransportCancel` are unchanged in shape; `reqCanceler` is the only
+mutable bookkeeping left in the struct, and `altProto` the only other map.
+
+File size: `transport.mx` went from 3196 lines to 1382. The build compiles the
+package for host and (phase 1c) for wasm; `tests/netsmoke/muxmatch` still passes
+all twelve registration shapes.
+
+### Routing tree: the direct form is rejected  [BLOCKED 3b]
+
+Replacing `nodeMatchesPath`/`nodeEntryKey` with the direct
+`if mp, _ := e.value.matchPath(pat7, nil); mp != nil { set[e.key] = true }` does
+not compile:
+
+    ; cannot resolve the type of mp in (*routingNode).matchingMethodsPath - the
+      right-hand side is not a value
+    mxc: compile error for net/http
+
+The same shape compiles in a small program both with an instantiated generic
+receiver (`tests/regressions/should_compile/generic_field_read.mx`) and with a
+plain struct holding a `mapping[string, *node]` field, so the gap is contextual
+rather than the field read itself. Per the item's instruction the launders were
+NOT replaced with a different workaround; they are back with a comment naming
+this measurement and the compiler gap, and the removal waits on that gap being
+fixed. `tests/netsmoke/muxmatch` passes with them in place.
+
 **Also closed, by re-measurement:** the `any` sweep in the stdlib generics. It
 is done, not open - `grep` finds no `any` in a generic signature anywhere in
 `src/` (the one hit, `src/iter/iter.mx:34`, is inside a `/* */` doc block
@@ -194,7 +256,10 @@ Remaining, all debt rather than defects:
 2. ~~The dnsmessage array~~ - closed: `Name.Data` is a slice, the comparability
    fallout is checked, and the trap scan is recorded (see "dnsmessage Name"
    below).
-3. Non-blocking debt recorded while closing the round: the classic transport's
+3. ~~The non-blocking debt~~ - 3a closed (dead transport cluster deleted); 3b
+   BLOCKED on a compiler gap (the routing-tree launders cannot go); 3c has a
+   bounded pre-fault at recycle whose before/after numbers land with the final
+   phase-8 run. The classic transport's
    `getConn`/`persistConn`/`readLoop`/`writeLoop` are dead on the client path and
    should be deleted; `routing_tree.mx`'s `nodeMatchesPath`/`nodeEntryKey` are
    LAUNDERS (they exist only to pass the generic slice's field through a concrete
