@@ -52,7 +52,11 @@ func (b *builder) createChanSend(instr *ssa.Send) {
 		b.createCodecChanSend(instr)
 		return
 	}
-	if typeNeedsStructural(instr.X.Type().Underlying().(*types.Chan).Elem()) {
+	// A send's X is the VALUE being sent, so its type IS the element type -
+	// unwrapping it as a chan panics on every send whose value is not itself a
+	// channel (types.Basic for a []byte). The recv hook below reads
+	// unop.X.Type() as the chan because a receive's operand IS the channel.
+	if typeNeedsStructural(instr.X.Type()) {
 		b.createStructuralChanSend(instr)
 		return
 	}
