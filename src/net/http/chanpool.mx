@@ -241,8 +241,20 @@ func chanWorkerLoop(jobs chan int32, results chan int32) {
 	runtime.SetArenaScope(prevScope)
 	done := false
 	for !done {
+		// EVERY allocation of an iteration belongs to the iteration, so the
+		// request arena is entered before the receive that starts it. The
+		// decode and the handler call were the visible half: with only those
+		// inside, the worker still grew the frame arena it inherited from
+		// spawn - which lives for the life of the process - at ~615B a request
+		// (measured: 50kB after 100 requests, 615kB after 800), and that
+		// overflowed into a chained 64MB region, which the phase-8
+		// no-accumulation unit saw as +2096kB over its 400 exchanges. The
+		// comment below is the rule: one iteration, one arena boundary.
+		runtime.ManualArenaEnter(arena)
 		i := <-jobs
 		if i < 0 {
+			runtime.ManualArenaExit(arena)
+			runtime.ArenaReset(arena)
 			break
 		}
 		if i >= chanSlotCount {
@@ -250,7 +262,6 @@ func chanWorkerLoop(jobs chan int32, results chan int32) {
 		}
 		slot := chanSlotBuf[chanSlotBase(i) : chanSlotBase(i)+chanSlotBytes]
 		routeID, rq, ok := chanSlotGetReq(slot)
-		runtime.ManualArenaEnter(arena)
 		h := chanRouteHandler(routeID)
 		var resp *Resp
 		if ok && h != nil {
@@ -261,13 +272,16 @@ func chanWorkerLoop(jobs chan int32, results chan int32) {
 		} else {
 			chanSlotPutResp(slot, resp)
 		}
+		// Answer before the reset: the shell only ever reads the slot, so it can
+		// take the reply while the worker's arena is still current, and nothing
+		// of the request outlives this line.
+		results <- i
 		runtime.ManualArenaExit(arena)
 		runtime.ArenaReset(arena)
 		// The worker is a request-scope server: drain the deferred compaction
 		// of its own long-lived sovereign receivers at the same boundary the
 		// connection loop uses.
 		runtime.SovDrainCompactions(chanSovDrainBudget)
-		results <- i
 	}
 	runtime.ArenaRelease(arena)
 }

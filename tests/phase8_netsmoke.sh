@@ -139,18 +139,13 @@ hello path=/two"
 		log_fail "netsmoke:repeatable-$mode" "responses differ: [$out1] [$out2] [$out3]"
 	fi
 
-	# 8b: the Moxie client resolves a name and completes a real request. The
-	# timeout is here because the client's own transport is the known blocker
-	# (see docs/OPEN_WORK.md): it calls readLoop then writeLoop with no
-	# concurrency, so it resolves, connects, and then waits for a response to a
-	# request it never writes. That is a CLIENT defect, not the resolver (which
-	# resolves here) and not this handler path (curl serves in both modes).
-	# The unit says which of the two it is instead of blaming the resolver.
-	# The Moxie client THROUGH net/http's Transport (--get). This is the unit
-	# that exercises the client stack's connection handling, not just the
-	# single-domain exchange: the transport is single-threaded (this domain has
-	# no goroutine and no task primitive), so one call dials, writes, reads and
-	# materialises the body.
+	# 8b: the Moxie client resolves a name and completes a real request THROUGH
+	# net/http's Transport (--get). This is the unit that exercises the client
+	# stack's connection handling, not just the single-domain exchange: the
+	# transport is single-threaded (this domain has no goroutine and no task
+	# primitive), so one call dials, writes, reads and materialises the body.
+	# The distinction the failure message keeps is resolver-vs-transport: an
+	# address with no status means the name resolved and the exchange did not.
 	crc=0
 	timeout 20 "$td/client" --get "http://127.0.0.1:$port/smoke" >"$td/client-$mode.out" 2>&1 || crc=$?
 	if [ "$crc" = 0 ] && grep -q 'transport ok' "$td/client-$mode.out" 2>/dev/null; then
@@ -161,12 +156,15 @@ hello path=/two"
 		log_fail "netsmoke:client-$mode" "rc=$crc: $(tail -3 "$td/client-$mode.out" 2>/dev/null)"
 	fi
 
-	# No accumulation, in the steady state: TWO runs of 200 exchanges on one
-	# connection each, with the server's own RSS report between them. The FIRST
-	# run is allowed to grow the process (the request arena is acquired with the
-	# first connection); the second one must not. The server also counts the
-	# calls it makes - one per request - so the delta proves the handler was
-	# called exactly once per exchange and nothing was retained.
+	# No accumulation: the FIRST 400 exchanges of the process, in two runs of
+	# 200 on one connection each, with the server's own RSS report between them.
+	# There is deliberately no warm-up run before the baseline: a one-time cost
+	# that lands in the first few hundred requests (an arena chaining an
+	# overflow region, a mapping being faulted) is retention as far as a
+	# long-lived server is concerned, so the strictest window is the honest one.
+	# The window is why the worker's decode had to move inside its request
+	# arena: outside, the worker grew 615B a request and chained a 64MB region,
+	# which read as +2096kB here while a warmed-up loop read +0.
 	s0="$(curl -s -m 10 "http://127.0.0.1:$port/stats" 2>/dev/null)"
 	mid_rss="$(printf '%s\n' "$s0" | sed -n 's/^rss_kb=//p' | head -1)"
 	lrc=0
@@ -192,15 +190,10 @@ hello path=/two"
 	fi
 
 	if [ "$mode" = "inline" ]; then
-		# The transport canary. http.Get is the blocked client path (its
-		# Transport needs two loops at once and dialConn runs them in sequence),
-		# so this asserts the blocker is STILL there: while it is, the canary
-		# passes and names it; the day http.Get works, the canary fails and
-		# says to put the transport back in the client unit. A defect that
-		# heals itself must not do it quietly.
-		# The unit above IS http.Get now. This one keeps the single-domain
-		# exchange alive beside it, so a transport regression and a socket
-		# regression cannot be mistaken for each other.
+		# The unit above IS the Transport path. This one keeps the single-domain
+		# exchange (LookupHost/Dial/Write/ReadResponse with no Transport)
+		# alive beside it, so a transport regression and a socket regression
+		# cannot be mistaken for each other.
 		src=0
 		timeout 20 "$td/client" "http://127.0.0.1:$port/smoke" >"$td/client-sync.out" 2>&1 || src=$?
 		if [ "$src" = 0 ]; then
