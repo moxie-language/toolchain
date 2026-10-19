@@ -5391,6 +5391,52 @@ func isUintptrType(t Type) (ok bool) {
 //
 // A generic body is skipped: its operand type is still a TypeParam, and the
 // instantiation is what knows the concrete type.
+// checkPtrToIntConv rejects a pointer converted straight to an integer type.
+// Go allows it only through unsafe.Pointer - `uintptr(p)` is not a conversion,
+// `uintptr(unsafe.Pointer(p))` is - and legacy enforces that rule. stage4 did
+// not, so `int32(attr.Files[i])` (an fd carried as a *File) compiled under
+// stage4 and failed under legacy, which is the bilateral divergence phase 2
+// found in src/os/exec_linux.mx.
+//
+// unsafe.Pointer is exempt in both directions: it IS the intermediate.
+func (fb *ssaFuncBuilder) checkPtrToIntConv(x SSAValue, dst Type) {
+	if x == nil || dst == nil || fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
+		return
+	}
+	if !isUserPackagePath(restrictPath(fb.fn.Pkg.Pkg.Path)) {
+		return
+	}
+	src := x.SSAType()
+	if src == nil {
+		return
+	}
+	if _, isTP := src.(*TypeParam); isTP {
+		return
+	}
+	if _, isPtr := SafeUnderlying(src).(*Pointer); !isPtr {
+		return
+	}
+	if isUnsafePtrType(src) {
+		return
+	}
+	d := SafeUnderlying(dst)
+	if d == nil {
+		return
+	}
+	db, isBasic := d.(*Basic)
+	if !isBasic {
+		return
+	}
+	// Only an INTEGER destination is the rule. unsafe.Pointer is a Basic in
+	// this model, and `unsafe.Pointer(p)` is the legal intermediate - rejecting
+	// it took the standard library (and so the compiler) with it.
+	if db.Info&IsInteger == 0 {
+		return
+	}
+	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+	push(cctx.compileErrors, fb.errPos() | "cannot convert " | src.String() | " to " | dst.String() | " directly: a pointer converts to an integer only through unsafe.Pointer")
+}
+
 func (fb *ssaFuncBuilder) checkUnsafePtrConv(val SSAValue, T Type) {
 	if val == nil || !isUnsafePtrType(T) {
 		return
@@ -5445,6 +5491,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 					// which folded to a nil Pointer and compiled (measured:
 					// rc=0, printed nil, where go/types rejects the source).
 					fb.checkSliceToArrayConv(args2[0], tn.Typ)
+					fb.checkPtrToIntConv(args2[0], tn.Typ)
 					fb.checkUnsafePtrConv(args2[0], tn.Typ)
 					if folded, okF := fb.foldConstConvert(args2[0], tn.Typ); okF {
 						return folded
@@ -5470,6 +5517,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 			}
 			fb.checkConstConvert(args3[0], convType)
 			fb.checkSliceToArrayConv(args3[0], convType)
+			fb.checkPtrToIntConv(args3[0], convType)
 			fb.checkUnsafePtrConv(args3[0], convType)
 			if folded, okF := fb.foldConstConvert(args3[0], convType); okF {
 				return folded
