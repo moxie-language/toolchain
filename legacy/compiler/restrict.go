@@ -733,10 +733,9 @@ func (b *builder) checkASTRestrictions() {
 					b.addError(paren.Pos(), "moxie: parenthesized call target is not allowed: write f(x), not (f)(x)")
 				}
 			}
+			b.checkPushRestriction(node)
 		case *ast.RangeStmt:
 			b.checkRangeRestriction(node)
-		case *ast.CallExpr:
-			b.checkPushRestriction(node)
 		case *ast.FuncDecl:
 			// Exempt compiler-generated builtins (__moxie_*).
 			if node.Name != nil && strings.HasPrefix(node.Name.Name, "__moxie_") {
