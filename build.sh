@@ -1,29 +1,57 @@
 #!/bin/bash
 set -e
 
-# LLVM 22 is pinned across the whole stack. Some distros ship only the
-# unversioned tool names for opt/llvm-extract, so accept either name but
-# verify the major version is 22 - a name is not proof of provenance.
-# Output formats differ ("clang version 22.1.8", "LLD 22.1.8",
-# "LLVM version 22.1.8"), so pull the first major.minor token.
-need_llvm22() {
-    local name="$1" bin=""
-    for c in "${name}-22" "$name"; do
-        if command -v "$c" >/dev/null 2>&1; then bin="$c"; break; fi
-    done
-    if [ -z "$bin" ]; then FAIL="$FAIL ${name}-22"; return; fi
+# The DRIVER speaks one LLVM major: whichever `llvm-config` reports. The tools
+# are asked for by their unversioned names and every one of them must report that
+# same major - a "-22" suffix on a binary that is really 23 is exactly the lie
+# that let this stack drift for months, and mixing majors inside one pipeline
+# produces bitcode the next tool cannot read (LLVM reads older bitcode, never
+# newer: a newer opt rewrites llvm.returnaddress into a name an older clang
+# cannot lower).
+#
+# The LEGACY bootstrap compiler is a separate client: its vendored go-llvm
+# purego layer is LLVM 22 shaped (it reports a `br` with the wrong opcode under
+# 23, measured), so it loads libLLVM-22. It writes 22 bitcode that this 23
+# driver reads - the supported direction - and no 22 tool ever reads 23 output.
+LLVM_MAJOR="${LLVM_MAJOR:-}"
+if [ -z "$LLVM_MAJOR" ]; then
+    if command -v llvm-config >/dev/null 2>&1; then
+        LLVM_MAJOR="$(llvm-config --version 2>/dev/null | cut -d. -f1)"
+    fi
+fi
+LEGACY_LLVM_MAJOR="${LEGACY_LLVM_MAJOR:-22}"
+
+need_major() {
+    local name="$1" bin="$1" want="$2"
+    command -v "$bin" >/dev/null 2>&1 || { FAIL="$FAIL $name"; return; }
     local ver
     ver="$("$bin" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1 | cut -d. -f1)"
-    if [ "$ver" != "22" ]; then FAIL="$FAIL ${name}(=${ver:-unknown})"; fi
+    if [ "$ver" != "$want" ]; then FAIL="$FAIL $name(=${ver:-unknown})"; fi
 }
 
 FAIL=""
-for tool in clang ld.lld opt llvm-link llvm-extract; do need_llvm22 "$tool"; done
-if [ -n "$FAIL" ]; then
-    echo "error: LLVM 22 required (pinned across the stack). bad/missing:$FAIL" >&2
-    echo "  arch:   pacman -S llvm22 clang22 lld22" >&2
-    echo "  debian: apt install llvm-22 clang-22 lld-22" >&2
+if [ -z "$LLVM_MAJOR" ]; then
+    echo "error: no llvm-config found; set LLVM_MAJOR to the LLVM major to use" >&2
     exit 1
+fi
+for tool in clang ld.lld opt llvm-link llvm-extract; do need_major "$tool" "$LLVM_MAJOR"; done
+if [ -n "$FAIL" ]; then
+    echo "error: LLVM $LLVM_MAJOR required (the host's one major). bad/missing:$FAIL" >&2
+    echo "  arch:   pacman -S llvm clang lld" >&2
+    exit 1
+fi
+
+# The legacy bootstrap compiler needs its own major's shared library; without it
+# the reference half of the bootstrap (phase 2, phase 6 :legacy) cannot run.
+LEGACY_LIB=""
+for p in "/usr/lib/libLLVM-${LEGACY_LLVM_MAJOR}.so" \
+         "/usr/lib64/libLLVM-${LEGACY_LLVM_MAJOR}.so" \
+         "/usr/lib/llvm-${LEGACY_LLVM_MAJOR}/lib/libLLVM-${LEGACY_LLVM_MAJOR}.so"; do
+    if [ -f "$p" ]; then LEGACY_LIB="$p"; break; fi
+done
+if [ -z "$LEGACY_LIB" ]; then
+    echo "warning: libLLVM-${LEGACY_LLVM_MAJOR}.so not found: legacy/moxie cannot run," >&2
+    echo "         so the bootstrap chain (phase 2, phase 6 :legacy) is unavailable." >&2
 fi
 
 MOXIEROOT="$(pwd)"

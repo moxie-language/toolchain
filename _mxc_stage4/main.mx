@@ -219,14 +219,13 @@ func fatal(msg string) {
 
 func mem2regBc(bcFile string) {
 	tmp := bcFile | ".m2r"
-	// opt-22, not opt: the unversioned name is whatever LLVM the host happens
-	// to have on PATH, and a newer opt UPGRADES the bitcode it writes. LLVM 23
-	// renamed llvm.returnaddress to llvm.returnaddress.p0 and rewrites the
-	// reference on the way out, so a mem2reg step run by opt(23) hands
-	// clang-22 a module whose intrinsic 22 does not know and the link dies on
-	// "undefined symbol: llvm.returnaddress.p0". Every other tool here is
-	// versioned (clang-22, llvm-link-22, ld.lld-22) for the same reason.
-	rc := run([]string{"opt-22", "-passes=mem2reg", bcFile, "-o", tmp})
+	// The driver speaks ONE LLVM major: whichever the host's clang/opt/link
+	// report, which build.sh asserts they all agree on. Names are unversioned
+	// on purpose - a "-22" suffix on a binary that is really 23 is exactly the
+	// lie that let this stack drift, and mixing majors inside one pipeline
+	// produces bitcode the next tool cannot read (a newer opt rewrites
+	// llvm.returnaddress into a name the older clang cannot lower).
+	rc := run([]string{"opt", "-passes=mem2reg", bcFile, "-o", tmp})
 	if rc != 0 {
 		fatal("opt mem2reg failed for " | bcFile)
 	}
@@ -4523,7 +4522,7 @@ func cmdCacheWarm() {
 		return
 	}
 	triple := "x86_64-unknown-linux-musleabihf"
-	clang := "clang-22"
+	clang := "clang"
 	tmpdir := buildScratchDir("./tmp", "mxc-build")
 	mkdirAll(tmpdir, 0755)
 	registerScratch(tmpdir)
@@ -5319,7 +5318,7 @@ func cmdUpdate(rebuildAll bool) {
 		return
 	}
 	triple := "x86_64-unknown-linux-musleabihf"
-	clang := "clang-22"
+	clang := "clang"
 	tmpdir := buildScratchDir("./tmp", "mxc-build")
 	mkdirAll(tmpdir, 0755)
 	registerScratch(tmpdir)
@@ -5480,7 +5479,7 @@ func cmdTest(args []string) {
 
 	root := moxieRoot()
 	triple := "x86_64-unknown-linux-musleabihf"
-	clang := "clang-22"
+	clang := "clang"
 
 	// A target that names a directory on disk (./pkg, ../pkg, /abs/pkg, or
 	// a bare relative dir like pkg) is resolved through the module root; an
@@ -5888,7 +5887,7 @@ func cmdTest(args []string) {
 	}
 	outpath := mxutil.JoinPath(tmpdir, "test.bin")
 	mxutil.WriteStr(2, "  link\n")
-	linker := "ld.lld-22"
+	linker := "ld.lld"
 	ldArgs := []string{linker, "--gc-sections", "-o", outpath,
 		mxutil.JoinPath(muslDir, "crt1.o")}
 	for _, o := range objList {
@@ -6737,7 +6736,7 @@ func main() {
 		triple = "wasm32-unknown-wasi"
 	}
 	isWasm := mxutil.TargetArch() == "wasm"
-	clang := "clang-22"
+	clang := "clang"
 
 	// A target that names a directory on disk (./pkg, ../pkg, /abs/pkg, or
 	// a bare relative dir like pkg) is resolved through the module root; an
@@ -7211,7 +7210,7 @@ func main() {
 			push(objList, ao)
 		}
 		mxutil.WriteStr(2, "  link\n")
-		ldArgs := []string{"ld.lld-22", "--gc-sections", "-o", outpath,
+		ldArgs := []string{"ld.lld", "--gc-sections", "-o", outpath,
 			mxutil.JoinPath(muslDir, "crt1.o")}
 		for _, o := range objList {
 			ldArgs = mxutil.Ensure(ldArgs, 1)
@@ -8409,7 +8408,7 @@ func cmdBuildRuntime() {
 	if mxutil.TargetArch() == "wasm" {
 		triple = "wasm32-unknown-wasi"
 	}
-	clang := "clang-22"
+	clang := "clang"
 	sysroot := mxutil.JoinPath(root, "sysroot")
 	tmpdir := buildScratchDir("/tmp", "mxc-rt-build")
 	mkdirAll(tmpdir, 0755)
@@ -8516,7 +8515,7 @@ func cmdBuildRuntime() {
 		}
 		writeFile(outBc, data, 0644)
 	} else {
-		linkArgs := []string{"llvm-link-22", "-o", outBc}
+		linkArgs := []string{"llvm-link", "-o", outBc}
 		for _, bf := range bcFiles {
 			linkArgs = mxutil.Ensure(linkArgs, 1)
 			push(linkArgs, bf)

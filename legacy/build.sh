@@ -6,13 +6,17 @@ set -e
 REAL_GOROOT=$(go env GOROOT)
 MOXIE_GOROOT="${MOXIE_GOROOT_CACHE:-/tmp/moxie-goroot}"
 
-# LLVM 22 is pinned across the whole stack: the legacy compiler links
-# libLLVM-22, stage4 invokes clang-22/llvm-link-22/ld.lld-22/opt, and the
-# top-level build.sh checks for the -22 tools. Do not fall back to another
-# major version - mixing majors yields bitcode one tool cannot read.
-# Some distros install LLVM 22 as the unversioned toolchain, so accept the
-# unversioned llvm-config but verify the major version it reports.
-LLVM_VER="22"
+# The legacy compiler is an LLVM 22 CLIENT, and that is not a preference: its
+# vendored go-llvm purego layer reads the C API with 22's enum values. Built
+# against 23 it compiles and loads libLLVM-23, then misreports a `br` with the
+# wrong opcode (measured), so the interpreter rejects valid IR on the first
+# package. The stage4 driver is the half that moves with the host (it asks for
+# unversioned tools and build.sh checks they agree). The bitcode boundary
+# between the two is one-way in the supported direction: legacy writes 22
+# bitcode, the 23 driver reads it.
+#
+# LLVM_VER overrides the major for a host with several installs.
+LLVM_VER="${LLVM_VER:-22}"
 LLVM_PREFIX=""
 for c in "llvm-config-${LLVM_VER}" llvm-config; do
     if command -v "$c" >/dev/null 2>&1; then
