@@ -6,6 +6,71 @@ taken, the findings that motivated them, and the two designs in flight
 
 ## REMAINING WORK (as of round 73) - read this first
 
+### Current state, the queue it leaves, and what not to reopen (round 15 close)
+
+The sections below this one are the historical map; where they disagree with this
+block, this block is the re-measured fact. Every claim here has a gate run or a
+committed fixture behind it, and the gate numbers are in "Gate state on this
+tree" (search for `cc161cb8e896aff1`).
+
+**Green on this tree**, one phase at a time (`-j 1`):
+
+    bootstrap fixpoint   r127a == r127b == r127c == cc161cb8e896aff1
+    phase 0a/0b          134/134 (88 + 46 units)
+    phase 1b             45 stdlib packages
+    phase 1c             4/4
+    phase 3              2/2
+    phase 4              2/2
+    phase 5 (wasm)       85/85, 0 failed
+    phase 6              PASS (23 ms), 0 :stage4 failures
+    phase 8              17/17 units PASS in BOTH dispatch modes, 2048kB
+                         no-accumulation threshold UNWIDENED (spawned +0kB)
+
+Phase 2 (selfhost) and the `:legacy` variants of phase 6 need libLLVM-22, which
+is not installed here: **environmental, reported, not worked around**.
+
+**Closed this round** (each with a fixture that pins it, each its own commit):
+
+| what | commit | pin |
+| --- | --- | --- |
+| a registered route is matched, every shape | `0047faea` | `tests/netsmoke/muxmatch` (12 checks) |
+| a runtime-built `[]byte` crosses a spawn channel byte-exact | `de425e2a` | `tests/netsmoke/spawnbytes` (6 cases) |
+| the pool carries bodies through a slot ring, one copy | `e0a4b871` | `spawn-cost`, `no-accumulation` |
+| the ring is pre-faulted at pool startup | `3320242d` | `no-accumulation` |
+| the slot is 64KB, sized by the measured message | `2a0ab6c7` | `no-accumulation` (ring 256kB) |
+| the pool worker's whole iteration is one request arena | `eeb95850` | `no-accumulation-spawned` (scope 0 flat, no overflow region) |
+| a Moxie HTTP client completes a request against a plain TCP peer | `0686b7bd` | phase-8 `client` unit (`--get`) |
+| `^` on a sized unsigned constant keeps its type | `f2e91e56` | `const_xor_width` |
+| a buffered `chan []byte` and a generic field read | `22487ecd` | `chan_buffered_slice`, `generic_field_read` |
+| `defer` in a loop registers once per iteration | `a638ec2e` | `defer_in_loop` |
+
+**The queue that is left, in order:**
+
+1. The `-cover` prefix defect (below): bilateral, and legacy cannot be built on
+   this host, so it stays recorded rather than half-applied.
+2. The `any` sweep in the stdlib generics (`iter`, `weak`,
+   `crypto/internal/fips140cache`, `maps`/`slices`/`bytes`), whose completion
+   condition is deleting the skip-list in `_mxc_stage4/main.mx` (~line 1722).
+3. The rule-9 array decision in `syscall` / `os.Pipe` (pin with a run fixture, or
+   convert).
+4. The `syscall/js` and `net/http/roundtrip_js` rule debt (convert, or pin
+   through the `gojs` stubs).
+5. Non-blocking debt recorded while closing the round: the classic transport's
+   `getConn`/`persistConn`/`readLoop`/`writeLoop` are dead on the client path and
+   should be deleted; `routing_tree.mx`'s `nodeMatchesPath`/`nodeEntryKey` are
+   LAUNDERS (they exist only to pass the generic slice's field through a concrete
+   parameter type, the round-73 workaround) and can go now that
+   `generic_field_read` pins the direct shape; the `sovGroup` recycle list is not
+   pre-faulted; `-cover` is the item above.
+
+**Do not reopen as "the leak"**: `hashmapOwner` and the root fallback. The
+per-request `Header` map is a sovereign group and its buckets die with the
+request reset; the root's residual is group bookkeeping that does not move RSS or
+VmData. The leak was closed by `arenaReleaseGroups` and the single-boundary
+`chanHandleOne`, and the acceptance instrument (scope 0 retained delta zero,
+mapped bytes identical across samples, live sovereign groups constant) is green
+in both dispatch modes.
+
 ### Repository boundaries - read this before the queue
 
 Four trees, and relay work goes in exactly one of them:
@@ -101,7 +166,23 @@ rather than half-applied. Repro after the fix: `make cover` in `../morly`
 should print a table under `git.smesh.lol/morly`, and
 `moxie test -cover ./pkg/store` there should name `pkg/store/engine.mx`.
 
-### Compiler: `^` on a sized unsigned constant loses its type  [COMPILER, both, MEASURED round 15]
+### Compiler: `^` on a sized unsigned constant loses its type  [CLOSED round 15, `f2e91e56`]
+
+**Fixed.** The two halves are the unary const fold in `_mxc_stage4/ssa_builder.mx`
+(an operand's `*Basic` now masks the folded value to its width via
+`MaskConstToBasic`) and `MaskConstToBasic` itself in `pkg/types/tc_const.mx` (a
+uint64 whose bit pattern is negative is `Unsigned: true`, not just one that was
+already marked). `tests/regressions/should_compile/const_xor_width.mx` asserts
+all four widths THROUGH a conversion, plus the signed and variable controls.
+The legacy compiler needs no mirror and this was checked by reading, not running:
+its unary `^` is never folded to a constant (`legacy/compiler/compiler.go`,
+`case token.XOR` in the unop path, emits `CreateXor(x, all-ones)` at `x`'s own
+LLVM type, so i8 all-ones is already 255), and its constant evaluation is the
+vendored Go type checker, which follows Go's rules. The divergence was stage4's
+own fold, which turned the operand into a signed `ConstInt` before the width was
+applied.
+
+The measurement that motivated it, kept as the record:
 
 Re-measured on this tree (one probe, four widths plus the variable control):
 
@@ -171,7 +252,7 @@ The array itself is still there and should become a slice; scanning the port for
 writing through the zero-length slice (there is a live one in the same file's
 `fixLen`, see the commit that fixed the resolver) is open work.
 
-### The net stack serves, except that a registered route is not matched  [STDLIB, next]
+### The net stack serves, and a registered route is matched  [CLOSED round 15, `0047faea`]
 
 Measured against a running stdlib server (net/http on 127.0.0.1): ListenAndServe
 listens, accepts, parses the request, dispatches through the handler chain and
@@ -306,7 +387,7 @@ the SLOT INDEX; the worker answers in the same slot and sends the index back.
     resets, so the steady state allocates nothing.
   * four slots of 64KB, sized by MEASURED in-flight concurrency and message
     size, not connections times slots: the shell is serial and blocks on the response, so one request
-    is in flight (`ring_committed_kb=4096` in the fixture's /stats). A frame that
+    is in flight (`ring_committed_kb=256` in the fixture's /stats). A frame that
     does not fit panics by name instead of truncating.
   * wasm: SharedBuffer panics by name (no shared mapping to hand out as a slice)
     and the structural channel entries route through the SAB bridge with the same
@@ -319,17 +400,35 @@ kB identical, mapped net identical across samples. That closes the +440B/request
 slope the int32 stream had, which came from the 32MB-per-direction spawn rings
 being touched: an index is four bytes.
 
-Phase-8 units against these binaries: build, mux-match, spawn-bytes, spawn-cost
-(206us), curl, client and keep-alive PASS in BOTH dispatch modes, and
-no-accumulation is +0 kB in each mode (rss 16400->16400 inline, 8008->8008
-spawned), ring_committed_kb=4096.
+The ring is PRE-FAULTED at pool startup (`chanSlotPrefault`: one byte per page)
+and it is 4 x 64KB, not 4 x 1MB. Both are measures of the same thing - the ring
+is queue-owned, so its resident pages are a startup cost, not a thing the request
+stream should pay for - and neither of them was the +2096kB.
 
-The ring is PRE-FAULTED at pool startup (`chanSlotPrefault`: one byte per page).
-Without it the mapping's pages are faulted by the first few hundred requests,
-which read as retention: the official script measured +2096kB over 400 exchanges
-in spawned mode against the 2048kB threshold. With it, the same sequence is +0 kB
-and the baseline RSS carries the ring (4MB) from startup, which is where a
-queue-owned ring's cost belongs.
+**The +2096kB was the pool WORKER's decode arena (fixed in `eeb95850`).** The
+worker decoded the slot into the frame arena it inherited from spawn (which lives
+for the life of the process) and only put the handler call and the write inside
+its request arena, so the inherited arena grew ~615B a request, overflowed its
+64kB region at ~200 requests and chained a 64MB overflow region. The official
+no-accumulation unit measures the FIRST 400 exchanges of the process, so it saw
+exactly that step. A warmed-up loop of the same binary read +0, which is why the
+diagnosis took a scope report rather than an RSS pair:
+
+    spawned, server6, one connection      scope 0 live used   request arena   rss_kb
+      0 requests                              2608/1408            12576        5896
+    200 requests                              2608/1408            12544        6156
+    800 requests                              2608/1408            12544        6156
+   1600 requests                              2608/1408            12544        6164
+
+The two scope-0 values are sample parity, not growth. The rule the fix applies is
+the same one the connection loop already had: one iteration, one arena boundary,
+entered before the receive that starts the iteration.
+
+The residual +268kB over 1600 exchanges is the slot ring itself: 4 x 64KB is
+256kB, it is MAP_SHARED and pre-faulted by the shell, and the pages the WORKER
+writes are charged to the worker's RSS the first time it writes them. That is
+bounded by the ring and it is a startup cost paid once, not a rate - the same
+reason the ring is pre-faulted rather than discovered by the request stream.
 
 ### The channel handler path  [DESIGN, src/net/http/chanpath.mx + chanpool.mx]
 
@@ -1689,6 +1788,32 @@ Moxie shapes, or pin them with a wasm fixture driven through the `gojs` stubs
 - Phase 2 (selfhost) and the `:legacy` variants of phase 6 need libLLVM-22, which
   is not installed here. Environmental.
 
+### Phase 8, the full unit list, as measured (commit `eeb95850`, both modes)
+
+    netsmoke:build                       PASS  all five fixtures built
+    netsmoke:mux-match                   PASS
+    netsmoke:spawn-bytes                 PASS
+    netsmoke:spawn-cost                  PASS  spawns=16 per_spawn_us=174
+    netsmoke:listen-inline               PASS
+    netsmoke:curl-inline                 PASS  200 with the handler body
+    netsmoke:keepalive-inline            PASS  two requests, one connection
+    netsmoke:repeatable-inline           PASS  three identical responses
+    netsmoke:client-inline               PASS  status 200, body matched, transport ok
+    netsmoke:no-accumulation-inline      PASS  rss 16492 -> 16508 kB (+16)
+    netsmoke:client-sync                 PASS  single-domain exchange
+    netsmoke:listen-spawned              PASS
+    netsmoke:curl-spawned                PASS
+    netsmoke:keepalive-spawned           PASS
+    netsmoke:repeatable-spawned          PASS
+    netsmoke:client-spawned              PASS
+    netsmoke:no-accumulation-spawned     PASS  rss 5896 -> 5896 kB (+0)
+
+`netsmoke:no-accumulation-spawned` is the unit that was red for three official runs
+at +2096kB; the cause is in "The pool transport is a queue-owned ring" above (the
+worker decoded outside its request arena). Nothing was widened, skipped or
+deleted to get here: the threshold is still `< 2048` and the window is still the
+first 400 exchanges of the process.
+
 ### Gate state on this tree (round 15, compiler fixpoint `cc161cb8e896aff1`)
 
 Run one phase at a time (`-j 1`), because four-way parallelism makes phase 5 fail
@@ -1702,7 +1827,7 @@ on Chromium contention: the same fixtures pass serially, which is why the rule i
     phase 3              2/2                                 PASS
     phase 4              2/2                                 PASS
     phase 5 (wasm)       85/85, 0 failed, -j 1               PASS
-    phase 8              official script, both dispatch modes  running at this commit
+    phase 8              17/17 units, both dispatch modes         PASS
     phase 0a/0b          134/134 (88 + 46 units), -j 1        PASS
 
 Phase 2 and the `:legacy` variants stay environmental: no libLLVM-22 on this host,
