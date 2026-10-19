@@ -296,25 +296,35 @@ func ListFiles(dir, ext string) (ss []string) {
 	if n <= 0 {
 		return nil
 	}
-	names := []string{:256}
+	// Count the matching entries first, then write through a cursor. The old
+	// shape staged the names in a fixed []string{:256} and panicked with
+	// "index out of range" the first time a directory held more: the compiler's
+	// cache root reaches ~255 entries as toolchain versions accumulate, and
+	// that panic breaks `moxie update` (and so the last step of build.sh).
+	count := int32(0)
 	start := int32(0)
-	ni := int32(0)
 	for i := int32(0); i < n; i++ {
 		if buf[i] == 0 {
 			if HasSuffix(string(buf[start:i]), ext) {
-				names[ni] = string(buf[start:i])
-				ni = ni + 1
+				count = count + 1
 			}
 			start = i + 1
 		}
 	}
-	if ni == 0 {
+	if count == 0 {
 		return nil
 	}
-	total := ni
-	result := []string{:total}
-	for j := int32(0); j < total; j = j + 1 {
-		result[j] = names[j]
+	result := []string{:count}
+	start = int32(0)
+	ri := int32(0)
+	for i := int32(0); i < n; i++ {
+		if buf[i] == 0 {
+			if HasSuffix(string(buf[start:i]), ext) {
+				result[ri] = string(buf[start:i])
+				ri = ri + 1
+			}
+			start = i + 1
+		}
 	}
 	return result
 }
