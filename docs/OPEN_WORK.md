@@ -13,24 +13,23 @@ block, this block is the re-measured fact. Every claim here has a gate run or a
 committed fixture behind it, and the gate numbers are in "Gate state on this
 tree" (search for `cc161cb8e896aff1`).
 
-**Green on this tree**, one phase at a time (`-j 1`), under the pinned LLVM 22
-and Go 1.25.3:
+**EVERY GATE IS GREEN on this tree**, one phase at a time (`-j 1`), with the
+driver on LLVM 23 and legacy on 22:
 
-    phase 2 (selfhost)   6/6 units, selfhost:fixpoint stage2 == stage3   PASS
-    phase 0a/0b          136/136 (89 + 47 units)                        PASS
-    phase 1b             45 stdlib packages                             PASS
-    phase 1c             path/filepath, syscall/js PASS; net OOMs clang-22
-    phase 3              2/2                                            PASS
-    phase 4              2/2                                            PASS
-    phase 5 (wasm)       85/85, 0 failed                     (not re-run after the pin)
-    phase 6              PASS, 0 :stage4 failures            (not re-run after the pin)
-    phase 8              17/17 units, both dispatch modes    (green at `eeb95850`,
-                         2048kB threshold unwidened)          before the pin)
+    phase 2 (selfhost)   6/6 internal, selfhost:fixpoint stage2 == stage3   PASS
+    phase 0a/0b          136/136 (89 + 47 units)                            PASS
+    phase 1b             45 stdlib packages, 2/2 units                      PASS
+    phase 1c             4/4                                                PASS
+    phase 3              2/2                                                PASS
+    phase 4              2/2                                                PASS
+    phase 5 (wasm)       85/85, 0 failed                                    PASS
+    phase 6              65 internal units, both compilers                  PASS
+    phase 8              17/17 units in BOTH dispatch modes                 PASS
+                         no-accumulation 16488->16504 kB inline (+16),
+                         5896->5896 kB spawned (+0), 2048kB threshold unwidened
 
-The `:legacy` half of phase 6 is no longer environmental: legacy runs under the
-pin (see the LLVM 22 section below). What stops a full sweep is phase 1c's `net`
-unit, which clang-22 cannot compile on a 14GB host - the measurements and the two
-ways out are in that same section.
+The wasm memory wall is gone with the 23 driver: the unit clang-22 could not
+compile (9.3GB, OOM-killed) is part of phase 1c's 4/4, which takes ~20 minutes.
 
 **Also closed, by re-measurement:** the `any` sweep in the stdlib generics. It
 is done, not open - `grep` finds no `any` in a generic signature anywhere in
@@ -63,9 +62,10 @@ phase 1b, which is green.
 
 **The queue that is left, in order:**
 
-1. The wasm memory wall under LLVM 22: phase 1c's `net` unit needs more memory
-   from clang-22 than this host has. Measured, with two ways out, in the LLVM 22
-   section. This is the only thing between the pin and a full green sweep.
+1. The `syscall/js` and `net/http/roundtrip_js` rule debt (surveyed - no `any`
+   left, four value receivers), and the non-blocking debt listed below. Both are
+   in the section under this one.
+
 **Closed since the queue was written**, so nobody re-opens them:
 
   * `-cover` now attributes and instruments the target's repository
@@ -81,7 +81,7 @@ phase 1b, which is green.
   * `moxie update` no longer panics when the cache root passes 256 entries
     (`d80e4aa3`).
 
-The queue that is left:
+Remaining, and both are debt rather than defects:
 
 1. The `syscall/js` and `net/http/roundtrip_js` rule debt: surveyed, smaller than
    recorded. There is no `any` left in either file; what remains is four value
@@ -2834,78 +2834,61 @@ explicit exemption declaration.
 
 ## Environment facts
 
-### LLVM 22 and Go 1.25.3 are PINNED and installed (round 15)
+### LLVM: one driver major (23), one legacy major (22), and Go 1.25.3 (round 15)
 
-`build.sh` always claimed LLVM 22 was pinned. It was not: every `-22` name was a
-symlink to the host's LLVM 23 (`clang-22 -> /bin/clang`, `ld.lld-22 ->
-/bin/ld.lld`, `llvm-link-22 -> /bin/llvm-link`), and the check passed only
-because it accepted the unversioned names it found. Making the pin TRUE took
-four things, and each one exposed a real defect:
+`build.sh` always claimed LLVM 22 was pinned across the stack. Two things were
+wrong: every `-22` name was a symlink to the host's LLVM 23, so the claim was
+false; and "one major for everything" was the wrong requirement, because the two
+halves of the bootstrap need different ones.
 
-1. **The packages.** `pacman -S llvm22 llvm22-libs clang22 lld22` (22.1.8), then
-   the `/usr/local/bin` shims repointed at `/usr/lib/llvm22/bin` (Arch does not
-   put `clang-22` in `/usr/bin`). `clang-22`, `clang++-22`, `ld.lld-22`,
-   `llvm-link-22`, `llvm-as-22`, `llvm-dis-22`, `opt-22` and `llvm-extract-22`
-   all report 22.1.8; `build.sh`'s five-tool check passes.
-2. **`opt` was unversioned** (`_mxc_stage4/main.mx`, mem2reg). LLVM 23's opt
-   REWRITES the bitcode it writes: `llvm.returnaddress` became
-   `llvm.returnaddress.p0`, which clang-22 cannot lower, so the link died with
-   `undefined symbol: llvm.returnaddress.p0`. The compiler now invokes `opt-22`
-   like every other tool. Legacy needed no mirror: it runs passes through the
-   LLVM C API in-process, never by spawning opt.
-3. **The runtime bake was 23-pure.** `sysroot/runtime_go.bc` is gitignored and
-   nothing regenerates it on a toolchain change, so the new 22 toolchain linked
-   a blob whose 13 `returnaddress.p0` references it could not resolve. Re-baked
-   with the pinned stack (`moxie build-runtime`): 13 `llvm.returnaddress`, no
-   `.p0`. The package cache was cleared at the same time - a cached `.bc`
-   carries the intrinsic names of whichever opt produced it.
-4. **Legacy needed a Go toolchain and could not be rebuilt.** `legacy/moxie`
-   shells out to `go env` (goenv.go) and refuses a Go other than the one that
-   built it, so Go 1.25.3 is installed at `/opt/go1.25.3` and pinned at
-   `/usr/local/bin/go` (the host's 1.27 stays at `/usr/bin/go`). Rebuilding it
-   then failed three times, each a real defect: a duplicate `*ast.CallExpr` case
-   in `legacy/compiler/restrict.go`, the vendored purego fakecgo missing the
-   `abi_*.h` headers its own assembly includes, and `_mxc_stage4/moxie.mod`
-   making the compiler's own tree "user code". All three are fixed and
-   committed. `GOROOT=/opt/go1.25.3 bash legacy/build.sh` now produces a working
-   reference compiler.
+**What is pinned now, and why:**
 
-**Consequence: phase 2 (selfhost) and the `:legacy` half of phase 6 are no longer
-environmental.** Phase 2 runs the whole chain - legacy builds stage1, stage1
-re-bakes the runtime and self-hosts stage2, and `selfhost:fixpoint` asserts
-`stage2 == stage3`. That is green.
+| component | major | why |
+| --- | --- | --- |
+| stage4 driver (`clang`, `opt`, `llvm-link`, `ld.lld`) | the host's, 23 | unversioned names; `build.sh` asserts all five agree with `llvm-config` |
+| `legacy/moxie` (bootstrap reference) | 22 | its vendored go-llvm purego layer reads the C API with 22's enums |
+| the bitcode between them | 22 -> 23 | legacy writes 22, the driver reads it. LLVM reads older bitcode, never newer |
 
-#### The pin exposes a wasm memory wall, and it is not the compiler  [BLOCKED, needs a decision]
+**The measurement that settled it.** With the driver on 22, js/wasm `net` could
+not be compiled on this host at all:
 
-Making the pin true turned phase 1c from "passes" into "one unit cannot finish on
-this host". The unit is js/wasm `net`, and the same 13,249,420-byte bitcode was
-compiled both ways as the control:
+    clang-23   same 13,249,420-byte bitcode, done in <500s inside a 6GB cap
+               (13,921,205-byte object)
+    clang-22   OOM-killed at 9,315,836kB anon RSS / 28,280,192kB VM
 
-    clang-23   completes in under 500s inside a 6GB cgroup cap
-               (13,921,205-byte object, rc=0)
-    clang-22   OOM-killed at 9,315,836kB anon RSS / 28,280,192kB total VM
-               (kernel log names clang-22, not the compiler);
-               under an 8GB cap: killed; under a 10GB cap: still running at
-               10 minutes with the host in swap, so it was stopped
+So the driver moved to the host's 23 and phase 1c went green (4/4).
 
-This host has 15,252MB of RAM and its swap was already full (zram 14.9G of 14.9G,
-nvme 8.9G of 16.4G) from unrelated work, so "give clang-22 10GB" is not available
-here. Phase 1c's other two units pass under 22 (`path/filepath`, `syscall/js`).
+**Why legacy stays a 22 client.** Rebuilt against 23 it compiles, loads
+libLLVM-23 and then misreports LLVM instruction opcodes: a plain `br` arrives as
+opcode 71 instead of `llvm.Br`, so the interpreter does not skip it and dies on
+its label operand ("unknown type kind 7 (LabelType) in markExternalValue").
+That is the purego binding layer, not a rebuild problem, so upgrading it is its
+own project. `legacy/build.sh` pins `LLVM_VER=22` and says so.
 
-The Moxie side of the input is large but not pathological for what it is: the
-`net` module is 972,359 IR lines in 730 functions, and the six biggest are
-69,727 to 117,734 lines (`net.(*OpError).Error` alone is 69,727). LLVM 22's wasm
-backend at -O0 is what turns that into 9GB; LLVM 23 does it in one third of the
-memory. Two ways out, both real work and neither one a threshold to widen:
+**Two defects this exposed, both fixed and committed:**
 
-  1. headroom - compile wasm units with nothing else running on a host with
-     ~12GB free, which is an environment fact, not a fix;
-  2. IR reduction - find out why a 40-line `Error()` method is 70k IR lines
-     (concatenation expansion is the first suspect) and make the module smaller,
-     which helps every target and both backends.
+  * the `-22` names had been LYING (pointing at 23). `build.sh` now checks the
+    driver's five tools agree with `llvm-config`, and legacy's build checks its
+    own major's headers and library.
+  * `llvm-glue` was built with a 22 library and 23 headers, because
+    `LLVM_LIB_PATH=/usr/lib/libLLVM-22.so` derives prefix `/usr`, whose
+    `/usr/include` belongs to 23. Struct layouts disagreed at every call and the
+    process corrupted its heap (`free(): invalid pointer` inside
+    `LLVMDisposeBuilder`). The glue build now takes prefix, includedir and
+    libdir from `llvm-config-<major>` and refuses a mismatch.
 
-Until one of them is done, phase 1c is red on this host under the pin, and phases
-5/6/8 have not been re-run since the OOM. That is recorded, not worked around.
+**Legacy also needed a Go toolchain and three source fixes.** `legacy/moxie`
+shells out to `go env` and refuses a Go other than the one that built it, so Go
+1.25.3 is installed at `/opt/go1.25.3` (pinned at `/usr/local/bin/go`; the host's
+1.27 stays at `/usr/bin/go`) and `~/.config/environment.d/go.conf` carries the
+GOROOT, because a stale `GOROOT=/home/mleku/go` in the session environment broke
+every `go` invocation. Rebuilding it then failed on a duplicate `*ast.CallExpr`
+case, on the vendored purego fakecgo missing its `abi_*.h` headers, and on
+`_mxc_stage4/moxie.mod` making the compiler's own tree "user code". All three are
+fixed.
+
+**Consequence:** phase 2 (selfhost, with `selfhost:fixpoint stage2 == stage3`)
+and the `:legacy` half of phase 6 are green - not environmental any more.
 
 - Build: `MOXIEROOT=/home/mleku/moxie/git.smesh.lol/moxie ./moxie build -a -o out ./_mxc_stage4`;
   full bootstrap `./build.sh` (needs `moxie-new` absent or it bootstraps from a
