@@ -176,6 +176,31 @@ File size: `transport.mx` went from 3196 lines to 1382. The build compiles the
 package for host and (phase 1c) for wasm; `tests/netsmoke/muxmatch` still passes
 all twelve registration shapes.
 
+### sovGroup pre-fault: measured, no effect, reverted  [CLOSED 3c]
+
+Implemented at the RECYCLE point, not at init or at take: a group reaches the
+bounded list of 32 only when it is about to be reused, and at that moment its
+slices still describe exactly what was used, so the walk is bounded by the
+group's own retained length and a group that is not going to be reused (the list
+is full) returns before walking anything. The fault was one read per 4096 bytes
+of each retained slice, kept as a blank assignment so it cannot write a retained
+record.
+
+Measured with the exact phase-8 no-accumulation sequence (baseline after the
+mode's first requests, then 400 exchanges on one connection):
+
+    before (recorded phase 8)      inline 16488 -> 16504 kB (+16)
+                                   spawned 5896 -> 5896 kB (+0)
+    with the pre-fault             inline 17560 -> 17576 kB (+16)
+                                   spawned 6116 -> 6116 kB (+0)
+
+The deltas are identical: the change moved the fault from the request that takes
+the group to the request that recycles it, and nothing else, so it was reverted
+rather than kept. The absolute baselines differ by ~1MB and ~220kB, which is the
+binary changing shape (the transport deletion landed between the two runs), not
+the pre-fault; both runs are three orders of magnitude under the 2048kB
+threshold.
+
 ### Routing tree: the direct form is rejected  [BLOCKED 3b]
 
 Replacing `nodeMatchesPath`/`nodeEntryKey` with the direct
@@ -257,9 +282,8 @@ Remaining, all debt rather than defects:
    fallout is checked, and the trap scan is recorded (see "dnsmessage Name"
    below).
 3. ~~The non-blocking debt~~ - 3a closed (dead transport cluster deleted); 3b
-   BLOCKED on a compiler gap (the routing-tree launders cannot go); 3c has a
-   bounded pre-fault at recycle whose before/after numbers land with the final
-   phase-8 run. The classic transport's
+   BLOCKED on a compiler gap (the routing-tree launders cannot go); 3c measured
+   and reverted (no measurable difference). The classic transport's
    `getConn`/`persistConn`/`readLoop`/`writeLoop` are dead on the client path and
    should be deleted; `routing_tree.mx`'s `nodeMatchesPath`/`nodeEntryKey` are
    LAUNDERS (they exist only to pass the generic slice's field through a concrete
