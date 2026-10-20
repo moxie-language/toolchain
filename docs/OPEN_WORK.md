@@ -326,6 +326,23 @@ Remaining, all debt rather than defects (all three closed on this tree):
    mapping directly - see "Routing tree: the launders are gone" above); 3c
    measured and reverted (the `sovGroup` pre-fault moved the fault, it did not
    reduce it).
+4. a builtin structural String for structs and named func types: a declared
+   String() keeps precedence, everything else renders `{field:value ...}` or
+   `func(params) (returns)`. **Measured, and it is not a Stringer:** fmt takes
+   `...Stringer`, does `p.arg.(Stringer)`, and prints `?` when the type has no
+   method; fmt holds no type information of its own (`%T` prints `?`), and the
+   interface value's descriptor is unreachable from Moxie code. The runtime
+   descriptor does carry struct field names, types and offsets (`RawType` walks
+   them), but a func descriptor carries no signature text, so the func form has
+   to come from the compiler. **Design:** the compiler synthesizes the method
+   for each type that needs it - a struct's body calls a runtime writer with
+   `unsafe.TypeOf(*p)` and a data pointer (the writer walks the descriptor:
+   basics, pointer, slice, map, interface, chan, nested structs, field names);
+   a named func type's body returns the signature text built at compile time.
+   Wiring is either a per-type thunk in the interface dispatch table or a
+   synthetic method source parsed by each compiler's own parser (smaller, and
+   the method then flows through the normal pipeline). Two compilers (wood law),
+   plus a bootstrap and a full sweep. Not started.
 
 **Do not reopen as "the leak"**: `hashmapOwner` and the root fallback. The
 per-request `Header` map is a sovereign group and its buckets die with the
@@ -1691,13 +1708,37 @@ fixture runs natively and in phase 5, 88/88), 1b 2/2 over 45 stdlib packages, 2
 2/2 (stage2 == stage3), 1c 5/5, 3 2/2, 4 2/2, 6 2/2, 8 2/2 with 17/17 netsmoke;
 zero failures, zero skips.
 
-**Recorded, not fixed: legacy stops in crypto/rsa on the way to net/http.**
-After the asn1 Stringers, `MOXIEROOT=$PWD GOROOT=/opt/go1.25.3 legacy/moxie
-build ./src/net/http` gets past asn1 and fails in 3s with
-`src/crypto/rsa/rsa.mx:173:17: opts (variable of Pointer type
-crypto.DecrypterOpts) is not an interface`. That is legacy's own checker
-limitation, independent of asn1, so net/http's legacy build is still not an
-oracle for the routing tree.
+**legacy's net/http build: three port defects fixed, one package left.**
+After the asn1 Stringers, legacy stopped in crypto/rsa (`opts (variable of
+Pointer type crypto.DecrypterOpts) is not an interface`). That one is fixed in
+`56e630bd`: DecrypterOpts is a real interface now, so Decrypt's type switch can
+match. It then stopped in `net` with eight errors; `a0569802` fixes them (the
+raw-conn, singleflight and timer callbacks are exported because their
+implementations live in another package, two files import the `unsafe` they
+use, and rawListener's Read/Write take syscall.RawConnAction). legacy now
+compiles `net` in full and stops in `crypto/x509`, which has independent
+defects:
+
+    src/crypto/x509/cert_pool.mx:185:20: potentialParent does not satisfy comparable
+    src/crypto/x509/oid.mx:374:11: cannot use nil as "encoding/asn1".ObjectIdentifier value
+    src/crypto/x509/parser.mx:252:57: undefined: crypto
+    src/crypto/x509/parser.mx:268:27: undefined: unsafe
+
+So legacy still cannot build net/http, and it is still not an oracle for the
+routing tree. The x509 work is a separate item.
+
+**Recorded: stage4 accepts four kinds of invalid code that legacy rejects.**
+The class is now measured, not guessed:
+
+  * a non-Stringer argument in a `...Stringer` position (rendered `?`);
+  * a cross-package call to, or implementation of, an unexported interface
+    method (rawAction, rawControlAction, singleflight call, timer onTimer);
+  * shadowing in a type switch binding (`switch opts := opts.(type)`);
+  * an identifier from a package that was never imported (net's unsafe use).
+
+Each surfaced while making the stdlib valid for legacy. Tightening the stage4
+checker is one change with one prerequisite: first count how much of the stdlib
+relies on each laxness, then fix the code and the checker together.
 
 ### Compiler: a buffered channel of a slice, and a generic field, do not resolve  [OLD NOTE]
 
