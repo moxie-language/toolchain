@@ -14,26 +14,27 @@ committed fixture behind it. The historical "Gate state on this tree" sections
 are snapshots of earlier commits, not the current numbers; this block is.
 
 **EVERY GATE IS GREEN on this tree**, one phase at a time (`-j 1`), with the
-driver on LLVM 23 and legacy on 22, re-run end to end at `15677827` (the commit
-before the documentation commit that records it):
+driver on LLVM 23 and legacy on 22, re-run end to end on the item-3b close tree
+(compiler `ae421fe8`, plus the http commit that follows it):
 
     command: GOROOT=/opt/go1.25.3 bash tests/unitrun.sh -j 1 --phases P --force
     phase 2 (selfhost)   6/6 internal, selfhost:fixpoint stage2 == stage3   PASS
-    phase 0a/0b          137/137 (90 + 46 units)                            PASS
+    phase 0a/0b          139/139 (91 + 47 units)                            PASS
     phase 1b             45 stdlib packages, 2/2 units                      PASS
     phase 1c             5/5 (3 packages + the jsbridge fixture)           PASS
     phase 3              6/6 internal, 2/2 units                            PASS
     phase 4              smoke:hello, 2/2 units                             PASS
-    phase 5 (wasm)       86/86 (85 fixtures + emitted host)                 PASS
+    phase 5 (wasm)       87/87 (86 fixtures + emitted host)                 PASS
     phase 6              65 internal units, both compilers                  PASS
     phase 8              17/17 units in BOTH dispatch modes                 PASS
-                         no-accumulation 16328->16344 kB inline (+16),
-                         6056->6056 kB spawned (+0), 2048kB threshold unwidened
+                         no-accumulation 16292->16308 kB inline (+16),
+                         6052->6052 kB spawned (+0), 2048kB threshold unwidened
 
 Every phase also runs `tree-cleanliness`; all nine were green in that sweep, so
-the totals above include it (137 = 90 + 46 + cleanliness, for example). The wasm
-memory wall is gone with the 23 driver: the unit clang-22 could not compile
-(9.3GB, OOM-killed) is inside phase 1c's `net/http`, which takes ~17 minutes.
+the totals above include it (139 = 91 + 47 + cleanliness, for example), and there
+were no failures and no skips in any phase. The wasm memory wall is gone with
+the 23 driver: the unit clang-22 could not compile (9.3GB, OOM-killed) is inside
+phase 1c's `net/http`, which takes ~17 minutes.
 
 ### The js bridge: mutators are package functions, and its state is one object  [CLOSED]
 
@@ -205,29 +206,59 @@ binary changing shape (the transport deletion landed between the two runs), not
 the pre-fault; both runs are three orders of magnitude under the 2048kB
 threshold.
 
-### Routing tree: the direct form is rejected  [BLOCKED 3b]
+### Routing tree: the launders are gone  [CLOSED 3b]
 
-Replacing `nodeMatchesPath`/`nodeEntryKey` with the direct
-`if mp, _ := e.value.matchPath(pat7, nil); mp != nil { set[e.key] = true }` does
-not compile. Reproduction, re-run at `6ccdcebf`:
+The two launders are deleted and the routing tree reads the mapping directly:
+
+    } else {
+        for _, e := range n.children.s {
+            mp, _ := e.value.matchPath(pat7, nil)
+            if mp != nil {
+                set[e.key] = true
+            }
+        }
+    }
+
+`nodeMatchesPath`, `nodeEntryKey` and the comment that justified them are gone
+from `routing_tree.mx`; `grep -rn "nodeMatchesPath\|nodeEntryKey" src/` returns
+nothing.
+
+Measured on the fixed driver (`ae421fe8`, "compiler: a field of an instantiated
+generic keeps its type in a non-generic method"):
 
     MOXIEROOT=$PWD GOROOT=/opt/go1.25.3 ./moxie build ./src/net/http
-    rc=1 after 172s, first error line:
+    rc=1 after 1482s, and the only error is the expected
+    ld.lld: error: undefined symbol: main.main          (a library target)
+
+Before the compiler fix, the same command with the same direct form failed at
+`SSA build` in 145s:
+
     ; cannot resolve the type of mp in (*routingNode).matchingMethodsPath -
       the right-hand side is not a value
     mxc: compile error for http
 
-(The compiler names the package `http`, not `net/http`, and joins the diagnostic
-to the `mxc:` line without a newline. The failure is compile-time inference - the
-build stops at `SSA build` with no object emitted - not link or runtime.)
+The cause was not the field read, and it was not really about net/http. Two
+losses met: a generic's type parameters were attached during the per-declaration
+Under pass in file order, so `mapping[K,V]` (declared in `mapping.mx` above
+`entry[K,V]`, which its slice field names) recorded its element with TArgs but no
+TParams; and the shallow instantiated copy made where the field was named kept
+Under nil, because the declaration's body did not exist yet, so the substituted
+struct lowered to its generic body (`{i8,i8}`) while the value stored was the
+substituted `{string,*node}`. Both are fixed as general rules: declaration order
+no longer decides whether a type keeps its parameters, and a Named's body
+resolves through its declaration object when the copy carries none. No package,
+type or function name is special-cased and no TArgs are fabricated.
 
-The same shape compiles in a small program both with an instantiated generic
-receiver (`tests/regressions/should_compile/generic_field_read.mx`) and with a
-plain struct holding a `mapping[string, *node]` field, so the gap is contextual
-rather than the field read itself. Per the item's instruction the launders were
-NOT replaced with a different workaround; they are back with a comment naming
-this measurement and the compiler gap, and the removal waits on that gap being
-fixed. `tests/netsmoke/muxmatch` passes with them in place.
+**Pins:** `tests/regressions/should_compile/generic_forward_field.mx` (red
+before the fix, green after) and
+`tests/restrictions/reject_unknown_method_generic.mx` (a genuinely missing
+method is still rejected with `has no field or method`).
+`tests/regressions/should_compile/generic_field_read.mx` keeps passing and now
+says in its header that it pins only the instantiated-RECEIVER shape, which
+compiled even while the package context did not. In the close sweep
+`0a/generic_forward_field` and `0b/reject_unknown_method_generic` pass,
+`tests/netsmoke/muxmatch` passes all 12 shapes inside phase 8, phase 1b builds
+the real package, and phase 8's request path is green in both dispatch modes.
 
 **Also closed, by re-measurement:** the `any` sweep in the stdlib generics. It
 is done, not open - `grep` finds no `any` in a generic signature anywhere in
@@ -279,9 +310,7 @@ phase 1b, which is green.
   * `moxie update` no longer panics when the cache root passes 256 entries
     (`d80e4aa3`).
 
-Remaining, all debt rather than defects (all three decided on this tree; 3b is
-the only one still open, and it is blocked on the compiler - see "Routing tree:
-the direct form is rejected"):
+Remaining, all debt rather than defects (all three closed on this tree):
 
 1. ~~The `syscall/js` and `net/http/roundtrip_js` rule debt~~ - closed: the four
    mutators (`Value.Set/Delete/SetIndex`, `Func.Release`) are package functions,
@@ -291,14 +320,12 @@ the direct form is rejected"):
 2. ~~The dnsmessage array~~ - closed: `Name.Data` is a slice, the comparability
    fallout is checked, the trap scan is recorded, and `dns_name_roundtrip` is a
    phase-0a unit (see "dnsmessage" above).
-3. ~~The non-blocking debt~~ - 3a closed (the dead transport cluster is deleted;
-   the live path is `RoundTrip` -> `roundTrip` -> `dialAndExchange`); 3c measured
-   and reverted (the `sovGroup` pre-fault moved the fault, it did not reduce it);
-   3b BLOCKED on a compiler gap: `nodeMatchesPath`/`nodeEntryKey` are LAUNDERS
-   (they exist only to pass the generic slice's field through a concrete
-   parameter type, the round-73 workaround) and the direct form does not compile,
-   so they stay until that gap is fixed. `generic_field_read` pins the direct
-   shape in isolation; the launders are the net/http workaround, not the pin.
+3. ~~The non-blocking debt~~ - closed in full: 3a (the dead transport cluster is
+   deleted; the live path is `RoundTrip` -> `roundTrip` -> `dialAndExchange`);
+   3b (the compiler gap is fixed in `ae421fe8` and the routing tree reads the
+   mapping directly - see "Routing tree: the launders are gone" above); 3c
+   measured and reverted (the `sovGroup` pre-fault moved the fault, it did not
+   reduce it).
 
 **Do not reopen as "the leak"**: `hashmapOwner` and the root fallback. The
 per-request `Header` map is a sovereign group and its buckets die with the
@@ -1636,14 +1663,17 @@ Fixture `tests/regressions/should_compile/chan_buffered_slice.mx`: two sends
 with NO receiver yet (only a buffered channel can hold them) for a slice and a
 scalar element, then receives in order. Before: build error. After: both rows ok.
 
-**Generic field read through an instantiated generic slice: VERIFIED CLOSED.**
-The recorded failure (`e.value.match(...)` over `mapping[string, *routingNode].s`
-inside a method) does not reproduce on this tree - the round-126 generic
-instantiation binding closed it. Fixture
-`tests/regressions/should_compile/generic_field_read.mx` pins the exact shape, so
-the two launders in src/net/http/routing_tree.mx (`nodeMatchesPath`,
-`nodeEntryKey`) can be deleted whenever that file is next opened; they are left in
-place this round because removing them is not part of the fix.
+**Generic field read through an instantiated generic slice: partly closed at
+this note, fully closed by 3b.** What round 126 closed is the shape where the
+method is declared ON the instantiated generic receiver:
+`tests/regressions/should_compile/generic_field_read.mx` pins it. It did NOT
+close the package context - a NON-generic method ranging a field of an
+instantiated generic whose generic is declared later in the file - which is what
+src/net/http needed. That gap was real (the routing tree's two one-line
+helpers), the fix is `ae421fe8`, and the pin is
+`tests/regressions/should_compile/generic_forward_field.mx`. The helpers are
+deleted in the commit that follows it. The history above stands; the "verified
+closed" claim was about the receiver shape only.
 
 ### Compiler: a buffered channel of a slice, and a generic field, do not resolve  [OLD NOTE]
 
