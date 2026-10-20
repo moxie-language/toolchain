@@ -10,26 +10,30 @@ taken, the findings that motivated them, and the two designs in flight
 
 The sections below this one are the historical map; where they disagree with this
 block, this block is the re-measured fact. Every claim here has a gate run or a
-committed fixture behind it, and the gate numbers are in "Gate state on this
-tree" (search for `cc161cb8e896aff1`).
+committed fixture behind it. The historical "Gate state on this tree" sections
+are snapshots of earlier commits, not the current numbers; this block is.
 
 **EVERY GATE IS GREEN on this tree**, one phase at a time (`-j 1`), with the
-driver on LLVM 23 and legacy on 22:
+driver on LLVM 23 and legacy on 22, re-run end to end at `15677827` (the commit
+before the documentation commit that records it):
 
+    command: GOROOT=/opt/go1.25.3 bash tests/unitrun.sh -j 1 --phases P --force
     phase 2 (selfhost)   6/6 internal, selfhost:fixpoint stage2 == stage3   PASS
-    phase 0a/0b          136/136 (89 + 47 units)                            PASS
+    phase 0a/0b          137/137 (90 + 46 units)                            PASS
     phase 1b             45 stdlib packages, 2/2 units                      PASS
-    phase 1c             4/4                                                PASS
-    phase 3              2/2                                                PASS
-    phase 4              2/2                                                PASS
-    phase 5 (wasm)       85/85, 0 failed                                    PASS
+    phase 1c             5/5 (3 packages + the jsbridge fixture)           PASS
+    phase 3              6/6 internal, 2/2 units                            PASS
+    phase 4              smoke:hello, 2/2 units                             PASS
+    phase 5 (wasm)       86/86 (85 fixtures + emitted host)                 PASS
     phase 6              65 internal units, both compilers                  PASS
     phase 8              17/17 units in BOTH dispatch modes                 PASS
-                         no-accumulation 16488->16504 kB inline (+16),
-                         5896->5896 kB spawned (+0), 2048kB threshold unwidened
+                         no-accumulation 16328->16344 kB inline (+16),
+                         6056->6056 kB spawned (+0), 2048kB threshold unwidened
 
-The wasm memory wall is gone with the 23 driver: the unit clang-22 could not
-compile (9.3GB, OOM-killed) is part of phase 1c's 4/4, which takes ~20 minutes.
+Every phase also runs `tree-cleanliness`; all nine were green in that sweep, so
+the totals above include it (137 = 90 + 46 + cleanliness, for example). The wasm
+memory wall is gone with the 23 driver: the unit clang-22 could not compile
+(9.3GB, OOM-killed) is inside phase 1c's `net/http`, which takes ~17 minutes.
 
 ### The js bridge: mutators are package functions, and its state is one object  [CLOSED]
 
@@ -269,27 +273,26 @@ phase 1b, which is green.
   * `moxie update` no longer panics when the cache root passes 256 entries
     (`d80e4aa3`).
 
-Remaining, all debt rather than defects:
+Remaining, all debt rather than defects (all three decided on this tree; 3b is
+the only one still open, and it is blocked on the compiler - see "Routing tree:
+the direct form is rejected"):
 
-1. The `syscall/js` and `net/http/roundtrip_js` rule debt: surveyed, smaller than
-   recorded. There is no `any` left in either file; what remains is four value
-   receivers (`Value.Set/Delete/SetIndex`, `Func.Release`) whose methods mutate JS
-   state through package globals, plus those globals themselves. Converting to
-   pointer receivers ripples into every `js.Global().Get("x").Set(...)` call
-   site, so this is a design decision about the bridge's API, not a cleanup; and
-   nothing runs these paths outside a browser.
+1. ~~The `syscall/js` and `net/http/roundtrip_js` rule debt~~ - closed: the four
+   mutators (`Value.Set/Delete/SetIndex`, `Func.Release`) are package functions,
+   the package's mutable state is one `br` object with the init-only handles
+   named as such, and `tests/wasmfixtures/jsbridge` is a phase-1c unit (see "The
+   js bridge" above).
 2. ~~The dnsmessage array~~ - closed: `Name.Data` is a slice, the comparability
-   fallout is checked, and the trap scan is recorded (see "dnsmessage Name"
-   below).
-3. ~~The non-blocking debt~~ - 3a closed (dead transport cluster deleted); 3b
-   BLOCKED on a compiler gap (the routing-tree launders cannot go); 3c measured
-   and reverted (no measurable difference). The classic transport's
-   `getConn`/`persistConn`/`readLoop`/`writeLoop` are dead on the client path and
-   should be deleted; `routing_tree.mx`'s `nodeMatchesPath`/`nodeEntryKey` are
-   LAUNDERS (they exist only to pass the generic slice's field through a concrete
-   parameter type, the round-73 workaround) and can go now that
-   `generic_field_read` pins the direct shape; the `sovGroup` recycle list is not
-   pre-faulted.
+   fallout is checked, the trap scan is recorded, and `dns_name_roundtrip` is a
+   phase-0a unit (see "dnsmessage" above).
+3. ~~The non-blocking debt~~ - 3a closed (the dead transport cluster is deleted;
+   the live path is `RoundTrip` -> `roundTrip` -> `dialAndExchange`); 3c measured
+   and reverted (the `sovGroup` pre-fault moved the fault, it did not reduce it);
+   3b BLOCKED on a compiler gap: `nodeMatchesPath`/`nodeEntryKey` are LAUNDERS
+   (they exist only to pass the generic slice's field through a concrete
+   parameter type, the round-73 workaround) and the direct form does not compile,
+   so they stay until that gap is fixed. `generic_field_read` pins the direct
+   shape in isolation; the launders are the net/http workaround, not the pin.
 
 **Do not reopen as "the leak"**: `hashmapOwner` and the root fallback. The
 per-request `Header` map is a sovereign group and its buckets die with the
