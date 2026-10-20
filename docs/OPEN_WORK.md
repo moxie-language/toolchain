@@ -14,24 +14,24 @@ committed fixture behind it. The historical "Gate state on this tree" sections
 are snapshots of earlier commits, not the current numbers; this block is.
 
 **EVERY GATE IS GREEN on this tree**, one phase at a time (`-j 1`), with the
-driver on LLVM 23 and legacy on 22, re-run end to end on the item-3b close tree
-(compiler `ae421fe8`, plus the http commit that follows it):
+driver on LLVM 23 and legacy on 22, re-run end to end on this tree (compiler
+`ae421fe8`; the asn1 Stringer change and the http close follow it):
 
     command: GOROOT=/opt/go1.25.3 bash tests/unitrun.sh -j 1 --phases P --force
     phase 2 (selfhost)   6/6 internal, selfhost:fixpoint stage2 == stage3   PASS
-    phase 0a/0b          139/139 (91 + 47 units)                            PASS
+    phase 0a/0b          140/140 (92 + 47 units)                            PASS
     phase 1b             45 stdlib packages, 2/2 units                      PASS
     phase 1c             5/5 (3 packages + the jsbridge fixture)           PASS
     phase 3              6/6 internal, 2/2 units                            PASS
     phase 4              smoke:hello, 2/2 units                             PASS
-    phase 5 (wasm)       87/87 (86 fixtures + emitted host)                 PASS
+    phase 5 (wasm)       88/88 (87 fixtures + emitted host)                 PASS
     phase 6              65 internal units, both compilers                  PASS
     phase 8              17/17 units in BOTH dispatch modes                 PASS
-                         no-accumulation 16292->16308 kB inline (+16),
-                         6052->6052 kB spawned (+0), 2048kB threshold unwidened
+                         no-accumulation 16448->16464 kB inline (+16),
+                         6104->6104 kB spawned (+0), 2048kB threshold unwidened
 
 Every phase also runs `tree-cleanliness`; all nine were green in that sweep, so
-the totals above include it (139 = 91 + 47 + cleanliness, for example), and there
+the totals above include it (140 = 92 + 47 + cleanliness, for example), and there
 were no failures and no skips in any phase. The wasm memory wall is gone with
 the 23 driver: the unit clang-22 could not compile (9.3GB, OOM-killed) is inside
 phase 1c's `net/http`, which takes ~17 minutes.
@@ -1674,6 +1674,30 @@ helpers), the fix is `ae421fe8`, and the pin is
 `tests/regressions/should_compile/generic_forward_field.mx`. The helpers are
 deleted in the commit that follows it. The history above stands; the "verified
 closed" claim was about the receiver shape only.
+
+**Recorded, not fixed: stage4 formats a non-Stringer struct as `?`.** The asn1
+tag-mismatch diagnostic prints two structs (`tagAndLength`, `fieldParameters`).
+Legacy refused to build the package ("does not implement fmt.Stringer"); stage4
+accepted the call and printed `?` for both, so the error lost the tag and the
+parameters - measured on
+`tests/regressions/should_compile/asn1_tag_mismatch.mx` with the Stringers
+removed: `tags don't match (16 vs ?) ? main.wantsOctetString @2`. Both types now
+declare String(), and both compilers print the same message, but the divergence
+stands: a `...Stringer` parameter accepts ANY concrete type in stage4 and the
+emitter renders `?`. Rejecting it as legacy does is a checker change whose first
+task is counting how much of the stdlib prints structs that way. The asn1
+change itself is measured by the full sweep on this tree: 0a/0b 140/140 (the new
+fixture runs natively and in phase 5, 88/88), 1b 2/2 over 45 stdlib packages, 2
+2/2 (stage2 == stage3), 1c 5/5, 3 2/2, 4 2/2, 6 2/2, 8 2/2 with 17/17 netsmoke;
+zero failures, zero skips.
+
+**Recorded, not fixed: legacy stops in crypto/rsa on the way to net/http.**
+After the asn1 Stringers, `MOXIEROOT=$PWD GOROOT=/opt/go1.25.3 legacy/moxie
+build ./src/net/http` gets past asn1 and fails in 3s with
+`src/crypto/rsa/rsa.mx:173:17: opts (variable of Pointer type
+crypto.DecrypterOpts) is not an interface`. That is legacy's own checker
+limitation, independent of asn1, so net/http's legacy build is still not an
+oracle for the routing tree.
 
 ### Compiler: a buffered channel of a slice, and a generic field, do not resolve  [OLD NOTE]
 

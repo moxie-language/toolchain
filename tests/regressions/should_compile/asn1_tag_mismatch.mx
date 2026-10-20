@@ -1,0 +1,44 @@
+// A tag mismatch reports the parsed tag and the field parameters.
+//
+// The diagnostic at parseField is the only place asn1 prints these two structs:
+//
+//	"tags don't match (%d vs %+v) %+v %s @%d"
+//
+// Moxie's fmt variadics take Stringer and every builtin has one, but a STRUCT
+// has none unless it declares it. Without the declared Stringers this fixture
+// is the measured compiler divergence: legacy refuses the package ("does not
+// implement fmt.Stringer") while stage4 accepted the argument and printed '?',
+// losing the tag and the parameters from the error. The assertions below pin
+// the fields the message must carry, so either half cannot regress silently.
+package main
+
+import (
+	"bytes"
+	"encoding/asn1"
+	"fmt"
+	"os"
+	"unsafe"
+)
+
+type wantsOctetString struct {
+	S string // default tag: OCTET STRING (universal 4)
+}
+
+func main() {
+	// INTEGER 5 (universal 2) where the field expects OCTET STRING.
+	der := []byte{0x02, 0x01, 0x05}
+	v := wantsOctetString{}
+	rest, err := asn1.Unmarshal(der, unsafe.TypeOf(v), unsafe.Pointer(&v))
+	if err == nil {
+		fmt.Printf("FAIL: a mismatched tag was accepted (rest %d)\n", len(rest))
+		os.Exit(1)
+	}
+	msg := err.String()
+	for _, want := range []string{"tags don't match", "class:", "isCompound:", "length:", "optional:", "explicit:", "tag:"} {
+		if !bytes.Contains(msg, want) {
+			fmt.Printf("FAIL: diagnostic lost %q: %s\n", want, msg)
+			os.Exit(1)
+		}
+	}
+	fmt.Printf("ok   asn1 tag mismatch: %s\n", msg)
+}
