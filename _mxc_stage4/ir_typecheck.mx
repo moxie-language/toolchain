@@ -476,6 +476,41 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 			}
 		}
 	}
+	// Attach a generic declaration's type parameters BEFORE any Under is
+	// resolved. The pass below walks declarations in file order, so a generic
+	// that names a type declared LATER saw that type's placeholder with no
+	// parameters: `type mapping[K,V] struct { s []entry[K,V] }` above
+	// `type entry[K,V] struct{...}` recorded the field's element with TArgs but
+	// no TParams, and instantiating the outer type had nothing to bind the
+	// arguments to - the range element's `value` stayed the bare V in every
+	// non-generic method. Declaration order must not decide whether a type
+	// keeps its parameters. The declaration's own body still resolves in the
+	// child scope built below; only the parameter objects move earlier.
+	for _, d := range file.DeclList {
+		td, ok := d.(*syntax.TypeDecl)
+		if !ok || td.Name == nil || len(td.TParamList) == 0 {
+			continue
+		}
+		obj := scope.Lookup(td.Name.Value)
+		tn, ok2 := obj.(*TypeName)
+		if !ok2 || tn == nil {
+			continue
+		}
+		named, ok3 := tn.Typ.(*Named)
+		if !ok3 || named == nil {
+			continue
+		}
+		for _, tp := range td.TParamList {
+			if tp.Name == nil || tp.Name.Value == "" {
+				continue
+			}
+			if namedTParam(named, tp.Name.Value) != nil {
+				continue
+			}
+			push(named.TParams, NewTypeParam(NewTypeName(pkg, tp.Name.Value, nil), nil))
+		}
+	}
+
 	// Bind aliases before the declarations that name them resolve. `type A = B`
 	// must reach B's type object, or A and B are distinct types and
 	// `var y B = anA` is rejected. Interface targets keep the Named form: the
@@ -640,12 +675,12 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 							tScope = NewScope(scope)
 							for _, tp := range td.TParamList {
 								if tp.Name != nil && tp.Name.Value != "" {
-									tpv := NewTypeParam(NewTypeName(pkg, tp.Name.Value, nil), nil)
-									tScope.Insert(NewTypeName(pkg, tp.Name.Value, tpv))
-									if len(named.TParams) < len(td.TParamList) {
-										named.TParams = mxutil.Ensure(named.TParams, 1)
+									tpv := namedTParam(named, tp.Name.Value)
+									if tpv == nil {
+										tpv = NewTypeParam(NewTypeName(pkg, tp.Name.Value, nil), nil)
 										push(named.TParams, tpv)
 									}
+									tScope.Insert(NewTypeName(pkg, tp.Name.Value, tpv))
 								}
 							}
 						}
@@ -2295,4 +2330,19 @@ func tcResolveFuncInline(ft *syntax.FuncType, scope *Scope) (s *Signature) {
 		rTuple = NewTuple(results...)
 	}
 	return NewSignature(nil, pTuple, rTuple, variadic)
+}
+
+// namedTParam returns the declaration's own type parameter with the given name,
+// if it has one. The declaration pass attaches them before any Under is
+// resolved so a later body pass reuses the same object.
+func namedTParam(n *Named, name string) (tp *TypeParam) {
+	if n == nil {
+		return nil
+	}
+	for i := int32(0); i < int32(len(n.TParams)); i++ {
+		if n.TParams[i] != nil && n.TParams[i].Obj != nil && n.TParams[i].Obj.Name == name {
+			return n.TParams[i]
+		}
+	}
+	return nil
 }

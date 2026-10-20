@@ -1,0 +1,83 @@
+// A field of an instantiated generic keeps its type when the generic it names
+// is declared LATER in the same file.
+//
+// `mapping[K,V]` is declared above `entry[K,V]`, which its slice field names.
+// The recorded defect (docs/OPEN_WORK.md, item 3b) was that the forward
+// reference left the field's element a bare type parameter: instantiating
+// mapping[string,*node] substituted nothing, so `e.value.match(...)` and
+// `e.key` did not resolve in a non-generic method and src/net/http's routing
+// tree laundered the field through concrete parameter types
+// (nodeMatchesPath/nodeEntryKey). This pins the direct form; the same file with
+// `entry` declared first compiled before the fix, so declaration order is part
+// of the shape, not incidental.
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+type mapping[K comparable, V comparable] struct {
+	s []entry[K, V]
+}
+
+type entry[K comparable, V comparable] struct {
+	key   K
+	value V
+}
+
+type node struct {
+	name string
+	hits int32
+}
+
+func (n *node) match(want string) (got *node, ok bool) {
+	if n.name == want {
+		return n, true
+	}
+	return nil, false
+}
+
+func (n *node) bump() {
+	n.hits = n.hits + 1
+}
+
+type tree struct {
+	children mapping[string, *node]
+}
+
+// scan ranges the instantiated generic's slice field and calls through the
+// element's pointer field: the method call behind the laundered helper.
+func (t *tree) scan(want string) (hits int32) {
+	for _, e := range t.children.s {
+		mp, _ := e.value.match(want)
+		if mp != nil {
+			mp.bump()
+			hits = hits + 1
+		}
+	}
+	return hits
+}
+
+// keyFor reads the element's key field: the map index behind the other helper.
+func (t *tree) keyFor(want string) (k string) {
+	for _, e := range t.children.s {
+		if e.value.name == want {
+			k = e.key
+		}
+	}
+	return k
+}
+
+func main() {
+	t := &tree{}
+	t.children.s = []entry[string, *node]{}
+	t.children.s = push(t.children.s, entry[string, *node]{key: "a", value: &node{name: "a"}})
+	h := t.scan("a")
+	k := t.keyFor("a")
+	if h != 1 || k != "a" || t.children.s[0].value.hits != 1 {
+		fmt.Printf("FAIL forward generic field: hits=%d key=[%s]\n", h, k)
+		os.Exit(1)
+	}
+	fmt.Printf("ok   forward generic field: %s %d\n", k, h)
+}

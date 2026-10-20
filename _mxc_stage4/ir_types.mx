@@ -106,7 +106,7 @@ func (e *irEmitter) llvmTypeInner(t Type) (s string) {
 		for i := int32(0); i < int32(m); i++ {
 			bind[tparams[i].String()] = n.TArgs[i]
 		}
-		if body, okBody := substTypeIn(n.Under, bind).(*TCStruct); okBody {
+		if body, okBody := substTypeIn(namedUnder(n), bind).(*TCStruct); okBody {
 			return e.llvmStructType(body)
 		}
 	}
@@ -644,4 +644,29 @@ func (e *irEmitter) structField0Type(t string) (s string) {
 		}
 	}
 	return "ptr"
+}
+
+// namedUnder returns a Named's body, falling back to the generic DECLARATION it
+// was copied from. An instantiated Named is a shallow copy made where the
+// instantiation is written; when the declaration's body had not been resolved
+// yet (a field naming a generic declared later in the same file) the
+// placeholder's body is still nil at copy time, so the copy carries Under nil
+// forever. The declaration object is shared and complete by the time any body is
+// built, so it is the authority for the body exactly as namedTParams is for the
+// parameters. Reading the copy's nil Under directly lowered the substituted
+// struct to its generic body: `push(t.children.s, entry[string,*node]{...})`
+// stored a {string,*node} value into an {i8,i8} element.
+func namedUnder(n *Named) (u Type) {
+	if n == nil {
+		return nil
+	}
+	if n.Under != nil {
+		return n.Under
+	}
+	if n.Obj != nil {
+		if base, ok := n.Obj.Typ.(*Named); ok && base != nil && base != n {
+			return base.Under
+		}
+	}
+	return n.Under
 }
