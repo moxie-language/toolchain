@@ -209,11 +209,17 @@ threshold.
 
 Replacing `nodeMatchesPath`/`nodeEntryKey` with the direct
 `if mp, _ := e.value.matchPath(pat7, nil); mp != nil { set[e.key] = true }` does
-not compile:
+not compile. Reproduction, re-run at `6ccdcebf`:
 
-    ; cannot resolve the type of mp in (*routingNode).matchingMethodsPath - the
-      right-hand side is not a value
-    mxc: compile error for net/http
+    MOXIEROOT=$PWD GOROOT=/opt/go1.25.3 ./moxie build ./src/net/http
+    rc=1 after 172s, first error line:
+    ; cannot resolve the type of mp in (*routingNode).matchingMethodsPath -
+      the right-hand side is not a value
+    mxc: compile error for http
+
+(The compiler names the package `http`, not `net/http`, and joins the diagnostic
+to the `mxc:` line without a newline. The failure is compile-time inference - the
+build stops at `SSA build` with no object emitted - not link or runtime.)
 
 The same shape compiles in a small program both with an instantiated generic
 receiver (`tests/regressions/should_compile/generic_field_read.mx`) and with a
