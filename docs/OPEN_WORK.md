@@ -1747,8 +1747,8 @@ fixture runs natively and in phase 5, 88/88), 1b 2/2 over 45 stdlib packages, 2
 2/2 (stage2 == stage3), 1c 5/5, 3 2/2, 4 2/2, 6 2/2, 8 2/2 with 17/17 netsmoke;
 zero failures, zero skips.
 
-**legacy's net/http build: asn1, crypto/rsa, net and crypto/x509 now pass; the
-next leg is crypto/tls.** Fixed in order, each measured with a legacy build:
+**legacy's net/http build: every package type-checks; the compiler now crashes
+during the link.** Fixed in order, each measured with a legacy build:
 asn1's Stringers (`c617be0b`); crypto/rsa's DecrypterOpts (`56e630bd`); net's
 exported callbacks and imports plus x509's own defects (`a0569802` and
 `1b58f904`: addrList as []Addr, the type-switch bindings, the pool constraint
@@ -1758,12 +1758,27 @@ and the `+`/`+=` text concatenations). The closure shadowing false positive is
 fixed in the legacy checker itself (`7a04b095`, "a closure is its own shadow
 root"), pinned by `closure_names.mx`.
 
-legacy now compiles `net` and `crypto/x509` and stops in `crypto/tls` with 32
-`cannot use ... as fmt.Stringer` diagnostics of the same class (interface values
-and slices passed to fmt.Errorf), plus one `undefined` in
-handshake_server_tls13.mx. That is the next leg; it is mechanical work of the
-same kind, not a new class. So legacy still cannot build net/http, and it is
-still not an oracle for the routing tree.
+`crypto/tls` and `net/http` themselves are fixed in `23290107`: the 32
+fmt/Stringer diagnostics get printable names (diag.mx), the CBC modes are
+asserted, the aead wrapper and AlertError locals are used, the shadowed
+switch/receiver names and the `rand` parameter are renamed, mime's
+BEncoding/QEncoding values are restored, the hpack and httpcommon sink methods
+are exported, the h2 closeWaiter and response-writer double pointer are fixed,
+and the package-level initialisers moved into the one init. The channel rule
+needed a compiler fix too (`a2355c56`): a close IS a sender for a breaker, and
+the checker now counts it, pinned by `close_breaker.mx`.
+
+Measured now: a program importing crypto/tls builds and runs under legacy
+(`tls version: 772`), and every package in net/http's closure type-checks. The
+net/http build then dies in the legacy compiler itself:
+
+    SIGSEGV: segmentation violation
+    signal arrived during cgo execution
+    ... purego.SyscallN ... (LLVM, after LowerInterfaces, during the LTO link)
+
+That is a legacy compiler crash on the net/http module, not a port defect, and
+it is the next thing to investigate. So legacy still cannot link net/http, and
+it is still not an oracle for the routing tree.
 
 **Recorded: stage4 accepts four kinds of invalid code that legacy rejects.**
 The class is now measured, not guessed:
