@@ -108,7 +108,22 @@ func onBoundingRect(l, t, r, b, w, h int32) {
 	dom.SetStyle(dom.GetElementById(boxID), "width", "40px")
 }
 
-var resizeSeen bool
+// resizeChain is the idempotence gate. It is a sovereign type because a
+// package global may not be mutated outside init: the mutation goes through
+// the method, which is the allowed shape.
+type resizeChain struct {
+	done bool
+}
+
+func (r *resizeChain) first() (ok bool) {
+	if r.done {
+		return false
+	}
+	r.done = true
+	return true
+}
+
+var resizeChainState resizeChain
 
 func onResize() {
 	// The observer is registered for good, so a second layout notification would
@@ -116,10 +131,9 @@ func onResize() {
 	// intermittently, even with UnobserveResize first - a notification already
 	// queued still runs - so the chain is made idempotent here. The gate still
 	// requires the callback to arrive at least once, which is what it is for.
-	if resizeSeen {
+	if !resizeChainState.first() {
 		return
 	}
-	resizeSeen = true
 	dom.UnobserveResize(dom.GetElementById(boxID))
 	println("ok: observe_resize callback")
 	dom.RequestAnimationFrame(onFrame)
