@@ -14,27 +14,35 @@ committed fixture behind it. The historical "Gate state on this tree" sections
 are snapshots of earlier commits, not the current numbers; this block is.
 
 **EVERY GATE IS GREEN on this tree**, one phase at a time (`-j 1`), with the
-driver on LLVM 23 and legacy on 22, re-run end to end on this tree (compiler
-`ae421fe8`; the asn1 Stringer change and the http close follow it):
+driver on LLVM 23 and legacy on 22, re-run end to end on this tree (the
+compiler carries the builtin String for user structs and func types):
 
     command: GOROOT=/opt/go1.25.3 bash tests/unitrun.sh -j 1 --phases P --force
     phase 2 (selfhost)   6/6 internal, selfhost:fixpoint stage2 == stage3   PASS
-    phase 0a/0b          140/140 (92 + 47 units)                            PASS
+    phase 0a/0b          141/141 (93 + 47 units)                            PASS
     phase 1b             45 stdlib packages, 2/2 units                      PASS
     phase 1c             5/5 (3 packages + the jsbridge fixture)           PASS
     phase 3              6/6 internal, 2/2 units                            PASS
     phase 4              smoke:hello, 2/2 units                             PASS
-    phase 5 (wasm)       88/88 (87 fixtures + emitted host)                 PASS
+    phase 5 (wasm)       89/89 (88 fixtures + emitted host)                 PASS
     phase 6              65 internal units, both compilers                  PASS
     phase 8              17/17 units in BOTH dispatch modes                 PASS
-                         no-accumulation 16448->16464 kB inline (+16),
-                         6104->6104 kB spawned (+0), 2048kB threshold unwidened
+                         no-accumulation 15852->15868 kB inline (+16),
+                         6048->6048 kB spawned (+0), 2048kB threshold unwidened
 
 Every phase also runs `tree-cleanliness`; all nine were green in that sweep, so
-the totals above include it (140 = 92 + 47 + cleanliness, for example), and there
-were no failures and no skips in any phase. The wasm memory wall is gone with
-the 23 driver: the unit clang-22 could not compile (9.3GB, OOM-killed) is inside
-phase 1c's `net/http`, which takes ~17 minutes.
+the totals above include it (141 = 93 + 47 + cleanliness, for example), and no
+phase skipped a unit.
+
+One transient failure is recorded rather than averaged away: the first phase-5
+run had `5/web_dom_roundtrip` fail (browser-only fixture; the native reference
+aborted and the browser output carried two extra lines), and both a rerun of
+that unit alone and a full rerun of phase 5 passed 89/89 on the same tree. The
+first count is 88/89; the re-measured count is 89/89.
+
+The wasm memory wall is gone with the 23 driver: the unit clang-22 could not
+compile (9.3GB, OOM-killed) is inside phase 1c's `net/http`, which takes ~17
+minutes.
 
 ### The js bridge: mutators are package functions, and its state is one object  [CLOSED]
 
@@ -350,6 +358,13 @@ Remaining, all debt rather than defects (all three closed on this tree):
    diagnostic has one) until the builtin method is served from the dispatch
    default instead of a per-type declaration; that is the next step if full
    coverage is wanted.
+
+   **Gate record on this tree:** 2 2/2 (`stage2 == stage3`), 0a/0b 141/141,
+   1b 2/2 over 45 stdlib packages, 1c 5/5, 3 2/2, 4 2/2, 5 89/89 (second run;
+   the first had the transient web_dom_roundtrip failure noted at the top),
+   6 2/2 over 65 internal units, 8 2/2 with 17/17 netsmoke in both dispatch
+   modes and `muxmatch ok`; the new fixture runs natively and in Chromium with
+   identical output.
 
 **Do not reopen as "the leak"**: `hashmapOwner` and the root fallback. The
 per-request `Header` map is a sovereign group and its buckets die with the
