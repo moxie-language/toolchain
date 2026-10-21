@@ -1747,24 +1747,23 @@ fixture runs natively and in phase 5, 88/88), 1b 2/2 over 45 stdlib packages, 2
 2/2 (stage2 == stage3), 1c 5/5, 3 2/2, 4 2/2, 6 2/2, 8 2/2 with 17/17 netsmoke;
 zero failures, zero skips.
 
-**legacy's net/http build: three port defects fixed, one package left.**
-After the asn1 Stringers, legacy stopped in crypto/rsa (`opts (variable of
-Pointer type crypto.DecrypterOpts) is not an interface`). That one is fixed in
-`56e630bd`: DecrypterOpts is a real interface now, so Decrypt's type switch can
-match. It then stopped in `net` with eight errors; `a0569802` fixes them (the
-raw-conn, singleflight and timer callbacks are exported because their
-implementations live in another package, two files import the `unsafe` they
-use, and rawListener's Read/Write take syscall.RawConnAction). legacy now
-compiles `net` in full and stops in `crypto/x509`, which has independent
-defects:
+**legacy's net/http build: asn1, crypto/rsa, net and crypto/x509 now pass; the
+next leg is crypto/tls.** Fixed in order, each measured with a legacy build:
+asn1's Stringers (`c617be0b`); crypto/rsa's DecrypterOpts (`56e630bd`); net's
+exported callbacks and imports plus x509's own defects (`a0569802` and
+`1b58f904`: addrList as []Addr, the type-switch bindings, the pool constraint
+as an interface, the OID zero value, missing imports, the fmt-Stringer
+diagnostics, `&InsecureAlgorithmError(...)`, `[]map` strata, dsa.PublicKey.Equal,
+and the `+`/`+=` text concatenations). The closure shadowing false positive is
+fixed in the legacy checker itself (`7a04b095`, "a closure is its own shadow
+root"), pinned by `closure_names.mx`.
 
-    src/crypto/x509/cert_pool.mx:185:20: potentialParent does not satisfy comparable
-    src/crypto/x509/oid.mx:374:11: cannot use nil as "encoding/asn1".ObjectIdentifier value
-    src/crypto/x509/parser.mx:252:57: undefined: crypto
-    src/crypto/x509/parser.mx:268:27: undefined: unsafe
-
-So legacy still cannot build net/http, and it is still not an oracle for the
-routing tree. The x509 work is a separate item.
+legacy now compiles `net` and `crypto/x509` and stops in `crypto/tls` with 32
+`cannot use ... as fmt.Stringer` diagnostics of the same class (interface values
+and slices passed to fmt.Errorf), plus one `undefined` in
+handshake_server_tls13.mx. That is the next leg; it is mechanical work of the
+same kind, not a new class. So legacy still cannot build net/http, and it is
+still not an oracle for the routing tree.
 
 **Recorded: stage4 accepts four kinds of invalid code that legacy rejects.**
 The class is now measured, not guessed:
