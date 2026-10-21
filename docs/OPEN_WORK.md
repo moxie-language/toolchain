@@ -14,35 +14,35 @@ committed fixture behind it. The historical "Gate state on this tree" sections
 are snapshots of earlier commits, not the current numbers; this block is.
 
 **EVERY GATE IS GREEN on this tree**, one phase at a time (`-j 1`), with the
-driver on LLVM 23 and legacy on 22, re-run end to end on this tree (the
-compiler carries the builtin String for user structs and func types):
+driver on LLVM 23 and legacy on 22. Phases 2, 3 and 4 last ran at `2f104452`
+(no stage4 source has changed since; the later compiler change was in the
+legacy checker); 0a/0b, 1b, 1c, 5, 6 and 8 were re-run at `1b58f904` and
+`5a7e2000`:
 
     command: GOROOT=/opt/go1.25.3 bash tests/unitrun.sh -j 1 --phases P --force
     phase 2 (selfhost)   6/6 internal, selfhost:fixpoint stage2 == stage3   PASS
-    phase 0a/0b          141/141 (93 + 47 units)                            PASS
+    phase 0a/0b          142/142 (94 + 47 units)                            PASS
     phase 1b             45 stdlib packages, 2/2 units                      PASS
     phase 1c             5/5 (3 packages + the jsbridge fixture)           PASS
     phase 3              6/6 internal, 2/2 units                            PASS
     phase 4              smoke:hello, 2/2 units                             PASS
-    phase 5 (wasm)       89/89 (88 fixtures + emitted host)                 PASS
+    phase 5 (wasm)       90/90 (89 fixtures + emitted host)                 PASS
     phase 6              65 internal units, both compilers                  PASS
     phase 8              17/17 units in BOTH dispatch modes                 PASS
-                         no-accumulation 15872->15888 kB inline (+16),
-                         6048->6048 kB spawned (+0), 2048kB threshold unwidened
+                         no-accumulation 16148->16164 kB inline (+16),
+                         6040->6040 kB spawned (+0), 2048kB threshold unwidened
 
 Every phase also runs `tree-cleanliness`; all nine were green in that sweep, so
-the totals above include it (141 = 93 + 47 + cleanliness, for example), and no
+the totals above include it (142 = 94 + 47 + cleanliness, for example), and no
 phase skipped a unit.
 
-Two transient failures are recorded rather than averaged away. An earlier
-phase 5 run had `5/web_dom_roundtrip` fail (browser-only fixture; the native
-reference aborted and the browser output carried two extra lines); a rerun of
-that unit and a full phase-5 rerun both passed 89/89. The final sweep's phase
-0a had `0a/http_header_api` die with no error line after ~7 minutes of a unit
-that normally takes ~19 (the build log ends on a clean `ci-free` line under
-~10.8 GB of unrelated system memory use, which is what an OOM kill looks like);
-the unit rerun alone passed 94/94 in 1168543 ms. All other units passed in both
-runs.
+Interruptions are recorded rather than averaged away. `5/web_dom_roundtrip`
+failed intermittently with its last two lines printed twice: the resize
+observer's second notification still ran the chain after UnobserveResize. The
+chain is idempotent now (`5a7e2000`) and phase 5 passes 90/90. Earlier, on the
+same tree, `0a/http_header_api` died with no error line under ~10.8 GB of
+unrelated system memory use (an OOM kill by the look of the log) and its rerun
+passed 94/94.
 
 The wasm memory wall is gone with the 23 driver: the unit clang-22 could not
 compile (9.3GB, OOM-killed) is inside phase 1c's `net/http`, which takes ~17
