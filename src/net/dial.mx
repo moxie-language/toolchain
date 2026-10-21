@@ -296,7 +296,7 @@ func parseNetwork(ctx context.Context, network string, needsProto bool) (afnet s
 // resolveAddrList resolves addr using hint and returns a list of
 // addresses. The result contains at least one address when error is
 // nil.
-func (r *Resolver) resolveAddrList(ctx context.Context, op, network, addr string, hint Addr) (raddrList addrList, rerr error) {
+func (r *Resolver) resolveAddrList(ctx context.Context, op, network, addr string, hint Addr) (raddrList []Addr, rerr error) {
 	afnet, _, err3 := parseNetwork(ctx, network, true)
 	if err3 != nil {
 		return nil, err3
@@ -313,7 +313,7 @@ func (r *Resolver) resolveAddrList(ctx context.Context, op, network, addr string
 		if op == "dial" && hint != nil && addr2.Network() != hint.Network() {
 			return nil, &AddrError{Err: "mismatched local address type", Addr: hint.String()}
 		}
-		return addrList{addr2}, nil
+		return []Addr{addr2}, nil
 	}
 	addrs, err2 := r.internetAddrList(ctx, afnet, addr)
 	if err2 != nil || op != "dial" || hint == nil {
@@ -325,15 +325,15 @@ func (r *Resolver) resolveAddrList(ctx context.Context, op, network, addr string
 		ip       *IPAddr
 		wildcard bool
 	)
-	switch hint := hint.(type) {
+	switch hintV := hint.(type) {
 	case *TCPAddr:
-		tcp = hint
+		tcp = hintV
 		wildcard = tcp.isWildcard()
 	case *UDPAddr:
-		udp = hint
+		udp = hintV
 		wildcard = udp.isWildcard()
 	case *IPAddr:
-		ip = hint
+		ip = hintV
 		wildcard = ip.isWildcard()
 	}
 	naddrs := addrs[:0]
@@ -526,9 +526,9 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (rcon
 		address: address,
 	}
 
-	var primaries, fallbacks addrList
+	var primaries, fallbacks []Addr
 	if d.dualStack() && network == "tcp" {
-		primaries, fallbacks = addrs.partition(isIPv4)
+		primaries, fallbacks = addrListPartition(addrs, isIPv4)
 	} else {
 		primaries = addrs
 	}
@@ -538,7 +538,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (rcon
 
 // dialParallel tries primaries first, then fallbacks.
 // Moxie: no goroutines, so sequential instead of racing.
-func (sd *sysDialer) dialParallel(ctx context.Context, primaries, fallbacks addrList) (rconn Conn, rerr error) {
+func (sd *sysDialer) dialParallel(ctx context.Context, primaries, fallbacks []Addr) (rconn Conn, rerr error) {
 	c, err := sd.dialSerial(ctx, primaries)
 	if err == nil {
 		return c, nil
@@ -551,7 +551,7 @@ func (sd *sysDialer) dialParallel(ctx context.Context, primaries, fallbacks addr
 
 // dialSerial connects to a list of addresses in sequence, returning
 // either the first successful connection, or the first error.
-func (sd *sysDialer) dialSerial(ctx context.Context, ras addrList) (rconn Conn, rerr error) {
+func (sd *sysDialer) dialSerial(ctx context.Context, ras []Addr) (rconn Conn, rerr error) {
 	var firstErr error // The error from the first address is most relevant.
 
 	for i, ra := range ras {
@@ -597,37 +597,37 @@ func (sd *sysDialer) dialSerial(ctx context.Context, ras addrList) (rconn Conn, 
 // the destination address.
 func (sd *sysDialer) dialSingle(ctx context.Context, ra Addr) (c Conn, err error) {
 	la := sd.LocalAddr
-	switch ra := ra.(type) {
+	switch raV := ra.(type) {
 	case *TCPAddr:
 		var tcpLA *TCPAddr
 		if okv, okok := la.(*TCPAddr); okok {
 			tcpLA = okv
 		}
 		if sd.MultipathTCP() {
-			c, err = sd.dialMPTCP(ctx, tcpLA, ra)
+			c, err = sd.dialMPTCP(ctx, tcpLA, raV)
 		} else {
-			c, err = sd.dialTCP(ctx, tcpLA, ra)
+			c, err = sd.dialTCP(ctx, tcpLA, raV)
 		}
 	case *UDPAddr:
 		var udpLA *UDPAddr
 		if okv, okok := la.(*UDPAddr); okok {
 			udpLA = okv
 		}
-		c, err = sd.dialUDP(ctx, udpLA, ra)
+		c, err = sd.dialUDP(ctx, udpLA, raV)
 	case *IPAddr:
 		var ipLA *IPAddr
 		if okv, okok := la.(*IPAddr); okok {
 			ipLA = okv
 		}
-		c, err = sd.dialIP(ctx, ipLA, ra)
+		c, err = sd.dialIP(ctx, ipLA, raV)
 	case *UnixAddr:
 		var unixLA *UnixAddr
 		if okv, okok := la.(*UnixAddr); okok {
 			unixLA = okv
 		}
-		c, err = sd.dialUnix(ctx, unixLA, ra)
+		c, err = sd.dialUnix(ctx, unixLA, raV)
 	default:
-		return nil, &OpError{Op: "dial", Net: sd.network, Source: la, Addr: ra, Err: &AddrError{Err: "unexpected address type", Addr: sd.address}}
+		return nil, &OpError{Op: "dial", Net: sd.network, Source: la, Addr: raV, Err: &AddrError{Err: "unexpected address type", Addr: sd.address}}
 	}
 	if err != nil {
 		return nil, &OpError{Op: "dial", Net: sd.network, Source: la, Addr: ra, Err: err} // c is non-nil interface containing nil pointer
@@ -713,18 +713,18 @@ func (lc *ListenConfig) Listen(ctx context.Context, network, address string) (rl
 		address:      address,
 	}
 	var l Listener
-	la := addrs.first(isIPv4)
-	switch la := la.(type) {
+	la := addrListFirst(addrs, isIPv4)
+	switch laV := la.(type) {
 	case *TCPAddr:
 		if sl.MultipathTCP() {
-			l, err = sl.listenMPTCP(ctx, la)
+			l, err = sl.listenMPTCP(ctx, laV)
 		} else {
-			l, err = sl.listenTCP(ctx, la)
+			l, err = sl.listenTCP(ctx, laV)
 		}
 	case *UnixAddr:
-		l, err = sl.listenUnix(ctx, la)
+		l, err = sl.listenUnix(ctx, laV)
 	default:
-		return nil, &OpError{Op: "listen", Net: sl.network, Source: nil, Addr: la, Err: &AddrError{Err: "unexpected address type", Addr: address}}
+		return nil, &OpError{Op: "listen", Net: sl.network, Source: nil, Addr: laV, Err: &AddrError{Err: "unexpected address type", Addr: address}}
 	}
 	if err != nil {
 		return nil, &OpError{Op: "listen", Net: sl.network, Source: nil, Addr: la, Err: err} // l is non-nil interface containing nil pointer
@@ -750,16 +750,16 @@ func (lc *ListenConfig) ListenPacket(ctx context.Context, network, address strin
 		address:      address,
 	}
 	var c PacketConn
-	la := addrs.first(isIPv4)
-	switch la := la.(type) {
+	la := addrListFirst(addrs, isIPv4)
+	switch laV := la.(type) {
 	case *UDPAddr:
-		c, err = sl.listenUDP(ctx, la)
+		c, err = sl.listenUDP(ctx, laV)
 	case *IPAddr:
-		c, err = sl.listenIP(ctx, la)
+		c, err = sl.listenIP(ctx, laV)
 	case *UnixAddr:
-		c, err = sl.listenUnixgram(ctx, la)
+		c, err = sl.listenUnixgram(ctx, laV)
 	default:
-		return nil, &OpError{Op: "listen", Net: sl.network, Source: nil, Addr: la, Err: &AddrError{Err: "unexpected address type", Addr: address}}
+		return nil, &OpError{Op: "listen", Net: sl.network, Source: nil, Addr: laV, Err: &AddrError{Err: "unexpected address type", Addr: address}}
 	}
 	if err != nil {
 		return nil, &OpError{Op: "listen", Net: sl.network, Source: nil, Addr: la, Err: err} // c is non-nil interface containing nil pointer

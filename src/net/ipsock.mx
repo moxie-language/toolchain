@@ -50,18 +50,15 @@ func supportsIPv4map() (rok bool) {
 	return ipStackCaps.ipv4MappedIPv6Enabled
 }
 
-// An addrList represents a list of network endpoint addresses.
-type addrList []Addr
-
 // isIPv4 reports whether addr contains an IPv4 address.
 func isIPv4(addr Addr) (rok bool) {
-	switch addr := addr.(type) {
+	switch addrV := addr.(type) {
 	case *TCPAddr:
-		return IPTo4(addr.IP) != nil
+		return IPTo4(addrV.IP) != nil
 	case *UDPAddr:
-		return IPTo4(addr.IP) != nil
+		return IPTo4(addrV.IP) != nil
 	case *IPAddr:
-		return IPTo4(addr.IP) != nil
+		return IPTo4(addrV.IP) != nil
 	}
 	return false
 }
@@ -72,7 +69,7 @@ func isNotIPv4(addr Addr) (rok bool) { return !isIPv4(addr) }
 // forResolve returns the most appropriate address in address for
 // a call to ResolveTCPAddr, ResolveUDPAddr, or ResolveIPAddr.
 // IPv4 is preferred, unless addr contains an IPv6 literal.
-func (addrs addrList) forResolve(network, addr []byte) (raddr Addr) {
+func addrListForResolve(addrs []Addr, network, addr []byte) (raddr Addr) {
 	var want6 bool
 	switch network {
 	case "ip":
@@ -83,14 +80,14 @@ func (addrs addrList) forResolve(network, addr []byte) (raddr Addr) {
 		want6 = bytealg.CountString(addr, '[') > 0
 	}
 	if want6 {
-		return addrs.first(isNotIPv4)
+		return addrListFirst(addrs, isNotIPv4)
 	}
-	return addrs.first(isIPv4)
+	return addrListFirst(addrs, isIPv4)
 }
 
 // first returns the first address which satisfies strategy, or if
 // none do, then the first address of any kind.
-func (addrs addrList) first(strategy func(Addr) bool) (raddr Addr) {
+func addrListFirst(addrs []Addr, strategy func(Addr) bool) (raddr Addr) {
 	for _, addr := range addrs {
 		if strategy(addr) {
 			return addr
@@ -105,7 +102,7 @@ func (addrs addrList) first(strategy func(Addr) bool) (raddr Addr) {
 // primaries, while addresses with the opposite label are returned
 // as fallbacks. For non-empty inputs, primaries is guaranteed to be
 // non-empty.
-func (addrs addrList) partition(strategy func(Addr) bool) (primaries, fallbacks addrList) {
+func addrListPartition(addrs []Addr, strategy func(Addr) bool) (primaries, fallbacks []Addr) {
 	var primaryLabel bool
 	for i, addr := range addrs {
 		label := strategy(addr)
@@ -151,8 +148,8 @@ func (m inetAddrFor) makeAddr(ip IPAddr) (ra Addr) {
 // yielding a list of Addr objects. Known filters are nil, ipv4only,
 // and ipv6only. It returns every address when the filter is nil.
 // The result contains at least one address when error is nil.
-func filterAddrList(filter func(IPAddr) bool, ips []IPAddr, inetaddr inetAddrMaker, originalAddr []byte) (raddrList addrList, rerr error) {
-	var addrs addrList
+func filterAddrList(filter func(IPAddr) bool, ips []IPAddr, inetaddr inetAddrMaker, originalAddr []byte) (raddrList []Addr, rerr error) {
+	var addrs []Addr
 	for _, ip := range ips {
 		if filter == nil || filter(ip) {
 			addrs = mxutil.Ensure(addrs, 1)
@@ -268,7 +265,7 @@ func JoinHostPort(host, port []byte) (rb []byte) {
 // address or a DNS name, and returns a list of internet protocol
 // family addresses. The result contains at least one address when
 // error is nil.
-func (r *Resolver) internetAddrList(ctx context.Context, net, addr []byte) (raddrList addrList, rerr error) {
+func (r *Resolver) internetAddrList(ctx context.Context, net, addr []byte) (raddrList []Addr, rerr error) {
 	var (
 		err        error
 		host, port []byte
@@ -293,7 +290,7 @@ func (r *Resolver) internetAddrList(ctx context.Context, net, addr []byte) (radd
 	}
 	inetaddr := inetAddrFor{network: net, portnum: portnum}
 	if host == "" {
-		return addrList{inetaddr.makeAddr(IPAddr{})}, nil
+		return []Addr{inetaddr.makeAddr(IPAddr{})}, nil
 	}
 
 	// Try as a literal IP address, then as a DNS name.

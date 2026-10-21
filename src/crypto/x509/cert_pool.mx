@@ -42,6 +42,21 @@ type certGetter interface {
 	get() (*Certificate, error)
 }
 
+// certConstraint is a pool constraint. It is an interface rather than a func
+// field because a struct holding a func is not comparable, and pool entries
+// travel through slices the compiler compares (legacy: "does not satisfy
+// comparable").
+type certConstraint interface {
+	constrain(chain []*Certificate) error
+}
+
+// funcConstraint adapts the public AddCertWithConstraint callback.
+type funcConstraint func([]*Certificate) error
+
+func (f funcConstraint) constrain(chain []*Certificate) error {
+	return f(chain)
+}
+
 // lazyCert is minimal metadata about a Cert and a func to retrieve it
 // in its normal expanded *Certificate form.
 type lazyCert struct {
@@ -54,7 +69,7 @@ type lazyCert struct {
 	// constraint is a function to run against a chain when it is a candidate to
 	// be added to the chain. This allows adding arbitrary constraints that are
 	// not specified in the certificate itself.
-	constraint func([]*Certificate) error
+	constraint certConstraint
 
 	// getCert returns the certificate.
 	//
@@ -111,7 +126,7 @@ func (s *CertPool) len() (rn int32) {
 }
 
 // cert returns cert index n in s.
-func (s *CertPool) cert(n int32) (rcertificate *Certificate, rerror func([]*Certificate) error, rerr error) {
+func (s *CertPool) cert(n int32) (rcertificate *Certificate, rconstraint certConstraint, rerr error) {
 	cert, err := s.lazyCerts[n].getCert.get()
 	return cert, s.lazyCerts[n].constraint, err
 }
@@ -157,7 +172,7 @@ func SystemCertPool() (rcertPool *CertPool, rerr error) {
 
 type potentialParent struct {
 	cert       *Certificate
-	constraint func([]*Certificate) error
+	constraint certConstraint
 }
 
 // findPotentialParents returns the certificates in s which might have signed
@@ -228,7 +243,7 @@ func (s *CertPool) AddCert(cert *Certificate) {
 //
 // The rawSubject is Certificate.RawSubject and must be non-empty.
 // The getCert func may be called 0 or more times.
-func (s *CertPool) addCertFunc(rawSum224 sum224, rawSubject string, getCert certGetter, constraint func([]*Certificate) error) {
+func (s *CertPool) addCertFunc(rawSum224 sum224, rawSubject string, getCert certGetter, constraint certConstraint) {
 	if getCert == nil {
 		panic("getCert can't be nil")
 	}
@@ -315,5 +330,9 @@ func (s *CertPool) AddCertWithConstraint(cert *Certificate, constraint func([]*C
 	if cert == nil {
 		panic("adding nil Certificate to CertPool")
 	}
-	s.addCertFunc(sha256.Sum224(cert.Raw), string(cert.RawSubject), &certGetterDirect{cert: cert}, constraint)
+	var c certConstraint
+	if constraint != nil {
+		c = funcConstraint(constraint)
+	}
+	s.addCertFunc(sha256.Sum224(cert.Raw), string(cert.RawSubject), &certGetterDirect{cert: cert}, c)
 }

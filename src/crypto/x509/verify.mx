@@ -8,6 +8,7 @@ import (
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"crypto"
+	"strconv"
 	"crypto/x509/pkix"
 	"errors"
 	"fmt"
@@ -783,7 +784,7 @@ func (c *Certificate) isValid(certType int32, currentChain []*Certificate, opts 
 					name := string(data)
 					mailbox, ok := parseRFC2821Mailbox(name)
 					if !ok {
-						return fmt.Errorf("x509: cannot parse rfc822Name %q", mailbox)
+						return fmt.Errorf("x509: cannot parse rfc822Name %q", name)
 					}
 
 					if err5 := checkNameConstraints(c, &comparisonCount, maxConstraintComparisons, "email address", name,
@@ -1110,7 +1111,7 @@ func (b *chainBuilder) considerCandidate(certType int32, candidate potentialPare
 	}
 
 	if candidate.constraint != nil {
-		if err1 := candidate.constraint(b.currentChain); err1 != nil {
+		if err1 := candidate.constraint.constrain(b.currentChain); err1 != nil {
 			if b.hintErr == nil {
 				b.hintErr = err1
 				b.hintCert = candidate.cert
@@ -1380,7 +1381,7 @@ NextCert:
 func mustNewOIDFromInts(ints []uint64) (roID OID) {
 	oid, err := OIDFromInts(ints)
 	if err != nil {
-		panic(fmt.Sprintf("OIDFromInts(%v) unexpected error: %v", ints, err))
+		panic(fmt.Sprintf("OIDFromInts(%s) unexpected error: %s", uint64sText(ints), err.String()))
 	}
 	return oid
 }
@@ -1408,8 +1409,10 @@ func newPolicyGraphNode(valid OID, parents []*policyGraphNode) (rpolicyGraphNode
 	return n
 }
 
+// policyStratum is held by pointer: a map is not comparable, and Moxie's slice
+// machinery requires comparable elements, so a []map cannot be pushed.
 type policyGraph struct {
-	strata []map[string]*policyGraphNode
+	strata []*map[string]*policyGraphNode
 	// map of OID -> nodes at strata[depth-1] with OID in their expectedPolicySet
 	parentIndex map[string][]*policyGraphNode
 	depth       int32
@@ -1424,14 +1427,34 @@ func newPolicyGraph() (rpolicyGraph *policyGraph) {
 		children:          map[*policyGraphNode]bool{},
 		parents:           map[*policyGraphNode]bool{},
 	}
+	first := map[string]*policyGraphNode{string(anyPolicyOID().der): &root}
 	return &policyGraph{
 		depth:  0,
-		strata: []map[string]*policyGraphNode{{string(anyPolicyOID().der): &root}},
+		strata: []*map[string]*policyGraphNode{&first},
 	}
 }
 
+// stratum returns the map at depth i.
+func (pg *policyGraph) stratum(i int32) (m map[string]*policyGraphNode) {
+	return *pg.strata[i]
+}
+
+// uint64sText renders a slice for a diagnostic: fmt's variadics are Stringer,
+// and a []uint64 is not one.
+func uint64sText(ints []uint64) (s string) {
+	buf := []byte{:0:32}
+	for i, v := range ints {
+		if i > 0 {
+			buf = mxutil.Ensure(buf, 1)
+			buf = push(buf, ',')
+		}
+		buf = strconv.AppendUint(buf, v, 10)
+	}
+	return string(buf)
+}
+
 func (pg *policyGraph) insert(n *policyGraphNode) {
-	pg.strata[pg.depth][string(n.validPolicy.der)] = n
+	pg.stratum(pg.depth)[string(n.validPolicy.der)] = n
 }
 
 func (pg *policyGraph) parentsWithExpected(expected OID) (rpolicyGraphNode []*policyGraphNode) {
@@ -1445,7 +1468,7 @@ func (pg *policyGraph) parentWithAnyPolicy() (rpolicyGraphNode *policyGraphNode)
 	if pg.depth == 0 {
 		return nil
 	}
-	return pg.strata[pg.depth-1][string(anyPolicyOID().der)]
+	return pg.stratum(pg.depth-1)[string(anyPolicyOID().der)]
 }
 
 func (pg *policyGraph) parents() (rpolicyGraphNode []*policyGraphNode) {
@@ -1453,7 +1476,7 @@ func (pg *policyGraph) parents() (rpolicyGraphNode []*policyGraphNode) {
 		return nil
 	}
 	var out []*policyGraphNode
-	for _, v := range pg.strata[pg.depth-1] {
+	for _, v := range pg.stratum(pg.depth-1) {
 		out = mxutil.Ensure(out, 1)
 		out = push(out, v)
 	}
@@ -1461,15 +1484,15 @@ func (pg *policyGraph) parents() (rpolicyGraphNode []*policyGraphNode) {
 }
 
 func (pg *policyGraph) leaves() (rm map[string]*policyGraphNode) {
-	return pg.strata[pg.depth]
+	return pg.stratum(pg.depth)
 }
 
 func (pg *policyGraph) leafWithPolicy(policy OID) (rpolicyGraphNode *policyGraphNode) {
-	return pg.strata[pg.depth][string(policy.der)]
+	return pg.stratum(pg.depth)[string(policy.der)]
 }
 
 func (pg *policyGraph) deleteLeaf(policy OID) {
-	n := pg.strata[pg.depth][string(policy.der)]
+	n := pg.stratum(pg.depth)[string(policy.der)]
 	if n == nil {
 		return
 	}
@@ -1479,13 +1502,13 @@ func (pg *policyGraph) deleteLeaf(policy OID) {
 	for c := range n.children {
 		delete(c.parents, n)
 	}
-	delete(pg.strata[pg.depth], string(policy.der))
+	delete(pg.stratum(pg.depth), string(policy.der))
 }
 
 func (pg *policyGraph) validPolicyNodes() (rpolicyGraphNode []*policyGraphNode) {
 	var validNodes []*policyGraphNode
 	for i := pg.depth; i >= 0; i-- {
-		for _, n := range pg.strata[i] {
+		for _, n := range pg.stratum(i) {
 			if n.validPolicy.Equal(anyPolicyOID()) {
 				continue
 			}
@@ -1505,12 +1528,12 @@ func (pg *policyGraph) validPolicyNodes() (rpolicyGraphNode []*policyGraphNode) 
 
 func (pg *policyGraph) prune() {
 	for i := pg.depth - 1; i > 0; i-- {
-		for _, n := range pg.strata[i] {
+		for _, n := range pg.stratum(i) {
 			if len(n.children) == 0 {
 				for p := range n.parents {
 					delete(p.children, n)
 				}
-				delete(pg.strata[i], string(n.validPolicy.der))
+				delete(pg.stratum(i), string(n.validPolicy.der))
 			}
 		}
 	}
@@ -1518,15 +1541,16 @@ func (pg *policyGraph) prune() {
 
 func (pg *policyGraph) incrDepth() {
 	pg.parentIndex = map[string][]*policyGraphNode{}
-	for _, n := range pg.strata[pg.depth] {
+	for _, n := range pg.stratum(pg.depth) {
 		for _, e := range n.expectedPolicySet {
 			pg.parentIndex[string(e.der)] = push(pg.parentIndex[string(e.der)], n)
 		}
 	}
 
 	pg.depth++
+	next := map[string]*policyGraphNode{}
 	pg.strata = mxutil.Ensure(pg.strata, 1)
-	pg.strata = push(pg.strata, map[string]*policyGraphNode{})
+	pg.strata = push(pg.strata, &next)
 }
 
 func policiesValid(chain []*Certificate, opts VerifyOptions) (rok bool) {
