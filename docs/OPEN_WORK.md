@@ -27,18 +27,22 @@ compiler carries the builtin String for user structs and func types):
     phase 5 (wasm)       89/89 (88 fixtures + emitted host)                 PASS
     phase 6              65 internal units, both compilers                  PASS
     phase 8              17/17 units in BOTH dispatch modes                 PASS
-                         no-accumulation 15852->15868 kB inline (+16),
+                         no-accumulation 15872->15888 kB inline (+16),
                          6048->6048 kB spawned (+0), 2048kB threshold unwidened
 
 Every phase also runs `tree-cleanliness`; all nine were green in that sweep, so
 the totals above include it (141 = 93 + 47 + cleanliness, for example), and no
 phase skipped a unit.
 
-One transient failure is recorded rather than averaged away: the first phase-5
-run had `5/web_dom_roundtrip` fail (browser-only fixture; the native reference
-aborted and the browser output carried two extra lines), and both a rerun of
-that unit alone and a full rerun of phase 5 passed 89/89 on the same tree. The
-first count is 88/89; the re-measured count is 89/89.
+Two transient failures are recorded rather than averaged away. An earlier
+phase 5 run had `5/web_dom_roundtrip` fail (browser-only fixture; the native
+reference aborted and the browser output carried two extra lines); a rerun of
+that unit and a full phase-5 rerun both passed 89/89. The final sweep's phase
+0a had `0a/http_header_api` die with no error line after ~7 minutes of a unit
+that normally takes ~19 (the build log ends on a clean `ci-free` line under
+~10.8 GB of unrelated system memory use, which is what an OOM kill looks like);
+the unit rerun alone passed 94/94 in 1168543 ms. All other units passed in both
+runs.
 
 The wasm memory wall is gone with the 23 driver: the unit clang-22 could not
 compile (9.3GB, OOM-killed) is inside phase 1c's `net/http`, which takes ~17
@@ -370,11 +374,13 @@ Remaining, all debt rather than defects (all three closed on this tree):
    declaring `type used` and `type dead` with only `used` constructed: the mxh
    has `method used String ->string 1` and no String line for `dead`.
 
-   **Gate record on this tree:** 2 2/2 (`stage2 == stage3`), 0a/0b 141/141,
-   1b 2/2 over 45 stdlib packages, 1c 5/5, 3 2/2, 4 2/2, 5 89/89 (second run;
-   the first had the transient web_dom_roundtrip failure noted at the top),
-   6 2/2 over 65 internal units, 8 2/2 with 17/17 netsmoke in both dispatch
-   modes and `muxmatch ok`; the new fixture runs natively and in Chromium with
+   **Gate record on this tree:** 2 2/2 (`stage2 == stage3`), 0a/0b 141/141
+   after the http_header_api rerun (the sweep's first pass was 140/141, the
+   transient failure noted at the top), 1b 2/2 over 45 stdlib packages, 1c 5/5,
+   3 2/2, 4 2/2, 5 89/89, 6 2/2 over 65 internal units, 8 2/2 with 17/17
+   netsmoke in both dispatch modes and `muxmatch ok`; no-accumulation
+   15872->15888 kB inline and 6048->6048 kB spawned against the unchanged
+   2048 kB threshold. The new fixture runs natively and in Chromium with
    identical output.
 
 **Do not reopen as "the leak"**: `hashmapOwner` and the root fallback. The
