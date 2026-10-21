@@ -1,0 +1,127 @@
+package runtime
+
+// Structural rendering for the compiler-synthesized String methods.
+//
+// Moxie has no reflect and fmt takes ...Stringer, so a struct or a named func
+// type with no declared String() had no printable form at all: stage4 accepted
+// the fmt call and printed '?', legacy refused it. The compiler now synthesizes
+// a String method for every such type (a declared one always wins), and this
+// file is the body it calls for structs. It walks the same type descriptors the
+// codec and the interface machinery use.
+//
+// The format follows Go's %+v: a struct is {field:value ...}, a slice is
+// [a b], a pointer is &<elem> (nil prints nil). A func value has no signature in
+// its descriptor, so the compiler passes that text to the method it generates;
+// a func-typed FIELD prints func. Kinds with no state to walk (map, chan) print
+// their kind word rather than guessing at a representation.
+
+import (
+	"git.smesh.lol/moxie/pkg/mxutil"
+	"unsafe"
+)
+
+// RenderValue returns the structural text of the value at p, described by t.
+func RenderValue(t *RawType, p unsafe.Pointer) (s string) {
+	var b []byte
+	b = renderValue(b, t, p)
+	return string(b)
+}
+
+func renderValue(b []byte, t *RawType, p unsafe.Pointer) (out []byte) {
+	out = b
+	if t == nil || p == nil {
+		return renderStr(out, "nil")
+	}
+	u := t.Underlying()
+	switch u.Kind() {
+	case Bool:
+		return renderStr(out, BoolText(*(*bool)(p)))
+	case Int, Int32:
+		return renderStr(out, Int64Text(int64(*(*int32)(p))))
+	case Int8:
+		return renderStr(out, Int64Text(int64(*(*int8)(p))))
+	case Int16:
+		return renderStr(out, Int64Text(int64(*(*int16)(p))))
+	case Int64:
+		return renderStr(out, Int64Text(*(*int64)(p)))
+	case Uint, Uint32:
+		return renderStr(out, Uint64Text(uint64(*(*uint32)(p))))
+	case Uint8:
+		return renderStr(out, Uint64Text(uint64(*(*uint8)(p))))
+	case Uint16:
+		return renderStr(out, Uint64Text(uint64(*(*uint16)(p))))
+	case Uint64:
+		return renderStr(out, Uint64Text(*(*uint64)(p)))
+	case Uintptr:
+		return renderStr(out, UintptrText(*(*uintptr)(p)))
+	case Float32:
+		return renderStr(out, Float32Text(*(*float32)(p)))
+	case Float64:
+		return renderStr(out, Float64Text(*(*float64)(p)))
+	case KindBytes:
+		return renderStr(out, *(*string)(p))
+	case KindPointer, KindUnsafePointer:
+		q := *(*unsafe.Pointer)(p)
+		if q == nil {
+			return renderStr(out, "nil")
+		}
+		if u.Kind() == KindUnsafePointer || u.Elem() == nil {
+			return renderStr(out, "ptr")
+		}
+		out = renderStr(out, "&")
+		return renderValue(out, u.Elem(), q)
+	case KindChan:
+		return renderStr(out, "chan")
+	case KindFunc:
+		return renderStr(out, "func")
+	case KindMap:
+		return renderStr(out, "map")
+	case KindSlice, KindArray:
+		elem := u.Elem()
+		n := int32(0)
+		if u.Kind() == KindArray {
+			n = u.ArrayLen()
+		} else {
+			n = int32((*_string)(p).length)
+		}
+		base := *(*unsafe.Pointer)(p)
+		sz := elem.Size()
+		out = renderStr(out, "[")
+		for i := int32(0); i < n; i++ {
+			if i > 0 {
+				out = renderStr(out, " ")
+			}
+			out = renderValue(out, elem, unsafe.Add(base, uintptr(i)*sz))
+		}
+		return renderStr(out, "]")
+	case KindStruct:
+		nf := int32(u.NumField())
+		out = renderStr(out, "{")
+		for i := int32(0); i < nf; i++ {
+			if i > 0 {
+				out = renderStr(out, " ")
+			}
+			out = renderStr(out, u.StructFieldName(i))
+			out = renderStr(out, ":")
+			out = renderValue(out, u.StructFieldType(i), unsafe.Add(p, u.StructFieldOffset(i)))
+		}
+		return renderStr(out, "}")
+	case KindInterface:
+		it := (*_interface)(p)
+		if it.typecode == nil {
+			return renderStr(out, "nil")
+		}
+		inner := (*RawType)(it.typecode)
+		data := it.value
+		if inner.Size() <= unsafe.Sizeof(uintptr(0)) {
+			data = unsafe.Pointer(&it.value)
+		}
+		return renderValue(out, inner, data)
+	}
+	return renderStr(out, "?")
+}
+
+func renderStr(b []byte, s string) (out []byte) {
+	out = mxutil.Ensure(b, len(s))
+	return push(out, s...)
+}

@@ -379,7 +379,7 @@ func isIdentCont(c byte) (ok bool) {
 	return isIdentStart(c) || (c >= '0' && c <= '9')
 }
 
-func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage, file *syntax.File) {
+func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) (pkg *TCPackage, file *syntax.File) {
 
 	shortName := name
 	for i := len(name) - 1; i >= 0; i-- {
@@ -428,6 +428,13 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena) (pkg *TCPackage
 	if file.PkgName != nil && file.PkgName.Value != "" {
 		pkg.Name = file.PkgName.Value
 	}
+	// Every struct and named func type gets a String() unless it declares one:
+	// fmt takes ...Stringer, so without the method a struct printed '?' in
+	// stage4 and did not compile under legacy at all. The method bodies are
+	// ordinary source, parsed here and merged into the file, so the type
+	// checker, the SSA builder and the interface dispatch all see a normal
+	// method. The same injection runs in legacy (wood law).
+	file = injectBuiltinString(file, pkg.Name, name, arena, pkgDir)
 	for _, d := range file.DeclList {
 		switch dd := d.(type) {
 		case *syntax.ImportDecl:
@@ -1113,7 +1120,7 @@ func regScopeLookup(regPkg *TCPackage, n string) (o Object) {
 // TypeCheckOnly typechecks src, serializes exports to mxhPath (if non-empty),
 // and populates the registry via loadMxh. The type graph never leaves the
 // typecheck arena - only the refined mxh text touches disk.
-func TypeCheckOnly(src []byte, name string, mxhPath string) {
+func TypeCheckOnly(src []byte, name string, mxhPath string, pkgDir string) {
 	memLine("   tc-in "|name)
 	// This pass has its own arena and frees it, so it must not leave compile
 	// errors behind: their bytes and the slice backing array live in that arena,
@@ -1132,7 +1139,7 @@ func TypeCheckOnly(src []byte, name string, mxhPath string) {
 	// sovereign groups whose receivers live in it - die together at
 	// ArenaFree below (sovInvalidateArena sweep).
 	runtime.ManualArenaEnter(arena)
-	pkg, file := typeCheckPkg(src, name, arena)
+	pkg, file := typeCheckPkg(src, name, arena, pkgDir)
 	if pkg != nil && file != nil {
 		mxhData := generateMxh(pkg)
 		runtime.ManualArenaExit(arena)
@@ -1152,7 +1159,7 @@ func TypeCheckOnly(src []byte, name string, mxhPath string) {
 
 
 
-func CompileToIR(src []byte, name string, triple string) (s string) {
+func CompileToIR(src []byte, name string, triple string, pkgDir string) (s string) {
 	cctx.compileTargetTriple = triple
 	cctx.curPkgPath = name
 	scanEmbedPragmas(src, cctx.compilePkgDir)
@@ -1194,7 +1201,7 @@ func CompileToIR(src []byte, name string, triple string) (s string) {
 	cctx.compileArena = arena
 	runtime.ManualArenaEnter(arena)
 
-	pkg, file := typeCheckPkg(src, name, arena)
+	pkg, file := typeCheckPkg(src, name, arena, pkgDir)
 	memLine("   ci-tc "|name)
 
 	// Generate mxh inside compile arena - type graph is alive.
@@ -2345,4 +2352,234 @@ func namedTParam(n *Named, name string) (tp *TypeParam) {
 		}
 	}
 	return nil
+}
+
+
+// renderSkipPkg reports whether the structural renderer cannot be named in
+// pkgPath because pkgPath is inside runtime's own import closure: the
+// synthesized method imports runtime, and runtime already imports these.
+// Measured closure of src/runtime at the time of writing (11 packages; the
+// list is alphabetical and must be recomputed if runtime's imports change).
+func renderSkipPkg(pkgPath string) (ok bool) {
+	switch pkgPath {
+	case "array", "errors", "git.smesh.lol/moxie/pkg/mxregexp",
+		"git.smesh.lol/moxie/pkg/mxutil", "internal/binary", "internal/task", "io",
+		"math/bits", "moxie", "runtime", "runtime/interrupt", "unsafe":
+		return true
+	}
+	return false
+}
+
+// injectRecvBaseName returns the base type name of a method receiver, or "".
+func injectRecvBaseName(t syntax.Expr) (name string) {
+	switch r := t.(type) {
+	case *syntax.Name:
+		return r.Value
+	case *syntax.Operation:
+		if r.Y == nil && r.Op == token.Mul {
+			return injectRecvBaseName(r.X)
+		}
+	case *syntax.ParenExpr:
+		return injectRecvBaseName(r.X)
+	case *syntax.IndexExpr:
+		return injectRecvBaseName(r.X)
+	}
+	return ""
+}
+
+// injectTypeText renders a type expression as source text, for the signature
+// of a synthesized func-type String. It covers the type forms a signature can
+// hold; an unexpected node prints its kind rather than nothing.
+func injectTypeText(e syntax.Expr) (s string) {
+	switch t := e.(type) {
+	case nil:
+		return ""
+	case *syntax.Name:
+		return t.Value
+	case *syntax.SelectorExpr:
+		return injectTypeText(t.X) | "." | injectTypeText(t.Sel)
+	case *syntax.Operation:
+		if t.Y == nil && t.Op == token.Mul {
+			return "*" | injectTypeText(t.X)
+		}
+	case *syntax.ParenExpr:
+		return "(" | injectTypeText(t.X) | ")"
+	case *syntax.SliceType:
+		return "[]" | injectTypeText(t.Elem)
+	case *syntax.ArrayType:
+		return "[" | injectTypeText(t.Len) | "]" | injectTypeText(t.Elem)
+	case *syntax.MapType:
+		return "map[" | injectTypeText(t.Key) | "]" | injectTypeText(t.Value)
+	case *syntax.ChanType:
+		return "chan " | injectTypeText(t.Elem)
+	case *syntax.DotsType:
+		return "..." | injectTypeText(t.Elem)
+	case *syntax.InterfaceType:
+		return "interface{}"
+	case *syntax.FuncType:
+		return injectFuncText(t)
+	case *syntax.StructType:
+		return "struct{}"
+	}
+	return "any"
+}
+
+// injectFieldsText renders a param or result list: it keeps the names when the
+// source had them, and parenthesizes a multi-result list the way Go prints it.
+func injectFieldsText(list []*syntax.Field) (s string) {
+	for i, f := range list {
+		if i > 0 {
+			s = s | ", "
+		}
+		if f.Name != nil {
+			s = s | f.Name.Value | " "
+		}
+		s = s | injectTypeText(f.Type)
+	}
+	return s
+}
+
+func injectFuncText(t *syntax.FuncType) (s string) {
+	params := injectFieldsText(t.ParamList)
+	results := injectFieldsText(t.ResultList)
+	s = "func(" | params | ")"
+	if results == "" {
+		return s
+	}
+	if len(t.ResultList) > 1 {
+		return s | " (" | results | ")"
+	}
+	return s | " " | results
+}
+
+// injectEsc quotes text for a source string literal.
+func injectEsc(s string) (out string) {
+	for i := int32(0); i < int32(len(s)); i++ {
+		c := s[i]
+		switch c {
+		case '"':
+			out = out | "\\\""
+		case '\\':
+			out = out | "\\\\"
+		case '\n':
+			out = out | "\\n"
+		case '\t':
+			out = out | "\\t"
+		default:
+			out = out | string(c)
+		}
+	}
+	return out
+}
+
+// injectBuiltinString appends a String() method for every struct and named
+// func type in the package that does not declare one, and returns the file
+// with the synthetic declarations merged in. A declared String() always wins:
+// the type is then left alone.
+func injectBuiltinString(file *syntax.File, pkgName, pkgPath string, arena *runtime.Arena, pkgDir string) (out *syntax.File) {
+	out = file
+	if file == nil || pkgName == "" || !renderUserPkg(pkgDir) || renderSkipPkg(pkgPath) {
+		return file
+	}
+	declared := map[string]bool{}
+	for _, d := range file.DeclList {
+		fd, ok := d.(*syntax.FuncDecl)
+		if !ok || fd.Recv == nil || fd.Name == nil || fd.Name.Value != "String" {
+			continue
+		}
+		if n := injectRecvBaseName(fd.Recv.Type); n != "" {
+			declared[n] = true
+		}
+	}
+	methods := ""
+	needRuntime := false
+	needUnsafe := false
+	for _, d := range file.DeclList {
+		td, ok := d.(*syntax.TypeDecl)
+		if !ok || td.Name == nil || td.Alias || len(td.TParamList) > 0 {
+			continue
+		}
+		if declared[td.Name.Value] {
+			continue
+		}
+		switch t := td.Type.(type) {
+		case *syntax.StructType:
+			// A struct with an embedded field may already have a String()
+			// promoted from that field; synthesizing one would replace the
+			// promotion. Leave those to the method they already have.
+			embedded := false
+			for _, f := range t.FieldList {
+				if f.Name == nil {
+					embedded = true
+				}
+			}
+			if embedded {
+				continue
+			}
+			needRuntime = true
+			needUnsafe = true
+			methods = methods | "func (p *" | td.Name.Value | ") String() (s string) {\n" |
+				"\treturn runtime.RenderValue((*runtime.RawType)(unsafe.TypeOf(*p)), unsafe.Pointer(p))\n}\n\n"
+		case *syntax.FuncType:
+			methods = methods | "func (p *" | td.Name.Value | ") String() (s string) { return \"" |
+				injectEsc(injectFuncText(t)) | "\" }\n\n"
+		}
+	}
+	if methods == "" {
+		return file
+	}
+	src := "package " | pkgName | "\n"
+	if needRuntime || needUnsafe {
+		src = src | "\nimport (\n"
+		if needRuntime {
+			src = src | "\t\"runtime\"\n"
+		}
+		if needUnsafe {
+			src = src | "\t\"unsafe\"\n"
+		}
+		src = src | ")\n"
+	}
+	src = src | "\n" | methods
+	synth, _ := syntax.ParseBytesArena(token.NewFileBase(pkgPath | ".string.mx"),
+		[]byte(src), collectParseError, nil, 0, arena)
+	if synth == nil || len(synth.DeclList) == 0 {
+		return file
+	}
+	decls := []syntax.Decl{:len(synth.DeclList) + len(file.DeclList)}
+	for i, d := range synth.DeclList {
+		decls[i] = d
+	}
+	base := len(synth.DeclList)
+	for i, d := range file.DeclList {
+		decls[base+i] = d
+	}
+	file.DeclList = decls
+	return file
+}
+
+// renderUserPkg reports whether pkgPath belongs to the program being built
+// rather than to the toolchain's own stdlib.
+//
+// Synthesizing String() for EVERY struct in the stdlib was measured to be
+// unshippable: each type gains a method in its export data and in the Stringer
+// dispatch table, and a ~250-package fixture (phase 0a http_header_api) grew
+// past the compiler's type-check arena (128 regions) before it linked. The
+// synthesized method is therefore for user code, where the request came from
+// and where the type set is small. A stdlib type that is printed needs a
+// declared String() (the asn1 diagnostic has one) until the builtin method is
+// served from the dispatch default instead of a per-type declaration.
+func renderUserPkg(pkgDir string) (ok bool) {
+	if pkgDir == "" {
+		return false
+	}
+	root := moxieRoot()
+	srcDir := mxutil.JoinPath(root, "src")
+	pkgDirRoot := mxutil.JoinPath(root, "pkg")
+	if pkgDir == srcDir || mxutil.HasPrefix(pkgDir, srcDir|"/") {
+		return false
+	}
+	if pkgDir == pkgDirRoot || mxutil.HasPrefix(pkgDir, pkgDirRoot|"/") {
+		return false
+	}
+	return true
 }

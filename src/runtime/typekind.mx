@@ -286,6 +286,37 @@ func (t *RawType) StructFieldType(i int32) (r0 *RawType) {
 	return fields.Index(i).fieldType
 }
 
+// StructFieldName returns the i-th field's name, decoded from the field
+// descriptor's data pointer. Data format: flags(1 byte) + varint(offset) +
+// name(null-term) + optional tag.
+func (t *RawType) StructFieldName(i int32) (s string) {
+	u := t.Underlying()
+	st := (*rtStructType)(unsafe.Pointer(u))
+	fields := array.At[rtStructFieldDesc](unsafe.Pointer(&st.fields[0]), int32(st.numField))
+	p := (*uint8)(fields.Index(i).data)
+	// skip flags byte
+	p = (*uint8)(unsafe.Add(unsafe.Pointer(p), 1))
+	// skip varint-encoded offset
+	for {
+		b := *p
+		p = (*uint8)(unsafe.Add(unsafe.Pointer(p), 1))
+		if b&0x80 == 0 {
+			break
+		}
+	}
+	start := unsafe.Pointer(p)
+	n := int32(0)
+	for {
+		if *(*uint8)(unsafe.Add(start, uintptr(n))) == 0 {
+			break
+		}
+		n++
+	}
+	out := []byte{:n}
+	copy(out, unsafe.Slice((*byte)(start), n))
+	return string(out)
+}
+
 // structFieldOffset returns the offset of the i-th field by reading the
 // varint-encoded offset from the field descriptor's data pointer.
 // Data format: flags(1 byte) + varint(offset) + name(null-term) + ...

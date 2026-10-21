@@ -326,23 +326,30 @@ Remaining, all debt rather than defects (all three closed on this tree):
    mapping directly - see "Routing tree: the launders are gone" above); 3c
    measured and reverted (the `sovGroup` pre-fault moved the fault, it did not
    reduce it).
-4. a builtin structural String for structs and named func types: a declared
-   String() keeps precedence, everything else renders `{field:value ...}` or
-   `func(params) (returns)`. **Measured, and it is not a Stringer:** fmt takes
-   `...Stringer`, does `p.arg.(Stringer)`, and prints `?` when the type has no
-   method; fmt holds no type information of its own (`%T` prints `?`), and the
-   interface value's descriptor is unreachable from Moxie code. The runtime
-   descriptor does carry struct field names, types and offsets (`RawType` walks
-   them), but a func descriptor carries no signature text, so the func form has
-   to come from the compiler. **Design:** the compiler synthesizes the method
-   for each type that needs it - a struct's body calls a runtime writer with
-   `unsafe.TypeOf(*p)` and a data pointer (the writer walks the descriptor:
-   basics, pointer, slice, map, interface, chan, nested structs, field names);
-   a named func type's body returns the signature text built at compile time.
-   Wiring is either a per-type thunk in the interface dispatch table or a
-   synthetic method source parsed by each compiler's own parser (smaller, and
-   the method then flows through the normal pipeline). Two compilers (wood law),
-   plus a bootstrap and a full sweep. Not started.
+4. ~~A builtin structural String for structs and named func types~~ -
+   implemented: a declared String() always wins, a user-code struct renders
+   `{field:value ...}`, and a named func type renders `func(params) (returns)`.
+   fmt/Stringer could not do it (fmt asserts `p.arg.(Stringer)` and has no type
+   information, and the runtime descriptor carries struct field names and
+   offsets but no func signature text), so both compilers synthesize the method
+   as source and parse it: `_mxc_stage4/ir_typecheck.mx injectBuiltinString` and
+   `legacy/loader/stringers.go`. A struct body calls `runtime.RenderValue`,
+   which walks the descriptor (`src/runtime/type_render.mx`; the numeric text
+   moved to the untagged `src/runtime/numfmt.mx` so wasm has it too), and a func
+   type body returns its signature text. Pin:
+   `tests/regressions/should_compile/builtin_string_render.mx` (struct, %+v,
+   direct method call, func type, declared override), which phase 0a and phase 5
+   (wasm) both run; both compilers print the same bytes.
+
+   **Scope, measured:** the method is synthesized for USER code only (a package
+   outside the toolchain's `src/` and `pkg/` trees). Doing it for every stdlib
+   struct was tried first and is unshippable: each type gains a method in its
+   mxh and in the Stringer dispatch table, and phase 0a's `http_header_api`
+   grew past the compiler's type-check arena (128 regions) before it linked. A
+   stdlib type that is printed still needs a declared String() (asn1's
+   diagnostic has one) until the builtin method is served from the dispatch
+   default instead of a per-type declaration; that is the next step if full
+   coverage is wanted.
 
 **Do not reopen as "the leak"**: `hashmapOwner` and the root fallback. The
 per-request `Header` map is a sovereign group and its buckets die with the

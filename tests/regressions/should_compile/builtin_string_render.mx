@@ -1,0 +1,54 @@
+// A struct and a named func type have a builtin String().
+//
+// fmt takes ...Stringer, so a type with no declared String() had no printable
+// form: stage4 accepted the call and printed '?', legacy refused the package.
+// The compiler now synthesizes the method for every struct and named func type
+// that does not declare one; a declared String() always wins. The struct body
+// walks the type descriptor in runtime (field names, offsets, nested types), and
+// a named func type renders its signature.
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+type inner struct {
+	n   int32
+	txt string
+}
+
+type point struct {
+	x, y int32
+	name string
+	next *point
+	vals []int32
+	in   inner
+}
+
+type callback func(a int32, s string) (int32, error)
+
+type custom struct {
+	n int32
+}
+
+func (c *custom) String() (s string) { return "custom" }
+
+func check(label, got, want string) {
+	if got != want {
+		fmt.Printf("FAIL %s: got %s want %s\n", label, got, want)
+		os.Exit(1)
+	}
+}
+
+func main() {
+	p := point{x: 1, y: -2, name: "p", in: inner{n: 7, txt: "t"}}
+	const want = "{x:1 y:-2 name:p next:nil vals:[] in:{n:7 txt:t}}"
+	check("struct", fmt.Sprintf("%v", p), want)
+	check("struct+", fmt.Sprintf("%+v", p), want)
+	check("method", p.String(), want)
+	var cb callback
+	check("func", fmt.Sprintf("%v", cb), "func(a int32, s string) (int32, error)")
+	check("override", fmt.Sprintf("%v", custom{n: 3}), "custom")
+	fmt.Println("builtin string render ok")
+}

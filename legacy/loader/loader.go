@@ -365,6 +365,10 @@ func (p *Package) Parse() error {
 	if err != nil {
 		return err
 	}
+	files, err = p.injectBuiltinStrings(files)
+	if err != nil {
+		return err
+	}
 	p.Files = files
 
 	return nil

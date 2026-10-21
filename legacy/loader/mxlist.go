@@ -347,6 +347,23 @@ func (r *resolver) walk(importPath string, srcDir string) error {
 
 	// Walk dependencies first (depth-first, deps before dependents).
 	allImports := pkg.Imports
+	// Packages get a synthesized String() method whose body calls
+	// runtime.RenderValue (loader/stringers.go), so the dependency graph has
+	// to carry the runtime edge the source does not spell out. Packages inside
+	// runtime's own import closure are skipped: the edge would be a cycle.
+	// Adding it for every other package only over-approximates the graph; a
+	// package whose types need no synthesized method simply does not import
+	// runtime in its source.
+	hasRuntime := false
+	for _, imp := range allImports {
+		if imp == "runtime" {
+			hasRuntime = true
+		}
+	}
+	if !hasRuntime && importPath != "runtime" && !renderSkipPkg(importPath) &&
+		renderUserPkg(dir, r.goroot) {
+		allImports = append(allImports, "runtime")
+	}
 	for _, imp := range allImports {
 		if false {
 			fmt.Fprintf(os.Stderr, "DEBUG: %q imports %q (dir=%s)\n", importPath, imp, dir)
@@ -364,7 +381,7 @@ func (r *resolver) walk(importPath string, srcDir string) error {
 		GoFiles:    goToMx(pkg.GoFiles, dir),
 		CgoFiles:   goToMx(pkg.CgoFiles, dir),
 		CFiles:     pkg.CFiles,
-		Imports:    pkg.Imports,
+		Imports:    allImports,
 		EmbedFiles: pkg.EmbedPatterns,
 	}
 

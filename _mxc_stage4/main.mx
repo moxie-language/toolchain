@@ -3172,6 +3172,14 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 			allImports = appendUniq(allImports, imp)
 		}
 	}
+	// A synthesized String() method (ir_typecheck injectBuiltinString) calls
+	// runtime.RenderValue, so runtime belongs in the closure even though no
+	// source file spells the import. Packages inside runtime's own import
+	// closure are skipped: the edge would be a cycle, and they get no
+	// synthesized method either.
+	if renderUserPkg(dir) && pkgPath != "runtime" && !renderSkipPkg(pkgPath) {
+		allImports = appendUniq(allImports, "runtime")
+	}
 	if !bst.quietDiscover {
 		mxutil.WriteStr(2, "  discover " | pkgPath | " [")
 		for fi, ff := range files {
@@ -3364,7 +3372,7 @@ func remapOneLine(line string) (s string) {
 
 func compileSource(src []byte, pkgName, triple, pkgDir string) (s string) {
 	cctx.compilePkgDir = pkgDir
-	ir := CompileToIR(src, pkgName, triple)
+	ir := CompileToIR(src, pkgName, triple, pkgDir)
 	if len(ir) > 0 && ir[0] == ';' {
 		mxutil.WriteStr(2, remapErrorLines(ir))
 		fatal("compile error for " | pkgName)
@@ -3397,7 +3405,7 @@ func typeCheckPkgSource(cacheBase, dir string, files []string, pkgPath, compileP
 		return
 	}
 	mkdirAll(mxutil.JoinPath(cacheBase, safeName(pkgPath)), 0755)
-	TypeCheckOnly(src, compilePath, cachedMxh)
+	TypeCheckOnly(src, compilePath, cachedMxh, dir)
 }
 
 // compilePkgSource concatenates a package's sources and compiles them. Free
@@ -4796,7 +4804,7 @@ func cmdHeader(pkgName, outdir string) {
 	if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 		compilePath = pkg.name
 	}
-	TypeCheckOnly(src, compilePath, "")
+	TypeCheckOnly(src, compilePath, "", pkg.dir)
 	tpkg := cctx.universe.Registry[compilePath]
 	if tpkg == nil || tpkg.Scope == nil {
 		fatal("header: typecheck failed for " | pkgName)
@@ -4887,7 +4895,7 @@ func cmdInstall(pkgName string) {
 		compilePath = pkg.name
 	}
 	src := concatSources(pkg.dir, pkg.files)
-	TypeCheckOnly(src, compilePath, "")
+	TypeCheckOnly(src, compilePath, "", pkg.dir)
 	mxutil.WriteStr(2, "install: " | compilePath | " cached\n")
 }
 
@@ -5634,10 +5642,10 @@ func cmdTest(args []string) {
 				// no arms ("interface dispatch: no impl for Write"). Write its
 				// mxh so the same text the index reads exists.
 				testMxh = mxutil.JoinPath(tmpdir, "testpkg.mxh")
-				TypeCheckOnly(src, compilePath, testMxh)
+				TypeCheckOnly(src, compilePath, testMxh, dp.dir)
 			} else {
 				src = concatSources(dp.dir, dp.files)
-				TypeCheckOnly(src, compilePath, "")
+				TypeCheckOnly(src, compilePath, "", dp.dir)
 			}
 		}
 	}
@@ -5700,7 +5708,7 @@ func cmdTest(args []string) {
 				csrc := concatSources(dp.dir, dp.files)
 				cdir := mxutil.JoinPath(cacheBase, safeName(dp.path))
 				mkdirAll(cdir, 0755)
-				TypeCheckOnly(csrc, compilePath, cachedMxh)
+				TypeCheckOnly(csrc, compilePath, cachedMxh, dp.dir)
 				allBcFiles = mxutil.Ensure(allBcFiles, 1)
 				push(allBcFiles, cached)
 				continue
@@ -6846,7 +6854,7 @@ func main() {
 					cachedMxh := cachedMxhPath(cacheBase, p.path, hash, p.version)
 					cdir := mxutil.JoinPath(cacheBase, safeName(p.path))
 					mkdirAll(cdir, 0755)
-					TypeCheckOnly(src, compilePath, cachedMxh)
+					TypeCheckOnly(src, compilePath, cachedMxh, p.dir)
 					p.baked = true
 					filtered = mxutil.Ensure(filtered, 1)
 					push(filtered, p)
@@ -8024,7 +8032,7 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 	mxutil.WriteStr(2, "  compile " | pkg.path | "\n")
 	src := concatSources(pkg.dir, pkg.files)
 	cctx.compilePkgDir = pkg.dir
-	ir := CompileToIR(src, compilePath, meta.triple)
+	ir := CompileToIR(src, compilePath, meta.triple, pkg.dir)
 	if len(ir) > 0 && ir[0] == ';' {
 		return remapErrorLines(ir)
 	}
@@ -8446,7 +8454,7 @@ func cmdBuildRuntime() {
 				compilePath = dp.name
 			}
 			src := concatSources(dp.dir, dp.files)
-			TypeCheckOnly(src, compilePath, "")
+			TypeCheckOnly(src, compilePath, "", dp.dir)
 			rtClosure = mxutil.Ensure(rtClosure, 1)
 			push(rtClosure, dp)
 		}
