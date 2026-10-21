@@ -939,6 +939,17 @@ func (b *builder) checkChannelCompleteness() {
 					}
 				case *ssa.Call:
 					if bi, ok := r.Call.Value.(*ssa.Builtin); ok {
+						if bi.Name() == "close" {
+							// close is the broadcast sender: a breaker channel
+							// carries no value, and its listeners wake on the
+							// close. The spawn model is built on exactly this.
+							for _, arg := range r.Call.Args {
+								if arg == mc {
+									hasSend = true
+									break
+								}
+							}
+						}
 						if bi.Name() == "spawn" {
 							// A channel passed to spawn escapes to the spawned
 							// domain, which provides the other end.
