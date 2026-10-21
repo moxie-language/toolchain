@@ -29,7 +29,7 @@ func verifyHandshakeSignature(sigType uint8, pubkey crypto.PublicKey, hashFunc c
 	case signatureECDSA:
 		pubKey, ok := pubkey.(*ecdsa.PublicKey)
 		if !ok {
-			return fmt.Errorf("expected an ECDSA public key, got %T", pubkey)
+			return fmt.Errorf("expected an ECDSA public key, got %s", publicKeyName(pubkey))
 		}
 		if !ecdsa.VerifyASN1(pubKey, signed, sig) {
 			return errors.New("ECDSA verification failure")
@@ -37,7 +37,7 @@ func verifyHandshakeSignature(sigType uint8, pubkey crypto.PublicKey, hashFunc c
 	case signatureEd25519:
 		pubKey, ok := pubkey.(ed25519.PublicKey)
 		if !ok {
-			return fmt.Errorf("expected an Ed25519 public key, got %T", pubkey)
+			return fmt.Errorf("expected an Ed25519 public key, got %s", publicKeyName(pubkey))
 		}
 		if !ed25519.Verify(pubKey, signed, sig) {
 			return errors.New("Ed25519 verification failure")
@@ -45,7 +45,7 @@ func verifyHandshakeSignature(sigType uint8, pubkey crypto.PublicKey, hashFunc c
 	case signaturePKCS1v15:
 		pubKey, ok := pubkey.(*rsa.PublicKey)
 		if !ok {
-			return fmt.Errorf("expected an RSA public key, got %T", pubkey)
+			return fmt.Errorf("expected an RSA public key, got %s", publicKeyName(pubkey))
 		}
 		if err := rsa.VerifyPKCS1v15(pubKey, hashFunc, signed, sig); err != nil {
 			return err
@@ -53,7 +53,7 @@ func verifyHandshakeSignature(sigType uint8, pubkey crypto.PublicKey, hashFunc c
 	case signatureRSAPSS:
 		pubKey, ok := pubkey.(*rsa.PublicKey)
 		if !ok {
-			return fmt.Errorf("expected an RSA public key, got %T", pubkey)
+			return fmt.Errorf("expected an RSA public key, got %s", publicKeyName(pubkey))
 		}
 		signOpts := &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash}
 		if err := rsa.VerifyPSS(pubKey, hashFunc, signed, sig, signOpts); err != nil {
@@ -72,7 +72,7 @@ func verifyLegacyHandshakeSignature(sigType uint8, pubkey crypto.PublicKey, hash
 	case signatureECDSA:
 		pubKey, ok := pubkey.(*ecdsa.PublicKey)
 		if !ok {
-			return fmt.Errorf("expected an ECDSA public key, got %T", pubkey)
+			return fmt.Errorf("expected an ECDSA public key, got %s", publicKeyName(pubkey))
 		}
 		if !ecdsa.VerifyASN1(pubKey, hashed, sig) {
 			return errors.New("ECDSA verification failure")
@@ -80,7 +80,7 @@ func verifyLegacyHandshakeSignature(sigType uint8, pubkey crypto.PublicKey, hash
 	case signaturePKCS1v15:
 		pubKey, ok := pubkey.(*rsa.PublicKey)
 		if !ok {
-			return fmt.Errorf("expected an RSA public key, got %T", pubkey)
+			return fmt.Errorf("expected an RSA public key, got %s", publicKeyName(pubkey))
 		}
 		if err := rsa.VerifyPKCS1v15(pubKey, hashFunc, hashed, sig); err != nil {
 			return err
@@ -167,7 +167,7 @@ func legacyTypeAndHashFromPublicKey(pub crypto.PublicKey) (sigType uint8, h cryp
 		// complexity, so we can't even test it properly.
 		return 0, 0, fmt.Errorf("tls: Ed25519 public keys are not supported before TLS 1.2")
 	default:
-		return 0, 0, fmt.Errorf("tls: unsupported public key: %T", pub)
+		return 0, 0, fmt.Errorf("tls: unsupported public key: %s", publicKeyName(pub))
 	}
 }
 
@@ -194,7 +194,7 @@ func _rsaSignatureSchemes() (rint32 []struct {
 }
 
 func signatureSchemesForPublicKey(version uint16, pub crypto.PublicKey) (rsignatureScheme []SignatureScheme) {
-	switch pub := pub.(type) {
+	switch k := pub.(type) {
 	case *ecdsa.PublicKey:
 		if version < VersionTLS13 {
 			// In TLS 1.2 and earlier, ECDSA algorithms are not
@@ -206,7 +206,7 @@ func signatureSchemesForPublicKey(version uint16, pub crypto.PublicKey) (rsignat
 				ECDSAWithSHA1,
 			}
 		}
-		switch pub.Curve {
+		switch k.Curve {
 		case elliptic.P256():
 			return []SignatureScheme{ECDSAWithP256AndSHA256}
 		case elliptic.P384():
@@ -217,7 +217,7 @@ func signatureSchemesForPublicKey(version uint16, pub crypto.PublicKey) (rsignat
 			return nil
 		}
 	case *rsa.PublicKey:
-		size := pub.Size()
+		size := k.Size()
 		rsaSigSchemes := _rsaSignatureSchemes()
 		sigAlgs := []SignatureScheme{:0:len(rsaSigSchemes)}
 		for _, candidate := range rsaSigSchemes {
@@ -289,16 +289,16 @@ func selectSignatureScheme(vers uint16, c *Certificate, peerAlgs []SignatureSche
 func unsupportedCertificateError(cert *Certificate) (rerr error) {
 	switch cert.PrivateKey.(type) {
 	case rsa.PrivateKey, ecdsa.PrivateKey:
-		return fmt.Errorf("tls: unsupported certificate: private key is %T, expected *%T",
-			cert.PrivateKey, cert.PrivateKey)
+		return fmt.Errorf("tls: unsupported certificate: private key is %s, expected *%s",
+			privateKeyName(cert.PrivateKey), privateKeyName(cert.PrivateKey))
 	case *ed25519.PrivateKey:
 		return fmt.Errorf("tls: unsupported certificate: private key is *ed25519.PrivateKey, expected ed25519.PrivateKey")
 	}
 
 	signer, ok := cert.PrivateKey.(crypto.Signer)
 	if !ok {
-		return fmt.Errorf("tls: certificate private key (%T) does not implement crypto.Signer",
-			cert.PrivateKey)
+		return fmt.Errorf("tls: certificate private key (%s) does not implement crypto.Signer",
+			privateKeyName(cert.PrivateKey))
 	}
 
 	switch pub := signer.Public().(type) {
@@ -314,12 +314,12 @@ func unsupportedCertificateError(cert *Certificate) (rerr error) {
 		return fmt.Errorf("tls: certificate RSA key size too small for supported signature algorithms")
 	case ed25519.PublicKey:
 	default:
-		return fmt.Errorf("tls: unsupported certificate key (%T)", pub)
+		return fmt.Errorf("tls: unsupported certificate key (%s)", publicKeyName(pub))
 	}
 
 	if cert.SupportedSignatureAlgorithms != nil {
 		return fmt.Errorf("tls: peer doesn't support the certificate custom signature algorithms")
 	}
 
-	return fmt.Errorf("tls: internal error: unsupported key (%T)", cert.PrivateKey)
+	return fmt.Errorf("tls: internal error: unsupported key (%s)", privateKeyName(cert.PrivateKey))
 }

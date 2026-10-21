@@ -23,7 +23,7 @@ import (
 	"golang.org/x/net/http/httpguts"
 )
 
-const ErrLineTooLong = internal.ErrLineTooLong
+var ErrLineTooLong error
 
 // httpMsg is the concrete union of *Request and *Response accepted by the
 // transfer reader and writer. Moxie has no empty interface, so the two
@@ -671,7 +671,7 @@ func (t *transferReader) parseTransferEncoding() (rerr error) {
 	// surfaces in HTTP/1.1 due to the risk of request smuggling, so we keep it
 	// strict and simple.
 	if len(raw) != 1 {
-		return &unsupportedTEError{fmt.Sprintf("too many transfer encodings: %q", raw)}
+		return &unsupportedTEError{fmt.Sprintf("too many transfer encodings: %s", quotedValues(raw))}
 	}
 	if !ascii.EqualFold(raw[0], "chunked") {
 		return &unsupportedTEError{fmt.Sprintf("unsupported transfer encoding: %q", raw[0])}
@@ -697,7 +697,7 @@ func fixLength(isResponse bool, status int32, requestMethod string, header Heade
 		first := textproto.TrimString(contentLens[0])
 		for _, ct := range contentLens[1:] {
 			if first != textproto.TrimString(ct) {
-				return 0, fmt.Errorf("http: message cannot contain multiple Content-Length headers; got %q", contentLens)
+				return 0, fmt.Errorf("http: message cannot contain multiple Content-Length headers; got %s", quotedValues(contentLens))
 			}
 		}
 
@@ -1146,4 +1146,16 @@ func (fw *bufioFlushWriter) Write(p []byte) (n int32, err error) {
 		}
 	}
 	return
+}
+
+// quotedValues renders header values for a diagnostic: fmt's variadics are
+// Stringer, and a [][]byte is not one.
+func quotedValues(vv [][]byte) (s string) {
+	for i, v := range vv {
+		if i > 0 {
+			s = s | " "
+		}
+		s = s | "\"" | string(v) | "\""
+	}
+	return s
 }

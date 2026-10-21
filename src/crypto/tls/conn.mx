@@ -227,7 +227,7 @@ func (hc *halfConn) setTrafficSecret(suite *cipherSuiteTLS13, level QUICEncrypti
 	hc.trafficSecret = secret
 	hc.level = level
 	key, iv := suite.trafficKey(secret)
-	hc.cipher = suite.aead(key, iv)
+	hc.cipher = &aeadCipher{a: suite.aead(key, iv)}
 	clear(hc.seq[:])
 }
 
@@ -1315,18 +1315,18 @@ func (c *Conn) handlePostHandshakeMessage() (rerr error) {
 		return c.in.setErrorLocked(errors.New("tls: too many non-advancing records"))
 	}
 
-	switch msg := msg.(type) {
+	switch m := msg.(type) {
 	case *newSessionTicketMsgTLS13:
-		return c.handleNewSessionTicket(msg)
+		return c.handleNewSessionTicket(m)
 	case *keyUpdateMsg:
-		return c.handleKeyUpdate(msg)
+		return c.handleKeyUpdate(m)
 	}
 	// The QUIC layer is supposed to treat an unexpected post-handshake CertificateRequest
 	// as a QUIC-level PROTOCOL_VIOLATION error (RFC 9001, Section 4.4). Returning an
 	// unexpected_message alert here doesn't provide it with enough information to distinguish
 	// this condition from other unexpected messages. This is probably fine.
 	c.sendAlert(alertUnexpectedMessage)
-	return fmt.Errorf("tls: received unexpected handshake message of type %T", msg)
+	return fmt.Errorf("tls: received unexpected handshake message of type %s", handshakeMessageName(msg))
 }
 
 func (c *Conn) handleKeyUpdate(keyUpdate *keyUpdateMsg) (rerr error) {
@@ -1601,7 +1601,8 @@ func (c *Conn) handshakeContext(ctx context.Context) (ret error) {
 			// any alert error we may have sent, or alertInternalError
 			// if we didn't send an alert.
 			// Truncate the text of the alert to 0 characters.
-			c.handshakeErr = fmt.Errorf("%w%.0w", c.handshakeErr, &AlertError(a))
+			ae := AlertError(a)
+			c.handshakeErr = fmt.Errorf("%w%.0w", c.handshakeErr, &ae)
 		}
 		close(c.quic.blockedc)
 		close(c.quic.signalc)

@@ -208,11 +208,11 @@ type EncodeHeadersResult struct {
 // which the headers should be encoded. It is an interface rather than a
 // function value because the writer carries the state it encodes into.
 type HeaderSink interface {
-	writeHeader(name, value string)
+	WriteHeader(name, value string)
 }
 
 // EncodeHeaders constructs request headers common to HTTP/2 and HTTP/3.
-// It validates a request and calls sink.writeHeader with each pseudo-header and
+// It validates a request and calls sink.WriteHeader with each pseudo-header and
 // header for the request.
 // The sink is called with the validated, canonicalized header name.
 // The client trace is passed concretely: Moxie's context carries no values.
@@ -433,10 +433,10 @@ func (w *requestHeaderWriter) emitHeader(name, value string) {
 		return
 	}
 
-	w.sink.writeHeader(name, value)
+	w.sink.WriteHeader(name, value)
 
 	if w.trace != nil && w.trace.WroteHeaderField != nil {
-		w.trace.WroteHeaderField(name, [][]byte{value})
+		httptrace.WroteHeaderField(w.trace, name, [][]byte{value})
 	}
 }
 
@@ -474,13 +474,13 @@ func IsRequestGzip(method string, header map[string][][]byte, disableCompression
 // For example, we allow "Transfer-Encoding: chunked", but drop the header when encoding.
 func checkConnHeaders(h map[string][][]byte) (rerr error) {
 	if vv := h["Upgrade"]; len(vv) > 0 && (vv[0] != "" && vv[0] != "chunked") {
-		return fmt.Errorf("invalid Upgrade request header: %q", vv)
+		return fmt.Errorf("invalid Upgrade request header: %s", quotedValues(vv))
 	}
 	if vv := h["Transfer-Encoding"]; len(vv) > 0 && (len(vv) > 1 || vv[0] != "" && vv[0] != "chunked") {
-		return fmt.Errorf("invalid Transfer-Encoding request header: %q", vv)
+		return fmt.Errorf("invalid Transfer-Encoding request header: %s", quotedValues(vv))
 	}
 	if vv := h["Connection"]; len(vv) > 0 && (len(vv) > 1 || vv[0] != "" && !asciiEqualFold(vv[0], "close") && !asciiEqualFold(vv[0], "keep-alive")) {
-		return fmt.Errorf("invalid Connection request header: %q", vv)
+		return fmt.Errorf("invalid Connection request header: %s", quotedValues(vv))
 	}
 	return nil
 }
@@ -647,4 +647,16 @@ func NewServerRequest(rp ServerRequestParam) (rserverRequestResult ServerRequest
 var ErrRequestHeaderListSize error
 func init() {
 	ErrRequestHeaderListSize = errors.New("request header list larger than peer's advertised limit")
+}
+
+// quotedValues renders header values for a diagnostic: fmt's variadics are
+// Stringer, and a [][]byte is not one.
+func quotedValues(vv [][]byte) (s string) {
+	for i, v := range vv {
+		if i > 0 {
+			s = s | " "
+		}
+		s = s | "\"" | string(v) | "\""
+	}
+	return s
 }
