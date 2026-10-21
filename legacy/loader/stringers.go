@@ -13,8 +13,10 @@ package loader
 // injectBuiltinString is the stage4 side. Wood law: both or neither.
 
 import (
+	"bytes"
 	"fmt"
 	"go/ast"
+	"os"
 	"path/filepath"
 	"go/parser"
 	"go/token"
@@ -104,10 +106,29 @@ func (p *Package) injectBuiltinStrings(files []*ast.File) ([]*ast.File, error) {
 		}
 	}
 
+	// Package source, for the used test: the type declaration itself is one
+	// mention, and a second mention is a use by this package. An unexported
+	// type that is never mentioned twice cannot reach a Stringer slot anywhere
+	// (unexported names are package-local), so it gets no method. Exported
+	// types are always kept: another package can place them in a slot, which
+	// this package cannot see.
+	var pkgSource []byte
+	for _, f := range p.GoFiles {
+		data, rerr := os.ReadFile(filepath.Join(p.Dir, f))
+		if rerr != nil {
+			continue
+		}
+		pkgSource = append(pkgSource, data...)
+		pkgSource = append(pkgSource, '\n')
+	}
+
 	var b strings.Builder
 	needRuntime := false
 	for _, ts := range specs {
 		if ts.Name == nil || ts.Assign.IsValid() || ts.TypeParams != nil || declared[ts.Name.Name] {
+			continue
+		}
+		if !isExportedName(ts.Name.Name) && !mentionCountAtLeast(pkgSource, ts.Name.Name, 2) {
 			continue
 		}
 		switch t := ts.Type.(type) {
@@ -153,4 +174,46 @@ func (p *Package) injectBuiltinStrings(files []*ast.File) ([]*ast.File, error) {
 		return append(files, f), nil
 	}
 	return append(files, f), nil
+}
+
+// isExportedName reports whether name starts with an upper-case letter, the
+// same rule the language uses.
+func isExportedName(name string) bool {
+	if name == "" {
+		return false
+	}
+	return name[0] >= 'A' && name[0] <= 'Z'
+}
+
+func isIdentByte(b byte) bool {
+	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// mentionCountAtLeast reports whether src names ident at least n times as a
+// whole identifier. Comments and strings count, which can only keep a method
+// that was not strictly needed, never drop one that was.
+func mentionCountAtLeast(src []byte, ident string, n int) bool {
+	if ident == "" {
+		return false
+	}
+	seen := 0
+	for i := 0; i+len(ident) <= len(src); i++ {
+		if src[i] != ident[0] {
+			continue
+		}
+		if i > 0 && isIdentByte(src[i-1]) {
+			continue
+		}
+		if !bytes.Equal(src[i:i+len(ident)], []byte(ident)) {
+			continue
+		}
+		if i+len(ident) < len(src) && isIdentByte(src[i+len(ident)]) {
+			continue
+		}
+		seen++
+		if seen >= n {
+			return true
+		}
+	}
+	return false
 }

@@ -2502,6 +2502,15 @@ func injectBuiltinString(file *syntax.File, pkgName, pkgPath string, arena *runt
 		if declared[td.Name.Value] {
 			continue
 		}
+		// An unexported type that its own package never names (one mention:
+		// the declaration itself) cannot reach a Stringer slot anywhere:
+		// unexported names are package-local. No method for it. Exported types
+		// are always kept because another package can place them in a
+		// Stringer slot, which this package cannot see; and a used unexported
+		// type is kept because the use may be that slot.
+		if !injectExportedName(td.Name.Value) && !injectMentioned(td.Name.Value) {
+			continue
+		}
 		switch t := td.Type.(type) {
 		case *syntax.StructType:
 			// A struct with an embedded field may already have a String()
@@ -2582,4 +2591,59 @@ func renderUserPkg(pkgDir string) (ok bool) {
 		return false
 	}
 	return true
+}
+
+// injectExportedName reports whether ident is exported (its first byte is an
+// upper-case letter), the same rule the language uses.
+func injectExportedName(name string) (ok bool) {
+	if len(name) == 0 {
+		return false
+	}
+	return name[0] >= 'A' && name[0] <= 'Z'
+}
+
+// injectIsIdentByte reports whether b can be part of an identifier.
+func injectIsIdentByte(b byte) (ok bool) {
+	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// injectMentioned reports whether the package source names ident more than
+// once. The type declaration itself is one mention; any second mention is a
+// use by the package (a field type, a composite literal, a conversion, a
+// receiver, a slot). Comments and strings count too, which can only keep a
+// method that was not strictly needed - never drop one that was.
+func injectMentioned(name string) (ok bool) {
+	src := cctx.tcPkgSrc
+	n := int32(len(src))
+	nl := int32(len(name))
+	if nl == 0 {
+		return false
+	}
+	seen := int32(0)
+	for i := int32(0); i+nl <= n; i++ {
+		if src[i] != name[0] {
+			continue
+		}
+		if i > 0 && injectIsIdentByte(src[i-1]) {
+			continue
+		}
+		match := true
+		for j := int32(0); j < nl; j++ {
+			if src[i+j] != name[j] {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		if i+nl < n && injectIsIdentByte(src[i+nl]) {
+			continue
+		}
+		seen++
+		if seen >= 2 {
+			return true
+		}
+	}
+	return false
 }

@@ -359,6 +359,17 @@ Remaining, all debt rather than defects (all three closed on this tree):
    default instead of a per-type declaration; that is the next step if full
    coverage is wanted.
 
+   **Declared is not the same as used.** An unexported type that its own
+   package names exactly once (the declaration) gets no method: unexported
+   names are package-local, so such a type can never be placed in a Stringer
+   slot. Exported types always get one, because another package can place them
+   in a slot this package cannot see. The test is the identifier's mention count
+   in the package source (`injectMentioned` in stage4, `mentionCountAtLeast` in
+   legacy); a second mention may be a field type or even a comment, which can
+   only keep a method, never drop one a slot needs. Measured on a fixture
+   declaring `type used` and `type dead` with only `used` constructed: the mxh
+   has `method used String ->string 1` and no String line for `dead`.
+
    **Gate record on this tree:** 2 2/2 (`stage2 == stage3`), 0a/0b 141/141,
    1b 2/2 over 45 stdlib packages, 1c 5/5, 3 2/2, 4 2/2, 5 89/89 (second run;
    the first had the transient web_dom_roundtrip failure noted at the top),
