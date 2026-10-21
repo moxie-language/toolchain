@@ -1254,9 +1254,37 @@ func (c *compilerContext) checkScopeShadowing(pkg *loader.Package) {
 	if info == nil || info.Scopes == nil {
 		return
 	}
+	// A function literal is its own shadow root: Moxie closures do not capture
+	// the enclosing scope, so a name inside a closure shadows nothing outside
+	// it and must not be reported. Names declared in the closure's own body
+	// still shadow the closure's parameters, so the walk stops AT the literal's
+	// function scope, after comparing against it.
+	// go/types keys a function literal's scope by the literal's *ast.FuncType,
+	// so collect those nodes from the syntax first.
+	litTypes := make(map[ast.Node]bool)
+	for _, f := range pkg.Files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			if fl, ok := n.(*ast.FuncLit); ok && fl.Type != nil {
+				litTypes[fl.Type] = true
+			}
+			return true
+		})
+	}
+	litRoot := make(map[*types.Scope]bool)
+	for node, sc := range info.Scopes {
+		if sc == nil {
+			continue
+		}
+		if litTypes[node] {
+			litRoot[sc] = true
+		}
+	}
 	pkgScope := pkg.Pkg.Scope()
 	for _, scope := range info.Scopes {
 		if scope == nil || scope == pkgScope {
+			continue
+		}
+		if litRoot[scope] {
 			continue
 		}
 		for _, name := range scope.Names() {
@@ -1267,10 +1295,14 @@ func (c *compilerContext) checkScopeShadowing(pkg *loader.Package) {
 			if obj == nil {
 				continue
 			}
-			// Walk parent scopes up to (and including) Universe.
+			// Walk parent scopes up to (and including) Universe, stopping at
+			// the nearest function literal.
 			for parent := scope.Parent(); parent != nil; parent = parent.Parent() {
 				if shadowedObj := parent.Lookup(name); shadowedObj != nil {
 					c.addError(obj.Pos(), "moxie: '"+name+"' shadows declaration in enclosing scope")
+					break
+				}
+				if litRoot[parent] {
 					break
 				}
 			}
