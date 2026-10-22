@@ -99,6 +99,7 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 		}
 	}
 	checkSovereignLoopDecls(p, files)
+	checkIfaceAssignments()
 	checkShadowing(files)
 	pb.checkImportConflicts(files)
 	checkPackageDecls(files, pkg.Path)
@@ -2183,6 +2184,37 @@ func (fb *ssaFuncBuilder) bindInstantiation(t Type) (tv Type) {
 	return fb.substTypeParams(instantiatedUnder(t))
 }
 
+// ifaceAssign is one "concrete value into interface" assignment. Its verdict
+// waits for the package's whole method set: a method declared in a file that has
+// not been built yet is absent from the receiver's type, and os.File.Stat lives
+// in stat_unix.mx after file.mx. Judging at build time reported "missing method
+// Stat" for *os.File, which was a property of the file order, not the program.
+type ifaceAssign struct {
+	V    Type
+	T    Type
+	what string
+	pos  string
+}
+
+var pendingIfaceAssigns []ifaceAssign
+
+// checkIfaceAssignments judges the recorded assignments and clears the list.
+func checkIfaceAssignments() {
+	for _, pa := range pendingIfaceAssigns {
+		tIface, isIface := SafeUnderlying(pa.T).(*TCInterface)
+		if !isIface || !IfaceCheckConclusive(pa.V, tIface) {
+			continue
+		}
+		missing := IfaceMissingMethod(pa.V, tIface)
+		if missing == "" {
+			continue
+		}
+		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+		push(cctx.compileErrors, pa.pos | "cannot use value of type " | pa.V.String() | " as " | pa.T.String() | " in " | pa.what | " (does not implement " | pa.T.String() | " (missing method " | missing | "))")
+	}
+	pendingIfaceAssigns = nil
+}
+
 func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 	if val == nil || T == nil {
 		return
@@ -2272,6 +2304,22 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 					cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 					push(cctx.compileErrors, fb.errPos() | "cannot use value of type " | V.String() | " as " | T.String() | " in " | what | " (an interface value needs a type assertion)")
 					return
+				}
+			}
+		}
+		// The DESTINATION interface direction: a concrete value must provide
+		// every method the interface declares. Skipped for a reason that only
+		// holds for a method set still being built (and for a type generic enough
+		// that "absent" is not established), so those cases stay skipped and the
+		// rest is recorded for the package post-pass. Without this the value
+		// reached the emitter and printed '?'.
+		if tIface, isIface := SafeUnderlying(T).(*TCInterface); isIface {
+			if _, vIface := SafeUnderlying(V).(*TCInterface); !vIface {
+				if _, vTP := V.(*TypeParam); !vTP {
+					if IfaceCheckConclusive(V, tIface) && IfaceMethodSetLocal(V, fb.fn.Pkg.Pkg) {
+						pendingIfaceAssigns = mxutil.Ensure(pendingIfaceAssigns, 1)
+						push(pendingIfaceAssigns, ifaceAssign{V: V, T: T, what: what, pos: fb.errPos()})
+					}
 				}
 			}
 		}

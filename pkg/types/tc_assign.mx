@@ -381,18 +381,46 @@ func methodSet(T Type) (m map[string]*TCFunc) {
 }
 
 func collectMethods(T Type, ms map[string]*TCFunc, ptrOk bool) {
+	collectMethodsDepth(T, ms, ptrOk, 0)
+}
+
+// collectMethodsDepth is collectMethods plus a promotion depth bound. An
+// embedded field promotes its type's methods to the outer type, and an
+// embedded INTERFACE promotes the methods it declares - io's nopCloser reaches
+// Read only that way - so a method set that ignores embedded fields answers
+// "missing method Read" for a type that has had Read all along. Each level
+// costs two steps through the chain (a Named and its underlying struct), and
+// pkg/syntax's ExprStmt reaches node's Pos() six steps down.
+func collectMethodsDepth(T Type, ms map[string]*TCFunc, ptrOk bool, depth int32) {
+	if depth > 12 {
+		return
+	}
+	if u, isSlice := SafeUnderlying(T).(*Slice); isSlice && isTextType(T) {
+		// string and []byte are one type, so a []byte carries the string method
+		// set: a channel of []byte handed to fmt was "missing method String"
+		// while `string(x)` of the same bytes never was.
+		collectMethodsDepth(Typ[TCString], ms, false, depth+1)
+		return
+	}
 	switch t := T.(type) {
+	case *Basic:
+		// Every predeclared type declares String() string (the runtime owns the
+		// bodies), so an int32 IS a Stringer.
+		for _, m := range t.Methods {
+			if _, dup := ms[m.Name]; !dup {
+				ms[m.Name] = m
+			}
+		}
 	case *Named:
 		for _, m := range t.Methods {
 			if _, dup := ms[m.Name]; !dup {
 				ms[m.Name] = m
 			}
 		}
-		// Also collect pointer receiver methods if T is addressable.
 		if ptrOk {
-			collectMethods(NewPointer(T), ms, false)
+			collectMethodsDepth(NewPointer(T), ms, false, depth+1)
 		}
-		collectMethods(t.Under, ms, ptrOk)
+		collectMethodsDepth(t.Under, ms, ptrOk, depth+1)
 	case *Pointer:
 		if named, ok := t.Base.(*Named); ok {
 			for _, m := range named.Methods {
@@ -401,11 +429,237 @@ func collectMethods(T Type, ms map[string]*TCFunc, ptrOk bool) {
 				}
 			}
 		}
+		if t.Base != nil {
+			collectMethodsDepth(t.Base, ms, false, depth+1)
+		}
+	case *TCStruct:
+		for _, f := range t.Fields {
+			if f == nil || !f.Anonymous || f.Typ == nil {
+				continue
+			}
+			base := f.Typ
+			if p, isP := base.(*Pointer); isP && p.Base != nil {
+				base = p.Base
+			}
+			collectMethodsDepth(base, ms, true, depth+1)
+		}
 	case *TCInterface:
+		t.Complete()
 		for _, m := range t.AllMethods {
+			if m == nil {
+				continue
+			}
 			if _, dup := ms[m.Name]; !dup {
 				ms[m.Name] = NewTCFunc(nil, m.Name, m.Sig)
 			}
 		}
 	}
+}
+
+// IfaceMethodSetLocal reports whether T's method set is complete enough to say
+// that a method is absent. Stage4 fills an imported package's method list from
+// what its own compilation needed, not from every declaration that package has,
+// so an imported Named type can look method-less. A type that cannot carry a
+// method at all, and a type declared in this package (every file of which is
+// built by the time the post-pass runs), are the cases where "absent" means
+// absent. Arrays are left out on purpose: Moxie is removing them in favour of
+// slices, and the port still has them where Go used a fixed-size buffer, so
+// their fix is the array->slice conversion, not a checker change.
+func IfaceMethodSetLocal(T Type, localPkg *TCPackage) (ok bool) {
+	if T == nil {
+		return false
+	}
+	switch u := T.(type) {
+	case *Named:
+		return localPkg != nil && u.Obj != nil && u.Obj.Pkg == localPkg
+	case *Pointer:
+		if named, isN := u.Base.(*Named); isN {
+			return localPkg != nil && named.Obj != nil && named.Obj.Pkg == localPkg
+		}
+		switch SafeUnderlying(u).(type) {
+		case *Basic, *Slice, *TCMap, *TCChan, *Signature:
+			return true
+		}
+		return false
+	}
+	switch SafeUnderlying(T).(type) {
+	case *Basic, *Slice, *TCMap, *TCChan, *Signature:
+		return true
+	}
+	return false
+}
+
+// IfaceCheckConclusive reports whether a missing-method verdict can be trusted
+// for this pair. A generic body still carries type parameters in its method
+// signatures until the instantiation substitutes them, and an untyped value's
+// type belongs to the constant rule, so both are skipped rather than guessed.
+func IfaceCheckConclusive(T Type, I *TCInterface) (ok bool) {
+	if T == nil || I == nil {
+		return false
+	}
+	I.Complete()
+	if I.IsEmpty() {
+		return false
+	}
+	for _, m := range I.AllMethods {
+		if m == nil || m.Sig == nil {
+			return false
+		}
+	}
+	if hasUntyped(T) || hasUntyped(I) {
+		return false
+	}
+	if hasTypeParams(T) || hasTypeParams(I) {
+		return false
+	}
+	return true
+}
+
+// IfaceMissingMethod returns the name of the first method I requires that T's
+// method set does not declare at all, or "" when every name is present. It does
+// not compare signatures: an alias of an interface gets its own Named wrapper
+// (os.FileInfo = fs.FileInfo exists because interface typing depends on
+// Named-ness), so a signature reached through such an alias compares unequal and
+// a false "does not implement" would follow. A missing NAME cannot be produced
+// by that aliasing.
+func IfaceMissingMethod(T Type, I *TCInterface) (missing string) {
+	if I == nil {
+		return ""
+	}
+	I.Complete()
+	if I.IsEmpty() {
+		return ""
+	}
+	for _, im := range I.AllMethods {
+		if im == nil {
+			continue
+		}
+		if !hasMethodNamed(T, im.Name, 0) {
+			return im.Name
+		}
+	}
+	return ""
+}
+
+// hasMethodNamed reports whether T's method set declares a method with this
+// name, at a bounded promotion depth. It walks the same edges as
+// collectMethodsDepth but stops at the first match and allocates nothing: the
+// compiler has no collector and its arena is per function, so a map per checked
+// assignment filled the arena region table on the 45-package stdlib sweep.
+func hasMethodNamed(T Type, name string, depth int32) (ok bool) {
+	if T == nil || depth > 12 {
+		return false
+	}
+	if u, isSlice := SafeUnderlying(T).(*Slice); isSlice && isTextType(T) {
+		return hasMethodNamed(Typ[TCString], name, depth+1)
+	}
+	switch t := T.(type) {
+	case *Basic:
+		for _, m := range t.Methods {
+			if m.Name == name {
+				return true
+			}
+		}
+	case *Named:
+		for _, m := range t.Methods {
+			if m.Name == name {
+				return true
+			}
+		}
+		if hasMethodNamed(t.Under, name, depth+1) {
+			return true
+		}
+	case *Pointer:
+		if named, isN := t.Base.(*Named); isN {
+			for _, m := range named.Methods {
+				if m.Name == name {
+					return true
+				}
+			}
+		}
+		if t.Base != nil {
+			return hasMethodNamed(t.Base, name, depth+1)
+		}
+	case *TCStruct:
+		for _, f := range t.Fields {
+			if f == nil || !f.Anonymous || f.Typ == nil {
+				continue
+			}
+			base := f.Typ
+			if p, isP := base.(*Pointer); isP && p.Base != nil {
+				base = p.Base
+			}
+			if hasMethodNamed(base, name, depth+1) {
+				return true
+			}
+		}
+	case *TCInterface:
+		t.Complete()
+		for _, m := range t.AllMethods {
+			if m != nil && m.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasTypeParams reports whether a type parameter or an instantiation appears
+// anywhere in T, to a bounded depth. The bound is what stops the walk at a
+// recursive interface: `Equal(x I) (ok bool)` on I makes I's own method
+// signature contain I.
+func hasTypeParams(T Type) (ok bool) {
+	return hasTypeParamsDepth(T, 0)
+}
+
+func hasTypeParamsDepth(T Type, depth int32) (ok bool) {
+	if T == nil || depth > 12 {
+		return false
+	}
+	switch u := T.(type) {
+	case *TypeParam:
+		return true
+	case *Named:
+		if u.TArgs != nil {
+			return true
+		}
+	}
+	switch u := SafeUnderlying(T).(type) {
+	case *TypeParam:
+		return true
+	case *Named:
+		return u.TArgs != nil
+	case *Pointer:
+		return hasTypeParamsDepth(u.Base, depth+1)
+	case *Slice:
+		return hasTypeParamsDepth(u.Elem, depth+1)
+	case *Array:
+		return hasTypeParamsDepth(u.Elem, depth+1)
+	case *TCMap:
+		return hasTypeParamsDepth(u.Key, depth+1) || hasTypeParamsDepth(u.Elem, depth+1)
+	case *TCChan:
+		return hasTypeParamsDepth(u.Elem, depth+1)
+	case *Signature:
+		if hasTypeParamsDepth(u.Params, depth+1) {
+			return true
+		}
+		return hasTypeParamsDepth(u.Results, depth+1)
+	case *Tuple:
+		if u == nil {
+			return false
+		}
+		for i := int32(0); i < u.Len(); i++ {
+			if v := u.At(i); v != nil && hasTypeParamsDepth(v.Typ, depth+1) {
+				return true
+			}
+		}
+	case *TCInterface:
+		u.Complete()
+		for _, m := range u.AllMethods {
+			if m != nil && hasTypeParamsDepth(m.Sig, depth+1) {
+				return true
+			}
+		}
+	}
+	return false
 }

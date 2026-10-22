@@ -1191,6 +1191,25 @@ type userRegion struct {
 	name   []byte
 }
 
+// String renders a user region for the diagnostics. fmt's variadics are
+// ...fmt.Stringer, and neither this struct nor the slice of rangeType below
+// declares one, so the values cannot be printed at all without these.
+func (r *userRegion) String() (s []byte) {
+	return "task=" | uint64(r.taskID).String() | " name=" | r.name
+}
+
+// rangeTypesText renders the in-flight range list for the diagnostics.
+func rangeTypesText(ts []rangeType) (s []byte) {
+	s = "["
+	for i, t := range ts {
+		if i > 0 {
+			s = s | " "
+		}
+		s = s | t.String()
+	}
+	return s | "]"
+}
+
 // rangeType is a way to classify special ranges of time.
 //
 // These typically correspond 1:1 with "Begin" events, but
@@ -1199,6 +1218,16 @@ type userRegion struct {
 type rangeType struct {
 	typ  tracev2.EventType // "Begin" event.
 	desc stringID          // Optional subtype.
+}
+
+// String renders a range type for the diagnostics: its event name, and the
+// subtype when it has one.
+func (t *rangeType) String() (s []byte) {
+	s = tracev2.Specs()[t.typ].Name
+	if t.desc != 0 {
+		s = s | "/" | uint64(t.desc).String()
+	}
+	return s
 }
 
 // makeRangeType constructs a new rangeType.
@@ -1286,7 +1315,7 @@ func (s *rangeState) activeRange(typ rangeType, isInitialGen bool) (rerr error) 
 		s.inFlight = mxutil.Ensure(s.inFlight, 1)
 		s.inFlight = push(s.inFlight, typ)
 	} else if !s.hasRange(typ) {
-		return fmt.Errorf("resource is missing active range: %v %v", tracev2.Specs()[typ.typ].Name, s.inFlight)
+		return fmt.Errorf("resource is missing active range: %s %s", tracev2.Specs()[typ.typ].Name, rangeTypesText(s.inFlight))
 	}
 	return nil
 }
