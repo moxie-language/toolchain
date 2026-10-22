@@ -14,29 +14,23 @@ committed fixture behind it. The historical "Gate state on this tree" sections
 are snapshots of earlier commits, not the current numbers; this block is.
 
 **EVERY GATE IS GREEN on this tree**, one phase at a time (`-j 1`), with the
-driver on LLVM 23 and legacy on 22. The last full sweep ran at `b125a200` (the
-local declared-type qualifier check, the last stage4 change), with phase 8
-re-run alone after the driver was killed mid-phase:
+driver on LLVM 23 and legacy on 22. The last full sweep ran at `d30ab22d` (the
+interface-argument check, the last stage4 change):
 
     command: GOROOT=/opt/go1.25.3 bash tests/unitrun.sh -j 1 --phases P --force
-    phase 0a/0b          144/144 (95 + 49 + cleanliness)                    PASS
-    phase 1b             45 stdlib packages, 1/1 units                      PASS
+    phase 0a/0b          145/145 + cleanliness                           PASS
+    phase 1b             45 stdlib packages, 1/1 units                   PASS
     phase 1c             4/4 (net/http, path/filepath, syscall/js, jsbridge) PASS
-    phase 2 (selfhost)   6/6 internal, selfhost:fixpoint stage2 == stage3   PASS
-    phase 3              6/6 internal, 1/1 unit                             PASS
-    phase 4              smoke:hello, 1/1 unit                              PASS
-    phase 5 (wasm)       90/90 (89 fixtures + the emitted bundle)           PASS
-    phase 6              65 internal units, both compilers                  PASS
-    phase 8              17/17 units in BOTH dispatch modes                 PASS
-                         spawn-cost 16 spawns / 2239 us, no-accumulation
-                         17936->17952 kB inline (+16), 5908->5908 kB spawned
+    phase 2 (selfhost)   6/6 internal, selfhost:fixpoint stage2 == stage3 PASS
+    phase 3              6/6 internal, 1/1 unit                          PASS
+    phase 4              smoke:hello, 1/1 unit                           PASS
+    phase 5 (wasm)       90/90 (89 fixtures + the emitted bundle)        PASS
+    phase 6              65 internal units, both compilers               PASS
+    phase 8              17/17 units in BOTH dispatch modes              PASS
+                         spawn-cost 16 spawns / 2421 us, no-accumulation
+                         16112->16128 kB inline (+16), 5848->5848 kB spawned
                          (+0), 2048kB threshold unwidened
-
-Phases 0a/0b, 1b and 1c were re-run at `0e004163` after the internal/profile
-dump fix and are green (150/150 with cleanliness, nothing skipped). Phases 2, 3,
-4, 5, 6 and 8 last ran at `b125a200`; the compiler is unchanged since then (this
-round's checker work was reverted and only `src/internal/profile` differs), and
-none of those phases builds that package.
+    total 246, passed 246, failed 0, skipped 0
 
 One bootstrap fact worth keeping: a stage4 binary built BY the legacy compiler
 aborts with "panic: runtime error ... arena: region table full" on the
