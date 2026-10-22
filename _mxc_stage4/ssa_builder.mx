@@ -2190,10 +2190,11 @@ func (fb *ssaFuncBuilder) bindInstantiation(t Type) (tv Type) {
 // in stat_unix.mx after file.mx. Judging at build time reported "missing method
 // Stat" for *os.File, which was a property of the file order, not the program.
 type ifaceAssign struct {
-	V    Type
-	T    Type
-	what string
-	pos  string
+	V       Type
+	T       Type
+	localPkg *TCPackage
+	what    string
+	pos     string
 }
 
 var pendingIfaceAssigns []ifaceAssign
@@ -2203,6 +2204,9 @@ func checkIfaceAssignments() {
 	for _, pa := range pendingIfaceAssigns {
 		tIface, isIface := SafeUnderlying(pa.T).(*TCInterface)
 		if !isIface || !IfaceCheckConclusive(pa.V, tIface) {
+			continue
+		}
+		if !IfaceMethodSetLocal(pa.V, pa.localPkg) {
 			continue
 		}
 		missing := IfaceMissingMethod(pa.V, tIface)
@@ -2233,6 +2237,31 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 			push(cctx.compileErrors, fb.errPos() | "cannot use " | cv.String() | " as " | T.String() | " in " | what | " (" | msg | ")")
 			return
+		}
+	}
+	// An unexported method of ANOTHER package's interface can never be
+	// implemented outside that package: method identity includes the package for
+	// an unexported name, so a same-named method here is a different method.
+	// Legacy rejects the assignment ("does not implement lib.Sealed (unexported
+	// method seal)") and this has to run before Assignable, because the method
+	// sets can look compatible by name. Only a CONCRETE source is judged: an
+	// interface value carries the unexported method with its package identity
+	// (that is what makes `syntax.Expr` assignable to `syntax.Expr` across
+	// packages, or a wrapper interface that embeds it), and a source that lacks
+	// the method is the missing-method rule's business.
+	if declPkg := typeDeclPkg(T); declPkg != nil && fb.fn != nil && fb.fn.Pkg != nil && declPkg != fb.fn.Pkg.Pkg {
+		if tIface, isIface := SafeUnderlying(T).(*TCInterface); isIface {
+			if _, vIface := SafeUnderlying(V).(*TCInterface); !vIface {
+				// A concrete type declared in the interface's OWN package can
+				// implement its unexported methods (types.TypeName implements
+				// types.Object that way), so only a type from a third package -
+				// or one with no package at all, like a slice - is impossible.
+				if u := ifaceUnexportedMethod(tIface); u != "" && typeDeclPkg(V) != declPkg {
+					cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+					push(cctx.compileErrors, fb.errPos() | "cannot use value of type " | V.String() | " as " | T.String() | " in " | what | " (does not implement " | T.String() | " (unexported method " | u | "))")
+					return
+				}
+			}
 		}
 	}
 	if Assignable(V, T) {
@@ -2316,9 +2345,11 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 		if tIface, isIface := SafeUnderlying(T).(*TCInterface); isIface {
 			if _, vIface := SafeUnderlying(V).(*TCInterface); !vIface {
 				if _, vTP := V.(*TypeParam); !vTP {
-					if IfaceCheckConclusive(V, tIface) && IfaceMethodSetLocal(V, fb.fn.Pkg.Pkg) {
-						pendingIfaceAssigns = mxutil.Ensure(pendingIfaceAssigns, 1)
-						push(pendingIfaceAssigns, ifaceAssign{V: V, T: T, what: what, pos: fb.errPos()})
+					if IfaceCheckConclusive(V, tIface) {
+						if IfaceMethodSetLocal(V, fb.fn.Pkg.Pkg) {
+							pendingIfaceAssigns = mxutil.Ensure(pendingIfaceAssigns, 1)
+							push(pendingIfaceAssigns, ifaceAssign{V: V, T: T, localPkg: fb.fn.Pkg.Pkg, what: what, pos: fb.errPos()})
+						}
 					}
 				}
 			}
@@ -8852,6 +8883,47 @@ func (fb *ssaFuncBuilder) buildEmbeddedIfaceMethodCall(sel *syntax.SelectorExpr,
 // invoke, the caller saw nil and fell through as if nothing had been emitted,
 // and `i.Bytes()` on an interface without Bytes evaluated to nil, silently
 // printing 0. go/types rejects that call.
+// typeDeclPkg returns the package a Named type (or a pointer to one) is
+// declared in, or nil when the type is not named.
+func typeDeclPkg(t Type) (p *TCPackage) {
+	if p1, ok := t.(*Pointer); ok && p1.Base != nil {
+		t = p1.Base
+	}
+	if n, ok := t.(*Named); ok && n.Obj != nil {
+		return n.Obj.Pkg
+	}
+	return nil
+}
+
+// ifaceUnexportedMethod returns the first unexported method name I declares, or
+// "" when every method is exported.
+func ifaceUnexportedMethod(I *TCInterface) (name string) {
+	if I == nil {
+		return ""
+	}
+	I.Complete()
+	for i := 0; i < I.NumMethods(); i++ {
+		if m := I.Method(i); m != nil && !isExportedName(m.Name) {
+			return m.Name
+		}
+	}
+	return ""
+}
+
+// ifaceHasMethod reports whether I declares a method with this name.
+func ifaceHasMethod(I *TCInterface, name string) (ok bool) {
+	if I == nil {
+		return false
+	}
+	I.Complete()
+	for i := 0; i < I.NumMethods(); i++ {
+		if m := I.Method(i); m != nil && m.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *syntax.SelectorExpr, recv SSAValue, argExprs []syntax.Expr) (s SSAValue, handled bool) {
 	typ := recv.SSAType()
 	if p6, ok43 := SafeUnderlying(typ).(*Pointer); ok43 {
@@ -8860,6 +8932,16 @@ func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *syntax.SelectorExpr, recv SS
 	iface, ok := SafeUnderlying(typ).(*TCInterface)
 	if !ok {
 		return nil, false
+	}
+	if declPkg := typeDeclPkg(recv.SSAType()); declPkg != nil && fb.fn != nil && fb.fn.Pkg != nil && declPkg != fb.fn.Pkg.Pkg {
+		// An unexported method name belongs to the package that declares the
+		// interface; another package cannot refer to it. Legacy reports
+		// "s.seal undefined (cannot refer to unexported method seal)".
+		if !isExportedName(sel.Sel.Value) && ifaceHasMethod(iface, sel.Sel.Value) {
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, fb.errPos() | sel.Sel.Value | " undefined (cannot refer to unexported method " | sel.Sel.Value | ")")
+			return nil, true
+		}
 	}
 	var methodSig *Signature
 	for i := 0; i < iface.NumMethods(); i++ {

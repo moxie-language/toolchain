@@ -18,7 +18,14 @@ run_one() {
 		return
 	fi
 	mkdir -p "$UNIT_WORK/pkg"
-	cp "$fixture" "$UNIT_WORK/pkg/main.mx"
+	if [ -d "$fixture" ]; then
+		# A directory fixture: its own sources are the package. A subpackage it
+		# imports stays in the tree and resolves by module path, like a
+		# should_compile directory fixture.
+		cp "$fixture"/*.mx "$UNIT_WORK/pkg/"
+	else
+		cp "$fixture" "$UNIT_WORK/pkg/main.mx"
+	fi
 	log="$UNIT_WORK/build.log"
 	MOXIEROOT="$ROOT" "$MOXIE" build -o /dev/null "$UNIT_WORK/pkg" >"$log" 2>&1 || rc=$?
 	if [ "$rc" -eq 0 ]; then
@@ -37,6 +44,10 @@ UNITS=()
 while IFS= read -r f; do
 	UNITS+=("$(basename "$f" .mx)")
 done < <(ls "$SCRIPT_DIR"/*.mx 2>/dev/null | sort)
+while IFS= read -r d; do
+	[ -f "$d/main.mx" ] || continue
+	UNITS+=("$(basename "$d")")
+done < <(ls -d "$SCRIPT_DIR"/*/ 2>/dev/null | sort)
 
 unit_args "$@"
 
