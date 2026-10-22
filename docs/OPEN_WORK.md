@@ -14,41 +14,50 @@ committed fixture behind it. The historical "Gate state on this tree" sections
 are snapshots of earlier commits, not the current numbers; this block is.
 
 **EVERY GATE IS GREEN on this tree**, one phase at a time (`-j 1`), with the
-driver on LLVM 23 and legacy on 22. Phases 2, 3 and 4 last ran at `2f104452`
-(no stage4 source has changed since; the later compiler change was in the
-legacy checker); 0a/0b, 1b, 1c, 5, 6 and 8 were re-run at `1b58f904` and
-`5a7e2000`:
+driver on LLVM 23 and legacy on 22. The last full sweep ran at `a86073b5` (the
+type-switch shadow check, the last stage4 change), with the 1c/5 pair re-run
+after `adb59b4d` and 0b re-run for its cleanliness line:
 
     command: GOROOT=/opt/go1.25.3 bash tests/unitrun.sh -j 1 --phases P --force
+    phase 0a/0b          144/144 (95 + 48 + cleanliness)                    PASS
+    phase 1b             45 stdlib packages, 1/1 units                      PASS
+    phase 1c             4/4 (net/http, path/filepath, syscall/js, jsbridge) PASS
     phase 2 (selfhost)   6/6 internal, selfhost:fixpoint stage2 == stage3   PASS
-    phase 0a/0b          143/143 (95 + 47 units)                            PASS
-    phase 1b             45 stdlib packages, 2/2 units                      PASS
-    phase 1c             5/5 (3 packages + the jsbridge fixture)           PASS
-    phase 3              6/6 internal, 2/2 units                            PASS
-    phase 4              smoke:hello, 2/2 units                             PASS
-    phase 5 (wasm)       91/91 (90 fixtures + emitted host)                 PASS
+    phase 3              6/6 internal, 1/1 unit                             PASS
+    phase 4              smoke:hello, 1/1 unit                              PASS
+    phase 5 (wasm)       90/90 (89 fixtures + the emitted bundle)           PASS
     phase 6              65 internal units, both compilers                  PASS
     phase 8              17/17 units in BOTH dispatch modes                 PASS
-                         no-accumulation 16148->16164 kB inline (+16),
-                         6040->6040 kB spawned (+0), 2048kB threshold unwidened
+                         no-accumulation 16100->16116 kB inline (+16),
+                         5848->5848 kB spawned (+0), 2048kB threshold unwidened
 
-Every phase also runs `tree-cleanliness`; all nine were green in that sweep, so
-the totals above include it (143 = 95 + 47 + cleanliness, for example), and no
-phase skipped a unit.
+Every phase also runs `tree-cleanliness`, and it is green: the sweep left no
+tracked file modified, and no phase skipped a unit (a skipped unit is not a
+pass). Phases 3, 4, 6 and 8 report their checks inside one monolithic unit; 2
+runs the bootstrap chain as one unit whose six internal verdicts are all PASS.
 
-Interruptions are recorded rather than averaged away. On the first run of this
-sweep two fixtures failed on their own fixes: `0a/web_dom_roundtrip` had used a
-plain package-level bool for its idempotence gate, which the native build
-rejects ("package globals are immutable outside init"); the gate is a sovereign
-type now (`6290be56`) and 0a passes 96/96. `5/close_breaker` called
-`os.Exit(0)`, which left the wasm harness with no output; main returns instead
-(`4ef129f8`) and phase 5 passes 91/91. Earlier, on the same tree,
-`0a/http_header_api` died with no error line under ~10.8 GB of unrelated system
-memory use (an OOM kill by the look of the log) and its rerun passed 94/94.
+Interruptions are recorded rather than averaged away. The sweep first came back
+red in exactly two places, both from one source line: `runtime.printitf` in the
+wasm-only `print_wasm.mx` read `switch msg := msg.(type)`, so every wasm build
+failed on the new shadow check - 1c 4/4 red, phase 5 90/90 red - while every
+native phase was green. Nothing had ever applied the rule to that file,
+because only stage4's wasm path compiles it. The binding is renamed
+(`adb59b4d`) and the pair then ran 95/95 (4 + 90 + cleanliness, emitted bundle
+included: 37 staged runtime modules and a loadable bootstrap).
+`tree-cleanliness` also reported FAIL in that same sweep for a tracked edit made
+while it ran (`tests/phase3_ir_validate.sh`); the file is committed, and 0b's
+re-run shows 49/49 with cleanliness PASS.
 
-The wasm memory wall is gone with the 23 driver: the unit clang-22 could not
-compile (9.3GB, OOM-killed) is inside phase 1c's `net/http`, which takes ~17
-minutes.
+Phase 3's own exit guard could not fire: `$(grep -c ... || echo 0)` is "0\n0"
+when nothing matches, so the `-gt` test errored to stderr instead of testing
+anything, and a red log could sit under a green run. It asks grep for a match
+now (`fe9efe7e`).
+
+Legacy's half: the compiler crash that stopped the net/http link is closed
+(`1c52e37f`, below), and legacy now links and runs that closure -
+`legacy/moxie build -o /tmp/mux-lg tests/netsmoke/muxmatch` prints all 12 shapes
+and `muxmatch ok`. Phases 2, 3 and 4 pass with the new legacy codegen, so the
+bootstrap chain is intact: stage2 == stage3.
 
 ### The js bridge: mutators are package functions, and its state is one object  [CLOSED]
 
