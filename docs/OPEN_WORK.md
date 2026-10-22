@@ -32,6 +32,12 @@ re-run alone after the driver was killed mid-phase:
                          17936->17952 kB inline (+16), 5908->5908 kB spawned
                          (+0), 2048kB threshold unwidened
 
+Phases 0a/0b, 1b and 1c were re-run at `0e004163` after the internal/profile
+dump fix and are green (150/150 with cleanliness, nothing skipped). Phases 2, 3,
+4, 5, 6 and 8 last ran at `b125a200`; the compiler is unchanged since then (this
+round's checker work was reverted and only `src/internal/profile` differs), and
+none of those phases builds that package.
+
 One bootstrap fact worth keeping: a stage4 binary built BY the legacy compiler
 aborts with "panic: runtime error ... arena: region table full" on the
 45-package phase-1b sweep, while a stage4-built generation of the same source
