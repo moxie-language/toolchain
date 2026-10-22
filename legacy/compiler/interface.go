@@ -954,13 +954,25 @@ func (c *compilerContext) getInterfaceValueReceiverWrapper(fn *ssa.Function, llv
 	block := b.ctx.AddBasicBlock(wrapper, "entry")
 	b.SetInsertPointAtEnd(block)
 
-	// Unpack the value from the interface data slot and take the address of a
-	// fresh copy for the pointer receiver.
-	unpacked := b.emitPointerUnpack(wrapper.Param(0), []llvm.Type{valueType})[0]
-	recvSlot := b.CreateAlloca(valueType, "iface.recv.copy")
-	b.CreateStore(unpacked, recvSlot)
+	// The receiver pointer. A value that does not fit in the data slot is
+	// already boxed behind it, so the method runs on that copy directly -
+	// copying it again to a fresh alloca is O(size) per call and stage4 does
+	// not do it (materializeIfaceValue returns the data pointer once the value
+	// is not inline). A 640KB alloca+load+store here crashed LLVM's
+	// SelectionDAG (ReplaceAllUsesWith) while selecting
+	// (*compress/flate.Writer).Close$invoke.value. Only an inline value needs
+	// unpacking into a slot the method can address.
+	var recvPtr llvm.Value
+	if b.targetData.TypeAllocSize(valueType) > b.targetData.TypeAllocSize(b.dataPtrType) {
+		recvPtr = wrapper.Param(0)
+	} else {
+		unpacked := b.emitPointerUnpack(wrapper.Param(0), []llvm.Type{valueType})[0]
+		recvSlot := b.CreateAlloca(valueType, "iface.recv.copy")
+		b.CreateStore(unpacked, recvSlot)
+		recvPtr = recvSlot
+	}
 
-	params := append([]llvm.Value{recvSlot}, wrapper.Params()[1:]...)
+	params := append([]llvm.Value{recvPtr}, wrapper.Params()[1:]...)
 	if llvmFnType.ReturnType().TypeKind() == llvm.VoidTypeKind {
 		b.CreateCall(llvmFnType, llvmFn, params, "")
 		b.CreateRetVoid()

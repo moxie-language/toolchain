@@ -1771,16 +1771,36 @@ needed a compiler fix too (`a2355c56`): a close IS a sender for a breaker, and
 the checker now counts it, pinned by `close_breaker.mx`.
 
 Measured now: a program importing crypto/tls builds and runs under legacy
-(`tls version: 772`), and every package in net/http's closure type-checks. The
-net/http build then dies in the legacy compiler itself:
+(`tls version: 772`), and legacy links and RUNS the whole net/http closure -
+`legacy/moxie build -o /tmp/mux-lg tests/netsmoke/muxmatch` prints all 12
+shapes and `muxmatch ok`. Legacy is an oracle for the routing tree again.
+
+Two net/http port defects surfaced only once the checker let the package
+through to codegen: the h2 verbose diagnostics passed `%p`/`%T`/struct values to
+`logf`/`vlogf` (`...fmt.Stringer`), which does not type-check, and `serve`'s
+keep-alive loop declared variables inside a loop in a self-mutating method,
+which the compiler rejects ("move the loop scratch into a helper function").
+The diagnostics now print values (`b7f0efd2` is the pair), and the loop body is
+`serveRequest`, reporting whether the connection keeps serving.
+
+The build used to die inside the legacy compiler, after LowerInterfaces and
+during the LTO link:
 
     SIGSEGV: segmentation violation
     signal arrived during cgo execution
-    ... purego.SyscallN ... (LLVM, after LowerInterfaces, during the LTO link)
+    ... purego.SyscallN ...
 
-That is a legacy compiler crash on the net/http module, not a port defect, and
-it is the next thing to investigate. So legacy still cannot link net/http, and
-it is still not an oracle for the routing tree.
+Root cause (`legacy/compiler/interface.go`): the value-form interface receiver
+wrapper unpacked the data slot and stored the value into a fresh alloca before
+calling the method. For a value that does not fit in the data pointer that is a
+whole-struct alloca + load + store per call - `compress/flate.Writer` is ~640 kB
+- and after inlining LLVM 22's SelectionDAG dies in ReplaceAllUsesWith while
+selecting `(*compress/flate.Writer).Close$invoke.value`. Stage4 never copied:
+`materializeIfaceValue` returns the data pointer once the value is not inline.
+Legacy now does the same, unpacking into a slot only for an inline value. The
+`.ll` dump (`legacy/moxie build -o /tmp/http.ll ./src/net/http`, 14051
+functions) reproduces it with `llc-22 -O2` alone, so it is neither a job race
+(`-p 1` did not avoid it) nor a verifier issue (`-internal-verifyir` passed).
 
 **Recorded: stage4 accepts four kinds of invalid code that legacy rejects.**
 The class is now measured, not guessed:
