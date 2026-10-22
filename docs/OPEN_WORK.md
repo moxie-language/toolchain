@@ -1826,8 +1826,8 @@ functions) reproduces it with `llc-22 -O2` alone, so it is neither a job race
 (`-p 1` did not avoid it) nor a verifier issue (`-internal-verifyir` passed).
 
 **Recorded: stage4 accepted four kinds of invalid code that legacy rejects.**
-All four surfaced while making the stdlib valid for legacy; three are closed and
-the cross-package unexported method rule is the one that remains:
+All four surfaced while making the stdlib valid for legacy, and all four are
+closed now:
 
   * ~~shadowing in a type switch binding (`switch opts := opts.(type)`)~~ -
     closed: the guard's binding is declared, so stage4 rejects it with legacy's
@@ -1842,18 +1842,26 @@ the cross-package unexported method rule is the one that remains:
     (os.File.Stat lives in stat_unix.mx, after file.mx; judging at build time
     said *os.File was "missing method Stat"), and it only judges types whose
     method set is knowable (a declared-in-this-package Named type, or a Basic,
-    slice, map, chan or func), because an imported type's method list in stage4
-    is only what that package's compilation needed - 
+    slice, array, map, chan or func), because an imported type's method list in
+    stage4 is only what that package's compilation needed -
     internal/coverage.CounterSegmentHeader looked method-less while it has the
-    builtin String. Arrays are excluded while the array->slice removal is
-    pending. `take(xs)` with xs []int32 now rejects with legacy's message:
+    builtin String. `take(xs)` with xs []int32 now rejects with legacy's
+    message:
     "[]int32 does not implement fmt.Stringer (missing method String)".
     Landing it also fixed the twelve stdlib sites that were printing `?`:
     internal/profile's graph, merge and profile dumps, and internal/trace's
     order.mx (userRegion and rangeType had no String at all, which is why a
     range diagnostic could not be printed).
-  * a cross-package call to, or implementation of, an unexported interface
-    method (rawAction, rawControlAction, singleflight call, timer onTimer).
+  * ~~a cross-package call to, or implementation of, an unexported interface
+    method~~ - closed in two halves, both pinned: a CALL from outside the
+    interface's package (`reject_crosspkg_unexported_call`) and an
+    IMPLEMENTATION of another package's interface that declares an unexported
+    method (`reject_crosspkg_unexported_impl`). Method identity includes the
+    declaring package for an unexported name, so the implementation half has to
+    run BEFORE Assignable, which sees compatible method sets by name. A concrete
+    type declared in the interface's own package is still allowed to implement
+    it (types.TypeName implements types.Object through unexported objectTag), and
+    an interface source is left to the missing-method rule.
   * ~~an identifier from a package that was never imported (net's unsafe use)~~ -
     closed for a local declaration's type, pinned by
     tests/restrictions/reject_unimported_local_var_type.mx. The SSA builder's
@@ -1862,6 +1870,20 @@ the cross-package unexported method rule is the one that remains:
     package-level forms already reported `undefined: <pkg>` through their own
     resolvers; what remains of this class is any expression position that still
     reaches a registry-by-name fallback instead of the file's imports.
+
+### The array -> slice conversion is unfinished, and the checker is no longer blind to it
+
+Moxie is removing arrays: a fixed-size array buys nothing in a language with no
+aliasing and no heap, and every array left in the tree is a Go slice bypass. The
+interface-assignment check used to SKIP arrays while that conversion was pending,
+so `fmt.Sprintf("%x", metaHash)` with `metaHash [16]byte` passed silently; the
+two sites in `internal/coverage/cfile` now render the hash explicitly (`hex16`),
+and arrays are judged like any other type with an empty method set. The
+conversion itself is still open: `[16]byte`/`[4]byte` hashes are threaded through
+`internal/coverage` (rtcov.CovMetaBlob.Hash, encodemeta, decodemeta,
+encodecounter, cfile) and should become `[]byte`. That is a mechanical change with
+one real decision - the byte-slice length is now the caller's contract - and it
+needs its own sweep.
 
 ### Compiler: a buffered channel of a slice, and a generic field, do not resolve  [OLD NOTE]
 
@@ -5051,7 +5073,12 @@ multi-line value behind for the parser to trip over. `time.Date(2023,3,14,...)`.
 `const_exact_fold` fixture pins the exact values plus the >int32 literal through
 a parameter. The full suite is green with `selfhost:fixpoint` holding.
 
-## STILL OPEN: x/net/idna's generated tables do not parse
+## CLOSED: x/net/idna's generated tables parse again
+
+CLOSED (round 78): `moxie build` of a program that imports
+`golang.org/x/net/idna` links with rc=0 on this tree, and `net/http` - which
+imports it for `ToASCII`/`ToUnicode` - is in phase 1b's sweep, which passes. The
+diagnosis below is kept because it names the parser shape that used to fail.
 
 `src/vendor/golang.org/x/net/idna/tables15.0.0.mx` fails to parse, so `net/http`
 (which reaches idna for `ToASCII`/`ToUnicode`) cannot build. Narrowed as far as
