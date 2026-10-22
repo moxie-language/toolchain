@@ -1802,18 +1802,24 @@ Legacy now does the same, unpacking into a slot only for an inline value. The
 functions) reproduces it with `llc-22 -O2` alone, so it is neither a job race
 (`-p 1` did not avoid it) nor a verifier issue (`-internal-verifyir` passed).
 
-**Recorded: stage4 accepts four kinds of invalid code that legacy rejects.**
-The class is now measured, not guessed:
+**Recorded: stage4 accepted four kinds of invalid code that legacy rejects.**
+All four surfaced while making the stdlib valid for legacy. The prerequisite
+for tightening the checker was the count, and the count is now zero by
+construction: legacy compiles the whole stdlib, so no remaining code depends on
+any of them. One is closed; three are recorded:
 
-  * a non-Stringer argument in a `...Stringer` position (rendered `?`);
+  * ~~shadowing in a type switch binding (`switch opts := opts.(type)`)~~ -
+    closed: the guard's binding is declared, so stage4 rejects it with legacy's
+    message, pinned by `tests/restrictions/reject_shadow_type_switch.mx`. Legacy
+    never had the gap: go/types puts the binding in the switch's scope.
+  * a non-Stringer argument in a `...Stringer` position (rendered `?`). Needs
+    interface satisfaction in stage4's own type model, which does not check it
+    at all; this is the largest of the three.
   * a cross-package call to, or implementation of, an unexported interface
-    method (rawAction, rawControlAction, singleflight call, timer onTimer);
-  * shadowing in a type switch binding (`switch opts := opts.(type)`);
-  * an identifier from a package that was never imported (net's unsafe use).
-
-Each surfaced while making the stdlib valid for legacy. Tightening the stage4
-checker is one change with one prerequisite: first count how much of the stdlib
-relies on each laxness, then fix the code and the checker together.
+    method (rawAction, rawControlAction, singleflight call, timer onTimer).
+  * an identifier from a package that was never imported (net's unsafe use) -
+    stage4 resolves a package-qualified name globally rather than through the
+    file's imports.
 
 ### Compiler: a buffered channel of a slice, and a generic field, do not resolve  [OLD NOTE]
 
