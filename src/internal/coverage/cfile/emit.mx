@@ -358,6 +358,18 @@ func (s *emitState) emitCounterDataToWriter(w io.Writer) (derr error) {
 	return nil
 }
 
+// hex16 renders a 16-byte hash the way "%x" of it did. A fixed-size array
+// carries no methods, and fmt's variadics are ...fmt.Stringer, so the array
+// cannot be an argument to Sprintf at all.
+func hex16(h [16]byte) (s []byte) {
+	const digits = "0123456789abcdef"
+	s = ""
+	for _, b := range h {
+		s = s | digits[b>>4:b>>4+1] | digits[b&0xf:b&0xf+1]
+	}
+	return s
+}
+
 // openMetaFile determines whether we need to emit a meta-data output
 // file, or whether we can reuse the existing file in the coverage out
 // dir. It updates mfname/mftmp/mf fields in 's', returning an error
@@ -366,7 +378,7 @@ func (s *emitState) emitCounterDataToWriter(w io.Writer) (derr error) {
 func (s *emitState) openMetaFile(metaHash [16]byte, metaLen uint64) (derr error) {
 
 	// Open meta-outfile for reading to see if it exists.
-	fn := fmt.Sprintf("%s.%x", coverage.MetaFilePref, metaHash)
+	fn := coverage.MetaFilePref | "." | hex16(metaHash)
 	s.mfname = filepath.Join(s.outdir, fn)
 	fi, err := os.Stat(s.mfname)
 	if err != nil || fi.Size() != int64(metaLen) {
@@ -386,7 +398,7 @@ func (s *emitState) openMetaFile(metaHash [16]byte, metaLen uint64) (derr error)
 // 's', returning an error if something went wrong.
 func (s *emitState) openCounterFile(metaHash [16]byte) (derr error) {
 	processID := os.Getpid()
-	fn := fmt.Sprintf(coverage.CounterFileTempl, coverage.CounterFilePref, metaHash, processID, time.Now().UnixNano())
+	fn := coverage.CounterFilePref | "." | hex16(metaHash) | "." | processID.String() | "." | time.Now().UnixNano().String()
 	s.cfname = filepath.Join(s.outdir, fn)
 	s.cftmp = filepath.Join(s.outdir, "tmp."|fn)
 	var err error
