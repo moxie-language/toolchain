@@ -73,6 +73,6 @@ fi
 # A phase that cannot go red is not a gate: this script's log showed six FAIL
 # verdicts while the process exited 0 (the driver records the exit status), so a
 # red log sat under a green run. Exit non-zero when anything failed.
-if [ -f "$STATUSFILE" ] && [ "$(grep -c '^FAIL' "$STATUSFILE" 2>/dev/null || echo 0)" -gt 0 ]; then
+if [ -f "$STATUSFILE" ] && grep -q '^FAIL' "$STATUSFILE" 2>/dev/null; then
 	exit 1
 fi
