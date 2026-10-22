@@ -14,12 +14,12 @@ committed fixture behind it. The historical "Gate state on this tree" sections
 are snapshots of earlier commits, not the current numbers; this block is.
 
 **EVERY GATE IS GREEN on this tree**, one phase at a time (`-j 1`), with the
-driver on LLVM 23 and legacy on 22. The last full sweep ran at `a86073b5` (the
-type-switch shadow check, the last stage4 change), with the 1c/5 pair re-run
-after `adb59b4d` and 0b re-run for its cleanliness line:
+driver on LLVM 23 and legacy on 22. The last full sweep ran at `b125a200` (the
+local declared-type qualifier check, the last stage4 change), with phase 8
+re-run alone after the driver was killed mid-phase:
 
     command: GOROOT=/opt/go1.25.3 bash tests/unitrun.sh -j 1 --phases P --force
-    phase 0a/0b          144/144 (95 + 48 + cleanliness)                    PASS
+    phase 0a/0b          144/144 (95 + 49 + cleanliness)                    PASS
     phase 1b             45 stdlib packages, 1/1 units                      PASS
     phase 1c             4/4 (net/http, path/filepath, syscall/js, jsbridge) PASS
     phase 2 (selfhost)   6/6 internal, selfhost:fixpoint stage2 == stage3   PASS
@@ -28,8 +28,9 @@ after `adb59b4d` and 0b re-run for its cleanliness line:
     phase 5 (wasm)       90/90 (89 fixtures + the emitted bundle)           PASS
     phase 6              65 internal units, both compilers                  PASS
     phase 8              17/17 units in BOTH dispatch modes                 PASS
-                         no-accumulation 16100->16116 kB inline (+16),
-                         5848->5848 kB spawned (+0), 2048kB threshold unwidened
+                         spawn-cost 16 spawns / 2239 us, no-accumulation
+                         17936->17952 kB inline (+16), 5908->5908 kB spawned
+                         (+0), 2048kB threshold unwidened
 
 Every phase also runs `tree-cleanliness`, and it is green: the sweep left no
 tracked file modified, and no phase skipped a unit (a skipped unit is not a
@@ -52,6 +53,12 @@ Phase 3's own exit guard could not fire: `$(grep -c ... || echo 0)` is "0\n0"
 when nothing matches, so the `-gt` test errored to stderr instead of testing
 anything, and a red log could sit under a green run. It asks grep for a match
 now (`fe9efe7e`).
+
+In the `b125a200` sweep the driver itself was killed while phase 8 was still
+building the netsmoke binaries, after 239 of 244 units had passed. Phase 8 was
+re-run alone (`--phases 8 --force`) and reported 2/2 - the phase unit and
+`tree-cleanliness`. Phases 2, 3, 4 and 6 had already exited 0 with every
+internal verdict PASS in that sweep.
 
 Legacy's half: the compiler crash that stopped the net/http link is closed
 (`1c52e37f`, below), and legacy now links and runs that closure -
