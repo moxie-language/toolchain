@@ -8962,6 +8962,20 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
 					return tn.Typ
 				}
 			}
+			// The qualifier is not an imported package. Returning nil silently
+			// here let `var p unsafe.Pointer` inside a body build with an empty
+			// type, where legacy reports `undefined: unsafe`; a local declared
+			// type is not covered by the parameter-type reporter. Only a name
+			// the compiler knows as a package is reported: a selector on a value
+			// (`s.Field`) reaches this branch too and is not a type.
+			if !fb.quietTypeErr {
+				if imp := cctx.universe.LookupByName(x.Value); imp != nil && imp.Scope != nil {
+					if _, isTn := imp.Scope.Lookup(ev.Sel.Value).(*TypeName); isTn {
+						cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+						push(cctx.compileErrors, "undefined: " | x.Value)
+					}
+				}
+			}
 		}
 	case *syntax.IndexExpr:
 		// Generic instantiation Curve[int32]: carry the instantiation args

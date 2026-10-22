@@ -1826,9 +1826,14 @@ any of them. One is closed; three are recorded:
     at all; this is the largest of the three.
   * a cross-package call to, or implementation of, an unexported interface
     method (rawAction, rawControlAction, singleflight call, timer onTimer).
-  * an identifier from a package that was never imported (net's unsafe use) -
-    stage4 resolves a package-qualified name globally rather than through the
-    file's imports.
+  * an identifier from a package that was never imported (net's unsafe use).
+    CLOSED for a local declaration's type: the SSA builder's type resolver
+    answered an out-of-scope qualifier with a silent nil, so
+    `var p unsafe.Pointer` in a body built with an empty type, pinned by
+    tests/restrictions/reject_unimported_local_var_type.mx. The parameter and
+    package-level forms already reported `undefined: <pkg>` through their own
+    resolvers; what remains of this class is any expression position that still
+    reaches a registry-by-name fallback instead of the file's imports.
 
 ### Compiler: a buffered channel of a slice, and a generic field, do not resolve  [OLD NOTE]
 
