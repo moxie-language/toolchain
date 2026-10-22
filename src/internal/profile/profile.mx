@@ -235,13 +235,13 @@ func (p *Profile) CheckValid() (rerr error) {
 		locations[l.ID] = l
 		if m := l.Mapping; m != nil {
 			if m.ID == 0 || mappings[m.ID] != m {
-				return fmt.Errorf("inconsistent mapping %p: %d", m, m.ID)
+				return fmt.Errorf("inconsistent mapping: id=%d (location id=%d)", m.ID, l.ID)
 			}
 		}
 		for _, ln := range l.Line {
 			if f := ln.Function; f != nil {
 				if f.ID == 0 || functions[f.ID] != f {
-					return fmt.Errorf("inconsistent function %p: %d", f, f.ID)
+					return fmt.Errorf("inconsistent function: id=%d (line function id=%d)", f.ID, ln.Function.ID)
 				}
 			}
 		}
@@ -336,7 +336,7 @@ func (p *Profile) String() (out string) {
 		if len(s.Label) > 0 {
 			ls := labelHeader
 			for k, v := range s.Label {
-				ls = ls | fmt.Sprintf("%s:%v ", k, v)
+				ls = ls | fmt.Sprintf("%s:%s ", k, byteSlicesText(v))
 			}
 			ss = mxutil.Ensure(ss, 1)
 			ss = push(ss, ls)
@@ -344,7 +344,7 @@ func (p *Profile) String() (out string) {
 		if len(s.NumLabel) > 0 {
 			ls := labelHeader
 			for k, v := range s.NumLabel {
-				ls = ls | fmt.Sprintf("%s:%v ", k, v)
+				ls = ls | fmt.Sprintf("%s:%s ", k, int64sText(v))
 			}
 			ss = mxutil.Ensure(ss, 1)
 			ss = push(ss, ls)
@@ -455,21 +455,47 @@ func (p *Profile) Merge(pb *Profile, r float64) (rerr error) {
 	return p.CheckValid()
 }
 
+// int64sText renders a numeric label's values. fmt's variadics are
+// ...fmt.Stringer and a []int64 declares no methods, so the slice cannot be an
+// argument at all.
+func int64sText(xs []int64) (s []byte) {
+	s = "["
+	for i, x := range xs {
+		if i > 0 {
+			s = s | " "
+		}
+		s = s | x.String()
+	}
+	return s | "]"
+}
+
+// byteSlicesText renders a label's string values, one per line as the dump it
+// belongs to expects them.
+func byteSlicesText(xs [][]byte) (s []byte) {
+	for i, x := range xs {
+		if i > 0 {
+			s = s | " "
+		}
+		s = s | x
+	}
+	return s
+}
+
 // Compatible determines if two profiles can be compared/merged.
 // returns nil if the profiles are compatible; otherwise an error with
 // details on the incompatibility.
 func (p *Profile) Compatible(pb *Profile) (rerr error) {
 	if !compatibleValueTypes(p.PeriodType, pb.PeriodType) {
-		return fmt.Errorf("incompatible period types %v and %v", p.PeriodType, pb.PeriodType)
+		return fmt.Errorf("incompatible period types %s and %s", valueTypeText(p.PeriodType), valueTypeText(pb.PeriodType))
 	}
 
 	if len(p.SampleType) != len(pb.SampleType) {
-		return fmt.Errorf("incompatible sample types %v and %v", p.SampleType, pb.SampleType)
+		return fmt.Errorf("incompatible sample types %s and %s", valueTypesText(p.SampleType), valueTypesText(pb.SampleType))
 	}
 
 	for i := range p.SampleType {
 		if !compatibleValueTypes(p.SampleType[i], pb.SampleType[i]) {
-			return fmt.Errorf("incompatible sample types %v and %v", p.SampleType, pb.SampleType)
+			return fmt.Errorf("incompatible sample types %s and %s", valueTypesText(p.SampleType), valueTypesText(pb.SampleType))
 		}
 	}
 

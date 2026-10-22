@@ -188,14 +188,14 @@ func (sample *Sample) key() (out sampleKey) {
 	labels := [][]byte{:0:len(sample.Label)}
 	for k, v := range sample.Label {
 		labels = mxutil.Ensure(labels, 1)
-		labels = push(labels, fmt.Sprintf("%q%q", k, v))
+		labels = push(labels, fmt.Sprintf("%q%s", k, labelValuesText(v)))
 	}
 	sort.Strings(labels)
 
 	numlabels := [][]byte{:0:len(sample.NumLabel)}
 	for k, v := range sample.NumLabel {
 		numlabels = mxutil.Ensure(numlabels, 1)
-		numlabels = push(numlabels, fmt.Sprintf("%q%x%x", k, v, sample.NumUnit[k]))
+		numlabels = push(numlabels, fmt.Sprintf("%q%s%s", k, int64sHexText(v), labelValuesText(sample.NumUnit[k])))
 	}
 	sort.Strings(numlabels)
 
@@ -451,23 +451,86 @@ func combineHeaders(srcs []*Profile) (out *Profile, rerr error) {
 // details on the incompatibility.
 func (p *Profile) compatible(pb *Profile) (rerr error) {
 	if !equalValueType(p.PeriodType, pb.PeriodType) {
-		return fmt.Errorf("incompatible period types %v and %v", p.PeriodType, pb.PeriodType)
+		return fmt.Errorf("incompatible period types %s and %s", valueTypeText(p.PeriodType), valueTypeText(pb.PeriodType))
 	}
 
 	if len(p.SampleType) != len(pb.SampleType) {
-		return fmt.Errorf("incompatible sample types %v and %v", p.SampleType, pb.SampleType)
+		return fmt.Errorf("incompatible sample types %s and %s", valueTypesText(p.SampleType), valueTypesText(pb.SampleType))
 	}
 
 	for i := range p.SampleType {
 		if !equalValueType(p.SampleType[i], pb.SampleType[i]) {
-			return fmt.Errorf("incompatible sample types %v and %v", p.SampleType, pb.SampleType)
+			return fmt.Errorf("incompatible sample types %s and %s", valueTypesText(p.SampleType), valueTypesText(pb.SampleType))
 		}
 	}
 	return nil
+}
+
+// valueTypesText renders the sample types for the diagnostic. fmt takes
+// ...fmt.Stringer, and a slice of ValueType declares no methods, so the slice
+// itself cannot be an argument; each element can.
+// valueTypeText renders one sample type as it is written ("cpu:nanoseconds").
+// ValueType has no String of its own - the builtin String is injected for types
+// the renderer needs, and this one is not among them - so the two fields are
+// joined here.
+func valueTypeText(t *ValueType) (s []byte) {
+	if t == nil {
+		return "<nil>"
+	}
+	return t.Type | ":" | t.Unit
+}
+
+func valueTypesText(ts []*ValueType) (s []byte) {
+	s = "["
+	for i, t := range ts {
+		if i > 0 {
+			s = s | " "
+		}
+		s = s | valueTypeText(t)
+	}
+	return s | "]"
 }
 
 // equalValueType returns true if the two value types are semantically
 // equal. It ignores the internal fields used during encode/decode.
 func equalValueType(st1, st2 *ValueType) (eq bool) {
 	return st1.Type == st2.Type && st1.Unit == st2.Unit
+}
+
+// labelValuesText renders one numeric-label key's string values. fmt's
+// variadics are ...fmt.Stringer, and a [][]byte declares no methods, so the
+// slice cannot be an argument; each element can (string and []byte are one type
+// and it carries the builtin String).
+func labelValuesText(vs [][]byte) (s []byte) {
+	for _, v := range vs {
+		s = s | fmt.Sprintf("%q", v)
+	}
+	return s
+}
+
+// int64sHexText renders a numeric-label key's values in hex, which is what the
+// key's text used to say.
+func int64sHexText(vs []int64) (s []byte) {
+	for i, v := range vs {
+		if i > 0 {
+			s = s | " "
+		}
+		s = s | hexUint64(uint64(v))
+	}
+	return s
+}
+
+func hexUint64(v uint64) (s []byte) {
+	const digits = "0123456789abcdef"
+	s = ""
+	for shift := int32(60); shift >= 0; shift -= 4 {
+		d := (v >> uint32(shift)) & 0xf
+		if d != 0 || len(s) > 0 {
+			s = s | digits[d:d+1]
+		}
+	}
+	if len(s) == 0 {
+		return "0"
+	}
+	return s
 }
