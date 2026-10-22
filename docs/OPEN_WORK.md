@@ -32,6 +32,13 @@ re-run alone after the driver was killed mid-phase:
                          17936->17952 kB inline (+16), 5908->5908 kB spawned
                          (+0), 2048kB threshold unwidened
 
+One bootstrap fact worth keeping: a stage4 binary built BY the legacy compiler
+aborts with "panic: runtime error ... arena: region table full" on the
+45-package phase-1b sweep, while a stage4-built generation of the same source
+does not. Two generations (legacy -> stage4 -> stage4) is the working shape;
+this is a concrete example of why the protocol calls a legacy-built stage4 a
+bootstrap and not an oracle.
+
 Every phase also runs `tree-cleanliness`, and it is green: the sweep left no
 tracked file modified, and no phase skipped a unit (a skipped unit is not a
 pass). Phases 3, 4, 6 and 8 report their checks inside one monolithic unit; 2
@@ -1819,28 +1826,45 @@ functions) reproduces it with `llc-22 -O2` alone, so it is neither a job race
 (`-p 1` did not avoid it) nor a verifier issue (`-internal-verifyir` passed).
 
 **Recorded: stage4 accepted four kinds of invalid code that legacy rejects.**
-All four surfaced while making the stdlib valid for legacy. The prerequisite
-for tightening the checker was the count, and the count is now zero by
-construction: legacy compiles the whole stdlib, so no remaining code depends on
-any of them. One is closed; three are recorded:
+All four surfaced while making the stdlib valid for legacy. Two are closed, one
+is deferred with its work measured, and one is untouched:
 
   * ~~shadowing in a type switch binding (`switch opts := opts.(type)`)~~ -
     closed: the guard's binding is declared, so stage4 rejects it with legacy's
     message, pinned by `tests/restrictions/reject_shadow_type_switch.mx`. Legacy
     never had the gap: go/types puts the binding in the switch's scope.
-  * a non-Stringer argument in a `...Stringer` position (rendered `?`). Needs
-    interface satisfaction in stage4's own type model, which does not check it
-    at all; this is the largest of the three.
+  * a non-Stringer argument in a `...Stringer` position (rendered `?`). WORKED
+    THROUGH AND DEFERRED, with the work measured rather than guessed. The
+    checker arm itself works: a concrete value assigned to a non-empty
+    interface must provide that interface's methods, and the verdict runs in a
+    package post-pass because a method declared in a later file is absent from
+    the receiver while earlier files are still being built (os.File.Stat lives
+    in stat_unix.mx, after file.mx; judging at build time reported "missing
+    method Stat" for *os.File). It rejects `take(xs)` with xs []int32 exactly as
+    legacy does, with "does not implement fmt.Stringer (missing method String)".
+    What blocks it is the standard library it then refuses: 12 call sites pass a
+    slice or a method-less named type into a Stringer slot (internal/profile's
+    graph, merge and profile; internal/trace's order.mx once profile compiles),
+    and every one of them is a `?` on the wire today. The fix is the injection
+    rule already agreed - any type placed in a Stringer slot must get the
+    builtin String - implemented in BOTH compilers (stage4's
+    injectBuiltinString and legacy/loader/stringers.go), not another round of
+    per-site text helpers. Until that lands the arm stays out, and the fixture
+    it needs is the []int32 one above.
   * a cross-package call to, or implementation of, an unexported interface
     method (rawAction, rawControlAction, singleflight call, timer onTimer).
-  * an identifier from a package that was never imported (net's unsafe use).
-    CLOSED for a local declaration's type: the SSA builder's type resolver
-    answered an out-of-scope qualifier with a silent nil, so
-    `var p unsafe.Pointer` in a body built with an empty type, pinned by
-    tests/restrictions/reject_unimported_local_var_type.mx. The parameter and
+  * ~~an identifier from a package that was never imported (net's unsafe use)~~ -
+    closed for a local declaration's type, pinned by
+    tests/restrictions/reject_unimported_local_var_type.mx. The SSA builder's
+    type resolver answered an out-of-scope qualifier with a silent nil, so
+    `var p unsafe.Pointer` in a body built with an empty type. The parameter and
     package-level forms already reported `undefined: <pkg>` through their own
     resolvers; what remains of this class is any expression position that still
     reaches a registry-by-name fallback instead of the file's imports.
+
+The same audit is why the dumps printed `?`: internal/profile passed slices and
+ids into Stringer slots, and those sites now render explicitly (graph, merge,
+profile).
 
 ### Compiler: a buffered channel of a slice, and a generic field, do not resolve  [OLD NOTE]
 
