@@ -48,27 +48,15 @@ func mxListPackagesImpl(config *compileopts.Config, goroot string, inputPkg stri
 		return nil, fmt.Errorf("mxlist: %w", err)
 	}
 
-	modCache := gomodcache()
-
-	// Parse module require and replace directives.
-	modFile := findModFile(modDir)
-	requires, err := readModRequires(modFile)
-	if err != nil {
-		return nil, fmt.Errorf("mxlist: reading module requires: %w", err)
-	}
-	replaces, err := readModReplaces(modFile, modDir)
-	if err != nil {
-		return nil, fmt.Errorf("mxlist: reading module replaces: %w", err)
-	}
-
+	// Modules are gone: imports resolve through the layout rules (the repository
+	// a package sits in, its vendor/ directory, and the installed-source cache)
+	// and version pins live in MANIFEST, which the build reads. A moxie.mod left
+	// in a sibling repo no longer influences resolution at all.
 	r := &resolver{
 		ctx:          ctx,
 		modPath:      modPath,
 		modDir:       modDir,
 		modGoVersion: modGoVersion,
-		modCache:     modCache,
-		requires:     requires,
-		replaces:     replaces,
 		goroot:       goroot,
 		seen:         make(map[string]*PackageJSON),
 		buildDir:     wd,
@@ -293,9 +281,6 @@ type resolver struct {
 	modPath      string
 	modDir       string
 	modGoVersion string
-	modCache     string
-	requires     map[string]string // module path → version
-	replaces     map[string]string // module path → absolute local dir
 	goroot       string
 	seen         map[string]*PackageJSON
 	sorted       []*PackageJSON
@@ -470,45 +455,12 @@ func (r *resolver) resolveDir(importPath string, srcDir string) (string, error) 
 		return dir, nil
 	}
 
-	// 4a. Local replace directives.
-	for mod, localDir := range r.replaces {
-		if importPath == mod || strings.HasPrefix(importPath, mod+"/") {
-			rel := strings.TrimPrefix(importPath, mod)
-			rel = strings.TrimPrefix(rel, "/")
-			dir := filepath.Join(localDir, rel)
-			if isDir(dir) {
-				return dir, nil
-			}
-			return "", fmt.Errorf("package %q not found in replace at %s", importPath, dir)
-		}
-	}
-
-	// 4b. Vendored packages (checked before module cache).
+	// 4. Vendored packages.
 	if r.modDir != "" {
 		vendorDir := filepath.Join(r.modDir, "vendor", importPath)
 		if isDir(vendorDir) {
 			return vendorDir, nil
 		}
-	}
-
-	// 4c. External dependencies (module cache — fallback when no vendor).
-	bestMod := ""
-	bestVer := ""
-	for mod, ver := range r.requires {
-		if (importPath == mod || strings.HasPrefix(importPath, mod+"/")) && len(mod) > len(bestMod) {
-			bestMod = mod
-			bestVer = ver
-		}
-	}
-	if bestMod != "" {
-		modCacheDir := filepath.Join(r.modCache, bestMod+"@"+bestVer)
-		rel := strings.TrimPrefix(importPath, bestMod)
-		rel = strings.TrimPrefix(rel, "/")
-		dir := filepath.Join(modCacheDir, rel)
-		if isDir(dir) {
-			return dir, nil
-		}
-		return "", fmt.Errorf("package %q not found in module cache at %s", importPath, dir)
 	}
 
 	// 5. Installed source (mxinstall cache): `moxie install` clones the
