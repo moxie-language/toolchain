@@ -79,16 +79,17 @@ bootstrap chain is intact: stage2 == stage3.
 Everything else recorded in this file is either closed or a historical snapshot.
 Three things remain, in the order they should be taken:
 
-1. **Module removal, the legacy half.** stage4 no longer reads `moxie.mod` and
-   resolves imports by layout + `MANIFEST`; legacy still *prefers* a module file
-   in `readModInfo` and still parses `require`/`replace` for `moxie vendor` and
-   `moxie fetch`. The first step is the resolver: make `readModInfo` return the
-   layout answer always (`moduleFromRoots`), which changes nothing on this tree
-   (it has no module file, so the fallback is the live path) and makes a module
-   file inert for other repos. Then port MANIFEST pinning into `vendor`/`fetch`,
-   delete `findModFile`/`parseGoMod`, and only then delete the `moxie.mod` files
-   and the Makefile `replace`/`require` lines in the sibling repos - that last
-   part is outside this checkout.
+1. **Module removal.** The BUILD is done in both compilers: `readModInfo`
+   answers from the layout always, the resolver no longer reads `require` or
+   `replace`, and a leftover `moxie.mod` cannot change what a package resolves to
+   (`9ca876a4`, `ab6d5cc8`). Phases 2 and 6 re-ran green after each. What is left
+   is the last module-era code and the files: `moxie vendor` and `moxie fetch`
+   still parse a module file (no caller in any sibling Makefile, and `moxie get`
+   supersedes fetch), and the `moxie.mod` files plus the Makefile
+   `replace`/`require` lines live in the sibling repos, outside this checkout.
+   The decision to make is whether `vendor` is worth porting to MANIFEST or should
+   go with `fetch`; until then both fail loud with "no moxie.mod or go.mod found",
+   which is the honest state for a command whose input no longer exists.
 2. **User-code exemption, with `src/syscall/js` as its motivating case.** Those
    files use value receivers (`func (v Value) Equal`, `func (e Error) Error`)
    because the API is a chain of temporaries; converting them to pointer
