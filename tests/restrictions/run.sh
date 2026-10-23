@@ -9,9 +9,12 @@ source "$SCRIPT_DIR/../util.sh"
 source "$SCRIPT_DIR/../split-util.sh"
 
 run_one() {
-	local fixture="$1" expected log rc=0
+	local fixture="$1" expected log rc=0 hdr="$1"
 	unit_begin
-	expected="$(grep "^// expected:" "$fixture" | head -1 | sed 's/^\/\/ expected: *//')"
+	if [ -d "$fixture" ]; then
+		hdr="$fixture/main.mx"
+	fi
+	expected="$(grep "^// expected:" "$hdr" | head -1 | sed 's/^\/\/ expected: *//')"
 	if [ -z "$expected" ]; then
 		unit_no "$UNIT_NAME" "no '// expected:' header"
 		unit_exit
@@ -55,10 +58,21 @@ echo ""
 echo "=== Phase 0b: Restrictions ==="
 
 if [ -n "$UNIT_NAME" ]; then
-	run_one "$SCRIPT_DIR/$UNIT_NAME.mx"
+	if [ -f "$SCRIPT_DIR/$UNIT_NAME.mx" ]; then
+		run_one "$SCRIPT_DIR/$UNIT_NAME.mx"
+	elif [ -d "$SCRIPT_DIR/$UNIT_NAME" ]; then
+		run_one "$SCRIPT_DIR/$UNIT_NAME"
+	else
+		echo "unknown restriction fixture: $UNIT_NAME" >&2
+		exit 1
+	fi
 	exit $?
 fi
 
 for u in "${UNITS[@]}"; do
-	run_one "$SCRIPT_DIR/$u.mx"
+	if [ -f "$SCRIPT_DIR/$u.mx" ]; then
+		run_one "$SCRIPT_DIR/$u.mx"
+	else
+		run_one "$SCRIPT_DIR/$u"
+	fi
 done
