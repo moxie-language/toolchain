@@ -200,6 +200,40 @@ What is still broken, measured with the compiled packages rather than guessed:
 `sig`, `bbig`, `bcache` and the rest of `src/crypto/internal/boring` are the
 next no-exceptions item, not an array item.
 
+### Three crypto defects found by making the boring-free paths run
+
+`790817fe` deletes the boringcrypto integration: `boring.Enabled` was constantly
+false, so every branch was dead and the whole of `crypto/internal/boring` (C
+headers, build scripts, syso, bbig, bcache, sig, the notboring twin) was a stub
+that could never run. The `ecdsa`/`rsa` boring halves were build-tagged and never
+compiled at all. What remains is the code that actually runs, and running it
+found three defects that no gate had ever reached:
+
+  * `094a2159` - `math/rand/v2`'s global Rand was built lazily inside
+    `initGlobalRand` and stored into a package global. That store is not
+    relocated into the root arena, so the Rand lived in the function's frame:
+    the first `rand.Uint64()` worked and the SECOND aborted with "interface
+    dispatch: no impl for Uint64". Through `randutil.MaybeReadByte` this is why
+    `crypto/rsa` and `crypto/ecdsa` died before doing any work, and why a second
+    `crypto/ecdh` key generation failed. It is the same rule the hash batch
+    found for crc64: a package global may only be written in init().
+  * `a577f4b3` - `ecdh.P256()` returned a fresh `&nistCurve` per call while
+    `PrivateKey.ECDH` compares the Curve interface, so every key was its own
+    curve and every exchange failed with "curves do not match". The three
+    curves are singletons built in init() now.
+  * STILL OPEN, and the next thing to fix: with both of those closed, P-256
+    arithmetic rejects its own keys - `ECDH` fails with "P256 point not on
+    curve", so `ecdsa.GenerateKey(elliptic.P256())` and every P-256 exchange
+    are broken. That is `crypto/internal/fips140/nistec` (and `nistec/fiat`),
+    which is also the biggest remaining array cluster (61 + 40 sites), so the
+    two pieces of work are the same piece: convert the limb arrays and the
+    point encodings carefully, with a known-answer vector from Go's P-256 at
+    each step.
+  * STILL OPEN: `rsa.GenerateKey(rand.Reader(), 1024)` never returns (240s
+    timeout, no output) inside `crypto/internal/fips140/rsa`'s prime
+    generation, which this tree did not touch. 512-bit keys are rejected by the
+    minimum-size policy before that. No gate has ever generated an RSA key.
+
 ### The no-exceptions queue, and its measured baseline
 
 The goal is that every fallible operation returns an error, that a panic is
