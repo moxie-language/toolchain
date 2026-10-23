@@ -734,6 +734,23 @@ func (b *builder) checkASTRestrictions() {
 				}
 			}
 			b.checkPushRestriction(node)
+			// copy's destination is a write. Into a subslice that write lands in
+			// a throwaway copy exactly like an assignment through one, so it is
+			// rejected the same way. copy(x[1], src) is addressing an element,
+			// not subslicing, and stays legal.
+			if ident, ok := node.Fun.(*ast.Ident); ok && ident.Name == "copy" && len(node.Args) > 0 {
+				dst := node.Args[0]
+				for {
+					if paren, ok2 := dst.(*ast.ParenExpr); ok2 {
+						dst = paren.X
+						continue
+					}
+					break
+				}
+				if _, isSlice := dst.(*ast.SliceExpr); isSlice {
+					b.addError(dst.Pos(), "moxie: a subslice is a copy, so copying into it is not allowed: write the elements or resize the slice")
+				}
+			}
 		case *ast.AssignStmt:
 			// A subslice is a copy: a store through one writes into a
 			// throwaway that has no address, and the original never changes.

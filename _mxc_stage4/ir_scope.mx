@@ -58,8 +58,27 @@ func isUserPackagePath(path string) bool {
 	if mxutil.HasPrefix(path, "golang.org/x/") {
 		return false
 	}
+	// Compiler infrastructure packages (pkg/types, pkg/syntax, pkg/mxutil, ...)
+	// are exempt, exactly as legacy's isUserPackage exempts them by the same
+	// "/pkg/" test. Without this a rule added here could fire on the compiler's
+	// own packages - which it did: the subslice-copy rule reported
+	// pkg/mxregexp, a package legacy has always exempted.
+	if hasSlashPkgSegment(path) {
+		return false
+	}
 	for i := int32(0); i < int32(len(path)); i++ {
 		if path[i] == '.' {
+			return true
+		}
+	}
+	return false
+}
+
+// hasSlashPkgSegment reports whether path contains the "/pkg/" segment that
+// marks the toolchain's own infrastructure packages.
+func hasSlashPkgSegment(path string) (ok bool) {
+	for i := int32(0); i+4 <= int32(len(path)); i++ {
+		if path[i] == '/' && path[i+1] == 'p' && path[i+2] == 'k' && path[i+3] == 'g' && path[i+4] == '/' {
 			return true
 		}
 	}
@@ -1091,6 +1110,103 @@ func checkShadowing(files []*syntax.File) {
 			scopes = shadowDeclField(fd.Name.Value, outer, scopes, fd.Recv)
 			scopes = shadowDeclSig(fd.Name.Value, outer, scopes, fd.Type)
 			shadowStmts(fd.Name.Value, outer, scopes, fd.Body.List)
+		}
+	}
+}
+
+// checkSubsliceCopyTargets rejects `copy(x[a:b], src)`: copy's destination is a
+// write, and into a subslice that write lands in a throwaway copy exactly like
+// an assignment through one. `copy(x[1], src)` addresses an element, not a
+// subslice, and stays legal.
+func checkSubsliceCopyTargets(files []*syntax.File, pkgPath string) {
+	if !isUserPackagePath(restrictPath(pkgPath)) {
+		return
+	}
+	for _, f := range files {
+		if f == nil {
+			continue
+		}
+		for _, d := range f.DeclList {
+			fd, ok := d.(*syntax.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			subsliceCopyStmtList(fd.Body.List)
+		}
+	}
+}
+
+func subsliceCopyStmtList(ss []syntax.Stmt) {
+	for _, st := range ss {
+		subsliceCopyStmt(st)
+	}
+}
+
+func subsliceCopyStmt(st syntax.Stmt) {
+	if st == nil {
+		return
+	}
+	switch t := st.(type) {
+	case *syntax.AssignStmt:
+		subsliceCopyExpr(t.Lhs)
+		subsliceCopyExpr(t.Rhs)
+	case *syntax.ExprStmt:
+		subsliceCopyExpr(t.X)
+	case *syntax.LabeledStmt:
+		subsliceCopyStmt(t.Stmt)
+	case *syntax.BlockStmt:
+		subsliceCopyStmtList(t.List)
+	case *syntax.IfStmt:
+		if t.Then != nil {
+			subsliceCopyStmtList(t.Then.List)
+		}
+		subsliceCopyStmt(t.Else)
+	case *syntax.ForStmt:
+		if t.Body != nil {
+			subsliceCopyStmtList(t.Body.List)
+		}
+	case *syntax.SwitchStmt:
+		for _, c := range t.Body {
+			if c != nil {
+				subsliceCopyStmtList(c.Body)
+			}
+		}
+	case *syntax.SelectStmt:
+		for _, c := range t.Body {
+			if c != nil {
+				subsliceCopyStmtList(c.Body)
+			}
+		}
+	}
+}
+
+// subsliceCopyExpr reports a copy call whose destination is a subslice.
+func subsliceCopyExpr(e syntax.Expr) {
+	if e == nil {
+		return
+	}
+	switch t := e.(type) {
+	case *syntax.ListExpr:
+		for _, x := range t.ElemList {
+			subsliceCopyExpr(x)
+		}
+	case *syntax.CallExpr:
+		if id, ok := t.Fun.(*syntax.Name); ok && id.Value == "copy" && t.ArgList != nil && len(t.ArgList) > 0 {
+			dst := t.ArgList[0]
+			for {
+				if paren, ok2 := dst.(*syntax.ParenExpr); ok2 {
+					dst = paren.X
+					continue
+				}
+				break
+			}
+			if _, isSlice := dst.(*syntax.SliceExpr); isSlice {
+				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+				push(cctx.compileErrors, "a subslice is a copy, so copying into it is not allowed: write the elements or resize the slice")
+			}
+		}
+		for _, a := range t.ArgList {
+			subsliceCopyExpr(a)
 		}
 	}
 }
