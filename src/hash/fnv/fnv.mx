@@ -25,8 +25,14 @@ type (
 	sum32a  uint32
 	sum64   uint64
 	sum64a  uint64
-	sum128  [2]uint64
-	sum128a [2]uint64
+	sum128 struct {
+		hi uint64
+		lo uint64
+	}
+	sum128a struct {
+		hi uint64
+		lo uint64
+	}
 )
 
 const (
@@ -72,8 +78,8 @@ func New64a() (h hash.Hash64) {
 // Its Sum method will lay the value out in big-endian byte order.
 func New128() (h hash.Hash) {
 	var s sum128
-	s[0] = offset128Higher
-	s[1] = offset128Lower
+	s.hi = offset128Higher
+	s.lo = offset128Lower
 	return &s
 }
 
@@ -81,8 +87,8 @@ func New128() (h hash.Hash) {
 // Its Sum method will lay the value out in big-endian byte order.
 func New128a() (h hash.Hash) {
 	var s sum128a
-	s[0] = offset128Higher
-	s[1] = offset128Lower
+	s.hi = offset128Higher
+	s.lo = offset128Lower
 	return &s
 }
 
@@ -90,8 +96,8 @@ func (s *sum32) Reset()   { *s = offset32 }
 func (s *sum32a) Reset()  { *s = offset32 }
 func (s *sum64) Reset()   { *s = offset64 }
 func (s *sum64a) Reset()  { *s = offset64 }
-func (s *sum128) Reset()  { s[0] = offset128Higher; s[1] = offset128Lower }
-func (s *sum128a) Reset() { s[0] = offset128Higher; s[1] = offset128Lower }
+func (s *sum128) Reset()  { s.hi = offset128Higher; s.lo = offset128Lower }
+func (s *sum128a) Reset() { s.hi = offset128Higher; s.lo = offset128Lower }
 
 func (s *sum32) Sum32() (v uint32)  { return uint32(*s) }
 func (s *sum32a) Sum32() (v uint32) { return uint32(*s) }
@@ -141,25 +147,25 @@ func (s *sum64a) Write(data []byte) (n int32, err error) {
 func (s *sum128) Write(data []byte) (n int32, err error) {
 	for _, c := range data {
 		// Compute the multiplication
-		s0, s1 := bits.Mul64(prime128Lower, s[1])
-		s0 += s[1]<<prime128Shift + prime128Lower*s[0]
+		s0, s1 := bits.Mul64(prime128Lower, s.lo)
+		s0 += s.lo<<prime128Shift + prime128Lower*s.hi
 		// Update the values
-		s[1] = s1
-		s[0] = s0
-		s[1] ^= uint64(c)
+		s.lo = s1
+		s.hi = s0
+		s.lo ^= uint64(c)
 	}
 	return len(data), nil
 }
 
 func (s *sum128a) Write(data []byte) (n int32, err error) {
 	for _, c := range data {
-		s[1] ^= uint64(c)
+		s.lo ^= uint64(c)
 		// Compute the multiplication
-		s0, s1 := bits.Mul64(prime128Lower, s[1])
-		s0 += s[1]<<prime128Shift + prime128Lower*s[0]
+		s0, s1 := bits.Mul64(prime128Lower, s.lo)
+		s0 += s.lo<<prime128Shift + prime128Lower*s.hi
 		// Update the values
-		s[1] = s1
-		s[0] = s0
+		s.lo = s1
+		s.hi = s0
 	}
 	return len(data), nil
 }
@@ -199,13 +205,13 @@ func (s *sum64a) Sum(in []byte) (out []byte) {
 }
 
 func (s *sum128) Sum(in []byte) (out []byte) {
-	ret := byteorder.BEAppendUint64(in, s[0])
-	return byteorder.BEAppendUint64(ret, s[1])
+	ret := byteorder.BEAppendUint64(in, s.hi)
+	return byteorder.BEAppendUint64(ret, s.lo)
 }
 
 func (s *sum128a) Sum(in []byte) (out []byte) {
-	ret := byteorder.BEAppendUint64(in, s[0])
-	return byteorder.BEAppendUint64(ret, s[1])
+	ret := byteorder.BEAppendUint64(in, s.hi)
+	return byteorder.BEAppendUint64(ret, s.lo)
 }
 
 const (
@@ -267,8 +273,8 @@ func (s *sum64a) MarshalBinary() (out []byte, merr error) {
 func (s *sum128) AppendBinary(b []byte) (out []byte, aerr error) {
 	out = mxutil.Ensure(b, len(magic128))
 	out = push(out, magic128...)
-	out = byteorder.BEAppendUint64(out, s[0])
-	out = byteorder.BEAppendUint64(out, s[1])
+	out = byteorder.BEAppendUint64(out, s.hi)
+	out = byteorder.BEAppendUint64(out, s.lo)
 	return out, nil
 }
 
@@ -279,8 +285,8 @@ func (s *sum128) MarshalBinary() (out []byte, merr error) {
 func (s *sum128a) AppendBinary(b []byte) (out []byte, aerr error) {
 	out = mxutil.Ensure(b, len(magic128a))
 	out = push(out, magic128a...)
-	out = byteorder.BEAppendUint64(out, s[0])
-	out = byteorder.BEAppendUint64(out, s[1])
+	out = byteorder.BEAppendUint64(out, s.hi)
+	out = byteorder.BEAppendUint64(out, s.lo)
 	return out, nil
 }
 
@@ -339,8 +345,8 @@ func (s *sum128) UnmarshalBinary(b []byte) (uerr error) {
 	if len(b) != marshaledSize128 {
 		return errors.New("hash/fnv: invalid hash state size")
 	}
-	s[0] = byteorder.BEUint64(b[4:])
-	s[1] = byteorder.BEUint64(b[12:])
+	s.hi = byteorder.BEUint64(b[4:])
+	s.lo = byteorder.BEUint64(b[12:])
 	return nil
 }
 
@@ -351,8 +357,8 @@ func (s *sum128a) UnmarshalBinary(b []byte) (uerr error) {
 	if len(b) != marshaledSize128 {
 		return errors.New("hash/fnv: invalid hash state size")
 	}
-	s[0] = byteorder.BEUint64(b[4:])
-	s[1] = byteorder.BEUint64(b[12:])
+	s.hi = byteorder.BEUint64(b[4:])
+	s.lo = byteorder.BEUint64(b[12:])
 	return nil
 }
 

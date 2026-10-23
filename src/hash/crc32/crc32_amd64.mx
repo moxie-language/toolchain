@@ -73,12 +73,10 @@ func ieeeCLMUL(crc uint32, p []byte) (out uint32) {
 const castagnoliK1 = 168
 const castagnoliK2 = 1344
 
-type sse42Table [4]Table
-
 type archState struct {
-	castagnoliSSE42TableK1 *sse42Table
-	castagnoliSSE42TableK2 *sse42Table
-	archIeeeTable8         *slicing8Table
+	castagnoliSSE42TableK1 [][]uint32
+	castagnoliSSE42TableK2 [][]uint32
+	archIeeeTable8         [][]uint32
 }
 
 func archAvailableCastagnoli() (avail bool) {
@@ -89,32 +87,37 @@ func (c *CRC32) archInitCastagnoli() {
 	if !cpu.X86.HasSSE42 {
 		panic("arch-specific Castagnoli not available")
 	}
-	c.castagnoliSSE42TableK1 = &sse42Table{}
-	c.castagnoliSSE42TableK2 = &sse42Table{}
+	k1 := [][]uint32{:4}
+	k2 := [][]uint32{:4}
 	// See description in archUpdateCastagnoli.
 	//    t[0][i] = CRC(i000, O)
 	//    t[1][i] = CRC(0i00, O)
 	//    t[2][i] = CRC(00i0, O)
 	//    t[3][i] = CRC(000i, O)
 	// where O is a sequence of K zeros.
-	var tmp [castagnoliK2]byte
+	tmpK1 := []byte{:castagnoliK1}
+	tmpK2 := []byte{:castagnoliK2}
 	// Declared once, outside both loops: a declaration in a loop in a
 	// self-mutating method is rejected, and the scratch would otherwise be
 	// re-allocated into the sovereign arena on every iteration.
 	var val uint32
 	for b := 0; b < 4; b++ {
+		k1[b] = []uint32{:256}
+		k2[b] = []uint32{:256}
 		for i := 0; i < 256; i++ {
 			val = uint32(i) << uint32(b*8)
-			c.castagnoliSSE42TableK1[b][i] = castagnoliSSE42(val, tmp[:castagnoliK1])
-			c.castagnoliSSE42TableK2[b][i] = castagnoliSSE42(val, tmp[:])
+			k1[b][i] = castagnoliSSE42(val, tmpK1)
+			k2[b][i] = castagnoliSSE42(val, tmpK2)
 		}
 	}
+	c.castagnoliSSE42TableK1 = k1
+	c.castagnoliSSE42TableK2 = k2
 }
 
 // castagnoliShift computes the CRC32-C of K1 or K2 zeroes (depending on the
 // table given) with the given initial crc value. This corresponds to
 // CRC(crc, O) in the description in archUpdateCastagnoli.
-func castagnoliShift(table *sse42Table, crc uint32) (out uint32) {
+func castagnoliShift(table [][]uint32, crc uint32) (out uint32) {
 	return table[3][crc>>24] ^
 		table[2][(crc>>16)&0xFF] ^
 		table[1][(crc>>8)&0xFF] ^

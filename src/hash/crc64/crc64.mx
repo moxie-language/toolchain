@@ -27,22 +27,20 @@ const (
 )
 
 // Table is a 256-word table representing the polynomial for efficient processing.
-type Table [256]uint64
-
-// slicing8Table is a set of 8 Tables, used by the slicing-by-8 algorithm.
-type slicing8Table [8]Table
-
-var slicing8Tables struct {
-	Done bool
-	ISO  slicing8Table
-	ECMA slicing8Table
+type Table struct {
+	words []uint64
 }
 
-func initSlicing8TablesOnce() {
-	if slicing8Tables.Done {
-		return
-	}
-	slicing8Tables.Done = true
+// The two slicing-by-8 table sets are built in init(), which is the only place
+// a package global may be written: outside init() a global store is rejected by
+// the restrictions and is not relocated into the root arena, so a slice built
+// in a caller's frame and stored into a global would dangle there.
+var slicing8Tables struct {
+	ISO  [][]uint64
+	ECMA [][]uint64
+}
+
+func init() {
 	slicing8Tables.ISO = makeSlicingBy8Table(makeTable(ISO))
 	slicing8Tables.ECMA = makeSlicingBy8Table(makeTable(ECMA))
 }
@@ -50,19 +48,18 @@ func initSlicing8TablesOnce() {
 // MakeTable returns a [Table] constructed from the specified polynomial.
 // The contents of this [Table] must not be modified.
 func MakeTable(poly uint64) (tab *Table) {
-	initSlicing8TablesOnce()
 	switch poly {
 	case ISO:
-		return &slicing8Tables.ISO[0]
+		return &Table{words: slicing8Tables.ISO[0]}
 	case ECMA:
-		return &slicing8Tables.ECMA[0]
+		return &Table{words: slicing8Tables.ECMA[0]}
 	default:
 		return makeTable(poly)
 	}
 }
 
 func makeTable(poly uint64) (tab *Table) {
-	tab = &Table{}
+	tab = &Table{words: []uint64{:256}}
 	for i := 0; i < 256; i++ {
 		crc := uint64(i)
 		for j := 0; j < 8; j++ {
@@ -72,17 +69,21 @@ func makeTable(poly uint64) (tab *Table) {
 				crc >>= 1
 			}
 		}
-		tab[i] = crc
+		tab.words[i] = crc
 	}
 	return tab
 }
 
-func makeSlicingBy8Table(t *Table) (tab slicing8Table) {
-	tab[0] = *t
+func makeSlicingBy8Table(t *Table) (tab [][]uint64) {
+	tab = [][]uint64{:8}
+	for j := 0; j < 8; j++ {
+		tab[j] = []uint64{:256}
+	}
+	copy(tab[0], t.words)
 	for i := 0; i < 256; i++ {
-		crc := t[i]
+		crc := t.words[i]
 		for j := 1; j < 8; j++ {
-			crc = t[crc&0xff] ^ (crc >> 8)
+			crc = t.words[crc&0xff] ^ (crc >> 8)
 			tab[j][i] = crc
 		}
 	}
@@ -145,14 +146,13 @@ func (d *digest) Clone() (cl hash.Cloner, cerr error) {
 }
 
 func update(crc uint64, tab *Table, p []byte) (out uint64) {
-	initSlicing8TablesOnce()
 	crc = ^crc
 	// Table comparison is somewhat expensive, so avoid it for small sizes
 	for len(p) >= 64 {
-		var helperTable slicing8Table
-		if *tab == slicing8Tables.ECMA[0] {
+		var helperTable [][]uint64
+		if tab.words == slicing8Tables.ECMA[0] {
 			helperTable = slicing8Tables.ECMA
-		} else if *tab == slicing8Tables.ISO[0] {
+		} else if tab.words == slicing8Tables.ISO[0] {
 			helperTable = slicing8Tables.ISO
 			// For smaller sizes creating extended table takes too much time
 		} else if len(p) >= 2048 {
@@ -178,7 +178,7 @@ func update(crc uint64, tab *Table, p []byte) (out uint64) {
 	}
 	// For reminders or small sizes
 	for _, v := range p {
-		crc = tab[byte(crc)^v] ^ (crc >> 8)
+		crc = tab.words[byte(crc)^v] ^ (crc >> 8)
 	}
 	return ^crc
 }
@@ -206,10 +206,9 @@ func Checksum(data []byte, tab *Table) (sum uint64) { return update(0, tab, data
 
 // tableSum returns the ISO checksum of table t.
 func tableSum(t *Table) (sum uint64) {
-	var a [2048]byte
-	b := a[:0]
+	b := []byte{:0:2048}
 	if t != nil {
-		for _, x := range t {
+		for _, x := range t.words {
 			b = byteorder.BEAppendUint64(b, x)
 		}
 	}

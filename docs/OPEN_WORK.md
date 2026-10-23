@@ -117,6 +117,63 @@ step concrete:
    with a restrictions fixture and the fixtures that use arrays
    (`array_elem_addr`, `addr_of_composite_lit`, `generic_type_method`,
    `dns_name_roundtrip`, `abi_arrays_pipe_times`) rewritten with them.
+### Arrays: the batches that have landed, and the init() rule
+
+Batch by batch, each verified against a known-answer vector (not against the
+compiler agreeing with itself) and, where a table or state is what changed, with
+the same probe under BOTH compilers:
+
+    first batch       86da77f2  fmt directive buffer, base64 quantum, base58
+                                 checksum, profile/proto varint scratch, zstd
+                                 read scratch, codec.mx 26 scratch buffers
+    debug             a2b41826  dwarf stringer tables, [][2]uint64 ranges,
+                                 elf's section buffer and 16-byte ident
+    crypto/aes        7c03dfcf  eleven table functions (FIPS-197 C.1 + GCM)
+    crypto/des        6bda1f5e  permutation/choice/rotation tables, the eight
+                                 s-boxes as one flat 512-entry table, the
+                                 feistel box as [][]uint32, per-cipher subkeys
+    crypto/sha3       e1dfd775  Sum224/256/384/512 return slices (FIPS 202)
+    bip39/bech32/elliptic  82fb58e7  word list, generator table, field mask
+    hash              (this)    fnv's sum128/sum128a state is a two-field
+                                 struct (a named slice type is banned), crc32's
+                                 Table/slicing8Table/sse42Table and crc64's
+                                 Table/slicing8Table are slices, both [N]byte
+                                 buffers are sized slices. Verified: CRC-32
+                                 IEEE/Castagnoli/Koopman, CRC-64 ISO/ECMA on
+                                 "123456789", and 100/2100/3000-byte buffers
+                                 (the slicing-by-8 and arch paths), FNV-1/-1a
+                                 32/64/128 including 128's 16-byte split, both
+                                 compilers agreeing.
+
+**The rule the hash batch produced.** A slice-valued package global may only be
+written from `init()`. Outside `init()` a global store is rejected in user code,
+and in a toolchain package - where the restriction does not apply - the store is
+NOT relocated into the root arena: the value stays in the writer's frame, and the
+next allocation that reuses that frame position overwrites it. Measured on
+crc64's lazy `initSlicing8TablesOnce`: `slicing8Tables.ISO = makeSlicingBy8Table(...)`
+read back as 8 rows of 256 words immediately after the store, then as 8 rows of
+ZERO words after the calling program allocated a 2100-byte buffer, and the
+slicing-by-8 CRC came out `b76fff4b8abddbc0` instead of `b02b5db55d155fb7`. Both
+compilers reproduced it, which places it in the shared model, not in one emitter.
+Building both table sets in `init()` makes the tables root-arena data by
+construction, and both compilers then agree with the reference.
+
+So the migration pattern for a package-level table is `init()`, not a lazy
+once-guard. Tables that hang off an instance (crc32's, des's feistel box) are
+fine built in the constructor: a receiver's fields are relocated, a global's are
+not.
+
+**Census at this point:** 1470 array-type occurrences in 285 files (counting
+`[N]T` type spellings, not index expressions), led by `syscall` 165, `vendor` 97,
+`internal/chacha8rand` 82, `crypto/internal/fips140/nistec` 61, `math` 59,
+`runtime` 53, `image/png` 50, `crypto/secp256k1` 43, `nistec/fiat` 40,
+`net/http` 39, `x/net/idna` 36, `edwards25519` 33. Still queued, in the order
+they are safe to take: crypto/tls's ticket key, `syscall` (needs the codegen
+decision: a `[]T` data pointer is what the kernel wants), the pointer-pun
+clusters (`edwards25519`, `keccakf`'s `*[200]byte`, the syscall ABI
+`*[2]Timeval`), `runtime`'s `len(*[N]T)` shapes, then `math`, `net`, `image`,
+`compress`, `encoding`, `vendor`, and the ban itself last with its fixtures.
+
 2. **The user-code exemption declaration**, motivated by `src/syscall/js`: its
    `Value` methods use value receivers because the API is a chain of
    temporaries, and converting them breaks `js.Global().Get("x").Call(...)`.

@@ -18,14 +18,14 @@ import "internal/byteorder"
 // polynomial. The table is suitable for use with the simple algorithm
 // (simpleUpdate).
 func simpleMakeTable(poly uint32) (tab *Table) {
-	tab = &Table{}
-	simplePopulateTable(poly, tab)
-	return tab
+	words := []uint32{:256}
+	simplePopulateTable(poly, words)
+	return &Table{words: words}
 }
 
 // simplePopulateTable constructs a Table for the specified polynomial, suitable
 // for use with simpleUpdate.
-func simplePopulateTable(poly uint32, t *Table) {
+func simplePopulateTable(poly uint32, t []uint32) {
 	for i := 0; i < 256; i++ {
 		crc := uint32(i)
 		for j := 0; j < 8; j++ {
@@ -41,7 +41,7 @@ func simplePopulateTable(poly uint32, t *Table) {
 
 // simpleUpdate uses the simple algorithm to update the CRC, given a table that
 // was previously computed using simpleMakeTable.
-func simpleUpdate(crc uint32, tab *Table, p []byte) (out uint32) {
+func simpleUpdate(crc uint32, tab []uint32, p []byte) (out uint32) {
 	crc = ^crc
 	for _, v := range p {
 		crc = tab[byte(crc)^v] ^ (crc >> 8)
@@ -52,14 +52,14 @@ func simpleUpdate(crc uint32, tab *Table, p []byte) (out uint32) {
 // Use slicing-by-8 when payload >= this value.
 const slicing8Cutoff = 16
 
-// slicing8Table is array of 8 Tables, used by the slicing-by-8 algorithm.
-type slicing8Table [8]Table
-
-// slicingMakeTable constructs a slicing8Table for the specified polynomial. The
-// table is suitable for use with the slicing-by-8 algorithm (slicingUpdate).
-func slicingMakeTable(poly uint32) (tab *slicing8Table) {
-	tab = &slicing8Table{}
-	simplePopulateTable(poly, &tab[0])
+// slicingMakeTable constructs the eight Tables used by the slicing-by-8
+// algorithm, one slice per table.
+func slicingMakeTable(poly uint32) (tab [][]uint32) {
+	tab = [][]uint32{:8}
+	for j := 0; j < 8; j++ {
+		tab[j] = []uint32{:256}
+	}
+	simplePopulateTable(poly, tab[0])
 	for i := 0; i < 256; i++ {
 		crc := tab[0][i]
 		for j := 1; j < 8; j++ {
@@ -72,7 +72,7 @@ func slicingMakeTable(poly uint32) (tab *slicing8Table) {
 
 // slicingUpdate uses the slicing-by-8 algorithm to update the CRC, given a
 // table that was previously computed using slicingMakeTable.
-func slicingUpdate(crc uint32, tab *slicing8Table, p []byte) (out uint32) {
+func slicingUpdate(crc uint32, tab [][]uint32, p []byte) (out uint32) {
 	if len(p) >= slicing8Cutoff {
 		crc = ^crc
 		for len(p) > 8 {
@@ -87,5 +87,5 @@ func slicingUpdate(crc uint32, tab *slicing8Table, p []byte) (out uint32) {
 	if len(p) == 0 {
 		return crc
 	}
-	return simpleUpdate(crc, &tab[0], p)
+	return simpleUpdate(crc, tab[0], p)
 }
