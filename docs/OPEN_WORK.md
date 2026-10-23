@@ -74,6 +74,20 @@ Legacy's half: the compiler crash that stopped the net/http link is closed
 and `muxmatch ok`. Phases 2, 3 and 4 pass with the new legacy codegen, so the
 bootstrap chain is intact: stage2 == stage3.
 
+### Gate record after the compiler change (this round)
+
+    GOROOT=/opt/go1.25.3 bash tests/unitrun.sh -j 1 --phases 0a --force
+        97/97 PASS (96 fixtures including the new untyped_const_return, plus
+        tree-cleanliness)
+    GOROOT=/opt/go1.25.3 bash tests/unitrun.sh -j 1 --phases 0b,2 --force
+        56/56 PASS (55 restriction fixtures, the selfhost chain with
+        stage2 == stage3 in 183s, plus tree-cleanliness)
+
+Those two runs bracket the stage4 return-conversion fix (`d12629d8`), which is
+the only compiler change in this stretch: 0a proves the new fixture passes,
+0b proves no restriction regressed, and phase 2 proves the bootstrap still
+reaches a fixpoint with the compiler built by itself.
+
 ### The queue that is left (round 79 pause)
 
 Everything else recorded in this file is closed or a historical snapshot. What
@@ -117,6 +131,65 @@ step concrete:
    with a restrictions fixture and the fixtures that use arrays
    (`array_elem_addr`, `addr_of_composite_lit`, `generic_type_method`,
    `dns_name_roundtrip`, `abi_arrays_pipe_times`) rewritten with them.
+### The no-exceptions queue, and its measured baseline
+
+The goal is that every fallible operation returns an error, that a panic is
+fatal and never caught, and that the only aborts left are declared ones. The
+baseline measured on this tree, so the delta is visible later:
+
+    1099  `panic(` sites in src/*.mx
+       0  `recover(` sites in src (the 12 grep hits are legacy/'s Go parser and
+          vendored x/tools, not Moxie code)
+     215  `defer ` statements at line start in src (not 245)
+     288  `io.EOF` references in src
+      25  of the 1099 are src/math/stubs.mx's "not implemented" stubs
+
+Clusters by directory, largest first: `web/dom` 84, `net/http` 80,
+`jsbridge/webgl` 73, `math/big` 71, `web/sw` 39, `crypto/internal/boring` 39,
+`math` 35 (25 of them the stubs), `internal/trace` 28, `web/callback` 23,
+`syscall/js` 18, `jsbridge/app` 18, `crypto/tls` 18, `web/idb` 17,
+`internal/runtime/maps` 16, `crypto/internal/fips140/nistec` 15.
+
+Two of the three phases need no design work and land first: deleting
+`src/math/stubs.mx` (the `haveArchX` consts are all false and the archX calls
+are dead) and deleting `src/crypto/internal/boring` (no cgo, no path). The js
+boundary, the reader/writer contract and the restriction rules follow in that
+order, each its own commit.
+
+### The image cluster cannot build at all, and why
+
+`src/image` does not compile in EITHER compiler today:
+
+    image.mx:1170: cannot use p.Palette (variable of type []color.Color) as
+    color.Model value in return statement: []color.Color does not implement
+    color.Model (missing method Convert)
+
+`Paletted.Palette` used to be a `color.Palette`, a named slice type with a
+`Convert` method. The named-slice-type ban removed the type and flattened every
+palette in the tree to `[]color.Color`, which cannot implement `color.Model` -
+so `ColorModel`, `draw`, `gif`, `png` and `jpeg` are all unbuildable, and have
+been since the ban landed. Nothing noticed because no gate's closure imports
+`image`.
+
+The fix is a `Palette` that is not a named slice: a struct holding
+`[]color.Color` with `Convert`, `Index` and `Len`, plus the 118 `Palette` sites
+across `src/image/*` (image, draw, gif, jpeg, png). That is a batch of its own,
+and the png conversion of `cr [nFilter][]uint8`, the chunk header/footer fields
+and the filter rows waits behind it. A png conversion was started and reverted
+when this surfaced; the details worth keeping: `e.header[:4]` works only because
+`header` is an array today, so a slice conversion must build the chunk header
+and trailer with cursor writes, and `cdatK := cr[K][1:]` must become direct
+`cr[K][1+i]` indexing because a subslice is a copy.
+
+### A fmt defect found while verifying chacha8
+
+`fmt.Printf("%d", byte(165))` prints `?` in stage4 and `165` in legacy, and
+`%x` of the same byte prints `313635` in stage4 (the hex of the decimal string)
+and `a5` in legacy. `%v` and `%s` print `165` in both. So the integer verbs on a
+`byte` are wrong in both compilers, differently, and the chacha verification had
+to cast to int32 to print. Unfixed; it belongs with the fmt/format work, not
+with the array queue.
+
 ### Arrays: the batches that have landed, and the init() rule
 
 Batch by batch, each verified against a known-answer vector (not against the
