@@ -72,9 +72,6 @@ type Reader struct {
 	// Buffers for sequence decode FSE tables.
 	seqTableBuffers [3][]fseBaselineEntry
 
-	// Scratch space used for small reads, to avoid allocation.
-	scratch [16]byte
-
 	// A scratch table for reading an FSE. Only temporarily valid.
 	fseScratch []fseEntry
 
@@ -166,8 +163,11 @@ func (r *Reader) readFrameHeader() (rerr error) {
 retry:
 	relativeOffset := 0
 
-	// Read magic number. RFC 3.1.1.
-	if _, err := io.ReadFull(r.r, r.scratch[:4]); err != nil {
+	// Read magic number. RFC 3.1.1. The four bytes are a local buffer: a
+	// fixed-size array is not a Moxie type, and a subslice of a slice would be
+	// a copy for the read to land in.
+	magicBuf := []byte{:4}
+	if _, err := io.ReadFull(r.r, magicBuf); err != nil {
 		// We require that the stream contains at least one frame.
 		if err == io.EOF && !r.readOneFrame {
 			err = io.ErrUnexpectedEOF
@@ -175,7 +175,7 @@ retry:
 		return r.wrapError(relativeOffset, err)
 	}
 
-	if magic := binary.LittleEndian().Uint32(r.scratch[:4]); magic != 0xfd2fb528 {
+	if magic := binary.LittleEndian().Uint32(magicBuf); magic != 0xfd2fb528 {
 		if magic >= 0x184d2a50 && magic <= 0x184d2a5f {
 			// This is a skippable frame.
 			r.blockOffset += int64(relativeOffset) + 4
@@ -192,10 +192,11 @@ retry:
 	relativeOffset += 4
 
 	// Read Frame_Header_Descriptor. RFC 3.1.1.1.1.
-	if _, err := io.ReadFull(r.r, r.scratch[:1]); err != nil {
+	descBuf := []byte{:1}
+	if _, err := io.ReadFull(r.r, descBuf); err != nil {
 		return r.wrapNonEOFError(relativeOffset, err)
 	}
-	descriptor := r.scratch[0]
+	descriptor := descBuf[0]
 
 	singleSegment := descriptor&(1<<5) != 0
 
@@ -230,7 +231,8 @@ retry:
 
 	headerSize := windowDescriptorSize + dictionaryIdSize + fcsFieldSize
 
-	if _, err := io.ReadFull(r.r, r.scratch[:headerSize]); err != nil {
+	hdr := []byte{:headerSize}
+	if _, err := io.ReadFull(r.r, hdr); err != nil {
 		return r.wrapNonEOFError(relativeOffset, err)
 	}
 
@@ -239,7 +241,7 @@ retry:
 	var windowSize uint64
 	if !singleSegment {
 		// Window descriptor. RFC 3.1.1.1.2.
-		windowDescriptor := r.scratch[0]
+		windowDescriptor := hdr[0]
 		exponent := uint64(windowDescriptor >> 3)
 		mantissa := uint64(windowDescriptor & 7)
 		windowLog := exponent + 10
@@ -255,7 +257,7 @@ retry:
 
 	// Dictionary_ID. RFC 3.1.1.1.3.
 	if dictionaryIdSize != 0 {
-		dictionaryId := r.scratch[windowDescriptorSize : windowDescriptorSize+dictionaryIdSize]
+		dictionaryId := hdr[windowDescriptorSize : windowDescriptorSize+dictionaryIdSize]
 		// Allow only zero Dictionary ID.
 		for _, b := range dictionaryId {
 			if b != 0 {
@@ -267,7 +269,7 @@ retry:
 	// Frame_Content_Size. RFC 3.1.1.1.4.
 	r.frameSizeUnknown = false
 	r.remainingFrameSize = 0
-	fb := r.scratch[windowDescriptorSize+dictionaryIdSize:]
+	fb := hdr[windowDescriptorSize+dictionaryIdSize:]
 	switch fcsFieldSize {
 	case 0:
 		r.frameSizeUnknown = true
@@ -319,13 +321,14 @@ retry:
 func (r *Reader) skipFrame() (rerr error) {
 	relativeOffset := 0
 
-	if _, err := io.ReadFull(r.r, r.scratch[:4]); err != nil {
+	sizeBuf := []byte{:4}
+	if _, err := io.ReadFull(r.r, sizeBuf); err != nil {
 		return r.wrapNonEOFError(relativeOffset, err)
 	}
 
 	relativeOffset += 4
 
-	size := binary.LittleEndian().Uint32(r.scratch[:4])
+	size := binary.LittleEndian().Uint32(sizeBuf)
 	if size == 0 {
 		r.blockOffset += int64(relativeOffset)
 		return nil
@@ -371,13 +374,14 @@ func (r *Reader) readBlock() (rerr error) {
 	relativeOffset := 0
 
 	// Read Block_Header. RFC 3.1.1.2.
-	if _, err := io.ReadFull(r.r, r.scratch[:3]); err != nil {
+	hdrBuf := []byte{:3}
+	if _, err := io.ReadFull(r.r, hdrBuf); err != nil {
 		return r.wrapNonEOFError(relativeOffset, err)
 	}
 
 	relativeOffset += 3
 
-	header := uint32(r.scratch[0]) | (uint32(r.scratch[1]) << 8) | (uint32(r.scratch[2]) << 16)
+	header := uint32(hdrBuf[0]) | (uint32(hdrBuf[1]) << 8) | (uint32(hdrBuf[2]) << 16)
 
 	lastBlock := header&1 != 0
 	blockType := (header >> 1) & 3
@@ -401,11 +405,12 @@ func (r *Reader) readBlock() (rerr error) {
 		r.blockOffset += int64(relativeOffset)
 	case 1:
 		r.setBufferSize(blockSize)
-		if _, err := io.ReadFull(r.r, r.scratch[:1]); err != nil {
+		oneBuf := []byte{:1}
+		if _, err := io.ReadFull(r.r, oneBuf); err != nil {
 			return r.wrapNonEOFError(relativeOffset, err)
 		}
 		relativeOffset++
-		v := r.scratch[0]
+		v := oneBuf[0]
 		for i := range r.buffer {
 			r.buffer[i] = v
 		}
@@ -439,11 +444,12 @@ func (r *Reader) readBlock() (rerr error) {
 		}
 		// Check for checksum at end of frame. RFC 3.1.1.
 		if r.hasChecksum {
-			if _, err := io.ReadFull(r.r, r.scratch[:4]); err != nil {
+			sumBuf := []byte{:4}
+			if _, err := io.ReadFull(r.r, sumBuf); err != nil {
 				return r.wrapNonEOFError(0, err)
 			}
 
-			inputChecksum := binary.LittleEndian().Uint32(r.scratch[:4])
+			inputChecksum := binary.LittleEndian().Uint32(sumBuf)
 			dataChecksum := uint32(r.checksum.digest())
 			if inputChecksum != dataChecksum {
 				return r.wrapError(0, fmt.Errorf("invalid checksum: got %#x want %#x", dataChecksum, inputChecksum))
