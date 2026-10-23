@@ -131,6 +131,52 @@ step concrete:
    with a restrictions fixture and the fixtures that use arrays
    (`array_elem_addr`, `addr_of_composite_lit`, `generic_type_method`,
    `dns_name_roundtrip`, `abi_arrays_pipe_times`) rewritten with them.
+### image now compiles; png, gif and flate are the next layer
+
+`53160fe6` gives `image.Palette` the struct shape the user prescribed: one
+`Element []color.Color` field plus `Convert`, `Index` and `Len` on the pointer
+receiver, so `Paletted.ColorModel` returns `&p.Palette` and `color.Model` is
+satisfied again. All 118 `.Palette` sites in image, draw, gif and png gained
+`.Element`; gif's ColorModel assertion is now `*image.Palette` and its two
+`image.Config` constructions wrap the table; png's palette truncation and growth
+use `resize`, which keeps capacity a subslice copy would have dropped. Verified:
+an image probe exercises RGBA Set/At, NewPaletted, Paletted
+Set/At/ColorIndexAt/Opaque/SubImage and Convert/Index/Len through the interface.
+
+Two compiler defects fell out of making `image` build, both fixed and bilaterally
+verified (`1af32054`, `6a3961ad`):
+
+  * a METHOD EXPRESSION `(*T).M` evaluated to a nil function value, silently.
+    flate stores its dispatch that way (`d.step = (*compressor).deflate`), so the
+    first time flate ran, `d.step(d)` called through nil and the process died
+    with SIGSEGV. Nothing had ever compiled flate, so nothing had reached it.
+    `tests/regressions/should_compile/method_expression.mx` calls the value in
+    both compilers.
+  * `resize(xs, n)` coerced `n` to the slice's ELEMENT type, which on a
+    `[]color.Color` boxed the length into an interface and made clang reject
+    `sext {i64, ptr} to i64`. Push-only now.
+
+What is still broken, measured with the compiled packages rather than guessed:
+
+  * `png.Encode` produces a stream whose one IDAT chunk is 6 bytes: the two-byte
+    zlib header plus the four-byte adler32, with all 50 compressed bytes missing.
+    flate's close path reports writing them to its `io.Writer` with no error
+    (`hbw write: len 50 n 50`), and the bufio that png flushes then holds only 6,
+    so those bytes land in a different object from the one png flushes. flate and
+    zlib used directly are correct - `flate` at default and level 0 matches Go's
+    byte for byte on a 10 KB buffer, and `zlib` likewise through a bufio - so the
+    trigger is inside png's encoder, and the next step is the writeImage ->
+    zlib -> flate -> dictWriter chain under the encoder's bufio.
+  * `flate` level 1 (BestSpeed, `deflatefast`) crashes with SIGSEGV. Levels
+    -1/0/6/9 are fine.
+  * A cheaper lead for both: boxing a VALUE whose methods have pointer receivers
+    into an interface COMPILES and mutates a copy (`takeIface(*bw)` where bw is a
+    *bufio.Writer leaves `bw.Buffered()` at 0). That should be a compile error,
+    and it is the shape that produces "wrote into a copy" symptoms.
+
+`sig`, `bbig`, `bcache` and the rest of `src/crypto/internal/boring` are the
+next no-exceptions item, not an array item.
+
 ### The no-exceptions queue, and its measured baseline
 
 The goal is that every fallible operation returns an error, that a panic is
