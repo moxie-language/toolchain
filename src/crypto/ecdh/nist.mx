@@ -6,7 +6,6 @@ package ecdh
 
 import (
 	"bytes"
-	"crypto/internal/boring"
 	"crypto/internal/fips140/ecdh"
 	"crypto/internal/fips140only"
 	"errors"
@@ -21,23 +20,27 @@ const (
 	curveP521
 )
 
+// The three NIST curves are singletons, built in init(): ECDH compares the
+// Curve an interface holds (PrivateKey.ECDH: `k.curve != remote.curve`), which
+// is a pointer comparison, so a fresh &nistCurve per P256() call makes every
+// key its own curve and every exchange fail with "curves do not match".
+var (
+	p256Curve *nistCurve
+	p384Curve *nistCurve
+	p521Curve *nistCurve
+)
+
+func init() {
+	p256Curve = &nistCurve{curveP256}
+	p384Curve = &nistCurve{curveP384}
+	p521Curve = &nistCurve{curveP521}
+}
+
 type nistCurve struct {
 	id curveID
 }
 
 func (c *nistCurve) String() (s string) {
-	switch c.id {
-	case curveP256:
-		return "P-256"
-	case curveP384:
-		return "P-384"
-	case curveP521:
-		return "P-521"
-	}
-	return ""
-}
-
-func (c *nistCurve) boringName() (b []byte) {
 	switch c.id {
 	case curveP256:
 		return "P-256"
@@ -98,25 +101,6 @@ func (c *nistCurve) fipsECDH(priv *ecdh.PrivateKey, pub *ecdh.PublicKey) (b []by
 }
 
 func (c *nistCurve) GenerateKey(rand io.Reader) (out *PrivateKey, derr error) {
-	name := c.boringName()
-	if boring.Enabled && rand == boring.RandReader {
-		key, keyBytes, err := boring.GenerateKeyECDH(name)
-		if err != nil {
-			return nil, err
-		}
-		pub, err := key.PublicKey()
-		if err != nil {
-			return nil, err
-		}
-		k := &PrivateKey{
-			curve:      c,
-			privateKey: keyBytes,
-			publicKey:  &PublicKey{curve: c, publicKey: pub.Bytes(), boring: pub},
-			boring:     key,
-		}
-		return k, nil
-	}
-
 	if fips140only.Enabled && !fips140only.ApprovedRandomReader(rand) {
 		return nil, errors.New("crypto/ecdh: only crypto/rand.Reader is allowed in FIPS 140-only mode")
 	}
@@ -136,41 +120,10 @@ func (c *nistCurve) GenerateKey(rand io.Reader) (out *PrivateKey, derr error) {
 			fips:      privateKey.PublicKey(),
 		},
 	}
-	if boring.Enabled {
-		bk, err := boring.NewPrivateKeyECDH(name, priv.privateKey)
-		if err != nil {
-			return nil, err
-		}
-		pub, err := bk.PublicKey()
-		if err != nil {
-			return nil, err
-		}
-		priv.boring = bk
-		priv.publicKey.boring = pub
-	}
 	return priv, nil
 }
 
 func (c *nistCurve) NewPrivateKey(key []byte) (out *PrivateKey, derr error) {
-	name := c.boringName()
-	if boring.Enabled {
-		bk, err := boring.NewPrivateKeyECDH(name, key)
-		if err != nil {
-			return nil, errors.New("crypto/ecdh: invalid private key")
-		}
-		pub, err := bk.PublicKey()
-		if err != nil {
-			return nil, errors.New("crypto/ecdh: invalid private key")
-		}
-		k := &PrivateKey{
-			curve:      c,
-			privateKey: bytes.Clone(key),
-			publicKey:  &PublicKey{curve: c, publicKey: pub.Bytes(), boring: pub},
-			boring:     bk,
-		}
-		return k, nil
-	}
-
 	fk, kerr := c.fipsNewPrivateKey(key)
 	if kerr != nil {
 		return nil, kerr
@@ -196,37 +149,26 @@ func (c *nistCurve) NewPublicKey(key []byte) (out *PublicKey, derr error) {
 		curve:     c,
 		publicKey: bytes.Clone(key),
 	}
-	if boring.Enabled {
-		bk, err := boring.NewPublicKeyECDH(c.boringName(), k.publicKey)
-		if err != nil {
-			return nil, errors.New("crypto/ecdh: invalid public key")
-		}
-		k.boring = bk
-	} else {
-		fk, err := c.fipsNewPublicKey(key)
-		if err != nil {
-			return nil, err
-		}
-		k.fips = fk
+	fk, err := c.fipsNewPublicKey(key)
+	if err != nil {
+		return nil, err
 	}
+	k.fips = fk
 	return k, nil
 }
 
 func (c *nistCurve) ecdh(local *PrivateKey, remote *PublicKey) (b []byte, derr error) {
-	if boring.Enabled {
-		return boring.ECDH(local.boring, remote.boring)
-	}
 	return c.fipsECDH(local.fips, remote.fips)
 }
 
 // P256 returns a [Curve] which implements NIST P-256 (FIPS 186-3, section D.2.3),
 // also known as secp256r1 or prime256v1.
-func P256() (out Curve) { return &nistCurve{curveP256} }
+func P256() (out Curve) { return p256Curve }
 
 // P384 returns a [Curve] which implements NIST P-384 (FIPS 186-3, section D.2.4),
 // also known as secp384r1.
-func P384() (out Curve) { return &nistCurve{curveP384} }
+func P384() (out Curve) { return p384Curve }
 
 // P521 returns a [Curve] which implements NIST P-521 (FIPS 186-3, section D.2.5),
 // also known as secp521r1.
-func P521() (out Curve) { return &nistCurve{curveP521} }
+func P521() (out Curve) { return p521Curve }
