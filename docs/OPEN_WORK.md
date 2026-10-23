@@ -74,6 +74,32 @@ Legacy's half: the compiler crash that stopped the net/http link is closed
 and `muxmatch ok`. Phases 2, 3 and 4 pass with the new legacy codegen, so the
 bootstrap chain is intact: stage2 == stage3.
 
+### The queue that is left (round 78 close)
+
+Everything else recorded in this file is either closed or a historical snapshot.
+Three things remain, in the order they should be taken:
+
+1. **Module removal, the legacy half.** stage4 no longer reads `moxie.mod` and
+   resolves imports by layout + `MANIFEST`; legacy still *prefers* a module file
+   in `readModInfo` and still parses `require`/`replace` for `moxie vendor` and
+   `moxie fetch`. The first step is the resolver: make `readModInfo` return the
+   layout answer always (`moduleFromRoots`), which changes nothing on this tree
+   (it has no module file, so the fallback is the live path) and makes a module
+   file inert for other repos. Then port MANIFEST pinning into `vendor`/`fetch`,
+   delete `findModFile`/`parseGoMod`, and only then delete the `moxie.mod` files
+   and the Makefile `replace`/`require` lines in the sibling repos - that last
+   part is outside this checkout.
+2. **User-code exemption, with `src/syscall/js` as its motivating case.** Those
+   files use value receivers (`func (v Value) Equal`, `func (e Error) Error`)
+   because the API is a chain of temporaries; converting them to pointer
+   receivers breaks `js.Global().Get("x").Call(...)`, the dominant spelling. They
+   compile only because `src/` is exempt wholesale. The design question is an
+   explicit exemption declaration (per package, checked by both compilers) rather
+   than the path-based exemption, so the exemption is stated where it applies
+   instead of being inferred from where the file lives.
+3. **The array buffer idioms** (the list below): each converts only with the fill
+   idiom rewritten, so they are small, independent changes - not one sweep.
+
 ### The js bridge: mutators are package functions, and its state is one object  [CLOSED]
 
 **Decision.** `Set`, `Delete`, `SetIndex` and `Release` are package functions whose
@@ -1872,19 +1898,40 @@ closed now:
     resolvers; what remains of this class is any expression position that still
     reaches a registry-by-name fallback instead of the file's imports.
 
-### The array -> slice conversion is unfinished, and the checker is no longer blind to it
+### The array -> slice conversion: measured, and narrower than it looked
 
-Moxie is removing arrays: a fixed-size array buys nothing in a language with no
-aliasing and no heap, and every array left in the tree is a Go slice bypass. The
-interface-assignment check used to SKIP arrays while that conversion was pending,
-so `fmt.Sprintf("%x", metaHash)` with `metaHash [16]byte` passed silently; the
-two sites in `internal/coverage/cfile` now render the hash explicitly (`hex16`),
-and arrays are judged like any other type with an empty method set. The
-conversion itself is still open: `[16]byte`/`[4]byte` hashes are threaded through
-`internal/coverage` (rtcov.CovMetaBlob.Hash, encodemeta, decodemeta,
-encodecounter, cfile) and should become `[]byte`. That is a mechanical change with
-one real decision - the byte-slice length is now the caller's contract - and it
-needs its own sweep.
+Moxie removes arrays because a slice already knows its length and there is no
+heap. Measuring the array semantics first, before converting anything, changed
+the plan. A slice subslice is a COPY, but an ARRAY slice is a VIEW:
+
+    var a [4]byte; copy(a[:], b)        // a[0..3] = b    (verified)
+    c := []byte{:4}; copy(c[:], b)      // c stays zero   (verified)
+
+So `copy(buf[:], src)` followed by reading `buf` is correct today and is broken by
+the naive conversion to `[]byte{:4}`: the copy goes into a temporary. The
+remaining conversions are therefore idiom rewrites (to `copy(buf, src)`, a cursor
+write, or `push`), not type swaps, and each needs its own look. The interface
+checker no longer has to skip arrays (`65294d1c`): the two sites that mattered
+(`internal/coverage/cfile`'s `%x` of a [16]byte hash) render explicitly now.
+
+What stays an array, and why:
+
+  * kernel ABI cast targets and layouts - `*[2]Timeval`, `*[2]Timespec`,
+    `*[2]_C_int`, `caps.data [2]capData`, `ifr.name [IFNAMSIZ]byte`: a slice
+    field changes the layout and the ioctl would read garbage. The rule-9
+    decision was already taken and is pinned by a RUN test:
+    `tests/regressions/should_compile/abi_arrays_pipe_times.mx` does an
+    `os.Pipe` round-trip.
+  * serialized file formats - `coverage.MetaFileHeader`'s `Magic [4]byte` and
+    `MetaFileHash [16]byte`, `CounterFileHeader.MetaHash`, the padding fields:
+    `CovMetaHeaderSize` is computed by hand and the struct IS the on-disk bytes,
+    so a slice field would change both.
+  * a buffer filled through `buf[:]` while the array remains the reader's view
+    (fmt's `tmp`, base64's `dbuf`, ascii85's `buf`/`out`, zstd's `scratch`,
+    profile/proto's `tmp`, moxie/codec's `b`, base58's `cksum`): each converts,
+    but only together with the idiom that fills it. base58 is the sharp case:
+    `copy(cksum[:], h2[:4])` then `return` works because the array slice is a
+    view.
 
 ### Compiler: a buffered channel of a slice, and a generic field, do not resolve  [OLD NOTE]
 
