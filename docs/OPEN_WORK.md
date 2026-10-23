@@ -162,11 +162,20 @@ What is still broken, measured with the compiled packages rather than guessed:
     zlib header plus the four-byte adler32, with all 50 compressed bytes missing.
     flate's close path reports writing them to its `io.Writer` with no error
     (`hbw write: len 50 n 50`), and the bufio that png flushes then holds only 6,
-    so those bytes land in a different object from the one png flushes. flate and
+    so those bytes land in a DIFFERENT OBJECT from the one png flushes. flate and
     zlib used directly are correct - `flate` at default and level 0 matches Go's
-    byte for byte on a 10 KB buffer, and `zlib` likewise through a bufio - so the
-    trigger is inside png's encoder, and the next step is the writeImage ->
-    zlib -> flate -> dictWriter chain under the encoder's bufio.
+    byte for byte on a 10 KB buffer, and `zlib` likewise through a bufio.
+    The field counts are the tell: the header and the adler go through zlib's own
+    `z.w` (its count ends at 6) while the compressed block goes through flate's
+    `dictWriter`, so one of the two holds a copy rather than the same pointer.
+    The likely mechanism is the codec's stack rule: `bufio.NewWriterSize` returns
+    a pointer to a composite literal, and if that allocation stays in the
+    caller's frame (an alloca the escape marking missed) instead of the arena,
+    then `codecIsStableAddr` reports it unstable - "stack memory is never stable"
+    - and every return that carries it terminates in a COPY. That is a compiler
+    bug (escape marking for a returned composite literal, inlined or not), and
+    the check that proves it is whether `e.bw` addresses the arena or the frame
+    at the moment `zlib.NewWriterLevelDict` returns.
   * `flate` level 1 (BestSpeed, `deflatefast`) crashes with SIGSEGV. Levels
     -1/0/6/9 are fine.
   * A cheaper lead for both: boxing a VALUE whose methods have pointer receivers
