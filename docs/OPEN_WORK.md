@@ -74,32 +74,55 @@ Legacy's half: the compiler crash that stopped the net/http link is closed
 and `muxmatch ok`. Phases 2, 3 and 4 pass with the new legacy codegen, so the
 bootstrap chain is intact: stage2 == stage3.
 
-### The queue that is left (round 78 close)
+### The queue that is left (round 79 pause)
 
-Everything else recorded in this file is either closed or a historical snapshot.
-Three things remain, in the order they should be taken:
+Everything else recorded in this file is closed or a historical snapshot. What
+remains, in the order it should be taken, with the measurements that make each
+step concrete:
 
-1. **Module removal.** The BUILD is done in both compilers: `readModInfo`
-   answers from the layout always, the resolver no longer reads `require` or
-   `replace`, and a leftover `moxie.mod` cannot change what a package resolves to
-   (`9ca876a4`, `ab6d5cc8`). Phases 2 and 6 re-ran green after each. What is left
-   is the last module-era code and the files: `moxie vendor` and `moxie fetch`
-   still parse a module file (no caller in any sibling Makefile, and `moxie get`
-   supersedes fetch), and the `moxie.mod` files plus the Makefile
-   `replace`/`require` lines live in the sibling repos, outside this checkout.
-   The decision to make is whether `vendor` is worth porting to MANIFEST or should
-   go with `fetch`; until then both fail loud with "no moxie.mod or go.mod found",
-   which is the honest state for a command whose input no longer exists.
-2. **User-code exemption, with `src/syscall/js` as its motivating case.** Those
-   files use value receivers (`func (v Value) Equal`, `func (e Error) Error`)
-   because the API is a chain of temporaries; converting them to pointer
-   receivers breaks `js.Global().Get("x").Call(...)`, the dominant spelling. They
-   compile only because `src/` is exempt wholesale. The design question is an
-   explicit exemption declaration (per package, checked by both compilers) rather
-   than the path-based exemption, so the exemption is stated where it applies
-   instead of being inferred from where the file lives.
-3. **The array buffer idioms** (the list below): each converts only with the fill
-   idiom rewritten, so they are small, independent changes - not one sweep.
+1. **Arrays are banned, and the tree still has them.** The rule is decided: Go
+   had two forms because one was stack and one was heap; Moxie has only arenas,
+   so a slice is the type and `resize`/`push`/`pop` manage its length. A write
+   through a subslice is already rejected in both compilers (`ab7a7e82`), which
+   is the same insight: subslicing is always a copy, so the fix is always
+   resize/push. The migration is the work. Measured on this tree: **1175 array
+   type occurrences in 285 files**, by top-level package:
+   `crypto 420`, `vendor 219`, `syscall 166`, `internal 137`, `math 94`,
+   `net 75`, `runtime 53`, `image 31`, `compress`, `encoding`, `debug`, `hash`,
+   `strconv`, `fmt`, `bytes` below that.
+   Clusters, in the order they are safe to take:
+   - value buffers filled through `buf[:]` (fmt's `tmp`, base64's `dbuf`,
+     ascii85's `buf`/`out`, zstd's `scratch`, profile/proto's `tmp`,
+     moxie/codec's `b`, base58's `cksum`): each converts with its fill idiom
+     rewritten to `copy(buf, src)` or a cursor write. Small, independent.
+   - crypto's fixed tables and hash states (`[256]uint32`, `[8]uint32`,
+     `[32]byte`): a table becomes a slice assigned in the package's one init()
+     (package-level vars may not have initializers), and a state becomes a
+     slice whose length is part of the contract. Large but mechanical.
+   - `syscall`'s ABI structs and `*[2]Timeval` / `*[2]_C_int` cast targets:
+     this one needs a decision before code - a []T's data pointer is what the
+     kernel wants, so the `//sys` marshalling has to pass that rather than a
+     pointer to a fixed-size object. Not a mechanical conversion.
+   - `runtime`'s `len(*[128]uint16)` / `len(*[512]pollDesc)` shapes, which the
+     compiler's own `len` check must keep accepting while they exist.
+   The ban itself (rejecting a fixed-size array type in user code) lands LAST,
+   with a restrictions fixture and the fixtures that use arrays
+   (`array_elem_addr`, `addr_of_composite_lit`, `generic_type_method`,
+   `dns_name_roundtrip`, `abi_arrays_pipe_times`) rewritten with them.
+2. **The user-code exemption declaration**, motivated by `src/syscall/js`: its
+   `Value` methods use value receivers because the API is a chain of
+   temporaries, and converting them breaks `js.Global().Get("x").Call(...)`.
+   They compile only because `src/` is exempt wholesale. The decision you gave:
+   eliminate the value receivers - JavaScript has no pointers, so a pointer
+   receiver crossing into JS resolves to a copy, a fixed one-to-one translation
+   (strings keep their existing pragma because JS really does distinguish them).
+   That is a change in `src/syscall/js` plus the jsruntime bridge, not a
+   language change.
+
+Also verified while closing the previous round, so it is not open: a store past
+a slice's LENGTH panics in both compilers even when capacity allows (probe:
+`ys := xs[:2]` with cap 8, `ys[4] = 1` -> index out of range in stage4 and in
+legacy), and x/net/idna's tables parse.
 
 ### The js bridge: mutators are package functions, and its state is one object  [CLOSED]
 
