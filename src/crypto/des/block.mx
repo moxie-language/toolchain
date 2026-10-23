@@ -31,7 +31,7 @@ func (c *desCipher) cryptBlock(dst, src []byte, decrypt bool) {
 	byteorder.BEPutUint64(dst, permuteFinalBlock(preOutput))
 }
 
-func feistel(fbox *[8][64]uint32, l, r uint32, k0, k1 uint64) (lout, rout uint32) {
+func feistel(fbox [][]uint32, l, r uint32, k0, k1 uint64) (lout, rout uint32) {
 	var t uint32
 
 	t = r ^ uint32(k0>>32)
@@ -61,15 +61,22 @@ func feistel(fbox *[8][64]uint32, l, r uint32, k0, k1 uint64) (lout, rout uint32
 	return l, r
 }
 
-func initFeistelBox() (box *[8][64]uint32) {
-	fbox := &[8][64]uint32{}
+func initFeistelBox() (box [][]uint32) {
+	// Eight rows of 64 entries. A slice of slices, because there are no
+	// arrays: the rows are allocated once here and are read-only afterwards.
+	fbox := [][]uint32{:8}
+	for s := int32(0); s < 8; s++ {
+		fbox[s] = []uint32{:64}
+	}
 	sBoxes := _sBoxes()
 	pf := _permutationFunction()
-	for s := range sBoxes {
+	// The s-boxes are one flat table of 8*4*16, so the outer loop counts the
+	// eight boxes rather than ranging the slice.
+	for s := int32(0); s < 8; s++ {
 		for i := 0; i < 4; i++ {
 			for j := 0; j < 16; j++ {
-				f := uint64(sBoxes[s][i][j]) << (4 * (7 - uint32(s)))
-				f = permuteBlock(f, pf[:])
+				f := uint64(sBoxes[s*64+i*16+j]) << (4 * (7 - uint32(s)))
+				f = permuteBlock(f, pf)
 
 				row := uint8(((i & 2) << 4) | i&1)
 				col := uint8(j << 1)
@@ -154,10 +161,13 @@ func (c *desCipher) generateSubkeys(keyBytes []byte) {
 	if c.fbox == nil {
 		c.fbox = initFeistelBox()
 	}
+	if c.subkeys == nil {
+		c.subkeys = []uint64{:16}
+	}
 
 	key := byteorder.BEUint64(keyBytes)
 	pc1 := _permutedChoice1()
-	permutedKey := permuteBlock(key, pc1[:])
+	permutedKey := permuteBlock(key, pc1)
 
 	leftRotations := ksRotate(uint32(permutedKey >> 28))
 	rightRotations := ksRotate(uint32(permutedKey<<4) >> 4)
@@ -168,7 +178,7 @@ func (c *desCipher) generateSubkeys(keyBytes []byte) {
 	var pc2Input uint64
 	for i := 0; i < 16; i++ {
 		pc2Input = uint64(leftRotations[i])<<28 | uint64(rightRotations[i])
-		c.subkeys[i] = unpack(permuteBlock(pc2Input, pc2[:]))
+		c.subkeys[i] = unpack(permuteBlock(pc2Input, pc2))
 	}
 }
 
