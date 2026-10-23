@@ -471,7 +471,7 @@ commands:
   vendor:  copy dependencies into vendor/
   header:  extract codec types from a package into a .mxh protocol header
   install: fetch, compile, and cache an external package binary + .mxh
-  fetch:   fetch and cache all dependencies declared in moxie.mod
+  get:     fetch a repository and pin it in MANIFEST (see moxie get -h)
   cache:   manage the install cache (subcommands: list, clean)
   help:    print this help text
 `
@@ -880,16 +880,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, "failed to run `moxie list`:", err)
 			exitNow(1)
 		}
-	case "vendor":
-		wd, err := os.Getwd()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			exitNow(1)
-		}
-		if err := loader.Vendor(wd); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			exitNow(1)
-		}
 	case "clean":
 		err := os.RemoveAll(goenv.Get("GOCACHE"))
 		if err != nil {
@@ -925,12 +915,6 @@ func main() {
 		}
 		pkgName := filepath.ToSlash(flag.Arg(0))
 		err := Install(pkgName, options)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			exitNow(1)
-		}
-	case "fetch":
-		err := Fetch(options)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			exitNow(1)

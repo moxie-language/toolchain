@@ -1174,6 +1174,96 @@ func waitRepoLock(mpath, repo string) {
 	}
 }
 
+// migrateModuleFile upgrades a repository that still carries a module file: when
+// the build root has no MANIFEST but has a moxie.mod (or go.mod), its requires
+// become pins, the MANIFEST is written, and the module file is deleted. Moxie
+// removed modules, so this is the one-way path off them; a `replace` with a
+// local directory has no MANIFEST spelling (the layout rules resolve checkouts)
+// and is reported on stderr rather than silently reinterpreted.
+//
+// It runs at the point the build root's MANIFEST is first consulted, so every
+// build and every moxie get upgrades the repository it is run in.
+func migrateModuleFile(root string) (migrated bool) {
+	if root == "" {
+		return false
+	}
+	modPath := ""
+	for _, name := range []string{"moxie.mod", "go.mod"} {
+		p := mxutil.JoinPath(root, name)
+		if _, ok := mxutil.ReadFile(p); ok {
+			modPath = p
+			break
+		}
+	}
+	if modPath == "" {
+		return false
+	}
+	data, hasFile := mxutil.ReadFile(modPath)
+	if !hasFile {
+		return false
+	}
+	var pins []manifestEntry
+	inBlock := false
+	droppedReplace := false
+	for _, raw := range mxutil.SplitLines(string(data)) {
+		line := mxutil.TrimSpace(raw)
+		if line == "" || mxutil.HasPrefix(line, "//") {
+			continue
+		}
+		if mxutil.HasPrefix(line, "require (") {
+			inBlock = true
+			continue
+		}
+		if inBlock && line == ")" {
+			inBlock = false
+			continue
+		}
+		if mxutil.HasPrefix(line, "replace ") {
+			// `replace old => new` - a local override. MANIFEST pins a
+			// repository to a ref; the layout rules already find a sibling
+			// checkout, so the override is dropped, loudly.
+			droppedReplace = true
+			continue
+		}
+		isReq := false
+		if mxutil.HasPrefix(line, "require ") {
+			line = mxutil.TrimSpace(line[8:])
+			isReq = true
+		}
+		if !isReq && !inBlock {
+			continue
+		}
+		f := fieldsOf(line)
+		if len(f) == 0 {
+			continue
+		}
+		ref := ""
+		if len(f) > 1 {
+			ref = f[1]
+		}
+		pins = mxutil.Ensure(pins, 1)
+		pins = push(pins, manifestEntry{repo: f[0], ref: ref})
+	}
+	var lines []string
+	lines = mxutil.Ensure(lines, 1)
+	lines = push(lines, "# MANIFEST - repository refs this build pins. Run `moxie get`")
+	lines = mxutil.Ensure(lines, 1)
+	lines = push(lines, "require (")
+	for _, e := range pins {
+		lines = mxutil.Ensure(lines, 1)
+		lines = push(lines, "	" | e.repo | " " | e.ref)
+	}
+	lines = mxutil.Ensure(lines, 1)
+	lines = push(lines, ")")
+	writeFile(mxutil.JoinPath(root, "MANIFEST"), []byte(joinStrings(lines, "\n") | "\n"), 0644)
+	os.Remove(modPath)
+	mxutil.WriteStr(2, "  MANIFEST written from " | baseName(modPath) | " (" | simpleItoa(int32(len(pins))) | " pins); module file removed\n")
+	if droppedReplace {
+		mxutil.WriteStr(2, "  note: a local `replace` was dropped - the layout rules resolve sibling checkouts\n")
+	}
+	return true
+}
+
 // loadManifest reads the build root's MANIFEST once per process. Only the
 // build root's file is read - a nested MANIFEST does not shadow it, which was
 // moxie.mod's failure mode - with $MOXIEROOT's as the fallback so a build
@@ -1194,6 +1284,18 @@ func loadManifest(root string) {
 				bst.manifestPins[e.repo] = e.ref
 			}
 			return
+		}
+		// No MANIFEST but a module file: upgrade the repository in place, then
+		// read the MANIFEST just written.
+		if migrateModuleFile(root) {
+			if data, ok := mxutil.ReadFile(mxutil.JoinPath(root, "MANIFEST")); ok {
+				bst.manifestDir = root
+				bst.manifestPins = map[string]string{}
+				for _, e := range parseManifestText(string(data)) {
+					bst.manifestPins[e.repo] = e.ref
+				}
+				return
+			}
 		}
 	}
 	if bst.manifestPins != nil {
@@ -1668,6 +1770,9 @@ func fetchOneRepo(mpath, repo, ref string) {
 	mxutil.WriteStr(2, "  " | repo | " @ " | ref | "\n")
 }
 
+// cmdFetch is the internal auto-fetch `moxie install` calls for a remote
+// package. The `moxie fetch` VERB is gone: materialising MANIFEST pins is what
+// `moxie get` does.
 func cmdFetch(url string) {
 	mpath := getMoxiePath()
 	mkdirAll(mpath, 0755)
@@ -4604,7 +4709,7 @@ func printHelp() {
 	mxutil.WriteStr(1, "  version: print version information\n")
 	mxutil.WriteStr(1, "  env:     print environment information\n")
 	mxutil.WriteStr(1, "  get:     fetch a repository and materialise a ref (see MANIFEST)\n")
-	mxutil.WriteStr(1, "  fetch:   clone and materialise the repositories MANIFEST pins\n")
+	mxutil.WriteStr(1, "  get:     clone and pin a repository in MANIFEST\n")
 	mxutil.WriteStr(1, "  cache:   manage the install cache (subcommands: list, clean, warm)\n")
 	mxutil.WriteStr(1, "  update:  rebuild cached packages\n")
 	mxutil.WriteStr(1, "  build-runtime: build the standalone runtime\n")
@@ -6513,7 +6618,7 @@ func main() {
 	bst.builtinOnly = []string{"unsafe"}
 	args := os.Args
 	if len(args) < 2 {
-		mxutil.WriteStr(2, "usage: mxc <build|test|version|cache|fetch|update> ...\n")
+		mxutil.WriteStr(2, "usage: mxc <build|test|version|cache|get|update> ...\n")
 		exitNow(1)
 	}
 
@@ -6595,14 +6700,6 @@ func main() {
 		cmdGet(args)
 		return
 	}
-	if cmd == "fetch" {
-		fetchURL := ""
-		if len(args) >= 3 {
-			fetchURL = args[2]
-		}
-		cmdFetch(fetchURL)
-		return
-	}
 	if cmd == "update" {
 		rebuildAll := false
 		for ai := int32(2); ai < int32(len(args)); ai++ {
@@ -6622,7 +6719,7 @@ func main() {
 		return
 	}
 	if cmd != "build" && cmd != "run" {
-		mxutil.WriteStr(2, "usage: mxc <build|run|test|version|cache|fetch|update|build-runtime> ...\n")
+		mxutil.WriteStr(2, "usage: mxc <build|run|test|version|cache|get|update|build-runtime> ...\n")
 		exitNow(1)
 	}
 	runAfter := cmd == "run"
