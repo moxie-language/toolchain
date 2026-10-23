@@ -734,6 +734,18 @@ func (b *builder) checkASTRestrictions() {
 				}
 			}
 			b.checkPushRestriction(node)
+		case *ast.AssignStmt:
+			// A subslice is a copy: a store through one writes into a
+			// throwaway that has no address, and the original never changes.
+			for _, lhs := range node.Lhs {
+				if subsliceWriteTarget(lhs) {
+					b.addError(lhs.Pos(), "moxie: a subslice is a copy, so a write through it is not allowed: resize the slice and push the value")
+				}
+			}
+		case *ast.IncDecStmt:
+			if subsliceWriteTarget(node.X) {
+				b.addError(node.X.Pos(), "moxie: a subslice is a copy, so a write through it is not allowed: resize the slice and push the value")
+			}
 		case *ast.RangeStmt:
 			b.checkRangeRestriction(node)
 		case *ast.FuncDecl:
@@ -759,6 +771,29 @@ func (b *builder) checkASTRestrictions() {
 		}
 		return true
 	})
+}
+
+// subsliceWriteTarget reports whether expr is a store target whose base is a
+// subslice expression - x[a:b][i], x[a:b].F, and any chain that ends in one.
+// Moxie subslicing is ALWAYS a copy, so such a store writes into a throwaway
+// that occupies arena space and is never assigned an address; the value the
+// programmer meant to change is untouched. Rewrite it with resize/push.
+func subsliceWriteTarget(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.IndexExpr:
+		if _, ok := e.X.(*ast.SliceExpr); ok {
+			return true
+		}
+		return subsliceWriteTarget(e.X)
+	case *ast.SelectorExpr:
+		if _, ok := e.X.(*ast.SliceExpr); ok {
+			return true
+		}
+		return subsliceWriteTarget(e.X)
+	case *ast.StarExpr:
+		return subsliceWriteTarget(e.X)
+	}
+	return false
 }
 
 // isTypeExpr returns true if the AST expression is syntactically a type

@@ -1095,6 +1095,103 @@ func checkShadowing(files []*syntax.File) {
 	}
 }
 
+// checkSubsliceStores rejects a store through a subslice in user code. Moxie
+// subslicing is ALWAYS a copy, so x[a:b][i] = v writes into a throwaway that has
+// no address and the value the programmer meant to change is untouched. The
+// rewrite is resize (to move the start) plus push (to write the value).
+func checkSubsliceStores(files []*syntax.File, pkgPath string) {
+	if !isUserPackagePath(restrictPath(pkgPath)) {
+		return
+	}
+	for _, f := range files {
+		if f == nil {
+			continue
+		}
+		for _, d := range f.DeclList {
+			fd, ok := d.(*syntax.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			subsliceStmtList(fd.Body.List)
+		}
+	}
+}
+
+func subsliceStmtList(ss []syntax.Stmt) {
+	for _, st := range ss {
+		subsliceStmt(st)
+	}
+}
+
+func subsliceStmt(st syntax.Stmt) {
+	if st == nil {
+		return
+	}
+	switch t := st.(type) {
+	case *syntax.AssignStmt:
+		subsliceTargets(t.Lhs)
+	case *syntax.LabeledStmt:
+		subsliceStmt(t.Stmt)
+	case *syntax.BlockStmt:
+		subsliceStmtList(t.List)
+	case *syntax.IfStmt:
+		if t.Then != nil {
+			subsliceStmtList(t.Then.List)
+		}
+		subsliceStmt(t.Else)
+	case *syntax.ForStmt:
+		if t.Body != nil {
+			subsliceStmtList(t.Body.List)
+		}
+	case *syntax.SwitchStmt:
+		for _, c := range t.Body {
+			if c != nil {
+				subsliceStmtList(c.Body)
+			}
+		}
+	case *syntax.SelectStmt:
+		for _, c := range t.Body {
+			if c != nil {
+				subsliceStmtList(c.Body)
+			}
+		}
+	}
+}
+
+func subsliceTargets(e syntax.Expr) {
+	if e == nil {
+		return
+	}
+	if le, ok := e.(*syntax.ListExpr); ok {
+		for _, x := range le.ElemList {
+			subsliceTargets(x)
+		}
+		return
+	}
+	if subsliceTarget(e) {
+		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+		push(cctx.compileErrors, "a subslice is a copy, so a write through it is not allowed: resize the slice and push the value")
+	}
+}
+
+// subsliceTarget reports whether e is a store target whose base is a subslice:
+// x[a:b][i], x[a:b].F, and any chain ending in one.
+func subsliceTarget(e syntax.Expr) (ok bool) {
+	switch t := e.(type) {
+	case *syntax.IndexExpr:
+		if _, isSlice := t.X.(*syntax.SliceExpr); isSlice {
+			return true
+		}
+		return subsliceTarget(t.X)
+	case *syntax.SelectorExpr:
+		if _, isSlice := t.X.(*syntax.SliceExpr); isSlice {
+			return true
+		}
+		return subsliceTarget(t.X)
+	}
+	return false
+}
+
 // packageImportNames collects every import binding in the package, deduped.
 func packageImportNames(files []*syntax.File) (names []string) {
 	for _, f := range files {
