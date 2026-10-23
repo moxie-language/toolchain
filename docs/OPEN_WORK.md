@@ -134,7 +134,7 @@ the same probe under BOTH compilers:
                                  feistel box as [][]uint32, per-cipher subkeys
     crypto/sha3       e1dfd775  Sum224/256/384/512 return slices (FIPS 202)
     bip39/bech32/elliptic  82fb58e7  word list, generator table, field mask
-    hash              (this)    fnv's sum128/sum128a state is a two-field
+    hash              6c150daa  fnv's sum128/sum128a state is a two-field
                                  struct (a named slice type is banned), crc32's
                                  Table/slicing8Table/sse42Table and crc64's
                                  Table/slicing8Table are slices, both [N]byte
@@ -144,6 +144,22 @@ the same probe under BOTH compilers:
                                  (the slicing-by-8 and arch paths), FNV-1/-1a
                                  32/64/128 including 128's 16-byte split, both
                                  compilers agreeing.
+    crypto/tls        (this)    SessionTicketKey and the ticketKey's aes/hmac
+                                 keys are slices, so are the Conn's 12-byte
+                                 Finished buffers, the alert header, the
+                                 halfConn's 8-byte sequence number and the
+                                 RecordHeaderError's five header bytes; the
+                                 stringer index tables are []uint8 and the
+                                 halfConn's 13-byte scratch field is gone (its
+                                 [:] subslice was a copy, so it never supplied
+                                 capacity). Verified under both compilers: all
+                                 three stringers, ParseSessionState on a
+                                 hand-built TLS 1.3 state, EncryptTicket and
+                                 DecryptTicket round trips against both a
+                                 caller-set and an auto-randomised key (the
+                                 randomised one starts with the DEPRECATED
+                                 prefix), and the record-parameter path by
+                                 net/http's compile in the sweep.
 
 **The rule the hash batch produced.** A slice-valued package global may only be
 written from `init()`. Outside `init()` a global store is rejected in user code,

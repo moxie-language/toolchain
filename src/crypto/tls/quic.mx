@@ -155,12 +155,6 @@ type quicState struct {
 	events    []QUICEvent
 	nextEvent int32
 
-	// eventArr is a statically allocated event array, large enough to handle
-	// the usual maximum number of events resulting from a single call: transport
-	// parameters, Initial data, Early read secret, Handshake write and read
-	// secrets, Handshake data, Application write secret, Application data.
-	eventArr [8]QUICEvent
-
 	started  bool
 	signalc  chan struct{}   // handshake data is available to be read
 	blockedc chan struct{}   // handshake is waiting for data, closed when done
@@ -202,7 +196,12 @@ func newQUICConn(conn *Conn, config *QUICConfig) (rqUICConn *QUICConn) {
 		blockedc:            chan struct{}{},
 		enableSessionEvents: config.EnableSessionEvents,
 	}
-	conn.quic.events = conn.quic.eventArr[:0]
+	// Room for the usual maximum number of events resulting from a single
+	// call: transport parameters, Initial data, Early read secret, Handshake
+	// write and read secrets, Handshake data, Application write secret,
+	// Application data. push fills this in place; a subslice would be a copy
+	// and would not.
+	conn.quic.events = []QUICEvent{:0:8}
 	return &QUICConn{
 		conn: conn,
 	}
@@ -253,7 +252,7 @@ func (q *QUICConn) NextEvent() (rqUICEvent QUICEvent) {
 		return QUICEvent{Kind: QUICErrorEvent, Err: q.conn.handshakeErr}
 	}
 	if qs.nextEvent >= len(qs.events) {
-		qs.events = qs.events[:0]
+		resize(qs.events, 0)
 		qs.nextEvent = 0
 		return QUICEvent{Kind: QUICNoEvent}
 	}

@@ -89,8 +89,8 @@ type Conn struct {
 	// by the client or server in the most recent handshake. This is
 	// retained to support the renegotiation extension and tls-unique
 	// channel-binding.
-	clientFinished [12]byte
-	serverFinished [12]byte
+	clientFinished []byte
+	serverFinished []byte
 
 	// clientProtocol is the negotiated ALPN protocol.
 	clientProtocol []byte
@@ -117,7 +117,7 @@ type Conn struct {
 	// the rest of the bits are the number of goroutines in Conn.Write.
 	activeCall int32
 
-	tmp [16]byte
+	tmp []byte
 }
 
 // Access to net.Conn methods.
@@ -161,6 +161,10 @@ func (c *Conn) NetConn() (rconn net.Conn) {
 	return c.conn
 }
 
+// recordMacScratch is the MAC input buffer: an 8-byte sequence number plus the
+// five-byte record header, which is the 13 bytes the old fixed array carried.
+func recordMacScratch() (b []byte) { return []byte{:0:13} }
+
 // A halfConn represents one direction of the record layer
 // connection, either sending or receiving.
 type halfConn struct {
@@ -168,9 +172,7 @@ type halfConn struct {
 	version uint16 // protocol version
 	cipher  recordCipher // cipher algorithm
 	mac     hash.Hash
-	seq     [8]byte // 64-bit sequence number
-
-	scratchBuf [13]byte // to avoid allocs; interface method args escape
+	seq     []byte // 64-bit sequence number
 
 	nextCipher recordCipher // next encryption state
 	nextMac    hash.Hash // next MAC algorithm
@@ -216,7 +218,7 @@ func (hc *halfConn) changeCipherSpec() (rerr error) {
 	hc.mac = hc.nextMac
 	hc.nextCipher = nil
 	hc.nextMac = nil
-	clear(hc.seq[:])
+	clear(hc.seq)
 	return nil
 }
 
@@ -228,7 +230,7 @@ func (hc *halfConn) setTrafficSecret(suite *cipherSuiteTLS13, level QUICEncrypti
 	hc.level = level
 	key, iv := suite.trafficKey(secret)
 	hc.cipher = &aeadCipher{a: suite.aead(key, iv)}
-	clear(hc.seq[:])
+	clear(hc.seq)
 }
 
 // incSeq increments the sequence number.
@@ -383,7 +385,7 @@ func (hc *halfConn) decrypt(record []byte) (rb []byte, rrecordType recordType, r
 			}
 			nonce := payload[:explicitNonceLen]
 			if len(nonce) == 0 {
-				nonce = hc.seq[:]
+				nonce = hc.seq
 			}
 			payload = payload[explicitNonceLen:]
 
@@ -391,7 +393,7 @@ func (hc *halfConn) decrypt(record []byte) (rb []byte, rrecordType recordType, r
 			if hc.version == VersionTLS13 {
 				additionalData = record[:recordHeaderLen]
 			} else {
-				additionalData = push(hc.scratchBuf[:0], hc.seq[:]...)
+				additionalData = push(recordMacScratch(), hc.seq...)
 				additionalData = mxutil.Ensure(additionalData, len(record[:3]))
 				additionalData = push(additionalData, record[:3]...)
 				n := len(payload) - c.a.Overhead()
@@ -462,7 +464,7 @@ func (hc *halfConn) decrypt(record []byte) (rb []byte, rrecordType recordType, r
 		record[3] = byte(n >> 8)
 		record[4] = byte(n)
 		remoteMAC := payload[n : n+macSize]
-		localMAC := tls10MAC(hc.mac, hc.scratchBuf[:0], hc.seq[:], record[:recordHeaderLen], payload[:n], payload[n+macSize:])
+		localMAC := tls10MAC(hc.mac, recordMacScratch(), hc.seq, record[:recordHeaderLen], payload[:n], payload[n+macSize:])
 
 		// This is equivalent to checking the MACs and paddingGood
 		// separately, but in constant-time to prevent distinguishing
@@ -517,7 +519,7 @@ func (hc *halfConn) encrypt(record, payload []byte, rnd io.Reader) (rb []byte, r
 			// 3DES' biggest problem anyway because the birthday bound on block
 			// collision is reached first due to its similarly small block size
 			// (see the Sweet32 attack).
-			copy(explicitNonce, hc.seq[:])
+			copy(explicitNonce, hc.seq)
 		} else {
 			if _, err := io.ReadFull(rnd, explicitNonce); err != nil {
 				return nil, err
@@ -528,14 +530,14 @@ func (hc *halfConn) encrypt(record, payload []byte, rnd io.Reader) (rb []byte, r
 	var dst []byte
 	switch c := hc.cipher.(type) {
 	case *streamCipher:
-		mac := tls10MAC(hc.mac, hc.scratchBuf[:0], hc.seq[:], record[:recordHeaderLen], payload, nil)
+		mac := tls10MAC(hc.mac, recordMacScratch(), hc.seq, record[:recordHeaderLen], payload, nil)
 		record, dst = sliceForAppend(record, len(payload)+len(mac))
 		c.s.XORKeyStream(dst[:len(payload)], payload)
 		c.s.XORKeyStream(dst[len(payload):], mac)
 	case *aeadCipher:
 		nonce := explicitNonce
 		if len(nonce) == 0 {
-			nonce = hc.seq[:]
+			nonce = hc.seq
 		}
 
 		if hc.version == VersionTLS13 {
@@ -554,13 +556,13 @@ func (hc *halfConn) encrypt(record, payload []byte, rnd io.Reader) (rb []byte, r
 			record = c.a.Seal(record[:recordHeaderLen],
 				nonce, record[recordHeaderLen:], record[:recordHeaderLen])
 		} else {
-			additionalData := push(hc.scratchBuf[:0], hc.seq[:]...)
+			additionalData := push(recordMacScratch(), hc.seq...)
 			additionalData = mxutil.Ensure(additionalData, len(record[:recordHeaderLen]))
 			additionalData = push(additionalData, record[:recordHeaderLen]...)
 			record = c.a.Seal(record, nonce, payload, additionalData)
 		}
 	case *cbcCipher:
-		mac := tls10MAC(hc.mac, hc.scratchBuf[:0], hc.seq[:], record[:recordHeaderLen], payload, nil)
+		mac := tls10MAC(hc.mac, recordMacScratch(), hc.seq, record[:recordHeaderLen], payload, nil)
 		blockSize := c.b.BlockSize()
 		plaintextLen := len(payload) + len(mac)
 		paddingLen := blockSize - plaintextLen%blockSize
@@ -593,7 +595,7 @@ type RecordHeaderError struct {
 	Msg []byte
 	// RecordHeader contains the five bytes of TLS record header that
 	// triggered the error.
-	RecordHeader [5]byte
+	RecordHeader []byte
 	// Conn provides the underlying net.Conn in the case that a client
 	// sent an initial handshake that didn't look like TLS.
 	// It is nil if there's already been a handshake or a TLS alert has
@@ -608,7 +610,8 @@ func (c *Conn) newRecordHeaderError(conn net.Conn, msg []byte) (err *RecordHeade
 	err = &RecordHeaderError{}
 	err.Msg = msg
 	err.Conn = conn
-	copy(err.RecordHeader[:], c.rawInput.Bytes())
+	err.RecordHeader = []byte{:5}
+	copy(err.RecordHeader, c.rawInput.Bytes())
 	return err
 }
 
@@ -1634,9 +1637,9 @@ func (c *Conn) connectionStateLocked() (rconnectionState ConnectionState) {
 	state.OCSPResponse = c.ocspResponse
 	if (!c.didResume || c.extMasterSecret) && c.vers != VersionTLS13 {
 		if c.clientFinishedIsFirst {
-			state.TLSUnique = c.clientFinished[:]
+			state.TLSUnique = c.clientFinished
 		} else {
-			state.TLSUnique = c.serverFinished[:]
+			state.TLSUnique = c.serverFinished
 		}
 	}
 	if c.config.Renegotiation != RenegotiateNever {

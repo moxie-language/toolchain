@@ -743,7 +743,7 @@ type Config struct {
 	// automatically rotated every day and dropped after seven days. For
 	// customizing the rotation schedule or synchronizing servers that are
 	// terminating connections for the same host, use SetSessionTicketKeys.
-	SessionTicketKey [32]byte
+	SessionTicketKey []byte
 
 	// ClientSessionCache is a cache of ClientSessionState entries for TLS
 	// session resumption. It is only used by clients.
@@ -954,8 +954,8 @@ const (
 
 // ticketKey is the internal representation of a session ticket key.
 type ticketKey struct {
-	aesKey  [16]byte
-	hmacKey [16]byte
+	aesKey  []byte
+	hmacKey []byte
 	// created is the time at which this ticket key was created. See Config.ticketKeys.
 	created time.Time
 }
@@ -963,14 +963,16 @@ type ticketKey struct {
 // ticketKeyFromBytes converts from the external representation of a session
 // ticket key to a ticketKey. Externally, session ticket keys are 32 random
 // bytes and this function expands that into sufficient name and key material.
-func (c *Config) ticketKeyFromBytes(b [32]byte) (key ticketKey) {
-	hashed := sha512.Sum512(b[:])
+func (c *Config) ticketKeyFromBytes(b []byte) (key ticketKey) {
+	hashed := sha512.Sum512(b)
 	// The first 16 bytes of the hash used to be exposed on the wire as a ticket
 	// prefix. They MUST NOT be used as a secret. In the future, it would make
 	// sense to use a proper KDF here, like HKDF with a fixed salt.
 	const legacyTicketKeyNameLen = 16
-	copy(key.aesKey[:], hashed[legacyTicketKeyNameLen:])
-	copy(key.hmacKey[:], hashed[legacyTicketKeyNameLen+len(key.aesKey):])
+	key.aesKey = []byte{:16}
+	key.hmacKey = []byte{:16}
+	copy(key.aesKey, hashed[legacyTicketKeyNameLen:])
+	copy(key.hmacKey, hashed[legacyTicketKeyNameLen+len(key.aesKey):])
 	key.created = c.time()
 	return key
 }
@@ -1040,21 +1042,22 @@ func (c *Config) initLegacySessionTicketKeyRLocked() {
 	// Don't write if SessionTicketKey is already defined as our deprecated string,
 	// or if it is defined by the user but sessionTicketKeys is already set.
 	depKey := _deprecatedSessionTicketKey()
-	if c.SessionTicketKey != [32]byte{} &&
-		(bytes.HasPrefix(c.SessionTicketKey[:], depKey) || len(c.sessionTicketKeys) > 0) {
+	if len(c.SessionTicketKey) != 0 &&
+		(bytes.HasPrefix(c.SessionTicketKey, depKey) || len(c.sessionTicketKeys) > 0) {
 		return
 	}
 
-	if c.SessionTicketKey == [32]byte{} {
-		if _, err := io.ReadFull(c.rand(), c.SessionTicketKey[:]); err != nil {
+	if len(c.SessionTicketKey) == 0 {
+		c.SessionTicketKey = []byte{:32}
+		if _, err := io.ReadFull(c.rand(), c.SessionTicketKey); err != nil {
 			panic(fmt.Sprintf("tls: unable to generate random session ticket key: %v", err))
 		}
 		// Write the deprecated prefix at the beginning so we know we created
 		// it. This key with the DEPRECATED prefix isn't used as an actual
 		// session ticket key, and is only randomized in case the application
 		// reuses it for some reason.
-		copy(c.SessionTicketKey[:], depKey)
-	} else if !bytes.HasPrefix(c.SessionTicketKey[:], depKey) && len(c.sessionTicketKeys) == 0 {
+		copy(c.SessionTicketKey, depKey)
+	} else if !bytes.HasPrefix(c.SessionTicketKey, depKey) && len(c.sessionTicketKeys) == 0 {
 		c.sessionTicketKeys = []ticketKey{c.ticketKeyFromBytes(c.SessionTicketKey)}
 	}
 
@@ -1096,8 +1099,8 @@ func (c *Config) ticketKeys(configForClient *Config) (rticketKey []ticketKey) {
 
 	// autoSessionTicketKeys are managed by auto-rotation.
 	if len(c.autoSessionTicketKeys) == 0 || c.time().Sub(c.autoSessionTicketKeys[0].created) >= ticketKeyRotation {
-		var newKey [32]byte
-		if _, err := io.ReadFull(c.rand(), newKey[:]); err != nil {
+		newKey := []byte{:32}
+		if _, err := io.ReadFull(c.rand(), newKey); err != nil {
 			panic(fmt.Sprintf("unable to generate random session ticket key: %v", err))
 		}
 		valid := []ticketKey{:0:len(c.autoSessionTicketKeys)+1}
@@ -1128,7 +1131,7 @@ func (c *Config) ticketKeys(configForClient *Config) (rticketKey []ticketKey) {
 // all have the same session ticket keys. If the session ticket keys leaks,
 // previously recorded and future TLS connections using those keys might be
 // compromised.
-func (c *Config) SetSessionTicketKeys(keys [][32]byte) {
+func (c *Config) SetSessionTicketKeys(keys [][]byte) {
 	if len(keys) == 0 {
 		panic("tls: keys must have at least one key")
 	}
