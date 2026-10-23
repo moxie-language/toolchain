@@ -1,0 +1,61 @@
+/*
+A method expression is a value, run rather than described.
+
+`(*T).M` names the method as a plain function whose first parameter is the
+receiver, and storing it in a field is how compress/flate keeps its fill and
+step functions (d.fill = (*compressor).fillDeflate, d.step = (*compressor).deflate).
+stage4 built the operand `(*T)` as an expression, got nothing, and left a NIL
+function value in the field - so `d.step(d)` called through a nil pointer and
+flate/flate->zlib->png died with SIGSEGV the first time any of it ran. legacy
+built it correctly, which is why the shape was in the tree at all.
+
+The fixture pins the value, the call through a struct field, a method with a
+result, and a method with no result: the nil was silent, so the only test that
+catches it is one that calls the value.
+*/
+package main
+
+type Counter struct {
+	step func(*Counter)
+	fill func(*Counter, int32)
+	n    int32
+}
+
+func (c *Counter) bump() {
+	c.n++
+}
+
+func (c *Counter) add(k int32) {
+	c.n += k
+}
+
+func (c *Counter) twice(x int32) (out int32) {
+	return x * 2
+}
+
+type Box struct {
+	mul func(*Counter, int32) int32
+}
+
+func main() {
+	c := &Counter{}
+	c.step = (*Counter).bump
+	c.fill = (*Counter).add
+	if c.step == nil || c.fill == nil {
+		panic("method expression evaluated to a nil function value")
+	}
+	c.step(c)
+	c.step(c)
+	if c.n != 2 {
+		panic("call through a method expression did not reach the method")
+	}
+	c.fill(c, 40)
+	if c.n != 42 {
+		panic("method expression with a parameter did not pass it")
+	}
+	b := &Box{mul: (*Counter).twice}
+	if b.mul(c, 21) != 42 {
+		panic("method expression with a result is wrong")
+	}
+	println("method expressions ok")
+}

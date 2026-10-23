@@ -6301,6 +6301,29 @@ func (fb *ssaFuncBuilder) buildSelector(e *syntax.SelectorExpr) (s SSAValue) {
 			}
 		}
 	}
+	// `(*T).M` is a method expression: a plain function value whose first
+	// parameter is the receiver. Nothing else in the builder produces one -
+	// buildExpr cannot build `(*T)` as a value - and the failure used to be
+	// SILENT: the expression evaluated to a nil function value, so flate's
+	// `d.step = (*compressor).store` stored nil and `d.step(d)` died with
+	// SIGSEGV. buildMethodValue covers only the bound form, x.M.
+	if pe, okp := e.X.(*syntax.ParenExpr); okp {
+		if op, oko := pe.X.(*syntax.Operation); oko && op.Op == token.Mul && op.Y == nil {
+			if nm, okn := op.X.(*syntax.Name); okn {
+				if obj := fb.lookupObject(nm.Value); obj != nil {
+					if tn, okTn := obj.(*TypeName); okTn && tn.Typ != nil {
+						mev := fb.buildMethodExprValue(e, NewPointer(tn.Typ))
+						if mev != nil {
+							return mev
+						}
+						cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+						push(cctx.compileErrors, fb.errPos() | e.Sel.Value | " is not a method of (" | nm.Value | ")")
+						return nil
+					}
+				}
+			}
+		}
+	}
 	fa := fb.buildSelectorAddr(e)
 	if fa != nil {
 		elemType := fa.SSAType()
@@ -6383,6 +6406,70 @@ func (fb *ssaFuncBuilder) buildMethodValue(sel *syntax.SelectorExpr, recv SSAVal
 	entry.Instrs = mxutil.Ensure(entry.Instrs, 1)
 	push(entry.Instrs, ret)
 	mc := &SSAMakeClosure{Fn: wrapper, Bindings: []SSAValue{fixedRecv}}
+	mc.typ = wrapperSig
+	mc.name = fb.nextName()
+	fb.emit(mc)
+	return mc
+}
+
+// buildMethodExprValue builds the value of a method expression `(*T).M`: a
+// function whose first parameter is the receiver and whose body calls the
+// method. It is the unbound twin of buildMethodValue, which binds the receiver
+// into a closure; a method expression has nothing to bind.
+func (fb *ssaFuncBuilder) buildMethodExprValue(sel *syntax.SelectorExpr, recvType Type) (out SSAValue) {
+	// resolveMethodCallWithRecv only reads the receiver's TYPE, and the type is
+	// all a method expression has, so a nil constant of that type is the honest
+	// receiver to hand it.
+	fn, _ := fb.resolveMethodCallWithRecv(sel, &SSAConst{typ: recvType, val: nil})
+	if fn == nil || fn.Signature == nil {
+		return nil
+	}
+	methodSig := fn.Signature
+	vars := []*TCVar{:1}
+	vars[0] = &TCVar{Name: "recv", Typ: recvType}
+	if methodSig.Params != nil {
+		for i := 0; i < methodSig.Params.Len(); i++ {
+			push(vars, methodSig.Params.At(i))
+		}
+	}
+	wrapperSig := NewSignature(nil, NewTuple(vars...), methodSig.Results, methodSig.Variadic)
+	w := &SSAFunction{
+		name:      fb.fn.name | "__mexpr" | ssaItoa(len(fb.fn.AnonFuncs)+1),
+		Signature: wrapperSig,
+		Pkg:       fb.fn.Pkg,
+		Prog:      fb.fn.Prog,
+		parent:    fb.fn,
+	}
+	fb.fn.AnonFuncs = mxutil.Ensure(fb.fn.AnonFuncs, 1)
+	push(fb.fn.AnonFuncs, w)
+	params := []SSAValue{:len(vars)}
+	for i := 0; i < len(vars); i++ {
+		p := &SSAParameter{name: vars[i].Name, typ: vars[i].Typ, parent: w}
+		w.Params = mxutil.Ensure(w.Params, 1)
+		push(w.Params, p)
+		params[i] = p
+	}
+	entry := NewSSABasicBlock(w, "entry")
+	var retType Type
+	if methodSig.Results != nil && methodSig.Results.Len() == 1 {
+		retType = methodSig.Results.At(0).Typ
+	} else if methodSig.Results != nil && methodSig.Results.Len() > 1 {
+		retType = methodSig.Results
+	}
+	call := &SSACall{Call: SSACallCommon{Value: fn, Args: params}}
+	call.typ = retType
+	call.name = "t1"
+	call.setBlock(entry)
+	entry.Instrs = mxutil.Ensure(entry.Instrs, 1)
+	push(entry.Instrs, call)
+	ret := &SSAReturn{}
+	if retType != nil {
+		ret.Results = []SSAValue{call}
+	}
+	ret.setBlock(entry)
+	entry.Instrs = mxutil.Ensure(entry.Instrs, 1)
+	push(entry.Instrs, ret)
+	mc := &SSAMakeClosure{Fn: w}
 	mc.typ = wrapperSig
 	mc.name = fb.nextName()
 	fb.emit(mc)
