@@ -168,16 +168,30 @@ What is still broken, measured with the compiled packages rather than guessed:
     The field counts are the tell: the header and the adler go through zlib's own
     `z.w` (its count ends at 6) while the compressed block goes through flate's
     `dictWriter`, so one of the two holds a copy rather than the same pointer.
-    The likely mechanism is the codec's stack rule: `bufio.NewWriterSize` returns
-    a pointer to a composite literal, and if that allocation stays in the
-    caller's frame (an alloca the escape marking missed) instead of the arena,
-    then `codecIsStableAddr` reports it unstable - "stack memory is never stable"
-    - and every return that carries it terminates in a COPY. That is a compiler
-    bug (escape marking for a returned composite literal, inlined or not), and
-    the check that proves it is whether `e.bw` addresses the arena or the frame
-    at the moment `zlib.NewWriterLevelDict` returns.
+    MECHANISM, confirmed by the byte at offset 2: the two objects share one
+    buffer array but have separate length counters. png's `e.bw` wrote the
+    two-byte header (its count 2) and, at close, the four-byte adler (its count
+    6); flate wrote its 50 compressed bytes through a SECOND copy of the same
+    bufio.Writer struct (its count 52) into the SAME array, so png's flush of
+    buf[0:6] emits the header followed by the adler written OVER the first four
+    compressed bytes. The IDAT payload is literally `78 9c` + the adler.
+    The copies are the codec's stack rule in action: `bufio.NewWriterSize`
+    returns a pointer to a composite literal, `codecIsStableAddr` reports stack
+    memory unstable ("frames are reclaimed on return but are not arenas"), so a
+    return-value relocation that reaches that pointer terminates in a copy. Each
+    boundary - `zlib.NewWriterLevelDict` returning `*Writer`, then
+    `flate.NewWriterDict` returning `*Writer` - can add one. The fix is on the
+    compiler side: a composite literal whose address is RETURNED must be
+    arena-allocated (the escape marking `markAddrEscaping` already implements for
+    `&`), so that identity survives the relocation. The check that proves it:
+    print the bufio's address and its `n` on both sides of
+    `zlib.NewWriterLevelDict` and `flate.NewWriterDict`.
   * `flate` level 1 (BestSpeed, `deflatefast`) crashes with SIGSEGV. Levels
     -1/0/6/9 are fine.
+  * `image/gif` is FIXED (`6f6d0532`): its encoder only asked for the palette as
+    a `*image.Palette` and wrote the global table. An 8x6 paletted image encodes
+    to 51 bytes, decodes back to the same indices, and Go 1.25's decoder sees
+    every index; the LZW stream is not byte-identical to Go's, which is legal.
   * A cheaper lead for both: boxing a VALUE whose methods have pointer receivers
     into an interface COMPILES and mutates a copy (`takeIface(*bw)` where bw is a
     *bufio.Writer leaves `bw.Buffered()` at 0). That should be a compile error,
