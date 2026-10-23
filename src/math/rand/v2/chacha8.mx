@@ -17,22 +17,23 @@ type ChaCha8 struct {
 	state chacha8rand.State
 
 	// The last readLen bytes of readBuf are still to be consumed by Read.
-	readBuf [8]byte
+	readBuf []byte
 	readLen int32 // 0 <= readLen <= 8
 }
 
 // NewChaCha8 returns a new ChaCha8 seeded with the given seed.
-func NewChaCha8(seed [32]byte) (rchaCha8 *ChaCha8) {
+func NewChaCha8(seed []byte) (rchaCha8 *ChaCha8) {
 	c := &ChaCha8{}
+	c.readBuf = []byte{:8}
 	c.state.Init(seed)
 	return c
 }
 
 // Seed resets the ChaCha8 to behave the same way as NewChaCha8(seed).
-func (c *ChaCha8) Seed(seed [32]byte) {
+func (c *ChaCha8) Seed(seed []byte) {
 	c.state.Init(seed)
 	c.readLen = 0
-	c.readBuf = [8]byte{}
+	c.readBuf = []byte{:8}
 }
 
 // Uint64 returns a uniformly distributed random uint64 value.
@@ -64,8 +65,8 @@ func (c *ChaCha8) Read(p []byte) (n int32, err error) {
 		n += 8
 	}
 	if len(p) > 0 {
-		byteorder.LEPutUint64(c.readBuf[:], c.Uint64())
-		n += copy(p, c.readBuf[:])
+		byteorder.LEPutUint64(c.readBuf, c.Uint64())
+		n += copy(p, c.readBuf)
 		c.readLen = 8 - len(p)
 	}
 	return
@@ -73,6 +74,7 @@ func (c *ChaCha8) Read(p []byte) (n int32, err error) {
 
 // UnmarshalBinary implements the [encoding.BinaryUnmarshaler] interface.
 func (c *ChaCha8) UnmarshalBinary(data []byte) (rerr error) {
+	c.readBuf = []byte{:8}
 	data, ok := cutPrefix(data, []byte("readbuf:"))
 	if ok {
 		var buf []byte

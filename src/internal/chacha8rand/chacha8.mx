@@ -9,13 +9,6 @@ package chacha8rand
 
 import (
 	"internal/byteorder"
-	"internal/cpu"
-	"unsafe"
-)
-
-// Offsets into internal/cpu records for use in assembly.
-const (
-	offsetLOONG64HasLSX = unsafe.Offsetof(cpu.Loong64.HasLSX)
 )
 
 const (
@@ -26,7 +19,7 @@ const (
 )
 
 // block is the chacha8rand block function.
-func block(seed *[4]uint64, blocks *[32]uint64, counter uint32) {
+func block(seed []uint64, blocks []uint64, counter uint32) {
 	block_generic(seed, blocks, counter)
 }
 
@@ -36,8 +29,8 @@ func block(seed *[4]uint64, blocks *[32]uint64, counter uint32) {
 // may see the same random values, but the code will not
 // crash or cause out-of-bounds memory accesses.
 type State struct {
-	buf  [32]uint64
-	seed [4]uint64
+	buf  []uint64
+	seed []uint64
 	i    uint32
 	n    uint32
 	c    uint32
@@ -62,19 +55,23 @@ func (s *State) Next() (x uint64, ok bool) {
 }
 
 // Init seeds the State with the given seed value.
-func (s *State) Init(seed [32]byte) {
-	s.Init64([4]uint64{
-		byteorder.LEUint64(seed[0*8:]),
-		byteorder.LEUint64(seed[1*8:]),
-		byteorder.LEUint64(seed[2*8:]),
-		byteorder.LEUint64(seed[3*8:]),
-	})
+func (s *State) Init(seed []byte) {
+	words := []uint64{:4}
+	for k := 0; k < 4; k++ {
+		words[k] = byteorder.LEUint64(seed[k*8:])
+	}
+	s.Init64(words)
 }
 
 // Init64 seeds the state with the given seed value.
-func (s *State) Init64(seed [4]uint64) {
-	s.seed = seed
-	block(&s.seed, &s.buf, 0)
+func (s *State) Init64(seed []uint64) {
+	// The two buffers are the state's storage, sized once per seeding. Init64
+	// is the only place a State gets its storage: Next and Refill before it
+	// see len(buf) == 0 and n == 0, which is "no values yet", not an index.
+	s.seed = []uint64{:4}
+	s.buf = []uint64{:32}
+	copy(s.seed, seed)
+	block(s.seed, s.buf, 0)
 	s.c = 0
 	s.i = 0
 	s.n = chunk
@@ -99,7 +96,7 @@ func (s *State) Refill() {
 		s.seed[3] = s.buf[len(s.buf)-reseed+3]
 		s.c = 0
 	}
-	block(&s.seed, &s.buf, s.c)
+	block(s.seed, s.buf, s.c)
 	s.i = 0
 	s.n = uint32(len(s.buf))
 	if s.c == ctrMax-ctrInc {
@@ -112,7 +109,7 @@ func (s *State) Refill() {
 // have been erased from the memory of the state and cannot be
 // recovered.
 func (s *State) Reseed() {
-	var seed [4]uint64
+	seed := []uint64{:4}
 	for i := range seed {
 		for {
 			x, ok := s.Next()
@@ -159,11 +156,13 @@ func Unmarshal(s *State, data []byte) (err error) {
 	if used > (ctrMax/ctrInc)*chunk-reseed {
 		return &errUnmarshalChaCha8{}
 	}
+	s.seed = []uint64{:4}
+	s.buf = []uint64{:32}
 	for i := range s.seed {
 		s.seed[i] = byteorder.LEUint64(data[(2+i)*8:])
 	}
 	s.c = ctrInc * (uint32(used) / chunk)
-	block(&s.seed, &s.buf, s.c)
+	block(s.seed, s.buf, s.c)
 	s.i = uint32(used) % chunk
 	s.n = chunk
 	if s.c == ctrMax-ctrInc {

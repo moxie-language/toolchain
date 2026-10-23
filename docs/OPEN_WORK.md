@@ -144,7 +144,16 @@ the same probe under BOTH compilers:
                                  (the slicing-by-8 and arch paths), FNV-1/-1a
                                  32/64/128 including 128's 16-byte split, both
                                  compilers agreeing.
-    crypto/tls        (this)    SessionTicketKey and the ticketKey's aes/hmac
+    math              26ff6a09  every coefficient table, bits' de Bruijn/ntz/
+                                 pop/rev/len tables, both ziggurat table sets,
+                                 j0/j1's coefficient sets (pointer-to-array
+                                 became a slice value), big's pow5 and its two
+                                 stringer index tables. Verified against Go
+                                 1.25's math: 186 comparisons (18 functions on
+                                 nine magnitudes, bits at 8/32/64 bits, rand's
+                                 Int63/ExpFloat64/NormFloat64 from seed 1)
+                                 with an empty diff in BOTH compilers.
+    crypto/tls        b901f690  SessionTicketKey and the ticketKey's aes/hmac
                                  keys are slices, so are the Conn's 12-byte
                                  Finished buffers, the alert header, the
                                  halfConn's 8-byte sequence number and the
@@ -160,6 +169,17 @@ the same probe under BOTH compilers:
                                  randomised one starts with the DEPRECATED
                                  prefix), and the record-parameter path by
                                  net/http's compile in the sweep.
+
+
+**A compiler bug the math batch measured.** `return 1` from a function whose
+result is float64 returned 0 in stage4 while legacy returned 1: buildReturn
+checked assignability and boxed interfaces but never ran the numeric coercion
+coerceStored runs for an assignment, so the operand stayed an integer where the
+caller read a double. math.Tanh was the visible victim - its two saturated
+branches are the only ones returning a bare constant, so tanh(1) was right and
+tanh(100) was 0. `d12629d8` converts; the fixture is
+`tests/regressions/should_compile/untyped_const_return.mx`, and it covers the
+switch-case, named-result, negative-constant and float-literal spellings too.
 
 **The rule the hash batch produced.** A slice-valued package global may only be
 written from `init()`. Outside `init()` a global store is rejected in user code,
