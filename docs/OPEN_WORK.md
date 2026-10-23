@@ -137,7 +137,8 @@ The goal is that every fallible operation returns an error, that a panic is
 fatal and never caught, and that the only aborts left are declared ones. The
 baseline measured on this tree, so the delta is visible later:
 
-    1099  `panic(` sites in src/*.mx
+    1099  `panic(` sites in src/*.mx at the start of this queue (1064 now: the
+          math arch stubs are gone, see below)
        0  `recover(` sites in src (the 12 grep hits are legacy/'s Go parser and
           vendored x/tools, not Moxie code)
      215  `defer ` statements at line start in src (not 245)
@@ -155,6 +156,22 @@ Two of the three phases need no design work and land first: deleting
 are dead) and deleting `src/crypto/internal/boring` (no cgo, no path). The js
 boundary, the reader/writer contract and the restriction rules follow in that
 order, each its own commit.
+
+**Landed: `ccfab056`, the math stubs.** 35 dead `if haveArchX` guards across 26
+files and the eight files that held nothing but a false constant and a
+`panic("not implemented")` are gone; the exported functions call their pure
+bodies. The 186-comparison value set against Go's math is still an empty diff in
+both compilers, and the panic count went 1099 -> 1064.
+
+**Next: `src/crypto/internal/boring`.** 93 `boring.` sites across
+`crypto/aes`, `crypto/ecdh`, `crypto/ecdsa`, `crypto/hmac`, `crypto/rsa` and
+`crypto/rand`, plus the public `crypto/boring` wrapper: the `boring.Enabled`
+branches are all false, the `boringPublicKey`/`boringPrivateKey` pairs in
+ecdsa/rsa are the notboring halves, `ecdh.PublicKey.boring`/`PrivateKey.boring`
+fields go, and the whole `src/crypto/internal/boring` tree (including
+`bbig`, `bcache`, `sig` and the C headers) is deleted. No functional gate covers
+RSA/ECDSA beyond compilation, so this lands on the 1b sweep plus a key
+generate/sign/verify probe.
 
 ### The image cluster cannot build at all, and why
 
