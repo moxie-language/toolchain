@@ -88,12 +88,12 @@ step concrete:
    packages and 2 (stage2 == stage3) were green on that batch; phase 6's only
    red unit was `regexp:table`, whose fixture used `copy(nb[:len(b)], b)` - the
    rule working as intended, fixed in `013facfb` and phase 6 then passed 2/2.
-   What is left: The rule is decided: Go
-   had two forms because one was stack and one was heap; Moxie has only arenas,
-   so a slice is the type and `resize`/`push`/`pop` manage its length. A write
-   through a subslice is already rejected in both compilers (`ab7a7e82`), which
-   is the same insight: subslicing is always a copy, so the fix is always
-   resize/push. The migration is the work. Measured on this tree: **1175 array
+   The rule itself is settled: Go had two forms because one was stack and one
+   was heap; Moxie has only arenas, so a slice is the type and `resize`/`push`/
+   `pop` manage its length. A write through a subslice is rejected in both
+   compilers (`ab7a7e82`), and so is `copy` into one (`7f416af4`) - the same
+   insight: subslicing is always a copy, so the fix is always resize/push.
+   Measured on this tree: **1175 array
    type occurrences in 285 files**, by top-level package:
    `crypto 420`, `vendor 219`, `syscall 166`, `internal 137`, `math 94`,
    `net 75`, `runtime 53`, `image 31`, `compress`, `encoding`, `debug`, `hash`,
