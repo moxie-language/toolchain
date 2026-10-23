@@ -6,7 +6,6 @@ package rsa
 
 import (
 	"crypto"
-	"crypto/internal/boring"
 	"crypto/internal/fips140/rsa"
 	"crypto/internal/fips140hash"
 	"crypto/internal/fips140only"
@@ -70,14 +69,6 @@ func SignPSS(random io.Reader, priv *PrivateKey, h crypto.Hash, digest []byte, o
 		h = opts.Hash
 	}
 
-	if boring.Enabled && random == boring.RandReader {
-		bkey, err1 := boringPrivateKey(priv)
-		if err1 != nil {
-			return nil, err1
-		}
-		return boring.SignRSAPSS(bkey, h, digest, opts.saltLength())
-	}
-	boring.UnreachableExceptTests()
 
 	dh := fips140hash.Unwrap(crypto.HashNew(h))
 
@@ -133,16 +124,6 @@ func VerifyPSS(pub *PublicKey, h crypto.Hash, digest []byte, sig []byte, opts *P
 		return err5
 	}
 
-	if boring.Enabled {
-		bkey, err2 := boringPublicKey(pub)
-		if err2 != nil {
-			return err2
-		}
-		if err1 := boring.VerifyRSAPSS(bkey, h, digest, sig, opts.saltLength()); err1 != nil {
-			return ErrVerification
-		}
-		return nil
-	}
 
 	dh := fips140hash.Unwrap(crypto.HashNew(h))
 
@@ -197,19 +178,6 @@ func EncryptOAEP(h hash.Hash, random io.Reader, pub *PublicKey, msg []byte, labe
 
 	defer h.Reset()
 
-	if boring.Enabled && random == boring.RandReader {
-		h.Reset()
-		k1 := pub.Size()
-		if len(msg) > k1-2*h.Size()-2 {
-			return nil, ErrMessageTooLong
-		}
-		bkey, err1 := boringPublicKey(pub)
-		if err1 != nil {
-			return nil, err1
-		}
-		return boring.EncryptRSAOAEP(h, h, bkey, msg, label)
-	}
-	boring.UnreachableExceptTests()
 
 	h = fips140hash.Unwrap(h)
 
@@ -250,22 +218,6 @@ func decryptOAEP(h, mgfHash hash.Hash, priv *PrivateKey, ciphertext []byte, labe
 		return nil, err5
 	}
 
-	if boring.Enabled {
-		k1 := priv.Size()
-		if len(ciphertext) > k1 ||
-			k1 < h.Size()*2+2 {
-			return nil, ErrDecryption
-		}
-		bkey, err2 := boringPrivateKey(priv)
-		if err2 != nil {
-			return nil, err2
-		}
-		out, err1 := boring.DecryptRSAOAEP(h, mgfHash, bkey, ciphertext, label)
-		if err1 != nil {
-			return nil, ErrDecryption
-		}
-		return out, nil
-	}
 
 	h = fips140hash.Unwrap(h)
 	mgfHash = fips140hash.Unwrap(mgfHash)
@@ -312,13 +264,6 @@ func SignPKCS1v15(random io.Reader, priv *PrivateKey, h crypto.Hash, hashed []by
 		return nil, err4
 	}
 
-	if boring.Enabled {
-		bkey, err1 := boringPrivateKey(priv)
-		if err1 != nil {
-			return nil, err1
-		}
-		return boring.SignRSAPKCS1v15(bkey, h, hashed)
-	}
 
 	if err3 := checkFIPS140OnlyPrivateKey(priv); err3 != nil {
 		return nil, err3
@@ -355,16 +300,6 @@ func VerifyPKCS1v15(pub *PublicKey, h crypto.Hash, hashed []byte, sig []byte) (d
 		return err5
 	}
 
-	if boring.Enabled {
-		bkey, err2 := boringPublicKey(pub)
-		if err2 != nil {
-			return err2
-		}
-		if err1 := boring.VerifyRSAPKCS1v15(bkey, h, hashed, sig); err1 != nil {
-			return ErrVerification
-		}
-		return nil
-	}
 
 	if err4 := checkFIPS140OnlyPublicKey(pub); err4 != nil {
 		return err4

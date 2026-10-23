@@ -5,7 +5,6 @@
 package rsa
 
 import (
-	"crypto/internal/boring"
 	"crypto/internal/fips140/rsa"
 	"crypto/internal/fips140only"
 	"crypto/internal/randutil"
@@ -58,15 +57,6 @@ func EncryptPKCS1v15(random io.Reader, pub *PublicKey, msg []byte) (b []byte, de
 		return nil, ErrMessageTooLong
 	}
 
-	if boring.Enabled && random == boring.RandReader {
-		bkey, err1 := boringPublicKey(pub)
-		if err1 != nil {
-			return nil, err1
-		}
-		return boring.EncryptRSAPKCS1(bkey, msg)
-	}
-	boring.UnreachableExceptTests()
-
 	// EM = 0x00 || 0x02 || PS || 0x00 || M
 	em := []byte{:k}
 	em[1] = 2
@@ -77,15 +67,6 @@ func EncryptPKCS1v15(random io.Reader, pub *PublicKey, msg []byte) (b []byte, de
 	}
 	em[len(em)-len(msg)-1] = 0
 	copy(mm, msg)
-
-	if boring.Enabled {
-		var bkey *boring.PublicKeyRSA
-		bkey, err3 = boringPublicKey(pub)
-		if err3 != nil {
-			return nil, err3
-		}
-		return boring.EncryptRSANoPadding(bkey, em)
-	}
 
 	fk, err2 := fipsPublicKey(pub)
 	if err2 != nil {
@@ -107,17 +88,6 @@ func DecryptPKCS1v15(random io.Reader, priv *PrivateKey, ciphertext []byte) (b [
 		return nil, err4
 	}
 
-	if boring.Enabled {
-		bkey, err2 := boringPrivateKey(priv)
-		if err2 != nil {
-			return nil, err2
-		}
-		out1, err1 := boring.DecryptRSAPKCS1(bkey, ciphertext)
-		if err1 != nil {
-			return nil, ErrDecryption
-		}
-		return out1, nil
-	}
 
 	valid, out2, index, err3 := decryptPKCS1v15(priv, ciphertext)
 	if err3 != nil {
@@ -206,17 +176,7 @@ func decryptPKCS1v15(priv *PrivateKey, ciphertext []byte) (valid int32, em []byt
 		return 0, nil, 0, err
 	}
 
-	if boring.Enabled {
-		var bkey *boring.PrivateKeyRSA
-		bkey, err = boringPrivateKey(priv)
-		if err != nil {
-			return 0, nil, 0, err
-		}
-		em, err = boring.DecryptRSANoPadding(bkey, ciphertext)
-		if err != nil {
-			return 0, nil, 0, ErrDecryption
-		}
-	} else {
+	{
 		fk, err1 := fipsPrivateKey(priv)
 		if err1 != nil {
 			return 0, nil, 0, err1
