@@ -545,31 +545,21 @@ func findModFile(dir string) string {
 	return filepath.Join(dir, "go.mod")
 }
 
-// readModInfo reads the module path and directory from moxie.mod (or go.mod).
+// readModInfo returns the module path and directory a package belongs to.
+//
+// There is no module file to read: Moxie removed modules, so the repository the
+// directory sits in IS the module - the toolchain tree inside MOXIEROOT, a
+// checkout under MOXIEPATH (its first two path components), and nothing at all
+// outside both, which leaves the package subject to the language restrictions as
+// user code should be. A `moxie.mod` or `go.mod` still sitting in a sibling repo
+// is ignored rather than preferred; version pins live in MANIFEST, which the
+// build already reads. The goVersion is therefore always empty and the checker
+// uses its default language version.
 func readModInfo(startDir string) (modPath, modDir, goVersion string, err error) {
-	dir := startDir
-	for {
-		modFile := findModFile(dir)
-		data, err := os.ReadFile(modFile)
-		if err == nil {
-			modPath, goVersion = parseGoMod(string(data))
-			return modPath, dir, goVersion, nil
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// No module file anywhere up the tree. The repository the
-			// directory sits in is the module: the toolchain tree inside
-			// MOXIEROOT, a checkout under MOXIEPATH (its first two path
-			// components), and nothing at all outside both - which leaves the
-			// package subject to the language restrictions, as user code
-			// should be.
-			if mp, md := moduleFromRoots(startDir); mp != "" {
-				return mp, md, "", nil
-			}
-			return "", startDir, "", nil
-		}
-		dir = parent
+	if mp, md := moduleFromRoots(startDir); mp != "" {
+		return mp, md, "", nil
 	}
+	return "", startDir, "", nil
 }
 
 // moduleFromRoots derives a module path and directory from the layout rules
@@ -754,24 +744,6 @@ func (r *resolver) layoutRepoDir(importPath string) (string, error) {
 		return dir, nil
 	}
 	return "", nil
-}
-
-// parseGoMod extracts the module path, go version, and moxie version from
-// go.mod or moxie.mod content.
-func parseGoMod(content string) (modPath, goVersion string) {
-	for _, line := range strings.Split(content, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "module ") {
-			modPath = strings.TrimSpace(strings.TrimPrefix(line, "module"))
-		}
-		if strings.HasPrefix(line, "go ") {
-			goVersion = strings.TrimSpace(strings.TrimPrefix(line, "go"))
-		}
-		if strings.HasPrefix(line, "moxie ") {
-			goVersion = strings.TrimSpace(strings.TrimPrefix(line, "moxie"))
-		}
-	}
-	return
 }
 
 // ParseMoxieModVersion reads a moxie.mod file and returns the moxie version
