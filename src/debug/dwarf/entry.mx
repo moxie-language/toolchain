@@ -563,6 +563,7 @@ func (b *buf) entry(cu *Entry, u *unit) (_r0 *Entry) {
 	var fm format
 	var val fieldValue
 	var aoff uint64
+	var addr uint64
 	var addrBase int64
 	var err error
 	var fvers int32
@@ -610,13 +611,17 @@ func (b *buf) entry(cu *Entry, u *unit) (_r0 *Entry) {
 			}
 
 			addrBase = int64(u.addrBase())
-			val, err = b.dwarf.debugAddr(b.format, uint64(addrBase), aoff)
+			addr, err = b.dwarf.debugAddr(b.format, uint64(addrBase), aoff)
 			if err != nil {
 				if b.err == nil {
 					b.err = err
 				}
 				return nil
 			}
+			// debugAddr resolves the address to a plain uint64, and a
+			// fieldValue is only satisfied by the wrapper types (valUint64 and
+			// friends), so the value is wrapped like every other integer form.
+			val = &valUint64(addr)
 
 		// block
 		case formDwarfBlock1:
@@ -998,7 +1003,7 @@ func (r *Reader) SeekPC(pc uint64) (_r0 *Entry, _r1 error) {
 	var u *unit
 	var e *Entry
 	var err error
-	var ranges [][2]uint64
+	var ranges [][]uint64
 	for i := 0; i < len(r.d.unit); i++ {
 		if uidx >= len(r.d.unit) {
 			uidx = 0
@@ -1034,8 +1039,8 @@ func (r *Reader) SeekPC(pc uint64) (_r0 *Entry, _r1 error) {
 // Ranges returns the PC ranges covered by e, a slice of [low,high) pairs.
 // Only some entry types, such as [TagCompileUnit] or [TagSubprogram], have PC
 // ranges; for others, this will return nil with no error.
-func (d *Data) Ranges(e *Entry) (_r0 [][2]uint64, _r1 error) {
-	var ret [][2]uint64
+func (d *Data) Ranges(e *Entry) (_r0 [][]uint64, _r1 error) {
+	var ret [][]uint64
 
 	low, lowOK := e.Val(AttrLowpc).(*valUint64)
 	var lowv uint64
@@ -1065,7 +1070,7 @@ func (d *Data) Ranges(e *Entry) (_r0 [][2]uint64, _r1 error) {
 
 	if lowOK && highOK {
 		ret = mxutil.Ensure(ret, 1)
-		ret = push(ret, [2]uint64{lowv, high})
+		ret = push(ret, []uint64{lowv, high})
 	}
 
 	var u *unit
@@ -1151,7 +1156,7 @@ func (d *Data) baseAddressForEntry(e *Entry) (_r0 *Entry, _r1 uint64, _r2 error)
 	return cu, 0, nil
 }
 
-func (d *Data) dwarf2Ranges(u *unit, base uint64, ranges int64, ret [][2]uint64) (_r0 [][2]uint64, _r1 error) {
+func (d *Data) dwarf2Ranges(u *unit, base uint64, ranges int64, ret [][]uint64) (_r0 [][]uint64, _r1 error) {
 	if ranges < 0 || ranges > int64(len(d.ranges)) {
 		return nil, fmt.Errorf("invalid range offset %d (max %d)", ranges, len(d.ranges))
 	}
@@ -1168,7 +1173,7 @@ func (d *Data) dwarf2Ranges(u *unit, base uint64, ranges int64, ret [][2]uint64)
 			base = high
 		} else {
 			ret = mxutil.Ensure(ret, 1)
-			ret = push(ret, [2]uint64{base + low, base + high})
+			ret = push(ret, []uint64{base + low, base + high})
 		}
 	}
 
@@ -1177,7 +1182,7 @@ func (d *Data) dwarf2Ranges(u *unit, base uint64, ranges int64, ret [][2]uint64)
 
 // dwarf5Ranges interprets a debug_rnglists sequence, see DWARFv5 section
 // 2.17.3 (page 53).
-func (d *Data) dwarf5Ranges(u *unit, cu *Entry, base uint64, ranges int64, ret [][2]uint64) (_r0 [][2]uint64, _r1 error) {
+func (d *Data) dwarf5Ranges(u *unit, cu *Entry, base uint64, ranges int64, ret [][]uint64) (_r0 [][]uint64, _r1 error) {
 	if ranges < 0 || ranges > int64(len(d.rngLists)) {
 		return nil, fmt.Errorf("invalid rnglist offset %d (max %d)", ranges, len(d.ranges))
 	}
@@ -1220,7 +1225,7 @@ func (d *Data) dwarf5Ranges(u *unit, cu *Entry, base uint64, ranges int64, ret [
 				return nil, err
 			}
 			ret = mxutil.Ensure(ret, 1)
-			ret = push(ret, [2]uint64{start, end})
+			ret = push(ret, []uint64{start, end})
 
 		case rleStartxLength:
 			startIdx := rb.uintVar()
@@ -1230,13 +1235,13 @@ func (d *Data) dwarf5Ranges(u *unit, cu *Entry, base uint64, ranges int64, ret [
 				return nil, err
 			}
 			ret = mxutil.Ensure(ret, 1)
-			ret = push(ret, [2]uint64{start, start + uint64(ln)})
+			ret = push(ret, []uint64{start, start + uint64(ln)})
 
 		case rleOffsetPair:
 			off1 := rb.uintVar()
 			off2 := rb.uintVar()
 			ret = mxutil.Ensure(ret, 1)
-			ret = push(ret, [2]uint64{base + uint64(off1), base + uint64(off2)})
+			ret = push(ret, []uint64{base + uint64(off1), base + uint64(off2)})
 
 		case rleBaseAddress:
 			base = rb.addr()
@@ -1245,13 +1250,13 @@ func (d *Data) dwarf5Ranges(u *unit, cu *Entry, base uint64, ranges int64, ret [
 			start := rb.addr()
 			end := rb.addr()
 			ret = mxutil.Ensure(ret, 1)
-			ret = push(ret, [2]uint64{start, end})
+			ret = push(ret, []uint64{start, end})
 
 		case rleStartLength:
 			start := rb.addr()
 			ln := rb.uintVar()
 			ret = mxutil.Ensure(ret, 1)
-			ret = push(ret, [2]uint64{start, start + uint64(ln)})
+			ret = push(ret, []uint64{start, start + uint64(ln)})
 		}
 	}
 }
