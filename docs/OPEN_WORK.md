@@ -14,11 +14,12 @@ committed fixture behind it. The historical "Gate state on this tree" sections
 are snapshots of earlier commits, not the current numbers; this block is.
 
 **EVERY GATE IS GREEN on this tree**, one phase at a time (`-j 1`), with the
-driver on LLVM 23 and legacy on 22. The last full sweep ran at `d30ab22d` (the
-interface-argument check, the last stage4 change):
+driver on LLVM 23 and legacy on 22. The last full sweep ran at `65294d1c` (the
+interface-check closure: unexported cross-package methods, arrays judged):
 
     command: GOROOT=/opt/go1.25.3 bash tests/unitrun.sh -j 1 --phases P --force
-    phase 0a/0b          145/145 + cleanliness                           PASS
+    phase 0a             95/95                                          PASS
+    phase 0b             53/53 (50 fixtures + the two cross-package ones) PASS
     phase 1b             45 stdlib packages, 1/1 units                   PASS
     phase 1c             4/4 (net/http, path/filepath, syscall/js, jsbridge) PASS
     phase 2 (selfhost)   6/6 internal, selfhost:fixpoint stage2 == stage3 PASS
@@ -27,17 +28,17 @@ interface-argument check, the last stage4 change):
     phase 5 (wasm)       90/90 (89 fixtures + the emitted bundle)        PASS
     phase 6              65 internal units, both compilers               PASS
     phase 8              17/17 units in BOTH dispatch modes              PASS
-                         spawn-cost 16 spawns / 2421 us, no-accumulation
-                         16112->16128 kB inline (+16), 5848->5848 kB spawned
+                         spawn-cost 16 spawns / 2506 us, no-accumulation
+                         16100->16116 kB inline (+16), 5852->5852 kB spawned
                          (+0), 2048kB threshold unwidened
-    total 246, passed 246, failed 0, skipped 0
+    total 249, passed 249, failed 0, skipped 0
 
-One bootstrap fact worth keeping: a stage4 binary built BY the legacy compiler
-aborts with "panic: runtime error ... arena: region table full" on the
-45-package phase-1b sweep, while a stage4-built generation of the same source
-does not. Two generations (legacy -> stage4 -> stage4) is the working shape;
-this is a concrete example of why the protocol calls a legacy-built stage4 a
-bootstrap and not an oracle.
+The sweep itself reported 246 passed and 2 skipped, and the two were the new
+cross-package fixtures: the restrictions runner appended ".mx" to every unit
+name and read the expected header from the fixture PATH, which is a directory for
+that shape, so both were SKIPPED - a skip is not a pass. `b5766761` fixes the
+dispatch and the header read; 0b then re-ran 53/53 with nothing skipped, which is
+the 53 in the table.
 
 Every phase also runs `tree-cleanliness`, and it is green: the sweep left no
 tracked file modified, and no phase skipped a unit (a skipped unit is not a
