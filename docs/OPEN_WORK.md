@@ -80,7 +80,15 @@ Everything else recorded in this file is closed or a historical snapshot. What
 remains, in the order it should be taken, with the measurements that make each
 step concrete:
 
-1. **Arrays are banned, and the tree still has them.** The rule is decided: Go
+1. **Arrays are banned, and most of the tree still has them.** The first batch
+   is in (`86da77f2`): fmt's directive buffer, base64's decode quantum, base58's
+   checksum, profile/proto's varint scratch, zstd's read scratch and codec.mx's
+   26 integer scratch buffers are slices now, with the fill idioms rewritten
+   (`copy(buf, src)`, a local sized per read). 0a 95/95, 0b 54/54, 1b 45
+   packages and 2 (stage2 == stage3) were green on that batch; phase 6's only
+   red unit was `regexp:table`, whose fixture used `copy(nb[:len(b)], b)` - the
+   rule working as intended, fixed in `013facfb` and phase 6 then passed 2/2.
+   What is left: The rule is decided: Go
    had two forms because one was stack and one was heap; Moxie has only arenas,
    so a slice is the type and `resize`/`push`/`pop` manage its length. A write
    through a subslice is already rejected in both compilers (`ab7a7e82`), which
