@@ -383,7 +383,7 @@ func (d *decoder) readImageDescriptor(keepAllFrames bool) (out error) {
 	}
 	useLocalColorTable := d.imageFields&fColorTable != 0
 	if useLocalColorTable {
-		m.Palette, err = d.readColorTable(d.imageFields)
+		m.Palette.Element, err = d.readColorTable(d.imageFields)
 		if err != nil {
 			return err
 		}
@@ -391,26 +391,26 @@ func (d *decoder) readImageDescriptor(keepAllFrames bool) (out error) {
 		if d.globalColorTable == nil {
 			return errors.New("gif: no color table")
 		}
-		m.Palette = d.globalColorTable
+		m.Palette.Element = d.globalColorTable
 	}
 	if d.hasTransparentIndex {
 		if !useLocalColorTable {
 			// Clone the global color table.
-			m.Palette = push([]color.Color(nil), d.globalColorTable...)
+			m.Palette.Element = push([]color.Color(nil), d.globalColorTable...)
 		}
-		if ti := int32(d.transparentIndex); ti < len(m.Palette) {
-			m.Palette[ti] = &color.RGBA{}
+		if ti := int32(d.transparentIndex); ti < len(m.Palette.Element) {
+			m.Palette.Element[ti] = &color.RGBA{}
 		} else {
 			// The transparentIndex is out of range, which is an error
 			// according to the spec, but Firefox and Google Chrome
 			// seem OK with this, so we enlarge the palette with
 			// transparent colors. See golang.org/issue/15059.
 			p := []color.Color{:ti+1}
-			copy(p, m.Palette)
-			for i := len(m.Palette); i < len(p); i++ {
+			copy(p, m.Palette.Element)
+			for i := len(m.Palette.Element); i < len(p); i++ {
 				p[i] = &color.RGBA{}
 			}
-			m.Palette = p
+			m.Palette.Element = p
 		}
 	}
 	litWidth, err := readByte(d.r)
@@ -457,9 +457,9 @@ func (d *decoder) readImageDescriptor(keepAllFrames bool) (out error) {
 	}
 
 	// Check that the color indexes are inside the palette.
-	if len(m.Palette) < 256 {
+	if len(m.Palette.Element) < 256 {
 		for _, pixel := range m.Pix {
-			if int32(pixel) >= len(m.Palette) {
+			if int32(pixel) >= len(m.Palette.Element) {
 				return errBadPixel
 			}
 		}
@@ -591,7 +591,7 @@ type GIF struct {
 	// specified).
 	Disposal []byte
 	// Config is the global color table (palette), width and height. A nil or
-	// empty-[]color.Color Config.ColorModel means that each frame has its own
+	// empty-element Config.ColorModel means that each frame has its own
 	// color table and there is no global color table. Each frame's bounds must
 	// be within the rectangle defined by the two points (0, 0) and
 	// (Config.Width, Config.Height).
@@ -618,7 +618,7 @@ func DecodeAll(r io.Reader) (out *GIF, derr error) {
 		Delay:     d.delay,
 		Disposal:  d.disposal,
 		Config: image.Config{
-			ColorModel: d.globalColorTable,
+			ColorModel: &image.Palette{Element: d.globalColorTable},
 			Width:      d.width,
 			Height:     d.height,
 		},
@@ -635,7 +635,7 @@ func DecodeConfig(r io.Reader) (cfg image.Config, derr error) {
 		return image.Config{}, err
 	}
 	return image.Config{
-		ColorModel: d.globalColorTable,
+		ColorModel: &image.Palette{Element: d.globalColorTable},
 		Width:      d.width,
 		Height:     d.height,
 	}, nil

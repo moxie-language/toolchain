@@ -235,7 +235,7 @@ func (e *encoder) writeImageBlock(pm *image.Paletted, delay int32, disposal byte
 		return
 	}
 
-	if len(pm.Palette) == 0 {
+	if len(pm.Palette.Element) == 0 {
 		e.err = errors.New("gif: cannot encode image block with empty palette")
 		return
 	}
@@ -251,7 +251,7 @@ func (e *encoder) writeImageBlock(pm *image.Paletted, delay int32, disposal byte
 	}
 
 	transparentIndex := -1
-	for i, c := range pm.Palette {
+	for i, c := range pm.Palette.Element {
 		if c == nil {
 			e.err = errors.New("gif: cannot encode color table with nil entries")
 			return
@@ -293,11 +293,11 @@ func (e *encoder) writeImageBlock(pm *image.Paletted, delay int32, disposal byte
 	// global palette, we can check a couple things. First, do they actually
 	// point to the same []color.Color? If so, they are equal so long as the
 	// frame's palette is not longer than the global palette...
-	paddedSize := log2(len(pm.Palette)) // Size of Local Color Table: 2^(1+n).
-	if gp, ok := e.g.Config.ColorModel.([]color.Color); ok && len(pm.Palette) <= len(gp) && &gp[0] == &pm.Palette[0] {
+	paddedSize := log2(len(pm.Palette.Element)) // Size of Local Color Table: 2^(1+n).
+	if gp, ok := e.g.Config.ColorModel.(*image.Palette); ok && len(pm.Palette.Element) <= len(gp.Element) && &gp.Element[0] == &pm.Palette.Element[0] {
 		e.writeByte(0) // Use the global color table.
 	} else {
-		ct, err := encodeColorTable(e.localColorTable[:], pm.Palette, paddedSize)
+		ct, err := encodeColorTable(e.localColorTable[:], pm.Palette.Element, paddedSize)
 		if err != nil {
 			if e.err == nil {
 				e.err = err
@@ -307,7 +307,7 @@ func (e *encoder) writeImageBlock(pm *image.Paletted, delay int32, disposal byte
 		// This frame's palette is not the very same slice as the global
 		// palette, but it might be a copy, possibly with one value turned into
 		// transparency by DecodeAll.
-		if ct <= e.globalCT && e.colorTablesMatch(len(pm.Palette), transparentIndex) {
+		if ct <= e.globalCT && e.colorTablesMatch(len(pm.Palette.Element), transparentIndex) {
 			e.writeByte(0) // Use the global color table.
 		} else {
 			// Use a local color table.
@@ -439,14 +439,14 @@ func Encode(w io.Writer, m image.Image, o *Options) (out error) {
 			}
 		}
 	}
-	if pm == nil || len(pm.Palette) > opts.NumColors {
+	if pm == nil || len(pm.Palette.Element) > opts.NumColors {
 		// Set pm to be a palettedized copy of m, including its bounds, which
 		// might not start at (0, 0).
 		//
 		// TODO: Pick a better sub-sample of the Plan 9 palette.
 		pm = image.NewPaletted(b, palette.Plan9()[:opts.NumColors])
 		if opts.Quantizer != nil {
-			pm.Palette = opts.Quantizer.Quantize([]color.Color{:0:opts.NumColors}, m)
+			pm.Palette.Element = opts.Quantizer.Quantize([]color.Color{:0:opts.NumColors}, m)
 		}
 		opts.Drawer.Draw(pm, b, m, b.Min)
 	}
@@ -464,7 +464,7 @@ func Encode(w io.Writer, m image.Image, o *Options) (out error) {
 		Image: []*image.Paletted{pm},
 		Delay: []int32{0},
 		Config: image.Config{
-			ColorModel: pm.Palette,
+			ColorModel: &pm.Palette,
 			Width:      b.Dx(),
 			Height:     b.Dy(),
 		},

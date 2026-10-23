@@ -272,7 +272,7 @@ func (d *decoder) parsePLTE(length uint32) (out error) {
 			// ImageMagick 6.5.7 returns an error.
 			d.palette[i] = &color.RGBA{0x00, 0x00, 0x00, 0xff}
 		}
-		d.palette = d.palette[:np]
+		resize(d.palette, np)
 	case cbTC8, cbTCA8, cbTC16, cbTCA16:
 		// As per the PNG spec, a PLTE chunk is optional (and for practical purposes,
 		// ignorable) for the ctTrueColor and ctTrueColorAlpha color types (section 4.1.2).
@@ -329,7 +329,7 @@ func (d *decoder) parsetRNS(length uint32) (out error) {
 		d.crc.Write(d.tmp[:n])
 
 		if len(d.palette) < n {
-			d.palette = d.palette[:n]
+			resize(d.palette, n)
 		}
 		// Declared once, outside the loop: a declaration in a loop in a
 		// self-mutating method is rejected, and the scratch would otherwise be
@@ -704,8 +704,8 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 				b := cdat[x/8]
 				for x2 := 0; x2 < 8 && x+x2 < width; x2++ {
 					idx := b >> 7
-					if len(paletted.Palette) <= int32(idx) {
-						paletted.Palette = paletted.Palette[:int32(idx)+1]
+					if len(paletted.Palette.Element) <= int32(idx) {
+						resize(paletted.Palette.Element, int32(idx)+1)
 					}
 					paletted.SetColorIndex(x+x2, y, idx)
 					b <<= 1
@@ -716,8 +716,8 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 				b := cdat[x/4]
 				for x2 := 0; x2 < 4 && x+x2 < width; x2++ {
 					idx := b >> 6
-					if len(paletted.Palette) <= int32(idx) {
-						paletted.Palette = paletted.Palette[:int32(idx)+1]
+					if len(paletted.Palette.Element) <= int32(idx) {
+						resize(paletted.Palette.Element, int32(idx)+1)
 					}
 					paletted.SetColorIndex(x+x2, y, idx)
 					b <<= 2
@@ -728,18 +728,18 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 				b := cdat[x/2]
 				for x2 := 0; x2 < 2 && x+x2 < width; x2++ {
 					idx := b >> 4
-					if len(paletted.Palette) <= int32(idx) {
-						paletted.Palette = paletted.Palette[:int32(idx)+1]
+					if len(paletted.Palette.Element) <= int32(idx) {
+						resize(paletted.Palette.Element, int32(idx)+1)
 					}
 					paletted.SetColorIndex(x+x2, y, idx)
 					b <<= 4
 				}
 			}
 		case cbP8:
-			if len(paletted.Palette) != 256 {
+			if len(paletted.Palette.Element) != 256 {
 				for x := 0; x < width; x++ {
-					if len(paletted.Palette) <= int32(cdat[x]) {
-						paletted.Palette = paletted.Palette[:int32(cdat[x])+1]
+					if len(paletted.Palette.Element) <= int32(cdat[x]) {
+						resize(paletted.Palette.Element, int32(cdat[x])+1)
 					}
 				}
 			}
@@ -852,12 +852,12 @@ func (d *decoder) mergePassInto(dst image.Image, src image.Image, pass int32) {
 		srcPix = source.Pix
 		dstPix, stride, rect = target.Pix, target.Stride, target.Rect
 		bytesPerPixel = 1
-		if len(target.Palette) < len(source.Palette) {
+		if len(target.Palette.Element) < len(source.Palette.Element) {
 			// readImagePass can return a paletted image whose implicit palette
 			// length (one more than the maximum Pix value) is larger than the
 			// explicit palette length (what's in the PLTE chunk). Make the
 			// same adjustment here.
-			target.Palette = source.Palette
+			target.Palette.Element = source.Palette.Element
 		}
 	case *image.RGBA:
 		srcPix = src.(*image.RGBA).Pix
@@ -1067,7 +1067,7 @@ func DecodeConfig(r io.Reader) (cfg image.Config, derr error) {
 	case cbTC8:
 		cm = color.RGBAModel()
 	case cbP1, cbP2, cbP4, cbP8:
-		cm = d.palette
+		cm = &image.Palette{Element: d.palette}
 	case cbTCA8:
 		cm = color.NRGBAModel()
 	case cbG16:
