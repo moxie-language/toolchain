@@ -1965,6 +1965,20 @@ What stays an array, and why:
     `copy(cksum[:], h2[:4])` then `return` works because the array slice is a
     view.
 
+### crypto/elliptic: interface dispatch has no arm for Params
+
+`ecdsa.GenerateKey(elliptic.P256(), rand.Reader())` panics with
+
+    interface dispatch: no impl for Params (6 impl(s), none matches)
+
+Measured on this tree, and the same panic happens with the file's array
+conversion reverted, so it predates it. Six implementations are registered and
+none matches the receiver the call arrives with - the same shape as the
+HandlerFunc dispatch bug recorded below (a receiver form the emitter never
+registers). Anything that generates an ECDSA key at run time is affected; the
+45-package sweep only compiles crypto/ecdsa, which is why it stayed green. This
+is the next runtime defect to chase, and it is independent of the array work.
+
 ### Compiler: a buffered channel of a slice, and a generic field, do not resolve  [OLD NOTE]
 
 Two limits hit while building the channel path. Both fail loud, both are worked
