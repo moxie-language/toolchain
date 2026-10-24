@@ -15887,3 +15887,39 @@ dispatch table at the make-interface site from the concrete type's method set,
 so an instantiation is covered there by construction. Legacy cannot compile
 `crypto/internal/fips140/nistec` at all (`undefined: fiat`), so this packet was
 only ever reachable through stage4.
+
+## Round 190: P-224's generator table was an array built lazily, so its signatures were wrong
+
+Round 189 left P-224 signing but not verifying, and Go rejected the signature
+too - so the fault was in producing `r`, not in the verify path. P-224 was the
+one curve still using the shape rounds 177 and 183 removed from the others:
+
+    var p224GeneratorTable *[p224ElementLength * 2]p224Table   // array of tables
+    func initP224GeneratorTable() { if nil { ... } }           // lazy
+    type p224Table [15]*P224Point                              // array of pointers
+
+Two independent problems, both already recorded in this file:
+
+  * a lazy `initPxxx` stores a package global outside `init()`, so the table
+    object stayed in the builder's frame arena. Round 188's root-arena switch
+    does not fire here: the store goes through a global whose declared type is a
+    *pointer*, which the global-root walkers deliberately do not treat as a
+    global store ("field mutations through a global pointer are fine").
+  * `[15]*P224Point` is an array of pointers. The relocation walks slice
+    elements but not the pointer fields of an array - the exact defect that made
+    `[15]*P384Point` dangle.
+
+`p224Table` is now `struct{ points []*P224Point }` with `newP224Table`, the
+generator table is `[]p224Table`, and `buildP224GeneratorTable` is called from
+the package `init()` beside the P-384 and P-521 builders. Same shape, same
+reason, now all four curves.
+
+Verified, all four curves, moxie-only and cross-checked against Go 1.25:
+
+    P-224 sign 63 bytes, P-224 verify true,  Go verifies moxie: true
+    P-256 sign 70 bytes, P-256 verify true,  Go verifies moxie: true
+    P-384 sign/verify true,  P-521 sign/verify true
+    a corrupted signature is rejected on every curve
+
+This closes the ecdsa sign path that rounds 175-189 tracked: ECDH and ECDSA both
+work on every NIST curve for the first time.

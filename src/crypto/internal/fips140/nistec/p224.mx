@@ -326,7 +326,22 @@ func (q *P224Point) Select(p1, p2 *P224Point, cond int32) (ret0 *P224Point) {
 // A p224Table holds the first 15 multiples of a point at offset -1, so [1]P
 // is at table[0], [15]P is at table[14], and [0]P is implicitly the identity
 // point.
-type p224Table [15]*P224Point
+type p224Table struct {
+	points []*P224Point
+}
+
+// newP224Table allocates the fifteen points. A slice, not an array: the
+// generator table lives in a package global, and the return relocation walks
+// slice elements but not the pointer fields of an array, so the table's point
+// pointers stayed in the builder's frame arena and ScalarBaseMult read released
+// memory. Same shape as p384Table and p521Table.
+func newP224Table() (t p224Table) {
+	t.points = []*P224Point{:15}
+	for i := 0; i < 15; i++ {
+		t.points[i] = NewP224Point()
+	}
+	return t
+}
 
 // Select selects the n-th multiple of the table base point into p. It works in
 // constant time by iterating over every entry of the table. n must be in [0, 15].
@@ -337,7 +352,7 @@ func (table *p224Table) Select(p *P224Point, n uint8) {
 	p.Set(NewP224Point())
 	for i := uint8(1); i < 16; i++ {
 		cond := subtle.ConstantTimeByteEq(i, n)
-		p.Select(table[i-1], p, cond)
+		p.Select(table.points[i-1], p, cond)
 	}
 }
 
@@ -345,14 +360,11 @@ func (table *p224Table) Select(p *P224Point, n uint8) {
 func (p *P224Point) ScalarMult(q *P224Point, scalar []byte) (ret0 *P224Point, ret1 error) {
 	// Compute a p224Table for the base point q. The explicit NewP224Point
 	// calls get inlined, letting the allocations live on the stack.
-	var table = p224Table{NewP224Point(), NewP224Point(), NewP224Point(),
-		NewP224Point(), NewP224Point(), NewP224Point(), NewP224Point(),
-		NewP224Point(), NewP224Point(), NewP224Point(), NewP224Point(),
-		NewP224Point(), NewP224Point(), NewP224Point(), NewP224Point()}
-	table[0].Set(q)
+	table := newP224Table()
+	table.points[0].Set(q)
 	for i := 1; i < 15; i += 2 {
-		table[i].Double(table[i/2])
-		table[i+1].Add(table[i], q)
+		table.points[i].Double(table.points[i/2])
+		table.points[i+1].Add(table.points[i], q)
 	}
 
 	// Instead of doing the classic double-and-add chain, we do it with a
@@ -386,27 +398,30 @@ func (p *P224Point) ScalarMult(q *P224Point, scalar []byte) (ret0 *P224Point, re
 	return p, nil
 }
 
-var p224GeneratorTable *[p224ElementLength * 2]p224Table
+var p224GeneratorTable []p224Table
 
-func initP224GeneratorTable() {
-	if p224GeneratorTable == nil {
-		p224GeneratorTable = &[p224ElementLength * 2]p224Table{}
-		base := NewP224Point().SetGenerator()
-		for i := 0; i < p224ElementLength*2; i++ {
-			p224GeneratorTable[i][0] = NewP224Point().Set(base)
-			for j := 1; j < 15; j++ {
-				p224GeneratorTable[i][j] = NewP224Point().Add(p224GeneratorTable[i][j-1], base)
-			}
-			base.Double(base)
-			base.Double(base)
-			base.Double(base)
-			base.Double(base)
+// buildP224GeneratorTable fills the table. It runs from the package init():
+// a package global assigned lazily keeps pointing into the frame arena that
+// built it, so every later ScalarBaseMult read released memory, and the array
+// of tables did not carry its point pointers even through an init-time store.
+func buildP224GeneratorTable() {
+	p224GeneratorTable = []p224Table{:p224ElementLength * 2}
+	base := NewP224Point().SetGenerator()
+	for i := 0; i < p224ElementLength*2; i++ {
+		t := newP224Table()
+		t.points[0] = NewP224Point().Set(base)
+		for j := 1; j < 15; j++ {
+			t.points[j] = NewP224Point().Add(t.points[j-1], base)
 		}
+		p224GeneratorTable[i] = t
+		base.Double(base)
+		base.Double(base)
+		base.Double(base)
+		base.Double(base)
 	}
 }
 
-func (p *P224Point) generatorTable() (ret0 *[p224ElementLength * 2]p224Table) {
-	initP224GeneratorTable()
+func (p *P224Point) generatorTable() (ret0 []p224Table) {
 	return p224GeneratorTable
 }
 
