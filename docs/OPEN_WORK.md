@@ -15838,3 +15838,52 @@ panicked "alloc: nil arena").
 Verified: the stage4 binary built by legacy from this change bootstraps and
 bakes its own runtime, `ecdsa.GenerateKey` followed by `SignASN1` no longer
 faults in `NewPublicKey`, and the runtime bake no longer panics in `main`.
+
+## Round 189: interface dispatch had no arm for an instantiated generic type, and the fall-through was silent
+
+With the curve initialised correctly the sign path stopped crashing and started
+*hanging*. `randomPoint` retries until a nonce is in range, and it never
+retried out of a valid one: the HMAC-DRBG handed back 32 zero bytes every time.
+Driving the same DRBG directly produced the right bytes, and calling `Generate`
+through an `interface{ Generate([]byte) }` produced zeros - a two-line
+reproduction in package `main`, so this was not the clone chain.
+
+The dispatch is a chain of type-ID arms emitted by `findIfaceImpls`, which
+enumerates candidates from a package's members by splitting `<type>.<method>`
+and from type DECLARATIONS of the link set. A generic type's declaration is
+skipped on purpose (its methods are never emitted standalone), so an
+*instantiation* - `*hmacDRBG[sha256.Digest]` - matched nothing, and
+`emitIfaceChain`'s zero-impl branch stores a `zeroinitializer`: the call
+returned without doing anything, silently. That is why the DRBG produced zeros
+instead of failing.
+
+Two things were missing, exactly as this file has said since round 175: the arms
+and the bodies.
+
+  * `genericMethodInstance` is the monomorphization half of a generic method
+    call, factored out of `tryGenericMethodCall`: it resolves the declared
+    method's signature with the instantiation's type arguments, names the clone
+    `<defpkg>.(*T).M__<args>`, builds its body in this module, and records the
+    substituted receiver type in `cctx.genericMethodInsts` (a root-arena map -
+    the first version of it was allocated in the builder's frame, and the next
+    insert crashed in `hashmapContentSet` on the dead buckets).
+  * `ensureIfaceInstMethods` runs at every boxing site (`coerceToInterface` and
+    the two direct `SSAMakeInterface` constructions) and creates the clone for
+    each interface method the instantiated type implements. A call through an
+    interface has no selector on a concrete type, so without this the body is
+    never created anywhere in the module.
+  * `findIfaceImpls` also scans its own package's members for the clone shape
+    `.<method>__` and adds an arm with the recorded receiver type, so the type
+    ID the boxing site produces matches.
+
+Verified: the two-line interface reproduction now prints the same eight bytes as
+the direct call (215 38 106 151 22 33 63 3), and `ecdsa.SignASN1` produces a
+signature that `ecdsa.VerifyASN1` accepts - P-256, P-384 and P-521 all sign,
+verify, and reject a corrupted signature. P-224 signs but does not verify yet;
+that is its own defect, opened below.
+
+No legacy mirror: legacy dispatch is tinygo's `LowerInterfaces`, which builds a
+dispatch table at the make-interface site from the concrete type's method set,
+so an instantiation is covered there by construction. Legacy cannot compile
+`crypto/internal/fips140/nistec` at all (`undefined: fiat`), so this packet was
+only ever reachable through stage4.

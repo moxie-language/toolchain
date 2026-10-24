@@ -541,6 +541,30 @@ func (e *irEmitter) findIfaceImpls(methodName string) (ss []ifaceImpl) {
 			hasType[sname] = true
 		}
 	}
+	// Monomorphized METHOD clones: "<defpkg>.(*T).M__<typeargs>", emitted into
+	// THIS module as members of this package. The scans above enumerate type
+	// DECLARATIONS and skip a generic declaration because its methods are never
+	// emitted as standalone symbols, so a value boxed as an instantiation
+	// matched no arm at all: the dispatch fell through to the zero value, and
+	// the HMAC-DRBG generated 32 zero bytes so randomPoint retried forever.
+	// The clone's own signature carries the substituted receiver, recorded in
+	// genericMethodInsts when the clone was built.
+	for mki2 := 0; mki2 < len(mkeys); mki2++ {
+		mname2 := mkeys[mki2]
+		fn2, okf := e.pkg.Members[mname2].(*SSAFunction)
+		if !okf || fn2 == nil || fn2.Signature == nil || fn2.Signature.Recv == nil {
+			continue
+		}
+		if !strContains(mname2, "." | methodName | "__") {
+			continue
+		}
+		recvT := cctx.genericMethodInsts[e.pkg.Pkg.Path | "|" | mname2]
+		if recvT == nil {
+			continue
+		}
+		impls = mxutil.Ensure(impls, 1)
+		push(impls, ifaceImpl{fn: fn2, recvType: recvT, ptrRecv: true})
+	}
 	selfPath := normalizePkgPath(e.pkg.Pkg.Path)
 	var importedPkgs []*TCPackage
 	seenPkg := map[string]bool{}

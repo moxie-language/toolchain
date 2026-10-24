@@ -2022,6 +2022,7 @@ func (fb *ssaFuncBuilder) coerceToInterface(val SSAValue, targetType Type) (s SS
 	}
 	if _, isIface := SafeUnderlying(targetType).(*TCInterface); isIface {
 		if _, alreadyIface := SafeUnderlying(val.SSAType()).(*TCInterface); !alreadyIface {
+					fb.ensureIfaceInstMethods(val.SSAType(), targetType)
 			mi := &SSAMakeInterface{X: val, IType: targetType}
 			mi.typ = targetType
 			mi.name = fb.nextName()
@@ -4468,6 +4469,7 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 					if u != nil && u != Type(n) {
 						if _, isIface := u.(*TCInterface); isIface {
 							if _, alreadyIface := SafeUnderlying(v.SSAType()).(*TCInterface); !alreadyIface {
+								fb.ensureIfaceInstMethods(v.SSAType(), retType)
 								mi := &SSAMakeInterface{X: v, IType: retType}
 								mi.typ = retType
 								mi.name = fb.nextName()
@@ -5799,6 +5801,7 @@ func (fb *ssaFuncBuilder) coerceArgsToInterface(args []SSAValue, sig *Signature)
 		if argIsIface {
 			continue
 		}
+		fb.ensureIfaceInstMethods(args[i].SSAType(), paramType)
 		mi := &SSAMakeInterface{X: args[i], IType: paramType}
 		mi.typ = paramType
 		mi.name = fb.nextName()
@@ -6606,48 +6609,9 @@ func (fb *ssaFuncBuilder) tryGenericMethodCall(sel *syntax.SelectorExpr, recv SS
 	if !ok || named.Obj == nil || len(named.TArgs) == 0 {
 		return nil, false
 	}
-	pkgPath := ""
-	if named.Obj.Pkg != nil {
-		pkgPath = named.Obj.Pkg.Path
-	}
-	key := pkgPath | "." | named.Obj.Name | "." | sel.Sel.Value
-	fd, ok2 := cctx.genericMethodDecls[key]
-	if !ok2 || fd == nil || fd.Recv == nil {
+	fn, sig, ok4 := fb.genericMethodInstance(named, sel.Sel.Value)
+	if !ok4 || fn == nil || sig == nil || sig.Recv == nil {
 		return nil, false
-	}
-	tparamNames := extractRecvTParamNames(fd.Recv.Type)
-	if len(tparamNames) == 0 || len(tparamNames) > len(named.TArgs) {
-		return nil, false
-	}
-	typeSubst := map[string]Type{}
-	for i, tn := range tparamNames {
-		typeSubst[tn] = named.TArgs[i]
-	}
-	var srcScope *Scope
-	if cctx.genericPkgScopes != nil {
-		srcScope = cctx.genericPkgScopes[pkgPath]
-	}
-	savedImports := cctx.sigDeclPkgImports
-	if fb.fn != nil && fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil && fb.fn.Pkg.Pkg.Path == pkgPath {
-		cctx.sigDeclPkgImports = fb.fn.Pkg.Pkg.Imports
-	}
-	sig := resolveMethodSigWithSubst(fd, typeSubst, srcScope)
-	cctx.sigDeclPkgImports = savedImports
-	if sig == nil || sig.Recv == nil {
-		return nil, false
-	}
-	mangledName := mangleGenericName("(*"|named.Obj.Name|")."|sel.Sel.Value, named.TArgs)
-	if pkgPath != "" {
-		pfx := ""
-		for j := 0; j < len(pkgPath); j++ {
-			c := pkgPath[j]
-			if c == '/' {
-				pfx = pfx | "_"
-			} else {
-				pfx = pfx | string([]byte{c})
-			}
-		}
-		mangledName = pfx | "." | mangledName
 	}
 	fixed := recv
 	if !isPtr {
@@ -6676,21 +6640,136 @@ func (fb *ssaFuncBuilder) tryGenericMethodCall(sel *syntax.SelectorExpr, recv SS
 	for _, ma := range args {
 		push(allArgs, ma)
 	}
-	if fn5, ok5 := fb.fn.Pkg.Members[mangledName].(*SSAFunction); ok5 {
-		return fb.emitCallToSSAFunc(fn5, allArgs, hasDots), true
+	return fb.emitCallToSSAFunc(fn, allArgs, hasDots), true
+}
+
+// genericMethodInstance returns the monomorphized body of methodName on the
+// instantiated receiver type `named`, creating it in this module when it does
+// not exist yet. It is the shared half of a generic method CALL and of an
+// interface dispatch that needs the body to exist at all (see
+// ensureIfaceInstMethods): the call site needs the receiver address rule, the
+// dispatch site only the body.
+func (fb *ssaFuncBuilder) genericMethodInstance(named *Named, methodName string) (fn *SSAFunction, sig *Signature, ok bool) {
+	if named == nil || named.Obj == nil || len(named.TArgs) == 0 {
+		return nil, nil, false
 	}
-	fn := &SSAFunction{
+	pkgPath := ""
+	if named.Obj.Pkg != nil {
+		pkgPath = named.Obj.Pkg.Path
+	}
+	key := pkgPath | "." | named.Obj.Name | "." | methodName
+	fd, ok2 := cctx.genericMethodDecls[key]
+	if !ok2 || fd == nil || fd.Recv == nil {
+		return nil, nil, false
+	}
+	tparamNames := extractRecvTParamNames(fd.Recv.Type)
+	if len(tparamNames) == 0 || len(tparamNames) > len(named.TArgs) {
+		return nil, nil, false
+	}
+	typeSubst := map[string]Type{}
+	for i, tn := range tparamNames {
+		typeSubst[tn] = named.TArgs[i]
+	}
+	var srcScope *Scope
+	if cctx.genericPkgScopes != nil {
+		srcScope = cctx.genericPkgScopes[pkgPath]
+	}
+	savedImports := cctx.sigDeclPkgImports
+	if fb.fn != nil && fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil && fb.fn.Pkg.Pkg.Path == pkgPath {
+		cctx.sigDeclPkgImports = fb.fn.Pkg.Pkg.Imports
+	}
+	sig = resolveMethodSigWithSubst(fd, typeSubst, srcScope)
+	cctx.sigDeclPkgImports = savedImports
+	if sig == nil || sig.Recv == nil {
+		return nil, nil, false
+	}
+	mangledName := mangleGenericName("(*"|named.Obj.Name|")."|methodName, named.TArgs)
+	if pkgPath != "" {
+		// Two generic types with the same name in different packages mangle
+		// identically; the defining package keeps them apart.
+		pfx := ""
+		for j := 0; j < len(pkgPath); j++ {
+			c := pkgPath[j]
+			if c == '/' {
+				pfx = pfx | "_"
+			} else {
+				pfx = pfx | string([]byte{c})
+			}
+		}
+		mangledName = pfx | "." | mangledName
+	}
+	if fn5, ok5 := fb.fn.Pkg.Members[mangledName].(*SSAFunction); ok5 {
+		return fn5, sig, true
+	}
+	fn = &SSAFunction{
 		name:      mangledName,
 		Signature: sig,
 		Pkg:       fb.fn.Pkg,
 		Prog:      fb.fn.Prog,
 	}
 	fb.fn.Pkg.SetMember(mangledName, fn)
+	// Record the instantiated receiver for interface dispatch: the arm scan
+	// enumerates type DECLARATIONS, and a generic declaration is skipped because
+	// its methods are never emitted standalone. Without this a value boxed as
+	// *hmacDRBG[sha256.Digest] has no arm and the invoke falls through to the
+	// zero value.
+	if sig.Recv != nil && sig.Recv.Typ != nil {
+		if cctx.genericMethodInsts == nil {
+			// The map outlives this frame and every frame after it, so it must
+			// not be allocated in the current one: a map created here dies with
+			// buildBody's arena and the NEXT insert crashes in
+			// hashmapContentSet on the dead buckets.
+			savedArena := runtime.CurrentArena()
+			runtime.SetCurrentArena(runtime.RootArena())
+			cctx.genericMethodInsts = map[string]Type{}
+			runtime.SetCurrentArena(savedArena)
+		}
+		ownerPath := ""
+		if fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil {
+			ownerPath = fb.fn.Pkg.Pkg.Path
+		}
+		cctx.genericMethodInsts[ownerPath | "|" | mangledName] = sig.Recv.Typ
+	}
 	subFb := newSSAFuncBuilder(fn, fb.info)
 	subFb.typeSubst = typeSubst
 	subFb.srcScope = srcScope
 	subFb.buildBody(fd)
-	return fb.emitCallToSSAFunc(fn, allArgs, hasDots), true
+	return fn, sig, true
+}
+
+// ensureIfaceInstMethods creates the monomorphized method bodies a value of an
+// INSTANTIATED generic type needs in order to satisfy an interface, before the
+// value is boxed. Interface dispatch enumerates implementations from type
+// declarations, so a generic type's methods have neither an arm nor a body
+// unless a clone exists - and a call through the interface never creates one,
+// because there is no selector on a concrete type to monomorphize. Without
+// this the dispatch fell through to the zero value: the HMAC-DRBG generated 32
+// zero bytes, randomPoint rejected every nonce, and ecdsa.Sign looped forever.
+func (fb *ssaFuncBuilder) ensureIfaceInstMethods(concrete Type, ifaceType Type) {
+	if concrete == nil || ifaceType == nil {
+		return
+	}
+	// The Named itself, not its underlying type: an instantiation is spelled
+	// *hmacDRBG[sha256.Digest] and the type ARGUMENTS live on the Named.
+	t := concrete
+	if p, isP := t.(*Pointer); isP {
+		t = p.Base
+	}
+	named, ok := t.(*Named)
+	if !ok || named == nil || named.Obj == nil || len(named.TArgs) == 0 {
+		return
+	}
+	iface, ok2 := SafeUnderlying(ifaceType).(*TCInterface)
+	if !ok2 || iface == nil || len(iface.AllMethods) == 0 {
+		return
+	}
+	for i := int32(0); i < int32(len(iface.AllMethods)); i++ {
+		im := iface.AllMethods[i]
+		if im == nil || im.Name == "" {
+			continue
+		}
+		fb.genericMethodInstance(named, im.Name)
+	}
 }
 
 // extractRecvTParamNames extracts the type parameter names declared on a
