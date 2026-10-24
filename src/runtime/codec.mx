@@ -180,6 +180,38 @@ func codecIsStableArenaAddr(p uintptr) (ok bool) {
 	return true
 }
 
+// codecSovDataAlias reports whether p points at an object that lives in a
+// live sovereign data arena and may therefore be kept by identity across the
+// current return. Identity is what makes one object one object: copying it
+// splits the receiver's state in two, and both halves keep mutating.
+// png.Encode lost its bufio.Writer this way - the encoder's own `bw` field and
+// the writer zlib held through flate's dictWriter became two buffers, so the
+// compressed block went into the copy's buffer and the flush emitted an
+// 18-byte IDAT where Go emits 29.
+//
+// The arena belongs to a receiver, so an alias handed outward must not be
+// moved: the group is marked escaped, which is the same promise the other
+// stable paths make (codecNoteStable). A group that dies with the frame being
+// released is never aliased - codecIsStableArenaAddr already answered "copy"
+// for it before this is asked - so the alias cannot outlive its arena.
+// Value data (byte/slice backing) is still copied on return; only objects are
+// aliased, because a copied object is a wrong program while a copied byte
+// range is only a copied value.
+func codecSovDataAlias(p uintptr) (ok bool) {
+	if !codecRetTransient || domainRoot == nil {
+		return false
+	}
+	g := sovRangeOwner(p)
+	if g == nil || g.released || g.data == nil {
+		return false
+	}
+	if domainRoot.fnTop >= 1 && sovGroupInDyingArena(domainRoot.fnStack[domainRoot.fnTop], p) {
+		return false
+	}
+	g.escaped = true
+	return true
+}
+
 // codecOnStack reports whether p addresses the current thread's stack. Stack
 // frames are not arenas, so callers must copy stack-backed data rather than
 // alias it across a return.
@@ -641,6 +673,12 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 			}
 			codecSeenAdd(ss, p, codecPointeeSize(typ))
 			codecEscapeNote()
+			codecWriteVarint(cb, codecTagStable)
+			codecWriteRaw(cb, unsafe.Pointer(&p), 8)
+			return
+		}
+		if codecSovDataAlias(uintptr(p)) {
+			codecSeenAdd(ss, p, codecPointeeSize(typ))
 			codecWriteVarint(cb, codecTagStable)
 			codecWriteRaw(cb, unsafe.Pointer(&p), 8)
 			return

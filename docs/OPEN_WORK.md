@@ -15695,3 +15695,44 @@ Measured before/after on `hash/adler32`:
 and on png: the IDAT trailer is now the Adler-32 of the scanlines instead of
 garbage (the remaining bytes of the IDAT still differed, which is the second
 defect, round 184).
+
+## Round 184: a sovereign object lost identity crossing a return, and png now matches Go byte for byte
+
+With the scalar lifetime fixed, the png IDAT was still 18 bytes of a 63-byte
+file where Go writes 29 of 104. The instrumented encode shows the split
+directly: `bufio.NewWriterSize`'s object receives the zlib header through one
+address, `flate.NewWriterDict` receives that same address as the `io.Writer`
+interface it is handed, and then `dictWriter.Write` writes through a *different*
+address - the encoder's `bw` and the writer zlib holds are two objects.
+
+The branch that made the copy was `codecIsStableArenaAddr`'s `codecRetTransient`
+arm: a pointer into *any* live sovereign data arena was answered "transient,
+copy it", because the arena belongs to a receiver and compaction may move it.
+The encoder's `bw` lives in `encoder`'s own sovereign data arena - the arena of
+the very receiver that is also about to store the zlib writer - so a nested
+call returning that pointer copied the `bufio.Writer`, buffer and all.
+
+Copying is safe for value data (a byte range) and wrong for an object (an
+identity): the copy keeps being written to while the receiver's field keeps the
+original, and the two never meet again. `codecSovDataAlias` therefore keeps a
+non-basic pointee by identity when it lives in a live sovereign data arena, and
+marks the owning group `escaped`, which is the promise every other stable path
+already makes (`codecNoteStable`) because an exterior holder now references the
+block. A group that dies with the frame being released is still copied - that
+question was already answered before this is asked - so an alias cannot outlive
+its arena. Byte and slice backing still copy on return.
+
+Verified: unrelated `png.Encode` of an 8x6 RGBA image now produces a 104-byte
+file whose hex is byte-identical to Go 1.25's for the same image -
+
+    89504e470d0a1a0a 0000000d49484452 00000008 00000006 0802000000
+    716748ac 0000002f49444154 789c62616060976360c0442c0c1a0c0c0ccc
+    98082ec1868690253891119a040f1c614af04310200000ffffe33902b9
+    35285f2c 0000000049454e44 ae426082
+
+- and `png.Decode` of it returns the original 8x6 image with the original
+pixels. Disabling only this alias (leaving round 183 in place) reproduces the
+broken 63-byte file and the decode failure, so the two fixes are independent.
+The three reduced reproducers of round 182 were negative because none of them
+put the pointee in a *sovereign* arena: the copy needed a receiver's own data
+arena, which only the real encoder has.
