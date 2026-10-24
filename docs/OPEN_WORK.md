@@ -15760,3 +15760,23 @@ decoder-independent size for the same image is 104.
 Moxie has no package-var initialisers, so the singletons are built once in
 `init()`. Verified: `png.Encode` of the same image now writes `0802000000` in
 IHDR (depth 8, colour type 2) and a 104-byte file byte-identical to Go 1.25's.
+
+## Round 186: adler32's digest was a bare uint32, so every hasher leaked a 64 KiB arena
+
+`hash/adler32` ported Go's `type digest uint32` and `func New() { var d digest;
+return &d }`. Round 183 makes that pattern safe (the pointer is aliased and the
+frame arena is leaked so the pointee stays alive), but "safe" here means one
+leaked frame arena per hasher: `zlib.NewWriterLevelDict` creates a digest for
+every compressed stream, and every png/gzip write creates one.
+
+A one-field struct is the shape that needs no leak: the pointee is no longer a
+basic kind, so the codec deep-copies it into the caller's arena at return and
+the digest lives exactly as long as its owner. `digest` is now `struct{ s
+uint32 }`; `Reset`, `Write`, `Sum`, `Sum32`, `MarshalBinary`, `UnmarshalBinary`
+and `Clone` read and write `d.s`, and `update` returns the struct by value.
+
+Verified: `New(); Sum32()` is 1, `Write("abcdef"); Sum32()` is 136184406
+(0x081E0256, the Adler-32 of "abcdef"), `Checksum` of the 150-byte png scanline
+block is 0xE33902B9 as in Go, and building and running the png probe with `-a`
+prints no arena-escape warning - the two warnings the same probe printed before
+this change were this leak and its clone in the decoder path.

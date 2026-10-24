@@ -34,9 +34,17 @@ const Size = 4
 
 // digest represents the partial evaluation of a checksum.
 // The low 16 bits are s1, the high 16 bits are s2.
-type digest uint32
+//
+// A struct, not a bare uint32 (Go's spelling): the codec cannot tell a pointer
+// to a whole scalar object from a pointer into a larger buffer, so a returned
+// *uint32 is aliased and its frame arena is leaked to keep it alive - one
+// 64 KiB arena per New, which for zlib means one per compressed stream. A
+// one-field struct is deep-copied into the caller's arena instead.
+type digest struct {
+	s uint32
+}
 
-func (d *digest) Reset() { *d = 1 }
+func (d *digest) Reset() { d.s = 1 }
 
 // New returns a new hash.Hash32 computing the Adler-32 checksum. Its
 // Sum method will lay the value out in big-endian byte order. The
@@ -61,7 +69,7 @@ const (
 func (d *digest) AppendBinary(b []byte) (out []byte, aerr error) {
 	out = mxutil.Ensure(b, len(magic))
 	out = push(out, magic...)
-	out = byteorder.BEAppendUint32(out, uint32(*d))
+	out = byteorder.BEAppendUint32(out, d.s)
 	return out, nil
 }
 
@@ -76,7 +84,7 @@ func (d *digest) UnmarshalBinary(b []byte) (uerr error) {
 	if len(b) != marshaledSize {
 		return errors.New("hash/adler32: invalid hash state size")
 	}
-	*d = digest(byteorder.BEUint32(b[len(magic):]))
+	d.s = byteorder.BEUint32(b[len(magic):])
 	return nil
 }
 
@@ -87,7 +95,7 @@ func (d *digest) Clone() (c hash.Cloner, cerr error) {
 
 // Add p to the running checksum d.
 func update(d digest, p []byte) (out digest) {
-	s1, s2 := uint32(d&0xffff), uint32(d>>16)
+	s1, s2 := d.s&0xffff, d.s>>16
 	for len(p) > 0 {
 		var q []byte
 		if len(p) > nmax {
@@ -112,7 +120,8 @@ func update(d digest, p []byte) (out digest) {
 		s2 %= mod
 		p = q
 	}
-	return digest(s2<<16 | s1)
+	out.s = s2<<16 | s1
+	return out
 }
 
 func (d *digest) Write(p []byte) (nn int32, err error) {
@@ -120,12 +129,12 @@ func (d *digest) Write(p []byte) (nn int32, err error) {
 	return len(p), nil
 }
 
-func (d *digest) Sum32() (s uint32) { return uint32(*d) }
+func (d *digest) Sum32() (s uint32) { return d.s }
 
 func (d *digest) Sum(in []byte) (out []byte) {
-	s := uint32(*d)
+	s := d.s
 	return push(in, byte(s>>24), byte(s>>16), byte(s>>8), byte(s))
 }
 
 // Checksum returns the Adler-32 checksum of data.
-func Checksum(data []byte) (sum uint32) { return uint32(update(1, data)) }
+func Checksum(data []byte) (sum uint32) { return update(digest{s: 1}, data).s }
