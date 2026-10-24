@@ -221,27 +221,38 @@ found three defects that no gate had ever reached:
     `PrivateKey.ECDH` compares the Curve interface, so every key was its own
     curve and every exchange failed with "curves do not match". The three
     curves are singletons built in init() now.
-  * STILL OPEN: with both of those closed, P-256 arithmetic is what fails -
-    `ECDH` answers "P256 point not on curve". Narrowed as far as it goes
-    without fixing it:
-      - `p256_asm.mx` carries `//:build ignore`, so it is NOT the live code; its
-        halt stubs (`p256FromMont` and friends panic "asm not available") never
-        compile. The live amd64 path is `p256.mx` + `fiat` + `p256_table.mx`.
-      - the 88064-byte precomputed table is byte-for-byte identical to Go
-        1.25's `p256_table.go` (extracted both literals and compared).
-      - `SetBytes(G)` accepts the generator, `p256CheckOnCurve` passes, and
-        `Bytes()` round-trips the generator exactly.
-      - `ScalarBaseMult` matches Go's `elliptic.P256()` for k = 1, 2, 3, 4 and
-        16, and diverges from k = 128 on: 1<<7 and 1<<63 BOTH answer 3G. So
-        field arithmetic, point add/double and encoding are sound and the
-        windowed base-multiplication walk is not: `boothW6` recoding,
-        `genTables[(index+1)/6]`, `p256AffineTable.Select` or `AddAffine` for
-        every window above the first. The next step is to compare
-        `Select`ed point for a scalar that lives in window 1 with Go's table
-        entry, then `AddAffine`.
-      This is also the biggest remaining array cluster (nistec 61 + fiat 40
-      sites), so the two pieces of work are one: fix the window walk with a
-      known-answer vector at each step, then convert the limb arrays.
+  * P-256 ARITHMETIC IS FIXED (`7ebc8281`): `_p256B`, the curve constant b, was
+    built by a lazy `initP256B` into a package global - the same frame-lifetime
+    bug as crc64 and rand/v2, and it has the signature shape a bad b hides:
+    adding the identity stayed correct (every b term is multiplied by Z1, zero
+    for the identity) while Add(G,G), Double(G) and ScalarMult(G,2) were all
+    wrong. With b built in the package init(), Add, Double and ScalarMult match
+    Go's elliptic.P256 for every bit and for k = 1..32.
+    ScalarBaseMult's precomputed affine-table walk is still wrong for every
+    scalar whose Booth digit is negative: it agrees with Go for k = 1..31 and
+    diverges from 32 on, 32 being the first scalar whose last-window digit is 32
+    with sign 1. Its inputs were verified rather than assumed - all 43 tables'
+    32 points equal n * 2^(6*table) * G entry by entry, and fiat's Add, Sub,
+    Mul, Square and Select each satisfy their own vectors - so the fault is in
+    the walk itself. ScalarBaseMult now computes scalar*G through the generic
+    ScalarMult and matches Go for k = 1..40; the walk is the open item, with the
+    failing boundary as the test vector.
+  * INTERFACE DISPATCH IS THE NEXT COMPILER ITEM, and it is now blocking crypto
+    verification rather than one odd path. Three measured instances, all the
+    same shape - an interface whose dynamic type is not among the registered
+    implementation arms, so the runtime aborts with "interface dispatch: no impl
+    for X (N impl(s), none matches)":
+      - `Params`, 6 impls, from `ecdsa.GenerateKey(elliptic.P256(), ...)`;
+      - `Uint64`, 22 impls, from math/rand/v2's global source (fixed by building
+        it in init, but the abort is the same mechanism);
+      - `Read`, 34 impls, from `ecdh.P256().GenerateKey(rand.Reader())` in one
+        link set, while a neighbouring link set instead answers "invalid scalar
+        length" from the same call.
+    The arms are emitted per link set (`prepareDispatchIndex`, the cache key
+    carries `linkSetKey`), and a *missing* arm is a dispatch-table bug, not a
+    type bug: the count shows implementations registered and the lookup still
+    failing to match. That is the thing to chase before ECDH, ECDSA or TLS can
+    be called verified.
   * STILL OPEN: `rsa.GenerateKey(rand.Reader(), 1024)` never returns (240s
     timeout, no output) inside `crypto/internal/fips140/rsa`'s prime
     generation, which this tree did not touch. 512-bit keys are rejected by the
