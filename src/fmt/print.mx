@@ -555,6 +555,39 @@ func (p *pp) printArg(arg Stringer, verb rune) {
 		return
 	}
 
+	// byte, rune and uintptr are NAMED types in one compiler's universe (distinct
+	// descriptors from uint8/int32/uintptr's underlying) and aliases in the
+	// other's, so they are dispatched in a switch of their own: listing them
+	// beside uint8/int32 in the switch below is a duplicate case for the alias
+	// model. Both compilers treat them as integers, which is what Go does.
+	switch na := arg.(type) {
+	case byte:
+		p.fmtInteger(uint64(na), unsigned, verb)
+		return
+	case uintptr:
+		p.fmtInteger(uint64(na), unsigned, verb)
+		return
+	}
+
+	// byte, rune and uintptr are NAMED types in stage4's universe (distinct
+	// descriptors from uint8/int32) and aliases in the legacy compiler's, so they
+	// are dispatched in a switch of their own: listing them beside uint8/int32 in
+	// the switch below is a duplicate case for the alias model. Both compilers
+	// treat them as integers, which is what Go does. Without this a byte fell to
+	// the builtin Stringer, so %d printed "?" and %x printed the hex of the
+	// DECIMAL STRING "165".
+	switch na := arg.(type) {
+	case byte:
+		p.fmtInteger(uint64(na), unsigned, verb)
+		return
+	case rune:
+		p.fmtInteger(uint64(na), signed, verb)
+		return
+	case uintptr:
+		p.fmtInteger(uint64(na), unsigned, verb)
+		return
+	}
+
 	// Some types can be done without reflection.
 	switch f := arg.(type) {
 	case bool:
@@ -580,16 +613,6 @@ func (p *pp) printArg(arg Stringer, verb rune) {
 		p.fmtInteger(uint64(f), unsigned, verb)
 	case uint64:
 		p.fmtInteger(f, unsigned, verb)
-	// byte, rune and uintptr are NAMED types in Moxie (distinct descriptors from
-	// uint8/int32/uint64), so they need their own arms. Without them a byte fell
-	// to the builtin Stringer and %d printed "?" while %x printed the hex of the
-	// DECIMAL STRING "165" - and the two compilers disagreed on %s.
-	case byte:
-		p.fmtInteger(uint64(f), unsigned, verb)
-	case rune:
-		p.fmtInteger(uint64(f), signed, verb)
-	case uintptr:
-		p.fmtInteger(uint64(f), unsigned, verb)
 	case []byte:
 		p.fmtBytes(f, verb, "[]byte")
 	default:
