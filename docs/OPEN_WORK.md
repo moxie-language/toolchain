@@ -15736,3 +15736,27 @@ broken 63-byte file and the decode failure, so the two fixes are independent.
 The three reduced reproducers of round 182 were negative because none of them
 put the pointee in a *sovereign* arena: the copy needed a receiver's own data
 arena, which only the real encoder has.
+
+## Round 185: the standard color models were a fresh object per call, so every model comparison was false
+
+`color.RGBAModel()` and friends returned `ModelFunc(...)`, which builds a new
+`&modelFunc` on every call. Go's version of the same functions returns a
+package-level singleton (`var RGBAModel Model = ModelFunc(rgbaModel)`), and the
+comment on `ModelFunc` says why that matters: "callers can still use
+comparisons like m == RGBAModel". Moxie's port kept the constructor call and
+dropped the variable, so no model ever compared equal to itself:
+
+    rgbs == rgbs   before: false   after: true
+    grays == grays before: false   after: true
+    cmyk == cmyk   before: false   after: true
+    rgbs == grays  before: false   after: false
+
+The consumer that noticed is `image/png`'s encoder, which switches on
+`m.ColorModel()` to choose the PNG colour type. Every case missed, so every
+image took the `default:` 16-bit branch: an 8x6 RGBA image encoded with bit
+depth 16 in IHDR (117 bytes) instead of bit depth 8 (104 bytes), and Go's
+decoder-independent size for the same image is 104.
+
+Moxie has no package-var initialisers, so the singletons are built once in
+`init()`. Verified: `png.Encode` of the same image now writes `0802000000` in
+IHDR (depth 8, colour type 2) and a 104-byte file byte-identical to Go 1.25's.
