@@ -15367,3 +15367,35 @@ pointee. The compiler fix is the one this file has carried since round 55: an
 address-of-composite-literal that is returned must be allocated where its
 identity is stable (root arena), the same marking `markAddrEscaping` already
 performs for `&`.
+
+## Round 177: ECDH works on all three NIST curves
+
+Parallel to the codec defect, the other two curves were dead from the same
+"global written outside init()" class that this file has recorded three times
+already, plus one array-relocation gap:
+
+  * `_p224B`, `_p384B` and `_p521B` were filled by lazy `initPxxxB` helpers. The
+    store is a global write outside `init()`, so the global kept a pointer into
+    the assigning frame's arena. `P384Point.SetBytes` then read a released
+    `fiat.P384Element` and rejected even the generator's own encoding ("P384
+    point not on curve"), which made `Double` panic on the curve generator and
+    every higher operation fail. They are now built by `buildPxxxB` from the
+    package `init()`.
+  * `p384GeneratorTable`/`p521GeneratorTable` were filled by lazy
+    `initPxxxGeneratorTable`, same defect one level deeper: `ScalarBaseMult`
+    read released table entries and died in `fiat.p384Mul`. They are built from
+    `init()` too, and the table type is now
+    `struct{ points []*PxxxPoint }` with the generator table a `[]p384Table`:
+    the global-store relocation walks slice elements, but the pointer fields
+    inside `[15]*PxxxPoint` were not carried, so an array table stayed dangling
+    even once the store itself happened in `init()`.
+
+Verified byte for byte against Go 1.25, same fixed private keys: P-256
+(`c7d4af84...`), P-384 (`be44c223...`) and P-521 (`00d23346...`) public keys and
+ECDH shared secrets all match, and for P-384 `Double(G) == Add(G,G) ==
+ScalarBaseMult(2)` with every result on the curve. `crypto/ecdh` still has no
+`P224`, so that curve is only covered through the `elliptic` facade.
+
+`ecdsa.Sign` remains blocked by the cloned-initializer defect from round 176's
+addendum: key generation works, the sign path reads a curve global that the
+clone emitted into `crypto/ecdsa` never initialised.
