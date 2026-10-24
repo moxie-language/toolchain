@@ -972,6 +972,12 @@ func ScanGenericDecls(src []byte, name string) {
 	// this, method calls on package types inside monomorphized bodies
 	// silently resolve to nothing.
 	regPkg := cctx.universe.Registry[name]
+	// Const-group state for the value pass: `const ( a = x; b )` repeats the
+	// previous line's expressions, and iota counts within one group.
+	var curConstGroup *syntax.Group
+	var prevConstValues syntax.Expr
+	var prevConstType syntax.Expr
+	iotaVal := int64(-1)
 	for _, d := range file.DeclList {
 		switch dd := d.(type) {
 		case *syntax.FuncDecl:
@@ -1033,12 +1039,65 @@ func ScanGenericDecls(src []byte, name string) {
 				}
 			}
 		case *syntax.ConstDecl:
+			// The declared VALUE must be resolved from source here, exactly as
+			// the typecheck pass resolves it for the package being compiled. An
+			// unexported constant is absent from the mxh export, so a nil-valued
+			// synthetic leaves every reference in a monomorphized clone a zero:
+			// ecdsa's unexported `p256 curveID = "P-256"` reached the initP256
+			// clone emitted into crypto/ecdsa as three zero words, so the curve
+			// that clone built carried an empty curveID and signing read a curve
+			// that no comparison matched. Measured in the disassembly: the clone
+			// passed rdi/rsi/rdx all zero where the defining package's copy
+			// passes {ptr "P-256", 5, 5}.
+			if dd.Group == nil || dd.Group != curConstGroup {
+				curConstGroup = dd.Group
+				iotaVal = int64(0)
+				prevConstValues = nil
+				prevConstType = nil
+			} else {
+				iotaVal++
+			}
+			valExpr := dd.Values
+			typeExpr := dd.Type
+			if valExpr == nil {
+				valExpr = prevConstValues
+				if typeExpr == nil {
+					typeExpr = prevConstType
+				}
+			}
+			if dd.Values != nil {
+				prevConstValues = dd.Values
+			}
+			if dd.Type != nil {
+				prevConstType = dd.Type
+			}
+			typ := tcResolveNameInline(typeExpr, scope)
+			if typ == nil && valExpr != nil {
+				// A re-exported constant takes the imported constant's own
+				// type, the same rule the typecheck pass applies.
+				if c := tcSelectorConst(valExpr, scope); c != nil && c.Typ != nil {
+					typ = c.Typ
+				}
+			}
+			if typ == nil && valExpr != nil {
+				typ = tcInferConstTypeFromExpr(valExpr, scope)
+			}
+			var val ConstVal
+			if valExpr != nil {
+				val = tcEvalConstExpr(valExpr, scope, iotaVal)
+			}
+			if typ == nil && val != nil {
+				typ = UntypedTypeOfCV(val)
+			}
+			if typ != nil && val != nil {
+				val = ConvertConstLocal(val, typ)
+			}
 			for _, cn := range dd.NameList {
 				if scope.Lookup(cn.Value) == nil {
 					if ro := regScopeLookup(regPkg,cn.Value); ro != nil {
 						scope.Insert(ro)
 					} else {
-						scope.Insert(NewTCConst(thePkg, cn.Value, nil, nil))
+						scope.Insert(NewTCConst(thePkg, cn.Value, typ, val))
 					}
 				}
 			}

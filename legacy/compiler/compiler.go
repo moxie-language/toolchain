@@ -214,6 +214,7 @@ type builder struct {
 	fnArenaVal    llvm.Value // per-function arena (freed on return)
 	parentArenaVal llvm.Value // caller's arena, saved by a sovereign borrow
 	arenaActive   bool       // true after emitArenaPrologue
+	initArenaSave llvm.Value // saved current arena of an initialiser (see createFunctionStart)
 	arenaBorrowed bool       // true when the arena is the receiver's sovereign arena
 	stableRegistered bool   // true when the receiver's arena is registered as stable for this frame
 	sovereignActive  bool   // true inside a mutating sovereign method
@@ -1642,6 +1643,40 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		}, "fn_arena")
 		b.arenaActive = true
 	}
+	// Initialisation code that writes a package global allocates in the ROOT
+	// arena, not in whatever frame happens to be current. The restriction pass
+	// permits global stores in any init-named function, but a lazy `initFoo`
+	// called from deep inside a frame allocated into that frame's arena: the
+	// global then dangled as soon as the caller returned, and the next reader
+	// saw a recycled block. ecdsa's `_p256Cached` was built by initP256 lazily
+	// during GenerateKey (whose arena is then reused) and read as garbage during
+	// Sign. The package's real init() has always run this way - it pushes no
+	// frame arena, so the current arena is the root - and the switch gives every
+	// initialiser the same target. Restored at every return, before the return
+	// encode, so the encode buffer still lands in the frame arena.
+	if b.runtimePkg != nil && isInitFunc(b.fn) && funcStoresGlobal(b.fn) {
+		b.initArenaSave = b.createRuntimeCall("CurrentArena", nil, "init.save")
+		rootArena := b.createRuntimeCall("RootArena", nil, "init.root")
+		b.createRuntimeCall("SetCurrentArena", []llvm.Value{rootArena}, "")
+	}
+}
+
+// funcStoresGlobal reports whether fn stores into a package-level global,
+// directly or through a field or index path rooted at one. Such a store is
+// only legal in initialisation code (checkGlobalStore enforces that), and the
+// memory it stores must outlive every frame.
+func funcStoresGlobal(fn *ssa.Function) bool {
+	if fn == nil || fn.Blocks == nil {
+		return false
+	}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if store, ok := instr.(*ssa.Store); ok && globalName(store.Addr) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // emitSovereignPrologue sets up a mutating method on a sovereign receiver:
@@ -1917,6 +1952,13 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 	case *ssa.Return:
 		if b.hasDeferFrame() {
 			b.createRuntimeCall("destroyDeferFrame", []llvm.Value{b.deferFrame}, "")
+		}
+		if !b.initArenaSave.IsNil() {
+			// Hand the caller's arena back before the return encode: the
+			// initialiser ran with the root as its allocation target, and the
+			// encode buffer must still be allocated in this frame's arena so it
+			// dies with the frame.
+			b.createRuntimeCall("InitArenaRestore", []llvm.Value{b.initArenaSave}, "")
 		}
 	if !b.arenaActive {
 		// Read-only sovereign methods register the receiver's arena as

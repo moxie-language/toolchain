@@ -271,30 +271,70 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 			}
 		}
 	}
-	if !e.funcNeedsCodec(e.curFunc) {
+	if e.funcNeedsCodec(e.curFunc) {
+		ipt := e.intptrType()
+		e.w("  %fn_arena = call ptr @runtime.FnArenaPush(")
+		e.w(ipt)
+		e.w(" 65536, ptr null)\n")
+		e.declareRuntime("runtime.FnArenaPush", "ptr", ipt)
+		// Read-only method of a sovereign type: register the receiver's arena
+		// as stable so returned views into receiver data stay views, while the
+		// method's own scratch lives in this fn arena and is freed at return.
+		if e.curFunc.Signature != nil && e.curFunc.Signature.Recv != nil && len(e.curFunc.Params) > 0 {
+			recvTyp := e.curFunc.Signature.Recv.Typ
+			if ptr, ok2 := SafeUnderlying(recvTyp).(*Pointer); ok2 {
+				if named, ok3 := ptr.Base.(*Named); ok3 && e.isSovereignNamedType(named) && !ssaFuncHasReceiverWrite(e.curFunc) {
+					recvName := e.operand(e.curFunc.Params[0])
+					e.w("  call void @runtime.codecRegStable(ptr ") ; e.w(recvName) ; e.w(", ptr null)\n")
+					e.declareRuntime("runtime.codecRegStable", "void", "ptr")
+					e.stableReg = true
+				}
+			}
+		}
+		e.arenaActive = true
+	}
+	// Initialisation code that writes a package global allocates in the ROOT
+	// arena, not in whatever frame happens to be current. The restriction pass
+	// permits global stores in any init-named function, but a lazy `initFoo`
+	// called from deep inside a frame allocated into that frame's arena: the
+	// global then dangled as soon as the caller returned and the next reader saw
+	// a recycled block. ecdsa's `_p256Cached` was built by initP256 lazily
+	// during GenerateKey (whose arena is then reused) and read as garbage during
+	// Sign. The package's real init() has always run this way - it pushes no
+	// frame arena, so the current arena is the root - and the switch gives every
+	// initialiser the same target. Restored at every return, before the return
+	// encode, so the encode buffer still lands in the frame arena.
+	if (e.curFunc.name == "__varinit" || isInitFuncName(e.curFunc.name)) && ssaFuncStoresGlobal(e.curFunc) {
+		e.nextReg++
+		e.initArenaNum = e.nextReg
+		e.w("  %init_arena") ; e.w(irItoa(e.initArenaNum)) ; e.w(" = call ptr @runtime.CurrentArena(ptr null)\n")
+		e.declareRuntime("runtime.CurrentArena", "ptr", "")
+		e.nextReg++
+		rootNum := e.nextReg
+		e.w("  %init_root") ; e.w(irItoa(rootNum)) ; e.w(" = call ptr @runtime.RootArena(ptr null)\n")
+		e.declareRuntime("runtime.RootArena", "ptr", "")
+		e.w("  call void @runtime.SetCurrentArena(ptr %init_root") ; e.w(irItoa(rootNum)) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.SetCurrentArena", "void", "ptr")
+	}
+	return e.arenaActive
+}
+
+// ssaFuncStoresGlobal reports whether f stores into a package-level global,
+// directly or through a field or index path rooted at one. Such a store is only
+// legal in initialisation code (checkGlobalMutation enforces that), and the
+// memory it stores must outlive every frame.
+func ssaFuncStoresGlobal(f *SSAFunction) (ok bool) {
+	if f == nil || f.Blocks == nil {
 		return false
 	}
-	ipt := e.intptrType()
-	e.w("  %fn_arena = call ptr @runtime.FnArenaPush(")
-	e.w(ipt)
-	e.w(" 65536, ptr null)\n")
-	e.declareRuntime("runtime.FnArenaPush", "ptr", ipt)
-	// Read-only method of a sovereign type: register the receiver's arena as
-	// stable so returned views into receiver data stay views, while the
-	// method's own scratch lives in this fn arena and is freed at return.
-	if e.curFunc.Signature != nil && e.curFunc.Signature.Recv != nil && len(e.curFunc.Params) > 0 {
-		recvTyp := e.curFunc.Signature.Recv.Typ
-		if ptr, ok2 := SafeUnderlying(recvTyp).(*Pointer); ok2 {
-			if named, ok3 := ptr.Base.(*Named); ok3 && e.isSovereignNamedType(named) && !ssaFuncHasReceiverWrite(e.curFunc) {
-				recvName := e.operand(e.curFunc.Params[0])
-				e.w("  call void @runtime.codecRegStable(ptr ") ; e.w(recvName) ; e.w(", ptr null)\n")
-				e.declareRuntime("runtime.codecRegStable", "void", "ptr")
-				e.stableReg = true
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			if st, ok2 := instr.(*SSAStore); ok2 && ssaGlobalRoot(st.Addr, 0) != "" {
+				return true
 			}
 		}
 	}
-	e.arenaActive = true
-	return true
+	return false
 }
 
 // emitSovereignCleanup hands the receiver's borrowed data arena back, marking

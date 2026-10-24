@@ -95,6 +95,7 @@ type irEmitter struct {
 	stableReg     bool       // true when this frame registered the receiver's arena as stable
 	sovereignGroupReg   string // LLVM register holding the receiver's sovGroup
 	parentArenaReg      string // LLVM register holding the caller's arena for restore
+	initArenaNum        int32  // register number holding an initialiser's saved arena (0 = none)
 	sovereignTypes map[string]bool // lazy-init: which named types are sovereign
 	typeCache     map[Type]string
 	pendTypeDescs     map[string]Type
@@ -1510,6 +1511,7 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 	e.stableReg = false
 	e.sovereignGroupReg = ""
 	e.parentArenaReg = ""
+	e.initArenaNum = 0
 	markReturnEscapes(f)
 	e.nextReg = 0
 	e.deferList = nil
@@ -2352,6 +2354,14 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 		e.w(e.deferFrame)
 		e.w(", ptr null)\n")
 		e.declareRuntime("runtime.destroyDeferFrame", "void", "ptr")
+	}
+	if e.initArenaNum != 0 {
+		// Hand the caller's arena back before the return encode: the
+		// initialiser ran with the root as its allocation target, and the encode
+		// buffer must still be allocated in this frame's arena so it dies with
+		// the frame.
+		e.w("  call void @runtime.InitArenaRestore(ptr %init_arena") ; e.w(irItoa(e.initArenaNum)) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.InitArenaRestore", "void", "ptr")
 	}
 	frt := e.funcRetType(e.curFunc)
 	if len(r.Results) == 0 || savedIntoResults {

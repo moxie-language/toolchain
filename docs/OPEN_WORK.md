@@ -15780,3 +15780,61 @@ Verified: `New(); Sum32()` is 1, `Write("abcdef"); Sum32()` is 136184406
 block is 0xE33902B9 as in Go, and building and running the png probe with `-a`
 prints no arena-escape warning - the two warnings the same probe printed before
 this change were this leak and its clone in the decoder path.
+
+## Round 187: a monomorphized clone resolved its defining package's unexported constants to zero
+
+`ecdsa.GenerateKey` worked and `ecdsa.SignASN1` died in
+`NewPublicKey___…P256Point` on a curve whose `newPoint` field held garbage.
+Disassembling the two copies of `initP256` in one binary (round 176's method,
+still valid) shows the difference exactly:
+
+    crypto/internal/fips140/ecdsa.initP256          rdi="P-256" rsi=5 rdx=5
+    crypto/ecdsa.…ecdsa.initP256__                  rdi=0       rsi=0 rdx=0
+
+The clone emitted into `crypto/ecdsa` passed three zero words for the
+`curveID`. `ScanGenericDecls` builds the scope a monomorphized body resolves
+against, and for a `ConstDecl` it inserted the *registry's* object when the
+constant was exported and a `NewTCConst(…, nil, nil)` placeholder when it was
+not. `p256 curveID = "P-256"` is unexported, so the placeholder had no value and
+every reference in the clone folded to the zero value. The VarDecl arm twenty
+lines below carries a comment about exactly this shape ("unexported vars
+referenced from a monomorphized body … degrade to the __any interface"); the
+ConstDecl arm never got the same treatment.
+
+The scan now evaluates the constant from source the same way the typecheck pass
+does: group and iota state, the repeated-expression rule for a bare line, the
+declared type, `tcSelectorConst` for a re-exported constant,
+`tcInferConstTypeFromExpr` as the fallback, and `ConvertConstLocal` to apply the
+declared type. Verified: the clone now passes `{ptr "P-256", 5, 5}` and the
+sign path gets past `NewPublicKey`.
+
+## Round 188: an initialiser's global stores landed in the caller's arena
+
+With the curve name fixed, the sign path died in `NewPublicKey` on a
+`newPoint` holding garbage. The curve pointer was valid at every clone boundary
+and the object was corrupt: `_p256Cached` pointed into memory that had been
+reused. The cause is the global-store rule. The restriction pass permits a store
+to a package global in any init-named function, but only the package's real
+`init()` is *safe*: it pushes no frame arena, so the current arena is the root
+and everything it allocates outlives the call. A lazy `initP256()` called from
+`GenerateKey` allocates its curve into `GenerateKey`'s frame arena; the global
+keeps that pointer and `GenerateKey`'s arena is recycled as soon as it returns.
+Key generation itself works (it runs entirely inside that frame), so the first
+observation is the *next* user: `SignASN1` read the reused block.
+
+Both compilers now give an initialiser the same target the real `init()` always
+had: a function that stores a package global runs with the root arena as its
+allocation target. The predicate is exact rather than name-based - `isInitFunc`
+*and* a store rooted at a package global (`funcStoresGlobal` /
+`ssaFuncStoresGlobal`, both using the existing `globalName` / `ssaGlobalRoot`
+walkers) - so an init-named helper that only touches locals is unchanged. The
+caller's arena is restored at every return *before* the return encode, so the
+encode buffer still lands in the frame arena, and the restore goes through the
+new `runtime.InitArenaRestore`, which leaves the root in place when the save is
+nil (that is `initDomain`'s own initialisers, which run before the root exists;
+restoring nil there left the fn stack with no arena and the next `alloc`
+panicked "alloc: nil arena").
+
+Verified: the stage4 binary built by legacy from this change bootstraps and
+bakes its own runtime, `ecdsa.GenerateKey` followed by `SignASN1` no longer
+faults in `NewPublicKey`, and the runtime bake no longer panics in `main`.
