@@ -15972,3 +15972,66 @@ Verified with a probe over the whole path: `Index`, `Count`, `Replace` (single
 byte, single-byte-to-multi-byte and the plain function), `Trim`/`TrimLeft`/
 `TrimRight`, `Fields`, `HasSuffix`, `LastIndex`, `Split`, `Equal` - every case
 correct, and the input buffer is untouched by every replacement path.
+
+## Round 192: the hash family's state and results become slices
+
+Second array cluster: `crypto/md5`, `crypto/sha1`, `crypto/internal/fips140/sha256`,
+`crypto/internal/fips140/sha512`, their block functions, and the public
+`crypto/sha256`/`crypto/sha512`/`crypto/hmac` wrappers.
+
+    md5.digest.s / .x                    [4]uint32 / [64]byte   -> []uint32 / []byte
+    md5.checkSum tmp / out               [72]byte / [16]byte    -> []byte
+    md5.Sum, sha1.Sum                    [Size]byte             -> []byte
+    sha1.digest.h / .x                   [5]uint32 / [64]byte   -> []uint32 / []byte
+    sha1 constSum length / out           [8]byte / [20]byte     -> []byte
+    blockGeneric w                       [16/64/80]            -> []uint16/[]uint32/[]uint64
+    _sha256K() / _sha512K()              [64]uint32/[80]uint64  -> slice literals
+    fips140 sha256/512 Digest.h / .x     fixed arrays           -> slices
+    checkSum tmp / digest                fixed arrays           -> slices
+    sha256.Sum256/Sum/Sum224             [Size]byte             -> []byte
+    sha512.Sum512/384/512_224/512_256    [Size*]byte            -> []byte
+    hmac.Sum                             [32]byte               -> []byte
+
+Three things this conversion taught, none of them about arrays:
+
+  * **A digest copy is not a value copy any more.** `d0 := *d` was correct for
+    an all-array struct; with slice fields it aliases the state, so `Sum`
+    and `Clone` would corrupt the digest they were asked to preserve. Each
+    package now has `copyState()`, which allocates `h`/`s` and `x` and copies
+    element-wise, and both callers go through it.
+
+  * **`copy(dst[off:], src)` writes into a copy.** The compiler rejects that
+    form for user packages ("a subslice is a copy, so copying into it is not
+    allowed") but exempts the stdlib, which is why `Write` and
+    `UnmarshalBinary` had been getting away with it. Converting `x` from an
+    array to a slice would have kept compiling while silently blocking input,
+    so every such site is now an explicit element loop: `Write` copies into
+    `d.x` by index, `UnmarshalBinary` copies by index and advances `b` by the
+    count.
+
+  * **The digest became a self-mutating type.** With array fields the struct
+    needed no codec, so `ssaIsSovereignNamedType` said no; with slice fields it
+    does, so the hash digests now own a sovereign arena and their mutating
+    methods are subject to the sovereign loop-declaration rule.
+    `sha1.constSum` was the one violation (`mask := ...` inside the padding
+    loop) and the scratch is now declared before the loop. Measured cost of the
+    change: 100k iterations of `md5.Sum` + `sha1.Sum` + `sha256.Sum256` over a
+    64-byte buffer peak at 1968 kB RSS, so the sovereign arena is bounded here
+    and does not grow per call.
+
+The public `Sum*` signatures changed, so the callers moved with them:
+`Sum256(x)[:]` becomes `Sum256(x)`, `h.Sum(sum[:0])` becomes `h.Sum(nil)` (the
+old form relied on `push` writing through a subslice view of the caller's
+array), and `base58`, `bip39`, `tls`, `secp256k1` and `x509` index the result
+as before. Two identifier types are still arrays on purpose - `chainhash.Hash`
+(value semantics: `rev := *hash` then swap) and `x509.sum224` (a `map` key) -
+so both packages convert at the boundary with a small `hashOf`/`sum224Of`
+helper; turning those into slices is its own item, not a drive-by.
+
+Verification: a differential probe against Go 1.25.3 over all eight digests
+(md5, sha1, sha256, sha224, sha512, sha384, sha512/224, sha512/256) for every
+input length 0..200, plus three-way split writes, `Clone` independence and
+`MarshalBinary`/`UnmarshalBinary` round trips mid-stream - 600 lines of output
+identical to Go. Callers exercised end to end: base58check text, a BIP-39
+mnemonic, chainhash `DoubleHashH`/`DoubleHashB`, and BIP-340 sign/verify on
+both the array and the `...Bytes` entry points.

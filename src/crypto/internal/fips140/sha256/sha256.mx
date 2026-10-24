@@ -50,11 +50,42 @@ const (
 
 // Digest is a SHA-224 or SHA-256 [hash.Hash] implementation.
 type Digest struct {
-	h     [8]uint32
-	x     [chunk]byte
+	h     []uint32
+	x     []byte
 	nx    int32
 	len   uint64
 	is224 bool // mark if this digest is SHA-224
+}
+
+// newDigest allocates the fixed-size state a digest always carries, so every
+// digest value is usable without a zero-value special case.
+func newDigest(is224 bool) (d *Digest) {
+	d = &Digest{
+		h:     []uint32{:8},
+		x:     []byte{:chunk},
+		is224: is224,
+	}
+	d.Reset()
+	return d
+}
+
+// copyState returns an independent copy of the digest, so the original can keep
+// being written while the copy is summed.
+func (d *Digest) copyState() (c *Digest) {
+	c = &Digest{
+		h:     []uint32{:8},
+		x:     []byte{:chunk},
+		nx:    d.nx,
+		len:   d.len,
+		is224: d.is224,
+	}
+	for i := 0; i < len(d.h); i++ {
+		c.h[i] = d.h[i]
+	}
+	for i := 0; i < len(d.x); i++ {
+		c.x[i] = d.x[i]
+	}
+	return c
 }
 
 const (
@@ -107,7 +138,14 @@ func (d *Digest) UnmarshalBinary(b []byte) (ret0 error) {
 	b, d.h[5] = consumeUint32(b)
 	b, d.h[6] = consumeUint32(b)
 	b, d.h[7] = consumeUint32(b)
-	b = b[copy(d.x[:], b):]
+	n := len(d.x)
+	if n > len(b) {
+		n = len(b)
+	}
+	for i := int32(0); i < n; i++ {
+		d.x[i] = b[i]
+	}
+	b = b[n:]
 	b, d.len = consumeUint64(b)
 	d.nx = int32(d.len % chunk)
 	return nil
@@ -122,8 +160,7 @@ func consumeUint32(b []byte) (ret0 []byte, ret1 uint32) {
 }
 
 func (d *Digest) Clone() (ret0 hash.Cloner, ret1 error) {
-	r := *d
-	return &r, nil
+	return d.copyState(), nil
 }
 
 func (d *Digest) Reset() {
@@ -152,17 +189,12 @@ func (d *Digest) Reset() {
 
 // New returns a new Digest computing the SHA-256 hash.
 func New() (ret0 *Digest) {
-	d := &Digest{}
-	d.Reset()
-	return d
+	return newDigest(false)
 }
 
 // New224 returns a new Digest computing the SHA-224 hash.
 func New224() (ret0 *Digest) {
-	d := &Digest{}
-	d.is224 = true
-	d.Reset()
-	return d
+	return newDigest(true)
 }
 
 func (d *Digest) Size() (ret0 int32) {
@@ -178,7 +210,13 @@ func (d *Digest) Write(p []byte) (nn int32, err error) {
 	nn = len(p)
 	d.len += uint64(nn)
 	if d.nx > 0 {
-		n := copy(d.x[d.nx:], p)
+		n := len(d.x) - d.nx
+		if n > len(p) {
+			n = len(p)
+		}
+		for i := int32(0); i < n; i++ {
+			d.x[d.nx+i] = p[i]
+		}
 		d.nx += n
 		if d.nx == chunk {
 			block(d, d.x[:])
@@ -197,7 +235,10 @@ func (d *Digest) Write(p []byte) (nn int32, err error) {
 		p = p[n:]
 	}
 	if len(p) > 0 {
-		d.nx = copy(d.x[:], p)
+		d.nx = len(p)
+		for i := int32(0); i < d.nx; i++ {
+			d.x[i] = p[i]
+		}
 	}
 	return
 }
@@ -205,18 +246,18 @@ func (d *Digest) Write(p []byte) (nn int32, err error) {
 func (d *Digest) Sum(in []byte) (ret0 []byte) {
 	fips140.RecordApproved()
 	// Make a copy of d so that caller can keep writing and summing.
-	d0 := *d
+	d0 := d.copyState()
 	sum := d0.checkSum()
 	if d0.is224 {
 		return push(in, sum[:size224]...)
 	}
-	return push(in, sum[:]...)
+	return push(in, sum...)
 }
 
-func (d *Digest) checkSum() (ret0 [size]byte) {
+func (d *Digest) checkSum() (ret0 []byte) {
 	dlen := d.len
 	// Padding. Add a 1 bit and 0 bits until 56 bytes mod 64.
-	var tmp [64 + 8]byte // padding + length buffer
+	tmp := []byte{:64 + 8} // padding + length buffer
 	tmp[0] = 0x80
 	var t uint64
 	if dlen%64 < 56 {
@@ -235,7 +276,7 @@ func (d *Digest) checkSum() (ret0 [size]byte) {
 		panic("d.nx != 0")
 	}
 
-	var digest [size]byte
+	digest := []byte{:size}
 
 	byteorder.BEPutUint32(digest[0:], d.h[0])
 	byteorder.BEPutUint32(digest[4:], d.h[1])

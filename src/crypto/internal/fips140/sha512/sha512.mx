@@ -71,11 +71,42 @@ const (
 // Digest is a SHA-384, SHA-512, SHA-512/224, or SHA-512/256 [hash.Hash]
 // implementation.
 type Digest struct {
-	h    [8]uint64
-	x    [chunk]byte
+	h    []uint64
+	x    []byte
 	nx   int32
 	len  uint64
 	size int32 // size224, size256, size384, or size512
+}
+
+// newDigest allocates the fixed-size state a digest always carries, so every
+// digest value is usable without a zero-value special case.
+func newDigest(size int32) (d *Digest) {
+	d = &Digest{
+		h:    []uint64{:8},
+		x:    []byte{:chunk},
+		size: size,
+	}
+	d.Reset()
+	return d
+}
+
+// copyState returns an independent copy of the digest, so the original can keep
+// being written while the copy is summed.
+func (d *Digest) copyState() (c *Digest) {
+	c = &Digest{
+		h:    []uint64{:8},
+		x:    []byte{:chunk},
+		nx:   d.nx,
+		len:  d.len,
+		size: d.size,
+	}
+	for i := 0; i < len(d.h); i++ {
+		c.h[i] = d.h[i]
+	}
+	for i := 0; i < len(d.x); i++ {
+		c.x[i] = d.x[i]
+	}
+	return c
 }
 
 func (d *Digest) Reset() {
@@ -192,7 +223,14 @@ func (d *Digest) UnmarshalBinary(b []byte) (ret0 error) {
 	b, d.h[5] = consumeUint64(b)
 	b, d.h[6] = consumeUint64(b)
 	b, d.h[7] = consumeUint64(b)
-	b = b[copy(d.x[:], b):]
+	n := len(d.x)
+	if n > len(b) {
+		n = len(b)
+	}
+	for i := int32(0); i < n; i++ {
+		d.x[i] = b[i]
+	}
+	b = b[n:]
 	b, d.len = consumeUint64(b)
 	d.nx = int32(d.len % chunk)
 	return nil
@@ -203,40 +241,27 @@ func consumeUint64(b []byte) (ret0 []byte, ret1 uint64) {
 }
 
 func (d *Digest) Clone() (ret0 hash.Cloner, ret1 error) {
-	r := *d
-	return &r, nil
+	return d.copyState(), nil
 }
 
 // New returns a new Digest computing the SHA-512 hash.
 func New() (ret0 *Digest) {
-	d := &Digest{}
-	d.size = size512
-	d.Reset()
-	return d
+	return newDigest(size512)
 }
 
 // New512_224 returns a new Digest computing the SHA-512/224 hash.
 func New512_224() (ret0 *Digest) {
-	d := &Digest{}
-	d.size = size224
-	d.Reset()
-	return d
+	return newDigest(size224)
 }
 
 // New512_256 returns a new Digest computing the SHA-512/256 hash.
 func New512_256() (ret0 *Digest) {
-	d := &Digest{}
-	d.size = size256
-	d.Reset()
-	return d
+	return newDigest(size256)
 }
 
 // New384 returns a new Digest computing the SHA-384 hash.
 func New384() (ret0 *Digest) {
-	d := &Digest{}
-	d.size = size384
-	d.Reset()
-	return d
+	return newDigest(size384)
 }
 
 func (d *Digest) Size() (ret0 int32) {
@@ -249,7 +274,13 @@ func (d *Digest) Write(p []byte) (nn int32, err error) {
 	nn = len(p)
 	d.len += uint64(nn)
 	if d.nx > 0 {
-		n := copy(d.x[d.nx:], p)
+		n := len(d.x) - d.nx
+		if n > len(p) {
+			n = len(p)
+		}
+		for i := int32(0); i < n; i++ {
+			d.x[d.nx+i] = p[i]
+		}
 		d.nx += n
 		if d.nx == chunk {
 			block(d, d.x[:])
@@ -263,7 +294,10 @@ func (d *Digest) Write(p []byte) (nn int32, err error) {
 		p = p[n:]
 	}
 	if len(p) > 0 {
-		d.nx = copy(d.x[:], p)
+		d.nx = len(p)
+		for i := int32(0); i < d.nx; i++ {
+			d.x[i] = p[i]
+		}
 	}
 	return
 }
@@ -271,16 +305,15 @@ func (d *Digest) Write(p []byte) (nn int32, err error) {
 func (d *Digest) Sum(in []byte) (ret0 []byte) {
 	fips140.RecordApproved()
 	// Make a copy of d so that caller can keep writing and summing.
-	d0 := &Digest{}
-	*d0 = *d
+	d0 := d.copyState()
 	sum := d0.checkSum()
 	return push(in, sum[:d.size]...)
 }
 
-func (d *Digest) checkSum() (ret0 [size512]byte) {
+func (d *Digest) checkSum() (ret0 []byte) {
 	// Padding. Add a 1 bit and 0 bits until 112 bytes mod 128.
 	dlen := d.len
-	var tmp [128 + 16]byte // padding + length buffer
+	tmp := []byte{:128 + 16} // padding + length buffer
 	tmp[0] = 0x80
 	var t uint64
 	if dlen%128 < 112 {
@@ -302,7 +335,7 @@ func (d *Digest) checkSum() (ret0 [size512]byte) {
 		panic("d.nx != 0")
 	}
 
-	var digest [size512]byte
+	digest := []byte{:size512}
 	byteorder.BEPutUint64(digest[0:], d.h[0])
 	byteorder.BEPutUint64(digest[8:], d.h[1])
 	byteorder.BEPutUint64(digest[16:], d.h[2])
