@@ -58,18 +58,42 @@ type tableEntry struct {
 // deflateFast maintains the table for matches,
 // and the previous byte block for cross block matching.
 type deflateFast struct {
-	table [tableSize]tableEntry
+	// A slice, not a [tableSize]tableEntry: the struct is copied across a
+	// return boundary by the codec, and an array field of 128 KiB next to the
+	// prev slice made the decode land the slice at the wrong offset, so the first
+	// BestSpeed block died in memcpy. clear(e.table[:]) was also a no-op (a
+	// subslice is a copy), which this fixes with clear(e.table).
+	table []tableEntry
 	prev  []byte // Previous block, zero length if unknown.
 	cur   int32  // Current match offset.
 }
 
 func newDeflateFast() (e *deflateFast) {
-	return &deflateFast{cur: maxStoreBlockSize, prev: []byte{:0:maxStoreBlockSize}}
+	return &deflateFast{cur: maxStoreBlockSize}
+}
+
+// ensureBuffers allocates prev and the hash table from the CURRENT arena.
+//
+// It must run from a mutating method of e (encode), whose prologue borrows e's
+// sovereign arena: an allocation made here lands in that arena and outlives the
+// call without a copy. Building the same buffers in newDeflateFast put them in
+// the constructor's frame arena, and the store into the compressor aliased them
+// as "ancestor" memory, so they dangled as soon as the compressor reset
+// returned - the first BestSpeed block then read 96 KiB past a released frame
+// (SIGSEGV in (*deflateFast).encode).
+func (e *deflateFast) ensureBuffers() {
+	if e.prev == nil {
+		e.prev = []byte{:0:maxStoreBlockSize}
+	}
+	if e.table == nil {
+		e.table = []tableEntry{:tableSize}
+	}
 }
 
 // encode encodes a block given in src and appends tokens
 // to dst and returns the result.
 func (e *deflateFast) encode(dst []token, src []byte) (out []token) {
+	e.ensureBuffers()
 	// Ensure that e.cur doesn't wrap.
 	if e.cur >= bufferReset {
 		e.shiftOffsets()
@@ -305,7 +329,7 @@ func (e *deflateFast) reset() {
 func (e *deflateFast) shiftOffsets() {
 	if len(e.prev) == 0 {
 		// We have no history; just clear the table.
-		clear(e.table[:])
+		clear(e.table)
 		e.cur = maxMatchOffset + 1
 		return
 	}
@@ -315,7 +339,7 @@ func (e *deflateFast) shiftOffsets() {
 	// self-mutating method is rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
 	var v int32
-	for i := range e.table[:] {
+	for i := range e.table {
 		v = e.table[i].offset - e.cur + maxMatchOffset + 1
 		if v < 0 {
 			// We want to reset e.cur to maxMatchOffset + 1, so we need to shift

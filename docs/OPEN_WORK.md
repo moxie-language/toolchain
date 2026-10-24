@@ -15526,3 +15526,25 @@ The compiler-level defect behind the first bullet is the same one this file has
 carried since round 55 (a returned value that must keep identity is copied); the
 source-level idiom that avoids it is "never chain a mutating call whose result
 you drop, and never write through a subslice".
+
+## Round 180: flate BestSpeed is fixed and byte-identical to Go
+
+Level 1 (`deflatefast`) died with SIGSEGV in `(*deflateFast).encode` on the first
+block. The faulting read was `e.table[12040]` at a base address in a released
+frame arena: `newDeflateFast` built the 64 KiB `prev` buffer and the 128 KiB hash
+table in its own frame and returned the struct by pointer, and the store into the
+compressor's sovereign arena aliased that memory as an "ancestor" frame (the
+codec keeps identity for ancestor arenas by design), so it dangled as soon as
+`compressor.reset` returned.
+
+The buffers are now allocated by `deflateFast.ensureBuffers` from inside
+`encode`, a mutating method of `e`: its prologue borrows `e`'s sovereign arena,
+so a direct allocation there lands in the arena that owns the receiver and needs
+no relocation. The table is a `[]tableEntry` rather than a
+`[tableSize]tableEntry` array, which also fixes `clear(e.table[:])` (clearing a
+subslice is a no-op) and keeps a 128 KiB array out of a struct the codec copies.
+
+Verified against Go 1.25 for levels -1, 0, 1, 6 and 9 over three inputs (4 KiB
+repetitive, 4 KiB pseudo-random, 8 KiB text): compressed length AND FNV hash of
+the output match for every case, e.g. level 1 gives 45/132/4106 bytes with the
+same hashes as Go.
