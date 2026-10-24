@@ -15923,3 +15923,52 @@ Verified, all four curves, moxie-only and cross-checked against Go 1.25:
 
 This closes the ecdsa sign path that rounds 175-189 tracked: ECDH and ECDSA both
 work on every NIST curve for the first time.
+
+## Round 191: the bytes package's tables become slices, and two lost-copy defects fall out
+
+First cluster of the array removal. Six tables went from arrays to slices, each
+built where its owner is built:
+
+    stringFinder.badCharSkip          [256]int32     -> []int32
+    genericReplacer.mapping           [256]byte      -> []byte
+    byteStringReplacer.replacements   [256][]byte    -> [][]byte
+    byteReplacer                      [256]byte      -> struct{ r []byte }
+    asciiSet                          [8]uint32      -> struct{ w []uint32 }
+    _asciiSpace()                     [256]uint8     -> []uint8
+
+Nothing about the semantics needed a decision: `len` is unchanged, indexing is
+unchanged, and `==` on slices is content equality (`runtime.sliceEqual`), so a
+slice table compares exactly as the array did. The one trap is the keyed slice
+LITERAL: `[]uint8{'\t':1, '\n':1, ...}` has length 33 (highest index plus one),
+not 256, so `_asciiSpace` now allocates `[]uint8{:256}` and fills six entries -
+as written the old literal became a 33-byte table and `bytes.Fields` panicked
+"index out of range" on the first space at index 32.
+
+Converting the package exposed two real defects, both in `bytes.Replacer`:
+
+  * `byteReplacer.Replace` used `buf = []byte(s)` as a lazy copy. In Moxie
+    `string` and `[]byte` are ONE mutable type, so that conversion is not a
+    copy: the first replacement wrote through into the CALLER's buffer. Worse,
+    `[]byte("literal")` points at the constant's backing, so
+    `NewReplacer(a->1, b->2).Replace([]byte("abcab"))` rewrote the constant and
+    a later `NewReplacer(a->XX, b->YY).Replace([]byte("abcab"))` received
+    "12c12" as its input. Fixed with `Clone(s)` (the package already had it),
+    verified: `replace: 12c12 input untouched: abcab`.
+
+  * `genericReplacer` (two or more multi-byte keys) crashes. This one is NOT
+    caused by the conversion: the same three-case probe on the pre-change tree
+    faults identically. `makeGenericReplacer` builds a correct trie inside the
+    package (verified with prints: tableSize 3, mapping a/b/c -> 0/1/2, root
+    table entries 0 and 1 non-nil), and the fault is in
+    `(*genericReplacer).lookup` at the dereference of the node pointer: the
+    disassembly loads it with a 32-BIT `mov 0x110(%rsp),%ecx` and then
+    dereferences it (`cmp %edx,0x18(%rcx)`), so a pointer local is spilled into
+    an i32 slot. Reproducer: `bytes.NewReplacer([]byte("ab"), []byte("Q"),
+    []byte("bc"), []byte("R")).Replace([]byte("abcabc"))` - expected "QcQc".
+    Parked as its own defect; it is a pointer-slot / layout question, not an
+    array one, and the array cluster above is otherwise complete.
+
+Verified with a probe over the whole path: `Index`, `Count`, `Replace` (single
+byte, single-byte-to-multi-byte and the plain function), `Trim`/`TrimLeft`/
+`TrimRight`, `Fields`, `HasSuffix`, `LastIndex`, `Split`, `Equal` - every case
+correct, and the input buffer is untouched by every replacement path.

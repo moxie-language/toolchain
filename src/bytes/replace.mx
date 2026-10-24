@@ -58,21 +58,24 @@ func (b *Replacer) build() (rp replacer) {
 	}
 
 	if allNewBytes {
-		br := byteReplacer{}
-		for i := range br {
-			br[i] = byte(i)
+		br := byteReplacer{r: []byte{:256}}
+		for i := range br.r {
+			br.r[i] = byte(i)
 		}
 		// The first occurrence of old->new map takes precedence
 		// over the others with the same old string.
 		for i := len(oldnew) - 2; i >= 0; i -= 2 {
 			o := oldnew[i][0]
 			n := oldnew[i+1][0]
-			br[o] = n
+			br.r[o] = n
 		}
 		return &br
 	}
 
-	r := byteStringReplacer{toReplace: [][]byte{:0:len(oldnew)/2}}
+	r := byteStringReplacer{
+		replacements: [][]byte{:256},
+		toReplace:    [][]byte{:0:len(oldnew) / 2},
+	}
 	// The first occurrence of old->new map takes precedence
 	// over the others with the same old string.
 	for i := len(oldnew) - 2; i >= 0; i -= 2 {
@@ -263,11 +266,11 @@ type genericReplacer struct {
 	// of unique key bytes.
 	tableSize int32
 	// mapping maps from key bytes to a dense index for trieNode.table.
-	mapping [256]byte
+	mapping []byte
 }
 
 func makeGenericReplacer(oldnew [][]byte) (rep *genericReplacer) {
-	r := &genericReplacer{}
+	r := &genericReplacer{mapping: []byte{:256}}
 	// Find each byte used, then assign them each an index.
 	for i := 0; i < len(oldnew); i += 2 {
 		key := oldnew[i]
@@ -421,18 +424,30 @@ func (r *singleStringReplacer) WriteString(w io.Writer, s []byte) (n int32, err 
 
 // byteReplacer is the implementation that's used when all the "old"
 // and "new" values are single ASCII bytes.
-// The array contains replacement bytes indexed by old byte.
-type byteReplacer [256]byte
+// r contains replacement bytes indexed by old byte.
+//
+// A slice, not a [256]byte array: the table is built once, stored in the
+// replacer the caller keeps, and belongs to whoever owns the replacer.
+type byteReplacer struct {
+	r []byte
+}
 
 func (r *byteReplacer) Replace(s []byte) (out []byte) {
 	var buf []byte // lazily allocated
 	for i := 0; i < len(s); i++ {
 		b := s[i]
-		if r[b] != b {
+		if r.r[b] != b {
 			if buf == nil {
-				buf = []byte(s)
+				// A real copy: in Moxie string and []byte are one mutable
+				// type, so `[]byte(s)` is not a copy and writing through it
+				// replaces the CALLER's bytes in place. This one mutated the
+				// input slice, and because a string CONSTANT converted to
+				// []byte points at the constant's backing, a second
+				// bytes.NewReplacer(...).Replace([]byte("abcab")) saw the bytes
+				// the first call had already rewritten ("12c12").
+				buf = Clone(s)
 			}
-			buf[i] = r[b]
+			buf[i] = r.r[b]
 		}
 	}
 	if buf == nil {
@@ -446,7 +461,7 @@ func (r *byteReplacer) WriteString(w io.Writer, s []byte) (n int32, err error) {
 	last := 0
 	for i := 0; i < len(s); i++ {
 		b := s[i]
-		if r[b] == b {
+		if r.r[b] == b {
 			continue
 		}
 		if last != i {
@@ -457,7 +472,7 @@ func (r *byteReplacer) WriteString(w io.Writer, s []byte) (n int32, err error) {
 			}
 		}
 		last = i + 1
-		nw, werr2 := w.Write(r[b : int32(b)+1])
+		nw, werr2 := w.Write(r.r[b : int32(b)+1])
 		n += nw
 		if werr2 != nil {
 			return n, werr2
@@ -478,7 +493,7 @@ func (r *byteReplacer) WriteString(w io.Writer, s []byte) (n int32, err error) {
 type byteStringReplacer struct {
 	// replacements contains replacement byte slices indexed by old byte.
 	// A nil []byte means that the old byte should not be replaced.
-	replacements [256][]byte
+	replacements [][]byte
 	// toReplace keeps a list of bytes to replace. Depending on length of toReplace
 	// and length of target string it may be faster to use Count, or a plain loop.
 	// We store single byte as a string, because Count takes a string.
