@@ -15224,3 +15224,65 @@ against a compiler whose `initAll` emission can be dumped (the build already
 prints `generate initAll`), or to bisect `wire.mx` itself by copying it into a
 probe module file by file - `wire.mx` alone first, since it is the package's only
 non-worker file.
+
+## Round 175: the codec's back-reference key is a size, not just an address
+
+`crypto/ecdh`'s ECDH returned `invalid scalar length` for a valid key pair, and
+the private scalar read back as a **16-byte slice with capacity 2** immediately
+after a key generation that had produced 32 bytes. The fips PrivateKey object at
+the failing call was not a corrupted original: it was a *different, smaller*
+object. Its `pub` PublicKey fields were byte-perfect and only the trailing `d`
+slice was garbage, which is the signature of an object that was decoded at the
+wrong size.
+
+The cause is in `src/runtime/codec.mx`, the graph encoder every function return
+goes through. Its seen set holds one entry per object it walks so that a pointer
+to something already encoded becomes a back-reference instead of a second copy.
+Those entries were keyed by **address alone**, and a struct shares its address
+with its first field. `crypto/ecdh.PrivateKey` holds
+`*fips140/ecdh.PrivateKey`, whose first field is the matching `PublicKey`: the
+PublicKey (48 bytes) was registered at the very address the enclosing PrivateKey
+(72 bytes) starts at, so the outer key's `fips` pointer became a back-reference
+to the PublicKey entry. The decoder resolved it to that 48-byte block, the
+PrivateKey's tail was never encoded, and `d` read whatever the arena held next.
+
+A back-reference is correct exactly when the object already encoded at that
+address **covers the pointee**. Entries are now (address, encoded size) pairs and
+the lookup requires `entrySize >= pointeeSize`; the pair index is still the
+back-reference index, so the encoder's table and the decoder's one-word table
+stay position-aligned, and `codecSeenSet`'s layout is untouched (both compilers
+allocate it from their emitted IR).
+
+The size, not the type, is the key because the *other* direction is a legitimate
+identity that must keep working: `fmt`'s printer holds `buf *[]byte` pointing at
+its **own first field**, so a pointer to a smaller object at a registered address
+must resolve to that address. Keying on the type instead made it a fresh copy of
+the slice header, and every formatted argument then wrote into a copy that never
+reached the printer's buffer - `fmt.Printf("%s", "lit")` printed an empty string
+while the argument's own `String()` still returned `lit`. That regression was
+caught by `tests/regressions/should_compile/builtin_string_render.mx` and
+`asn1_tag_mismatch.mx`, which is why the size rule carries both cases.
+
+Measured after the fix, against Go 1.25 on the same fixed private keys: P-256
+`NewPrivateKey`, both public keys, and the ECDH shared secret
+`c7d4af84c658a59f19868c89958637795eb6c6010f5179abba649b309ebd255d` match byte
+for byte. P-384 and P-521 still SIGSEGV inside `nistec`, which is a separate
+defect in those point ports.
+
+### Found, not fixed: interface dispatch has no arm for a generic instantiation
+
+`crypto/ecdsa.GenerateKey(elliptic.P256(), ...)` dies with `interface dispatch:
+no impl for Params (6 impl(s), none matches)`. This is not a naming mismatch:
+`findIfaceImpls` enumerates implementations from the **type declarations** of the
+link set, and it explicitly skips a generic declaration
+(`len(named3.TParams) > 0`) because a generic type's methods are never emitted as
+standalone symbols. The dynamic type here is the *instantiation*
+`*nistCurve[*nistec.P256Point]`, which has no declaration to enumerate, so no arm
+exists for it and the boxed value matches nothing. Arms for concrete impls of
+`Params` (`*CurveParams`, `*KoblitzCurve`) are present - they are the "6 impls".
+
+The compiler gap is real and is now the top item in this file: an interface
+invoke needs an arm (and a monomorphized body) for every instantiation of a
+generic type reachable in the link set, plus a registry that records those
+instantiations as they are created. Until that exists, `crypto/elliptic` must not
+hand out a generic type through an interface.

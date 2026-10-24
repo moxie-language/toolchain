@@ -389,20 +389,51 @@ func codecSeenInit(ss *codecSeenSet) {
 	ss.count = 0
 }
 
-func codecSeenLookup(ss *codecSeenSet, p unsafe.Pointer) int32 {
+// Seen entries are (address, encoded object size) PAIRS stored back to back in
+// the ptrs slice, with count counting pairs. The struct layout is unchanged: the
+// epilogue allocates codecSeenSet from the emitted IR of both compilers.
+//
+// The size is part of the key. An address alone over-claims identity in one
+// direction: a struct shares its address with its first field, so when only the
+// smaller object has been registered the back-reference resolves to a block that
+// is missing the enclosing object's tail. crypto/ecdh.PrivateKey holds
+// *fips140/ecdh.PrivateKey, whose first field is its PublicKey; the outer key's
+// fips pointer back-referenced the PublicKey entry, the PrivateKey was never
+// encoded, and the decoded key's private scalar read as a 16-byte slice over the
+// neighbouring allocation ("invalid scalar length" out of ECDH). A pointer to a
+// SMALLER object at a registered address is the other direction and must stay a
+// back-reference: fmt's printer holds `buf *[]byte` pointing at its own first
+// field, and re-encoding that slice instead of preserving the address left every
+// formatted argument writing into a copy that never reached the printer's
+// buffer.
+//
+// So: a back-reference is correct exactly when the registered object covers the
+// pointee, entrySize >= pointeeSize. The decoder's table stays one word per
+// entry (it only needs the address), and the pair index is the back-reference
+// index, so the two tables stay position-aligned.
+func codecSeenLookup(ss *codecSeenSet, p unsafe.Pointer, sz uintptr) int32 {
 	for i := int32(0); i < ss.count; i++ {
-		if ss.ptrs[i] == p { return i }
+		if ss.ptrs[i*2] == p && uintptr(ss.ptrs[i*2+1]) >= sz { return i }
 	}
 	return -1
 }
 
-func codecSeenAdd(ss *codecSeenSet, p unsafe.Pointer) int32 {
+func codecSeenAdd(ss *codecSeenSet, p unsafe.Pointer, sz uintptr) int32 {
 	if ss.count >= codecSeenCap { return -1 }
-	ss.ptrs = mxutil.Ensure(ss.ptrs, 1)
-	ss.ptrs = push(ss.ptrs, p)
+	ss.ptrs = mxutil.Ensure(ss.ptrs, 2)
+	ss.ptrs = push(ss.ptrs, p, unsafe.Pointer(sz))
 	n := ss.count
 	ss.count++
 	return n
+}
+
+// codecPointeeSize is the encoded size of the object a pointer type addresses.
+func codecPointeeSize(typ *RawType) (sz uintptr) {
+	et := typ.Elem()
+	if et == nil {
+		return 0
+	}
+	return uintptr(et.Size())
 }
 
 type codecDecodeSeen struct {
@@ -561,7 +592,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 			codecWriteVarint(cb, codecTagNil)
 			return
 		}
-		idx := codecSeenLookup(ss, p)
+		idx := codecSeenLookup(ss, p, codecPointeeSize(typ))
 		if idx >= 0 {
 			codecWriteVarint(cb, codecTagBackref)
 			codecWriteVarint(cb, uint64(uint32(idx)))
@@ -573,7 +604,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		// on both sides - adding it here as well was a second entry the decoder
 		// did not make, and that asymmetry is what shifted back-references.
 		if codecIsStableAddr(uintptr(p)) {
-			codecSeenAdd(ss, p)
+			codecSeenAdd(ss, p, codecPointeeSize(typ))
 			codecNoteStable(uintptr(p))
 			codecWriteVarint(cb, codecTagStable)
 			codecWriteRaw(cb, unsafe.Pointer(&p), 8)
@@ -593,13 +624,13 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 			// registration - this is the path the relay reported three times a
 			// run (pointee arena class 1), leaking a frame for every one.
 			if sovFindContainingArena(uintptr(p)) != nil {
-				codecSeenAdd(ss, p)
+				codecSeenAdd(ss, p, codecPointeeSize(typ))
 				codecNoteStable(uintptr(p))
 				codecWriteVarint(cb, codecTagStable)
 				codecWriteRaw(cb, unsafe.Pointer(&p), 8)
 				return
 			}
-			codecSeenAdd(ss, p)
+			codecSeenAdd(ss, p, codecPointeeSize(typ))
 			codecEscapeNote()
 			codecWriteVarint(cb, codecTagStable)
 			codecWriteRaw(cb, unsafe.Pointer(&p), 8)
@@ -671,7 +702,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		// the address is in the table before its fields are walked, so a field
 		// pointing back at the struct - or at an enclosing slice element - is
 		// encoded as a back-reference rather than recursively re-encoded.
-		codecSeenAdd(ss, ptr)
+		codecSeenAdd(ss, ptr, uintptr(typ.Size()))
 		for i := int32(0); i < nf; i++ {
 			off := typ.StructFieldOffset(i)
 			if off == 0 {
@@ -685,7 +716,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 				continue
 			}
 			fp := unsafe.Add(ptr, off)
-			codecSeenAdd(ss, fp)
+			codecSeenAdd(ss, fp, uintptr(typ.StructFieldType(i).Size()))
 		}
 		for i := int32(0); i < nf; i++ {
 			ft := typ.StructFieldType(i)
@@ -1233,7 +1264,7 @@ func codecEncodePtrValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, ele
 		codecWriteVarint(cb, codecTagNil)
 		return
 	}
-	idx := codecSeenLookup(ss, ptr)
+	idx := codecSeenLookup(ss, ptr, uintptr(elemType.Size()))
 	if idx >= 0 {
 		codecWriteVarint(cb, codecTagBackref)
 		codecWriteVarint(cb, uint64(uint32(idx)))
