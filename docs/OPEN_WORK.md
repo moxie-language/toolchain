@@ -15399,3 +15399,52 @@ ScalarBaseMult(2)` with every result on the curve. `crypto/ecdh` still has no
 `ecdsa.Sign` remains blocked by the cloned-initializer defect from round 176's
 addendum: key generation works, the sign path reads a curve global that the
 clone emitted into `crypto/ecdsa` never initialised.
+
+## Round 178: RSA key generation never returns because bigmod's exponentiation returns zero
+
+`rsa.GenerateKey(rand.Reader(), 1024)` does not terminate. It is not a deadlock:
+the prime search runs, it just never accepts a candidate. Measured with a print
+in `randomPrime`: 1923 candidates in 240 s, ~13% of them passing the trial
+division table and reaching Miller-Rabin, and not one accepted. For 512-bit
+candidates about one in twenty-three trial-division survivors is prime, so a
+working test would have accepted roughly ten of them.
+
+The primality test is fed a zero. Driving `crypto/internal/fips140/bigmod`
+directly, with a 256-bit odd modulus:
+
+  * `NewNat().SetBytes(base)` then `Bytes(m)` round-trips exactly (so the
+    limb<->byte conversion is fine);
+  * `NewModulusProduct(3, 5)` returns 15 (so the plain multiply-accumulate path
+    is fine);
+  * `NewNat().Exp(x, {0}, m)` returns **1** (so the Montgomery domain setup and
+    the final reduction round-trip through it);
+  * `Exp(x, {1}, m)`, `Exp(x, {2}, m)`, `Exp(x, {1000}, m)` and `Mul(x, x, m)`
+    all return **0**.
+
+So every Miller-Rabin round computes `b^m mod w = 0`, never `1` or `-1`, and
+every candidate is reported composite - including primes. `GenrateKey` therefore
+loops forever, in both compilers (the legacy-built probe behaves the same, so
+this is a runtime/src defect, not stage4 codegen).
+
+Two subslice-write defects in `nat.mx` were found while chasing it and are real
+by the language law, but they are NOT sufficient to explain the zero result, so
+they were left uncommitted rather than shipped half-diagnosed:
+
+  * `expand` does `clear(x.limbs[len(x.limbs):n])` and `reset` does
+    `clear(x.limbs[:max(n, len(x.limbs))])`. A subslice is a copy, so both
+    `clear` calls clear a throwaway copy and the limbs keep their old values
+    (`reset` is then not a reset).
+  * `addMulVVW` is called with destination subslices (`T[i:n+i]`), so every
+    limb write in the Montgomery accumulation loop is discarded.
+
+Note `NewModulusProduct` works at baseline and *panicked* with the offset-taking
+`addMulVVW` rewrite, so that rewrite needs its own diagnosis before it can land:
+the remaining defect in `montgomeryMul`/`Exp` (most likely the constant-time
+table selection at `tmp.assign(ctEq(k, uint32(i+1)), table[i])`, since an
+exponent nibble of 0 is the only case that produces the right answer) has to be
+found first, and then all of it verified together.
+
+This is the next item for the bigmod work: the fix is in
+`src/crypto/internal/fips140/bigmod/nat.mx`, and `rsa.GenerateKey` is the
+end-to-end test that proves it (a 1024-bit key must come out with a 1024-bit N
+and `E = 65537`).
