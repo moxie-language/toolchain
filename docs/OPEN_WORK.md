@@ -221,14 +221,27 @@ found three defects that no gate had ever reached:
     `PrivateKey.ECDH` compares the Curve interface, so every key was its own
     curve and every exchange failed with "curves do not match". The three
     curves are singletons built in init() now.
-  * STILL OPEN, and the next thing to fix: with both of those closed, P-256
-    arithmetic rejects its own keys - `ECDH` fails with "P256 point not on
-    curve", so `ecdsa.GenerateKey(elliptic.P256())` and every P-256 exchange
-    are broken. That is `crypto/internal/fips140/nistec` (and `nistec/fiat`),
-    which is also the biggest remaining array cluster (61 + 40 sites), so the
-    two pieces of work are the same piece: convert the limb arrays and the
-    point encodings carefully, with a known-answer vector from Go's P-256 at
-    each step.
+  * STILL OPEN: with both of those closed, P-256 arithmetic is what fails -
+    `ECDH` answers "P256 point not on curve". Narrowed as far as it goes
+    without fixing it:
+      - `p256_asm.mx` carries `//:build ignore`, so it is NOT the live code; its
+        halt stubs (`p256FromMont` and friends panic "asm not available") never
+        compile. The live amd64 path is `p256.mx` + `fiat` + `p256_table.mx`.
+      - the 88064-byte precomputed table is byte-for-byte identical to Go
+        1.25's `p256_table.go` (extracted both literals and compared).
+      - `SetBytes(G)` accepts the generator, `p256CheckOnCurve` passes, and
+        `Bytes()` round-trips the generator exactly.
+      - `ScalarBaseMult` matches Go's `elliptic.P256()` for k = 1, 2, 3, 4 and
+        16, and diverges from k = 128 on: 1<<7 and 1<<63 BOTH answer 3G. So
+        field arithmetic, point add/double and encoding are sound and the
+        windowed base-multiplication walk is not: `boothW6` recoding,
+        `genTables[(index+1)/6]`, `p256AffineTable.Select` or `AddAffine` for
+        every window above the first. The next step is to compare
+        `Select`ed point for a scalar that lives in window 1 with Go's table
+        entry, then `AddAffine`.
+      This is also the biggest remaining array cluster (nistec 61 + fiat 40
+      sites), so the two pieces of work are one: fix the window walk with a
+      known-answer vector at each step, then convert the limb arrays.
   * STILL OPEN: `rsa.GenerateKey(rand.Reader(), 1024)` never returns (240s
     timeout, no output) inside `crypto/internal/fips140/rsa`'s prime
     generation, which this tree did not touch. 512-bit keys are rejected by the
