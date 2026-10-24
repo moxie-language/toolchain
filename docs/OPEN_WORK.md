@@ -16077,3 +16077,40 @@ caches.
 
 Verification: `legacy/moxie build` → bake → `s4a` → `s4b` → `s4c`, with
 `s4b == s4c` (fixpoint), then 0a 97/97 with `s4b` installed as `./moxie`.
+
+## Round 194: utf8's tables become slices, and the probe found RuneCountInString counting bytes
+
+Third array cluster: `unicode/utf8`.
+
+    _firstTable          [256]uint8        -> []uint8
+    _acceptRangesTable   [16]acceptRange   -> []acceptRange
+
+`_acceptRangesTable` is the second keyed-literal trap in this sweep: its Go form
+is `[16]acceptRange{0: {...}, 1: {...}, 2: {...}, 3: {...}, 4: {...}}`, which an
+array literal sizes at 16 and fills with zeros. Written as `[]acceptRange{...}`
+the same keyed literal has length 5, so the table is allocated `[]acceptRange{:16}`
+and the five ranges are assigned by index.
+
+The conversion itself is behaviour-preserving, and the differential probe proves
+it: for every 1-, 2- and 3-byte sequence (plus a structured sample of 4-byte
+sequences) the probe folds `DecodeRune`, `RuneLen`, `RuneStart`, `FullRune` and
+`Valid` into an FNV accumulator, and for every code point `0..0x10FFFF` it folds
+`EncodeRune` + `DecodeRune` round trips into another. Both accumulators, plus
+`DecodeLastRune` on a well-formed and on a truncated tail and `ValidString`,
+match Go 1.25.3 exactly.
+
+The one mismatch the probe found was NOT the tables:
+
+    runecount  moxie 41   go 27     (41 is len(s) in bytes)
+
+`RuneCountInString` was `for range s { n++ }`. Go's version ranges over a
+string, which iterates RUNES; here `string` and `[]byte` are one mutable type,
+so ranging yields bytes and the function returned the byte length for any
+non-ASCII string. It is now an explicit decode loop (`DecodeRune`, advance by
+the rune size). Everything that measured text by rune count was affected and is
+now correct: `fmt`'s width padding of non-ASCII arguments (format.mx:99,117),
+`tabwriter`'s cell width, and `bytes.RuneCount`, whose result sizes the `[]rune`
+that `strings`-style helpers build.
+
+A grep for other `range` over a would-be string in `unicode`, `bytes` and the
+formatting packages finds no second instance of this shape.
