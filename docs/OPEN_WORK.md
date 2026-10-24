@@ -15596,3 +15596,42 @@ instrumentation that discriminates them: print the `*bufio.Writer` address insid
 `bufio.(*Writer).Write` and inside `Flush` for the png path - if `Write` sees a
 different address from `Flush`, the pointer was copied before reaching bufio; if
 both see `e.bw`, the copy is on the flush side.
+
+## Round 182: the png copy is made when a *nested* interface is relocated
+
+Instrumenting `bufio.NewWriterSize`, `(*bufio.Writer).Write`,
+`(*bufio.Writer).Flush`, `flate.NewWriterDict` and `(*dictWriter).Write` in one
+run of `png.Encode` gives the whole chain (addresses from that run):
+
+    NewWriterSize made        140484403989552
+    Write recv                140484403965840  len 2   n 0     <- zlib header, OK
+    NewWriterDict w word      140484403965840                  <- the interface it received is OK
+    dictWriter.Write w word   140484401647616  len 25          <- a DIFFERENT object
+    Write recv                140484401647616  len 25  n 2     <- compressed block
+    dictWriter.Write w word   140484401647616  len 4
+    Write recv                140484401647616  len 4   n 27    <- adler
+    Write recv                140484403965840  len 4   n 2     <- png's own adler
+    Flush recv                140484403965840  n 6
+
+So the value handed to `flate.NewWriterDict` is the same object zlib wrote its
+header through, and the copy appears between that call and `dictWriter.Write`:
+`dictWriter{dw := &dictWriter{w}}` is passed as an `io.Writer` into
+`flate.NewWriter`, whose `*Writer` is then returned. When that return relocates
+the `*dictWriter` (its own pointer is in the dying frame, so it is deep-copied),
+the codec descends into the pointee's `w io.Writer` field and copies the
+*bufio.Writer it points at* as well, instead of aliasing it.
+
+That is the defect: a pointer reached as an **interface payload inside a struct
+that is being copied** does not get the "ancestor arena keeps identity" treatment
+the same pointer gets at the top level. The descriptor path is
+`codecEncodeIfaceValue` -> `codecEncodeValue(&value, pointerType)` ->
+`KindPointer` -> `codecIsStableAddr`, and the encode runs inside the return of
+`flate.NewWriter`/`NewWriterDict`, where `codecRetTransient` is set and the
+bufio object lives in an ancestor frame that the code says keeps identity - so
+either that call takes a different branch than the code suggests, or the copy is
+produced by a second relocation of the same graph after the first (the
+`NewWriterDict` return). The next probe is to print inside `codecIsStableAddr`
+for this exact pointer and see which branch returns false; the source-side
+workaround, if the runtime fix is too broad, is to create the `bufio.Writer` in
+`png.Encode`'s frame (which outlives every call that stores or copies it) rather
+than inside the mutating `writeIDATs`.
