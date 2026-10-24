@@ -6359,32 +6359,9 @@ func prepareDispatchIndex(pkgs []*pkgInfo, cacheBase string, skip *pkgInfo) {
 	}
 }
 
-// dispFingerprintPath is where a package's measured arm set is kept. It is
-// written beside the cached objects, one file per package: every object in that
-// directory was compiled with this same arm set (a different arm set is a
-// different pkgHash, which the object's own file name carries), so one file is
-// enough and the newest writer wins - they agree by construction.
-func dispFingerprintPath(cacheBase, pkgPath string) (s string) {
-	return mxutil.JoinPath(mxutil.JoinPath(cacheBase, safeName(pkgPath)), "disp.fp")
-}
-
-func readDispFingerprint(cacheBase, pkgPath, version string) (fp string, ok bool) {
-	data, rok := mxutil.ReadFile(dispFingerprintPath(cacheBase, pkgPath))
-	if !rok {
-		return "", false
-	}
-	return string(data), true
-}
-
-func writeDispFingerprint(cacheBase, pkgPath, fp string) {
-	dir := mxutil.JoinPath(cacheBase, safeName(pkgPath))
-	mkdirAll(dir, 0755)
-	writeFile(dispFingerprintPath(cacheBase, pkgPath), []byte(fp), 0644)
-}
-
 // measureDispFingerprints fills the dispatch fingerprint for every package in
-// a link, reading what is on disk before measuring anything.
-func measureDispFingerprints(pkgs []*pkgInfo, cacheBase string) {
+// a link by measuring it. There is no on-disk copy: see measureDispFingerprint.
+func measureDispFingerprints(pkgs []*pkgInfo) {
 	// The map's own storage is allocated where this line runs, so it is
 	// allocated HERE, on the arena the build already has, and never inside a
 	// measurement arena: a hashmap that grows while a measurement arena is
@@ -6399,12 +6376,25 @@ func measureDispFingerprints(pkgs []*pkgInfo, cacheBase string) {
 		if dp.baked {
 			continue
 		}
-		measureDispFingerprint(dp, cacheBase)
+		measureDispFingerprint(dp)
 	}
 }
 
 // measureDispFingerprint records a package's interface-dispatch arm set under its
 // cache key, so pkgHash stops folding the whole link set in for it.
+//
+// It measures on every build. The arm set is a property of the package AND the
+// link: findIfaceImpls enumerates the impls of the whole resolved closure, so
+// one package has a different arm set under a different link set. Keeping one
+// fingerprint per package on disk ("the newest writer wins - they agree by
+// construction") was therefore a cache hazard, not an optimisation: a build
+// that found a fingerprint written for another link set computed a key for an
+// object whose arms did not cover its own link, linked it anyway, and
+// dispatched the missing impl through the zero-impl branch - silently, since
+// that branch is valid IR. It showed up as
+// tests/regressions/should_compile/ed25519_roundtrip failing inside a full 0a
+// run while passing on its own: the package whose fingerprint had been measured
+// for a smaller link set was the hash inside crypto/ed25519.
 //
 // The measurement is a scan of the package's own source for `x.Method(` call
 // sites. It has to run before the first pkgHash - the key is what the build is
@@ -6421,15 +6411,11 @@ func measureDispFingerprints(pkgs []*pkgInfo, cacheBase string) {
 // every name still share an object - and one that merely mentions a name the
 // other does not gets its own key. Over-measuring costs a little sharing;
 // under-measuring would be a stale hit.
-func measureDispFingerprint(dp *pkgInfo, cacheBase string) {
+func measureDispFingerprint(dp *pkgInfo) {
 	if bst.pkgDispFingerprint == nil {
 		bst.pkgDispFingerprint = map[string]string{}
 	}
 	if _, done := bst.pkgDispFingerprint[dp.path]; done {
-		return
-	}
-	if stored, ok := readDispFingerprint(cacheBase, dp.path, dp.version); ok {
-		bst.pkgDispFingerprint[dp.path] = stored
 		return
 	}
 	src := concatSources(dp.dir, dp.files)
@@ -6454,7 +6440,6 @@ func measureDispFingerprint(dp *pkgInfo, cacheBase string) {
 		fp = e.dispFingerprintForMethods(methods)
 	}
 	bst.pkgDispFingerprint[dp.path] = fp
-	writeDispFingerprint(cacheBase, dp.path, fp)
 }
 
 // scanSelectorCalls returns the distinct method names a source calls through a
@@ -6984,10 +6969,8 @@ func main() {
 
 	// With the index built, every package's dispatch arms can be measured - and
 	// the measurement has to happen before the first pkgHash, because that is
-	// the key the build is about to look up. A package whose object is already
-	// cached is not going to be compiled, so it needs no measurement: the
-	// fingerprint written beside that object is read instead.
-	measureDispFingerprints(pkgs, cacheBase)
+	// the key the build is about to look up.
+	measureDispFingerprints(pkgs)
 
 	// Whole-link registry pre-pass: interface dispatch emits a typeID switch
 	// over impls found in cctx.universe.Registry, which is populated in

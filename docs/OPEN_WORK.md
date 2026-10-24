@@ -16035,3 +16035,45 @@ input length 0..200, plus three-way split writes, `Clone` independence and
 identical to Go. Callers exercised end to end: base58check text, a BIP-39
 mnemonic, chainhash `DoubleHashH`/`DoubleHashB`, and BIP-340 sign/verify on
 both the array and the `...Bytes` entry points.
+
+## Round 193: a cached dispatch fingerprint was reused across link sets, so a linked object could be missing arms
+
+`tests/regressions/should_compile/ed25519_roundtrip` compiled from a cache that
+carried a stale dispatch-arm fingerprint and then silently failed at runtime with
+`panic: Verify rejected a valid signature`. It reproduced inside a 97-unit phase
+0a run and passed when that unit ran on its own, which is the signature of cache
+state, not of source.
+
+The cause is in the cache key. A package's object is keyed by
+`pkgHash = fnv(source, deps, dispatch arms, target)`, and the arms are measured
+by `dispFingerprintForMethods`: for each interface method the package invokes,
+the sorted identity of every impl `findIfaceImpls` enumerates. That enumeration
+runs over the whole resolved closure, so **one package has a different arm set
+under a different link set**.
+
+`measureDispFingerprint` nevertheless kept one fingerprint per package on disk
+(`<cacheBase>/<pkg>/disp.fp`) and preferred it over measuring, on the theory
+that "every object in that directory was compiled with this same arm set ...
+the newest writer wins - they agree by construction". They do not agree: the
+fingerprint is a function of the link set, and the file is not. A build whose
+closure differed from the one that wrote the file computed a key for an object
+whose arms did not cover its own link, found it, linked it, and dispatched the
+missing impl through the zero-impl branch. That branch is valid IR, so nothing
+failed to compile; the hash inside `crypto/ed25519` simply disagreed between
+signing and verifying.
+
+The fix deletes the on-disk fingerprint entirely (`dispFingerprintPath`,
+`readDispFingerprint`, `writeDispFingerprint`) and measures on every build.
+`measureDispFingerprints` runs after `prepareDispatchIndex`, so the measurement
+sees exactly the registry emission sees. The cost is a source scan per package
+plus an emitter pass for packages that mention a method call at all - 440 of 454
+packages measure `""` and skip the emitter - and a full 0a phase with the new
+compiler passes 97/97 including the ed25519 fixture.
+
+Legacy needs no mirror: it has no build cache at all, so it compiles every
+package of the closure on every build and its arm sets are link-exact by
+construction. This is a stage4 driver defect that only exists because stage4
+caches.
+
+Verification: `legacy/moxie build` → bake → `s4a` → `s4b` → `s4c`, with
+`s4b == s4c` (fixpoint), then 0a 97/97 with `s4b` installed as `./moxie`.
