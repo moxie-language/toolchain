@@ -110,14 +110,11 @@ func (p *P521Point) SetBytes(b []byte) (ret0 *P521Point, ret1 error) {
 
 var _p521B *fiat.P521Element
 
-func initP521B() {
-	if _p521B == nil {
-		_p521B, _ = (&fiat.P521Element{}).SetBytes([]byte{0x0, 0x51, 0x95, 0x3e, 0xb9, 0x61, 0x8e, 0x1c, 0x9a, 0x1f, 0x92, 0x9a, 0x21, 0xa0, 0xb6, 0x85, 0x40, 0xee, 0xa2, 0xda, 0x72, 0x5b, 0x99, 0xb3, 0x15, 0xf3, 0xb8, 0xb4, 0x89, 0x91, 0x8e, 0xf1, 0x9, 0xe1, 0x56, 0x19, 0x39, 0x51, 0xec, 0x7e, 0x93, 0x7b, 0x16, 0x52, 0xc0, 0xbd, 0x3b, 0xb1, 0xbf, 0x7, 0x35, 0x73, 0xdf, 0x88, 0x3d, 0x2c, 0x34, 0xf1, 0xef, 0x45, 0x1f, 0xd4, 0x6b, 0x50, 0x3f, 0x0})
-	}
+func buildP521B() {
+	_p521B, _ = (&fiat.P521Element{}).SetBytes([]byte{0x0, 0x51, 0x95, 0x3e, 0xb9, 0x61, 0x8e, 0x1c, 0x9a, 0x1f, 0x92, 0x9a, 0x21, 0xa0, 0xb6, 0x85, 0x40, 0xee, 0xa2, 0xda, 0x72, 0x5b, 0x99, 0xb3, 0x15, 0xf3, 0xb8, 0xb4, 0x89, 0x91, 0x8e, 0xf1, 0x9, 0xe1, 0x56, 0x19, 0x39, 0x51, 0xec, 0x7e, 0x93, 0x7b, 0x16, 0x52, 0xc0, 0xbd, 0x3b, 0xb1, 0xbf, 0x7, 0x35, 0x73, 0xdf, 0x88, 0x3d, 0x2c, 0x34, 0xf1, 0xef, 0x45, 0x1f, 0xd4, 0x6b, 0x50, 0x3f, 0x0})
 }
 
 func p521B() (ret0 *fiat.P521Element) {
-	initP521B()
 	return _p521B
 }
 
@@ -330,7 +327,22 @@ func (q *P521Point) Select(p1, p2 *P521Point, cond int32) (ret0 *P521Point) {
 // A p521Table holds the first 15 multiples of a point at offset -1, so [1]P
 // is at table[0], [15]P is at table[14], and [0]P is implicitly the identity
 // point.
-type p521Table [15]*P521Point
+type p521Table struct {
+	points []*P521Point
+}
+
+// newp521Table allocates the fifteen points. A slice, not an array: the
+// generator table lives in a package global, and the return relocation walks
+// slice elements but not the pointer fields of an array, so the table's point
+// pointers stayed in the builder's frame arena and ScalarBaseMult read released
+// memory (SIGSEGV in fiat.p521Mul).
+func newp521Table() (t p521Table) {
+	t.points = []*P521Point{:15}
+	for i := 0; i < 15; i++ {
+		t.points[i] = NewP521Point()
+	}
+	return t
+}
 
 // Select selects the n-th multiple of the table base point into p. It works in
 // constant time by iterating over every entry of the table. n must be in [0, 15].
@@ -341,7 +353,7 @@ func (table *p521Table) Select(p *P521Point, n uint8) {
 	p.Set(NewP521Point())
 	for i := uint8(1); i < 16; i++ {
 		cond := subtle.ConstantTimeByteEq(i, n)
-		p.Select(table[i-1], p, cond)
+		p.Select(table.points[i-1], p, cond)
 	}
 }
 
@@ -349,14 +361,11 @@ func (table *p521Table) Select(p *P521Point, n uint8) {
 func (p *P521Point) ScalarMult(q *P521Point, scalar []byte) (ret0 *P521Point, ret1 error) {
 	// Compute a p521Table for the base point q. The explicit NewP521Point
 	// calls get inlined, letting the allocations live on the stack.
-	var table = p521Table{NewP521Point(), NewP521Point(), NewP521Point(),
-		NewP521Point(), NewP521Point(), NewP521Point(), NewP521Point(),
-		NewP521Point(), NewP521Point(), NewP521Point(), NewP521Point(),
-		NewP521Point(), NewP521Point(), NewP521Point(), NewP521Point()}
-	table[0].Set(q)
+	table := newp521Table()
+	table.points[0].Set(q)
 	for i := 1; i < 15; i += 2 {
-		table[i].Double(table[i/2])
-		table[i+1].Add(table[i], q)
+		table.points[i].Double(table.points[i/2])
+		table.points[i+1].Add(table.points[i], q)
 	}
 
 	// Instead of doing the classic double-and-add chain, we do it with a
@@ -390,30 +399,33 @@ func (p *P521Point) ScalarMult(q *P521Point, scalar []byte) (ret0 *P521Point, re
 	return p, nil
 }
 
-var p521GeneratorTable *[p521ElementLength * 2]p521Table
+var p521GeneratorTable []p521Table
 
-func initP521GeneratorTable() {
-	if p521GeneratorTable == nil {
-		p521GeneratorTable = &[p521ElementLength * 2]p521Table{}
-		base := NewP521Point().SetGenerator()
-		for i := 0; i < p521ElementLength*2; i++ {
-			p521GeneratorTable[i][0] = NewP521Point().Set(base)
-			for j := 1; j < 15; j++ {
-				p521GeneratorTable[i][j] = NewP521Point().Add(p521GeneratorTable[i][j-1], base)
-			}
-			base.Double(base)
-			base.Double(base)
-			base.Double(base)
-			base.Double(base)
+// buildP521GeneratorTable fills the table. It runs from the package init():
+// a package global assigned outside init() is not relocated into the root arena,
+// so the table kept pointing into the builder's frame arena and every later
+// ScalarBaseMult read released memory ("SIGSEGV in (*P521Point).Select").
+func buildP521GeneratorTable() {
+	p521GeneratorTable = []p521Table{:p521ElementLength * 2}
+	base := NewP521Point().SetGenerator()
+	for i := 0; i < p521ElementLength*2; i++ {
+		t := newp521Table()
+		t.points[0] = NewP521Point().Set(base)
+		for j := 1; j < 15; j++ {
+			t.points[j] = NewP521Point().Add(t.points[j-1], base)
 		}
+		p521GeneratorTable[i] = t
+		base.Double(base)
+		base.Double(base)
+		base.Double(base)
+		base.Double(base)
 	}
 }
 
 // generatorTable returns a sequence of p521Tables. The first table contains
 // multiples of G. Each successive table is the previous table doubled four
 // times.
-func (p *P521Point) generatorTable() (ret0 *[p521ElementLength * 2]p521Table) {
-	initP521GeneratorTable()
+func (p *P521Point) generatorTable() (ret0 []p521Table) {
 	return p521GeneratorTable
 }
 

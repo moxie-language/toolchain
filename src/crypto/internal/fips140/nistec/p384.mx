@@ -110,14 +110,11 @@ func (p *P384Point) SetBytes(b []byte) (ret0 *P384Point, ret1 error) {
 
 var _p384B *fiat.P384Element
 
-func initP384B() {
-	if _p384B == nil {
-		_p384B, _ = (&fiat.P384Element{}).SetBytes([]byte{0xb3, 0x31, 0x2f, 0xa7, 0xe2, 0x3e, 0xe7, 0xe4, 0x98, 0x8e, 0x5, 0x6b, 0xe3, 0xf8, 0x2d, 0x19, 0x18, 0x1d, 0x9c, 0x6e, 0xfe, 0x81, 0x41, 0x12, 0x3, 0x14, 0x8, 0x8f, 0x50, 0x13, 0x87, 0x5a, 0xc6, 0x56, 0x39, 0x8d, 0x8a, 0x2e, 0xd1, 0x9d, 0x2a, 0x85, 0xc8, 0xed, 0xd3, 0xec, 0x2a, 0xef})
-	}
+func buildP384B() {
+	_p384B, _ = (&fiat.P384Element{}).SetBytes([]byte{0xb3, 0x31, 0x2f, 0xa7, 0xe2, 0x3e, 0xe7, 0xe4, 0x98, 0x8e, 0x5, 0x6b, 0xe3, 0xf8, 0x2d, 0x19, 0x18, 0x1d, 0x9c, 0x6e, 0xfe, 0x81, 0x41, 0x12, 0x3, 0x14, 0x8, 0x8f, 0x50, 0x13, 0x87, 0x5a, 0xc6, 0x56, 0x39, 0x8d, 0x8a, 0x2e, 0xd1, 0x9d, 0x2a, 0x85, 0xc8, 0xed, 0xd3, 0xec, 0x2a, 0xef})
 }
 
 func p384B() (ret0 *fiat.P384Element) {
-	initP384B()
 	return _p384B
 }
 
@@ -330,7 +327,22 @@ func (q *P384Point) Select(p1, p2 *P384Point, cond int32) (ret0 *P384Point) {
 // A p384Table holds the first 15 multiples of a point at offset -1, so [1]P
 // is at table[0], [15]P is at table[14], and [0]P is implicitly the identity
 // point.
-type p384Table [15]*P384Point
+type p384Table struct {
+	points []*P384Point
+}
+
+// newp384Table allocates the fifteen points. A slice, not an array: the
+// generator table lives in a package global, and the return relocation walks
+// slice elements but not the pointer fields of an array, so the table's point
+// pointers stayed in the builder's frame arena and ScalarBaseMult read released
+// memory (SIGSEGV in fiat.p384Mul).
+func newp384Table() (t p384Table) {
+	t.points = []*P384Point{:15}
+	for i := 0; i < 15; i++ {
+		t.points[i] = NewP384Point()
+	}
+	return t
+}
 
 // Select selects the n-th multiple of the table base point into p. It works in
 // constant time by iterating over every entry of the table. n must be in [0, 15].
@@ -341,7 +353,7 @@ func (table *p384Table) Select(p *P384Point, n uint8) {
 	p.Set(NewP384Point())
 	for i := uint8(1); i < 16; i++ {
 		cond := subtle.ConstantTimeByteEq(i, n)
-		p.Select(table[i-1], p, cond)
+		p.Select(table.points[i-1], p, cond)
 	}
 }
 
@@ -349,14 +361,11 @@ func (table *p384Table) Select(p *P384Point, n uint8) {
 func (p *P384Point) ScalarMult(q *P384Point, scalar []byte) (ret0 *P384Point, ret1 error) {
 	// Compute a p384Table for the base point q. The explicit NewP384Point
 	// calls get inlined, letting the allocations live on the stack.
-	var table = p384Table{NewP384Point(), NewP384Point(), NewP384Point(),
-		NewP384Point(), NewP384Point(), NewP384Point(), NewP384Point(),
-		NewP384Point(), NewP384Point(), NewP384Point(), NewP384Point(),
-		NewP384Point(), NewP384Point(), NewP384Point(), NewP384Point()}
-	table[0].Set(q)
+	table := newp384Table()
+	table.points[0].Set(q)
 	for i := 1; i < 15; i += 2 {
-		table[i].Double(table[i/2])
-		table[i+1].Add(table[i], q)
+		table.points[i].Double(table.points[i/2])
+		table.points[i+1].Add(table.points[i], q)
 	}
 
 	// Instead of doing the classic double-and-add chain, we do it with a
@@ -390,30 +399,33 @@ func (p *P384Point) ScalarMult(q *P384Point, scalar []byte) (ret0 *P384Point, re
 	return p, nil
 }
 
-var p384GeneratorTable *[p384ElementLength * 2]p384Table
+var p384GeneratorTable []p384Table
 
-func initP384GeneratorTable() {
-	if p384GeneratorTable == nil {
-		p384GeneratorTable = &[p384ElementLength * 2]p384Table{}
-		base := NewP384Point().SetGenerator()
-		for i := 0; i < p384ElementLength*2; i++ {
-			p384GeneratorTable[i][0] = NewP384Point().Set(base)
-			for j := 1; j < 15; j++ {
-				p384GeneratorTable[i][j] = NewP384Point().Add(p384GeneratorTable[i][j-1], base)
-			}
-			base.Double(base)
-			base.Double(base)
-			base.Double(base)
-			base.Double(base)
+// buildP384GeneratorTable fills the table. It runs from the package init():
+// a package global assigned outside init() is not relocated into the root arena,
+// so the table kept pointing into the builder's frame arena and every later
+// ScalarBaseMult read released memory ("SIGSEGV in (*P384Point).Select").
+func buildP384GeneratorTable() {
+	p384GeneratorTable = []p384Table{:p384ElementLength * 2}
+	base := NewP384Point().SetGenerator()
+	for i := 0; i < p384ElementLength*2; i++ {
+		t := newp384Table()
+		t.points[0] = NewP384Point().Set(base)
+		for j := 1; j < 15; j++ {
+			t.points[j] = NewP384Point().Add(t.points[j-1], base)
 		}
+		p384GeneratorTable[i] = t
+		base.Double(base)
+		base.Double(base)
+		base.Double(base)
+		base.Double(base)
 	}
 }
 
 // generatorTable returns a sequence of p384Tables. The first table contains
 // multiples of G. Each successive table is the previous table doubled four
 // times.
-func (p *P384Point) generatorTable() (ret0 *[p384ElementLength * 2]p384Table) {
-	initP384GeneratorTable()
+func (p *P384Point) generatorTable() (ret0 []p384Table) {
 	return p384GeneratorTable
 }
 
