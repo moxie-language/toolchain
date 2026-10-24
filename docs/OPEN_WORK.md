@@ -15474,3 +15474,24 @@ useful next probe prints `xR.limbs[0]` right after `montgomeryRepresentation`
 (a 256-bit `m`, x=3) and compares it with `3 * R mod m` computed in Go; if `xR`
 is zero, the representation is the defect, and `Exp(x, {0}) == 1` only worked
 because 1 round-trips through a representation that zeroes every other value.
+
+### Round 178, second addendum: the exact spot inside Exp
+
+Instrumenting `Exp` for a 256-bit modulus and x=3 shows the first table entry is
+in the **normal** domain (`table[0].limbs[0] == 3`) where it must be `3R mod m`,
+and `table[1]` (its square) is 0. Everything downstream of a zero base is zero.
+
+`ExpShortVarTime`, which uses the same `xR := NewNat().set(x).montgomeryRepresentation(m)`
+chain but KEEPS the returned pointer in a variable, is correct:
+`ExpShortVarTime(3, 1000)` equals the 256-bit expected value
+`8325760f12e0f3c898fe1403ce306adaefe6091a1d35855970e541f77084eb8f`. So
+`montgomeryRepresentation` and `montgomeryMul` work when their result is kept;
+the failing shape is the `Exp` table build, where the value is produced through
+`table[i].montgomeryMul(table[i-1], table[0], m)` on fresh `NewNat()` elements
+inside a 15-element array literal.
+
+Rewriting `table[0].set(x).montgomeryRepresentation(m)` as two statements did
+**not** change the result, so the next probe should print `table[0]` immediately
+after `montgomeryRepresentation` returns in both shapes (kept in a variable vs
+called on an array element) and compare; a difference there is a receiver
+identity/relocation defect with a tiny reproducer, not a bigmod arithmetic bug.
