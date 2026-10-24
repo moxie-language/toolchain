@@ -112,12 +112,21 @@ func (p *P256Point) SetBytes(b []byte) (ret0 *P256Point, ret1 error) {
 	}
 }
 
+// _p256B is the curve constant b. It is built by the package init() in
+// p256_table.mx: a package global may only be written there, because a store
+// outside init() is not relocated into the root arena - the element would live
+// in the initialiser's frame and be overwritten by the next allocation.
+// Measured as P-256 point addition and doubling returning wrong points while
+// adding the identity stayed correct, which is the shape that hides a bad b
+// (the b terms are multiplied by Z1, which is zero for the identity).
 var _p256B *fiat.P256Element
 
+// _p256G is the canonical base point, built by the package init() (see the
+// comment on _p256B).
+var _p256G *P256Point
+
 func initP256B() {
-	if _p256B == nil {
-		_p256B, _ = (&fiat.P256Element{}).SetBytes([]byte{0x5a, 0xc6, 0x35, 0xd8, 0xaa, 0x3a, 0x93, 0xe7, 0xb3, 0xeb, 0xbd, 0x55, 0x76, 0x98, 0x86, 0xbc, 0x65, 0x1d, 0x6, 0xb0, 0xcc, 0x53, 0xb0, 0xf6, 0x3b, 0xce, 0x3c, 0x3e, 0x27, 0xd2, 0x60, 0x4b})
-	}
+	return
 }
 
 func p256B() (ret0 *fiat.P256Element) {
@@ -596,57 +605,16 @@ func boothW6(in uint64) (ret0 uint8, ret1 int32) {
 // endian value, and returns r. If scalar is not 32 bytes long, ScalarBaseMult
 // returns an error and the receiver is unchanged.
 func (p *P256Point) ScalarBaseMult(scalar []byte) (ret0 *P256Point, ret1 error) {
-	// This function works like ScalarMult above, but the table is fixed and
-	// "pre-doubled" for each iteration, so instead of doubling we move to the
-	// next table at each iteration.
-
-	genTables := _p256GeneratorTables()
-
-	s, err := (&p256OrdElement{}).SetBytes(scalar)
-	if err != nil {
-		return nil, err
-	}
-
-	// Start scanning the window from the most significant bits. We move by
-	// 6 bits at a time and need to finish at -1, so -1 + 6 * 42 = 251.
-	index := 251
-
-	sel, sign := boothW6(s.Rsh(index))
-	// sign is always zero because the boothW6 input here is at
-	// most five bits long, so the top bit is never set.
-	_ = sign
-
-	t := &p256AffinePoint{}
-	table := &genTables[(index+1)/6]
-	table.Select(t, sel)
-
-	// Select's output is undefined if the selector is zero, when it should be
-	// the point at infinity (because infinity can't be represented in affine
-	// coordinates). Here we conditionally set p to the infinity if sel is zero.
-	// In the loop, that's handled by AddAffine.
-	selIsZero := subtle.ConstantTimeByteEq(sel, 0)
-	p.Select(NewP256Point(), t.Projective(), selIsZero)
-
-	for index >= 5 {
-		index -= 6
-
-		if index >= 0 {
-			sel, sign = boothW6(s.Rsh(index) & 0b1111111)
-		} else {
-			// Booth encoding considers a virtual zero bit at index -1,
-			// so we shift left the least significant limb.
-			wvalue := (s[0] << 1) & 0b1111111
-			sel, sign = boothW6(wvalue)
-		}
-
-		tab := &genTables[(index+1)/6]
-		tab.Select(t, sel)
-		t.Negate(sign)
-		selZero := subtle.ConstantTimeByteEq(sel, 0)
-		p.AddAffine(p, t, selZero)
-	}
-
-	return p, nil
+	// The precomputed affine-table walk this used to run is wrong for every
+	// scalar whose Booth digit is negative: it agrees with Go for k < 32 and
+	// diverges from 32 on (measured against Go's elliptic.P256 for k = 1..40;
+	// 32 is the first scalar whose last-window digit is 32 with sign 1). The
+	// table itself was verified entry by entry against the curve: every one of
+	// the 43 tables' 32 points equals n * 2^(6*table) * G, and fiat's Add, Sub,
+	// Mul, Square and Select all satisfy their own vectors, so the fault is in
+	// the walk, not in its inputs. Until that is fixed, the generic scalar
+	// multiplication - whose vectors match Go for every bit - computes scalar*G.
+	return p.ScalarMult(_p256G, scalar)
 }
 
 // Negate sets p to -p, if cond == 1, and to p if cond == 0.
