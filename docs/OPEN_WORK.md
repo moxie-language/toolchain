@@ -15548,3 +15548,32 @@ Verified against Go 1.25 for levels -1, 0, 1, 6 and 9 over three inputs (4 KiB
 repetitive, 4 KiB pseudo-random, 8 KiB text): compressed length AND FNV hash of
 the output match for every case, e.g. level 1 gives 45/132/4106 bytes with the
 same hashes as Go.
+
+## Round 181: the png IDAT identity loss is a store-back aliasing rule, and its location
+
+With the flate and bigmod fixes in place, `png.Encode` of an 8x6 RGBA image is
+still 63 bytes with an 18-byte IDAT where Go emits 86 with 29, and
+`bufio.Writer.Buffered()` is 6 after `writeImage` returns, so the compressed
+block still goes into a second copy of the same Writer struct.
+
+The copy is produced by `codecIsStableArenaAddr`'s **store-back** branch
+(`src/runtime/codec.mx`, `codecTopOnlyTransient`), specifically its last rule:
+
+    // Ancestors below the receiver's arena keep identity, except the
+    // sovereign scratch frames, which the store-back reclaims itself.
+
+`encoder.writeIDATs` is a mutating method: its prologue pushes the receiver's
+borrowed sovereign arena ABOVE its own frame, so its own frame - where
+`bufio.NewWriterSize`'s returned object lives - is an "ancestor below the
+receiver's arena". The rule therefore treats `e.bw`'s target as stable and
+aliases it into the receiver's arena; when `writeIDATs` returns, that frame is
+released and the receiver's `bw` pointer dangles - or, when the arena is reused
+before the dangling is observed, the flush sees a different `n`.
+
+The correct predicate for a store-back is "the arena that owns the target also
+owns, or outlives, the receiver". The sovereign group already records exactly
+that in `g.ctxArena` (`codecSovereignArena` sets it via `sovFindContainingArena`),
+so the fix is to alias only pointers contained in the receiver's `ctxArena` (or
+the root arena) and copy everything else. That single change should also cure
+the general "wrote into a copy" family this file has recorded for bufio, zlib and
+the relay.
