@@ -561,7 +561,7 @@ func NewModulusProduct(a, b []byte) (ret0 *Modulus, ret1 error) {
 	y := NewNat().resetToBytes(b)
 	n := NewNat().reset(len(x.limbs) + len(y.limbs))
 	for i := range y.limbs {
-		n.limbs[i+len(x.limbs)] = addMulVVW(n.limbs[i:i+len(x.limbs)], x.limbs, y.limbs[i])
+		n.limbs[i+len(x.limbs)] = addMulVVW(n.limbs, i, x.limbs, y.limbs[i])
 	}
 	return newModulus(n.trim())
 }
@@ -788,11 +788,7 @@ func (x *Nat) montgomeryMul(a *Nat, b *Nat, m *Modulus) (ret0 *Nat) {
 	switch n {
 	default:
 		// Attempt to use a stack-allocated backing array.
-		T := []uint32{:0:preallocLimbs*2}
-		if cap(T) < n*2 {
-			T = []uint32{:0:n*2}
-		}
-		T = T[:n*2]
+		T := []uint32{:n * 2}
 
 		// This loop implements Word-by-Word Montgomery Multiplication, as
 		// described in Algorithm 4 (Fig. 3) of "Efficient Software
@@ -820,7 +816,7 @@ func (x *Nat) montgomeryMul(a *Nat, b *Nat, m *Modulus) (ret0 *Nat) {
 			// possible because each iteration only uses T[i] in Step 2 and then
 			// discards it in Step 6.
 			d := bLimbs[i]
-			c1 := addMulVVW(T[i:n+i], aLimbs, d)
+			c1 := addMulVVW(T, i, aLimbs, d)
 
 			// Step 6 is replaced by shifting the virtual window we operate
 			// over: T of the algorithm is T[i:] for us. That means that T1 in
@@ -831,7 +827,7 @@ func (x *Nat) montgomeryMul(a *Nat, b *Nat, m *Modulus) (ret0 *Nat) {
 			// at T[i:]. The two carries (from a × d and Y × m) are added up in
 			// the next word T[n+i], and the carry bit from that addition is
 			// brought forward to the next iteration.
-			c2 := addMulVVW(T[i:n+i], mLimbs, Y)
+			c2 := addMulVVW(T, i, mLimbs, Y)
 			T[n+i], c = bits.Add(c1, c2, c)
 		}
 
@@ -844,7 +840,11 @@ func (x *Nat) montgomeryMul(a *Nat, b *Nat, m *Modulus) (ret0 *Nat) {
 		// cost is very similar since the constant time subtraction tells us if
 		// x >= m as a side effect, and taking care of the broken invariant is
 		// highly undesirable (see https://go.dev/issue/13907).
-		copy(x.reset(n).limbs, T[n:])
+		// Two statements: the receiver a mutating method returns is a relocated
+		// copy of it, so x.reset(n).limbs wrote the product into that copy and the
+		// real x stayed zeroed by the reset (every Exp/Mul result came out 0).
+		x.reset(n)
+		copy(x.limbs, T[n:])
 		x.maybeSubtractModulus(choice(c), m)
 
 	// The following specialized cases follow the exact same algorithm, but
@@ -862,7 +862,10 @@ func (x *Nat) montgomeryMul(a *Nat, b *Nat, m *Modulus) (ret0 *Nat) {
 			c2 := addMulVVW1024(&T[i], &mLimbs[0], Y)
 			T[nLimbs+i], c = bits.Add(c1, c2, c)
 		}
-		copy(x.reset(nLimbs).limbs, T[nLimbs:])
+		// See the default case: split the reset from the copy, because the
+		// receiver reset returns is a relocated copy.
+		x.reset(nLimbs)
+		copy(x.limbs, T[nLimbs:])
 		x.maybeSubtractModulus(choice(c), m)
 
 	case 1536 / _W:
@@ -876,7 +879,10 @@ func (x *Nat) montgomeryMul(a *Nat, b *Nat, m *Modulus) (ret0 *Nat) {
 			c2 := addMulVVW1536(&T[i], &mLimbs[0], Y)
 			T[nLimbs+i], c = bits.Add(c1, c2, c)
 		}
-		copy(x.reset(nLimbs).limbs, T[nLimbs:])
+		// See the default case: split the reset from the copy, because the
+		// receiver reset returns is a relocated copy.
+		x.reset(nLimbs)
+		copy(x.limbs, T[nLimbs:])
 		x.maybeSubtractModulus(choice(c), m)
 
 	case 2048 / _W:
@@ -890,30 +896,36 @@ func (x *Nat) montgomeryMul(a *Nat, b *Nat, m *Modulus) (ret0 *Nat) {
 			c2 := addMulVVW2048(&T[i], &mLimbs[0], Y)
 			T[nLimbs+i], c = bits.Add(c1, c2, c)
 		}
-		copy(x.reset(nLimbs).limbs, T[nLimbs:])
+		// See the default case: split the reset from the copy, because the
+		// receiver reset returns is a relocated copy.
+		x.reset(nLimbs)
+		copy(x.limbs, T[nLimbs:])
 		x.maybeSubtractModulus(choice(c), m)
 	}
 
 	return x
 }
 
-// addMulVVW multiplies the multi-word value x by the single-word value y,
-// adding the result to the multi-word value z and returning the final carry.
-// It can be thought of as one row of a pen-and-paper column multiplication.
+// addMulVVW adds x*y into z starting at z[off] and returns the carry. It can be
+// thought of as one row of a pen-and-paper column multiplication.
 //
 //:norace
-func addMulVVW(z, x []uint32, y uint32) (carry uint32) {
-	_ = x[len(z)-1] // bounds check elimination hint
-	for i := range z {
+//
+// It takes the destination slice and an offset, not a z[off:off+len(x)]
+// subslice: a subslice is a COPY in Moxie, so every limb accumulated through
+// the window was written into a throwaway and the Montgomery product came out
+// of the low limbs as zero.
+func addMulVVW(z []uint32, off int32, x []uint32, y uint32) (carry uint32) {
+	for i := range x {
 		hi, lo := bits.Mul(x[i], y)
-		lo, c := bits.Add(lo, z[i], 0)
+		lo, c := bits.Add(lo, z[off+i], 0)
 		// We use bits.Add with zero to get an add-with-carry instruction that
 		// absorbs the carry from the previous bits.Add.
 		hi, _ = bits.Add(hi, 0, c)
 		lo, c = bits.Add(lo, carry, 0)
 		hi, _ = bits.Add(hi, 0, c)
 		carry = hi
-		z[i] = lo
+		z[off+i] = lo
 	}
 	return carry
 }
@@ -939,15 +951,11 @@ func (x *Nat) Mul(y *Nat, m *Modulus) (ret0 *Nat) {
 	switch n {
 	default:
 		// Attempt to use a stack-allocated backing array.
-		T := []uint32{:0:preallocLimbs*2}
-		if cap(T) < n*2 {
-			T = []uint32{:0:n*2}
-		}
-		T = T[:n*2]
+		T := []uint32{:n * 2}
 
 		// T = x * y
 		for i := 0; i < n; i++ {
-			T[n+i] = addMulVVW(T[i:n+i], xLimbs, yLimbs[i])
+			T[n+i] = addMulVVW(T, i, xLimbs, yLimbs[i])
 		}
 
 		// x = T mod m
@@ -1003,7 +1011,14 @@ func (out *Nat) Exp(x *Nat, e []byte, m *Modulus) (ret0 *Nat) {
 		NewNat(), NewNat(), NewNat(), NewNat(), NewNat(),
 		NewNat(), NewNat(), NewNat(), NewNat(), NewNat(),
 	}
-	table[0].set(x).montgomeryRepresentation(m)
+	// Two statements, not `table[0].set(x).montgomeryRepresentation(m)`: the
+	// receiver a mutating method returns is a relocated copy of it, so dropping
+	// the chained result left the Montgomery representation on that copy and
+	// table[0] stayed in the normal domain. Every table entry built from it was
+	// then garbage and Exp returned 0, while ExpShortVarTime - which keeps the
+	// chained result in a variable - was correct.
+	table[0].set(x)
+	table[0].montgomeryRepresentation(m)
 	for i := 1; i < len(table); i++ {
 		table[i].montgomeryMul(table[i-1], table[0], m)
 	}

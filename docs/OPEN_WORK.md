@@ -15495,3 +15495,34 @@ Rewriting `table[0].set(x).montgomeryRepresentation(m)` as two statements did
 after `montgomeryRepresentation` returns in both shapes (kept in a variable vs
 called on an array element) and compare; a difference there is a receiver
 identity/relocation defect with a tiny reproducer, not a bigmod arithmetic bug.
+
+## Round 179: RSA key generation works - the zero was a lost receiver write
+
+The zero in `bigmod.Exp` was two defects in `nat.mx`, both instances of "a
+subslice is a copy" meeting "a returned receiver is a relocated copy":
+
+  * `montgomeryMul` ended with `copy(x.reset(n).limbs, T[n:])`. The receiver a
+    mutating method returns is a **relocated copy** of it, so `.limbs` named the
+    copy's limbs: the product was written into that throwaway while the real `x`
+    stayed zeroed by the reset. It is now two statements, `x.reset(n)` then
+    `copy(x.limbs, T[n:])`, and the same shape in the 1024/1536/2048-bit cases.
+  * `addMulVVW(z, x, y)` was called with destination *subslices*
+    (`T[i:n+i]`), so every low limb it accumulated was written into a copy and
+    discarded; only the carries in `T[n+i]` survived, which is why the high half
+    of the product was nonzero and the low half was zero. It now takes the whole
+    destination slice plus an offset.
+  * the `Exp` window table also relied on `table[0].set(x).montgomeryRepresentation(m)`
+    mutating `table[0]` through a chained call whose result is dropped; it is two
+    statements now, so the representation lands on the table entry.
+
+Measured after the fix, against Python's `pow`: `Exp(3, 1000)` with a 256-bit
+modulus is `8325760f12e0f3c898fe1403ce306adaefe6091a1d35855970e541f77084eb8f`,
+with a 1024-bit modulus `348358fc...ad66d25a`, and the 2048-bit path agrees too
+(`Exp` then `Exp(.,2)` equals `pow(a**2)`). End to end:
+`rsa.GenerateKey(rand.Reader(), 1024)` returns with `N.BitLen() == 1024` and
+`E == 65537` - the first time it has terminated.
+
+The compiler-level defect behind the first bullet is the same one this file has
+carried since round 55 (a returned value that must keep identity is copied); the
+source-level idiom that avoids it is "never chain a mutating call whose result
+you drop, and never write through a subslice".
