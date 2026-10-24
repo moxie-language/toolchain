@@ -15333,3 +15333,37 @@ Verified against Go 1.25 on the same inputs: P-256 `ScalarBaseMult(5)`,
 `IsOnCurve`, and `Params().Name` for all four curves (P-224/P-256/P-384/P-521),
 which are now callable repeatedly - the lazy-init defect made the *second* call
 to any curve accessor crash.
+
+### Round 176 addendum: the ecdsa sign crash is a cloned-initializer global
+
+Disassembling the two copies of `initP256` in one binary shows the split
+exactly. The in-package `crypto/internal/fips140/ecdsa.initP256` passes the
+`curveID` argument as `{ptr "P-256", len 5, cap 5}` and the point constructor as
+`{null, nistec.NewP256Point}`. The clone emitted into `crypto/ecdsa`
+(`crypto/ecdsa.crypto_internal_fips140_ecdsa.initP256__`) passes **zeros** for
+the whole `curveID` (all three words) and the same correct constructor pair. The
+body of the cloned `newCurve` is byte-identical to the in-package one (same 0x58
+allocation, same field offsets), so the field layout is not the problem.
+
+Both clones read and write the same TLS slot (`%fs:-0x38`) and both start with
+"if the slot is non-nil, return". In the failing run the sign path's
+`c.newPoint()` loads `{ctx, code}` from an object that is not the curve that was
+built, which is consistent with the clone's guard seeing a foreign non-nil value
+in that slot and skipping the initializer: a package-level global of a package
+whose code was monomorphized into another package has no slot of its own at the
+clone site. So the remaining work for ecdsa/ecdh is
+"monomorphized clones of package-level state need their own storage (or must
+stay in the defining package)", not the interface dispatch and not the codec.
+
+The png identity defect was measured again after the codec fix and is unchanged:
+`png.Encode` of an 8x6 RGBA image emits a 63-byte stream with an 18-byte IDAT
+where Go emits 86 bytes with a 29-byte IDAT, and `bufio.Writer.Buffered()` is 6
+after `writeImage` returns - the zlib header and adler are in the png-visible
+bufio, the compressed block went into a second copy of the same Writer struct.
+`zlib.NewWriterLevel` and `flate.NewWriterDict` each return `&Writer{...}` (a
+composite literal) whose address has to survive the return with identity intact;
+`codecIsStableAddr` reports frame memory unstable, so each boundary copies the
+pointee. The compiler fix is the one this file has carried since round 55: an
+address-of-composite-literal that is returned must be allocated where its
+identity is stable (root arena), the same marking `markAddrEscaping` already
+performs for `&`.
