@@ -15635,3 +15635,23 @@ for this exact pointer and see which branch returns false; the source-side
 workaround, if the runtime fix is too broad, is to create the `bufio.Writer` in
 `png.Encode`'s frame (which outlives every call that stores or copies it) rather
 than inside the mutating `writeIDATs`.
+
+### Round 182 addendum: three minimal shapes do NOT reproduce the nested-interface copy
+
+Reduced reproducers were tried in user code and all three preserve the identity
+(the object the interface points at observes the writes):
+
+  * `relay(w W) W` returning `pass(&holder{w: w})` - one return boundary, the
+    holder created in the callee's frame: payload aliased;
+  * `pass2(w W) *holder` returning `&holder{w: w}` from its own frame, then
+    `relay2` returning it again - two boundaries: aliased;
+  * `inner2 -> mid2 -> outer2`, an interface payload two struct levels deep with
+    `*holder` inside `*wrap`: aliased.
+
+So the trigger is not "an interface payload inside a copied struct" in general; it
+is something in flate's specific graph (a `compressor` carrying the 64 KiB window
+and other large slices next to the `w io.Writer` field, the Writer returned from
+`NewWriter` and then again from `NewWriterDict`, plus two mutations in between:
+`fillWindow(dict)` and the `dict` push). The next probe should therefore be the
+`codecIsStableAddr` print inside the real png encode, not another reduction -
+that names the branch directly and cannot be fooled by a smaller graph.
