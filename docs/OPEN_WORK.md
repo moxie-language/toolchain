@@ -15448,3 +15448,29 @@ This is the next item for the bigmod work: the fix is in
 `src/crypto/internal/fips140/bigmod/nat.mx`, and `rsa.GenerateKey` is the
 end-to-end test that proves it (a 1024-bit key must come out with a 1024-bit N
 and `E = 65537`).
+
+### Round 178 addendum: what bigmod's zero is NOT
+
+Four more hypotheses were tested and eliminated, so the next attempt does not
+have to repeat them:
+
+  * Rewriting every write-through-alias in `nat.mx` (`add`, `sub`, `assign`,
+    `ShiftRightVarTime`, `expand`, `reset`, and `addMulVVW` taking an offset
+    instead of a `T[i:n+i]` destination) did **not** change `Exp`/`Mul`: they
+    still returned 0. The aliasing is still a latent bug by the subslice law
+    (`assign`'s constant-time select writes into a copy), but it is not the
+    cause of the zero. That rewrite also made `NewModulusProduct` panic, so it
+    needs its own verification pass before landing.
+  * The receiver-vs-returned-value relocation is not the cause: `exp :=
+    bigmod.NewNat(); r := exp.Exp(x, e, m)` leaves BOTH `r` and `exp` at 0.
+  * `bits.Mul`, `bits.Add`, `bits.Len32` are correct (checked directly:
+    `Mul(3,3)`, `Mul(2^32-1, 2^32-1)`, carry propagation).
+  * `Bytes`/`SetBytes` round-trip and `NewModulusProduct(3,5) == 15` are correct,
+    so the limb<->byte path and the plain multiply-accumulate are fine.
+
+What is left is the Montgomery path itself: `montgomeryRepresentation`,
+`montgomeryMul`'s final `maybeSubtractModulus`, or `montgomeryReduction`. A
+useful next probe prints `xR.limbs[0]` right after `montgomeryRepresentation`
+(a 256-bit `m`, x=3) and compares it with `3 * R mod m` computed in Go; if `xR`
+is zero, the representation is the defect, and `Exp(x, {0}) == 1` only worked
+because 1 round-trips through a representation that zeroes every other value.
