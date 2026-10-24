@@ -16114,3 +16114,61 @@ that `strings`-style helpers build.
 
 A grep for other `range` over a would-be string in `unicode`, `bytes` and the
 formatting packages finds no second instance of this shape.
+
+## Round 195: time's zone reader and quoted-printable's line buffer become slices, and three crashing packages are parked
+
+    time/zoneinfo_read n [6]int32           -> []int32
+    time/zoneinfo_read readFile buf [4096]  -> []byte
+    mime/quotedprintable Writer.line [78]   -> []byte, allocated in NewWriter
+
+Both are verified against Go 1.25.3 rather than assumed:
+
+  * time: five zones (UTC, Europe/Berlin, America/New_York, Asia/Tokyo,
+    Australia/Adelaide) x six instants (two DST-differing 2026 dates, the
+    epoch, epoch+1, the 2038 boundary and 2100) formatted with
+    "2006-01-02T15:04:05 MST -0700" plus `Zone()`'s name and offset. All 30
+    lines are byte-identical to Go, which exercises the TZif v2 path: the
+    six-count header, the 32-bit skip, the second count block and the
+    transition/zone tables. The 4 KiB read buffer feeds the same parser through
+    the embedded tzdata.
+  * quoted-printable: eight inputs (plain, '=', trailing space + CRLF, a 100-byte
+    line that must soft-wrap, tabs/CR/LF/high bytes, empty, two spaces, a long
+    wrapping paragraph). Output is byte-identical to Go in both text and binary
+    line-wrapping behaviour.
+
+Three packages were found broken while sizing the next packages, all
+PRE-EXISTING (each reproduces at the same fault address with the file reverted
+via `git stash`, so none of them is caused by the array work), and all three
+block a conversion whose only verifier is a run:
+
+  * `mime.TypeByExtension` SIGSEGVs on any call on this host. Backtrace:
+    `runtime[stringEqual]` <- `mime.(*mimeTypesStore).setExtensionType` <-
+    `mime[loadMimeGlobsFile]` <- `mime[osInitMime]` <-
+    `(*mimeTypesStore).init` <- `mime[TypeByExtension]`. The globs parser is
+    reached because /usr/share/mime/globs2 exists. A faithful standalone mimic
+    of the loop body (bufio.Scanner + bytes.Split + ParseMediaType + the same
+    map writes) runs all 1616 lines clean, so the difference is the sovereign
+    `mimeTypesStore` receiver, not the parsing. `mime/type.mx`'s `var buf
+    [10]byte` is therefore left alone: its case-insensitive path cannot be
+    exercised at all until this is fixed.
+
+  * `archive/zip.Writer` writes a corrupt SECOND central-directory record. A
+    312-byte archive from a `Store`-mode header, one file and one
+    `Create("dir/second.bin")` differs from Go's 298-byte archive only from the
+    second `PK\x01\x02` onward: the local file data and the first central entry
+    are byte-identical, the second entry is `504b01021ed6c47f...` followed by
+    0xff filler. It is also NONDETERMINISTIC: the same binary crashes or
+    succeeds across 10 runs (7/10 with the arrays, 2/10 with slots) and ran
+    clean under gdb. The suspect is the reused scratch
+    (`hdrBuf`/`zipBuf`/`hdrB`/`zipB`, declared outside the directory loop
+    because declarations inside a loop in a self-mutating method are rejected,
+    and whose header bytes survive only partially), so `writer.mx` keeps its
+    arrays and the conversion is blocked on this.
+
+  * `bytes.genericReplacer.lookup` (round 191) is the same family: a pointer
+    local dereferenced from a 32-bit slot, legacy printing the wrong answer and
+    stage4 faulting.
+
+All three point at the same gap: a self-mutating (sovereign) value whose scratch
+or whose map/pointer local is reused across iterations or across a call boundary.
+That is one investigation, not three.
