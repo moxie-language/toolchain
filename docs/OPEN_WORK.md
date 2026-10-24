@@ -15286,3 +15286,50 @@ invoke needs an arm (and a monomorphized body) for every instantiation of a
 generic type reachable in the link set, plus a registry that records those
 instantiations as they are created. Until that exists, `crypto/elliptic` must not
 hand out a generic type through an interface.
+
+## Round 176: elliptic.Curve is handed out as a non-generic type
+
+The `Params` dispatch was not a naming mismatch. `findIfaceImpls` enumerates an
+interface's implementations from the **type declarations** of the link set, and
+it skips a generic declaration because a generic type's methods are never emitted
+as standalone symbols. The dynamic type of `elliptic.P256()` was the
+*instantiation* `*nistCurve[*nistec.P256Point]`, which has no declaration to
+enumerate, so no arm existed and the boxed value matched none of the six impls
+(`*CurveParams`, `*KoblitzCurve` and their value forms).
+
+`crypto/elliptic` no longer hands a generic type out through an interface.
+`nistCurveImpl` is a plain struct holding a `curveKind` and the `*CurveParams`,
+and each `elliptic.Curve` method forwards through a four-way switch to a **generic
+free function** (`nistIsOnCurve[P]`, `nistScalarMult[P]`, ...). A call to a
+generic function is monomorphized at the call site, so the type argument never
+becomes a value that has to survive a return or be boxed. `nistCurve[P]` itself is
+gone; the constraint (`nistPoint[P]`) and the arithmetic stayed single-sourced.
+
+Two defects fell out of the change, both measured:
+
+  * The curve set was built lazily by `initAllCurves`, which stored
+    `_curves()`'s result into the package global `_cachedCurves`. That store is a
+    global write outside `init()`, so it is not relocated: the global kept a
+    pointer into `initAllCurves`'s frame arena, and the FIRST reader saw a
+    relocated copy while the SECOND reader walked released memory and died
+    (`SIGSEGV` in `elliptic.P224`). The name `initAllCurves` satisfied the
+    restriction check without getting the relocation the rule exists for. The
+    set is now built in a real `init()`. This is the same class as the crc64
+    table and the rand/v2 global Rand, and it is the reason the rule is
+    "initialize globals in init()", not "name your function initSomething".
+  * `ecdsa.GenerateKey(elliptic.P256(), ...)` now gets through key generation and
+    then dies in the sign path: inside the cross-package monomorphized clone
+    `fips140/ecdsa.NewPublicKey[*nistec.P256Point]`, the call `c.newPoint()`
+    loads a two-word function value `{ctx, code}` from the `Curve[P]` field, but
+    the code word is not what was stored - the call jumps into an unmapped data
+    address (gdb: `SIGSEGV` at a `0x7fff...` address two instructions after
+    `mov 0x18(%rax),%rdi; mov 0x20(%rax),%rax; call *%rax`). A minimal probe of
+    the same shape (generic struct with a `func() P` field, constructed by a
+    generic function, called from a generic function) works in one package, so
+    the defect is specific to the clone emitted into a foreign package.
+
+Verified against Go 1.25 on the same inputs: P-256 `ScalarBaseMult(5)`,
+`Double` (10G), `ScalarMult(2)` of 5G, `Marshal`/`Unmarshal` round trip,
+`IsOnCurve`, and `Params().Name` for all four curves (P-224/P-256/P-384/P-521),
+which are now callable repeatedly - the lazy-init defect made the *second* call
+to any curve accessor crash.

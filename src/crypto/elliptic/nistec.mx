@@ -10,16 +10,44 @@ import (
 	"math/big"
 )
 
+// curveKind selects the nistec point type a curve forwards to.
+type curveKind int32
+
+const (
+	curveP224 curveKind = iota
+	curveP256
+	curveP384
+	curveP521
+)
+
 type nistCurves struct {
-	p224 *nistCurve[*nistec.P224Point]
-	p256 *nistCurve[*nistec.P256Point]
-	p384 *nistCurve[*nistec.P384Point]
-	p521 *nistCurve[*nistec.P521Point]
+	p224 *nistCurveImpl
+	p256 *nistCurveImpl
+	p384 *nistCurveImpl
+	p521 *nistCurveImpl
+}
+
+// nistCurveImpl is the elliptic.Curve implementation for a NIST curve.
+//
+// An implementation of an interface handed out as a value must be a NON-GENERIC
+// type. An interface invoke compares the interface's type word against one arm
+// per implementation, and the arms are enumerated from the type declarations of
+// the link set. An instantiated generic type has no declaration to enumerate, so
+// a boxed nistCurve[*nistec.P256Point] matched no arm at all and every
+// elliptic.Curve method reached through the interface died with "interface
+// dispatch: no impl for Params" (crypto/ecdsa, crypto/x509, crypto/tls).
+//
+// The point arithmetic stays generic and lives in free functions: a call to a
+// generic function is monomorphized at the call site, so the type argument never
+// becomes a value that has to survive a return or be boxed into an interface.
+type nistCurveImpl struct {
+	kind   curveKind
+	params *CurveParams
 }
 
 func _curves() (out *nistCurves) {
 	return &nistCurves{
-		p224: newNistCurve(nistec.NewP224Point, &CurveParams{
+		p224: &nistCurveImpl{kind: curveP224, params: &CurveParams{
 			Name:    "P-224",
 			BitSize: 224,
 			// SP 800-186, Section 3.2.1.2
@@ -28,8 +56,8 @@ func _curves() (out *nistCurves) {
 			B:  bigFromHex("b4050a850c04b3abf54132565044b0b7d7bfd8ba270b39432355ffb4"),
 			Gx: bigFromHex("b70e0cbd6bb4bf7f321390b94a03c1d356c21122343280d6115c1d21"),
 			Gy: bigFromHex("bd376388b5f723fb4c22dfe6cd4375a05a07476444d5819985007e34"),
-		}),
-		p256: newNistCurve(nistec.NewP256Point, &CurveParams{
+		}},
+		p256: &nistCurveImpl{kind: curveP256, params: &CurveParams{
 			Name:    "P-256",
 			BitSize: 256,
 			// SP 800-186, Section 3.2.1.3
@@ -38,8 +66,8 @@ func _curves() (out *nistCurves) {
 			B:  bigFromHex("5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b"),
 			Gx: bigFromHex("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"),
 			Gy: bigFromHex("4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"),
-		}),
-		p384: newNistCurve(nistec.NewP384Point, &CurveParams{
+		}},
+		p384: &nistCurveImpl{kind: curveP384, params: &CurveParams{
 			Name:    "P-384",
 			BitSize: 384,
 			// SP 800-186, Section 3.2.1.4
@@ -53,8 +81,8 @@ func _curves() (out *nistCurves) {
 				"e082542a385502f25dbf55296c3a545e3872760ab7"),
 			Gy: bigFromHex("3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da31" |
 				"13b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f"),
-		}),
-		p521: newNistCurve(nistec.NewP521Point, &CurveParams{
+		}},
+		p521: &nistCurveImpl{kind: curveP521, params: &CurveParams{
 			Name:    "P-521",
 			BitSize: 521,
 			// SP 800-186, Section 3.2.1.5
@@ -73,39 +101,14 @@ func _curves() (out *nistCurves) {
 			Gy: bigFromHex("011839296a789a3bc0045c8a5fb42c7d1bd998f54449579b446817" |
 				"afbd17273e662c97ee72995ef42640c550b9013fad0761353c7086a272c24088" |
 				"be94769fd16650"),
-		}),
+		}},
 	}
-}
-
-// newNistCurve builds a nistCurve from its point constructor and parameters.
-// Passing the constructor through the type parameter keeps the parametric
-// field type assigned from a value of that same parametric type.
-func newNistCurve[P nistPoint[P]](np func() P, params *CurveParams) (out *nistCurve[P]) {
-	c := &nistCurve[P]{params: params}
-	c.newPoint = np
-	return c
-}
-
-// nistCurve is a Curve implementation based on a nistec Point.
-//
-// It's a wrapper that exposes the big.Int-based Curve interface and encodes the
-// legacy idiosyncrasies it requires, such as invalid and infinity point
-// handling.
-//
-// To interact with the nistec package, points are encoded into and decoded from
-// properly formatted byte slices. All big.Int use is limited to this package.
-// Encoding and decoding is 1/1000th of the runtime of a scalar multiplication,
-// so the overhead is acceptable.
-type nistCurve[Point nistPoint[Point]] struct {
-	newPoint func() Point
-	params   *CurveParams
 }
 
 // nistPoint is a generic constraint for the nistec Point types.
 // T's bound is a method interface: the upstream Go code binds T to `any`,
 // and binding it to `comparable` makes the self-referential constraint
-// nistCurve[Point nistPoint[Point]] invalid ("P does not satisfy
-// comparable" - the recursion never bottoms out).
+// invalid ("P does not satisfy comparable" - the recursion never bottoms out).
 type nistPoint[T pointLike] interface {
 	Bytes() []byte
 	SetBytes([]byte) (T, error)
@@ -120,139 +123,232 @@ type pointLike interface {
 	Bytes() []byte
 }
 
-func (curve *nistCurve[Point]) Params() (out *CurveParams) {
+// --- the Curve facade ---
+
+func (curve *nistCurveImpl) Params() (out *CurveParams) {
 	return curve.params
 }
 
-func (curve *nistCurve[Point]) IsOnCurve(x, y *big.Int) (ok bool) {
+func (curve *nistCurveImpl) IsOnCurve(x, y *big.Int) (ok bool) {
+	switch curve.kind {
+	case curveP224:
+		return nistIsOnCurve(nistec.NewP224Point, curve.params, x, y)
+	case curveP256:
+		return nistIsOnCurve(nistec.NewP256Point, curve.params, x, y)
+	case curveP384:
+		return nistIsOnCurve(nistec.NewP384Point, curve.params, x, y)
+	}
+	return nistIsOnCurve(nistec.NewP521Point, curve.params, x, y)
+}
+
+func (curve *nistCurveImpl) Add(x1, y1, x2, y2 *big.Int) (out *big.Int, res *big.Int) {
+	switch curve.kind {
+	case curveP224:
+		return nistAdd(nistec.NewP224Point, curve.params, x1, y1, x2, y2)
+	case curveP256:
+		return nistAdd(nistec.NewP256Point, curve.params, x1, y1, x2, y2)
+	case curveP384:
+		return nistAdd(nistec.NewP384Point, curve.params, x1, y1, x2, y2)
+	}
+	return nistAdd(nistec.NewP521Point, curve.params, x1, y1, x2, y2)
+}
+
+func (curve *nistCurveImpl) Double(x1, y1 *big.Int) (out *big.Int, res *big.Int) {
+	switch curve.kind {
+	case curveP224:
+		return nistDouble(nistec.NewP224Point, curve.params, x1, y1)
+	case curveP256:
+		return nistDouble(nistec.NewP256Point, curve.params, x1, y1)
+	case curveP384:
+		return nistDouble(nistec.NewP384Point, curve.params, x1, y1)
+	}
+	return nistDouble(nistec.NewP521Point, curve.params, x1, y1)
+}
+
+func (curve *nistCurveImpl) ScalarMult(Bx, By *big.Int, scalar []byte) (out *big.Int, res *big.Int) {
+	switch curve.kind {
+	case curveP224:
+		return nistScalarMult(nistec.NewP224Point, curve.params, Bx, By, scalar)
+	case curveP256:
+		return nistScalarMult(nistec.NewP256Point, curve.params, Bx, By, scalar)
+	case curveP384:
+		return nistScalarMult(nistec.NewP384Point, curve.params, Bx, By, scalar)
+	}
+	return nistScalarMult(nistec.NewP521Point, curve.params, Bx, By, scalar)
+}
+
+func (curve *nistCurveImpl) ScalarBaseMult(scalar []byte) (out *big.Int, res *big.Int) {
+	switch curve.kind {
+	case curveP224:
+		return nistScalarBaseMult(nistec.NewP224Point, curve.params, scalar)
+	case curveP256:
+		return nistScalarBaseMult(nistec.NewP256Point, curve.params, scalar)
+	case curveP384:
+		return nistScalarBaseMult(nistec.NewP384Point, curve.params, scalar)
+	}
+	return nistScalarBaseMult(nistec.NewP521Point, curve.params, scalar)
+}
+
+func (curve *nistCurveImpl) Unmarshal(data []byte) (x, y *big.Int) {
+	switch curve.kind {
+	case curveP224:
+		return nistUnmarshal(nistec.NewP224Point, curve.params, data)
+	case curveP256:
+		return nistUnmarshal(nistec.NewP256Point, curve.params, data)
+	case curveP384:
+		return nistUnmarshal(nistec.NewP384Point, curve.params, data)
+	}
+	return nistUnmarshal(nistec.NewP521Point, curve.params, data)
+}
+
+func (curve *nistCurveImpl) UnmarshalCompressed(data []byte) (x, y *big.Int) {
+	switch curve.kind {
+	case curveP224:
+		return nistUnmarshalCompressed(nistec.NewP224Point, curve.params, data)
+	case curveP256:
+		return nistUnmarshalCompressed(nistec.NewP256Point, curve.params, data)
+	case curveP384:
+		return nistUnmarshalCompressed(nistec.NewP384Point, curve.params, data)
+	}
+	return nistUnmarshalCompressed(nistec.NewP521Point, curve.params, data)
+}
+
+// --- the parametric arithmetic ---
+//
+// Each function is a wrapper over a nistec Point: points are encoded into and
+// decoded from properly formatted byte slices, and all big.Int use stays in this
+// package. Encoding and decoding is 1/1000th of the runtime of a scalar
+// multiplication, so the overhead is acceptable.
+
+func nistIsOnCurve[Point nistPoint[Point]](np func() Point, params *CurveParams, x, y *big.Int) (ok bool) {
 	// IsOnCurve is documented to reject (0, 0), the conventional point at
-	// infinity, which however is accepted by pointFromAffine.
+	// infinity, which however is accepted by nistPointFromAffine.
 	if x.Sign() == 0 && y.Sign() == 0 {
 		return false
 	}
-	_, err := curve.pointFromAffine(x, y)
+	_, err := nistPointFromAffine(np, params, x, y)
 	return err == nil
 }
 
-func (curve *nistCurve[Point]) pointFromAffine(x, y *big.Int) (p Point, err error) {
+func nistPointFromAffine[Point nistPoint[Point]](np func() Point, params *CurveParams, x, y *big.Int) (p Point, err error) {
 	// (0, 0) is by convention the point at infinity, which can't be represented
 	// in affine coordinates. See Issue 37294.
 	if x.Sign() == 0 && y.Sign() == 0 {
-		return curve.newPoint(), nil
+		return np(), nil
 	}
 	// Reject values that would not get correctly encoded.
 	if x.Sign() < 0 || y.Sign() < 0 {
 		return p, errors.New("negative coordinate")
 	}
-	if x.BitLen() > curve.params.BitSize || y.BitLen() > curve.params.BitSize {
+	if x.BitLen() > params.BitSize || y.BitLen() > params.BitSize {
 		return p, errors.New("overflowing coordinate")
 	}
 	// Encode the coordinates and let SetBytes reject invalid points.
-	byteLen := (curve.params.BitSize + 7) / 8
-	buf := []byte{:1+2*byteLen}
+	byteLen := (params.BitSize + 7) / 8
+	buf := []byte{:1 + 2*byteLen}
 	buf[0] = 4 // uncompressed point
 	x.FillBytes(buf[1 : 1+byteLen])
 	y.FillBytes(buf[1+byteLen : 1+2*byteLen])
-	return curve.newPoint().SetBytes(buf)
+	return np().SetBytes(buf)
 }
 
-func (curve *nistCurve[Point]) pointToAffine(p Point) (x, y *big.Int) {
+func nistPointToAffine[Point nistPoint[Point]](params *CurveParams, p Point) (x, y *big.Int) {
 	out := p.Bytes()
 	if len(out) == 1 && out[0] == 0 {
 		// This is the encoding of the point at infinity, which the affine
 		// coordinates API represents as (0, 0) by convention.
 		return &big.Int{}, &big.Int{}
 	}
-	byteLen := (curve.params.BitSize + 7) / 8
+	byteLen := (params.BitSize + 7) / 8
 	x = (&big.Int{}).SetBytes(out[1 : 1+byteLen])
 	y = (&big.Int{}).SetBytes(out[1+byteLen:])
 	return x, y
 }
 
-func (curve *nistCurve[Point]) Add(x1, y1, x2, y2 *big.Int) (out *big.Int, res *big.Int) {
-	p1, err := curve.pointFromAffine(x1, y1)
+func nistAdd[Point nistPoint[Point]](np func() Point, params *CurveParams, x1, y1, x2, y2 *big.Int) (out *big.Int, res *big.Int) {
+	p1, err := nistPointFromAffine(np, params, x1, y1)
 	if err != nil {
 		panic("crypto/elliptic: Add was called on an invalid point")
 	}
-	p2, err := curve.pointFromAffine(x2, y2)
+	p2, err := nistPointFromAffine(np, params, x2, y2)
 	if err != nil {
 		panic("crypto/elliptic: Add was called on an invalid point")
 	}
-	return curve.pointToAffine(p1.Add(p1, p2))
+	return nistPointToAffine(params, p1.Add(p1, p2))
 }
 
-func (curve *nistCurve[Point]) Double(x1, y1 *big.Int) (out *big.Int, res *big.Int) {
-	p, err := curve.pointFromAffine(x1, y1)
+func nistDouble[Point nistPoint[Point]](np func() Point, params *CurveParams, x1, y1 *big.Int) (out *big.Int, res *big.Int) {
+	p, err := nistPointFromAffine(np, params, x1, y1)
 	if err != nil {
 		panic("crypto/elliptic: Double was called on an invalid point")
 	}
-	return curve.pointToAffine(p.Double(p))
+	return nistPointToAffine(params, p.Double(p))
 }
 
-// normalizeScalar brings the scalar within the byte size of the order of the
+// nistNormalizeScalar brings the scalar within the byte size of the order of the
 // curve, as expected by the nistec scalar multiplication functions.
-func (curve *nistCurve[Point]) normalizeScalar(scalar []byte) (b []byte) {
-	byteSize := (curve.params.N.BitLen() + 7) / 8
+func nistNormalizeScalar(params *CurveParams, scalar []byte) (b []byte) {
+	byteSize := (params.N.BitLen() + 7) / 8
 	if len(scalar) == byteSize {
 		return scalar
 	}
 	s := (&big.Int{}).SetBytes(scalar)
 	if len(scalar) > byteSize {
-		s.Mod(s, curve.params.N)
+		s.Mod(s, params.N)
 	}
 	out := []byte{:byteSize}
 	return s.FillBytes(out)
 }
 
-func (curve *nistCurve[Point]) ScalarMult(Bx, By *big.Int, scalar []byte) (out *big.Int, res *big.Int) {
-	p, err := curve.pointFromAffine(Bx, By)
+func nistScalarMult[Point nistPoint[Point]](np func() Point, params *CurveParams, Bx, By *big.Int, scalar []byte) (out *big.Int, res *big.Int) {
+	p, err := nistPointFromAffine(np, params, Bx, By)
 	if err != nil {
 		panic("crypto/elliptic: ScalarMult was called on an invalid point")
 	}
-	scalar = curve.normalizeScalar(scalar)
+	scalar = nistNormalizeScalar(params, scalar)
 	p, err = p.ScalarMult(p, scalar)
 	if err != nil {
 		panic("crypto/elliptic: nistec rejected normalized scalar")
 	}
-	return curve.pointToAffine(p)
+	return nistPointToAffine(params, p)
 }
 
-func (curve *nistCurve[Point]) ScalarBaseMult(scalar []byte) (out *big.Int, res *big.Int) {
-	scalar = curve.normalizeScalar(scalar)
-	p, err := curve.newPoint().ScalarBaseMult(scalar)
+func nistScalarBaseMult[Point nistPoint[Point]](np func() Point, params *CurveParams, scalar []byte) (out *big.Int, res *big.Int) {
+	scalar = nistNormalizeScalar(params, scalar)
+	p, err := np().ScalarBaseMult(scalar)
 	if err != nil {
 		panic("crypto/elliptic: nistec rejected normalized scalar")
 	}
-	return curve.pointToAffine(p)
+	return nistPointToAffine(params, p)
 }
 
-func (curve *nistCurve[Point]) Unmarshal(data []byte) (x, y *big.Int) {
+func nistUnmarshal[Point nistPoint[Point]](np func() Point, params *CurveParams, data []byte) (x, y *big.Int) {
 	if len(data) == 0 || data[0] != 4 {
 		return nil, nil
 	}
 	// Use SetBytes to check that data encodes a valid point.
-	_, err := curve.newPoint().SetBytes(data)
+	_, err := np().SetBytes(data)
 	if err != nil {
 		return nil, nil
 	}
-	// We don't use pointToAffine because it involves an expensive field
+	// We don't use nistPointToAffine because it involves an expensive field
 	// inversion to convert from Jacobian to affine coordinates, which we
 	// already have.
-	byteLen := (curve.params.BitSize + 7) / 8
+	byteLen := (params.BitSize + 7) / 8
 	x = (&big.Int{}).SetBytes(data[1 : 1+byteLen])
 	y = (&big.Int{}).SetBytes(data[1+byteLen:])
 	return x, y
 }
 
-func (curve *nistCurve[Point]) UnmarshalCompressed(data []byte) (x, y *big.Int) {
+func nistUnmarshalCompressed[Point nistPoint[Point]](np func() Point, params *CurveParams, data []byte) (x, y *big.Int) {
 	if len(data) == 0 || (data[0] != 2 && data[0] != 3) {
 		return nil, nil
 	}
-	p, err := curve.newPoint().SetBytes(data)
+	p, err := np().SetBytes(data)
 	if err != nil {
 		return nil, nil
 	}
-	return curve.pointToAffine(p)
+	return nistPointToAffine(params, p)
 }
 
 func bigFromDecimal(s []byte) (out *big.Int) {
