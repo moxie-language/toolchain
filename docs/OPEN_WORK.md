@@ -15577,3 +15577,22 @@ so the fix is to alias only pointers contained in the receiver's `ctxArena` (or
 the root arena) and copy everything else. That single change should also cure
 the general "wrote into a copy" family this file has recorded for bufio, zlib and
 the relay.
+
+### Round 181 correction: the store-back ancestor rule is NOT the png mechanism
+
+Restricting the store-back branch of `codecIsStableArenaAddr` to the receiver's
+own arena and `g.ctxArena` (the arena that allocated the receiver) - the change
+that paragraph proposed - was implemented and tested: `png.Encode` still emits 63
+bytes with an 18-byte IDAT and `bufio.Writer.Buffered()` is still 6. So the copy
+that splits zlib/flate from png's flush is produced somewhere else and that
+runtime edit was reverted unshipped.
+
+The remaining candidates, in order: the return-value relocation of
+`zlib.NewWriterLevelDict`'s `*Writer` (whose `w io.Writer` field holds the bufio
+pointer; `codecEncodeIfaceValue` takes the `ct.Size() <= sizeof(uintptr)` branch
+for a pointer dynamic type and encodes the value word as a pointer, which should
+alias it), the `flate.NewWriterDict` hop, and `bufio.Writer.Reset`. The
+instrumentation that discriminates them: print the `*bufio.Writer` address inside
+`bufio.(*Writer).Write` and inside `Flush` for the png path - if `Write` sees a
+different address from `Flush`, the pointer was copied before reaching bufio; if
+both see `e.bw`, the copy is on the flush side.
