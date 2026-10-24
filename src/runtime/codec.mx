@@ -616,14 +616,23 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		// real object. Preserve the address and leak the fn arena so
 		// the pointee stays alive for the caller.
 		if et := typ.Elem(); et != nil && isBasicKind(et.Kind()) {
-			// A pointee inside a sovereign arena is NOT transient: the arena
-			// lives as long as its receiver, so the address is stable and
+			// A pointee inside a sovereign DATA arena is NOT transient: the
+			// arena lives as long as its receiver, so the address is stable and
 			// nothing needs leaking. The stable registration is LIFO and can
 			// already have been popped by the time a caller encodes a pointer
-			// into a callee's arena, so ask the region itself rather than the
-			// registration - this is the path the relay reported three times a
-			// run (pointee arena class 1), leaking a frame for every one.
-			if sovFindContainingArena(uintptr(p)) != nil {
+			// into a callee's arena, so ask the registered regions rather than
+			// the registration - this is the path the relay reported three times
+			// a run (pointee arena class 1), leaking a frame for every one.
+			//
+			// This must NOT be asked of sovFindContainingArena: that scans every
+			// arena on the fn stack, including the one being released right now,
+			// so `var d digest; return &d` (hash/adler32.New) was answered
+			// "sovereign, stable" for its own dying frame - the pointer was
+			// aliased, no escape was armed, the arena went back to the pool, and
+			// the caller's digest was overwritten by the next frame to acquire
+			// that arena. Every png IDAT ended in an Adler-32 of whatever had
+			// been written into the recycled block.
+			if domainRoot != nil && sovInSovereignDataArena(uintptr(p)) {
 				codecSeenAdd(ss, p, codecPointeeSize(typ))
 				codecNoteStable(uintptr(p))
 				codecWriteVarint(cb, codecTagStable)

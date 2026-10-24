@@ -15655,3 +15655,43 @@ and other large slices next to the `w io.Writer` field, the Writer returned from
 `fillWindow(dict)` and the `dict` push). The next probe should therefore be the
 `codecIsStableAddr` print inside the real png encode, not another reduction -
 that names the branch directly and cannot be fooled by a smaller graph.
+
+## Round 183: a returned pointer to a scalar was answered "sovereign" for its own dying frame
+
+The instrumented `codecIsStableAddr` inside the real `png.Encode` named the png
+loss in one run, and the png loss turned out to be two independent defects, not
+one. The first is the one that had been invisible in every reduced reproducer
+because it looks like a lifetime question, not an identity question.
+
+`codecEncodeValue`'s `KindPointer` branch aliases a pointer whose pointee is a
+basic kind (`*uint32`, `*byte`) instead of deep-copying it: a pointer into a
+buffer cannot be copied, because the pointee's declared size does not describe
+the object. To keep such a pointee alive it arms the escape flag, which makes
+the compiler leak the frame arena instead of returning it to the pool. The
+guard for that arm asked
+
+    if sovFindContainingArena(uintptr(p)) != nil { ...stable, no leak... }
+
+and `sovFindContainingArena` scans every arena on the fn stack - *including the
+one being released right now*. So for `func New() { var d digest; return &d }`
+the pointee was found in its own dying frame, the answer was "sovereign, stable,
+nothing to leak", the pointer was aliased, and the arena went straight back to
+the pool. The caller's pointer then read whatever the next frame to acquire that
+arena wrote: `hash/adler32`'s digest state came back as 0, or 0x3E6CB000, or
+0x75E59000 depending on what had just run, and every png IDAT ended in that
+value as its Adler-32 trailer.
+
+The predicate is now the registered sovereign data-arena range list
+(`sovInSovereignDataArena`), which is exactly the question the comment was
+trying to ask and which cannot see the current frame: those ranges are only
+created for sovereign data arenas and dropped when the arena is freed.
+
+Measured before/after on `hash/adler32`:
+
+    New(); Sum32()                   1            1
+    Write("abcdef"); Sum32()         0            136184406   (= 0x081E0256)
+    Checksum(150-byte IDAT block)    0xE33902B9   0xE33902B9
+
+and on png: the IDAT trailer is now the Adler-32 of the scanlines instead of
+garbage (the remaining bytes of the IDAT still differed, which is the second
+defect, round 184).
