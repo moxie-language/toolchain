@@ -16319,19 +16319,16 @@ The tables now live in `tables.mx` and are filled by `initTables()` from the
 package's single init (deflate.mx). Before, `lengthCode` and `offsetCode`
 materialised a 256-entry literal on every call - once per token in the encoder.
 
-Two traps, both found by the differential probe rather than by reading:
+One trap, found by the differential probe rather than by reading:
+`decompressor.buf` was only allocated in `Reset`, and `NewReader` and
+`NewReaderDict` build a `decompressor` field by field without calling Reset, so
+the first reader had a nil (zero-length) buffer and `f.buf[0]` was an index out
+of range on the first stored block. Both constructors allocate it now.
 
-  * `io.ReadFull(f.r, f.buf[0:4])`. With `buf` an array that is a view into the
-    array; with `buf` a slice it is a subslice, and a subslice passed as a
-    parameter is a copy, so the four header bytes never landed in `buf`. The
-    read now takes the whole slice, whose length is exactly four. This is the
-    same rule the compiler enforces in user code ("a subslice is a copy, so
-    copying into it is not allowed") and exempts in the stdlib.
-  * `decompressor.buf` was only allocated in `Reset`, and `NewReader` and
-    `NewReaderDict` build a `decompressor` field by field without calling
-    Reset, so the first reader had a nil (zero-length) buffer: `f.buf[0]` was an
-    index out of range on the first stored block. Both constructors allocate it
-    now.
+The read target was written as `io.ReadFull(f.r, f.buf[0:4])` and is now
+`io.ReadFull(f.r, f.buf)` - with `buf` exactly four bytes long the two are the
+same, and round 201 measured that a subslice argument is NOT copied (see below),
+so the change is clarity, not a fix. The nil buffer was the whole bug.
 
 Verification: a gzip differential over four payload shapes (incrementing bytes,
 repeating letters, a mixed pattern, all zeros) at sizes 0, 1, 5, 100, 1000, 5000
@@ -16364,10 +16361,11 @@ Also converted: `_bitCount() [256]byte` and `encoder.bitCount`, `huffmanSpec.cou
 [16]byte` and the four `[16]byte` table literals in `_theHuffmanSpec()` (now
 `[]byte`), `encoder.buf [16]byte`, and the decoder's `bytes.buf [4096]byte`.
 
-The decoder's buffer needed the read-copy rule the flate round hit:
-`d.r.Read(d.bytes.buf[d.bytes.j:])` fills a copy, so `fill` reads into a temporary
-of `len(buf)-j` and copies the bytes in by index; both Decode and DecodeConfig
-allocate the buffer.
+The decoder's read buffer is allocated by both Decode and DecodeConfig, which
+build a `decoder` field by field. Its `fill` still reads straight into
+`d.bytes.buf[d.bytes.j:]`: round 201 measured that a subslice argument aliases,
+so a temporary plus a copy-back would have been dead weight.
+
 
 Still arrays in this package, and one open difference:
 
@@ -16383,3 +16381,47 @@ Still arrays in this package, and one open difference:
     `image/format.mx:37` with "format does not satisfy comparable", an unrelated
     pre-existing legacy-only error, so image/jpeg cannot be built by legacy at
     all. Recorded rather than papered over.
+
+## Round 201: the encoding tables become slices, and a correction: a subslice argument is not copied
+
+    base64.Encoding.encode    [64]byte   -> []byte (allocated in NewEncoding)
+    base64.Encoding.decodeMap [256]uint8 -> []byte
+    base32.Encoding.encode    [32]byte   -> []byte
+    base32.Encoding.decodeMap [256]uint8 -> []byte
+    base58 _b58()             [256]byte  -> []byte
+    hex encoder.out           [bufferSize]byte -> []byte (NewEncoder)
+    hex decoder.arr           [bufferSize]byte -> []byte (NewDecoder)
+    hex dumper.rightChars     [18]byte   -> []byte
+    hex dumper.buf            [14]byte   -> []byte
+
+`Encoding` is copied by value in `WithPadding` and `Strict` (`e := *enc`); with
+slices that shares the two tables instead of copying 320 bytes, which is correct
+because they are written once in the constructor and never again.
+
+Verification, all against Go 1.25.3:
+
+  * base64: four alphabets (std, url, raw, rawurl) x 13 input sizes, `Encode`
+    bytes and `Decode` round trip - identical.
+  * base32: std and a custom lowercase alphabet x 8 sizes - identical.
+  * hex: `EncodeToString`, `DecodeString`, the streaming encoder, the streaming
+    decoder and `Dump` at 7+6 sizes - identical.
+  * base58 has no Go analogue; `Encode("hello world")` is `StV1DL6CwTryKyV` and
+    `CheckEncode("hello", 0)` is `12L5B5yqsf7vwb`, both confirmed against an
+    independent Python implementation, and every case round-trips.
+
+Correction. Rounds 199 and 200 explained two crashes by saying that a subslice
+passed as a parameter is a copy. That is wrong, and the record should not keep a
+wrong mechanism. A probe measured all four shapes:
+
+	fillDirect(b[:])            -> writes reach b        (full subslice)
+	fillDirect(b[2:])           -> writes reach b        (offset subslice)
+	var r io.Reader = &sink{}   r.Read(b[2:]) -> writes reach b
+	io.ReadFull(bytes.NewReader(..), b[:]) -> bytes land in b
+
+So a subslice argument aliases in both direct and interface calls. The flate
+crash was only the unallocated `decompressor.buf`; the jpeg `fill` rewrite that
+assumed otherwise was reverted to the direct read, and its buffer allocation in
+the two constructors is the actual fix. What IS true is that `copy(dst[a:b], src)`
+is a compile error in user packages and that archiving a subslice into a value
+that outlives the parent is what the "a subslice is a copy" rule is guarding
+against - the restriction is a safety rule, not the runtime behaviour.
