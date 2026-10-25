@@ -936,12 +936,20 @@ func (p *http2clientConnPool) addConnLocked(key string, cc *http2ClientConn) {
 }
 
 func (p *http2clientConnPool) MarkDead(cc *http2ClientConn) {
+	// The pool is a self-mutating receiver (this writes its maps), so the
+	// loop scratch is declared once instead of per iteration: a `:=` in a
+	// mutating method allocates in the receiver's arena, where it would
+	// persist for every dead connection. newList is the product the map
+	// keeps, so its allocation belongs there.
+	var vv []*http2ClientConn
+	var ok bool
+	var newList []*http2ClientConn
 	for _, key := range p.keys[cc] {
-		vv, ok := p.conns[key]
+		vv, ok = p.conns[key]
 		if !ok {
 			continue
 		}
-		newList := http2filterOutClientConn(vv, cc)
+		newList = http2filterOutClientConn(vv, cc)
 		if len(newList) > 0 {
 			p.conns[key] = newList
 		} else {
@@ -6868,11 +6876,16 @@ const http2TrailerPrefix = "Trailer:"
 // This method runs after the Handler is done and promotes any Header
 // fields to be trailers.
 func (rws *http2responseWriterState) promoteUndeclaredTrailers() {
+	// The response writer state is a self-mutating receiver (this writes
+	// handlerHeader), so the loop scratch is declared once instead of per
+	// iteration: a `:=` in a mutating method allocates in the receiver's
+	// arena, where it would persist for every header promoted.
+	var trailerKey []byte
 	for k, vv := range rws.handlerHeader {
 		if !bytes.HasPrefix(k, http2TrailerPrefix) {
 			continue
 		}
-		trailerKey := bytes.TrimPrefix(k, http2TrailerPrefix)
+		trailerKey = bytes.TrimPrefix(k, http2TrailerPrefix)
 		rws.declareTrailer(trailerKey)
 		rws.handlerHeader[CanonicalHeaderKey(trailerKey)] = vv
 	}
