@@ -16766,3 +16766,41 @@ and `<&>`: `%v`, `%s`, `%q`, `%x`, `%X`, `%#v`, `%10q` and `%.3q` are identical,
 as are `%q`/`%x`/`%X` and `%s` on a `[]byte`, plus `Sprint` and `Sprintln`. The
 two remaining differences are the documented `%v` element list and the type name
 inside a bad-verb marker.
+
+## Round 210: X25519 was a new curve per call, so every ECDH exchange failed
+
+`crypto/ecdh.X25519()` returned a freshly allocated curve object:
+
+    func X25519() (out Curve) { return &x25519Curve{} }
+
+Go returns a package singleton, and the identity is part of the contract:
+`PrivateKey.ECDH` and `PublicKey.ECDH` compare the key's curve against the
+caller's and answer "private key and public key curves do not match" when they
+differ. Two keys built through two `X25519()` calls never matched, so every
+X25519 exchange failed - including the RFC 7748 section 6.1 vector, and
+including `crypto/tls`'s key exchange, which builds the peer key through its own
+`X25519()` call.
+
+This is round 185's shape (the standard colour models were a fresh object per
+call, so no model ever compared equal to itself) in a place where the failure is
+a hard error rather than a wrong branch. The curve is a package singleton now,
+built in the package's existing `init()` beside the NIST curves.
+
+Found while converting `x25519ScalarMult`'s clamping buffer to a slice: the
+buffer conversion is behaviour-neutral, and the RFC vector was the thing that
+proved it - and then failed, for the unrelated reason above. Both are in this
+commit.
+
+Verified:
+
+  * RFC 7748 section 6.1 - Alice's private key with Bob's public key gives
+    `4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742`.
+  * A two-party exchange where each key comes from a separate `X25519()` call
+    now succeeds and both sides derive the same secret.
+  * `io/fs.FileMode.String`'s 32-byte scratch buffer is a slice too; sixteen
+    modes (plain, dir, symlink, pipe, socket, device, char device, setuid,
+    setgid, sticky, irregular, an out-of-range bit and a combination) print
+    identically to Go 1.25.3.
+
+`tests/regressions/should_compile/x25519_ecdh` pins the exchange; against the
+old source it fails at the first `ECDH` with the curve-mismatch error.
