@@ -40,6 +40,25 @@ type header struct {
 	raw    bool
 }
 
+// ownFileHeader returns a copy of fh that belongs to the caller's arena.
+//
+// The writer keeps the header in w.dir and writes the central directory from it
+// at Close, long after the function that built fh has returned - "Writer takes
+// ownership of fh" is the contract, and this is the transfer. Storing the
+// caller's pointer instead left the central directory reading a released
+// frame: the bytes came out of whatever the next callee had put there, so a
+// record was corrupt in some runs and not others (and never under gdb, where
+// the allocation pattern differs).
+//
+// The copy is made by returning the value: the codec relocates what a function
+// returns into the caller's arena, and that includes the byte slices the header
+// carries, so no field needs copying by hand.
+func ownFileHeader(fh *FileHeader) (r *FileHeader) {
+	c := *fh
+	r = &c
+	return r
+}
+
 // NewWriter returns a new [Writer] writing a zip file to w.
 func NewWriter(w io.Writer) (zw *Writer) {
 	return &Writer{cw: &countWriter{w: bufio.NewWriter(w)}, cc: crc32.NewCRC32()}
@@ -263,10 +282,15 @@ func (w *Writer) prepare(fh *FileHeader) (oerr error) {
 			return err
 		}
 	}
-	if len(w.dir) > 0 && w.dir[len(w.dir)-1].FileHeader == fh {
-		// See https://golang.org/issue/11144 confusion.
-		return errors.New("archive/zip: invalid duplicate FileHeader")
-	}
+	// Go rejects a second CreateHeader call with the same *FileHeader
+	// (golang.org/issue/11144) by comparing the caller's pointers. That test
+	// cannot survive ownership transfer: the header the writer keeps is its own
+	// copy, and in an arena world a freed frame slot's address is handed to the
+	// next allocation, so two unrelated headers compare equal and two calls
+	// with the same header would not be caught. The check is dropped rather
+	// than made unreliable - a duplicate still produces two entries, which no
+	// reader is obliged to accept, and the caller contract already forbids
+	// reusing a header.
 	return nil
 }
 
@@ -281,6 +305,7 @@ func (w *Writer) CreateHeader(fh *FileHeader) (out io.Writer, oerr error) {
 	if err := w.prepare(fh); err != nil {
 		return nil, err
 	}
+	fh = ownFileHeader(fh)
 
 	// The ZIP format has a sad state of affairs regarding character encoding.
 	// Officially, the name and comment fields are supposed to be encoded
@@ -451,6 +476,7 @@ func (w *Writer) CreateRaw(fh *FileHeader) (out io.Writer, oerr error) {
 	if err := w.prepare(fh); err != nil {
 		return nil, err
 	}
+	fh = ownFileHeader(fh)
 
 	fh.CompressedSize = uint32(min(fh.CompressedSize64, uint32max))
 	fh.UncompressedSize = uint32(min(fh.UncompressedSize64, uint32max))
