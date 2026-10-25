@@ -26,6 +26,26 @@ type mimeTypesStore struct {
 
 var mimeStore *mimeTypesStore
 
+// ownBytes returns a copy of b allocated in the caller's arena.
+//
+// A slice passed to a method belongs to the caller's frame arena, which is
+// released when the caller returns. Storing that slice in the receiver makes
+// the receiver point at recycled memory the moment the loader returns - the
+// store must own what it keeps. There is no automatic relocation for a store
+// through a pointer, so a method that keeps data it was handed performs the
+// transfer itself. Copying inside a mutating method lands the copy in the
+// receiver's arena; a free function's return lands in the caller's arena for
+// the same reason, which is also why the copy is done here and not in the
+// loader - the loader does not know the owner.
+func ownBytes(b []byte) (r []byte) {
+	r = []byte{:len(b)}
+	if len(b) == 0 {
+		return r
+	}
+	copy(r, b)
+	return r
+}
+
 // setTypes is used by init's non-test path, and by tests.
 func (m *mimeTypesStore) setTypes(lowerExt, mixExt map[string][]byte) {
 	if m.types == nil {
@@ -43,11 +63,14 @@ func (m *mimeTypesStore) setTypes(lowerExt, mixExt map[string][]byte) {
 		delete(m.extensions, k)
 	}
 
+	// The tables arrive as a parameter map owned by the caller's frame, so
+	// every key and value the store keeps is copied into the store's arena
+	// (see ownBytes).
 	for k, v := range lowerExt {
-		m.typesLower[k] = v
+		m.typesLower[string(ownBytes(k))] = ownBytes(v)
 	}
 	for k, v := range mixExt {
-		m.types[k] = v
+		m.types[string(ownBytes(k))] = ownBytes(v)
 	}
 
 	var justType []byte
@@ -57,7 +80,7 @@ func (m *mimeTypesStore) setTypes(lowerExt, mixExt map[string][]byte) {
 		if perr != nil {
 			panic(perr.Error())
 		}
-		m.extensions[justType] = push(m.extensions[justType], k)
+		m.extensions[justType] = push(m.extensions[justType], ownBytes(k))
 	}
 }
 
@@ -120,10 +143,10 @@ func TypeByExtension(ext []byte) (rb []byte) {
 	}
 
 	// Case-insensitive lookup.
-	// Optimistically assume a short ASCII extension and be
-	// allocation-free in that case.
-	var buf [10]byte
-	lower := buf[:0]
+	// Optimistically assume a short ASCII extension: ten bytes of capacity
+	// covers every extension in the tables. A longer one grows through push,
+	// which is safe here because the buffer belongs to this frame.
+	lower := []byte{:0:10}
 	const utf8RuneSelf = 0x80 // from utf8 package, but not importing it.
 	for i := 0; i < len(ext); i++ {
 		c := ext[i]
@@ -195,6 +218,12 @@ func (m *mimeTypesStore) setExtensionType(extension, mimeType []byte) (rerr erro
 		mimeType = FormatMediaType(mimeType, param)
 	}
 	extLower := bytes.ToLower(extension)
+
+	// The store outlives the caller: take ownership of the three slices that
+	// end up in it (see ownBytes).
+	extension = ownBytes(extension)
+	extLower = ownBytes(extLower)
+	mimeType = ownBytes(mimeType)
 
 	m.types[string(extension)] = mimeType
 	m.typesLower[string(extLower)] = mimeType

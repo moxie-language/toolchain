@@ -16522,3 +16522,72 @@ Verification, both against Go 1.25.3:
   * net (over the same code): ParseIP, To4/To16 lengths, IPEqual, IPv4(),
     IsLoopback/IsUnspecified, ParseCIDR with mask size and Contains, CIDRMask -
     identical.
+
+## Round 205: mime's store was a read-only method's frame arena, so every extension pointed at recycled memory
+
+`mime.TypeByExtension(".css")` died in `runtime[stringEqual]` during the store's
+own init. The crash had been filed under the `[][]byte` corruption family and
+suspected of sharing a root cause with archive/zip. It does not: it is an
+ownership bug in the sovereign classification, and the `[][]byte` shape was
+coincidence - the store's tables happen to be maps of byte slices.
+
+`setExtensionType` mutates the receiver only through its maps:
+
+    m.types[string(extension)] = mimeType
+    m.typesLower[string(extLower)] = mimeType
+    m.extensions[justType] = push(exts, extLower)
+
+Both compilers decided whether a method is a *mutating* method - the predicate
+that makes it borrow the receiver's sovereign arena instead of pushing its own
+frame arena - by scanning for a `Store` instruction rooted at the receiver.
+`ssaFuncHasReceiverWrite` (stage4) and `ssaFuncWritesReceiver` (legacy) look at
+`*SSAStore` / `*ssa.Store` and nothing else. A map update is not a Store, so
+`setExtensionType` was classified READ-ONLY: it got a per-function frame arena,
+its parse results and every `push` growth landed there, and the store's map
+buckets were left holding headers into a frame released when the loader
+returned. `.css` and `.pdf` survived by luck; `image/gif`, `image/jpeg`,
+`text/html; charset=utf-8` and the rest read recycled memory, and the key
+comparison in `stringEqual` dereferenced the debris.
+
+Fixed in both compilers, legacy first as wood law requires: a `MapUpdate` whose
+map is rooted at the receiver counts as a receiver write. The walk was already
+there for stores; this is the instruction that was missing from it.
+
+The second half is the ownership transfer the arena model demands and the
+compiler does not automate. With the classification fixed, the method's own
+allocations land in the store's arena, but the *data* it is handed still belongs
+to the caller's frame: `mime.setExtensionType` is called with subslices of the
+loader's `bytes.Split` result, and `mime.setTypes` with a map built in
+`_builtinTypesLower`'s caller. Storing those headers is a cross-arena reference,
+which `docs/OWNERSHIP.md` says must not happen: "a pointer into one function's
+arena must not be stored in another function's arena without going through
+return". There is no automatic relocation for a store through a pointer, so the
+store performs the transfer itself - `ownBytes` in `src/mime/type.mx` copies
+into the receiver's arena, which is where a copy made inside a mutating method
+lands. Without it the classification fix alone still produced garbage values
+with correct lengths (`.gif` 9 bytes, `.html` 24 bytes, wrong bytes).
+
+`mime/type.mx` also drops its last array: `var buf [10]byte; lower := buf[:0]`
+is `lower := []byte{:0:10}`.
+
+Verified against Go 1.25.3, byte-identical output: TypeByExtension for the built
+ins and for case-folded and system-database extensions (`.css`, `.CSS`, `.PNG`,
+`.jpeg`, `.Jpg`, missing, `.gz`, `.ttf`, `.webm`), ExtensionsByType sorted lists
+for `image/jpeg` (4), `text/html; charset=utf-8` (2), `application/pdf`,
+`text/css`, AddExtensionType with the `charset` default and its dotless-extension
+error, and the round trip through ExtensionsByType. The system database is
+`/usr/share/mime/globs2`, 1334 entries.
+
+The regression fixture `tests/regressions/should_compile/sovereign_map_store`
+isolates the classification: a sovereign type, a method that writes only through
+a map, and a loader whose error return gives it a frame arena. Against a compiler
+built without the detector change it dies with SIGSEGV in `stringEqual`; against
+the fixed compiler it prints `ok`. The loader's keys and values are literals on
+purpose - a frame-local argument would dangle for the ownership reason above,
+which is mime's own half of the fix.
+
+Open, and now stated as its own class rather than as a `[][]byte` symptom: a
+store through a pointer into state that outlives the frame has no automatic
+relocation, so any package that keeps data it was handed must copy it into the
+owner's arena. Every such site in the tree is a latent use-after-free, and the
+compiler cannot currently tell one from a legitimate borrow.
