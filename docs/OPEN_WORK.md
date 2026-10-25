@@ -16268,3 +16268,35 @@ Verification:
 
 Legacy needs no mirror: it types shifts with go/types, which already applies the
 contextual conversion. This is stage4 catching up to the reference.
+
+## Round 198: strconv's four duplicated 696-entry power tables become one slice, and the decimal state becomes a slice
+
+    detailedPowersOfTen   [696][2]uint64  x4 local literals -> []pow10 built once in init
+    uint64pow10           [20]uint64 (local)               -> []uint64 built once in init
+    decimal.d             [800]byte                        -> []byte (newDecimal)
+    decimal.Assign buf    [24]byte                         -> []byte
+    ftoa scratch buf      [32]byte / [24]byte              -> []byte
+
+The interesting part is the table: four functions (mult64bitPow10,
+mult128bitPow10, eiselLemire64, eiselLemire32) each carried a private copy of the
+same 696-entry `[696][2]uint64` literal - 2800 lines of duplicated constants, and
+a nested array type, which is exactly the shape that broke P-224's tables
+(round 190). There is now one `[]pow10` (a `{hi, lo}` struct) plus one
+`[]uint64` for the 20 small powers, both filled by `initPow10` from the single
+remaining copy of the literal. strconv has one `init()` (atoi.mx, the
+`ErrRange`/`ErrSyntax` one), so that init calls `initPow10()`.
+
+The indexing is a value copy (`pow := detailedPowersOfTen[i]` then `pow.hi += 1`
+for inverse powers), so the shared table is never mutated - the same guarantee
+the local array literals gave.
+
+Converting `decimal.d` to a slice makes `decimal` a codec-carrying type, i.e.
+self-mutating, so two methods had a `:=` inside a loop that the sovereign rule
+rejects; `Assign`'s `v1` and `RoundUp`'s `c` are now declared before their loops.
+
+Verification: the four-fold FNV differential (float formatting across 28 values
+x 5 formats x precisions -1..17, integer formatting in five bases, Parse*
+families, and the Append* family) is byte-identical to Go 1.25.3 - and, before
+round 197's compiler fix, moxie-against-moxie identical across this conversion,
+which is what proves the conversion itself is behaviour-preserving: the same
+probe on the pre-change tree produced the same four accumulators.
