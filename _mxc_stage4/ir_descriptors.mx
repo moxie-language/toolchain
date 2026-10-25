@@ -404,13 +404,26 @@ func typeDescSize(t Type) (sz int32) {
 	case *TCInterface:
 		return descPtrSize() * 2
 	case *Array:
+		// The size of an array is n * stride, where the stride is the element
+		// size rounded up to the element alignment. `(n-1)*align + size` is only
+		// that when size == align - byte and word arrays, which is why it went
+		// unnoticed - and it is 32 bytes short for `[3][]T` (a slice is 24 bytes
+		// with 8-byte alignment, so the third element strided by 8 instead of
+		// 24). Every field after such an array then read the wrong slot: zstd's
+		// Reader has `seqTables [3][]fseBaselineEntry` and the codec relocated
+		// its checksum state from wherever the descriptor said, so a decoded
+		// frame's xxhash header was garbage.
 		es := typeDescSize(tt.Elem)
 		ea := typeDescAlign(tt.Elem)
+		if ea <= 0 {
+			ea = 1
+		}
 		n := int32(tt.Len)
 		if n <= 0 {
 			return 0
 		}
-		return (n-1)*ea + es
+		stride := (es + ea - 1) &^ (ea - 1)
+		return n * stride
 	case *TCStruct:
 		off := int32(0)
 		maxal := int32(1)

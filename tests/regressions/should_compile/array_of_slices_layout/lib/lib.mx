@@ -1,0 +1,79 @@
+package lib
+
+// Regression: the compiler's descriptor layout computed the size of an array as
+// `(n-1)*align(elem) + size(elem)`, which is only valid when an element's size
+// equals its alignment. For `[3][]T` (24-byte element, 8-byte alignment) it
+// reported 40 instead of 72, so every field after such an array was 32 bytes
+// off in the type descriptor the codec relocates values with.
+//
+// zstd's Reader is the shape that found it: `seqTables [3][]fseBaselineEntry`
+// sits twelve fields before the checksum state, so a decoded frame's xxhash
+// header was read from the wrong slot and the decoder crashed in memset.
+//
+// The fixture is the same shape without the decoder: a struct with an array of
+// slices followed by scalars, arrays and a nested struct that itself holds
+// slices, built in a frame and returned, so the codec relocates all of it.
+type Inner struct {
+	len uint64
+	v   []uint64
+	buf []byte
+	cnt int32
+}
+
+type Holder struct {
+	tables [3][]uint16
+	bits   [3]uint8
+	more   [3][]uint16
+	sl     []byte
+	inner  Inner
+	tail   int32
+}
+
+func NewHolder() (h *Holder) {
+	h = &Holder{}
+	for i := int32(0); i < 3; i++ {
+		h.tables[i] = []uint16{:4}
+		h.tables[i][0] = uint16(0x1000 + i)
+		h.tables[i][3] = uint16(0x2000 + i)
+		h.bits[i] = uint8(i + 1)
+		h.more[i] = []uint16{:2}
+		h.more[i][1] = uint16(0x3000 + i)
+	}
+	h.sl = []byte{:8}
+	h.sl[7] = 0xAB
+	h.inner.len = 9
+	h.inner.v = []uint64{:4}
+	h.inner.v[3] = 0xDEAD
+	h.inner.buf = []byte{:32}
+	h.inner.buf[31] = 0x55
+	h.inner.cnt = 3
+	h.tail = 77
+	return h
+}
+
+func Check(h *Holder) (msg []byte) {
+	for i := int32(0); i < 3; i++ {
+		if len(h.tables[i]) != 4 || h.tables[i][0] != uint16(0x1000+i) || h.tables[i][3] != uint16(0x2000+i) {
+			return "tables wrong"
+		}
+		if h.bits[i] != uint8(i+1) {
+			return "bits wrong"
+		}
+		if len(h.more[i]) != 2 || h.more[i][1] != uint16(0x3000+i) {
+			return "more wrong"
+		}
+	}
+	if len(h.sl) != 8 || h.sl[7] != 0xAB {
+		return "sl wrong"
+	}
+	if h.inner.len != 9 || h.tail != 77 || h.inner.cnt != 3 {
+		return "scalars wrong"
+	}
+	if len(h.inner.v) != 4 || h.inner.v[3] != 0xDEAD {
+		return "inner.v wrong"
+	}
+	if len(h.inner.buf) != 32 || h.inner.buf[31] != 0x55 {
+		return "inner.buf wrong"
+	}
+	return "ok"
+}
