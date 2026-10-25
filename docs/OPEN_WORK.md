@@ -16614,3 +16614,61 @@ and it cannot report anything while it cannot run. Recorded as its own open
 item: either the type-check phase must not hold 45 packages' arenas live at
 once, or the region table needs a bound stated in bytes rather than in regions
 (and a diagnostic that names what filled it).
+
+## Round 207: archive/zip stored the caller's pointers; the writer wrote a corrupt directory from a dead frame
+
+The zip bug had been filed as nondeterministic - seven runs in ten failed with
+arrays, two in ten with slices, and it never failed under gdb - and parked as
+part of the `[][]byte` corruption family. It is the ownership class, twice:
+
+    Writer.Create -> header := &FileHeader{...}      header in Create's frame
+    CreateHeader(fh) -> h := &header{FileHeader: fh}  fh kept by pointer
+    Close() -> write the central directory from h
+
+`CreateHeader` stored the caller's `*FileHeader` - for `Create`, a header built
+in `Create`'s own frame by `w.Create` - and read it back at `Close`. Every
+central-directory record was therefore written from whatever the next callee had
+left in a released frame. That is why the symptom moved between runs and why
+gdb (different allocation pattern) never reproduced it: the record content was
+the debris of the previous call, not the header.
+
+`ownFileHeader` performs the transfer the writer's contract already states
+("Writer takes ownership of fh and may mutate its fields"): it copies the header
+and every byte slice it carries into the caller's arena through the return path,
+which is the one relocation the model provides. `CreateHeader` and `CreateRaw`
+both own before they build the `header`.
+
+The duplicate-header check went with it. Go rejects a second `CreateHeader` with
+the same pointer (issue 11144) by comparing addresses; after ownership transfer
+the stored header is a copy, and a freed frame slot's address is handed to the
+next allocation, so the comparison fired on unrelated headers (`invalid
+duplicate FileHeader` on a plain five-entry archive) and could never have caught
+a real duplicate. It is dropped rather than made unreliable, and the comment in
+`prepare` says so.
+
+With the archive bytes finally correct, reading it back failed a second way:
+`readDirectoryHeader` parses the name, extra field and comment into its own
+frame arena and left subslices of that frame in the `File`. The frame is
+released at return and reused by the next call, so all five entries read the
+LAST entry's name - `e.txt` five times. Those bytes belong to the reader, and
+the loop that keeps them is a mutating method of it, so the copies are made
+there and land in its arena.
+
+The package's scratch buffers are slices now (`fileHeaderLen`,
+`directoryHeaderLen`, `dataDescriptorLen`, `directoryEndLen`, the zip64 record,
+the 9-byte extended-timestamp field and the 28-byte zip64 extra); no array type
+remains in `archive/zip`.
+
+Verified against Go 1.25.3, byte-identical output for a five-entry archive that
+exercises: a deflated entry, a stored entry with 5000 bytes, an entry with a
+comment and a `Modified` timestamp (extended-timestamp extra field), a directory
+entry, and a non-ASCII name (UTF-8 flag). Compared: the archive's length and
+SHA-256, and for every entry its name, method, both sizes, CRC32, modification
+time, comment bytes and the SHA-256 of the extracted body, plus one `OpenRaw`
+read. Six consecutive runs of the probe agree, so the two-in-ten reproduction is
+gone.
+
+This was also the last item the `[][]byte` family was blocking. That family is
+now three separate fires, not one: mime was a misclassified method (round 205),
+zip was ownership of stored pointers (this round), and `bytes.genericReplacer`'s
+32-bit pointer slot remains.
