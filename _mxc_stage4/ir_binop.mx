@@ -1146,12 +1146,14 @@ func (e *irEmitter) emitValueCompare(reg string, op SSAOp, t Type, vt, lv, rv st
 			return
 		}
 		et := e.llvmType(ar.Elem)
-		if et == "ptr" || e.intBits(et) > 0 {
-			// An array of scalars is one integer of element-width times
-			// length; compare it whole.
-			e.w("  ") ; e.w(reg) ; e.w(" = ") ; e.w(cmpOp) ; e.w(" ") ; e.w(vt) ; e.w(" ") ; e.w(lv) ; e.w(", ") ; e.w(rv) ; e.w("\n")
-			return
-		}
+		// Element-wise, always. The shortcut this replaces compared the whole
+		// aggregate with one `icmp`, on the theory that an array of scalars is
+		// "one integer of element-width times length" - it is not: an LLVM
+		// icmp takes scalars and vectors, and handing it `[10 x i32]` fails the
+		// module ("icmp requires integer operands"). FieldVal's limbs are
+		// `[10]uint32`, so `crypto/ec`'s `point.X == inf.X` broke the build the
+		// only time it was ever compiled. legacy/compiler compares element-wise
+		// in createBinOp's *types.Array case, so this also restores the pair.
 		var acc string
 		for i := 0; i < n; i++ {
 			lf := "zeroinitializer"

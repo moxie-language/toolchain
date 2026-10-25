@@ -16881,3 +16881,42 @@ Verified:
     the standalone verifier accepts all of them. Two independent implementations
     of the same spec agreeing is the strongest check available in-tree, since
     Go's standard library has no secp256k1.
+
+## Round 212: `==` on an array emitted one icmp on the aggregate, which is not an integer
+
+`crypto/ec` was the first package ever to compare a value containing a
+fixed-size array, and the module clang refused was:
+
+    %sf6 = icmp eq [10 x i32] %sf4, %sf5
+    error: icmp requires integer operands
+
+`FieldVal` keeps its limbs in `[10]uint32`, so `point.X == inf.X` reached
+ir_binop's array branch, which had this:
+
+    if et == "ptr" || e.intBits(et) > 0 {
+        // An array of scalars is one integer of element-width times length;
+        // compare it whole.
+        ... icmp <aggregate>
+    }
+
+The comment's premise is false in LLVM: `icmp` takes scalars and vectors, never
+a plain aggregate, whatever its element width. The shortcut was unreachable
+until an array comparison was actually compiled, and no array comparison had
+ever been compiled - which is why a package that does not build survived
+unnoticed.
+
+The branch now always compares element-wise, which is what the spec says (array
+values are equal when their corresponding elements are equal) and what
+`legacy/compiler`'s `createBinOp` has done in its `*types.Array` case all along.
+So this is a stage4-only divergence; the legacy side needed no change.
+
+The cost is one compare per element: a `[32]byte` key comparison is 32 icmps and
+an and-chain instead of a memcmp. That is a reason to keep converting fixed-size
+byte buffers to slices, where `==` reaches `runtime.sliceEqual`, not a reason to
+resurrect a shortcut LLVM never accepted.
+
+Verified with `tests/regressions/should_compile/value_equality`, which compares a
+struct whose fields are arrays (32 bytes, four words, ten 32-bit words with the
+high bits set) and nested structs, and which fails to build on the previous
+compiler with `icmp requires integer operands` and prints `ok` on this one. The
+bootstrap reached its fixpoint (s4b == s4c) with the change in.

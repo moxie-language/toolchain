@@ -1,0 +1,81 @@
+// Regression: `==` on a value whose LLVM type is an aggregate emitted one
+// `icmp` on the aggregate, which clang rejects.
+//
+// ir_binop's array branch had a shortcut for "an array of scalars is one
+// integer of element-width times length" and compared it whole. An LLVM icmp
+// takes scalars and vectors, never a plain aggregate, so the module failed with
+// "icmp requires integer operands". Nothing noticed until `crypto/ec` was built
+// for the first time: its `FieldVal` keeps its limbs in `[10]uint32` and
+// `point.X == inf.X` compared a struct whose only field is that array. legacy's
+// createBinOp has compared arrays and structs element-wise all along, so this
+// was a stage4-only divergence.
+//
+// The comparison is element-wise again, matching the spec: array values are
+// equal when their corresponding elements are equal, and struct values when
+// their corresponding non-blank fields are.
+package main
+
+import (
+	"os"
+)
+
+type limbs struct {
+	n [10]uint32
+}
+
+type point struct {
+	X, Y limbs
+	tag  [3]byte
+}
+
+func cmp(name string, got, want bool) {
+	if got != want {
+		println("FAIL: " | name | " got ", got, " want ", want)
+		os.Exit(1)
+	}
+}
+
+func main() {
+	var a, b limbs
+	// Large elements, so an element compare cannot pass by looking at the low
+	// word only.
+	a.n[0] = 0xFFFFFFFF
+	a.n[9] = 0x80000000
+	b = a
+	cmp("array equal", a == b, true)
+	cmp("array neq", a != b, false)
+	b.n[9] = 0x80000001
+	cmp("array high word differs", a == b, false)
+	cmp("array high word differs neq", a != b, true)
+
+	var p, q point
+	p.X = a
+	p.Y = b
+	p.tag = [3]byte{'x', 'y', 'z'}
+	q = p
+	cmp("struct equal", p == q, true)
+	q.tag[2] = 'w'
+	cmp("struct last byte differs", p == q, false)
+
+	// Nested, and after mutation through the value.
+	cmp("nested same", q.X == p.X, true)
+	// p.Y is b, which differs from a in the last word.
+	cmp("nested differs", q.Y == a, false)
+	cmp("nested other way", a == q.Y, false)
+
+	// Arrays of bytes and of 64-bit words, the shapes the digest code has.
+	var d1, d2 [32]byte
+	d1[31] = 9
+	d2[31] = 9
+	cmp("32 bytes equal", d1 == d2, true)
+	d2[31] = 8
+	cmp("32 bytes differ", d1 == d2, false)
+
+	var w1, w2 [4]uint64
+	w1[3] = 1 << 63
+	w2[3] = 1 << 63
+	cmp("4 words equal", w1 == w2, true)
+	w2[0] = 1
+	cmp("4 words differ low", w1 == w2, false)
+	println("ok")
+}
