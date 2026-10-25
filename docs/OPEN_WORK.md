@@ -16460,3 +16460,28 @@ consequence of the unified type; `%q`/`%x` are not, because they are well
 defined for bytes under either reading. Fixing them means giving `fmtBytes` a
 verb switch, which changes the output of every fixture that prints with `%q` or
 `%x` - its own round, not a drive-by.
+
+## Round 203: a link failure from stale per-compiler cache directories
+
+`0a/mime_header_parse` failed its gate with
+
+    ld.lld: error: undefined symbol: runtime.InitArenaRestore
+    >>> referenced by internal_oserror.ll
+    >>>   /home/mleku/moxie/cache/mxc-1.9.11-cc03d824-9c7193e9-linux-amd64/pkg/...
+
+The build-id component of that cache directory is not the installed compiler's
+(`...-752bc703-...`), so the link was pulling objects out of a directory written
+by an older compiler binary. Deleting every cache directory except the current
+compiler's (475 of 476, 87 GB down to 19 MB) made the unit pass immediately, and
+the full gate that followed is green at 154/154.
+
+This is the third cache-state failure this session: the dispatch fingerprint
+(round 193), a stale fixture binary (round 195), and now stale object
+directories. They are not the same bug - 193 was a wrong key, this one is an
+object from another compiler's directory being linked - but they share a cause
+worth stating plainly: the cache is a build input, and a cache directory that no
+current compiler writes is still readable by the linker if anything names it.
+Housekeeping is part of the build's correctness, not tidying up afterwards.
+
+The tree was not at fault: no source changed between the failing run and the
+green one.
