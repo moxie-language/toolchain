@@ -112,12 +112,12 @@ func (w *Writer) Close() (oerr error) {
 	// allocated into the sovereign arena on every iteration. The names carry
 	// a prefix because `buf` and `b` are declared again below in this
 	// function, at scopes that would then shadow these.
-	var hdrBuf [directoryHeaderLen]byte
+	hdrBuf := []byte{:directoryHeaderLen}
 	var hdrB []byte
-	var zipBuf [28]byte // 2x uint16 + 3x uint64
+	zipBuf := []byte{:28} // 2x uint16 + 3x uint64
 	var zipB []byte
 	for _, h := range w.dir {
-		hdrB = hdrBuf[:]
+		hdrB = hdrBuf
 		hdrB = writeBufUint32(hdrB, uint32(directoryHeaderSignature))
 		hdrB = writeBufUint16(hdrB, h.CreatorVersion)
 		hdrB = writeBufUint16(hdrB, h.ReaderVersion)
@@ -181,8 +181,8 @@ func (w *Writer) Close() (oerr error) {
 	}
 
 	if records >= uint16max || size >= uint32max || offset >= uint32max {
-		var zbuf [directory64EndLen + directory64LocLen]byte
-		zb := zbuf[:]
+		zbuf := []byte{:directory64EndLen + directory64LocLen}
+		zb := zbuf
 
 		// zip64 end of central directory record
 		zb = writeBufUint32(zb, directory64EndSignature)
@@ -202,7 +202,7 @@ func (w *Writer) Close() (oerr error) {
 		zb = writeBufUint64(zb, uint64(end)) // relative offset of the zip64 end of central directory record
 		zb = writeBufUint32(zb, 1)           // total number of disks
 
-		if _, err := w.cw.Write(zbuf[:]); err != nil {
+		if _, err := w.cw.Write(zbuf); err != nil {
 			return err
 		}
 
@@ -214,8 +214,8 @@ func (w *Writer) Close() (oerr error) {
 	}
 
 	// write end record
-	var buf [directoryEndLen]byte
-	b := buf[:]
+	buf := []byte{:directoryEndLen}
+	b := buf
 	b = writeBufUint32(b, uint32(directoryEndSignature))
 	b = b[4:]                             // skip over disk number and first disk number (2x uint16)
 	b = writeBufUint16(b, uint16(records)) // number of entries this disk
@@ -223,7 +223,7 @@ func (w *Writer) Close() (oerr error) {
 	b = writeBufUint32(b, uint32(size))    // size of directory
 	b = writeBufUint32(b, uint32(offset))  // start of directory
 	b = writeBufUint16(b, uint16(len(w.comment))) // byte size of EOCD comment
-	if _, err := w.cw.Write(buf[:]); err != nil {
+	if _, err := w.cw.Write(buf); err != nil {
 		return err
 	}
 	if _, err := io.WriteString(w.cw, w.comment); err != nil {
@@ -353,15 +353,15 @@ func (w *Writer) CreateHeader(fh *FileHeader) (out io.Writer, oerr error) {
 		//
 		// This format happens to be identical for both local and central header
 		// if modification time is the only timestamp being encoded.
-		var mbuf [9]byte // 2*SizeOf(uint16) + SizeOf(uint8) + SizeOf(uint32)
+		mbuf := []byte{:9} // 2*SizeOf(uint16) + SizeOf(uint8) + SizeOf(uint32)
 		mt := uint32(fh.Modified.Unix())
-		eb := mbuf[:]
+		eb := mbuf
 		eb = writeBufUint16(eb, extTimeExtraID)
 		eb = writeBufUint16(eb, 5)  // Size: SizeOf(uint8) + SizeOf(uint32)
 		eb = writeBufUint8(eb, 1)   // Flags: ModTime
 		eb = writeBufUint32(eb, mt) // ModTime
-		fh.Extra = mxutil.Ensure(fh.Extra, len(mbuf[:]))
-		fh.Extra = push(fh.Extra, mbuf[:]...)
+		fh.Extra = mxutil.Ensure(fh.Extra, len(mbuf))
+		fh.Extra = push(fh.Extra, mbuf...)
 	}
 
 	var (
@@ -428,8 +428,8 @@ func writeHeader(w io.Writer, h *header) (oerr error) {
 		return errLongExtra
 	}
 
-	var buf [fileHeaderLen]byte
-	b := buf[:]
+	buf := []byte{:fileHeaderLen}
+	b := buf
 	b = writeBufUint32(b, uint32(fileHeaderSignature))
 	b = writeBufUint16(b, h.ReaderVersion)
 	b = writeBufUint16(b, h.Flags)
@@ -452,7 +452,7 @@ func writeHeader(w io.Writer, h *header) (oerr error) {
 	}
 	b = writeBufUint16(b, uint16(len(h.Name)))
 	b = writeBufUint16(b, uint16(len(h.Extra)))
-	if _, err := w.Write(buf[:]); err != nil {
+	if _, err := w.Write(buf); err != nil {
 		return err
 	}
 	if _, err := io.WriteString(w, h.Name); err != nil {
