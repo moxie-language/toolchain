@@ -43,6 +43,16 @@ type Curve interface {
 	// selected public keys can cause ECDH to return an error.
 	NewPublicKey(key []byte) (*PublicKey, error)
 
+	// kind identifies the curve. Two curves are the same curve when their kinds
+	// match, and that - not the identity of the object - is what decides whether
+	// a key pair may exchange. Comparing identities made the answer depend on
+	// how the curve was constructed: a fresh &x25519Curve{} per X25519() call
+	// failed every exchange, and an arena copy of a curve object would fail the
+	// same way. It is unexported because Curve already carries an unexported
+	// method, so no implementation of this interface can come from outside the
+	// package.
+	kind() (k curveKind)
+
 	// ecdh performs an ECDH exchange and returns the shared secret. It's exposed
 	// as the PrivateKey.ECDH method.
 	//
@@ -82,7 +92,7 @@ func (k *PublicKey) Equal(x crypto.PublicKey) (okay bool) {
 	if !ok {
 		return false
 	}
-	return k.curve == xx.curve &&
+	return k.curve.kind() == xx.curve.kind() &&
 		subtle.ConstantTimeCompare(k.publicKey, xx.publicKey) == 1
 }
 
@@ -114,7 +124,7 @@ type PrivateKey struct {
 // For [X25519], this performs ECDH as specified in RFC 7748, Section 6.1. If
 // the result is the all-zero value, ECDH returns an error.
 func (k *PrivateKey) ECDH(remote *PublicKey) (b []byte, derr error) {
-	if k.curve != remote.curve {
+	if k.curve.kind() != remote.curve.kind() {
 		return nil, errors.New("crypto/ecdh: private key and public key curves do not match")
 	}
 	return k.curve.ecdh(k, remote)
@@ -140,7 +150,7 @@ func (k *PrivateKey) Equal(x crypto.PrivateKey) (okay bool) {
 	if !ok {
 		return false
 	}
-	return k.curve == xx.curve &&
+	return k.curve.kind() == xx.curve.kind() &&
 		subtle.ConstantTimeCompare(k.privateKey, xx.privateKey) == 1
 }
 

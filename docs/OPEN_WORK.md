@@ -16791,6 +16791,18 @@ buffer conversion is behaviour-neutral, and the RFC vector was the thing that
 proved it - and then failed, for the unrelated reason above. Both are in this
 commit.
 
+The singleton was the second-best fix and is not the load-bearing one. Go's
+`Curve` is a stateless namespace of operations, and the exchange compared the
+two curve OBJECTS, so the answer depended on how a curve was constructed - a
+fresh object per call failed, and an arena copy of a curve would fail the same
+way for the same reason round 183's png encoder failed. `Curve` now carries an
+unexported `kind()`, and `PrivateKey.ECDH`, `PrivateKey.Equal` and
+`PublicKey.Equal` compare kinds. Verified by building the tree with
+`X25519()` returning `&x25519Curve{}` again: the fixture still passes, so
+identity carries nothing. The singleton stays for the other half - the
+comparison Go's API invites at the CALL site, `key.Curve() == ecdh.X25519()` -
+and the fixture pins that separately.
+
 Verified:
 
   * RFC 7748 section 6.1 - Alice's private key with Bob's public key gives

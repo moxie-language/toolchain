@@ -20,10 +20,22 @@ const (
 	curveP521
 )
 
-// The three NIST curves are singletons, built in init(): ECDH compares the
-// Curve an interface holds (PrivateKey.ECDH: `k.curve != remote.curve`), which
-// is a pointer comparison, so a fresh &nistCurve per P256() call makes every
-// key its own curve and every exchange fail with "curves do not match".
+// curveKind is the value identity of a curve. ECDH compares these instead of
+// the Curve objects, so an exchange does not depend on how the curve was built
+// or on whether the key's curve is the same OBJECT as the caller's.
+type curveKind uint8
+
+const (
+	kindX25519 curveKind = iota + 1
+	kindP256
+	kindP384
+	kindP521
+)
+
+// The three NIST curves are singletons, built in init(), so that
+// `key.Curve() == ecdh.P256()` - the comparison Go's API invites callers to
+// make - sees one object. Nothing inside the package depends on that any more:
+// the kind() comparison is what decides whether an exchange is legal.
 var (
 	p256Curve *nistCurve
 	p384Curve *nistCurve
@@ -39,6 +51,18 @@ func init() {
 
 type nistCurve struct {
 	id curveID
+}
+
+func (c *nistCurve) kind() (k curveKind) {
+	switch c.id {
+	case curveP256:
+		return kindP256
+	case curveP384:
+		return kindP384
+	case curveP521:
+		return kindP521
+	}
+	return 0
 }
 
 func (c *nistCurve) String() (s string) {
