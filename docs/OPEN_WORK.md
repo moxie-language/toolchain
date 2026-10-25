@@ -16920,3 +16920,74 @@ struct whose fields are arrays (32 bytes, four words, ten 32-bit words with the
 high bits set) and nested structs, and which fails to build on the previous
 compiler with `icmp requires integer operands` and prints `ok` on this one. The
 bootstrap reached its fixpoint (s4b == s4c) with the change in.
+
+## Round 213: an array was sized as `(n-1)*align + size`, which is not the stride
+
+The type descriptor carries each struct field's byte offset and the struct's
+size, and the codec relocates values by them. stage4 computed those sizes itself:
+
+    case *Array:
+        es := typeDescSize(tt.Elem)
+        ea := typeDescAlign(tt.Elem)
+        return (n-1)*ea + es
+
+That is the size of an array only when an element's size equals its alignment.
+It is right for `[32]byte`, `[4]uint64`, `[3]uint8` - every array whose elements
+are scalars - which is why it survived. For `[3][]T` it is 32 bytes short: a
+slice is 24 bytes with 8-byte alignment, so the elements stride by 24 and the
+array is 72 bytes, not 40. The descriptors of zstd's `Reader` were therefore:
+
+    seqTables       200        (both agree)
+    seqTableBits    240        LLVM: 272
+    seqTableBuffers 248        LLVM: 280
+    fseScratch      288        LLVM: 352
+    checksum        312        LLVM: 376     struct size 376 vs LLVM's 432
+
+The compiled code used LLVM's offsets and the codec used the descriptor's, so
+relocating a `Reader` wrote its `checksum` state 64 bytes away from where the
+decoder read it: `reset` then cleared a 32-byte buffer whose header it had read
+out of an unrelated field, and zstd's first decoded frame died in memset on a
+nil pointer with a length of 4 MB.
+
+The size is `n * stride`, with the stride the element size rounded up to the
+element alignment, and the descriptor now says 432 for `Reader` like LLVM does.
+Legacy compares cleanly here for a structural reason worth stating: it asks LLVM
+for the layout (`targetData.ElementOffset` and `TypeStoreSize`) instead of
+recomputing it, so it cannot drift. stage4 emits text and has no target data, so
+the arithmetic is unavoidable - which is why it needs a test that compares the
+two, and now has one.
+
+Verified: `tests/regressions/should_compile/array_of_slices_layout` holds a
+struct with `[3][]uint16`, `[3]uint8`, `[3][]uint16`, a slice and a nested struct
+with its own slices, built in a frame and returned so the codec relocates all of
+it. Against the previous compiler it fails ("scalars wrong" - the fields after
+the arrays land somewhere else); against this one it prints ok. The bootstrap
+reached its fixpoint (s4b == s4c).
+
+## Round 214: zstd's checksum state is built once, in the constructor, and its buffers are slices
+
+`xxhash64` held `v [4]uint64` and `buf [32]byte`, and the trailing struct-field
+shift above is what actually broke the decoder - but the buffers are slices now
+too, and the state's storage is allocated in `newXxhash64`, called from
+`NewReader`, rather than lazily inside `reset`.
+
+The reason is the ownership rule in its struct-field form: `reset` mutates the
+receiver, so a lazy `xh.buf = []byte{:32}` inside it lands in the receiver's
+sovereign arena - and the receiver is `&r.checksum`, an address inside a Reader
+that was *relocated* into the caller's arena when `NewReader` returned. The
+group would be keyed by the address of the frame copy and die with that frame,
+leaving the caller's Reader holding a pointer into a dead arena. Building the
+state in the constructor puts it in `NewReader`'s frame, so the return
+relocation carries it along with everything else. Same shape as md5/sha1's
+`newDigest`, for the same reason.
+
+Verified against frames from `zstd --check`:
+
+  * a 3.6 KB text at `-19` and at `-1`: both decode to SHA-256
+    `458dad51...` which is the source file's;
+  * a 366 KB file at `-19` and at `-3` (multi-block): both decode to
+    `ab9265fb...`;
+  * a frame with one byte of its XXH64 trailer flipped is rejected with
+    "invalid checksum: got 0x1bedee68 want 0xe4edee68" - the checksum is
+    computed and compared, so the slice-backed digest state is exercised, not
+    bypassed.

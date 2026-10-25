@@ -19,10 +19,23 @@ const (
 
 // xxhash64 is the state of a xxHash-64 checksum.
 type xxhash64 struct {
-	len uint64    // total length hashed
-	v   [4]uint64 // accumulators
-	buf [32]byte  // buffer
-	cnt int32       // number of bytes in buffer
+	len uint64   // total length hashed
+	v   []uint64 // accumulators, four of them
+	buf []byte   // 32-byte buffer
+	cnt int32    // number of bytes in buffer
+}
+
+// newXxhash64 returns a checksum state with its storage allocated.
+//
+// The state is built by a free function, not lazily inside reset: a mutating
+// method's allocations land in the receiver's sovereign arena, and the receiver
+// here is a field of the Reader, so a lazy first-call allocation is a copy into
+// an arena whose lifetime is tied to an address inside another object. This is
+// the same shape the hash digests use (md5/sha1's newDigest).
+func newXxhash64() (xh xxhash64) {
+	xh.v = []uint64{:4}
+	xh.buf = []byte{:32}
+	return xh
 }
 
 // reset discards the current state and prepares to compute a new hash.
@@ -41,7 +54,7 @@ func (xh *xxhash64) reset() {
 	xh.v[3] = xxhPrime64c1
 	xh.v[3] = -xh.v[3]
 
-	clear(xh.buf[:])
+	clear(xh.buf)
 	xh.cnt = 0
 }
 
@@ -58,7 +71,7 @@ func (xh *xxhash64) update(b []byte) {
 	if xh.cnt > 0 {
 		n := copy(xh.buf[xh.cnt:], b)
 		b = b[n:]
-		xh.v[0] = xh.round(xh.v[0], binary.LittleEndian().Uint64(xh.buf[:]))
+		xh.v[0] = xh.round(xh.v[0], binary.LittleEndian().Uint64(xh.buf))
 		xh.v[1] = xh.round(xh.v[1], binary.LittleEndian().Uint64(xh.buf[8:]))
 		xh.v[2] = xh.round(xh.v[2], binary.LittleEndian().Uint64(xh.buf[16:]))
 		xh.v[3] = xh.round(xh.v[3], binary.LittleEndian().Uint64(xh.buf[24:]))
@@ -99,7 +112,7 @@ func (xh *xxhash64) digest() (out uint64) {
 
 	nb := xh.len
 	nb &= 31
-	buf := xh.buf[:]
+	buf := xh.buf
 	for nb >= 8 {
 		k1 := xh.round(0, binary.LittleEndian().Uint64(buf))
 		buf = buf[8:]
