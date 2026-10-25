@@ -171,14 +171,14 @@ func schnorrVerify(sig *Signature, hash []byte, pubKeyBytes []byte) (err error) 
 	// Step 5.
 	//
 	// e = int32(tagged_hash("BIP0340/challenge", bytes(r) || bytes(P) || M)) mod n.
-	var rBytes [32]byte
-	sig.r.PutBytesUnchecked(rBytes[:])
+	rBytes := []byte{:32}
+	sig.r.PutBytesUnchecked(rBytes)
 	pBytes := SerializePubKey(pubKey)
 	commitment := chainhash.TaggedHash(
-		chainhash.TagBIP0340Challenge, rBytes[:], pBytes, hash,
+		chainhash.TagBIP0340Challenge, rBytes, pBytes, hash,
 	)
 	var e btcec.ModNScalar
-	e.SetBytes((*[32]byte)(commitment))
+	e.SetBytes(commitment[:])
 	// Negate e here so we can use AddNonConst below to subtract the s*G
 	// point from e*P.
 	e.Negate()
@@ -233,9 +233,9 @@ func (sig *Signature) Verify(hash []byte, pubKey *btcec.PublicKey) (valid bool) 
 	return
 }
 
-// zeroArray zeroes the memory of a scalar array.
-func zeroArray(a *[scalarSize]byte) {
-	for i := 0; i < scalarSize; i++ {
+// zeroArray zeroes the memory of a scalar buffer.
+func zeroArray(a []byte) {
+	for i := 0; i < len(a); i++ {
 		a[i] = 0x00
 	}
 }
@@ -305,15 +305,15 @@ func schnorrSign(
 	// Step 12.
 	//
 	// e = tagged_hash("BIP0340/challenge", bytes(R) || bytes(P) || m) mod n
-	var rBytes [32]byte
+	rBytes := []byte{:32}
 	r := &R.X
-	r.PutBytesUnchecked(rBytes[:])
+	r.PutBytesUnchecked(rBytes)
 	pBytes := SerializePubKey(pubKey)
 	commitment := chainhash.TaggedHash(
-		chainhash.TagBIP0340Challenge, rBytes[:], pBytes, hash,
+		chainhash.TagBIP0340Challenge, rBytes, pBytes, hash,
 	)
 	var e btcec.ModNScalar
-	if overflow := e.SetBytes((*[32]byte)(commitment)); overflow != 0 {
+	if overflow := e.SetBytes(commitment[:]); overflow != 0 {
 		k.Zero()
 		str := "hash of (r || P || m) too big"
 		err = signatureError(ErrSchnorrHashValue, str)
@@ -359,7 +359,7 @@ type signOptions struct {
 	fastSign bool
 	// authNonce allows the user to pass in their own nonce information, which
 	// is useful for schemes like mu-sig.
-	authNonce *[32]byte
+	authNonce []byte
 }
 
 // defaultSignOptions returns the default set of signing operations.
@@ -379,11 +379,11 @@ func FastSign() (option SignOption) {
 
 // customNonceOption holds auxData for CustomNonce.
 type customNonceOption struct {
-	auxData [32]byte
+	auxData []byte
 }
 
 func (o *customNonceOption) apply(sigOpts *signOptions) {
-	sigOpts.authNonce = &o.auxData
+	sigOpts.authNonce = o.auxData
 }
 
 // CustomNonce allows users to pass in a custom set of auxData that's used as
@@ -391,7 +391,10 @@ func (o *customNonceOption) apply(sigOpts *signOptions) {
 // to specify this custom value when using multi-signatures schemes such as
 // Mu-Sig2. If this option isn't set, then rfc6979 will be used to generate the
 // nonce material.
-func CustomNonce(auxData [32]byte) (option SignOption) {
+func CustomNonce(auxData []byte) (option SignOption) {
+	if len(auxData) != 32 {
+		panic("schnorr: CustomNonce needs 32 bytes of aux data")
+	}
 	option = &customNonceOption{auxData: auxData}
 	return
 }
@@ -489,7 +492,7 @@ func Sign(
 		// t = bytes(d) xor tagged_hash("BIP0340/aux", a)
 		privBytes := privKeyScalar.Bytes()
 		t := chainhash.TaggedHash(
-			chainhash.TagBIP0340Aux, (*opts.authNonce)[:],
+			chainhash.TagBIP0340Aux, opts.authNonce,
 		)
 		for i := 0; i < len(t); i++ {
 			t[i] ^= privBytes[i]
@@ -507,7 +510,7 @@ func Sign(
 		//
 		// k'= int32(rand) mod n
 		var kPrime btcec.ModNScalar
-		kPrime.SetBytes((*[32]byte)(rand))
+		kPrime.SetBytes(rand[:])
 		// Step 9.
 		//
 		// Fail if k' = 0
@@ -523,9 +526,9 @@ func Sign(
 		}
 		return
 	}
-	var privKeyBytes [scalarSize]byte
-	privKeyScalar.PutBytes(&privKeyBytes)
-	defer zeroArray(&privKeyBytes)
+	privKeyBytes := []byte{:scalarSize}
+	privKeyScalar.PutBytes(privKeyBytes)
+	defer zeroArray(privKeyBytes)
 	for iteration := uint32(0); ; iteration++ {
 		var k *secp256k1.ModNScalar
 		// Step 6-9.

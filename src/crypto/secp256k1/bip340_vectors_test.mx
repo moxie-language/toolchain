@@ -139,8 +139,6 @@ func TestBIP340Vectors(t *testing.T) {
 			t.Errorf("vec %s: bad pubkey hex", idx)
 			continue
 		}
-		var pkArr [32]byte
-		copy(pkArr[:], pk)
 
 		msg, hexOK2 := hexDecode(msgHex)
 		if !hexOK2 {
@@ -153,8 +151,6 @@ func TestBIP340Vectors(t *testing.T) {
 			t.Errorf("vec %s: bad sig hex (%d bytes)", idx, len(sig))
 			continue
 		}
-		var sigArr [64]byte
-		copy(sigArr[:], sig)
 
 		// Sign vectors (those with a secret key) - check determinism.
 		if skHex != "" {
@@ -163,35 +159,31 @@ func TestBIP340Vectors(t *testing.T) {
 				t.Errorf("vec %s: bad sk hex", idx)
 				continue
 			}
-			var skArr [32]byte
-			copy(skArr[:], sk)
 
 			aux, hexOK5 := hexDecode(auxHex)
 			if !hexOK5 || len(aux) != 32 {
 				t.Errorf("vec %s: bad aux hex", idx)
 				continue
 			}
-			var auxArr [32]byte
-			copy(auxArr[:], aux)
 
-			gotSig, ok := SignSchnorrBytes(skArr, msg, auxArr)
+			gotSig, ok := SignSchnorrBytes(sk, msg, aux)
 			if !ok {
 				t.Errorf("vec %s: SignSchnorrBytes returned not ok", idx)
 				continue
 			}
-			if !bytes.Equal(gotSig[:], sig) {
-				t.Errorf("vec %s: sig mismatch\n want %x\n got  %x", idx, sig, gotSig[:])
+			if !bytes.Equal(gotSig, sig) {
+				t.Errorf("vec %s: sig mismatch\n want %x\n got  %x", idx, sig, gotSig)
 				continue
 			}
 
 			// Sanity: derived pubkey matches expected.
-			gotPK, ok := PubKeyFromSecKey(skArr)
+			gotPK, ok := PubKeyFromSecKey(sk)
 			if !ok {
 				t.Errorf("vec %s: PubKeyFromSecKey not ok", idx)
 				continue
 			}
-			if !bytes.Equal(gotPK[:], pk) {
-				t.Errorf("vec %s: derived pubkey mismatch\n want %x\n got  %x", idx, pk, gotPK[:])
+			if !bytes.Equal(gotPK, pk) {
+				t.Errorf("vec %s: derived pubkey mismatch\n want %x\n got  %x", idx, pk, gotPK)
 				continue
 			}
 			signCount++
@@ -199,7 +191,7 @@ func TestBIP340Vectors(t *testing.T) {
 		verifyCount++
 
 		// All vectors: verify and compare to expected TRUE/FALSE.
-		got := VerifySchnorrBytes(pkArr, msg, sigArr)
+		got := VerifySchnorrBytes(pk, msg, sig)
 		if got != want {
 			t.Errorf("vec %s: VerifySchnorrBytes = %v, want %v", idx, got, want)
 		}
@@ -226,14 +218,14 @@ func TestRadix16Carry(t *testing.T) {
 // TestNostrEventRoundtrip exercises the SignSchnorr/VerifySchnorr 32-byte
 // API that Nostr uses (sha256 of canonical event JSON, then sign).
 func TestNostrEventRoundtrip(t *testing.T) {
-	var sk [32]byte
+	sk := []byte{:32}
 	sk[31] = 5
 	pk, ok := PubKeyFromSecKey(sk)
 	if !ok {
 		t.Fatal("PubKeyFromSecKey failed")
 	}
 	msg := sha256.Sum([]byte(`[0,"deadbeef",1700000000,1,[],"hello"]`))
-	var aux [32]byte
+	aux := []byte{:32}
 	sig, ok := SignSchnorr(sk, msg, aux)
 	if !ok {
 		t.Fatal("SignSchnorr failed")
@@ -278,9 +270,9 @@ func TestLiftXRejectsNonCanonicalX(t *testing.T) {
 		t.Error("LiftX rejected the generator's x coordinate")
 	}
 	// ECDH must refuse the non-canonical key as well.
-	var sk [32]byte
+	sk := []byte{:32}
 	sk[31] = 5
-	var bad [32]byte
+	bad := []byte{:32}
 	for i := int32(0); i < 32; i++ {
 		bad[i] = 0xFF
 	}

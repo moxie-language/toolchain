@@ -16816,3 +16816,68 @@ Verified:
 
 `tests/regressions/should_compile/x25519_ecdh` pins the exchange; against the
 old source it fails at the first `ECDH` with the curve-mismatch error.
+
+## Round 211: the secp256k1 byte APIs take slices, and the btcec port compiles for the first time
+
+The `[32]byte` cluster was blocked on the out-parameter puns, and this round
+settles the representation decision by just taking it: a 32-byte buffer is a
+`[]byte`. A slice header passed by value writes the caller's backing (measured
+in round 201), so nothing needs an address-of, and every `(*[32]byte)(x)` in the
+tree disappears with it.
+
+Converted:
+
+    FieldVal.SetBytes(*[32]byte)     -> SetBytes([]byte)      (length checked)
+    FieldVal.PutBytes(*[32]byte)     -> PutBytes([]byte)
+    FieldVal.Bytes()  *[32]byte      -> []byte
+    ModNScalar.SetBytes/PutBytes     -> []byte
+    ModNScalar.Bytes() [32]byte      -> []byte
+    feToBytes/feToLEBytes [32]byte   -> []byte
+    VerifySchnorr/VerifySchnorrBytes (pubkey [32]byte, sig [64]byte) -> []byte
+    SignSchnorr/SignSchnorrBytes     (seckey/msg/aux [32]byte, sig [64]byte) -> []byte
+    PubKeyFromSecKey / ECDH / ScalarAddModN / CompressedPubKey -> []byte
+    CustomNonce(auxData [32]byte)    -> []byte, and signOptions.authNonce
+    zeroArray32(*[32]byte)           -> zeroBytes([]byte)
+
+`VerifySchnorr` and `VerifySchnorrBytes` now have the same signature, because
+string and `[]byte` are one type and the fixed-32-versus-arbitrary distinction
+that separated them in Go does not exist here. Both names are kept so existing
+callers keep compiling; one delegates.
+
+**This is a breaking change for application code**: a call that passed
+`[32]byte` values now passes the bytes (drop the `[:]`), and a signature comes
+back as a slice. The in-tree caller, `crypto/bip32`, is updated.
+
+Two findings while verifying:
+
+  * `crypto/ec` (the btcec port) **had never compiled**. `curve.mx` compared two
+    `FieldVal` values with `==`; a `FieldVal` holds its limbs in `[10]uint32`, so
+    the comparison reached the emitter as one aggregate compare and clang
+    rejected the IR: `icmp eq [10 x i32]` (an aggregate is not an integer
+    operand). Nothing in the tree imports that package, so no build ever noticed.
+    The comparison is `FieldVal.Equals` now, which the rest of the package
+    already uses, and the package builds and runs. The compiler gap is real and
+    separate: `==` on a pointer-free struct or array should compare field by
+    field, and today it emits invalid IR. Recorded, not papered over.
+  * `schnorr.CustomNonce` and `signOptions.authNonce` were the last `[32]byte`
+    buffer in that package.
+
+Verified:
+
+  * **BIP-340 official vectors, all four tests green** (`moxie test
+    ./src/crypto/secp256k1`): 8 sign vectors compared byte for byte, 19 verify
+    vectors including every failure case (wrong parity, negated message,
+    non-canonical x, s == n, R not on the curve), the radix-16 carry case, the
+    Nostr round trip, and the non-canonical-X rejections.
+  * **BIP-32 test vector 1**: `m/0'/1` for seed `000102...0f` gives private key
+    `3c6cb8d0f6a264c91ea8b5030fadaa8e538b020f0a387421a12de9319dc93368` and
+    chain code `2a7857631386ba23dacac34180dd1983734e444fdbf774041578e9b6adb37c19`,
+    exactly the published values. That path exercises both the hardened branch
+    (`ScalarAddModN`) and the non-hardened one (`CompressedPubKey`).
+  * **btcec, first run ever**: ECDSA sign/verify, a rejected wrong hash, a DER
+    serialize/parse round trip, schnorr sign/verify and a rejected wrong hash.
+  * **Cross-check**: 24 BIP-340 signatures (8 keys x 3 messages, aux varied) from
+    the btcec port are byte-identical to the standalone implementation's, and
+    the standalone verifier accepts all of them. Two independent implementations
+    of the same spec agreeing is the strongest check available in-tree, since
+    Go's standard library has no secp256k1.

@@ -34,13 +34,19 @@ func ValidatePubKey(pubkey []byte) (valid bool) {
 	return
 }
 
-func VerifySchnorr(pubkey, msg [32]byte, sig [64]byte) (valid bool) {
-	valid = VerifySchnorrBytes(pubkey, msg[:], sig)
+// VerifySchnorr verifies a BIP-340 signature. Since string and []byte are one
+// type there is no length distinction to make between this and
+// VerifySchnorrBytes, which is kept as the name existing callers use.
+func VerifySchnorr(pubkey, msg, sig []byte) (valid bool) {
+	valid = VerifySchnorrBytes(pubkey, msg, sig)
 	return
 }
 
-func VerifySchnorrBytes(pubkey [32]byte, msg []byte, sig [64]byte) (valid bool) {
-	px := feFromBytes(pubkey[:])
+func VerifySchnorrBytes(pubkey []byte, msg []byte, sig []byte) (valid bool) {
+	if len(pubkey) != PubKeyBytesLen || len(sig) != SignatureSize {
+		return
+	}
+	px := feFromBytes(pubkey)
 	P, ok := LiftX(px)
 	if !ok {
 		return
@@ -80,13 +86,18 @@ func VerifySchnorrBytes(pubkey [32]byte, msg []byte, sig [64]byte) (valid bool) 
 }
 
 // SignSchnorr creates a BIP-340 Schnorr signature over a 32-byte message hash.
-func SignSchnorr(seckey, msg, auxRand [32]byte) (sig [64]byte, ok bool) {
-	return SignSchnorrBytes(seckey, msg[:], auxRand)
+// See VerifySchnorr for why the Bytes spelling also exists.
+func SignSchnorr(seckey, msg, auxRand []byte) (sig []byte, ok bool) {
+	return SignSchnorrBytes(seckey, msg, auxRand)
 }
 
-// SignSchnorrBytes signs a variable-length message per BIP-340.
-func SignSchnorrBytes(seckey [32]byte, msg []byte, auxRand [32]byte) (sig [64]byte, ok bool) {
-	sk := scalarFromBytes(seckey[:])
+// SignSchnorrBytes signs a message per BIP-340.
+func SignSchnorrBytes(seckey []byte, msg []byte, auxRand []byte) (sig []byte, ok bool) {
+	if len(seckey) != 32 || len(auxRand) != 32 {
+		return
+	}
+	sig = []byte{:SignatureSize}
+	sk := scalarFromBytes(seckey)
 	if scalarIsZero(sk) || feCmp(sk, curveN()) >= 0 {
 		return sig, false
 	}
@@ -100,15 +111,15 @@ func SignSchnorrBytes(seckey [32]byte, msg []byte, auxRand [32]byte) (sig [64]by
 
 	pkBytes := feToBytes(P.X)
 
-	var t [32]byte
-	aux := taggedHash("BIP0340/aux", auxRand[:])
+	t := []byte{:32}
+	aux := taggedHash("BIP0340/aux", auxRand)
 	dBytes := feToBytes(d)
 	for i := 0; i < 32; i++ {
 		t[i] = dBytes[i] ^ aux[i]
 	}
 
 	// k' = tagged_hash("BIP0340/nonce", t || pkBytes || msg) mod n
-	nonceInput := t[:] | pkBytes[:] | msg
+	nonceInput := t | pkBytes | msg
 	kHash := taggedHash("BIP0340/nonce", nonceInput)
 	k := scalarFromBytes(kHash)
 
@@ -127,20 +138,23 @@ func SignSchnorrBytes(seckey [32]byte, msg []byte, auxRand [32]byte) (sig [64]by
 
 	rxBytes := feToBytes(R.X)
 
-	e := computeChallenge(rxBytes[:], pkBytes[:], msg)
+	e := computeChallenge(rxBytes, pkBytes, msg)
 
 	s := scalarAdd(k, scalarMul(e, d))
 	sBytes := feToBytes(s)
 
-	copy(sig[:32], rxBytes[:])
-	copy(sig[32:], sBytes[:])
+	copy(sig[:32], rxBytes)
+	copy(sig[32:], sBytes)
 	return sig, true
 }
 
 // PubKeyFromSecKey derives the x-only public key from a secret key.
-// Returns zero [32]byte and false on failure.
-func PubKeyFromSecKey(seckey [32]byte) (pubkey [32]byte, ok bool) {
-	sk := scalarFromBytes(seckey[:])
+// Returns nil and false on failure.
+func PubKeyFromSecKey(seckey []byte) (pubkey []byte, ok bool) {
+	if len(seckey) != 32 {
+		return
+	}
+	sk := scalarFromBytes(seckey)
 	if scalarIsZero(sk) {
 		return pubkey, false
 	}
@@ -151,12 +165,15 @@ func PubKeyFromSecKey(seckey [32]byte) (pubkey [32]byte, ok bool) {
 // ECDH computes the shared secret x-coordinate: seckey * pubkey.
 // pubkey is a 32-byte x-only public key.
 // Returns the 32-byte x-coordinate and true on success.
-func ECDH(seckey, pubkey [32]byte) (x [32]byte, ok bool) {
-	sk := scalarFromBytes(seckey[:])
+func ECDH(seckey, pubkey []byte) (x []byte, ok bool) {
+	if len(seckey) != 32 || len(pubkey) != PubKeyBytesLen {
+		return
+	}
+	sk := scalarFromBytes(seckey)
 	if scalarIsZero(sk) {
 		return
 	}
-	px := feFromBytes(pubkey[:])
+	px := feFromBytes(pubkey)
 	P, err := LiftX(px)
 	if !err {
 		return
@@ -173,9 +190,12 @@ func ECDH(seckey, pubkey [32]byte) (x [32]byte, ok bool) {
 
 // ScalarAddModN returns (a + b) mod n where n is the secp256k1 group order.
 // a and b are 32-byte big-endian scalars.
-func ScalarAddModN(a, b [32]byte) (out [32]byte, ok bool) {
-	sa := scalarFromBytes(a[:])
-	sb := scalarFromBytes(b[:])
+func ScalarAddModN(a, b []byte) (out []byte, ok bool) {
+	if len(a) != 32 || len(b) != 32 {
+		return
+	}
+	sa := scalarFromBytes(a)
+	sb := scalarFromBytes(b)
 	r := scalarAdd(sa, sb)
 	if feCmp(r, curveN()) >= 0 {
 		r = scalarSub(r, curveN())
@@ -190,8 +210,12 @@ func ScalarAddModN(a, b [32]byte) (out [32]byte, ok bool) {
 
 // CompressedPubKey returns the 33-byte SEC1 compressed public key for a secret key.
 // Format: 0x02 or 0x03 prefix (even/odd Y) followed by 32-byte X coordinate.
-func CompressedPubKey(seckey [32]byte) (out [33]byte, ok bool) {
-	sk := scalarFromBytes(seckey[:])
+func CompressedPubKey(seckey []byte) (out []byte, ok bool) {
+	if len(seckey) != 32 {
+		return
+	}
+	out = []byte{:33}
+	sk := scalarFromBytes(seckey)
 	if scalarIsZero(sk) {
 		return
 	}
@@ -203,7 +227,7 @@ func CompressedPubKey(seckey [32]byte) (out [33]byte, ok bool) {
 	} else {
 		out[0] = 0x03
 	}
-	copy(out[1:], xb[:])
+	copy(out[1:], xb)
 	ok = true
 	return
 }

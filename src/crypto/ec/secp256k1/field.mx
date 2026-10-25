@@ -243,7 +243,10 @@ func (f *FieldVal) SetInt(ui uint16) (out *FieldVal) {
 //	Preconditions: None
 //	Output Normalized: Yes if no overflow, no otherwise
 //	Output Max Magnitude: 1
-func (f *FieldVal) SetBytes(b *[32]byte) (i uint32) {
+func (f *FieldVal) SetBytes(b []byte) (i uint32) {
+	if len(b) < 32 {
+		panic("secp256k1: FieldVal.SetBytes needs 32 bytes")
+	}
 	// Pack the 256 total bits across the 10 uint32 words with a max of
 	// 26-bits per word.  This could be done with a couple of for loops,
 	// but this unrolled version is significantly faster.  Benchmarks show
@@ -314,12 +317,13 @@ func (f *FieldVal) SetBytes(b *[32]byte) (i uint32) {
 //	Output Normalized: Yes if no overflow, no otherwise
 //	Output Max Magnitude: 1
 func (f *FieldVal) SetByteSlice(b []byte) (ok bool) {
-	var b32 [32]byte
+	b32 := []byte{:32}
 	b = b[:constantTimeMin(uint32(len(b)), 32)]
-	copy(b32[:], b32[:32-len(b)])
+	// b32 starts zeroed, so the leading bytes are the padding a short
+	// big-endian input needs.
 	copy(b32[32-len(b):], b)
-	result := f.SetBytes(&b32)
-	zeroArray32(&b32)
+	result := f.SetBytes(b32)
+	zeroBytes(b32)
 	return result != 0
 }
 
@@ -494,7 +498,12 @@ func (f *FieldVal) PutBytesUnchecked(b []byte) {
 //
 //	Preconditions:
 //	  - The field value MUST be normalized
-func (f *FieldVal) PutBytes(b *[32]byte) { f.PutBytesUnchecked(b[:]) }
+func (f *FieldVal) PutBytes(b []byte) {
+	if len(b) < 32 {
+		panic("secp256k1: FieldVal.PutBytes needs 32 bytes")
+	}
+	f.PutBytesUnchecked(b)
+}
 
 // Bytes unpacks the field value to a 32-byte big-endian value in constant time.
 //
@@ -505,9 +514,9 @@ func (f *FieldVal) PutBytes(b *[32]byte) { f.PutBytesUnchecked(b[:]) }
 //
 //	Preconditions:
 //	  - The field value MUST be normalized
-func (f *FieldVal) Bytes() (out *[32]byte) {
-	b := &[32]byte{}
-	f.PutBytesUnchecked(b[:])
+func (f *FieldVal) Bytes() (out []byte) {
+	b := []byte{:32}
+	f.PutBytesUnchecked(b)
 	return b
 }
 
