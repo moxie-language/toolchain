@@ -139,6 +139,7 @@ func (r *Reader) init(rdr io.ReaderAt, size int64) (ierr error) {
 	// self-mutating method is rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
 	var f *File
+	var name, extra, comment []byte
 	for {
 		f = &File{zip: r, zipr: rdr}
 		err = readDirectoryHeader(f, buf)
@@ -148,6 +149,21 @@ func (r *Reader) init(rdr io.ReaderAt, size int64) (ierr error) {
 		if err != nil {
 			return err
 		}
+		// readDirectoryHeader parsed the name, extra field and comment into its
+		// own frame arena, which is released when it returns: keeping those
+		// slices left every entry reading whatever the next parse left in the
+		// recycled buffer, so all names read the last entry's. This method
+		// mutates r, so allocations here land in the reader's arena, which is
+		// the owner those bytes belong to.
+		name = []byte{:len(f.Name)}
+		copy(name, f.Name)
+		extra = []byte{:len(f.Extra)}
+		copy(extra, f.Extra)
+		comment = []byte{:len(f.Comment)}
+		copy(comment, f.Comment)
+		f.Name = name
+		f.Extra = extra
+		f.Comment = comment
 		f.headerOffset += r.baseOffset
 		r.File = mxutil.Ensure(r.File, 1)
 		r.File = push(r.File, f)
