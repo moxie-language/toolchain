@@ -74,6 +74,7 @@ func (b *Replacer) build() (rp replacer) {
 
 	r := byteStringReplacer{
 		replacements: [][]byte{:256},
+		present:      []bool{:256},
 		toReplace:    [][]byte{:0:len(oldnew) / 2},
 	}
 	// The first occurrence of old->new map takes precedence
@@ -82,7 +83,7 @@ func (b *Replacer) build() (rp replacer) {
 		o := oldnew[i][0]
 		n := oldnew[i+1]
 		// To avoid counting repetitions multiple times.
-		if r.replacements[o] == nil {
+		if !r.present[o] {
 			// We need to use string([]byte{o}) instead of string(o),
 			// to avoid utf8 encoding of o.
 			// E. g. byte(150) produces string of length 2.
@@ -90,6 +91,7 @@ func (b *Replacer) build() (rp replacer) {
 			r.toReplace = push(r.toReplace, []byte([]byte{o}))
 		}
 		r.replacements[o] = []byte(n)
+		r.present[o] = true
 
 	}
 	return &r
@@ -159,7 +161,17 @@ type trieNode struct {
 	table []*trieNode
 }
 
-func (t *trieNode) add(key, val []byte, priority int32, r *genericReplacer) {
+// trieAdd inserts key=val into the trie at t.
+//
+// A free function, not a method on trieNode: a mutating method borrows the
+// receiver's sovereign arena, so every node the insertion allocates lands in
+// the arena of the node it hangs off - a tree scattered over one arena per
+// node, which cannot be relocated as one value. The replacer is built in a
+// frame and returned, so the nodes must be in that frame and move with it;
+// `add` as a method left the deeper nodes behind in groups keyed by the
+// addresses of the copies' originals, and lookup read a dead node's priority
+// as zero (bytes.NewReplacer with two multi-byte keys replaced nothing).
+func trieAdd(t *trieNode, key, val []byte, priority int32, r *genericReplacer) {
 	if key == "" {
 		if t.priority == 0 {
 			t.value = val
@@ -177,7 +189,7 @@ func (t *trieNode) add(key, val []byte, priority int32, r *genericReplacer) {
 			}
 		}
 		if n == len(t.prefix) {
-			t.next.add(key[n:], val, priority, r)
+			trieAdd(t.next, key[n:], val, priority, r)
 		} else if n == 0 {
 			// First byte differs, start a new lookup table here. Looking up
 			// what is currently t.prefix[0] will lead to prefixNode, and
@@ -197,7 +209,7 @@ func (t *trieNode) add(key, val []byte, priority int32, r *genericReplacer) {
 			t.table[r.mapping[key[0]]] = keyNode
 			t.prefix = ""
 			t.next = nil
-			keyNode.add(key[1:], val, priority, r)
+			trieAdd(keyNode, key[1:], val, priority, r)
 		} else {
 			// Insert new node after the common section of the prefix.
 			next := &trieNode{
@@ -206,7 +218,7 @@ func (t *trieNode) add(key, val []byte, priority int32, r *genericReplacer) {
 			}
 			t.prefix = t.prefix[:n]
 			t.next = next
-			next.add(key[n:], val, priority, r)
+			trieAdd(next, key[n:], val, priority, r)
 		}
 	} else if t.table != nil {
 		// Insert into existing table.
@@ -214,11 +226,11 @@ func (t *trieNode) add(key, val []byte, priority int32, r *genericReplacer) {
 		if t.table[m] == nil {
 			t.table[m] = &trieNode{}
 		}
-		t.table[m].add(key[1:], val, priority, r)
+		trieAdd(t.table[m], key[1:], val, priority, r)
 	} else {
 		t.prefix = key
 		t.next = &trieNode{}
-		t.next.add("", val, priority, r)
+		trieAdd(t.next, "", val, priority, r)
 	}
 }
 
@@ -296,7 +308,7 @@ func makeGenericReplacer(oldnew [][]byte) (rep *genericReplacer) {
 	r.root.table = []*trieNode{:r.tableSize}
 
 	for i := 0; i < len(oldnew); i += 2 {
-		r.root.add(oldnew[i], oldnew[i+1], len(oldnew)-i, r)
+		trieAdd(&r.root, oldnew[i], oldnew[i+1], len(oldnew)-i, r)
 	}
 	return r
 }
@@ -492,8 +504,13 @@ func (r *byteReplacer) WriteString(w io.Writer, s []byte) (n int32, err error) {
 // "old" values are single ASCII bytes but the "new" values vary in size.
 type byteStringReplacer struct {
 	// replacements contains replacement byte slices indexed by old byte.
-	// A nil []byte means that the old byte should not be replaced.
 	replacements [][]byte
+	// present records which bytes have a replacement. An empty slice cannot
+	// mean "no replacement": "a" -> "" is a valid, distinct replacement, and in
+	// Moxie every empty slice compares equal to nil (slice == is content
+	// equality), so the old nil test made an empty replacement indeciferable
+	// from an absent one and Replace left the input untouched.
+	present []bool
 	// toReplace keeps a list of bytes to replace. Depending on length of toReplace
 	// and length of target string it may be faster to use Count, or a plain loop.
 	// We store single byte as a string, because Count takes a string.
@@ -525,7 +542,7 @@ func (r *byteStringReplacer) Replace(s []byte) (out []byte) {
 	} else {
 		for i := 0; i < len(s); i++ {
 			b := s[i]
-			if r.replacements[b] != nil {
+			if r.present[b] {
 				// See above for explanation of -1
 				newSize += len(r.replacements[b]) - 1
 				anyChanges = true
@@ -539,7 +556,7 @@ func (r *byteStringReplacer) Replace(s []byte) (out []byte) {
 	j := 0
 	for i := 0; i < len(s); i++ {
 		b := s[i]
-		if r.replacements[b] != nil {
+		if r.present[b] {
 			j += copy(buf[j:], r.replacements[b])
 		} else {
 			buf[j] = b
@@ -554,7 +571,7 @@ func (r *byteStringReplacer) WriteString(w io.Writer, s []byte) (n int32, err er
 	last := 0
 	for i := 0; i < len(s); i++ {
 		b := s[i]
-		if r.replacements[b] == nil {
+		if !r.present[b] {
 			continue
 		}
 		if last != i {

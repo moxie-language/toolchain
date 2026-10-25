@@ -1,0 +1,55 @@
+// Regression: two bytes.Replacer defects.
+//
+// 1. The generic replacer's trie was built by a METHOD on each node, so every
+//    node the insertion allocated landed in the receiver node's sovereign arena
+//    instead of in the replacer's frame. The replacer is returned to the
+//    caller, which copies it, but the deeper nodes were left behind in groups
+//    keyed by the addresses of the originals: lookup then read a dead node's
+//    priority as zero and found nothing, so a replacer with two multi-byte keys
+//    returned its input unchanged. The insertion is a free function now, so the
+//    whole trie is one graph in one frame and moves with it.
+//
+// 2. byteStringReplacer used a nil replacement slice to mean "this byte has no
+//    replacement". In Moxie slice equality is content equality, so an EMPTY
+//    replacement ("a" -> "") was indistinguishable from an absent one and
+//    banana came back unchanged instead of bnn. Presence is its own table.
+package main
+
+import (
+	"bytes"
+	"os"
+)
+
+func chk(name, got, want string) {
+	if got != want {
+		println("FAIL " | name | ": got [" | got | "] want [" | want | "]")
+		os.Exit(1)
+	}
+}
+
+func replace(all [][]byte, in string) (out string) {
+	r := bytes.NewReplacer(all...)
+	return string(r.Replace([]byte(in)))
+}
+
+func main() {
+	// multi-byte keys: the generic trie
+	chk("generic", replace([][]byte{[]byte("ab"), []byte("Q"), []byte("bc"), []byte("R")}, "abcabc"), "QcQc")
+	chk("generic overlap", replace([][]byte{[]byte("ab"), []byte("Q"), []byte("bc"), []byte("R")}, "abcbabc"), "QcbQc")
+	chk("priority", replace([][]byte{[]byte("aaa"), []byte("b"), []byte("aa"), []byte("c"), []byte("a"), []byte("d")}, "aaaaa"), "bc")
+	chk("deep", replace([][]byte{[]byte("xyz"), []byte("123"), []byte("y"), []byte("Y"), []byte("z"), []byte("Z")}, "xyzyzz"), "123YZZ")
+
+	// empty replacement: byteStringReplacer's present table
+	chk("empty", replace([][]byte{[]byte("a"), []byte("")}, "banana"), "bnn")
+	chk("empty mixed", replace([][]byte{[]byte("a"), []byte(""), []byte("n"), []byte("N")}, "banana"), "bNN")
+
+	// single-byte table and single-pattern paths
+	chk("byte table", replace([][]byte{[]byte("a"), []byte("1"), []byte("b"), []byte("2")}, "abcab"), "12c12")
+	chk("single pattern", replace([][]byte{[]byte("abc"), []byte("Z")}, "abcabcx"), "ZZx")
+
+	// the input must not be modified by a replacement
+	in := []byte("abcab")
+	bytes.NewReplacer([]byte("a"), []byte("1"), []byte("b"), []byte("2")).Replace(in)
+	chk("input untouched", string(in), "abcab")
+	println("ok")
+}
