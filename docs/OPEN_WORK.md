@@ -16591,3 +16591,26 @@ store through a pointer into state that outlives the frame has no automatic
 relocation, so any package that keeps data it was handed must copy it into the
 owner's arena. Every such site in the tree is a latent use-after-free, and the
 compiler cannot currently tell one from a legitimate borrow.
+
+## Round 206: phase 1b cannot run at all - the compiler's arena region table fills while type-checking the 45-package sweep
+
+`tests/unitrun.sh --phases 1b` aborts before any code is emitted:
+
+    mem    tc-in main rss=491MB ...
+    panic: runtime error at 0x...: arena: region table full
+
+`tc-in main` is the last package of the type-check phase of the sweep's single
+45-package build, so the compiler dies at the transition into SSA build. 491 MB
+resident across the closure's type-check arenas overruns the compiler's region
+table.
+
+Not caused by the map-update classification change: a compiler built from the
+tree before it (`fe2fd3e7`) aborts identically on the same sweep, at the same
+point. It has nothing to do with mime or net/http either - the sweep's targets
+are not the compiler's own imports.
+
+This is the phase that exists to catch a stdlib package that does not compile,
+and it cannot report anything while it cannot run. Recorded as its own open
+item: either the type-check phase must not hold 45 packages' arenas live at
+once, or the region table needs a bound stated in bytes rather than in regions
+(and a diagnostic that names what filled it).
