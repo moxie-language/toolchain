@@ -471,9 +471,35 @@ func (p *pp) fmtString(v []byte, verb rune) {
 	}
 }
 
+// fmtBytes formats a byte slice, and a string, because in moxie they are ONE
+// type: an argument cannot be told apart by its spelling, so this implements the
+// verbs where the two agree and leaves the rest to badVerb.
+//
+//   - %v and %s print the bytes as content. Go's %v of a []byte is the decimal
+//     list `[104 105]`, but that is also what a STRING's %v would become, and
+//     Sprintf("%v", "hi") is "hi" - content wins.
+//   - %q, %x and %X are identical for both spellings in Go, and used to print
+//     raw here: %q printed the string unquoted and %x printed its text instead
+//     of its bytes.
 func (p *pp) fmtBytes(v []byte, verb rune, typeString []byte) {
-	// []byte IS string in moxie. Always print as UTF-8 content.
-	p.fmt.fmtBs(v)
+	switch verb {
+	case 'v':
+		if p.fmt.sharpV {
+			p.fmt.fmtQ(v)
+			return
+		}
+		p.fmt.fmtBs(v)
+	case 's':
+		p.fmt.fmtBs(v)
+	case 'x':
+		p.fmt.fmtSx(v, ldigits)
+	case 'X':
+		p.fmt.fmtSx(v, udigits)
+	case 'q':
+		p.fmt.fmtQ(v)
+	default:
+		p.badVerb(verb)
+	}
 }
 
 func (p *pp) handleMethods(verb rune) (handled bool) {

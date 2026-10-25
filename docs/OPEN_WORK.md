@@ -16742,3 +16742,27 @@ old source at the first generic case.
 With this, the `[][]byte` corruption family is closed: three separate defects,
 none of them a layout bug - mime's misclassified method (round 205), zip's
 stored caller pointers (round 207), and this one.
+
+## Round 209: %q and %x on a string printed the string
+
+`fmtBytes` ignored its verb entirely - "[]byte IS string in moxie, always print
+as UTF-8 content" - so `Sprintf("%q", "hi\n")` printed `hi` and a newline
+instead of `"hi\n"`, and `Sprintf("%x", "hi")` printed `hi` instead of `6869`.
+Every fmt consumer that quoted a name or hex-dumped a buffer got the raw bytes.
+
+The verbs are implemented where a string and a `[]byte` agree in Go, which is
+where the unification leaves nothing to choose: `%q`, `%x`, `%X`, and `%v`/`%s`
+as content. Other verbs now report a bad verb instead of printing the value -
+Go reports one too, with its type name where moxie has none (`%!d(?=hi)` against
+`%!d(string=hi)`).
+
+What cannot be matched, and is now the only divergence in this area, is that Go
+prints `%v` of a `[]byte` as its decimal elements, `[104 105]`. Rendering that
+would render every `%v` of a *string* the same way, and `Sprintf("%v", "hi")` is
+`hi`. The content reading wins; a caller that wants the element list asks for it.
+
+Verified against Go 1.25.3 on a string carrying a NUL, a tab, a non-ASCII rune
+and `<&>`: `%v`, `%s`, `%q`, `%x`, `%X`, `%#v`, `%10q` and `%.3q` are identical,
+as are `%q`/`%x`/`%X` and `%s` on a `[]byte`, plus `Sprint` and `Sprintln`. The
+two remaining differences are the documented `%v` element list and the type name
+inside a bad-verb marker.
