@@ -316,7 +316,7 @@ type decompressor struct {
 	fixedHuffmanDecoder huffmanDecoder
 
 	// Temporary buffer (avoids repeated allocation).
-	buf [4]byte
+	buf []byte
 
 	// Next step in the decompression,
 	// and decompression state.
@@ -398,7 +398,6 @@ func (f *decompressor) Close() (err error) {
 
 func (f *decompressor) readHuffman() (rerr error) {
 	// RFC 1951 section 3.2.7.
-	codeOrder := [19]int32{16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15}
 
 	// HLIT[5], HDIST[5], HCLEN[4].
 	for f.nb < 5+5+4 {
@@ -668,7 +667,10 @@ func (f *decompressor) dataBlock() {
 	f.b = 0
 
 	// Length then ones-complement of length.
-	nr, err := io.ReadFull(f.r, f.buf[0:4])
+	// buf is exactly the four bytes of the stored-block header. Reading into
+	// buf[0:4] would read into a copy: a subslice is a copy, so the header
+	// would never land in buf.
+	nr, err := io.ReadFull(f.r, f.buf)
 	f.roffset += int64(nr)
 	if err != nil {
 		f.err = noEOF(err)
@@ -811,7 +813,7 @@ func (f *decompressor) makeReader(r io.Reader) {
 
 func (f *decompressor) initFixedHuffmanDecoder() {
 	// These come from the RFC section 3.2.6.
-	var lens [288]int32
+	lens := []int32{:288}
 	for i := 0; i < 144; i++ {
 		lens[i] = 8
 	}
@@ -833,6 +835,7 @@ func (f *decompressor) Reset(r io.Reader, dict []byte) (err error) {
 		bits:     f.bits,
 		codebits: f.codebits,
 		dict:     f.dict,
+		buf:      []byte{:4},
 		step:     (*decompressor).nextBlock,
 	}
 	f.initFixedHuffmanDecoder()
@@ -856,6 +859,7 @@ func NewReader(r io.Reader) (rc io.ReadCloser) {
 	f.bits = &[maxNumLit + maxNumDist]int32{}
 	f.codebits = &[numCodes]int32{}
 	f.step = (*decompressor).nextBlock
+	f.buf = []byte{:4}
 	f.dict.init(maxMatchOffset, nil)
 	return &f
 }
@@ -874,6 +878,7 @@ func NewReaderDict(r io.Reader, dict []byte) (rc io.ReadCloser) {
 	f.bits = &[maxNumLit + maxNumDist]int32{}
 	f.codebits = &[numCodes]int32{}
 	f.step = (*decompressor).nextBlock
+	f.buf = []byte{:4}
 	f.dict.init(maxMatchOffset, dict)
 	return &f
 }

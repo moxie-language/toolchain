@@ -16300,3 +16300,42 @@ families, and the Append* family) is byte-identical to Go 1.25.3 - and, before
 round 197's compiler fix, moxie-against-moxie identical across this conversion,
 which is what proves the conversion itself is behaviour-preserving: the same
 probe on the pre-change tree produced the same four accumulators.
+
+## Round 199: flate's RFC 1951 tables become one shared set of slices
+
+    codegenOrder      [19]uint32   x2 (encoder)        -> []uint32, one copy
+    lengthExtraBits   [29]int8     x2 (encoder)        -> []int8, one copy
+    offsetExtraBits   [30]int8     x2 (encoder)        -> []int8, one copy
+    lengthBase        [29]uint32                      -> []uint32
+    offsetBase        [30]uint32                      -> []uint32
+    codeOrder         [19]int32    (decoder)           -> []int32
+    lengthCodes       [256]uint32  (token)             -> []uint32
+    offsetCodes       [256]uint32  (token)             -> []uint32
+    huffmanEncoder.bitCount [17]int32                 -> []int32
+    decompressor.buf  [4]byte                         -> []byte
+    initFixedHuffmanDecoder lens [288]int32           -> []int32
+
+The tables now live in `tables.mx` and are filled by `initTables()` from the
+package's single init (deflate.mx). Before, `lengthCode` and `offsetCode`
+materialised a 256-entry literal on every call - once per token in the encoder.
+
+Two traps, both found by the differential probe rather than by reading:
+
+  * `io.ReadFull(f.r, f.buf[0:4])`. With `buf` an array that is a view into the
+    array; with `buf` a slice it is a subslice, and a subslice passed as a
+    parameter is a copy, so the four header bytes never landed in `buf`. The
+    read now takes the whole slice, whose length is exactly four. This is the
+    same rule the compiler enforces in user code ("a subslice is a copy, so
+    copying into it is not allowed") and exempts in the stdlib.
+  * `decompressor.buf` was only allocated in `Reset`, and `NewReader` and
+    `NewReaderDict` build a `decompressor` field by field without calling
+    Reset, so the first reader had a nil (zero-length) buffer: `f.buf[0]` was an
+    index out of range on the first stored block. Both constructors allocate it
+    now.
+
+Verification: a gzip differential over four payload shapes (incrementing bytes,
+repeating letters, a mixed pattern, all zeros) at sizes 0, 1, 5, 100, 1000, 5000
+and 70000 - which covers stored blocks, fixed and dynamic Huffman, the 32 KiB
+window and the empty stream - produces compressed output byte-identical to Go
+1.25.3 and round-trips every case to the original bytes. Before the two fixes the
+probe crashed; with only the first fix it panicked "index out of range".
