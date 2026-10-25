@@ -16425,3 +16425,38 @@ the two constructors is the actual fix. What IS true is that `copy(dst[a:b], src
 is a compile error in user packages and that archiving a subslice into a value
 that outlives the parent is what the "a subslice is a copy" rule is guarding
 against - the restriction is a safety rule, not the runtime behaviour.
+
+## Round 202: fmt, ascii85 and pem arrays become slices
+
+    fmt.fmt.intbuf            [68]byte        -> []byte (allocated in newPrinter)
+    fmt tailBuf               [6]byte         -> []byte{:0:6}
+    fmt isSpace space         [10][2]uint16   -> []spaceRange built in the package init
+    ascii85 encoder buf/out   [4]/[1024]byte  -> []byte (NewEncoder)
+    ascii85 decoder buf/outbuf [1024]byte     -> []byte (NewDecoder)
+    pem lineBreaker.line      [64]byte        -> []byte (Encode)
+
+`isSpace`'s table was a nested array literal materialised per rune examined while
+scanning; it is a `[]spaceRange` filled once by the package's single init
+(scan.mx). The struct also removes the `[2]uint16` element type.
+
+Verification: a differential probe against Go 1.25.3 covering 20 fmt format
+strings (integer, float, string, byte-slice, width/precision/flag combinations,
+`%U`, `%#U`, `%*d`), ascii85 at eight sizes with encode and decode round trips
+plus the streaming encoder, and a pem Encode/Decode round trip. Every line is
+byte-identical to Go except three, which are a pre-existing documented
+divergence rather than a regression - see below. The same probe run against the
+pre-change fmt produces the identical output, so the conversion changed nothing.
+
+Open: fmt's string verbs are incomplete. `fmtBytes` deliberately ignores the
+verb ("[]byte IS string in moxie. Always print as UTF-8 content"), so for both
+`string` and `[]byte`:
+
+    %q   "hi\t\"x\""   Go quotes and escapes; moxie prints hi<TAB>"x" raw
+    %x   0102ab        Go hex-encodes;          moxie prints the raw bytes
+    %q   "a\x00b\xff"  Go quotes;               moxie prints the raw bytes
+
+`%v` for a []byte is raw instead of Go's `[1 2 3]`, which is the intended
+consequence of the unified type; `%q`/`%x` are not, because they are well
+defined for bytes under either reading. Fixing them means giving `fmtBytes` a
+verb switch, which changes the output of every fixture that prints with `%q` or
+`%x` - its own round, not a drive-by.
