@@ -88,23 +88,27 @@ func init() {
 
 // IPv6LinkLocalAllNodes returns the IPv6 link-local all nodes multicast
 // address ff02::1.
-func IPv6LinkLocalAllNodes() (raddr Addr) { return AddrFrom16([16]byte{0: 0xff, 1: 0x02, 15: 0x01}) }
+func IPv6LinkLocalAllNodes() (raddr Addr) { return AddrFrom16([]byte{0: 0xff, 1: 0x02, 15: 0x01}) }
 
 // IPv6LinkLocalAllRouters returns the IPv6 link-local all routers multicast
 // address ff02::2.
-func IPv6LinkLocalAllRouters() (raddr Addr) { return AddrFrom16([16]byte{0: 0xff, 1: 0x02, 15: 0x02}) }
+func IPv6LinkLocalAllRouters() (raddr Addr) { return AddrFrom16([]byte{0: 0xff, 1: 0x02, 15: 0x02}) }
 
 // IPv6Loopback returns the IPv6 loopback address ::1.
-func IPv6Loopback() (raddr Addr) { return AddrFrom16([16]byte{15: 0x01}) }
+func IPv6Loopback() (raddr Addr) { return AddrFrom16([]byte{15: 0x01}) }
 
 // IPv6Unspecified returns the IPv6 unspecified address "::".
 func IPv6Unspecified() (raddr Addr) { return Addr{z: z6noz} }
 
 // IPv4Unspecified returns the IPv4 unspecified address "0.0.0.0".
-func IPv4Unspecified() (raddr Addr) { return AddrFrom4([4]byte{}) }
+func IPv4Unspecified() (raddr Addr) { return AddrFrom4([]byte{}) }
 
 // AddrFrom4 returns the address of the IPv4 address given by the bytes in addr.
-func AddrFrom4(addr [4]byte) (raddr Addr) {
+// The argument is a slice, not an array: only ABI structures (sockaddr, stat,
+// timeval) keep fixed arrays, because their layout is the kernel's. An address
+// is not one - and a slice parameter lets AddrFromSlice and UnmarshalBinary
+// hand over their bytes without an array conversion.
+func AddrFrom4(addr []byte) (raddr Addr) {
 	return Addr{
 		addr: uint128{0, 0xffff00000000 | uint64(addr[0])<<24 | uint64(addr[1])<<16 | uint64(addr[2])<<8 | uint64(addr[3])},
 		z:    z4,
@@ -114,7 +118,7 @@ func AddrFrom4(addr [4]byte) (raddr Addr) {
 // AddrFrom16 returns the IPv6 address given by the bytes in addr.
 // An IPv4-mapped IPv6 address is left as an IPv6 address.
 // (Use Unmap to convert them if needed.)
-func AddrFrom16(addr [16]byte) (raddr Addr) {
+func AddrFrom16(addr []byte) (raddr Addr) {
 	return Addr{
 		addr: uint128{
 			byteorder.BEUint64(addr[:8]),
@@ -210,8 +214,8 @@ func parseIPv4Fields(in string, off, end int32, fields []uint8) (rerr error) {
 
 // parseIPv4 parses s as an IPv4 address (in form "192.168.0.1").
 func parseIPv4(s string) (ip Addr, err error) {
-	var fields [4]uint8
-	err = parseIPv4Fields(s, 0, len(s), fields[:])
+	fields := []byte{:4}
+	err = parseIPv4Fields(s, 0, len(s), fields)
 	if err != nil {
 		return Addr{}, err
 	}
@@ -236,7 +240,7 @@ func parseIPv6(in string) (raddr Addr, rerr error) {
 		}
 	}
 
-	var ip [16]byte
+	ip := []byte{:16}
 	ellipsis := -1 // position of ellipsis in ip
 
 	// Might have leading ellipsis
@@ -365,9 +369,9 @@ func parseIPv6(in string) (raddr Addr, rerr error) {
 func AddrFromSlice(slice []byte) (ip Addr, ok bool) {
 	switch len(slice) {
 	case 4:
-		return AddrFrom4([4]byte(slice)), true
+		return AddrFrom4(slice), true
 	case 16:
-		return AddrFrom16([16]byte(slice)), true
+		return AddrFrom16(slice), true
 	}
 	return Addr{}, false
 }
@@ -633,7 +637,7 @@ func (ip *Addr) IsGlobalUnicast() (rok bool) {
 
 	// Match package net's IsGlobalUnicast logic. Notably private IPv4 addresses
 	// and ULA IPv6 addresses are still considered "global unicast".
-	if ipv.Is4() && (ipv == IPv4Unspecified() || ipv == AddrFrom4([4]byte{255, 255, 255, 255})) {
+	if ipv.Is4() && (ipv == IPv4Unspecified() || ipv == AddrFrom4([]byte{255, 255, 255, 255})) {
 		return false
 	}
 
@@ -709,6 +713,9 @@ func (ip *Addr) Prefix(b int32) (rprefix Prefix, rerr error) {
 // IPv6 addresses with zones are returned without their zone (use the
 // [Addr.Zone] method to get it).
 // The ip zero value returns all zeroes.
+// As16 returns the address as a fixed 16-byte array, not a slice: its main
+// consumers are the syscall sockaddr structures, whose fields are fixed arrays
+// because their layout is the kernel's. AsSlice is the slice form.
 func (ip *Addr) As16() (a16 [16]byte) {
 	byteorder.BEPutUint64(a16[:8], ip.addr.hi)
 	byteorder.BEPutUint64(a16[8:], ip.addr.lo)
@@ -718,6 +725,7 @@ func (ip *Addr) As16() (a16 [16]byte) {
 // As4 returns an IPv4 or IPv4-in-IPv6 address in its 4-byte representation.
 // If ip is the zero [Addr] or an IPv6 address, As4 panics.
 // Note that 0.0.0.0 is not the zero Addr.
+// As4 returns the address as a fixed 4-byte array; see As16.
 func (ip *Addr) As4() (a4 [4]byte) {
 	if ip.z == z4 || ip.Is4In6() {
 		byteorder.BEPutUint32(a4[:], uint32(ip.addr.lo))
@@ -1082,13 +1090,13 @@ func (ip *Addr) UnmarshalBinary(b []byte) (rerr error) {
 		*ip = Addr{}
 		return nil
 	case n == 4:
-		*ip = AddrFrom4([4]byte(b))
+		*ip = AddrFrom4(b)
 		return nil
 	case n == 16:
-		*ip = AddrFrom16([16]byte(b))
+		*ip = AddrFrom16(b)
 		return nil
 	case n > 16:
-		*ip = AddrFrom16([16]byte(b[:16])).WithZone(string(b[16:]))
+		*ip = AddrFrom16(b[:16]).WithZone(string(b[16:]))
 		return nil
 	}
 	return errors.New("unexpected slice size")

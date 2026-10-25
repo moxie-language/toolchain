@@ -16485,3 +16485,40 @@ Housekeeping is part of the build's correctness, not tidying up afterwards.
 
 The tree was not at fault: no source changed between the failing run and the
 green one.
+
+## Round 204: netip's address inputs become slices; its byte outputs stay arrays on purpose
+
+    AddrFrom4(addr [4]byte)   -> AddrFrom4(addr []byte)
+    AddrFrom16(addr [16]byte) -> AddrFrom16(addr []byte)
+    parseIPv4 fields          [4]uint8  -> []byte
+    parseIP's IPv6 buffer     [16]byte  -> []byte
+    net._v4InV6Prefix()       [12]byte  -> package []byte filled by init
+
+Eight `AddrFrom16([16]byte{...})` literals in `net/addrselect` are `[]byte{...}`
+now, and the sockaddr round trips pass `from.Addr[:]`.
+
+`As4()` and `As16()` still return `[4]byte` / `[16]byte`, and that is the
+decision, not an omission: their consumers are `syscall.SockaddrInet4.Addr` and
+`SockaddrInet6.Addr`, whose layout is the kernel's, so those fields must stay
+fixed arrays - and a slice-returning As4 would force a copy into every one of
+them. `AsSlice()` is the slice form for callers that are not crossing an ABI
+boundary. The rule this round settles is: **arrays survive only where a struct
+layout is dictated by the kernel or another ABI**; everything else, including
+address bytes in transit, is a slice.
+
+I converted As4/As16 to slices first and reverted it before committing: the only
+thing that exercises `addrPortToSockaddrInet4/6` is a real socket, those paths
+are not in the 0a/0b/2 gate, and phase 8 needs a net/http fixture build long
+enough that I stopped it rather than claim a verification I had not run. The
+unverified change was removed instead of documented as "probably fine".
+
+Verification, both against Go 1.25.3:
+
+  * netip (98 lines): 17 addresses through ParseAddr/String/StringExpanded/
+    Is4/Is6/Is4In6/Zone/BitLen, As4/As16/AsSlice bytes, Unmap/WithZone/
+    Next/Prev/PrefixFrom, ParsePrefix/Masked/Bits/Contains, address comparison,
+    AddrFromSlice for valid IPv4, valid IPv6 and a bad length, and
+    MarshalBinary/UnmarshalBinary round trips - identical.
+  * net (over the same code): ParseIP, To4/To16 lengths, IPEqual, IPv4(),
+    IsLoopback/IsUnspecified, ParseCIDR with mask size and Contains, CIDRMask -
+    identical.
