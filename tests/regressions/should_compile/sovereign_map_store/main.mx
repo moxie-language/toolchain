@@ -1,0 +1,53 @@
+package main
+
+import (
+	"os"
+	"tests/regressions/should_compile/sovereign_map_store/lib"
+)
+
+func chk(name, got, want string) {
+	if got != want {
+		println("FAIL: " | name | " got [" | got | "] want [" | want | "]")
+		os.Exit(1)
+	}
+}
+
+func main() {
+	rounds := int32(500)
+	err := lib.Load(rounds)
+	if err != nil {
+		println("FAIL: load: " | err.Error())
+		os.Exit(1)
+	}
+	if lib.Marks() != rounds {
+		println("FAIL: marks ", lib.Marks(), " want ", rounds)
+		os.Exit(1)
+	}
+
+	// Every one of these values was produced by an allocation inside a
+	// map-only method. The loader that called it has returned, so a frame
+	// arena there means these now read recycled memory.
+	want := ""
+	for i := int32(0); i < rounds; i++ {
+		want = want | "ab"
+	}
+	chk("grown value", string(lib.Value([]byte("acc"))), want)
+
+	exts := lib.Exts([]byte("image/jpeg"))
+	if int32(len(exts)) != rounds {
+		println("FAIL: jpeg extension count ", len(exts), " want ", rounds)
+		os.Exit(1)
+	}
+	for i := int32(0); i < rounds; i++ {
+		if string(exts[i]) != ".jpg" {
+			println("FAIL: jpeg extension ", i, " = [" | string(exts[i]) | "]")
+			os.Exit(1)
+		}
+	}
+	exts = lib.Exts([]byte("text/html"))
+	if int32(len(exts)) != rounds || string(exts[rounds-1]) != ".html" {
+		println("FAIL: html extensions wrong")
+		os.Exit(1)
+	}
+	println("ok")
+}

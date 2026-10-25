@@ -129,6 +129,20 @@ func ssaFuncHasReceiverWrite(fn *SSAFunction) (ok bool) {
 	}
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
+			// A map update through the receiver is a receiver write even
+			// though no Store instruction carries it: it mutates the map's
+			// storage (and a push into a value can reallocate its backing).
+			// Missing this classified a method whose only mutation is a map
+			// update as READ-ONLY, so it pushed its own frame arena instead of
+			// borrowing the receiver's - mime's setExtensionType stored parsed
+			// lines into the package store and every key and value pointed at
+			// a frame that was released when the loader returned.
+			if mu, ok3 := instr.(*SSAMapUpdate); ok3 {
+				if mu.Map != nil && ssaRecvRooted(mu.Map, recvParam, localStore) {
+					return true
+				}
+				continue
+			}
 			store, ok2 := instr.(*SSAStore)
 			if !ok2 {
 				continue

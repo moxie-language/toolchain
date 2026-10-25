@@ -4204,13 +4204,27 @@ func (c *compilerContext) receiverMatches(rt types.Type, named *types.Named) boo
 }
 
 // ssaFuncWritesReceiver reports whether fn stores into a field of its own
-// receiver parameter (through any pointer/field chain rooted at the receiver).
+// receiver parameter (through any pointer/field chain rooted at the receiver),
+// or updates a map reached through the receiver.
 func ssaFuncWritesReceiver(fn *ssa.Function) bool {
 	if fn.Signature == nil || fn.Signature.Recv() == nil || len(fn.Params) == 0 {
 		return false
 	}
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
+			// A map update through the receiver mutates the map's storage and
+			// can reallocate the backing of one of its values, so it is a
+			// receiver write even though no Store instruction carries it.
+			// Missing this classified a method whose only mutation is a map
+			// update as read-only, and its allocations landed in a frame that
+			// died at return. Mirrors stage4 ir_deepcopy.mx
+			// ssaFuncHasReceiverWrite.
+			if mu, okMU := instr.(*ssa.MapUpdate); okMU {
+				if mu.Map != nil && ssaValueRootedIn(mu.Map, fn.Params[0]) {
+					return true
+				}
+				continue
+			}
 			store, ok := instr.(*ssa.Store)
 			if !ok {
 				continue

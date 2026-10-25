@@ -1,0 +1,80 @@
+package lib
+
+// Regression: a method whose only mutation is a map update was classified as
+// READ-ONLY, so it pushed its own frame arena instead of borrowing the
+// receiver's. Everything it stored in the receiver - the value header, and any
+// backing a push or a concatenation allocated for it - lived in a frame that
+// was released at return, and the receiver was left pointing at recycled
+// memory.
+//
+// Three parts are needed to expose it, and all three are here:
+//
+//   - the type must be sovereign, which needs at least one method that stores
+//     a field (Reset and Mark below); otherwise the map-only method gets a
+//     plain frame arena either way and the classification does not matter;
+//   - the method under test (Grow, AddExt) must write ONLY through a map: one
+//     field store anywhere in it would have made the detector fire;
+//   - the caller (Load) must have a frame arena of its own, which it gets by
+//     returning a value that needs a codec (an error).
+//
+// mime.TypeByExtension was the live case: the store was created in init, the
+// mime.types loader parsed lines into its own frame and called a map-only
+// method to record them, and every extension answered with garbage. The keys
+// and values here are literals on purpose - a frame-local argument would
+// dangle for a second, independent reason (the store must take ownership of
+// data it is handed, which mime does with ownBytes).
+type Store struct {
+	m    map[string][]byte
+	ext  map[string][][]byte
+	n    int32
+}
+
+var st = newStore()
+
+func newStore() (s *Store) {
+	s = &Store{}
+	s.m = map[string][]byte{}
+	s.ext = map[string][][]byte{}
+	return s
+}
+
+func (s *Store) Reset() {
+	s.n = 0
+	s.m = map[string][]byte{}
+	s.ext = map[string][][]byte{}
+}
+
+func (s *Store) Mark() {
+	s.n++
+}
+
+// Grow appends to a stored value. It writes only through the map: the new
+// bytes come from a concatenation allocated inside the method.
+func (s *Store) Grow(k, v []byte) {
+	s.m[string(k)] = s.m[string(k)] | v
+}
+
+// AddExt appends to a stored list. It writes only through the map: the new
+// backing comes from push.
+func (s *Store) AddExt(typ, ext []byte) {
+	cur := s.ext[string(typ)]
+	s.ext[string(typ)] = push(cur, ext)
+}
+
+func Value(k []byte) []byte     { return st.m[string(k)] }
+func Exts(typ []byte) [][]byte  { return st.ext[string(typ)] }
+func Count(k []byte) int32      { return int32(len(st.m[string(k)])) }
+func Marks() int32              { return st.n }
+
+// Load returns an error so this frame owns an arena, then builds everything it
+// keeps from literals the store can hold without taking ownership.
+func Load(rounds int32) (rerr error) {
+	st.Reset()
+	for i := int32(0); i < rounds; i++ {
+		st.Mark()
+		st.Grow([]byte("acc"), []byte("ab"))
+		st.AddExt([]byte("image/jpeg"), []byte(".jpg"))
+		st.AddExt([]byte("text/html"), []byte(".html"))
+	}
+	return nil
+}
