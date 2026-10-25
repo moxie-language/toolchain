@@ -16172,3 +16172,52 @@ block a conversion whose only verifier is a run:
 All three point at the same gap: a self-mutating (sovereign) value whose scratch
 or whose map/pointer local is reused across iterations or across a call boundary.
 That is one investigation, not three.
+
+## Round 196: the mime crash is a corrupted [][]byte element, shifted one word
+
+Round 195 parked three packages on pre-existing crashes. This round narrows one
+of them to a concrete memory corruption, which is worth writing down even though
+it is not fixed.
+
+`mime.TypeByExtension` -> `osInitMime` -> `loadMimeGlobsFile` ->
+`(*mimeTypesStore).setExtensionType`, and inside it the loop
+
+	for _, v := range exts { if v == extLower { return nil } }
+
+where `exts` is `m.extensions[justType]`, a `[][]byte`. Instrumenting the real
+package prints this for `application/pkix-cert` (element 0 then element 1):
+
+	elem 0 len 0         cap 0          val ""
+	elem 1 len 1981123776 cap -2063202462 val <fault>
+
+`1981123776` and `-2063202462` are the two halves of a 64-bit pointer
+(0x8517..7612..), so element 1 is being read 8 bytes off: its `len` field holds a
+pointer's low half and its `cap` holds the high half. Element 0 reads as
+{0, 0} because the same shift puts its pointer word where element 0's header
+should start. The comparison then dereferences a pointer whose value is 41 -
+which is exactly what the faulting instruction shows (`mov (%rdx,%rsi,1),%dl`
+with `rdx = 0x29`) - and the process dies inside `runtime[stringEqual`.
+
+So: a `[]byte` header inside a `[][]byte` is written or read one word away from
+where the other side expects it. Everything else about the bug is now known to be
+irrelevant: the fault is deterministic (same address, same line, five runs), it
+is not the [10]byte scratch, not the scanner-buffer aliasing (a faithful
+copy of the whole loader in another package ranges 1334 groups with correct
+headers, printed), not `bytes.ToLower` (all 1616 globs extensions lower
+correctly), not a missing-key map read (4000 misses return clean zero slices),
+and not the number of entries or the extra `unicode.Tables` global.
+
+What is left is the difference between the two builds: the real store is
+`mimeStore`, a package-level `*mimeTypesStore` in package mime, and the copy is a
+package-level `*store` in another package. Same code, same data, same call shape
+(init -> method -> free function -> method), different layout. That points at the
+codec/codegen for `[][]byte` elements under the sovereign arena - the same family
+as round 191's pointer-in-a-32-bit-slot and round 195's corrupt zip directory -
+and it is now the single blocker for `mime`, `archive/zip`, `bytes.genericReplacer`
+and, by extension, any package whose scratch is a slice-of-slices.
+
+Evidence kept: the instrumented runs print the element headers above; the copy
+that stays clean is /tmp/glz (lib/lib.mx + main.mx), the minimal probes are
+/tmp/nest (slice-of-slices range/compare, clean), /tmp/sovarena (slice-of-slices
+in a sovereign receiver over 40 appends, clean), /tmp/mapmiss (4000 missing
+lookups, clean) and /tmp/tolower (1616 extensions, clean).
