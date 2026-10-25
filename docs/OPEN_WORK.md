@@ -16672,3 +16672,73 @@ This was also the last item the `[][]byte` family was blocking. That family is
 now three separate fires, not one: mime was a misclassified method (round 205),
 zip was ownership of stored pointers (this round), and `bytes.genericReplacer`'s
 32-bit pointer slot remains.
+
+## Round 208: the replay of a trie built by a mutating method, and an empty replacement that was not one
+
+`bytes.NewReplacer` with two multi-byte keys returned its input unchanged. It
+had been parked as a "32-bit pointer slot" - the disassembly showed a node
+pointer spilled into a 32-bit stack slot - and it is not that. Instrumenting the
+trie shows the truth:
+
+    inside makeGenericReplacer   self lookup found true  keylen 2  val Q
+    after the return             lookup found false      the terminal node's
+                                 priority reads 0
+
+The trie is built correctly and then loses its deeper nodes on the way out. The
+build was a METHOD on each node:
+
+    func (t *trieNode) add(key, val []byte, priority int32, r *genericReplacer)
+
+`add` writes receiver fields, so `trieNode` is a self-mutating type and the call
+borrows the receiver's sovereign arena. Every node the insertion allocates
+therefore lands in the arena of the node it hangs off - a tree scattered across
+one group per node - and the root's group is keyed by the address of a node in
+`makeGenericReplacer`'s frame. The replacer is built in that frame and returned,
+so the codec copies the graph; the copies get new addresses and therefore new
+(empty) groups, while pointers into the originals' groups are kept by identity
+and those groups die with the frame that owned their receiver.
+
+Nothing about it is 32-bit: the addresses in question are identical before and
+after the boundary, which is why the same address read a priority of 4 in the
+self-test and 0 outside - the block was released and reused.
+
+Fixed in the source, not the codec: the insertion is a free function,
+
+    func trieAdd(t *trieNode, key, val []byte, priority int32, r *genericReplacer)
+
+so it has no receiver to borrow and every node it allocates lands in the current
+arena - the frame the replacer is being built in. The trie is then one graph in
+one frame and the return relocation copies all of it. This is the authoring rule
+the sovereign model already implies, stated the other way round: a graph that is
+built and then returned must be built in the arena it will be returned from, so
+do not put the builder's methods on the nodes.
+
+The second defect is a Moxie-specific one. `byteStringReplacer` used a nil
+replacement slice as "this byte has no replacement":
+
+    if r.replacements[b] != nil { ... }
+
+Slice equality in Moxie is content equality, so `[]byte("")` is equal to nil and
+an EMPTY replacement (`"a" -> ""`) was indistinguishable from an absent one:
+`Replace([]byte("banana"))` returned `banana` where Go returns `bnn`. Presence
+is its own table (`present []bool`), and every reader asks it.
+
+That is the second time this session that a slice's nil-ness was used as a
+sentinel (zip's duplicate check compared header pointers, and mime and zip both
+treated a slice as something a receiver could keep for free). In Moxie nil and
+empty are the same value; any code that distinguishes them is wrong by
+construction, and the fix is always an explicit flag or an explicit copy.
+
+Verified against Go 1.25.3 for eleven shapes, through both `Replace` and
+`WriteString`: two multi-byte overlapping keys (`abcabc` -> `QcQc`,
+`abcbabc` -> `QcbQc`), priority with nested keys (`aaaaa` -> `bc`), a deep trie
+with single-byte keys at the root (`xyzyzz` -> `123YZZ`), an empty replacement
+(`banana` -> `bnn`), an empty replacement mixed with a byte replacement
+(`banana` -> `bNN`), the single-byte table (`abcab` -> `12c12`), one multi-byte
+pattern (`abcabcx` -> `ZZx`), and that a replacement leaves its input untouched.
+All identical, and `tests/regressions/should_compile/bytes_replacer` fails on the
+old source at the first generic case.
+
+With this, the `[][]byte` corruption family is closed: three separate defects,
+none of them a layout bug - mime's misclassified method (round 205), zip's
+stored caller pointers (round 207), and this one.
