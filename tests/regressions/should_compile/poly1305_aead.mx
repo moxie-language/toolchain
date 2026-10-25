@@ -1,0 +1,87 @@
+// Regression: RFC 8439's poly1305 and AEAD_CHACHA20_POLY1305 test vectors.
+//
+// The MAC's buffering scratch is a slice now. Nothing else changed, and a
+// zero MAC has a nil buffer - so `New` building `&MAC{}` and calling
+// initialize directly dropped every buffered message chunk and produced a
+// stable but wrong tag (df33cbbe... instead of a8061dc1...), while Seal/Open
+// stayed self-consistent and a flipped tag was still rejected. Only the
+// published vector saw it. `New` goes through newMACGeneric now, which is
+// where the buffer is allocated.
+//
+// Covers poly1305 over its own vector, the AEAD ciphertext and tag byte for
+// byte (so chacha20, poly1305 and the padded AAD/length framing are all in
+// play), the Open round trip and a corrupted tag being refused.
+package main
+
+import (
+	"golang.org/x/crypto/chacha20poly1305"
+	"golang.org/x/crypto/internal/poly1305"
+)
+
+func hex(b []byte) (out []byte) {
+	const d = "0123456789abcdef"
+	out = []byte{:len(b) * 2}
+	for i := 0; i < len(b); i++ {
+		out[i*2] = d[b[i]>>4]
+		out[i*2+1] = d[b[i]&0xf]
+	}
+	return out
+}
+
+func unhex(s []byte) (out []byte) {
+	nib := func(c byte) byte {
+		if c >= '0' && c <= '9' {
+			return c - '0'
+		}
+		return c - 'a' + 10
+	}
+	out = []byte{:len(s) / 2}
+	for i := 0; i < len(out); i++ {
+		out[i] = nib(s[i*2])<<4 | nib(s[i*2+1])
+	}
+	return out
+}
+
+func main() {
+	key := unhex([]byte("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b"))
+	msg := []byte("Cryptographic Forum Research Group")
+	tag := []byte{:16}
+	poly1305.Sum(tag, msg, key)
+	if string(hex(tag)) != "a8061dc1305136c6c22b8baf0c0127a9" {
+		panic("poly1305 tag: " | string(hex(tag)))
+	}
+	if !poly1305.Verify(unhex([]byte("a8061dc1305136c6c22b8baf0c0127a9")), msg, key) {
+		panic("poly1305 Verify rejected the RFC tag")
+	}
+	if poly1305.Verify(unhex([]byte("a8061dc1305136c6c22b8baf0c0127a8")), msg, key) {
+		panic("poly1305 Verify accepted a wrong tag")
+	}
+
+	key2 := unhex([]byte("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"))
+	nonce := unhex([]byte("070000004041424344454647"))
+	aad := unhex([]byte("50515253c0c1c2c3c4c5c6c7"))
+	pt := []byte("Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.")
+	ctHex := []byte("d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116")
+	tagHex := []byte("1ae10b594f09e26a7e902ecbd0600691")
+	want := unhex(ctHex | tagHex)
+
+	aead, err := chacha20poly1305.New(key2)
+	if err != nil {
+		panic(err.Error())
+	}
+	got := aead.Seal(nil, nonce, pt, aad)
+	if string(hex(got)) != string(hex(want)) {
+		panic("aead mismatch: " | string(hex(got)))
+	}
+	back, oerr := aead.Open(nil, nonce, got, aad)
+	if oerr != nil || string(back) != string(pt) {
+		panic("aead Open failed")
+	}
+	bad := []byte{:len(got)}
+	copy(bad, got)
+	bad[len(bad)-1] ^= 1
+	if _, berr := aead.Open(nil, nonce, bad, aad); berr == nil {
+		panic("aead Open accepted a corrupted tag")
+	}
+	println("ok")
+}

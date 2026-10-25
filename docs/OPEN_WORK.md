@@ -16991,3 +16991,38 @@ Verified against frames from `zstd --check`:
     "invalid checksum: got 0x1bedee68 want 0xe4edee68" - the checksum is
     computed and compared, so the slice-backed digest state is exercised, not
     bypassed.
+
+## Round 215: poly1305's buffering scratch is a slice, and a zero MAC has no scratch
+
+`poly1305`'s byte API took pointers to fixed arrays (`Sum(out *[16]byte, ...)`,
+`New(key *[32]byte)`, `(*mac).Sum(out *[16]byte)`), and `macGeneric` buffered its
+message chunk in `buffer [TagSize]byte`. All of it is `[]byte` now, allocated by
+`newMACGeneric`.
+
+That last part is where the trap was. `New` built `&MAC{}` and called
+`initialize` on the state directly, never going through `newMACGeneric`, so the
+buffer field was a nil slice: every buffered chunk of the message was silently
+dropped. The tag came out stable, Seal and Open agreed with each other, and a
+flipped tag was still rejected - the only thing that could see it was the
+published vector:
+
+    RFC 8439 2.5.2   got df33cbbee5c281caf23e2a6065f8a2f4
+                     want a8061dc1305136c6c22b8baf0c0127a9
+
+This is flate's shape (round: `decompressor.buf` allocated only in `Reset`, so
+the constructors that build the struct field by field got a nil buffer): a
+buffer that stops being inline padding and becomes an allocated slice needs
+every constructor to allocate it, and the zero value stops being usable.
+
+`New` goes through `newMACGeneric` now. Verified:
+
+  * RFC 8439 2.5.2 poly1305 tag `a8061dc1305136c6c22b8baf0c0127a9`, Verify
+    accepting it and refusing the last byte changed.
+  * RFC 8439 2.8.2 AEAD_CHACHA20_POLY1305: the 114-byte ciphertext and the
+    16-byte tag byte-identical to the RFC (so chacha20, poly1305, the AAD
+    padding and the length framing are all in play), Open round-tripping, and a
+    frame with one tag byte flipped refused.
+
+`tests/regressions/should_compile/poly1305_aead` holds both vectors; with `New`
+reverted to the direct-initialize form it fails on the tag, which is exactly the
+bug the vectors exist to catch.
