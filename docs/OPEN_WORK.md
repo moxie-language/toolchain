@@ -16221,3 +16221,50 @@ that stays clean is /tmp/glz (lib/lib.mx + main.mx), the minimal probes are
 /tmp/nest (slice-of-slices range/compare, clean), /tmp/sovarena (slice-of-slices
 in a sovereign receiver over 40 appends, clean), /tmp/mapmiss (4000 missing
 lookups, clean) and /tmp/tolower (1616 extensions, clean).
+
+## Round 197: a shift compared against a wider operand ran at 32 bits, so stage4 mis-rounded every float
+
+Found while building a differential probe for the strconv conversion: stage4's
+`FormatFloat(1, 'e', 0, 64)` returned `2e+00`, and 0.1 with four decimals
+returned `2.0001e-01` - every last digit rounded up. Legacy compiled the same
+source and matched Go, so this was a stage4 miscompilation, not a source port
+bug.
+
+Bisecting the ryu path printed the exact expression:
+
+	dfrac = 0, extra = 62, d0 = true, di = 1, prec = 1
+	c2 := dfrac == 1<<(extra-1)      stage4: true      legacy: false
+	half (printed as int64)          2305843009213693952
+
+`0 == 1<<61` was true in stage4, because the shift ran at 32 bits and
+`1<<61` truncated to 0. The minimal form is two lines:
+
+	var zero uint64 = 0
+	var s uint32 = 62
+	zero == 1<<(s-1)        // stage4: true, Go and legacy: false
+
+`adoptSiblingType` (was: an inline width guard in buildBinaryOp) retyped an
+untyped shift to the sibling operand's type only when the two widths were
+EQUAL. Go's rule is that the untyped operand converts to the typed one's type,
+so a wider sibling must retype the shift - the emitter shifts at the
+instruction's declared width, and the declared width was 32. The guard now
+allows equal OR wider siblings and still refuses narrower ones, because stage4
+does not report an untyped constant that overflows the narrower context the way
+Go does, and narrowing would turn that diagnostic gap into a silently truncated
+shift.
+
+Verification:
+
+  * tests/regressions/should_compile/shift_compare_context.mx (new): uint64 and
+    int64 contexts, both operand orders, equal-width uint32 and byte contexts,
+    and the four FormatFloat cases that exposed it. Passes on stage4 and on
+    legacy.
+  * a 2744-case float-formatting differential (28 values x 5 formats x
+    precisions -1..17, plus 32-bit and bool forms) is byte-identical to Go
+    1.25.3 - it had 292 mismatched lines before the fix.
+  * the strconv differential probe (format, integer formatting, parsing and the
+    Append family, FNV-folded) now matches Go on all four accumulators; the
+    format and parse accumulators differed before.
+
+Legacy needs no mirror: it types shifts with go/types, which already applies the
+contextual conversion. This is stage4 catching up to the reference.

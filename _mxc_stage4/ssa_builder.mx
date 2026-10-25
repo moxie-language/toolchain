@@ -2636,6 +2636,34 @@ func (fb *ssaFuncBuilder) checkDefaultRepr(val SSAValue, what string) {
 	}
 }
 
+// adoptSiblingType gives an untyped shift its sibling operand's type when that
+// type is at least as wide.
+//
+// Equal widths keep the emitted codegen exactly as it was. A WIDER sibling is
+// Go's rule - the untyped operand converts to the typed one's type - and it is
+// the case a width-preserving guard got wrong, because the emitter shifts at
+// the instruction's declared width: `dfrac > 1<<(extra-1)` with dfrac uint64
+// compared a 64-bit value against a 32-bit shift, so 1<<61 became 0, every
+// exact ryu rounding decision came out "round up", and stage4 formatted
+// 1.0 as "2e+00" and 0.1 as "2.0001e-01" while legacy formatted them correctly
+// (strconv's ryuFtoaFixed64).
+//
+// A NARROWER sibling is still left alone: stage4 does not report an untyped
+// constant that overflows the narrower context the way Go does, and narrowing
+// the shift here would turn that diagnostic gap into a silently truncated
+// shift. Widening cannot lose a bit, so it is always safe to take.
+func adoptSiblingType(shift, sib SSAValue) {
+	bin, ok := shift.(*SSABinOp)
+	if !ok || bin == nil || !bin.untypedShift {
+		return
+	}
+	n := intTypeBits(sib.SSAType())
+	if n == 0 || n < intTypeBits(bin.SSAType()) {
+		return
+	}
+	retypeUntypedShift(bin, sib.SSAType())
+}
+
 // retypeUntypedShift gives a shift, and the shifts feeding it, the context type
 // T. A chain such as `1 << mantbits << expbits` takes one type from the
 // surrounding expression, so assigning the outer shift the context type is not
@@ -5335,19 +5363,9 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 	// Go types a shift whose left operand is an untyped constant by the type
 	// that operand would take in context, so the enclosing operation supplies
 	// the type, not the count: `1<<uint32(expbits) + int32(bias)` is int32, and
-	// only the sibling operand knows that (strconv's atofHex). The width guard
-	// keeps codegen unchanged - the shift already emits at that width, and a
-	// fully constant shift returned above.
-	if xs, ok := x.(*SSABinOp); ok && xs.untypedShift {
-		if n := intTypeBits(y.SSAType()); n > 0 && n == intTypeBits(xs.SSAType()) {
-			retypeUntypedShift(xs, y.SSAType())
-		}
-	}
-	if ys, ok := y.(*SSABinOp); ok && ys.untypedShift {
-		if n := intTypeBits(x.SSAType()); n > 0 && n == intTypeBits(ys.SSAType()) {
-			retypeUntypedShift(ys, x.SSAType())
-		}
-	}
+	// only the sibling operand knows that (strconv's atofHex).
+	adoptSiblingType(x, y)
+	adoptSiblingType(y, x)
 	b := &SSABinOp{Op: op, X: x, Y: y}
 	b.name = fb.nextName()
 	switch op {
