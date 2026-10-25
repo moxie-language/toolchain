@@ -127,7 +127,7 @@ type decoder struct {
 	bytes struct {
 		// buf[i:j] are the buffered bytes read from the underlying
 		// io.Reader that haven't yet been passed further on.
-		buf  [4096]byte
+		buf  []byte
 		i, j int32
 		// nUnreadable is the number of bytes to back up i after
 		// overshooting. It can be 0, 1 or 2.
@@ -176,8 +176,14 @@ func (d *decoder) fill() (out error) {
 		d.bytes.buf[1] = d.bytes.buf[d.bytes.j-1]
 		d.bytes.i, d.bytes.j = 2, 2
 	}
-	// Fill in the rest of the buffer.
-	n, err := d.r.Read(d.bytes.buf[d.bytes.j:])
+	// Fill in the rest of the buffer. The read has to go to a slice of its
+	// own: a subslice is a copy, so Read(d.bytes.buf[j:]) would fill a
+	// throwaway and the bytes would never arrive.
+	tmp := []byte{:len(d.bytes.buf) - d.bytes.j}
+	n, err := d.r.Read(tmp)
+	for k := int32(0); k < n; k++ {
+		d.bytes.buf[d.bytes.j+k] = tmp[k]
+	}
 	d.bytes.j += n
 	if n > 0 {
 		return nil
@@ -812,6 +818,7 @@ func (d *decoder) convertToRGB() (out image.Image, derr error) {
 // Decode reads a JPEG image from r and returns it as an [image.Image].
 func Decode(r io.Reader) (img image.Image, derr error) {
 	var d decoder
+	d.bytes.buf = []byte{:4096}
 	return d.decode(r, false)
 }
 
@@ -819,6 +826,7 @@ func Decode(r io.Reader) (img image.Image, derr error) {
 // decoding the entire image.
 func DecodeConfig(r io.Reader) (cfg image.Config, derr error) {
 	var d decoder
+	d.bytes.buf = []byte{:4096}
 	if _, err := d.decode(r, true); err != nil {
 		return image.Config{}, err
 	}

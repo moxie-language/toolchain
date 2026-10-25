@@ -16339,3 +16339,47 @@ and 70000 - which covers stored blocks, fixed and dynamic Huffman, the 32 KiB
 window and the empty stream - produces compressed output byte-identical to Go
 1.25.3 and round-trips every case to the original bytes. Before the two fixes the
 probe crashed; with only the first fix it panicked "index out of range".
+
+## Round 200: jpeg did not compile at all, and its quantization tables were read two bytes off
+
+Two findings, in the order they appeared:
+
+1. `image/jpeg` did not compile under stage4. `writeSOS` used the Go idiom
+   `switch m := m.(type)`, which re-declares the parameter `m`; Moxie forbids
+   shadowing, so the package had been uncompilable and therefore untested. The
+   type-switch variable is `mm` now. This is why nothing had noticed (2).
+
+2. With the package compiling, the encoder's output diverged from Go at the
+   chroma quantization table: 597 bytes long in both cases, the same up to the
+   end of the luma DQT, then moxie emitted `06 06 07 06 05 08` where Go emits
+   `09 09 09 0c 0b 0c`. Those are the *luma* table's values scaled, starting one
+   entry in - i.e. `e.quant[1]` addressed the wrong storage. `quant` was
+   `[nQuantIndex][blockSize]byte` and `_unscaledQuant()` returned the same
+   nested array type: array-of-array element addressing, the shape that broke
+   P-224's tables (round 190). Converting both to `[][]byte` (and writing
+   `e.quant[i]` rather than `e.quant[i][:]`) fixed it: the JPEG bytes are now
+   identical to Go 1.25.3 for three synthetic images at 1x1, 8x6, 17x9 and 33x32.
+
+Also converted: `_bitCount() [256]byte` and `encoder.bitCount`, `huffmanSpec.count
+[16]byte` and the four `[16]byte` table literals in `_theHuffmanSpec()` (now
+`[]byte`), `encoder.buf [16]byte`, and the decoder's `bytes.buf [4096]byte`.
+
+The decoder's buffer needed the read-copy rule the flate round hit:
+`d.r.Read(d.bytes.buf[d.bytes.j:])` fills a copy, so `fill` reads into a temporary
+of `len(buf)-j` and copies the bytes in by index; both Decode and DecodeConfig
+allocate the buffer.
+
+Still arrays in this package, and one open difference:
+
+  * `type block [blockSize]int32`, the decoder's `quant [maxTq+1]block`, the
+    huffmanDecoder fields (`vals [maxNCodes]uint8`, `minCodes`/`maxCodes`/
+    `valsIndices` `[maxCodeLength]int32`), `dc [maxComponents]int32` and
+    `_unzig() [blockSize]int32`. These need `block` to become a slice, which
+    changes the dct/idct/scan signatures - its own change.
+  * Decoded pixels differ from Go's decoder by 1..5 per channel on the same
+    input bytes (moxie decodes low). The encoder is byte-identical, so this is
+    the IDCT/dequantize rounding in the port, not the stream. It cannot be
+    attributed with the legacy compiler as the oracle: `legacy/moxie` rejects
+    `image/format.mx:37` with "format does not satisfy comparable", an unrelated
+    pre-existing legacy-only error, so image/jpeg cannot be built by legacy at
+    all. Recorded rather than papered over.
