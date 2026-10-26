@@ -754,6 +754,41 @@ Constraints:
   used for the bootstrap sees it rewritten as `//go:linkdata`, exactly like
   `//:linkname`.
 
+### `//:linkname` names a location, `//:embed` carries the data
+
+`//:linkname <local> <symbol>` binds a declaration to a symbol that already
+exists at link time: the address of a function the runtime exports, or the
+address of a variable another object defines. It names a **memory location**,
+and that is all it can do - it carries no length, no capacity and no ownership.
+A blob brought in through a linkname is an address whose size the program does
+not know, so it must not be used to import binary data.
+
+Raw data belongs to `//:embed`, which copies the file's bytes into the
+compiler's output and generates the length itself:
+
+```moxie
+//:embed data/C_r16.bin
+var _C_r16 []uint16
+```
+
+`//moxie:embed_le <path>` does the same for a typed table, taking the element
+size from the declaration (`[]uint16`, `[]uint32`, `[]int32`, `[]int64`, and the
+unicode table structs `[]Range16`, `[]Range32`, `[]CaseRange`, `[]foldPair`) and
+dividing the file size by it for the element count. The result is a normal
+slice whose storage is part of the module, with `len` and `cap` derived from the
+file - no external producer, no capacity sentinel, no struct layout to agree on.
+
+Byte order: embed copies bytes verbatim and never swaps them. `_le` names the
+file's order, so the file must match the target's; every current target
+(amd64, arm64, 386, wasm) is little-endian, and a big-endian input would need a
+conversion pass first - there is no `_be` variant.
+
+`//:embed` is understood by both compilers (the bootstrap loader rewrites it to
+`//go:embed`). `//moxie:embed_le` is implemented in stage4 only: the loader
+rewrites `//:` pragmas, not `//moxie:` ones, so a legacy build of a package
+using it sees a zero-valued global. Recorded as a bilateral gap in
+`docs/OPEN_WORK.md`.
+
 ### Short Variable Declarations
 
 ```moxie
