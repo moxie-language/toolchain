@@ -227,8 +227,10 @@ combined := sliceA | sliceB
 
 The `...` token is valid in variadic parameter declarations
 (`func f(args ...T)`) and in variadic call sites (`f(slice...)`).
-`append` does not exist - use `push(s, v...)` for element insertion and
-`a | b` for slice concatenation.
+`append` does not exist in any spelling - use `push(s, v...)` for element
+insertion and `a | b` for slice concatenation. The name is not predeclared and
+the compiler carries no append code path: the internal alias it once lowered to
+(`__moxie_append`) is gone, so neither name resolves.
 
 ### Integer Literals
 
@@ -1242,9 +1244,11 @@ cleanup:
 
 ### push/pop/resize vs append
 
-`append` is a **compile error** in Moxie. It was removed because its semantics
-conflate two operations - allocation and element insertion - into one call with
-unpredictable behavior:
+`append` is **undefined** in Moxie - the name is not predeclared, and the
+compiler has no append lowering left: the internal `__moxie_append` alias it
+used to keep is gone, so a source file cannot reach append semantics under any
+spelling. It was removed because it conflates two operations - allocation and
+element insertion - into one call with unpredictable behavior:
 
 - `append` sometimes returns the same backing array, sometimes a new one.
   The caller cannot know which without comparing pointers.
@@ -1254,18 +1258,22 @@ unpredictable behavior:
 - `append` hides capacity decisions from the programmer. Growth strategy is
   runtime-internal; the programmer never declares intent about expected size.
 
-`push` resolves this by separating concerns:
+`push` separates the two:
 
-- **Allocation** is explicit: declare capacity with `[]T{:0:cap}`. If you push
-  to a nil slice, it lazy-inits with a reasonable capacity (min 32). But once
-  a slice has a capacity, exceeding it is a panic - the programmer must know
-  the bounds.
-- **Insertion** is `push(s, v1, v2, ...)` - stores elements into existing
-  capacity. The compiler emits the store-back to `s` implicitly (like `i++`
-  modifies `i`).
-- **No hidden reallocation.** Push never silently copies the backing array.
-  If you hit the cap, you miscalculated - fix the allocation site, don't hide
-  the error behind growth.
+- **Allocation** is explicit: declare capacity with `[]T{:0:cap}`. A push from
+  a zero-capacity slice lazy-inits it to the first push batch (floor 4) in one
+  allocation.
+- **Insertion** is `push(s, v1, v2, ...)` - stores elements into the capacity
+  that is there. The compiler emits the store-back to `s` implicitly (like
+  `i++` modifies `i`).
+- **Overflow grows, and growth is charged to the arena.** Pushing past the
+  capacity doubles it and copies the elements, so a push loop into a slice
+  never presized enters the growth regime; every abandoned backing stays live
+  in the arena that allocated it until that arena is released. In a sovereign
+  receiver's arena that is permanent. This is why the tree's growth happens
+  inside free functions (their frame arena dies at return) and why
+  `mxutil.Ensure`/`Reserve`/`GrowCap` exist: presize when the size is knowable,
+  and let the one place that must grow be a function whose garbage dies early.
 
 `pop` and `resize` complete the set: `pop` is the inverse of a single-element
 push, and `resize` gives direct control over length without touching capacity.

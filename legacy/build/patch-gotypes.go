@@ -437,11 +437,12 @@ func patchMoxieSliceBuiltins(dir string) {
 		"\t_New:     {\"new\", 1, false, expression},",
 		"\t_New:     {\"__ptralloc\", 1, false, expression},")
 
-	// append is not predeclared for users: the compiler's own packages use
-	// the internal __moxie_append name, which retains append semantics.
+	// append is removed outright: no spelling of it resolves, and there is no
+	// internal alias left for the compiler to lower. push/pop/resize are the
+	// slice mutators.
 	src = mustReplace(f, src,
 		"\t_Append:  {\"append\", 1, true, expression},\n",
-		"\t_Append:  {\"__moxie_append\", 1, true, expression},\n")
+		"")
 
 	// complex numbers are removed from Moxie: the complex/real/imag builtins
 	// resolve as undefined.
@@ -457,14 +458,14 @@ func patchMoxieSliceBuiltins(dir string) {
 
 	mustWrite(f, src)
 
-	// Patch builtins.go: allow ... on push (like append) and add
-	// type-checking handlers for push/pop/resize.
+	// Patch builtins.go: allow ... on push and add type-checking handlers for
+	// push/pop/resize.
 	f = filepath.Join(dir, "builtins.go")
 	src = mustRead(f)
 
 	src = mustReplace(f, src,
 		"\t// append is the only built-in that permits the use of ... for the last argument\n\tbin := predeclaredFuncs[id]\n\tif hasDots(call) && id != _Append {",
-		"\t// append and push are the only built-ins that permit the use of ... for the last argument\n\tbin := predeclaredFuncs[id]\n\tif hasDots(call) && id != _Append && id != _Push {")
+		"\t// push is the only built-in that permits the use of ... for the last argument\n\tbin := predeclaredFuncs[id]\n\tif hasDots(call) && id != _Push {")
 
 	src = mustReplace(f, src,
 		"\tcase _Recover:\n\t\t// recover() interface{}\n\t\tx.mode = value\n\t\tx.typ = &emptyInterface\n\t\tif check.recordTypes() {\n\t\t\tcheck.recordBuiltinType(call.Fun, makeSig(x.typ))\n\t\t}\n\n\tcase _Spawn:",

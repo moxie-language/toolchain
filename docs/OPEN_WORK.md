@@ -17608,3 +17608,61 @@ returned tables (round 224: they need `//:embed` data or an `init`-filled
 global, the pattern sha3's round constants and GCM's reduction table now use),
 and the polynomial matrices in mlkem/nistec/edwards25519, which are value
 vectors inside the key structures.
+
+## Round 228: append is gone in every spelling, and what the removal exposed
+
+    legacy/build/patch-gotypes.go   _Append entry deleted, not renamed
+    legacy/compiler/compiler.go     case "push", "__moxie_append" -> case "push"
+    pkg/types/tc_object.mx          BuiltinAppend removed from the id list
+    pkg/types/tc_universe.mx        "__moxie_append" removed from builtinNames
+    _mxc_stage4/ssa_types.mx        ssaBuiltinID case removed
+    _mxc_stage4/ssa_builder.mx      buildBuiltinCall case removed
+
+`append` already read as `undefined: append` in both compilers, because the
+patched go/types universe had its `_Append` entry *renamed* to
+`__moxie_append` rather than deleted, and stage4's universe registered the
+same internal name. The rename left a hole that was wider than the user-facing
+ban: a source file could write `__moxie_append(xs, 1)`.
+
+Stage4 compiled that and only failed at the link, because the SSA builder
+lowered `BuiltinAppend` to an `SSACall` whose IR emitter has no `append` arm -
+the call fell through to a generic call to a symbol that does not exist:
+
+    _ = __moxie_append(xs, 1)
+    >>> referenced by runtime.ll
+    >>>  ./tmp/mxc-build-849233/runtime.bc.o:(runtime.run)
+    mxc: linker failed
+
+Legacy had the matching hole with working codegen: `__moxie_append` was a
+mention in the same `case` as `push`, so it compiled and ran with full append
+semantics. Two compilers, one name, two different failure modes - the
+bilateral invariant applied to a builtin that was supposed to be gone.
+
+Both entries are deleted now, so the name is undefined in both compilers and
+there is no append lowering left to reach. `tests/restrictions/` pins it from
+both sides: `reject_append_builtin.mx` for the user-facing name,
+`reject_internal_append.mx` for the internal one.
+
+Two documentation claims fell over while writing the reference section:
+
+  * **push grows.** `slicePush` doubles capacity on overflow (measured: push
+    into `[]byte{:0:2}` twice gives len 2, then a third push gives len 3
+    cap 4); it only refuses fixed-length storage (`cap == -1`). The reference
+    said overflow was a panic and the lazy-init floor was 32; the runtime
+    uses 4. Both corrected in `docs/REFERENCE.md`.
+  * **A sub-slice is documented as a copy and implemented as a view.**
+    Measured against the current compiler:
+
+        x := []byte{:0:8}; x = push(x, 'A', 'B')
+        y := x[:0]              // len 0, cap 8
+        y = push(y, 'Z')        // x is now "ZB" - the write landed in x
+
+    `emitSliceOp` even says so ("View: sub-slice aliases the parent"). The
+    write-through-subslice restrictions only cover `xs[a:b] = v` and
+    `copy(xs[a:b], src)`, so `push` into a sub-slice is the remaining way to
+    reach the parent's storage. The fix is the next round: an empty sub-slice
+    must be a header that refers to nothing, and prefix trims used as cursors
+    have to become reader/writer walks (`src/bytes/buffer.mx` and
+    `src/bytes/reader.mx` are the model - an offset field over the whole
+    buffer), because `x = x[n:]` in a loop copies the whole remainder per
+    step once the copy rule is enforced.

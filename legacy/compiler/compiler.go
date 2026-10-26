@@ -2222,12 +2222,10 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 			result = b.CreateSelect(cmp, result, arg, "")
 		}
 		return result, nil
-	case "push", "__moxie_append":
+	case "push":
 		// then individual element stores via GEP. Elements are passed
 		// individually; push(s, e...) with a spread slice is recognized
-		// as a bulk copy of e's elements. __moxie_append is the internal
-		// name the patched go/types gives append (user-facing append is
-		// undefined in Moxie); it has identical append semantics.
+		// as a bulk copy of e's elements.
 		src := argValues[0]
 		var elemType llvm.Type
 		switch ut := argTypes[0].Underlying().(type) {
