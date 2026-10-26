@@ -89,8 +89,8 @@ const (
 // unzig maps from the zig-zag ordering to the natural ordering. For example,
 // unzig[3] is the column and row of the fourth element in zig-zag order. The
 // value is 16, which means first column (16%8 == 0) and third row (16/8 == 2).
-func _unzig() (out [blockSize]int32) {
-	return [blockSize]int32{
+func _unzig() (out []int32) {
+	return []int32{
 		0, 1, 8, 16, 9, 2, 3, 10,
 		17, 24, 32, 25, 18, 11, 4, 5,
 		12, 19, 26, 33, 40, 48, 41, 34,
@@ -100,6 +100,13 @@ func _unzig() (out [blockSize]int32) {
 		58, 59, 52, 45, 38, 31, 39, 46,
 		53, 60, 61, 54, 47, 55, 62, 63,
 	}
+}
+
+// channelTranslation is one decoded channel and its stride, used to interleave
+// a CMYK image's four planes.
+type channelTranslation struct {
+	src    []byte
+	stride int32
 }
 
 // Deprecated: Reader is not used by the [image/jpeg] package and should
@@ -156,11 +163,36 @@ type decoder struct {
 	adobeTransform      uint8
 	eobRun              uint16 // End-of-Band run, specified in section G.1.2.2.
 
-	comp       [maxComponents]component
-	progCoeffs [maxComponents][]block // Saved state between progressive-mode scans.
-	huff       [maxTc + 1][maxTh + 1]huffman
-	quant      [maxTq + 1]block // Quantization tables, in zig-zag order.
-	tmp        [2 * blockSize]byte
+	comp       []component
+	progCoeffs [][]block // Saved state between progressive-mode scans.
+	huff       [][]huffman
+	quant      []block // Quantization tables, in zig-zag order.
+	tmp        []byte
+}
+
+// newDecoder allocates a decoder and its fixed-size tables. Every buffer the
+// decode path writes is allocated here, in the caller's frame, so the return
+// relocation carries it: a buffer allocated lazily inside a mutating method
+// would land in the decoder's sovereign arena and stay there.
+func newDecoder() (out *decoder) {
+	d := &decoder{
+		comp:       []component{:maxComponents},
+		progCoeffs: [][]block{:maxComponents},
+		huff:       [][]huffman{:maxTc + 1},
+		quant:      []block{:maxTq + 1},
+		tmp:        []byte{:2 * blockSize},
+	}
+	d.bytes.buf = []byte{:4096}
+	for tc := int32(0); tc <= maxTc; tc++ {
+		d.huff[tc] = []huffman{:maxTh + 1}
+		for th := int32(0); th <= maxTh; th++ {
+			d.huff[tc][th] = *newHuffman()
+		}
+	}
+	for tq := int32(0); tq <= maxTq; tq++ {
+		d.quant[tq] = newBlock()
+	}
+	return d
 }
 
 // fill fills up the d.bytes.buf buffer from the underlying io.Reader. It
@@ -751,10 +783,7 @@ func (d *decoder) applyBlack() (out image.Image, derr error) {
 	bounds := d.img3.Bounds()
 	img := image.NewCMYK(bounds)
 
-	translations := [4]struct {
-		src    []byte
-		stride int32
-	}{
+	translations := []channelTranslation{
 		{d.img3.Y, d.img3.YStride},
 		{d.img3.Cb, d.img3.CStride},
 		{d.img3.Cr, d.img3.CStride},
@@ -811,16 +840,14 @@ func (d *decoder) convertToRGB() (out image.Image, derr error) {
 
 // Decode reads a JPEG image from r and returns it as an [image.Image].
 func Decode(r io.Reader) (img image.Image, derr error) {
-	var d decoder
-	d.bytes.buf = []byte{:4096}
+	d := newDecoder()
 	return d.decode(r, false)
 }
 
 // DecodeConfig returns the color model and dimensions of a JPEG image without
 // decoding the entire image.
 func DecodeConfig(r io.Reader) (cfg image.Config, derr error) {
-	var d decoder
-	d.bytes.buf = []byte{:4096}
+	d := newDecoder()
 	if _, err := d.decode(r, true); err != nil {
 		return image.Config{}, err
 	}

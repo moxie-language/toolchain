@@ -17142,3 +17142,61 @@ Verified:
     decode (12 images, per-plane and RGBA), png encode and decode (12 images),
     gif encode and decode (4 paletted images).
   * The bootstrap reached its fixpoint (s4b == s4c) with the change in.
+
+## Round 218: jpeg's coefficient blocks and huffman tables are slices, and two traps that found
+
+The last arrays in `image/jpeg`:
+
+    type block [blockSize]int32            -> type block []int32 (+ newBlock)
+    decoder.quant      [maxTq+1]block      -> []block, built by newDecoder
+    decoder.progCoeffs [maxComponents][]block -> [][]block
+    decoder.comp       [maxComponents]component, decoder.tmp [2*blockSize]byte
+    huffman.lut/vals/minCodes/maxCodes/valsIndices -> slices, built by newHuffman
+    encoder.huffLUT    [4][]uint32         -> [][]uint32
+    applyBlack's       [4]struct{src,stride} -> []channelTranslation
+
+`block` becoming a slice is what turns the fixed tables into constructor work:
+the huffman tables and the quantization tables are now allocated by
+`newDecoder` (which `Decode` and `DecodeConfig` call), so the return relocation
+carries them in one move instead of a mutating method allocating them lazily
+into the decoder's sovereign arena.
+
+Two traps, both only reachable once `block` was no longer an array:
+
+1. `qt := &d.quant[d.comp[compIndex].tq]` was a pointer to a *block array* in
+   Go, where `qt[zig]` indexes its elements. With `block` a slice it is a
+   pointer to a *slice header*, and `qt[zig]` indexes the header.
+   **stage4 accepted it** and emitted `mul i32 %value, %slice` - clang rejected
+   the module with `'%t35' defined with type '{ ptr, i64, i64 }' but expected
+   'i32'`. Go itself rejects `p[i]` for `p *[]T` ("cannot index p"), so this is
+   a stage4 typechecker gap as well as a source fix: `qt` is the table value
+   now. Recorded as open work below.
+
+2. `progCoeffs[sComp] = []block{:n}` was a single allocation in Go, because an
+   array of arrays carries its storage inline. A slice of blocks is n empty
+   slice headers, so the progressive path panicked with "index out of range" on
+   the first coefficient write (`b[0] = dc[sComp] << al` with `len(b) == 0`).
+   `newProgCoeffs` allocates in a free function - one block per set and the
+   whole graph returned in one move - and the same shape applies to every
+   "array of arrays" that becomes a "slice of slices": the storage has to be
+   allocated per element.
+
+Verified against Go 1.25.3 on a corpus that the encoder differential cannot
+reach, because Go's encoder writes baseline YCbCr only:
+
+    cmyk.jpg  37x29 four-component with Adobe APP14  -> *image.CMYK, identical
+    gray.jpg  23x17 grayscale                        -> *image.Gray, identical
+    prog.jpg  37x29 progressive 4:2:0                -> *image.YCbCr, identical
+    sub422    31x21 4:2:2                            -> identical
+    sub444    31x21 4:4:4                            -> identical
+
+So the progressive refine/reconstruct path and the CMYK four-plane interleave
+have a reference for the first time. The 12-image encode+decode differential
+and the per-plane Y/Cb/Cr differential are unchanged (0 differing lines), and
+`tests/regressions/should_compile/jpeg_progressive_cmyk.mx` embeds the
+progressive and CMYK files with Go's expected pixels so the gate keeps both
+paths covered.
+
+Open from this round: stage4 accepts an index on a pointer-to-slice
+(`p[i]` for `p *[]T`), which Go rejects; it emits an index into the slice
+header. It should be rejected in both compilers.

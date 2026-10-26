@@ -206,8 +206,8 @@ func initHuffmanLUT(s huffmanSpec) (out []uint32) {
 	return h
 }
 
-func _initHuffmanLUT() (out [4][]uint32) {
-	var lut [4][]uint32
+func _initHuffmanLUT() (out [][]uint32) {
+	lut := [][]uint32{:len(_theHuffmanSpec())}
 	specs := _theHuffmanSpec()
 	for i, s := range specs {
 		lut[i] = initHuffmanLUT(s)
@@ -234,7 +234,7 @@ type encoder struct {
 	bits, nBits uint32
 	// quant is the scaled quantization tables, in zig-zag order.
 	quant    [][]byte
-	huffLUT  [4][]uint32
+	huffLUT  [][]uint32
 	bitCount []byte
 }
 
@@ -374,7 +374,7 @@ func (e *encoder) writeDHT(nComponent int32) {
 // writeBlock writes a block of pixel data using the given quantization table,
 // returning the post-quantized DC value of the DCT-transformed block. b is in
 // natural (not zig-zag) order.
-func (e *encoder) writeBlock(b *block, q quantIndex, prevDC int32) (out int32) {
+func (e *encoder) writeBlock(b block, q quantIndex, prevDC int32) (out int32) {
 	unzig := _unzig()
 	fdct(b)
 	// Emit the DC delta.
@@ -403,7 +403,7 @@ func (e *encoder) writeBlock(b *block, q quantIndex, prevDC int32) (out int32) {
 
 // toYCbCr converts the 8x8 region of m whose top-left corner is p to its
 // YCbCr values.
-func toYCbCr(m image.Image, p image.Point, yBlock, cbBlock, crBlock *block) {
+func toYCbCr(m image.Image, p image.Point, yBlock, cbBlock, crBlock block) {
 	b := m.Bounds()
 	xmax := b.Max.X - 1
 	ymax := b.Max.Y - 1
@@ -419,7 +419,7 @@ func toYCbCr(m image.Image, p image.Point, yBlock, cbBlock, crBlock *block) {
 }
 
 // grayToY stores the 8x8 region of m whose top-left corner is p in yBlock.
-func grayToY(m *image.Gray, p image.Point, yBlock *block) {
+func grayToY(m *image.Gray, p image.Point, yBlock block) {
 	b := m.Bounds()
 	xmax := b.Max.X - 1
 	ymax := b.Max.Y - 1
@@ -433,7 +433,7 @@ func grayToY(m *image.Gray, p image.Point, yBlock *block) {
 }
 
 // rgbaToYCbCr is a specialized version of toYCbCr for image.RGBA images.
-func rgbaToYCbCr(m *image.RGBA, p image.Point, yBlock, cbBlock, crBlock *block) {
+func rgbaToYCbCr(m *image.RGBA, p image.Point, yBlock, cbBlock, crBlock block) {
 	b := m.Bounds()
 	xmax := b.Max.X - 1
 	ymax := b.Max.Y - 1
@@ -458,7 +458,7 @@ func rgbaToYCbCr(m *image.RGBA, p image.Point, yBlock, cbBlock, crBlock *block) 
 }
 
 // yCbCrToYCbCr is a specialized version of toYCbCr for image.YCbCr images.
-func yCbCrToYCbCr(m *image.YCbCr, p image.Point, yBlock, cbBlock, crBlock *block) {
+func yCbCrToYCbCr(m *image.YCbCr, p image.Point, yBlock, cbBlock, crBlock block) {
 	b := m.Bounds()
 	xmax := b.Max.X - 1
 	ymax := b.Max.Y - 1
@@ -483,7 +483,7 @@ func yCbCrToYCbCr(m *image.YCbCr, p image.Point, yBlock, cbBlock, crBlock *block
 
 // scale scales the 16x16 region represented by the 4 src blocks to the 8x8
 // dst block.
-func scale(dst *block, src *[4]block) {
+func scale(dst block, src []block) {
 	for i := 0; i < 4; i++ {
 		dstOff := (i&2)<<4 | (i&1)<<2
 		for y := 0; y < 4; y++ {
@@ -527,11 +527,15 @@ func (e *encoder) writeSOS(m image.Image) {
 	var (
 		// Scratch buffers to hold the YCbCr values.
 		// The blocks are in natural (not zig-zag) order.
-		b      block
-		cb, cr [4]block
+		b  block
+		cb []block
+		cr []block
 		// DC components are delta-encoded.
 		prevDCY, prevDCCb, prevDCCr int32
 	)
+	b = newBlock()
+	cb = []block{newBlock(), newBlock(), newBlock(), newBlock()}
+	cr = []block{newBlock(), newBlock(), newBlock(), newBlock()}
 	bounds := m.Bounds()
 	// The switch variable is mm, not m: a re-declared m would shadow the
 	// parameter, which Moxie rejects.
@@ -541,8 +545,8 @@ func (e *encoder) writeSOS(m image.Image) {
 		for y := bounds.Min.Y; y < bounds.Max.Y; y += 8 {
 			for x := bounds.Min.X; x < bounds.Max.X; x += 8 {
 				p := image.Pt(x, y)
-				grayToY(mm, p, &b)
-				prevDCY = e.writeBlock(&b, 0, prevDCY)
+				grayToY(mm, p, b)
+				prevDCY = e.writeBlock(b, 0, prevDCY)
 			}
 		}
 	default:
@@ -561,18 +565,18 @@ func (e *encoder) writeSOS(m image.Image) {
 					yOff := (i & 2) * 4
 					p := image.Pt(x+xOff, y+yOff)
 					if rgba != nil {
-						rgbaToYCbCr(rgba, p, &b, &cb[i], &cr[i])
+						rgbaToYCbCr(rgba, p, b, cb[i], cr[i])
 					} else if ycbcr != nil {
-						yCbCrToYCbCr(ycbcr, p, &b, &cb[i], &cr[i])
+						yCbCrToYCbCr(ycbcr, p, b, cb[i], cr[i])
 					} else {
-						toYCbCr(mm, p, &b, &cb[i], &cr[i])
+						toYCbCr(mm, p, b, cb[i], cr[i])
 					}
-					prevDCY = e.writeBlock(&b, 0, prevDCY)
+					prevDCY = e.writeBlock(b, 0, prevDCY)
 				}
-				scale(&b, &cb)
-				prevDCCb = e.writeBlock(&b, 1, prevDCCb)
-				scale(&b, &cr)
-				prevDCCr = e.writeBlock(&b, 1, prevDCCr)
+				scale(b, cb)
+				prevDCCb = e.writeBlock(b, 1, prevDCCb)
+				scale(b, cr)
+				prevDCCr = e.writeBlock(b, 1, prevDCCr)
 			}
 		}
 	}

@@ -8,6 +8,27 @@ import (
 	"image"
 )
 
+// newProgCoeffs allocates the coefficient storage a progressive scan keeps
+// between passes: one block per 8x8 coefficient set, all in the function's own
+// frame so the caller takes the whole graph in a single move. A block is a
+// slice, so a slice of blocks needs each block allocated - Go's array-of-arrays
+// carried the storage inline.
+func newProgCoeffs(n int32) (out []block) {
+	out = []block{:n}
+	for k := int32(0); k < n; k++ {
+		out[k] = newBlock()
+	}
+	return out
+}
+
+// scanComponent is one component's entry in a start-of-scan header: which
+// component it is and which DC and AC Huffman tables it uses.
+type scanComponent struct {
+	compIndex uint8
+	td        uint8 // DC table selector.
+	ta        uint8 // AC table selector.
+}
+
 // makeImg allocates and initializes the destination image.
 func (d *decoder) makeImg(mxx, myy int32) {
 	if d.nComp == 1 {
@@ -83,11 +104,7 @@ func (d *decoder) processSOS(n int32) (out error) {
 	if n != 4+2*nComp {
 		return newFormatError("SOS length inconsistent with number of components")
 	}
-	var scan [maxComponents]struct {
-		compIndex uint8
-		td        uint8 // DC table selector.
-		ta        uint8 // AC table selector.
-	}
+	scan := []scanComponent{:maxComponents}
 	totalHV := 0
 	for i := 0; i < nComp; i++ {
 		cs = d.tmp[1+2*i] // Component selector.
@@ -174,7 +191,7 @@ func (d *decoder) processSOS(n int32) (out error) {
 		for i := 0; i < nComp; i++ {
 			sComp = scan[i].compIndex
 			if d.progCoeffs[sComp] == nil {
-				d.progCoeffs[sComp] = []block{:mxx*myy*d.comp[sComp].h*d.comp[sComp].v}
+				d.progCoeffs[sComp] = newProgCoeffs(mxx * myy * d.comp[sComp].h * d.comp[sComp].v)
 			}
 		}
 	}
@@ -182,14 +199,19 @@ func (d *decoder) processSOS(n int32) (out error) {
 	d.bits = bits{}
 	mcu, expectedRST := 0, uint8(rst0Marker)
 	var (
-		// b is the decoded coefficients, in natural (not zig-zag) order.
+		// b is the decoded coefficients, in natural (not zig-zag) order. It is
+		// allocated once for the scan and cleared per block, except in a
+		// progressive scan where it aliases the stored coefficients so that
+		// refine can update them in place.
 		b  block
-		dc [maxComponents]int32
+		dc []int32
 		// bx and by are the location of the current block, in units of 8x8
 		// blocks: the third block in the first row has (bx, by) = (2, 0).
 		bx, by     int32
 		blockCount int32
 	)
+	b = newBlock()
+	dc = []int32{:maxComponents}
 	for my := 0; my < myy; my++ {
 		for mx := 0; mx < mxx; mx++ {
 			for i := 0; i < nComp; i++ {
@@ -239,11 +261,11 @@ func (d *decoder) processSOS(n int32) (out error) {
 					if d.progressive {
 						b = d.progCoeffs[sComp][by*mxx*hi+bx]
 					} else {
-						b = block{}
+						clear(b)
 					}
 
 					if ah != 0 {
-						if err = d.refine(&b, &d.huff[acTable][scan[i].ta], zigStart, zigEnd, 1<<al); err != nil {
+						if err = d.refine(b, &d.huff[acTable][scan[i].ta], zigStart, zigEnd, 1<<al); err != nil {
 							return err
 						}
 					} else {
@@ -319,7 +341,7 @@ func (d *decoder) processSOS(n int32) (out error) {
 						// SOS markers are processed.
 						continue
 					}
-					if err = d.reconstructBlock(&b, bx, by, int32(sComp)); err != nil {
+					if err = d.reconstructBlock(b, bx, by, int32(sComp)); err != nil {
 						return err
 					}
 				} // for j
@@ -343,7 +365,7 @@ func (d *decoder) processSOS(n int32) (out error) {
 				// Reset the Huffman decoder.
 				d.bits = bits{}
 				// Reset the DC components, as per section F.2.1.3.1.
-				dc = [maxComponents]int32{}
+				clear(dc)
 				// Reset the progressive decoder state, as per section G.1.2.2.
 				d.eobRun = 0
 			}
@@ -355,7 +377,7 @@ func (d *decoder) processSOS(n int32) (out error) {
 
 // refine decodes a successive approximation refinement block, as specified in
 // section G.1.2.
-func (d *decoder) refine(b *block, h *huffman, zigStart, zigEnd, delta int32) (out error) {
+func (d *decoder) refine(b block, h *huffman, zigStart, zigEnd, delta int32) (out error) {
 	unzig := _unzig()
 	// Loop scratch is declared once, outside the loop: a declaration in a loop
 	// in a self-mutating method is rejected, and the scratch would otherwise be
@@ -444,7 +466,7 @@ func (d *decoder) refine(b *block, h *huffman, zigStart, zigEnd, delta int32) (o
 
 // refineNonZeroes refines non-zero entries of b in zig-zag order. If nz >= 0,
 // the first nz zero entries are skipped over.
-func (d *decoder) refineNonZeroes(b *block, zig, zigEnd, nz, delta int32) (out int32, derr error) {
+func (d *decoder) refineNonZeroes(b block, zig, zigEnd, nz, delta int32) (out int32, derr error) {
 	unzig := _unzig()
 	for ; zig <= zigEnd; zig++ {
 		u := unzig[zig]
@@ -485,7 +507,7 @@ func (d *decoder) reconstructProgressiveImage() (out error) {
 		stride := mxx * d.comp[i].h
 		for by := 0; by*v < d.height; by++ {
 			for bx := 0; bx*h < d.width; bx++ {
-				if err := d.reconstructBlock(&d.progCoeffs[i][by*stride+bx], bx, by, i); err != nil {
+				if err := d.reconstructBlock(d.progCoeffs[i][by*stride+bx], bx, by, i); err != nil {
 					return err
 				}
 			}
@@ -496,9 +518,12 @@ func (d *decoder) reconstructProgressiveImage() (out error) {
 
 // reconstructBlock dequantizes, performs the inverse DCT and stores the block
 // to the image.
-func (d *decoder) reconstructBlock(b *block, bx, by, compIndex int32) (out error) {
+func (d *decoder) reconstructBlock(b block, bx, by, compIndex int32) (out error) {
 	unzig := _unzig()
-	qt := &d.quant[d.comp[compIndex].tq]
+	// qt is the quantization table itself, not a pointer to it: a slice header
+	// copied from d.quant aliases the table, and a *block would make qt[zig] an
+	// index into a slice header rather than into its elements.
+	qt := d.quant[d.comp[compIndex].tq]
 	for zig := 0; zig < blockSize; zig++ {
 		b[unzig[zig]] *= qt[zig]
 	}

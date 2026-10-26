@@ -1,0 +1,115 @@
+// The progressive and CMYK decode paths, which no other fixture reaches: the
+// encoder only writes baseline YCbCr, and Go's encoder refuses CMYK input, so
+// both were unexercised until a JPEG corpus was decoded against Go 1.25.3.
+//
+// The progressive path is the one that exercises saved coefficient blocks:
+// `progCoeffs` keeps every block between scans, refine() mutates the stored
+// block in place, and reconstructProgressiveImage() runs the inverse DCT over
+// all of them at the end. With `block` converted from an array to a slice it
+// also exercises the allocation shape - a slice of blocks starts out as n
+// empty headers, not as n blocks of storage, so newProgCoeffs has to allocate
+// each one. Before that it panicked with "index out of range" on the first
+// coefficient write.
+//
+// The CMYK path exercises the four-plane interleave in applyBlack: the
+// channel table there was an array of {slice, stride} pairs.
+//
+// The expected pixels are Go 1.25.3's output for the same bytes.
+package main
+
+import (
+	"bytes"
+	"image"
+	"image/jpeg"
+	"os"
+)
+
+// unhex decodes a hex string. The JPEG inputs are embedded rather than read
+// from disk so the fixture carries its own corpus.
+func unhex(s string) (out []byte) {
+	out = []byte{:len(s) / 2}
+	var hi, lo byte
+	for i := 0; i < len(out); i++ {
+		hi = s[2*i]
+		lo = s[2*i+1]
+		if hi >= 'a' {
+			hi = hi - 'a' + 10
+		} else {
+			hi = hi - '0'
+		}
+		if lo >= 'a' {
+			lo = lo - 'a' + 10
+		} else {
+			lo = lo - '0'
+		}
+		out[i] = hi<<4 | lo
+	}
+	return out
+}
+
+func check(name string, got, want uint32) {
+	if got != want {
+		println("FAIL: " | name | ": got ", int32(got), " want ", int32(want))
+		os.Exit(1)
+	}
+}
+
+func px(img image.Image, x, y int32) (r, g, b uint32) {
+	rr, gg, bb, _ := img.At(x, y).RGBA()
+	return rr >> 8, gg >> 8, bb >> 8
+}
+
+// progressiveJPEG is a 37x29 4:2:0 progressive JPEG.
+const progressiveJPEG = "ffd8ffe000104a46494600010100000100010000ffdb0043000503040404030504040405050506070c08070707070f0b0b090c110f1212110f111113161c1713141a1511111821181a1d1d1f1f1f13172224221e241c1e1f1effdb0043010505050706070e08080e1e1411141e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1effc2001108001d002503012200021101031101ffc400160001010100000000000000000000000000000406ffc400160101010100000000000000000000000000000702ffda000c03010002100310000001c8a46a8d5a415a412255327b52515251ffc400161001010100000000000000000000000000001211ffda0008010100010502a5294a5294a5294a529ad6b5afffc400161101010100000000000000000000000000001501ffda0008010301013f01a6a6a6a3aa3aa3afffc40017110003010000000000000000000000000000011561ffda0008010201013f0193849c24e1311311311fffc40014100100000000000000000000000000000040ffda0008010100063f0227ffc400161001010100000000000000000000000000001130ffda0008010100013f21dc0005294a53ffda000c0301000200030000001004107cf3cfffc400161101010100000000000000000000000000710020ffda0008010301013f10739e3fffc40014110100000000000000000000000000000020ffda0008010201013f10557fffc400161001010100000000000000000000000000710020ffda0008010100013f105294a5294a5294a5296aaaffd9"
+
+// cmykJPG is a 37x29 four-component (CMYK) JPEG with Adobe APP14 metadata.
+const cmykJPG = "ffd8ffee000e41646f626500640000000002ffdb0043000302020302020303030304030304050805050404050a070706080c0a0c0c0b0a0b0b0d0e12100d0e110e0b0b1016101113141515150c0f171816141812141514ffdb00430103040405040509050509140d0b0d1414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414ffc0001408001d002504011100021101031101041100ffc40017000101010100000000000000000000000000070806ffc400241000010009040300000000000000000000000102030415161751a114526392536191ffc40017010101010100000000000000000000000000080609ffc4001e11000103050101000000000000000000000002031401131651521591ffda000e040100021103110400003f00bdeb7d9bff00713b396768dfd5539b235bec7b89d8b42aa73646b7d8f713b168554e6c8d6fb1ee2762d0aa9cd91adf63dc4ec5a15539b27311269e35faa49033947469603bcd7e190ea33c59af5488934f1afd52339474203bcd7e0a8cf166bd52224d3c6bf548ce51d080ef35f82a33c59af5488934f1afd52339474203bcd7e0a8cf166bd52224d3c6bf548ce51d080ef35f82a33c59af5495492d4d88f84bf3ebb2c3c4dbe4a152ce1c092d4d88f827d763136f914b387024b53623e09f5d8c4dbe452ce1c092d4d88f827d763136f914b387024b53623e09f5d8c4dbe452ce1c1538732b60c85d51454068d6326b8db021ccad81754203424d71b6043995b02ea8406849ae36c08732b605d5080d0935c6d810e656c0baa101a126b8db07ffd9"
+
+func main() {
+	pimg, perr := jpeg.Decode(bytes.NewReader(unhex(progressiveJPEG)))
+	if perr != nil {
+		println("FAIL: progressive decode error")
+		os.Exit(1)
+	}
+	pb := pimg.Bounds()
+	check("progressive width", uint32(pb.Dx()), 37)
+	check("progressive height", uint32(pb.Dy()), 29)
+	r, g, b := px(pimg, 0, 0)
+	check("progressive 0,0 r", r, 251)
+	check("progressive 0,0 g", g, 2)
+	check("progressive 0,0 b", b, 4)
+	r, g, b = px(pimg, 0, 28)
+	check("progressive 0,28 r", r, 2)
+	check("progressive 0,28 b", b, 250)
+	r, g, b = px(pimg, 18, 14)
+	check("progressive 18,14 r", r, 125)
+	check("progressive 18,14 b", b, 133)
+	r, g, b = px(pimg, 36, 28)
+	check("progressive 36,28 r", r, 2)
+	check("progressive 36,28 b", b, 250)
+
+	cimg, cerr := jpeg.Decode(bytes.NewReader(unhex(cmykJPG)))
+	if cerr != nil {
+		println("FAIL: cmyk decode error")
+		os.Exit(1)
+	}
+	cm, ok := cimg.(*image.CMYK)
+	if !ok {
+		println("FAIL: 4-component JPEG did not decode to CMYK")
+		os.Exit(1)
+	}
+	check("cmyk pix len", uint32(len(cm.Pix)), 37*29*4)
+	cb := cm.Bounds()
+	check("cmyk width", uint32(cb.Dx()), 37)
+	r, g, b = px(cimg, 0, 0)
+	check("cmyk 0,0 r", r, 255)
+	check("cmyk 0,0 g", g, 0)
+	check("cmyk 0,0 b", b, 0)
+	r, g, b = px(cimg, 0, 28)
+	check("cmyk 0,28 r", r, 1)
+	check("cmyk 0,28 b", b, 255)
+	r, g, b = px(cimg, 18, 14)
+	check("cmyk 18,14 r", r, 128)
+	check("cmyk 18,14 b", b, 125)
+	println("ok")
+}
