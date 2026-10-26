@@ -17464,3 +17464,41 @@ clang object stage is serial because `adaptiveJobs` caps at
 same unit with the `.bc` cache warm passed in 1261552ms, and `tree-cleanliness`
 passed. That is a machine-budget artifact, recorded rather than hidden, and not
 a reason to widen the timeout.
+
+## Round 225: a link-data binding refuses push, pop and resize
+
+Round 219 gave `//:linkdata` slices an all-ones capacity so `cap()` reads `-1`
+as the "not ours to grow" sentinel, and the documentation claimed `push` would
+fail because `len >= cap`. That was wrong twice over: the runtime compares
+`len` against the capacity as a `uintptr`, so all-ones is *huge*, and `push`
+sailed through and wrote past the imported symbol. `pop` and `resize` had the
+same hole from the other side - they only look at the length and the capacity,
+and both accepted the sentinel.
+
+All three builtins now test the sentinel explicitly:
+
+    slicePush        refuses before the lazy-init/capacity arithmetic
+    sliceCheckPop    takes the capacity as well as the length, refuses first
+    sliceCheckResize takes the current length as well as the requested one
+
+and the panic is `slice length is fixed: the storage is not ours`. stage4 passes
+the extra capacity/length arguments (the pop check had never seen the capacity
+and the resize check had never seen the length); legacy compares the capacity
+against all-ones with `createRuntimeAssert` before its existing `pop`/`resize`
+asserts.
+
+Verified on both compilers:
+
+  * `push`, `pop` and `resize` against `crypto/internal/fips140/check.Linkinfo`
+    each die with that message (`len 48 cap -1` printed first), under
+    `moxie`-built and `legacy`-built binaries alike;
+  * ordinary slices are unchanged: a probe pushing, resizing, popping, lazily
+    initialising and re-pushing after a shrink prints identical results under
+    both compilers;
+  * `tests/regressions/should_compile/linkdata_fixed_length.mx` pins the header
+    (`len 48`, `cap -1`, and a local `//:linkdata 16` binding) and that normal
+    slice operations still work - a panic itself cannot be asserted in a fixture
+    because Moxie has no `recover`.
+
+`docs/REFERENCE.md` now describes the three refusals instead of the wrong
+`push` explanation.

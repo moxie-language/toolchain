@@ -1,0 +1,60 @@
+/*
+A //:linkdata binding has a fixed length, and the length-changing builtins
+refuse it.
+
+The storage is an external symbol, so the slice header is built with len equal
+to the declared length and cap all-ones, which cap() reads as -1. push, pop and
+resize all check for that sentinel and die with "slice length is fixed: the
+storage is not ours" rather than growing, shrinking, or - the trap push had
+before - accepting the write because an all-ones capacity looks large enough.
+
+A panic cannot be asserted inside a fixture (there is no recover), so this file
+pins what can be: the header the compiler builds and the fact that ordinary
+slices keep working. The three panics were measured with throwaway probes
+against both compilers.
+*/
+package main
+
+import (
+	"crypto/internal/fips140/check"
+	"os"
+)
+
+//:linkdata 16 fixturesymbol
+var local []byte
+
+func checkInt(name string, got, want int32) {
+	if got != want {
+		println("FAIL: " | name | ": got ", got, " want ", want)
+		os.Exit(1)
+	}
+}
+
+func main() {
+	// The binding: len is the declared length, cap is the sentinel.
+	checkInt("check.Linkinfo len", int32(len(check.Linkinfo)), 48)
+	checkInt("check.Linkinfo cap", int32(cap(check.Linkinfo)), -1)
+	checkInt("local len", int32(len(local)), 16)
+	checkInt("local cap", int32(cap(local)), -1)
+
+	// Ordinary slices are unaffected: the sentinel is -1, never a real capacity.
+	s := []int32{:0:2}
+	s = push(s, 10, 20, 30)
+	checkInt("push len", int32(len(s)), 3)
+	checkInt("push cap", int32(cap(s)), 4)
+	checkInt("push value", s[2], 30)
+	s = resize(s, 2)
+	checkInt("resize len", int32(len(s)), 2)
+	checkInt("resize cap", int32(cap(s)), 4)
+	x := pop(s)
+	checkInt("pop value", x, 20)
+	checkInt("pop len", int32(len(s)), 2)
+
+	// Lazy init from a zero-capacity slice still works.
+	var z []int32
+	z = push(z, 7)
+	checkInt("lazy len", int32(len(z)), 1)
+	checkInt("lazy value", z[0], 7)
+
+	println("ok")
+}

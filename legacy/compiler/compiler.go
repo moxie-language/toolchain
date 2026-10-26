@@ -2320,6 +2320,12 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		src := argValues[0]
 		srcPtr := b.CreateExtractValue(src, 0, "pop.ptr")
 		srcLen := b.CreateExtractValue(src, 1, "pop.len")
+		srcCap := b.CreateExtractValue(src, 2, "pop.cap")
+		// External storage (a //:linkdata binding) has a fixed length: its
+		// capacity is the all-ones sentinel, so cap() reads as -1 and a pop
+		// must not shorten it.
+		ext := b.CreateICmp(llvm.IntEQ, srcCap, llvm.ConstInt(srcCap.Type(), ^uint64(0), false), "pop.external")
+		b.createRuntimeAssert(ext, "pop", "sliceFixedPanic")
 		zero := llvm.ConstInt(srcLen.Type(), 0, false)
 		empty := b.CreateICmp(llvm.IntEQ, srcLen, zero, "pop.empty")
 		b.createRuntimeAssert(empty, "pop", "slicePanic")
@@ -2341,6 +2347,8 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		// resize(s, n) - set len to n. Panics if n > cap or n < 0.
 		src := argValues[0]
 		srcCap := b.CreateExtractValue(src, 2, "resize.cap")
+		ext := b.CreateICmp(llvm.IntEQ, srcCap, llvm.ConstInt(srcCap.Type(), ^uint64(0), false), "resize.external")
+		b.createRuntimeAssert(ext, "resize", "sliceFixedPanic")
 		newLen := argValues[1]
 		// The slice length/cap fields are uintptr-width; widen the int32
 		// resize argument before comparing and inserting.

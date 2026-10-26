@@ -730,10 +730,16 @@ one shape the compiler can construct for data it does not define, so the layout
 question never reaches a type.
 
 `cap` is `-1`, not the length: that is the sentinel for storage that is not ours
-to grow. The usual `len <= cap` invariant is deliberately violated, so a
-`push` onto the slice compares `len` against `-1` and fails loud ("push past end
-of slice capacity") instead of running past the imported symbol. Slicing within
-`len` is unaffected.
+to resize. The usual `len <= cap` invariant is deliberately violated, and every
+builtin that would change the length refuses it:
+
+- `push` dies with "slice length is fixed: the storage is not ours" instead of
+  writing past the imported symbol - an all-ones capacity would otherwise look
+  large enough and the store would silently run off the end of the blob;
+- `pop` refuses, because shortening the slice is still a change of length;
+- `resize` refuses any new length, including a smaller one.
+
+Reading, indexing and slicing within `len` are unaffected.
 
 Binding is one-way and read-only. A package-level variable cannot be assigned
 outside `init`, and a store through it - `Linkinfo[0] = 0` - is rejected as a
@@ -747,6 +753,7 @@ Reads copy from the bound slice into that storage.
 Constraints:
 
 - the variable must be a slice of one-byte elements;
+- the length is fixed: `push`, `pop` and `resize` all refuse the binding;
 - the declared length must be positive;
 - the symbol is declared `[length x i8]`, so every package that binds the same
   symbol must declare the same length - `llvm-link` merges the declarations;

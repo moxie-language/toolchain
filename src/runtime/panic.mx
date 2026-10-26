@@ -177,18 +177,40 @@ func slicePanic() {
 	runtimePanicAt(returnAddress(0), "slice out of range")
 }
 
-// sliceCheckPop traps when a pop is attempted on an empty slice. The pop and
+// capExternal is the capacity sentinel for slice storage this program does not
+// own: a //:linkdata binding, whose bytes are an external symbol with a length
+// fixed at build time. The header carries all-ones capacity, which cap() reads
+// as -1, and every builtin that would change the length refuses instead of
+// writing past the external blob.
+func sliceExternalCap(capacity uintptr) (ok bool) {
+	return capacity == ^uintptr(0)
+}
+
+func sliceFixedPanic() {
+	runtimePanicAt(returnAddress(0), "slice length is fixed: the storage is not ours")
+}
+
+// sliceCheckPop traps when a pop is attempted on an empty slice, or on a slice
+// whose storage is external and therefore has a fixed length. The pop and
 // resize builtins used to emit the panic call inline behind an icmp, which
 // panics on every execution: the runtime panic entries are unconditional, so
 // the test has to run inside the entry, not at the call site.
-func sliceCheckPop(length uintptr) {
+func sliceCheckPop(length, capacity uintptr) {
+	if sliceExternalCap(capacity) {
+		sliceFixedPanic()
+	}
 	if length == 0 {
 		slicePanic()
 	}
 }
 
-// sliceCheckResize traps when a resize would exceed the slice capacity.
-func sliceCheckResize(newLen, capacity uintptr) {
+// sliceCheckResize traps when a resize would exceed the slice capacity, or when
+// the slice's storage is external: its length is fixed at build time, so no
+// resize - not even a shrinking one - is allowed.
+func sliceCheckResize(newLen, length, capacity uintptr) {
+	if sliceExternalCap(capacity) {
+		sliceFixedPanic()
+	}
 	if newLen > capacity {
 		slicePanic()
 	}
