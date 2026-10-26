@@ -709,6 +709,51 @@ rules.
 No declaration (`var` or `:=`) may reuse a name that is already visible in
 the current or any enclosing scope. See [No Scope Shadowing](#no-scope-shadowing).
 
+### External Data Bindings (`//:linkdata`)
+
+A package-level byte slice can be bound to data that the link step supplies
+instead of storage the package defines:
+
+```moxie
+//:linkdata 48 go:fipsinfo
+var Linkinfo []byte
+```
+
+The compiler builds the slice header itself: the data pointer is the named
+symbol, `len` is the declared length, and `cap` is `-1`. The symbol is declared
+`extern_weak`, so a build in which nothing produces it still links and leaves
+the data pointer null.
+
+The directive exists because an externally-produced blob would otherwise need a
+struct whose field layout has to match a foreign writer. A slice header is the
+one shape the compiler can construct for data it does not define, so the layout
+question never reaches a type.
+
+`cap` is `-1`, not the length: that is the sentinel for storage that is not ours
+to grow. The usual `len <= cap` invariant is deliberately violated, so a
+`push` onto the slice compares `len` against `-1` and fails loud ("push past end
+of slice capacity") instead of running past the imported symbol. Slicing within
+`len` is unaffected.
+
+Binding is one-way and read-only. A package-level variable cannot be assigned
+outside `init`, and a store through it - `Linkinfo[0] = 0` - is rejected as a
+package-global mutation, so a link-data slice cannot be written at all. Data
+that has to be written belongs in a slice the application creates: in `main`
+itself, or in an initializer function that something in `main` calls. A main
+package cannot declare `init()` - the entry point is `main` - so the setup is
+explicit and belongs to the application, not to a library's package scope.
+Reads copy from the bound slice into that storage.
+
+Constraints:
+
+- the variable must be a slice of one-byte elements;
+- the declared length must be positive;
+- the symbol is declared `[length x i8]`, so every package that binds the same
+  symbol must declare the same length - `llvm-link` merges the declarations;
+- `//:linkdata` is spelled `//:linkdata` in Moxie source and the Go toolchain
+  used for the bootstrap sees it rewritten as `//go:linkdata`, exactly like
+  `//:linkname`.
+
 ### Short Variable Declarations
 
 ```moxie

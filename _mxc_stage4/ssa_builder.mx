@@ -7172,6 +7172,13 @@ func (fb *ssaFuncBuilder) buildIndex(e *syntax.IndexExpr) (s SSAValue) {
 		fb.emit(ia)
 		return fb.emitLoad(ia, et)
 	case *Pointer:
+		// `p[i]` selects an element of the ARRAY p points at, and nothing else
+		// is indexable through a pointer. The fallback that accepted any
+		// indexable pointee - `*[]T` included - indexed the slice HEADER:
+		// image/jpeg's `qt := &d.quant[tq]` then `qt[zig]` emitted
+		// `mul i32 %value, %slice` after quant became a slice, and clang
+		// rejected the module. go/types refuses the expression outright, so
+		// accepting it was a stage4-only gap.
 		if arr, ok2 := SafeUnderlying(t.Base).(*Array); ok2 {
 			ia2 := &SSAIndexAddr{X: x, Index: idx}
 			ia2.typ = NewPointer(t.Base)
@@ -7179,16 +7186,8 @@ func (fb *ssaFuncBuilder) buildIndex(e *syntax.IndexExpr) (s SSAValue) {
 			fb.emit(ia2)
 			return fb.emitLoad(ia2, arr.Elem)
 		}
-		if !isIndexable(t.Base) {
-			fb.reportNotIndexable(x.SSAType())
-			return nil
-		}
-		et := ssaElemType(x.SSAType())
-		ia := &SSAIndexAddr{X: x, Index: idx}
-		ia.typ = NewPointer(et)
-		ia.name = fb.nextName()
-		fb.emit(ia)
-		return fb.emitLoad(ia, et)
+		fb.reportNotIndexable(x.SSAType())
+		return nil
 	default:
 		fb.reportNotIndexable(x.SSAType())
 		return nil
@@ -7209,17 +7208,19 @@ func isIndexable(t Type) (ok bool) {
 	case *TypeParam:
 		return true
 	case *Pointer:
-		// Every pointer-to-array is indexable (syscall writes through *[2]byte).
-		// The first version of this predicate forgot the case; the failure that
-		// exposed it was reported by an OLD compiler binary rather than the
-		// patched one, which is worth remembering: when a new rule seems to
-		// reject the tree, check which compiler actually ran before believing
-		// the rule is wrong.
+		// Only a pointer-to-ARRAY is indexable: `p[i]` selects an element of the
+		// array p points at, which is what syscall's `*[2]byte` writes do.
+		//
+		// The temptation is to recurse into the pointee - `*[]T` would then be
+		// indexable - and that is wrong in a way that compiles: image/jpeg's
+		// `qt := &d.quant[tq]` indexed `qt[zig]` after `quant` became a slice,
+		// and the emitter produced `mul i32 %value, %slice`. Go rejects the
+		// expression outright ("cannot index p"), so the recursion was a shared
+		// gap between the two compilers, not a moxie convenience.
 		if _, isArr := SafeUnderlying(u.Base).(*Array); isArr {
 			return true
 		}
-
-		return isIndexable(u.Base)
+		return false
 	}
 	return false
 }

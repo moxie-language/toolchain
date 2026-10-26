@@ -12,34 +12,28 @@
 // after the check has completed.)
 package check
 
-import (
-	"unsafe"
-)
-
 // Verified is set when verification succeeded. It can be expected to always be
 // true when [fips140.Enabled] is true, or init would have panicked.
 const Verified = false
 
-// Linkinfo holds the go:fipsinfo symbol prepared by the linker.
-// See cmd/link/internal/ld/fips.go for details.
+// Linkinfo holds the go:fipsinfo blob prepared by the linker: the 16-byte
+// magic, then the 32-byte digest, then the link-time self pointer and the
+// section table. Only the two fixed byte fields are described here, as one
+// slice bound to the blob, because the tail's layout depends on the target's
+// pointer width and nothing in Moxie computes or reads a FIPS digest.
 //
-//:linkname Linkinfo go:fipsinfo
-var Linkinfo struct {
-	Magic [16]byte
-	Sum   [32]byte
-	Self  uintptr
-	Sects [4]struct {
-		// Note: These must be unsafe.Pointer, not uintptr,
-		// or else checkptr panics about turning uintptrs
-		// into pointers into the data segment during
-		// go test -race.
-		Start unsafe.Pointer
-		End   unsafe.Pointer
-	}
-}
+// The binding is external: //:linkdata declares the data pointer as the symbol
+// and len as the declared length, so the layout question never reaches a
+// struct. cap is -1: the blob is not ours to grow, and any push into it fails
+// loud instead of running past the symbol. The symbol is declared extern_weak -
+// Moxie's linker does not produce go:fipsinfo, so the data pointer is null
+// until something does, and fips140's Enabled() short-circuits on the const
+// Enabled before it could read this.
+//
+//:linkdata 48 go:fipsinfo
+var Linkinfo []byte
 
 // "\xff"+fipsMagic is the expected linkinfo.Magic.
 // We avoid writing that explicitly so that the string does not appear
 // elsewhere in normal binaries, just as a precaution.
 const fipsMagic = " Go fipsinfo \xff\x00"
-

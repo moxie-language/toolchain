@@ -273,6 +273,77 @@ func scanExternGlobals(src []byte) (m map[string]string) {
 	return m
 }
 
+// scanLinkdataPragmas collects //:linkdata bindings: a package-level byte
+// slice whose data pointer is an external symbol instead of storage this
+// package defines.
+//
+//	//:linkdata <len> <symbol>
+//	var name []byte
+//
+// The symbol is declared extern_weak, so a build with no producer of it links
+// and leaves the slice's data pointer null while len and cap keep the declared
+// length. The declaration is `[len x i8]` in every package that binds it, so
+// the modules merge at llvm-link.
+func scanLinkdataPragmas(src []byte) {
+	cctx.linkDataVars = map[string]*linkDataInfo{}
+	pragmaPrefix := []byte("//:linkdata ")
+	varPrefix := []byte("var ")
+	slen := int32(len(src))
+	i := int32(0)
+	pending := ""
+	var pendingLen int32
+	for i < slen {
+		le := srcFindByte(src, i, slen, '\n')
+		if le < 0 {
+			le = slen
+		}
+		ts := srcTrimStart(src, i, le)
+		te := srcTrimEnd(src, i, le)
+		tlen := te - ts
+		if len(pending) > 0 {
+			// The pragma belongs to the next var declaration; comments and blank
+			// lines between them are fine.
+			if tlen == 0 || srcHasPrefix(src, ts, te, []byte("//")) {
+				if le < slen {
+					i = le + 1
+				} else {
+					i = slen
+				}
+				continue
+			}
+			if srcHasPrefix(src, ts, te, varPrefix) {
+				rs := ts + int32(len(varPrefix))
+				sp := srcFindByte(src, rs, te, ' ')
+				if sp > rs {
+					varName := string(src[rs:sp])
+					info := &linkDataInfo{target: pending, length: pendingLen}
+					cctx.linkDataVars[varName] = info
+				}
+			}
+			pending = ""
+			pendingLen = 0
+		} else if srcHasPrefix(src, ts, te, pragmaPrefix) {
+			args := srcTrimStart(src, ts+int32(len(pragmaPrefix)), te)
+			ae := srcTrimEnd(src, args, te)
+			sp := srcFindByte(src, args, ae, ' ')
+			if sp > args {
+				lenStr := string(src[args:sp])
+				symStart := srcTrimStart(src, sp+1, ae)
+				symEnd := srcTrimEnd(src, symStart, ae)
+				if symEnd > symStart {
+					pending = string(src[symStart:symEnd])
+					pendingLen = parseInt32(lenStr)
+				}
+			}
+		}
+		if le < slen {
+			i = le + 1
+		} else {
+			i = slen
+		}
+	}
+}
+
 func scanLinknameMap(src []byte) (m map[string]string) {
 	result := map[string]string{}
 	prefix := []byte("//:linkname ")

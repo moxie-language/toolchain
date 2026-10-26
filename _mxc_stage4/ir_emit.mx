@@ -1265,6 +1265,10 @@ func (e *irEmitter) emitGlobal(g *SSAGlobal) {
 			return
 		}
 	}
+	if ld, ok := cctx.linkDataVars[g.name]; ok {
+		e.emitLinkDataGlobal(g, name, ld)
+		return
+	}
 	if ei, ok := cctx.embedVars[g.name]; ok {
 		e.emitEmbedGlobal(g, name, ei)
 		return
@@ -1275,6 +1279,37 @@ func (e *irEmitter) emitGlobal(g *SSAGlobal) {
 	e.w(e.tlsPrefix())
 	e.w(typ)
 	e.w(" zeroinitializer\n")
+}
+
+// emitLinkDataGlobal binds a package-level byte slice to an external symbol.
+// The header is a normal slice - len and cap are the declared length - and the
+// data pointer is the symbol itself, declared extern_weak so that a build
+// without a producer of it still links (and leaves the pointer null).
+func (e *irEmitter) emitLinkDataGlobal(g *SSAGlobal, name string, ld *linkDataInfo) {
+	// A global's type is the pointer to its storage; the slice is the pointee.
+	gt := g.typ
+	if p, ok := SafeUnderlying(gt).(*Pointer); ok && p.Base != nil {
+		gt = p.Base
+	}
+	elemSize := int32(0)
+	if sl, ok := SafeUnderlying(gt).(*Slice); ok && sl.Elem != nil {
+		elemSize = typeDescSize(sl.Elem)
+	}
+	if elemSize != 1 || ld.length <= 0 {
+		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+		push(cctx.compileErrors, "linkdata: " | g.name | " must be a slice of one-byte elements with a positive length")
+		e.w(name | " = hidden " | e.tlsPrefix() | e.sliceType() | " zeroinitializer\n")
+		return
+	}
+	blobName := irQuoteName(ld.target)
+	e.w(blobName | " = extern_weak global [" | irItoa(ld.length) | " x i8], align 1\n")
+	// len is the imported length; cap is -1, which marks storage that is not
+	// ours to grow. `push` compares len against cap and fails loud, so a write
+	// that would need room beyond the imported blob dies with "push past end
+	// of slice capacity" instead of scribbling past the symbol.
+	ipt := e.intptrType()
+	e.w(name | " = hidden " | e.tlsPrefix() | "{ptr, " | ipt | ", " | ipt | "} {ptr " | blobName |
+		", " | ipt | " " | irItoa(ld.length) | ", " | ipt | " -1}\n")
 }
 
 func (e *irEmitter) emitEmbedGlobal(g *SSAGlobal, name string, ei *embedInfo) {

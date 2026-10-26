@@ -17200,3 +17200,73 @@ paths covered.
 Open from this round: stage4 accepts an index on a pointer-to-slice
 (`p[i]` for `p *[]T`), which Go rejects; it emits an index into the slice
 header. It should be rejected in both compilers.
+
+## Round 219: indexing a pointer-to-slice is a compile error, and external data binds as a slice
+
+Two compiler changes, both found by the jpeg conversion in round 218.
+
+**1. `p[i]` where `p` is `*[]T`.** Go rejects the expression ("cannot index p");
+both Moxie compilers accepted it and left the meaning to codegen. stage4's
+index builder checked `isIndexable(t.Base)` - the pointee - so `*[]T` passed and
+the index went into the slice *header*: after `quant` became `[]block`,
+image/jpeg's `qt := &d.quant[tq]; qt[zig]` emitted
+
+    %t35 = load {ptr, i64, i64}, ptr %t34     ; a slice, not a scalar
+    %t36 = mul i32 %t31, %t35                 ; clang: expected 'i32'
+
+`isIndexable`'s own `*Pointer` case no longer recurses either: only a
+pointer-to-array is indexable, which is what `*[2]byte` writes in syscall need.
+legacy rewrote the same expression through go/types, so it already rejected the
+*source* - but `moxieAssignable`'s restriction pass never saw it, and the
+`isIndexableType` mirror in `legacy/compiler/restrict.go` had the same recursion.
+Both sides are fixed, and `tests/restrictions/reject_index_pointer_to_slice.mx`
+names the rule (`// expected: cannot index`).
+
+**2. `//:linkdata <len> <symbol>`.** A package-level `[]byte` can be bound to
+data the link step supplies instead of storage the package defines:
+
+    //:linkdata 48 go:fipsinfo
+    var Linkinfo []byte
+
+The compiler builds the slice header itself - data pointer is the symbol, `len`
+is the declared length - so an external blob never has to be described by a
+struct whose layout must match a foreign writer. The symbol is declared
+`extern_weak`, so a build without a producer still links and leaves the pointer
+null. `cap` is `-1`: the sentinel for storage that is not ours to grow, which
+makes any `push` onto the binding fail loud instead of running past the symbol.
+
+The binding is read-only by construction: a package-level var cannot be assigned
+outside `init`, and a store through it is a package-global mutation. Writable
+storage belongs to the application - created in `main` or by an initializer
+function `main` calls, then copied into from the bound slice. `docs/REFERENCE.md`
+has the directive documented in full.
+
+`crypto/internal/fips140/check` is converted: `Linkinfo` was
+`struct{Magic [16]byte; Sum [32]byte; Self uintptr; Sects [4]struct{Start, End
+unsafe.Pointer}}` behind a `//:linkname`, the last "external array" in the tree.
+It is now one 48-byte slice over the blob (magic 0:16, digest 16:48); the tail's
+layout depends on the target's pointer width and nothing in Moxie computes a FIPS
+digest. legacy sees the directive as `//go:linkdata` because the loader rewrites
+`//:` pragmas wholesale, and its mirror emits the same header through
+`getLLVMRuntimeType("_string")`.
+
+Verified:
+
+  * the restriction fixture is rejected by stage4 (`invalid operation: cannot
+    index *[]byte`) and by legacy (`cannot index p (variable of type *[]byte)`),
+    and was accepted by the previous stage4;
+  * a probe against `crypto/internal/fips140/check` prints `len 48 cap -1`, and
+    the binary carries `go:fipsinfo` as a WEAK UND symbol; `leak` of the data is
+    a null dereference by design until something defines the blob (recorded, not
+    hidden - a defined producer is future work);
+  * a 46-bucket blank-import sweep over all 271 stdlib packages produces an
+    *identical* failure set under the previous and the new compiler, so nothing
+    in the tree relied on indexing a pointer-to-slice. The sweep also measured
+    the pre-existing failures that block phase 1b, one place instead of a
+    narrative: `net` (arena: region table full), `text` (src/text/scanner casts
+    i32 to a slice), `time` (undefined `time.initRegisterLoadFromEmbeddedTZData`),
+    `os`/`runtime` (duplicate symbols), `debug` (':=' inside a loop in a
+    self-mutating method), `html` (syntax error), `builtin` (sovereign borrow
+    stack overflow), `container`/`log` (no reason given), `syscall` and
+    `internal` (import paths that still name `src/...`);
+  * the bootstrap reached its fixpoint (s4b == s4c).

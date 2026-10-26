@@ -630,10 +630,20 @@ func (c *compilerContext) addStandardAttributes(llvmFn llvm.Value) {
 // linkName is equal to .RelString(nil) on a global and extern is false, but for
 // some symbols this is different (due to //go:extern for example).
 type globalInfo struct {
-	linkName string // go:extern, go:linkname
-	extern   bool   // go:extern
-	align    int    // go:align
-	section  string // go:section
+	linkName string    // go:extern, go:linkname
+	extern   bool      // go:extern
+	align    int       // go:align
+	section  string    // go:section
+	linkData *linkData // //:linkdata <len> <symbol>
+}
+
+// linkData is a //:linkdata binding: a package-level byte slice whose data
+// pointer is an external symbol, with len and cap fixed at the declared
+// length. The symbol is declared extern_weak, so a build with no producer of
+// it links and leaves the pointer null.
+type linkData struct {
+	target string
+	length int
 }
 
 // loadASTComments loads comments on globals from the AST, for use later in the
@@ -750,6 +760,19 @@ func (info *globalInfo) parsePragmas(doc *ast.CommentGroup, c *compilerContext, 
 			// No "unsafe" import gate: see the function-declaration case
 			// above. Stage4 honours the pragma either way.
 			info.linkName = parts[2]
+		case "//go:linkdata":
+			// Moxie's //:linkdata <len> <symbol>, rewritten to //go: by the
+			// loader. stage4 scans the //: form directly; this is the mirror.
+			if len(parts) != 3 {
+				c.addError(comment.Slash, "//:linkdata needs a byte length and a symbol")
+				continue
+			}
+			n, err := strconv.Atoi(parts[1])
+			if err != nil || n <= 0 {
+				c.addError(comment.Slash, "//:linkdata needs a positive byte length")
+				continue
+			}
+			info.linkData = &linkData{target: parts[2], length: n}
 		}
 	}
 }

@@ -293,7 +293,13 @@ func isIndexableType(t types.Type) bool {
 	case *types.Basic:
 		return u.Info()&types.IsString != 0
 	case *types.Pointer:
-		return isIndexableType(u.Elem())
+		// Only a pointer-to-array is indexable: `p[i]` selects an element of
+		// the array p points at. Recursing into the pointee made `*[]T`
+		// indexable, which Go rejects ("cannot index p") and which stage4
+		// compiled into an index on the slice header. See the mirror in
+		// _mxc_stage4/ssa_builder.mx isIndexable.
+		_, isArr := u.Elem().Underlying().(*types.Array)
+		return isArr
 	case *types.TypeParam:
 		return true
 	}

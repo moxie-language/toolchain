@@ -1139,7 +1139,9 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 			// Global variable.
 			info := c.getGlobalInfo(member)
 			global := c.getGlobal(member)
-			if files, ok := c.embedGlobals[member.Name()]; ok {
+			if info.linkData != nil {
+				c.createLinkDataGlobal(member, global, info.linkData)
+			} else if files, ok := c.embedGlobals[member.Name()]; ok {
 				c.createEmbedGlobal(member, global, files)
 			} else if !info.extern {
 				global.SetInitializer(llvm.ConstNull(global.GlobalValueType()))
@@ -1223,6 +1225,35 @@ func (c *compilerContext) createBuiltinMethods(irbuilder llvm.Builder, pkg *ssa.
 			}
 		}
 	}
+}
+
+// createLinkDataGlobal binds a package-level byte slice to an external symbol.
+// The header is a normal slice - len and cap are the declared length - and the
+// data pointer is the symbol itself, declared extern_weak so that a build with
+// no producer of it still links (and leaves the pointer null). Mirrors stage4's
+// emitLinkDataGlobal.
+func (c *compilerContext) createLinkDataGlobal(member *ssa.Global, global llvm.Value, ld *linkData) {
+	typ, ok := member.Type().(*types.Pointer).Elem().Underlying().(*types.Slice)
+	if !ok || typ.Elem().Underlying().(*types.Basic).Kind() != types.Byte {
+		c.addError(member.Pos(), "//:linkdata must apply to a byte slice")
+		return
+	}
+	blobType := llvm.ArrayType(c.ctx.Int8Type(), ld.length)
+	blob := c.mod.NamedGlobal(ld.target)
+	if blob.IsNil() {
+		blob = llvm.AddGlobal(c.mod, blobType, ld.target)
+		blob.SetLinkage(llvm.ExternalWeakLinkage)
+		blob.SetAlignment(1)
+	}
+	length := llvm.ConstInt(c.uintptrType, uint64(ld.length), false)
+	// len is the imported length; cap is all-ones (-1 when read as a signed
+	// int32), which marks storage that is not ours to grow. push compares len
+	// against cap and fails loud, so a write that would need room beyond the
+	// imported blob dies instead of scribbling past the symbol.
+	noCap := llvm.ConstInt(c.uintptrType, ^uint64(0), false)
+	sliceObj := llvm.ConstNamedStruct(c.getLLVMRuntimeType("_string"), []llvm.Value{blob, length, noCap})
+	global.SetInitializer(sliceObj)
+	global.SetVisibility(llvm.HiddenVisibility)
 }
 
 // createEmbedGlobal creates an initializer for a //go:embed global variable.
