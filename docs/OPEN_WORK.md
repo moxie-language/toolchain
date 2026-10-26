@@ -17354,3 +17354,49 @@ violates it: `dk.rho = rho` aliased `kemKeyGen`'s frame. Every "field = local
 slice" assignment in the tree is a latent dangle, and the workaround above is
 per-call-site. A minimal reproducer is worth building next; the symptom is a
 value that reads correctly until the frame's arena is reused.
+
+## Round 222: measuring the gap behind ML-KEM's dangle - 189 free functions write through a pointer parameter
+
+Round 221 fixed ML-KEM by copying into storage the constructor allocated, but
+the mechanism deserves its own entry because it is not about slices being
+stored: it is about **who is allowed to be written**.
+
+The model says only a method receiver can be written, and that a write through a
+pointer *parameter* is a compile-time error. It is not enforced. Both compilers
+accept
+
+    func f(p *T) { p.n = 5; p.buf = []byte{1, 2, 3} }
+
+and the write reaches the caller. Scalars are fine, because nothing needs
+relocating. A slice is not: the callee's frame arena is released when it
+returns, and because the compiler does not treat a written-through parameter as
+a relocation root, the stored slice keeps pointing into the dead frame. That is
+exactly ML-KEM's `kemKeyGen(dk *DecapsulationKey768, ...)`, whose
+`dk.rho = rho` pointed at `G` in the callee's frame: the key read back correctly
+until the frame was reused, then changed between two reads of the same key.
+
+Measured, not guessed: a scan for free functions with a pointer parameter that
+write through it finds **189 functions in 76 files** - `internal/runtime/maps`,
+`internal/trace`, `internal/profile`, `internal/coverage`, `internal/chacha8rand`,
+`crypto/internal/fips140/*`, and more. So this is not a handful of sites that
+can simply be turned into methods; enforcing the documented rule is a refactor of
+its own, and the alternative is to make the rule obsolete.
+
+Two coherent fixes, neither taken yet:
+
+1. **Enforce it.** Reject a store through a pointer parameter in both compilers
+   and convert the 189 sites to methods (or to an explicit out-parameter
+   protocol). This is the model as documented, and it makes the mistake loud.
+2. **Honour it.** Treat every written-through pointer parameter as a relocation
+   root on return, exactly as a receiver is treated. Callers already expect the
+   write to land; this makes the *contents* land too.
+
+Option 2 is the smaller change to the tree and the larger change to the
+compiler: the return relocation currently roots on results and receiver writes,
+and would gain one root per written-through parameter. Either way the two
+compilers move together (wood law).
+
+Meanwhile the authoring rule for new code is the one ML-KEM now follows: storage
+a callee hands to a caller through a pointer must already exist - the
+constructor allocates it, the callee `copy`s into it - and never be a slice the
+callee allocated in its own frame.
