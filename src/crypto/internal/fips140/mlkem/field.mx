@@ -146,15 +146,16 @@ func polySub[T ~[n]fieldElement](a, b T) (s T) {
 //
 // It implements ByteEncode₁₂, according to FIPS 203, Algorithm 5.
 func polyByteEncode[T ~[n]fieldElement](b []byte, f T) (ret0 []byte) {
-	out, B := sliceForAppend(b, encodingSize12)
+	off := len(b)
+	b = growFor(b, encodingSize12)
 	for i := 0; i < n; i += 2 {
 		x := uint32(f[i]) | uint32(f[i+1])<<12
-		B[0] = uint8(x)
-		B[1] = uint8(x >> 8)
-		B[2] = uint8(x >> 16)
-		B = B[3:]
+		b[off] = uint8(x)
+		b[off+1] = uint8(x >> 8)
+		b[off+2] = uint8(x >> 16)
+		off += 3
 	}
-	return out
+	return b
 }
 
 // polyByteDecode decodes the 384-byte encoding of a polynomial, checking that
@@ -182,19 +183,27 @@ func polyByteDecode[T ~[n]fieldElement](b []byte) (ret0 T, ret1 error) {
 	return f, nil
 }
 
-// sliceForAppend takes a slice and a requested number of bytes. It returns a
-// slice with the contents of the given slice followed by that many bytes and a
-// second slice that aliases into it and contains only the extra bytes. If the
-// original slice has sufficient capacity then no allocation is performed.
-func sliceForAppend(in []byte, nb int32) (head, tail []byte) {
-	if total := len(in) + nb; cap(in) >= total {
-		head = in[:total]
-	} else {
-		head = []byte{:total}
-		copy(head, in)
+// growFor returns a slice with the contents of in followed by n fresh bytes.
+//
+// It replaces Go's sliceForAppend, which returns the head and a tail view of
+// the same buffer. A pair of slices sharing one buffer does not stay shared
+// across a function return - each result is relocated on its own - so the
+// caller's writes through the tail never reach the head and the encoders read
+// back zeros. That is not hypothetical: it made ML-KEM decapsulation fail its
+// own re-encryption check, silently falling back to implicit rejection and
+// returning a wrong shared key for every ciphertext, and only when the package
+// was built as a dependency of an application (in-package the same helper kept
+// the aliasing). The callers write through an offset into the single returned
+// slice instead.
+func growFor(in []byte, nb int32) (out []byte) {
+	total := len(in) + nb
+	if cap(in) >= total {
+		out = in[:total]
+		return out
 	}
-	tail = head[len(in):]
-	return
+	out = []byte{:total}
+	copy(out, in)
+	return out
 }
 
 // ringCompressAndEncode1 appends a 32-byte encoding of a ring element to s,
@@ -203,12 +212,13 @@ func sliceForAppend(in []byte, nb int32) (head, tail []byte) {
 // It implements Compress₁, according to FIPS 203, Definition 4.7,
 // followed by ByteEncode₁, according to FIPS 203, Algorithm 5.
 func ringCompressAndEncode1(s []byte, f ringElement) (ret0 []byte) {
-	s, b := sliceForAppend(s, encodingSize1)
-	for i := range b {
-		b[i] = 0
+	off := len(s)
+	s = growFor(s, encodingSize1)
+	for i := 0; i < encodingSize1; i++ {
+		s[off+i] = 0
 	}
 	for i := range f {
-		b[i/8] |= uint8(compress(f[i], 1) << (i % 8))
+		s[off+i/8] |= uint8(compress(f[i], 1) << (i % 8))
 	}
 	return s
 }
@@ -234,9 +244,10 @@ func ringDecodeAndDecompress1(b []byte) (ret0 ringElement) {
 // It implements Compress₄, according to FIPS 203, Definition 4.7,
 // followed by ByteEncode₄, according to FIPS 203, Algorithm 5.
 func ringCompressAndEncode4(s []byte, f ringElement) (ret0 []byte) {
-	s, b := sliceForAppend(s, encodingSize4)
+	off := len(s)
+	s = growFor(s, encodingSize4)
 	for i := 0; i < n; i += 2 {
-		b[i/2] = uint8(compress(f[i], 4) | compress(f[i+1], 4)<<4)
+		s[off+i/2] = uint8(compress(f[i], 4) | compress(f[i+1], 4)<<4)
 	}
 	return s
 }
@@ -261,19 +272,20 @@ func ringDecodeAndDecompress4(b []byte) (ret0 ringElement) {
 // It implements Compress₁₀, according to FIPS 203, Definition 4.7,
 // followed by ByteEncode₁₀, according to FIPS 203, Algorithm 5.
 func ringCompressAndEncode10(s []byte, f ringElement) (ret0 []byte) {
-	s, b := sliceForAppend(s, encodingSize10)
+	off := len(s)
+	s = growFor(s, encodingSize10)
 	for i := 0; i < n; i += 4 {
 		var x uint64
 		x |= uint64(compress(f[i], 10))
 		x |= uint64(compress(f[i+1], 10)) << 10
 		x |= uint64(compress(f[i+2], 10)) << 20
 		x |= uint64(compress(f[i+3], 10)) << 30
-		b[0] = uint8(x)
-		b[1] = uint8(x >> 8)
-		b[2] = uint8(x >> 16)
-		b[3] = uint8(x >> 24)
-		b[4] = uint8(x >> 32)
-		b = b[5:]
+		s[off] = uint8(x)
+		s[off+1] = uint8(x >> 8)
+		s[off+2] = uint8(x >> 16)
+		s[off+3] = uint8(x >> 24)
+		s[off+4] = uint8(x >> 32)
+		off += 5
 	}
 	return s
 }

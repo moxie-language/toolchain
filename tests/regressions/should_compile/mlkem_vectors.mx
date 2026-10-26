@@ -1,0 +1,140 @@
+/*
+ML-KEM-768 against a fixed Go vector, built as an application.
+
+The KEM had a silent failure that only showed up here: its ring encoders used
+Go's sliceForAppend, which hands back the grown buffer and a tail view of it.
+Moxie relocates each returned slice on its own, so the tail the encoders wrote
+through was a copy and the buffer they returned was zeros. In-package the helper
+happened to keep the aliasing, so a package test passed; built as a dependency of
+an application, decapsulation failed its own re-encryption check and fell back to
+implicit rejection, returning a deterministic but wrong shared key for every
+ciphertext. That is why this fixture is an application, not a package test, and
+why it pins bytes rather than round tripping.
+
+Reference (Go 1.25.3, crypto/mlkem): seed 0x00,0x03,.. gives this decapsulation
+key and encapsulation key, and decapsulating this ciphertext gives this shared
+key.
+*/
+package main
+
+import (
+	"bytes"
+	"crypto/mlkem"
+	"os"
+)
+
+const seedHex = "000306090c0f1215181b1e2124272a2d303336393c3f4245484b4e5154575a5d606366696c6f7275787b7e8184878a8d909396999c9fa2a5a8abaeb1b4b7babd"
+const wantDK = "000306090c0f1215181b1e2124272a2d303336393c3f4245484b4e5154575a5d606366696c6f7275787b7e8184878a8d909396999c9fa2a5a8abaeb1b4b7babd"
+const wantEK = "38b68cabe5ad452299fde27228e95b388183c89a1d110b0bf7a715a9187ad2c1817406813d8a5c18f3904f903b0c1b9676734884b51acb144e6650856d876147c57b5ce6991ea82d74c4612ae7ade726c92a2943c9da05b1bb95d03832e66bc1c2f32a97381d121a7b58f7bd4fb21790a62f2d953fa071c589905efce354640233831c0eabc95b6a36c55ae4b47b4c11feb2680ca6a2c4261cfd6826d111641c291a7d665509d797c514a0d92b4d7804467de6479df03229a755261b6188b25599c471d2a35ff84a6d47a7a68087b460a26b73e174a6d450b2994235d85418284e38e86d2edc2e27b36818d95e37f0163ba119ee58cc5ae056bd2a585d7a9a7c166f2756cde26910708baea0d6be37999642f31f244040de1653ae3562c9bcb6ef8c7377d6a16478429cb6838f8bb9c18333b2f76f68e764ce9747b83092d8a82dfcab62300ac7e3897d52629502e15450576e7b005b3f63a00166b5df363427794f09d0593bfabab3e47c2264cba36bc565d40035c98f0038c1ee7648580027a9817bccc3a26e54238fa50f773179ea771741eb7d193304e6f2ac96c519866c9b4e9705aaf783f6a1a8102a038e690869fb3493ccce801300c1667866087e9799be9814b6aaba85191aaf5c889148dccae8e24ebc2cc987037eec098ecab86f6c7b344b9439a076cdbe91827f48c0afb5c98c1b9ece576861e6567524aadb230a2c01cd6d7478c231c2079c27433968a9455484b19f208542e994c177b2225fe74eee384111f234ba425cb0a409cd9aa6506a5f9c983d0a144d2a40240586b47f5a64cd821da323504b61385936547771790cd76eeeda7ca7d48375e4245764829c82bfe4b7a198c208f985c0a9850578502507ea2f258650c62c4926e73274c542bc039e66195c2f969b7fc3311d403a4aa612a17c438c363fb4db92dfa57bb3aca549b4851c81720a437da1c06cf6c1476de67bb10967b5ec701dba3295c0c1c5a91dd90411fe4777cc0c08866c4b3eb173cbc4bc47640a2e013c3905a844646cab58439be41929186cc3746fc5e2b9b419320522a0678c42c6e710cdd866bab40bebfb1d9aab5dcc4c45546c68f8644603b4b33df13e9bf169c45abf3d07bfa2e2421884373f630b755439db436cb6c029b1805bba072ef7e699c89151f09a16ed6031affb0099f54af8516c36384692452bce511ae1076b7a6395ba597e7e05ab77e6c612b616ed6ca4a7602e04cabb824b9a8d5a15ed4544179417829600a3d799ef369663482bc9b5accb184073b54479f438d8128e86f3b03c3234d8819c6dd49fbde55439e4bc98806285c8c3b0601b83641397bc5452192f9339a4f001a73cac88df5b1a1cfc5aa3da2e719ac01385af8f3356e454a363bc588945a1c3e7ad866b43af95aa622355c2a8c8022b2d6e2703e723236a27cd7ab241f04981fbab26fa67c8a7821778fa02c37360802663b8e09dac93368f16af9b421e6a7738efc094aa5a563ed672c9468079817d90fa730a0343dc48be91d121c0a35677e18a350b7ca8976bcc55b4bff592d48a9ecc6694872a77b499849cb325b645653219a75c329baf4a3ee0cacd0b45ce5e0a4e755605c2f0332bfa71abcb69cd27c75b822c2851f2833fb0c7c03da700d99acd959a2b8b0771b3dcb37932a8"
+const ctHex = "85e5a2850f5d69a3f90ee0e754210791b5208b1d1c6d56f4fe78f64c1981eb52386fbf666c820b6b476aadb647e2dd401b6f3e18601fbb4fc024214b7ac7d76b5a9278dfd1060b7d2d068163d0711504ac6efe38df9f10adf0b0b0869e3055a1a679b891769afdd46e86f1404b4b52025568c6288e60b896cf53a650541c6579b0142c36a1006af08380ea0f68b3a514e35ee29f31af570b70e66b76e2178a1bb460d7d3c60e6f9dbe94de54f29d14f340fa381f43a4ed6243def03de4ce17c796b5a4bfaa768428e01ba544c8486047ac2adeeeede02652c60c077b1531bb8a651adb8cf9ca21586ee04273fe60c8d4f4bb803025f92f2b5ff0ab9e651d94a5bd6363da16ac9281546ced2f43184ccac90a85573b9c4d469d1a735520b06f48305133c3d7b7d0f919298874cb5e0a2c969c886171b26092123b3698b76786a0b92f4ee179292c345c98e1011d278d56655a6f2a0f57683a80f7ce732836aec503004401c2d73621535337226a7d6959b755ce0fd7dceb52d2c5732fe08170cc4ca6d308c67ad89b2a06e3b331411cc7c5ac14c2b3e7cf21ce38b1aca8ea4e13f25336f9d4f1a3d7d539d64e55274a18dfee15e47dbdf98e8e1ecb5eb8a24b5ce3d8aa8d3787eafe56b78ec462321948f2dc3ce490c8e0d75abebfef8a597d27dcbf28a90437aa3fa98725528baaf65a2c017eea613ebd9a953116f12fa47f1ed997efa7f18c5b2d7ff43381d0c3e04bc5856c9493f7a9f62339fc28e6ffe0b43a9ca88dbd91950ac5dd706122bec2ab3e9a778a7204926a62dafcd7a6bba9f6efb5ffa0a5f33aa4c1ab1cbc3f7b5356fb330a01b9c045bd9860e40cd846f0bc161c4762582685eb5ae1d9e4600ac1ba9e5199f7b566cf42a512f052f5837c49e3eba19c3a789cf7ec07ae47aae54b049e5b80eb7eea605b5bb3158cdbab5d0c7c713d8f1adf0956b8d0477f19523bde4fd67129cef5e2e135ffac029ce4674376f6f6670bdc38e6136338887ad4d30b08a154135f6b36f95c3c183fe7d9622e9f78e9e0d7132c659afff97601d24c36bafbad70db5f69102d4c14d5bb7e1237292783e9487b2691fc1bb50663196e0d0b5b4ccaa1f24fdde5edc75b7e55cc81b3e49031bbd0e5cbbd23cfac56c1330d88aed8c665d6b59dff7d8e226b5f1684f61f5e6b760d6b286e3454755b382c159fe4bc15ea181802be520a8919f61bf5417d90ba4a46cd77413a6808cb1635aaffa711b34f89a44be7b31cb593ff65909f30ce1d77b96e853436a887f163f203622620d5e4052b30d985a9693aa40f9cf9983637522a3b87227a4f902de4735711407cca839627d1b8adeb1078033dcc6e29c37cfd20ec0e810e0faabd066f5cef2f20bc105955a914810032e446fe8eaba7c6921620ea14ca7d82c8b47174858f7a7406c1d84b75035992205bf3c694f9030688c98f2ff6e190aff1048ee46ed014dfb0a72776361e9ed6eafcda11680109dbb6b6415fcd8766951cf495419cae6c6cedfc8400d0a59735f2c72b4e4b"
+const wantSS = "f789c54d4e79dbc0c871f44fbc38e56c1cc7b0ef8a314cb3bc6aea2611a9b1e5"
+
+func hex(b []byte) (s string) {
+	const t = "0123456789abcdef"
+	o := []byte{:len(b) * 2}
+	for i := 0; i < len(b); i++ {
+		o[2*i] = t[b[i]>>4]
+		o[2*i+1] = t[b[i]&0xf]
+	}
+	return string(o)
+}
+
+func unhex(s string) (out []byte) {
+	out = []byte{:len(s) / 2}
+	var hi, lo byte
+	for i := 0; i < len(out); i++ {
+		hi = s[2*i]
+		lo = s[2*i+1]
+		if hi >= 'a' {
+			hi = hi - 'a' + 10
+		} else {
+			hi = hi - '0'
+		}
+		if lo >= 'a' {
+			lo = lo - 'a' + 10
+		} else {
+			lo = lo - '0'
+		}
+		out[i] = hi<<4 | lo
+	}
+	return out
+}
+
+func check(name string, got, want string) {
+	if got != want {
+		println("FAIL: " | name)
+		println("  got  " | got)
+		println("  want " | want)
+		os.Exit(1)
+	}
+}
+
+func main() {
+	dk, err := mlkem.NewDecapsulationKey768(unhex(seedHex))
+	if err != nil {
+		println("FAIL: NewDecapsulationKey768")
+		os.Exit(1)
+	}
+	check("decapsulation key", hex(dk.Bytes()), wantDK)
+	ek := dk.EncapsulationKey()
+	check("encapsulation key", hex(ek.Bytes()), wantEK)
+	ss, derr := dk.Decapsulate(unhex(ctHex))
+	if derr != nil {
+		println("FAIL: Decapsulate returned an error for a valid ciphertext")
+		os.Exit(1)
+	}
+	check("shared key", hex(ss), wantSS)
+
+	// The same key rebuilt from its seed and from its encapsulation key bytes
+	// must behave identically: this is the path an application takes.
+	dk2, err2 := mlkem.NewDecapsulationKey768(unhex(seedHex))
+	if err2 != nil {
+		println("FAIL: NewDecapsulationKey768 (second)")
+		os.Exit(1)
+	}
+	ek2, err3 := mlkem.NewEncapsulationKey768(unhex(wantEK))
+	if err3 != nil {
+		println("FAIL: NewEncapsulationKey768")
+		os.Exit(1)
+	}
+	check("rebuilt encapsulation key", hex(ek2.Bytes()), wantEK)
+	ss2, derr2 := dk2.Decapsulate(unhex(ctHex))
+	if derr2 != nil {
+		println("FAIL: Decapsulate (second)")
+		os.Exit(1)
+	}
+	check("rebuilt shared key", hex(ss2), wantSS)
+
+	// Its own encapsulation must round trip, and a tampered ciphertext must
+	// take the implicit-rejection path: 32 bytes, no error, not the real key.
+	ssA, ct := ek2.Encapsulate()
+	ssB, derr3 := dk2.Decapsulate(ct)
+	if derr3 != nil || !bytes.Equal(ssA, ssB) {
+		println("FAIL: encapsulate/decapsulate round trip")
+		os.Exit(1)
+	}
+	bad := unhex(ctHex)
+	bad[10] = bad[10] ^ 0x01
+	ssR, derr4 := dk2.Decapsulate(bad)
+	if derr4 != nil || len(ssR) != 32 || bytes.Equal(ssR, ss) {
+		println("FAIL: tampered ciphertext did not take implicit rejection")
+		os.Exit(1)
+	}
+	// ML-KEM-1024 has no Go 1.25 reference, so only its round trip is pinned:
+	// a key derived from the seed must decapsulate what its own encapsulation
+	// key produced. The same sliceForAppend and stored-slice bugs would break
+	// it the same way, and this is the only coverage it has.
+	dk3, err4 := mlkem.NewDecapsulationKey1024(unhex(seedHex))
+	if err4 != nil {
+		println("FAIL: NewDecapsulationKey1024")
+		os.Exit(1)
+	}
+	ek3 := dk3.EncapsulationKey()
+	ssC, ctC := ek3.Encapsulate()
+	ssD, derr5 := dk3.Decapsulate(ctC)
+	if derr5 != nil || !bytes.Equal(ssC, ssD) || len(ctC) != 1568 {
+		println("FAIL: ML-KEM-1024 round trip")
+		os.Exit(1)
+	}
+	println("ok")
+}

@@ -17298,3 +17298,59 @@ not `//moxie:` ones, so a legacy build of `src/unicode/tables.mx` sees
 zero-valued tables. Nothing in the legacy bootstrap's closure reads them, which
 is why it has never surfaced; recorded here as a bilateral gap, and
 `docs/REFERENCE.md` documents `//:embed` as the portable spelling.
+
+## Round 221: ML-KEM was returning the wrong shared key, and it was two slice bugs
+
+`crypto/internal/fips140/mlkem`'s key structs held their 32-byte seeds as
+arrays (`d`, `z`, `rho`, `h`) and its encoders took arrays for the ciphertext
+and message scratch (`[CiphertextSize768]byte`, `[messageSize]byte`). They are
+slices now, allocated by `newDecapsulationKeyStorage*` /
+`newEncapsulationKeyStorage*` and carried out by the return relocation. The
+polynomial matrices (`[k]nttElement`, `[k*k]nttElement`) stay arrays: they are
+fixed-size value matrices inside the key, not buffers.
+
+Converting it exposed two bugs that made ML-KEM **return a wrong shared key for
+every ciphertext** - it never failed, it silently took FIPS 203's implicit
+rejection path:
+
+1. **Go's `sliceForAppend` does not survive a function return.** The helper
+   handed back the grown buffer and a tail view of the same buffer; the
+   encoders wrote through the tail and returned the head. Each returned slice is
+   relocated on its own, so the tail was a *copy*: `ringCompressAndEncode*` and
+   `polyByteEncode` returned zeros. `growFor` replaces it - one slice, callers
+   write through an offset - which is the same fix `crypto/cipher/gcm.mx`
+   already documents for the same helper. What made this invisible for so long
+   is that `moxie test` in-package kept the aliasing (the helper was inlined
+   there), while the same code built as a dependency of an application did not:
+   the package's own tests passed and every real user got a wrong key.
+
+2. **A slice stored through a receiver pointer aliases, it is not copied.**
+   `dk.rho = rho`, where `rho` is a sub-slice of a local `G`, left the key
+   pointing into `kemKeyGen`'s frame. The bytes survived as long as nothing
+   reused that frame - a small caller saw the right rho, a caller with a few
+   more allocations saw garbage that changed between two reads of the same key.
+   The fix is the ownership rule stated as an authoring pattern: the
+   constructor allocates the key's storage, and the code `copy`s into it
+   (`copy(dk.rho, rho)`, and `EncapsulationKey` builds a key with its own storage
+   and copies dk's seeds in). **The compiler should have made this copy; see the
+   open item below.**
+
+Verified against Go 1.25.3 (`crypto/mlkem`, seed 0x00,0x03,...,0xbd):
+
+  * `dk.Bytes()` and `ephemeralKey.Bytes()` byte-identical;
+  * decapsulating a ciphertext Go produced yields Go's shared key
+    `f789c54d4e79dbc0...` (before these fixes: `dfdb0058...`, i.e. J(z||c));
+  * `tests/regressions/should_compile/mlkem_vectors.mx` pins the seed, dk, ek,
+    ciphertext and shared key, and is an *application* so it takes the code path
+    users take. It also round-trips ML-KEM-1024 (no Go reference exists for it)
+    and checks that a tampered ciphertext takes implicit rejection: 32 bytes, no
+    error, not the real key;
+  * the 79-package `crypto` bucket builds.
+
+Open item, high priority: **a store into a slice field through a pointer does
+not copy the backing.** The documented rule is that a store must copy (there is
+no relocation for a store through a pointer, only for returns), and the codec
+violates it: `dk.rho = rho` aliased `kemKeyGen`'s frame. Every "field = local
+slice" assignment in the tree is a latent dangle, and the workaround above is
+per-call-site. A minimal reproducer is worth building next; the symptom is a
+value that reads correctly until the frame's arena is reused.

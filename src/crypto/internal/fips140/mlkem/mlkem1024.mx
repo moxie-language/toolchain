@@ -15,24 +15,36 @@ import (
 // A DecapsulationKey1024 is the secret key used to decapsulate a shared key from a
 // ciphertext. It includes various precomputed values.
 type DecapsulationKey1024 struct {
-	d [32]byte // decapsulation key seed
-	z [32]byte // implicit rejection sampling seed
+	d []byte // decapsulation key seed
+	z []byte // implicit rejection sampling seed
 
-	rho [32]byte // sampleNTT seed for A, stored for the encapsulation key
-	h [32]byte // H(ek), stored for ML-KEM.Decaps_internal
+	rho []byte // sampleNTT seed for A, stored for the encapsulation key
+	h []byte // H(ek), stored for ML-KEM.Decaps_internal
 
 	encryptionKey1024
 	decryptionKey1024
+}
+
+// newDecapsulationKeyStorage allocates a decapsulation key and the byte storage
+// its fields need, in this function's frame, so the caller takes the whole key
+// in one move.
+func newDecapsulationKeyStorage1024() (out *DecapsulationKey1024) {
+	return &DecapsulationKey1024{
+		d:   []byte{:32},
+		z:   []byte{:32},
+		rho: []byte{:32},
+		h:   []byte{:32},
+	}
 }
 
 // Bytes returns the decapsulation key as a 64-byte seed in the "d || z" form.
 //
 // The decapsulation key must be kept secret.
 func (dk *DecapsulationKey1024) Bytes() (ret0 []byte) {
-	var b [SeedSize]byte
-	copy(b[:], dk.d[:])
-	copy(b[32:], dk.z[:])
-	return b[:]
+	b := []byte{:SeedSize}
+	copy(b, dk.d)
+	copy(b[32:], dk.z)
+	return b
 }
 
 // TestingOnlyExpandedBytes1024 returns the decapsulation key as a byte slice
@@ -52,14 +64,14 @@ func TestingOnlyExpandedBytes1024(dk *DecapsulationKey1024) (ret0 []byte) {
 	for i := range dk.t {
 		b = polyByteEncode(b, dk.t[i])
 	}
-	b = mxutil.Ensure(b, len(dk.rho[:]))
-	b = push(b, dk.rho[:]...)
+	b = mxutil.Ensure(b, len(dk.rho))
+	b = push(b, dk.rho...)
 
 	// H(ek) || z
-	b = mxutil.Ensure(b, len(dk.h[:]))
-	b = push(b, dk.h[:]...)
-	b = mxutil.Ensure(b, len(dk.z[:]))
-	b = push(b, dk.z[:]...)
+	b = mxutil.Ensure(b, len(dk.h))
+	b = push(b, dk.h...)
+	b = mxutil.Ensure(b, len(dk.z))
+	b = push(b, dk.z...)
 
 	return b
 }
@@ -67,19 +79,30 @@ func TestingOnlyExpandedBytes1024(dk *DecapsulationKey1024) (ret0 []byte) {
 // EncapsulationKey returns the public encapsulation key necessary to produce
 // ciphertexts.
 func (dk *DecapsulationKey1024) EncapsulationKey() (ret0 *EncapsulationKey1024) {
-	return &EncapsulationKey1024{
-		rho:                 dk.rho,
-		h:                 dk.h,
-		encryptionKey1024: dk.encryptionKey1024,
-	}
+	// The key gets its own storage and copies into it: a slice stored through a
+	// pointer is not relocated into the receiver's arena, so aliasing dk's
+	// bytes here would leave the new key pointing at a frame that is about to
+	// end.
+	ek := newEncapsulationKeyStorage1024()
+	copy(ek.rho, dk.rho)
+	copy(ek.h, dk.h)
+	ek.encryptionKey1024 = dk.encryptionKey1024
+	return ek
 }
 
 // An EncapsulationKey1024 is the public key used to produce ciphertexts to be
 // decapsulated by the corresponding [DecapsulationKey1024].
 type EncapsulationKey1024 struct {
-	rho [32]byte // sampleNTT seed for A
-	h [32]byte // H(ek)
+	rho []byte // sampleNTT seed for A
+	h []byte // H(ek)
 	encryptionKey1024
+}
+
+func newEncapsulationKeyStorage1024() (out *EncapsulationKey1024) {
+	return &EncapsulationKey1024{
+		rho: []byte{:32},
+		h:   []byte{:32},
+	}
 }
 
 // Bytes returns the encapsulation key as a byte slice.
@@ -93,8 +116,8 @@ func (ek *EncapsulationKey1024) bytes(b []byte) (ret0 []byte) {
 	for i := range ek.t {
 		b = polyByteEncode(b, ek.t[i])
 	}
-	b = mxutil.Ensure(b, len(ek.rho[:]))
-	b = push(b, ek.rho[:]...)
+	b = mxutil.Ensure(b, len(ek.rho))
+	b = push(b, ek.rho...)
 	return b
 }
 
@@ -113,16 +136,16 @@ type decryptionKey1024 struct {
 // a DRBG. The decapsulation key must be kept secret.
 func GenerateKey1024() (ret0 *DecapsulationKey1024, ret1 error) {
 	// The actual logic is in a separate function to outline this allocation.
-	dk := &DecapsulationKey1024{}
+	dk := newDecapsulationKeyStorage1024()
 	return generateKey1024(dk)
 }
 
 func generateKey1024(dk *DecapsulationKey1024) (ret0 *DecapsulationKey1024, ret1 error) {
-	var d [32]byte
-	drbg.Read(d[:])
-	var z [32]byte
-	drbg.Read(z[:])
-	kemKeyGen1024(dk, d[:], z[:])
+	d := []byte{:32}
+	drbg.Read(d)
+	z := []byte{:32}
+	drbg.Read(z)
+	kemKeyGen1024(dk, d, z)
 	var pctErr error
 	if fips140.Enabled {
 		pctErr = kemPCT1024(dk)
@@ -134,9 +157,9 @@ func generateKey1024(dk *DecapsulationKey1024) (ret0 *DecapsulationKey1024, ret1
 
 // GenerateKeyInternal1024 is a derandomized version of GenerateKey1024,
 // exclusively for use in tests.
-func GenerateKeyInternal1024(d, z *[32]byte) (ret0 *DecapsulationKey1024) {
-	dk := &DecapsulationKey1024{}
-	kemKeyGen1024(dk, d[:], z[:])
+func GenerateKeyInternal1024(d, z []byte) (ret0 *DecapsulationKey1024) {
+	dk := newDecapsulationKeyStorage1024()
+	kemKeyGen1024(dk, d, z)
 	return dk
 }
 
@@ -144,7 +167,7 @@ func GenerateKeyInternal1024(d, z *[32]byte) (ret0 *DecapsulationKey1024) {
 // seed in the "d || z" form. The seed must be uniformly random.
 func NewDecapsulationKey1024(seed []byte) (ret0 *DecapsulationKey1024, ret1 error) {
 	// The actual logic is in a separate function to outline this allocation.
-	dk := &DecapsulationKey1024{}
+	dk := newDecapsulationKeyStorage1024()
 	return newKeyFromSeed1024(dk, seed)
 }
 
@@ -169,7 +192,7 @@ func TestingOnlyNewDecapsulationKey1024(b []byte) (ret0 *DecapsulationKey1024, r
 		return nil, errors.New("mlkem: invalid NIST decapsulation key length")
 	}
 
-	dk := &DecapsulationKey1024{}
+	dk := newDecapsulationKeyStorage1024()
 	for i := range dk.s {
 		var perr error
 		dk.s[i], perr = polyByteDecode[nttElement](b[:encodingSize12])
@@ -183,23 +206,23 @@ func TestingOnlyNewDecapsulationKey1024(b []byte) (ret0 *DecapsulationKey1024, r
 	if err != nil {
 		return nil, err
 	}
-	dk.rho = ek.rho
-	dk.h = ek.h
+	copy(dk.rho, ek.rho)
+	copy(dk.h, ek.h)
 	dk.encryptionKey1024 = ek.encryptionKey1024
 	b = b[EncapsulationKeySize1024:]
 
-	if !bytes.Equal(dk.h[:], b[:32]) {
+	if !bytes.Equal(dk.h, b[:32]) {
 		return nil, errors.New("mlkem: inconsistent H(ek) in encoded bytes")
 	}
 	b = b[32:]
 
-	copy(dk.z[:], b)
+	copy(dk.z, b)
 
 	// Generate a random d value for use in Bytes(). This is a safety mechanism
 	// that avoids returning a broken key vs a random key if this function is
 	// called in contravention of the TestingOnlyNewDecapsulationKey1024 function
 	// comment advising against it.
-	drbg.Read(dk.d[:])
+	drbg.Read(dk.d)
 
 	return dk, nil
 }
@@ -210,15 +233,18 @@ func TestingOnlyNewDecapsulationKey1024(b []byte) (ret0 *DecapsulationKey1024, r
 // K-PKE.KeyGen according to FIPS 203, Algorithm 13. The two are merged to save
 // copies and allocations.
 func kemKeyGen1024(dk *DecapsulationKey1024, d, z []byte) {
-	copy(dk.d[:], d)
-	copy(dk.z[:], z)
+	copy(dk.d, d)
+	copy(dk.z, z)
 
 	g := sha3.New512()
 	g.Write(d)
 	g.Write([]byte{k1024}) // Module dimension as a domain separator.
 	G := g.Sum([]byte{:0:64})
 	rho, sigma := G[:32], G[32:]
-	dk.rho = [32]byte(rho)
+	// Copy into the key's own storage rather than storing the local slice:
+	// a store through the receiver pointer does not relocate the backing, so
+	// `dk.rho = rho` left the key pointing into this function's frame.
+	copy(dk.rho, rho)
 
 	A := &dk.a
 	for i := byte(0); i < k1024; i++ {
@@ -250,7 +276,10 @@ func kemKeyGen1024(dk *DecapsulationKey1024, d, z []byte) {
 	H := sha3.New256()
 	ek := dk.EncapsulationKey().Bytes()
 	H.Write(ek)
-	H.Sum(dk.h[:0])
+	// Sum writes the digest into dk.h's storage; copying it explicitly keeps
+	// this correct whether a sub-slice aliases its parent or copies it.
+	hSum := H.Sum(dk.h[:0])
+	copy(dk.h, hSum)
 }
 
 // kemPCT1024 performs a Pairwise Consistency Test per FIPS 140-3 IG 10.3.A
@@ -280,36 +309,36 @@ func kemPCT1024(dk *DecapsulationKey1024) (ret0 error) {
 // The shared key must be kept secret.
 func (ek *EncapsulationKey1024) Encapsulate() (sharedKey, ciphertext []byte) {
 	// The actual logic is in a separate function to outline this allocation.
-	var cc [CiphertextSize1024]byte
-	return ek.encapsulate(&cc)
+	cc := []byte{:CiphertextSize1024}
+	return ek.encapsulate(cc)
 }
 
-func (ek *EncapsulationKey1024) encapsulate(cc *[CiphertextSize1024]byte) (sharedKey, ciphertext []byte) {
-	var m [messageSize]byte
-	drbg.Read(m[:])
+func (ek *EncapsulationKey1024) encapsulate(cc []byte) (sharedKey, ciphertext []byte) {
+	m := []byte{:messageSize}
+	drbg.Read(m)
 	// Note that the modulus check (step 2 of the encapsulation key check from
 	// FIPS 203, Section 7.2) is performed by polyByteDecode in parseEK1024.
 	fips140.RecordApproved()
-	return kemEncaps1024(cc, ek, &m)
+	return kemEncaps1024(cc, ek, m)
 }
 
 // EncapsulateInternal is a derandomized version of Encapsulate, exclusively for
 // use in tests.
-func (ek *EncapsulationKey1024) EncapsulateInternal(m *[32]byte) (sharedKey, ciphertext []byte) {
-	cc := &[CiphertextSize1024]byte{}
+func (ek *EncapsulationKey1024) EncapsulateInternal(m []byte) (sharedKey, ciphertext []byte) {
+	cc := []byte{:CiphertextSize1024}
 	return kemEncaps1024(cc, ek, m)
 }
 
 // kemEncaps1024 generates a shared key and an associated ciphertext.
 //
 // It implements ML-KEM.Encaps_internal according to FIPS 203, Algorithm 17.
-func kemEncaps1024(cc *[CiphertextSize1024]byte, ek *EncapsulationKey1024, m *[messageSize]byte) (K, c []byte) {
+func kemEncaps1024(cc []byte, ek *EncapsulationKey1024, m []byte) (K, c []byte) {
 	g := sha3.New512()
-	g.Write(m[:])
-	g.Write(ek.h[:])
+	g.Write(m)
+	g.Write(ek.h)
 	G := g.Sum(nil)
 	K, r := G[:SharedKeySize], G[SharedKeySize:]
-	c = pkeEncrypt1024(cc, &ek.encryptionKey1024, m[:], r)
+	c = pkeEncrypt1024(cc, &ek.encryptionKey1024, m, r)
 	return K, c
 }
 
@@ -317,7 +346,7 @@ func kemEncaps1024(cc *[CiphertextSize1024]byte, ek *EncapsulationKey1024, m *[m
 // If the encapsulation key is not valid, NewEncapsulationKey1024 returns an error.
 func NewEncapsulationKey1024(encapsulationKey []byte) (ret0 *EncapsulationKey1024, ret1 error) {
 	// The actual logic is in a separate function to outline this allocation.
-	ek := &EncapsulationKey1024{}
+	ek := newEncapsulationKeyStorage1024()
 	return parseEK1024(ek, encapsulationKey)
 }
 
@@ -332,7 +361,8 @@ func parseEK1024(ek *EncapsulationKey1024, ekPKE []byte) (ret0 *EncapsulationKey
 
 	h := sha3.New256()
 	h.Write(ekPKE)
-	h.Sum(ek.h[:0])
+	hSum := h.Sum(ek.h[:0])
+	copy(ek.h, hSum)
 
 	for i := range ek.t {
 		var err error
@@ -342,11 +372,11 @@ func parseEK1024(ek *EncapsulationKey1024, ekPKE []byte) (ret0 *EncapsulationKey
 		}
 		ekPKE = ekPKE[encodingSize12:]
 	}
-	copy(ek.rho[:], ekPKE)
+	copy(ek.rho, ekPKE)
 
 	for i := byte(0); i < k1024; i++ {
 		for j := byte(0); j < k1024; j++ {
-			ek.a[i*k1024+j] = sampleNTT(ek.rho[:], j, i)
+			ek.a[i*k1024+j] = sampleNTT(ek.rho, j, i)
 		}
 	}
 
@@ -357,7 +387,7 @@ func parseEK1024(ek *EncapsulationKey1024, ekPKE []byte) (ret0 *EncapsulationKey
 //
 // It implements K-PKE.Encrypt according to FIPS 203, Algorithm 14, although the
 // computation of t and AT is done in parseEK1024.
-func pkeEncrypt1024(cc *[CiphertextSize1024]byte, ex *encryptionKey1024, m []byte, rnd []byte) (ret0 []byte) {
+func pkeEncrypt1024(cc []byte, ex *encryptionKey1024, m []byte, rnd []byte) (ret0 []byte) {
 	var N byte
 	r, e1 := []nttElement{:k1024}, []ringElement{:k1024}
 	for i := range r {
@@ -418,17 +448,17 @@ func kemDecaps1024(dk *DecapsulationKey1024, c []byte) (K []byte) {
 	fips140.RecordApproved()
 	m := pkeDecrypt1024(&dk.decryptionKey1024, c)
 	g := sha3.New512()
-	g.Write(m[:])
-	g.Write(dk.h[:])
+	g.Write(m)
+	g.Write(dk.h)
 	G := g.Sum([]byte{:0:64})
 	Kprime, r := G[:SharedKeySize], G[SharedKeySize:]
 	J := sha3.NewShake256()
-	J.Write(dk.z[:])
+	J.Write(dk.z)
 	J.Write(c)
 	Kout := []byte{:SharedKeySize}
 	J.Read(Kout)
-	var cc [CiphertextSize1024]byte
-	c1 := pkeEncrypt1024(&cc, &dk.encryptionKey1024, m, r)
+	cc := []byte{:CiphertextSize1024}
+	c1 := pkeEncrypt1024(cc, &dk.encryptionKey1024, m, r)
 
 	subtle.ConstantTimeCopy(subtle.ConstantTimeCompare(c, c1), Kout, Kprime)
 	return Kout
