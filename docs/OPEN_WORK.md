@@ -17502,3 +17502,12 @@ Verified on both compilers:
 
 `docs/REFERENCE.md` now describes the three refusals instead of the wrong
 `push` explanation.
+
+The growth helpers had the same hole from a third side: `mxutil.Ensure`,
+`Reserve` and `GrowCap` read `cap()` as an `int32`, so the sentinel is `-1`,
+`cap(s)*2` is `-2`, the "at least 16" floor turns that into a 16-element
+allocation, and `copy(nb[:len(s)], s)` then copies 48 elements into it - a
+silent buffer overflow rather than a failed push. All three now refuse the
+sentinel before any arithmetic, with the same message. Verified: `Ensure` on
+`check.Linkinfo` dies with it, while `Ensure`/`Reserve`/`GrowCap` on ordinary
+slices still grow exactly as before (2 -> 16 -> 20 -> 20).
