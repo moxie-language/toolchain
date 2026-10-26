@@ -1,0 +1,58 @@
+// An interface value whose concrete type fits in a pointer is stored INLINE (
+// packed into the value slot), which is the representation the shared runtime
+// codec and relocator assume: RelocMarkIface only forwards a boxed value when
+// its type is larger than a pointer word, and codecEncodeValue reads the slot
+// as the value itself for the same reason.
+//
+// stage4 boxed small aggregates by pointer anyway, so a four-byte struct
+// returned from another package pointed into the returning frame's arena,
+// which was never forwarded: the receiver arrived as garbage and the call
+// faulted. legacy's emitPointerPack has always packed by value-size, so this
+// was a stage4-only divergence - and an unsound one, because the two
+// representations are indistinguishable at the slot.
+//
+// Fixed by deciding the representation from the type's store size, exactly as
+// legacy and the runtime do, and by unpacking on every consumer side
+// (dispatch receivers, boxing method arguments, type assertions).
+package main
+
+import (
+	"os"
+	"tests/regressions/should_compile/iface_inline_box/lib"
+)
+
+func check(name string, got, want uint8) {
+	if got != want {
+		println("FAIL: " | name | ": got ", got, " want ", want)
+		os.Exit(1)
+	}
+}
+
+func main() {
+	cs := lib.Box()
+	r, g, b, a := cs[0].RGBA()
+	check("dispatch in caller", r, 1)
+	check("dispatch in caller 2", g, 2)
+	check("dispatch in caller 3", b, 3)
+	check("dispatch in caller 4", a, 4)
+	check("dispatch in defining package", lib.Sum(cs), 6)
+
+	// The value form of a type assertion unpacks the same inline slot, and a
+	// failed assertion must yield the zero value without reading memory.
+	c, ok := cs[1].(lib.Colour)
+	if !ok {
+		println("FAIL: comma-ok assertion")
+		os.Exit(1)
+	}
+	check("asserted value", c.R, 5)
+	check("asserted value 2", c.A, 8)
+	c2 := cs[0].(lib.Colour)
+	check("single assertion", c2.G, 2)
+	// A pointer assertion against a value-boxed interface must fail and
+	// leave the target zero, not read the packed slot as an address.
+	if p, bad := cs[0].(*lib.Colour); bad || p != nil {
+		println("FAIL: pointer assertion against a packed value succeeded")
+		os.Exit(1)
+	}
+	println("ok")
+}

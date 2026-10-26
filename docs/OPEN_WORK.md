@@ -17083,3 +17083,62 @@ Verified:
 
 The decoder still holds `block`, `quant`, `huffLUT` and the huffman tables as
 arrays; that conversion is unaffected by this and remains open.
+
+## Round 217: a value that fits in a pointer is packed INTO the interface slot, not boxed behind one
+
+The interface representation is `{typecode, value}` with one word for `value`,
+and a concrete value that fits in that word is stored *in* it. The shared
+runtime decides the representation from the type's size in two places and in
+the same way, so this is not a stage4 convention that could drift:
+
+    codecEncodeIfacePayload   t.Size() > PtrSize -> iface.value is a pointer
+    RelocMarkIface            t.Size() > PtrSize -> mark the boxed pointee
+    RelocFixupIface           t.Size() > PtrSize -> translate the pointer
+
+legacy's `emitPointerPack` packs by `TypeAllocSize <= PtrSize` as well. stage4
+packed only *scalars* inline and boxed every aggregate with `runtime.alloc`,
+whatever its size - so a four-byte struct in an interface was a pointer to a
+box in the returning frame's arena, and the relocator, reading the slot as the
+value itself, neither forwarded the box nor fixed the pointer. The interface
+dangled.
+
+The failure mode is worth recording because it is silent for a while: the
+freed frame's memory is not reused immediately, so the same program prints the
+right answer inside one package and starts printing garbage as soon as the
+value crosses a package boundary and a return. Reduced to three packages -
+`lib` boxes a `Colour{1,2,3,4}` into `[]Color` and returns it, `main` passes it
+on, `other` dispatches `RGBA()` - the receiver arrives as `0xf7fdec20` and the
+call faults. The same shape is why a `[]color.Color` built from
+`color.RGBA{...}` *values* crashed `gif.Encode` while a palette of
+`&color.RGBA{...}` worked: the pointer spelling stores a real pointer, the value
+spelling is inline, and only the second one was boxed.
+
+`image/gif` was never exercised before this, which is the same reason round
+200's jpeg encoder bug survived: an unbuilt package hides every bug in it. The
+encoder and decoder are now byte-identical to Go 1.25.3 for four paletted
+images (41, 51, 60 and 107 bytes) and round-trip their indices.
+
+The fix decides the representation from the type's store size in stage4 the way
+legacy and the runtime do (`ifaceInlineSize`), and unpacks on every consumer
+side: dispatch receivers (`materializeIfaceValue`), boxing of concrete method
+arguments, and both type-assertion forms. A small aggregate is packed by
+storing it into a zeroed pointer word and reading that word back, which is
+exactly what legacy's `emitPointerPack` does through its typed alloca; the
+unpack never dereferences the slot, so a failed comma-ok assertion or a nil
+interface still yields the zero value.
+
+Verified:
+
+  * `tests/regressions/should_compile/iface_inline_box` (lib + main) boxes a
+    four-byte struct in one package, returns it, dispatches from two other
+    packages, and asserts both the value and the pointer form. On the previous
+    compiler it dies with SIGSEGV; on this one it prints `ok`, and legacy
+    builds and runs it identically.
+  * Nine interface shapes - value and pointer boxing, single and comma-ok
+    assertion of a four-byte struct, a 24-byte struct and a four-byte array,
+    wrong-type and nil assertions - print byte-identical output under
+    legacy and stage4.
+  * The whole image stack stays byte-identical to Go 1.25.3: jpeg encode and
+    decode (12 images, per-plane and RGBA), png encode and decode (12 images),
+    gif encode and decode (4 paletted images).
+  * The bootstrap reached its fixpoint (s4b == s4c) with the change in.

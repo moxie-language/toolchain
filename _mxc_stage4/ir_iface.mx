@@ -39,14 +39,17 @@ func (e *irEmitter) emitMakeInterface(m *SSAMakeInterface) {
 	var valPtr string
 	if valType == "ptr" {
 		valPtr = val
-	} else if e.isScalarType(valType) && e.ifaceInlineWidth(valType) > 0 && e.ifaceInlineWidth(valType) <= e.intBits(e.intptrType()) {
-		// A value that fits in a pointer is stored INLINE in the value
-		// slot. The shared codec (codecEncodeValue KindInterface) and the
-		// legacy compiler's emitPointerPack both define the representation
-		// that way, so boxing here made the codec copy the box pointer as
-		// if it were the value: after relocation the interface pointed at
-		// a box in the source frame's arena, which then died with it.
-		valPtr = e.emitInlineToPtr(valType, val, "mi")
+	} else if e.ifaceInlineSize(m.X.SSAType()) > 0 {
+		// A value whose store size fits in a pointer is stored INLINE in the
+		// value slot - scalars as a bitcast of the word, small aggregates as
+		// packed bytes. The shared codec (codecEncodeValue KindInterface) and
+		// the relocator (RelocMarkIface) both define the representation that
+		// way from the type's size, as does legacy's emitPointerPack. Boxing
+		// a small aggregate by pointer made the codec copy the box address as
+		// if it were the value and the relocator leave the box unforwarded,
+		// so the interface pointed into the source frame's arena and died
+		// with it.
+		valPtr = e.emitIfacePack(valType, val, "mi")
 	} else {
 		ipt := e.intptrType()
 		sz := e.nextReg2("ha")
@@ -140,6 +143,74 @@ func (e *irEmitter) emitInlineFromPtr(lt, valPtr, prefix string) (s string) {
 	return s
 }
 
+// ifaceInlineSize returns the store size of a concrete value that the
+// interface representation keeps INLINE in the value slot, or 0 when the value
+// is stored out of line behind a pointer.
+//
+// The rule is legacy's emitPointerPack: a pointer is the pointer itself, a
+// value whose store size fits in a pointer word is packed into the slot, and
+// anything larger is boxed. The shared codec (codecEncodeValue KindInterface,
+// codecEncodeIfacePayload) and the relocator (RelocMarkIface,
+// RelocFixupIface) both decide the same way from the type's size, so a
+// divergence here is a dangling pointer, not a wrong answer: stage4 boxed a
+// four-byte struct by pointer while both of them read the slot as the value,
+// so the box was never forwarded and died with the frame that made it.
+func (e *irEmitter) ifaceInlineSize(t Type) (sz int32) {
+	if t == nil {
+		return 0
+	}
+	if _, isPtr := SafeUnderlying(t).(*Pointer); isPtr {
+		return 0
+	}
+	if _, isIface := SafeUnderlying(t).(*TCInterface); isIface {
+		return 0
+	}
+	sz = typeDescSize(t)
+	if sz <= 0 || sz > descPtrSize() {
+		return 0
+	}
+	return sz
+}
+
+// ifaceInlineScalar reports whether an inline value of LLVM type lt is stored
+// as a bitcast of its low bytes (integers and floats) rather than as a packed
+// aggregate that has to be loaded through a word.
+func (e *irEmitter) ifaceInlineScalar(lt string) (ok bool) {
+	return lt == "float" || lt == "double" || e.intBits(lt) > 0
+}
+
+// emitIfacePack stores an inline concrete value in the interface value slot.
+// A scalar is a bitcast of the pointer word; an aggregate is stored into a
+// zeroed word and read back as a pointer, which is what legacy's
+// emitPointerPack does through its typed alloca.
+func (e *irEmitter) emitIfacePack(lt, val, prefix string) (reg string) {
+	if e.ifaceInlineScalar(lt) {
+		return e.emitInlineToPtr(lt, val, prefix)
+	}
+	raw := e.nextReg2(prefix)
+	e.w("  ") ; e.w(raw) ; e.w(" = alloca ptr\n")
+	e.w("  store ptr zeroinitializer, ptr ") ; e.w(raw) ; e.w("\n")
+	e.w("  store ") ; e.w(lt) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(raw) ; e.w("\n")
+	reg = e.nextReg2(prefix)
+	e.w("  ") ; e.w(reg) ; e.w(" = load ptr, ptr ") ; e.w(raw) ; e.w("\n")
+	return reg
+}
+
+// emitIfaceUnpack is the mirror of emitIfacePack: it produces the inline
+// concrete value from the pointer word. It never dereferences valPtr, so a
+// nil interface or an all-zero word unpacks to zero.
+func (e *irEmitter) emitIfaceUnpack(lt, valPtr, prefix string) (val string) {
+	if e.ifaceInlineScalar(lt) {
+		return e.emitInlineFromPtr(lt, valPtr, prefix)
+	}
+	raw := e.nextReg2(prefix)
+	e.w("  ") ; e.w(raw) ; e.w(" = alloca ptr\n")
+	e.w("  store ptr ") ; e.w(valPtr) ; e.w(", ptr ") ; e.w(raw) ; e.w("\n")
+	val = e.nextReg2(prefix)
+	e.w("  ") ; e.w(val) ; e.w(" = load ") ; e.w(lt) ; e.w(", ptr ") ; e.w(raw) ; e.w("\n")
+	return val
+}
+
 // materializeIfaceValue returns a pointer to the concrete data behind an
 // interface value slot. An inline value (fits in a pointer) is unpacked
 // into a fresh alloca; anything else already is that pointer.
@@ -147,12 +218,11 @@ func (e *irEmitter) materializeIfaceValue(t Type, valPtr string) (reg string) {
 	if t == nil {
 		return valPtr
 	}
-	lt := e.llvmType(t)
-	w := e.ifaceInlineWidth(lt)
-	if w <= 0 || w > e.intBits(e.intptrType()) {
+	if e.ifaceInlineSize(t) <= 0 {
 		return valPtr
 	}
-	v := e.emitInlineFromPtr(lt, valPtr, "ifv")
+	lt := e.llvmType(t)
+	v := e.emitIfaceUnpack(lt, valPtr, "ifv")
 	reg = e.nextReg2("ifa")
 	e.w("  ") ; e.w(reg) ; e.w(" = alloca ") ; e.w(lt) ; e.w("\n")
 	e.w("  store ") ; e.w(lt) ; e.w(" ") ; e.w(v) ; e.w(", ptr ") ; e.w(reg) ; e.w("\n")
@@ -1659,9 +1729,9 @@ func (e *irEmitter) boxConcreteToIfaceParam(paramType Type, arg SSAValue, argT, 
 	}
 	ity := e.ifaceType()
 	if argT != "ptr" {
-		if w := e.ifaceInlineWidth(argT); w > 0 && w <= e.intBits(e.intptrType()) {
+		if e.ifaceInlineSize(arg.SSAType()) > 0 {
 			// Fits in a pointer: inline in the value slot.
-			argV = e.emitInlineToPtr(argT, argV, "box")
+			argV = e.emitIfacePack(argT, argV, "box")
 		} else {
 			// Wider than a pointer: heap-allocate a copy and box its address.
 			ipt := e.intptrType()
@@ -2119,6 +2189,13 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 			}
 			loaded = e.nextReg2("ta")
 			e.w("  ") ; e.w(loaded) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ") ; e.w(assertedType) ; e.w(" ") ; e.w(extracted) ; e.w(", ") ; e.w(assertedType) ; e.w(" ") ; e.w(zero) ; e.w("\n")
+		} else if e.ifaceInlineSize(t.AssertedType) > 0 {
+			// A small aggregate is packed into the value slot, so unpacking
+			// reads the slot word rather than memory behind it: a failed
+			// assertion yields zero without dereferencing anything.
+			extracted := e.emitIfaceUnpack(assertedType, valPtr, "ta")
+			loaded = e.nextReg2("ta")
+			e.w("  ") ; e.w(loaded) ; e.w(" = select i1 ") ; e.w(ok) ; e.w(", ") ; e.w(assertedType) ; e.w(" ") ; e.w(extracted) ; e.w(", ") ; e.w(assertedType) ; e.w(" zeroinitializer\n")
 		} else {
 			nonnull0 := e.nextReg2("ta")
 			e.w("  ") ; e.w(nonnull0) ; e.w(" = icmp ne ptr ") ; e.w(valPtr) ; e.w(", null\n")
@@ -2199,6 +2276,11 @@ func (e *irEmitter) emitTypeAssert(t *SSATypeAssert) {
 		} else if e.isScalarType(assertedType) {
 			extracted := e.extractScalarFromIface(valPtr, assertedType)
 			e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(assertedType) ; e.w(" ") ; e.w(extracted) ; e.w(", 0\n")
+		} else if e.ifaceInlineSize(t.AssertedType) > 0 {
+			// Small aggregate packed into the slot: the value is the slot
+			// word reinterpreted, not a load through it.
+			extracted := e.emitIfaceUnpack(assertedType, valPtr, "ta")
+			e.w("  ") ; e.w(reg) ; e.w(" = select i1 true, ") ; e.w(assertedType) ; e.w(" ") ; e.w(extracted) ; e.w(", ") ; e.w(assertedType) ; e.w(" zeroinitializer\n")
 		} else {
 			e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(assertedType) ; e.w(", ptr ") ; e.w(valPtr) ; e.w("\n")
 		}
