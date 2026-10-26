@@ -68,77 +68,99 @@ func (c *CTR) XORKeyStreamAt(dst, src []byte, offset uint64) {
 	if len(dst) < len(src) {
 		panic("crypto/aes: len(dst) < len(src)")
 	}
-	dst = dst[:len(src)]
-	if alias.InexactOverlap(dst, src) {
+	if alias.InexactOverlapLen(dst, len(src), src, len(src)) {
 		panic("crypto/aes: invalid buffer overlap")
 	}
 	fips140.RecordApproved()
 
 	ivlo, ivhi := add128(c.ivlo, c.ivhi, offset/BlockSize)
+	pos := int32(0)
 
 	if blockOffset := offset % BlockSize; blockOffset != 0 {
 		// We have a partial block at the beginning.
 		var in, out [BlockSize]byte
 		copy(in[blockOffset:], src)
-		ctrBlocks1(&c.b, out[:], in[:], ivlo, ivhi)
-		n := copy(dst, out[blockOffset:])
-		src = src[n:]
-		dst = dst[n:]
+		ctrBlocks1(&c.b, out[:], 0, BlockSize, in[:], 0, ivlo, ivhi)
+		n := int32(BlockSize) - int32(blockOffset)
+		if n > int32(len(src)) {
+			n = int32(len(src))
+		}
+		for i := int32(0); i < n; i++ {
+			dst[i] = out[blockOffset+i]
+		}
+		pos = n
 		ivlo, ivhi = add128(ivlo, ivhi, 1)
 	}
 
-	for len(src) >= 8*BlockSize {
-		ctrBlocks8(&c.b, dst[:8*BlockSize], src[:8*BlockSize], ivlo, ivhi)
-		src = src[8*BlockSize:]
-		dst = dst[8*BlockSize:]
+	// The cursor is the offset into dst and src: a sub-slice of the cipher's
+	// buffers is a copy, so the block loops take the base slices and a
+	// position rather than dst[pos:].
+	for len(src)-pos >= 8*BlockSize {
+		ctrBlocks8(&c.b, dst, pos, 8*BlockSize, src, pos, ivlo, ivhi)
+		pos += 8 * BlockSize
 		ivlo, ivhi = add128(ivlo, ivhi, 8)
 	}
 
 	// The tail can have at most 7 = 4 + 2 + 1 blocks.
-	if len(src) >= 4*BlockSize {
-		ctrBlocks4(&c.b, dst[:4*BlockSize], src[:4*BlockSize], ivlo, ivhi)
-		src = src[4*BlockSize:]
-		dst = dst[4*BlockSize:]
+	if len(src)-pos >= 4*BlockSize {
+		ctrBlocks4(&c.b, dst, pos, 4*BlockSize, src, pos, ivlo, ivhi)
+		pos += 4 * BlockSize
 		ivlo, ivhi = add128(ivlo, ivhi, 4)
 	}
-	if len(src) >= 2*BlockSize {
-		ctrBlocks2(&c.b, dst[:2*BlockSize], src[:2*BlockSize], ivlo, ivhi)
-		src = src[2*BlockSize:]
-		dst = dst[2*BlockSize:]
+	if len(src)-pos >= 2*BlockSize {
+		ctrBlocks2(&c.b, dst, pos, 2*BlockSize, src, pos, ivlo, ivhi)
+		pos += 2 * BlockSize
 		ivlo, ivhi = add128(ivlo, ivhi, 2)
 	}
-	if len(src) >= 1*BlockSize {
-		ctrBlocks1(&c.b, dst[:1*BlockSize], src[:1*BlockSize], ivlo, ivhi)
-		src = src[1*BlockSize:]
-		dst = dst[1*BlockSize:]
+	if len(src)-pos >= 1*BlockSize {
+		ctrBlocks1(&c.b, dst, pos, 1*BlockSize, src, pos, ivlo, ivhi)
+		pos += 1 * BlockSize
 		ivlo, ivhi = add128(ivlo, ivhi, 1)
 	}
 
-	if len(src) != 0 {
+	if len(src)-pos != 0 {
 		// We have a partial block at the end.
 		var in, out [BlockSize]byte
-		copy(in[:], src)
-		ctrBlocks1(&c.b, out[:], in[:], ivlo, ivhi)
-		copy(dst, out[:])
+		n := int32(len(src)) - pos
+		for i := int32(0); i < n; i++ {
+			in[i] = src[pos+i]
+		}
+		ctrBlocks1(&c.b, out[:], 0, BlockSize, in[:], 0, ivlo, ivhi)
+		for i := int32(0); i < n; i++ {
+			dst[pos+i] = out[i]
+		}
 	}
 }
 
-// Each ctrBlocksN function XORs src with N blocks of counter keystream, and
-// stores it in dst. src is loaded in full before storing dst, so they can
-// overlap even inexactly. The starting counter value is passed in as a pair of
-// little-endian 64-bit integers.
+// Each ctrBlocksN function XORs n bytes of src starting at srcOff with N blocks
+// of counter keystream, and stores it in dst at dstOff. src is loaded in full
+// before storing dst, so they can overlap even inexactly. The starting counter
+// value is passed in as a pair of little-endian 64-bit integers.
 
-func ctrBlocks(b *Block, dst, src []byte, ivlo, ivhi uint64) {
-	buf := []byte{:len(src):8*BlockSize}
-	for i := 0; i < len(buf); i += BlockSize {
-		byteorder.BEPutUint64(buf[i:], ivhi)
-		byteorder.BEPutUint64(buf[i+8:], ivlo)
+func ctrBlocks(b *Block, dst []byte, dstOff int32, n int32, src []byte, srcOff int32, ivlo, ivhi uint64) {
+	buf := []byte{:n:8*BlockSize}
+	var ct [BlockSize]byte
+	for i := int32(0); i < len(buf); i += BlockSize {
+		byteorder.BEPutUint64(ct[0:8], ivhi)
+		byteorder.BEPutUint64(ct[8:16], ivlo)
 		ivlo, ivhi = add128(ivlo, ivhi, 1)
-		encryptBlock(b, buf[i:], buf[i:])
+		encryptBlock(b, ct[:], ct[:])
+		for j := int32(0); j < BlockSize; j++ {
+			buf[i+j] = ct[j]
+		}
 	}
 	// XOR into buf first, in case src and dst overlap (see above).
-	subtle.XORBytes(buf, src, buf)
-	copy(dst, buf)
+	subtle.XORBytesAt(buf, 0, src, srcOff, buf, 0, n)
+	ctrCopyOffset(dst, dstOff, buf)
+}
+
+// ctrCopyOffset stores src into dst at off. It is a loop rather than
+// copy(dst[off:], src) because a sub-slice is a copy: the write would land in
+// the copy and never reach dst.
+func ctrCopyOffset(dst []byte, off int32, src []byte) {
+	for i := int32(0); i < len(src); i++ {
+		dst[off+i] = src[i]
+	}
 }
 
 func add128(lo, hi uint64, x uint64) (ret0 uint64, ret1 uint64) {

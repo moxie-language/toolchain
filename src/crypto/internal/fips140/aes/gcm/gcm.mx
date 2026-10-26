@@ -7,7 +7,6 @@ package gcm
 import (
 	"crypto/internal/fips140"
 	"crypto/internal/fips140/aes"
-	"crypto/internal/fips140/alias"
 	"errors"
 )
 
@@ -78,13 +77,7 @@ func (g *GCM) sealAfterIndicator(dst, nonce, plaintext, data []byte) (ret0 []byt
 
 	sealed := seal(g, nonce, plaintext, data)
 	out := growFor(dst, len(sealed))
-	if alias.InexactOverlap(out[len(dst):], plaintext) {
-		panic("crypto/cipher: invalid buffer overlap of output and input")
-	}
-	if alias.AnyOverlap(out[len(dst):], data) {
-		panic("crypto/cipher: invalid buffer overlap of output and additional data")
-	}
-	copy(out[len(dst):], sealed)
+	gcmCopyAt(out, int32(len(dst)), sealed)
 	return out
 }
 
@@ -114,35 +107,38 @@ func (g *GCM) Open(dst, nonce, ciphertext, data []byte) (ret0 []byte, ret1 error
 		// and to avoid releasing unauthenticated plaintext, we clear the
 		// destination in the event of an error.
 		zeroed := growFor(dst, len(ciphertext)-g.tagSize)
-		clear(zeroed[len(dst):])
+		for i := int32(len(dst)); i < len(zeroed); i++ {
+			zeroed[i] = 0
+		}
 		return nil, err
 	}
 	out := growFor(dst, len(pt))
-	if alias.InexactOverlap(out[len(dst):], ciphertext) {
-		panic("crypto/cipher: invalid buffer overlap of output and input")
-	}
-	if alias.AnyOverlap(out[len(dst):], data) {
-		panic("crypto/cipher: invalid buffer overlap of output and additional data")
-	}
 	fips140.RecordApproved()
-	copy(out[len(dst):], pt)
+	gcmCopyAt(out, int32(len(dst)), pt)
 	return out, nil
 }
 
 // growFor returns a slice with the contents of in followed by n fresh bytes.
-// The extra bytes are written by the caller with copy, never by handing a
-// second slice over the same buffer to another function: a pair of slices
-// sharing one buffer does not stay shared across a call boundary, so
-// sliceForAppend's tail came back unchanged.
+// The caller writes the fresh bytes by index: a sub-slice is a copy, so
+// copy(out[len(in):], p) would fill a copy and leave out unchanged.
 func growFor(in []byte, n int32) (out []byte) {
 	total := len(in) + n
-	if cap(in) >= total {
-		out = in[:total]
-		return out
+	out = in
+	if cap(in) < total {
+		out = []byte{:0:total}
+		for i := int32(0); i < len(in); i++ {
+			out[i] = in[i]
+		}
 	}
-	out = []byte{:total}
-	copy(out, in)
-	return out
+	return resize(out, total)
+}
+
+// gcmCopyAt stores src into dst at off. A loop, not copy(dst[off:], src): a
+// sub-slice is a copy, so the write would land in the copy.
+func gcmCopyAt(dst []byte, off int32, src []byte) {
+	for i := int32(0); i < len(src); i++ {
+		dst[off+i] = src[i]
+	}
 }
 
 func init() {

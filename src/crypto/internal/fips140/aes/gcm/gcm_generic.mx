@@ -27,7 +27,9 @@ func sealGeneric(g *GCM, nonce, plaintext, additionalData []byte) (out []byte) {
 
 	tag := []byte{:gcmTagSize}
 	gcmAuthGeneric(tag, H, tagMask, out[:len(plaintext)], additionalData)
-	copy(out[len(plaintext):], tag)
+	for i := int32(0); i < g.tagSize; i++ {
+		out[len(plaintext)+i] = tag[i]
+	}
 	return out
 }
 
@@ -78,28 +80,28 @@ func deriveCounterGeneric(H, counter []byte, nonce []byte) {
 // counter is the initial value and will be updated with the next value.
 func gcmCounterCryptGeneric(b *aes.Block, out, src []byte, counter []byte) {
 	mask := []byte{:gcmBlockSize}
+	pos := int32(0)
 
-	for len(src) >= gcmBlockSize {
+	for len(src)-pos >= gcmBlockSize {
 		aes.EncryptBlockInternal(b, mask, counter)
 		gcmInc32(counter)
 
-		subtle.XORBytes(out, src, mask)
-		out = out[gcmBlockSize:]
-		src = src[gcmBlockSize:]
+		subtle.XORBytesAt(out, pos, src, pos, mask, 0, gcmBlockSize)
+		pos += gcmBlockSize
 	}
 
-	if len(src) > 0 {
+	if n := int32(len(src)) - pos; n > 0 {
 		aes.EncryptBlockInternal(b, mask, counter)
 		gcmInc32(counter)
-		subtle.XORBytes(out, src, mask)
+		subtle.XORBytesAt(out, pos, src, pos, mask, 0, n)
 	}
 }
 
 // gcmInc32 treats the final four bytes of counterBlock as a big-endian value
 // and increments it.
 func gcmInc32(counterBlock []byte) {
-	ctr := counterBlock[len(counterBlock)-4:]
-	byteorder.BEPutUint32(ctr, byteorder.BEUint32(ctr)+1)
+	off := int32(len(counterBlock)) - 4
+	byteorder.BEPutUint32At(counterBlock, off, byteorder.BEUint32At(counterBlock, off)+1)
 }
 
 // gcmAuthGeneric calculates GHASH(additionalData, ciphertext), masks the result

@@ -59,13 +59,17 @@ func (x *ofb) refill() {
 		return
 	}
 	copy(x.out, x.out[x.outUsed:])
-	x.out = x.out[:cap(x.out)]
+	// resize, not x.out[:cap(x.out)]: a sub-slice is a copy, so the header
+	// would point at a fresh copy of the keystream buffer.
+	x.out = resize(x.out, cap(x.out))
 	for remain < len(x.out)-bs {
 		x.b.Encrypt(x.cipher, x.cipher)
-		copy(x.out[remain:], x.cipher)
+		for i := int32(0); i < bs; i++ {
+			x.out[remain+i] = x.cipher[i]
+		}
 		remain += bs
 	}
-	x.out = x.out[:remain]
+	x.out = resize(x.out, remain)
 	x.outUsed = 0
 }
 
@@ -73,17 +77,23 @@ func (x *ofb) XORKeyStream(dst, src []byte) {
 	if len(dst) < len(src) {
 		panic("crypto/cipher: output smaller than input")
 	}
-	if alias.InexactOverlap(dst[:len(src)], src) {
+	if alias.InexactOverlapLen(dst, len(src), src, len(src)) {
 		panic("crypto/cipher: invalid buffer overlap")
 	}
+	// The walk keeps offsets: a sub-slice of dst would be a copy, so the write
+	// would land in the copy after the first block.
+	pos := int32(0)
 	var n int32
-	for len(src) > 0 {
+	for pos < len(src) {
 		if x.outUsed >= len(x.out)-x.b.BlockSize() {
 			x.refill()
 		}
-		n = subtle.XORBytes(dst, src, x.out[x.outUsed:])
-		dst = dst[n:]
-		src = src[n:]
+		n = int32(len(src)) - pos
+		if avail := int32(len(x.out)) - x.outUsed; n > avail {
+			n = avail
+		}
+		subtle.XORBytesAt(dst, pos, src, pos, x.out, x.outUsed, n)
+		pos += n
 		x.outUsed += n
 	}
 }

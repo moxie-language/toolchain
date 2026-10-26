@@ -4,7 +4,10 @@
 
 package subtle
 
-import "crypto/internal/fips140/alias"
+import (
+	"crypto/internal/fips140/alias"
+	"unsafe"
+)
 
 // XORBytes sets dst[i] = x[i] ^ y[i] for all i < n = min(len(x), len(y)),
 // returning n, the number of bytes written to dst.
@@ -22,9 +25,33 @@ func XORBytes(dst, x, y []byte) (written int32) {
 	if n > len(dst) {
 		panic("subtle.XORBytes: dst too short")
 	}
-	if alias.InexactOverlap(dst[:n], x[:n]) || alias.InexactOverlap(dst[:n], y[:n]) {
+	if alias.InexactOverlapLen(dst, n, x, n) || alias.InexactOverlapLen(dst, n, y, n) {
 		panic("subtle.XORBytes: invalid overlap")
 	}
 	xorBytes(&dst[0], &x[0], &y[0], n) // arch-specific
+	return n
+}
+
+// XORBytesAt sets dst[dstOff+i] = x[xOff+i] ^ y[yOff+i] for all i < n,
+// returning n, the number of bytes written. It is the form the block loops
+// use: a sub-slice is a copy, so passing dst[off:] would write into a copy and
+// leave the caller's buffer untouched.
+func XORBytesAt(dst []byte, dstOff int32, x []byte, xOff int32, y []byte, yOff int32, n int32) (written int32) {
+	if n <= 0 {
+		return 0
+	}
+	if n > len(dst)-dstOff || n > len(x)-xOff || n > len(y)-yOff {
+		panic("subtle.XORBytesAt: buffer too short")
+	}
+	dp := &dst[dstOff]
+	xp := &x[xOff]
+	yp := &y[yOff]
+	dpv := unsafe.Pointer(dp)
+	xpv := unsafe.Pointer(xp)
+	ypv := unsafe.Pointer(yp)
+	if alias.InexactOverlapRange(dpv, xpv, n) || alias.InexactOverlapRange(dpv, ypv, n) {
+		panic("subtle.XORBytesAt: invalid overlap")
+	}
+	xorBytes(dp, xp, yp, n)
 	return n
 }

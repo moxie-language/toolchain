@@ -11,9 +11,26 @@ import "unsafe"
 // AnyOverlap reports whether x and y share memory at any (not necessarily
 // corresponding) index. The memory beyond the slice length is ignored.
 func AnyOverlap(x, y []byte) (overlap bool) {
-	return len(x) > 0 && len(y) > 0 &&
-		uintptr(unsafe.Pointer(&x[0])) <= uintptr(unsafe.Pointer(&y[len(y)-1])) &&
-		uintptr(unsafe.Pointer(&y[0])) <= uintptr(unsafe.Pointer(&x[len(x)-1]))
+	return AnyOverlapLen(x, len(x), y, len(y))
+}
+
+// AnyOverlapLen reports whether the first xLen bytes of x share memory with
+// the first yLen bytes of y. It is the form a caller uses when only a prefix
+// of a buffer is in play: a sub-slice is a copy, so x[:n] would be a copy of
+// the buffer and the check would compare the copy with itself.
+func AnyOverlapLen(x []byte, xLen int32, y []byte, yLen int32) (overlap bool) {
+	return xLen > 0 && yLen > 0 &&
+		uintptr(unsafe.Pointer(&x[0])) <= uintptr(unsafe.Pointer(&y[yLen-1])) &&
+		uintptr(unsafe.Pointer(&y[0])) <= uintptr(unsafe.Pointer(&x[xLen-1]))
+}
+
+// AnyOverlapRange reports whether the n-byte regions starting at p and q share
+// memory. It is the pointer form for a buffer plus an offset, where forming a
+// sub-slice would copy.
+func AnyOverlapRange(p, q unsafe.Pointer, n int32) (overlap bool) {
+	return n > 0 &&
+		uintptr(p) <= uintptr(q)+uintptr(n)-1 &&
+		uintptr(q) <= uintptr(p)+uintptr(n)-1
 }
 
 // InexactOverlap reports whether x and y share memory at any non-corresponding
@@ -23,8 +40,23 @@ func AnyOverlap(x, y []byte) (overlap bool) {
 // InexactOverlap can be used to implement the requirements of the crypto/cipher
 // AEAD, Block, BlockMode and Stream interfaces.
 func InexactOverlap(x, y []byte) (overlap bool) {
-	if len(x) == 0 || len(y) == 0 || &x[0] == &y[0] {
+	return InexactOverlapLen(x, len(x), y, len(y))
+}
+
+// InexactOverlapLen is InexactOverlap for the first xLen bytes of x and the
+// first yLen bytes of y.
+func InexactOverlapLen(x []byte, xLen int32, y []byte, yLen int32) (overlap bool) {
+	if xLen == 0 || yLen == 0 || &x[0] == &y[0] {
 		return false
 	}
-	return AnyOverlap(x, y)
+	return AnyOverlapLen(x, xLen, y, yLen)
+}
+
+// InexactOverlapRange is InexactOverlap for two n-byte regions given by a
+// buffer base and an offset.
+func InexactOverlapRange(p, q unsafe.Pointer, n int32) (overlap bool) {
+	if n == 0 || p == q {
+		return false
+	}
+	return AnyOverlapRange(p, q, n)
 }

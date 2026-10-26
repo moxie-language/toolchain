@@ -146,17 +146,26 @@ func (d *Digest) readGeneric(out []byte) (n int32, err error) {
 
 	n = len(out)
 
-	// Now, do the squeezing.
-	var x int32
-	for len(out) > 0 {
+	// Now, do the squeezing. The write position is an offset into out: a
+	// sub-slice of out is a copy, so advancing with out = out[x:] would squeeze
+	// every block after the first into a throwaway.
+	pos := int32(0)
+	var take int32
+	for pos < n {
 		// Apply the permutation if we've squeezed the sponge dry.
 		if d.n == d.rate {
 			d.permute()
 		}
 
-		x = copy(out, d.a[d.n:d.rate])
-		d.n += x
-		out = out[x:]
+		take = d.rate - d.n
+		if take > n-pos {
+			take = n - pos
+		}
+		for i := int32(0); i < take; i++ {
+			out[pos+i] = d.a[d.n+i]
+		}
+		d.n += take
+		pos += take
 	}
 
 	return
