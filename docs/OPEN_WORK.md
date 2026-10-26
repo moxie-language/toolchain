@@ -17026,3 +17026,60 @@ every constructor to allocate it, and the zero value stops being usable.
 `tests/regressions/should_compile/poly1305_aead` holds both vectors; with `New`
 reverted to the direct-initialize form it fails on the tag, which is exactly the
 bug the vectors exist to catch.
+
+## Round 216: an index into an array reached through a pointer stepped by the element, not the array
+
+jpeg's decoder read chroma from the luma quantization table. `decoder.quant` is
+`[maxTq + 1]block` with `block [blockSize]int32`, and `reconstructBlock` does
+
+    qt := &d.quant[d.comp[compIndex].tq]
+
+so the address of one `block` inside an array of blocks is formed through a
+struct field. Every chroma block was dequantized with `quant[0]`'s numbers read
+at a 4-byte step: a 1x1 red image decoded to `c3 19 1a` where Go gives
+`fe 00 00`. The encoder was byte-identical to Go all along (round 200), so this
+was the decoder, and round 200 recorded the 1..5-per-channel difference as
+unattributed IDCT rounding. It was not rounding - the luma plane was exact and
+only Cb/Cr were wrong, which a plane-level differential against Go showed in one
+run (`Y` identical for all 12 images, `C` wrong for all of them).
+
+The wrong IR, for `&h.q[i]` over a struct field `q [4][8]int32`:
+
+    %t55 = getelementptr inbounds {[4 x [8 x i32]]}, ptr %t1, i32 0, i32 0
+    %t56 = getelementptr inbounds [8 x i32], ptr %t55, i32 0, i32 %t54
+
+The second GEP steps `i` elements of `[8 x i32]`, i.e. 4 bytes per step, so
+`&h.q[1]` pointed at `h.q[0][1]`. `emitIndexAddr` decides whether the indexed
+base is an array by looking at the index operand's own type, plus two special
+cases (an alloca, a load from an addressable chain). A base whose type is
+`*[N]E` - a struct field, a `*[N]E` parameter, a loaded pointer - matched none
+of them and fell through to the branch that treats the base as a pointer to a
+single element, whose GEP source type is `[8 x i32]`.
+
+The fix is a branch before that machinery: when the base's type is `*[N]E` and
+the index is not a slice or a byte step, GEP the array type itself with
+`i32 0, <index>`. That is the address of an element of the array, whatever
+route the pointer took to get there, and it turns the four cases above into one
+shape. The branch emits no alloca, so it also cannot re-enter the per-iteration
+frame growth the load-forwarding case exists to avoid.
+
+legacy never had this: it builds the GEP with `CreateGEP` from the pointee type
+LLVM already knows, so there is nothing to mirror. Measured rather than assumed:
+`legacy/moxie` builds the fixture below and prints every address correctly.
+
+Verified:
+
+  * `tests/regressions/should_compile/nested_array_field_addr.mx` checks the
+    address of a row reached four ways - a struct field, a pointer to the
+    struct, a `*[n]row` parameter, a pointer loaded from a variable - plus a
+    write-back through the address, a plain local array and a slice of arrays.
+    On the previous compiler it fails at the first check (`got 1 want 1000`);
+    on this one it prints `ok`.
+  * `image/jpeg`: 3 synthetic images x 4 sizes (1x1, 8x6, 17x9, 33x32) encode
+    byte-identically to Go 1.25.3 and now decode byte-identically as well, both
+    per-plane Y/Cb/Cr and as RGBA pixels. Before the fix all 8 multi-component
+    cases differed in Cb and Cr; after it all 24 lines match.
+  * The bootstrap reached its fixpoint (s4b == s4c) with the change in.
+
+The decoder still holds `block`, `quant`, `huffLUT` and the huffman tables as
+arrays; that conversion is unaffected by this and remains open.

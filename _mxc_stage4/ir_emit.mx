@@ -3143,6 +3143,30 @@ func (e *irEmitter) emitIndexAddr(idx *SSAIndexAddr) {
 		}
 		return
 	}
+	// A base whose type is *[N]E indexes array elements, and the GEP source
+	// type is the array itself. Deciding "is this an array?" from the index
+	// operand's own type misses every base that reaches the array through a
+	// pointer - a struct field, a package-level struct field, a *[N]E
+	// parameter, a loaded pointer. Those fell through to the element branch
+	// below, which steps by the element type: &h.q[i] over `q [n]row` came out
+	// as `getelementptr [8 x i32], ptr %row_field, i32 0, i32 %i`, a 4-byte
+	// step instead of a row, so every i > 0 addressed row 0. legacy builds the
+	// GEP from the type LLVM already has and never had this shape.
+	if !isSlice && !idx.byteStep {
+		if p, ok4 := SafeUnderlying(idx.X.SSAType()).(*Pointer); ok4 && p.Base != nil {
+			if _, ok6 := SafeUnderlying(p.Base).(*Array); ok6 {
+				arrT := e.llvmType(p.Base)
+				e.w("  ") ; e.w(reg) ; e.w(" = getelementptr inbounds ")
+				e.w(arrT) ; e.w(", ptr ") ; e.w(base) ; e.w(", i32 0, ")
+				e.w(idxType) ; e.w(" ") ; e.w(index) ; e.w("\n")
+				aet := e.arrayElemType(arrT)
+				if aet != "" {
+					e.setRegType(idx, reg, aet)
+				}
+				return
+			}
+		}
+	}
 	arr, isArray := SafeUnderlying(idx.X.SSAType()).(*Array)
 	if !isArray {
 		if at, ok4 := e.allocTypes[idx.X]; ok4 && len(at) > 0 && at[0] == '[' {

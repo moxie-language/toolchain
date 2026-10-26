@@ -1,0 +1,123 @@
+// The address of an element of an array-of-arrays.
+//
+// stage4's emitIndexAddr decides whether the indexed base is an array and, when
+// it is, GEPs the array type with two indices. The detection looked only at the
+// index operand's own type, so a base that is a *pointer to* an array - a
+// struct field, a global, a *[N]E parameter - fell through to the branch that
+// treats the base as a pointer to one element, and emitted
+//
+//	getelementptr [8 x i32], ptr %row_of_field, i32 0, i32 %i
+//
+// which steps i*4 bytes instead of i*32: &h.q[1] pointed into h.q[0]. Indexing
+// an array value directly (a local `var q [n]row`) was fine because an alloca
+// carries its array type, which is why this survived.
+//
+// It was found by image/jpeg, whose decoder does
+// `qt := &d.quant[d.comp[compIndex].tq]` with `quant [4]block` and `block
+// [64]int32`: every chroma block was dequantized from the luma table read at a
+// 4-byte step, so decoded chroma came out wrong (a red 1x1 decoded to
+// 195,25,26 instead of 254,0,0) while the encoder stayed byte-identical to Go.
+// legacy builds this fixture correctly; the fix is stage4-only.
+package main
+
+import (
+	"os"
+)
+
+const n = 4
+const m = 8
+
+type row [m]int32
+
+type holder struct {
+	q [n]row
+}
+
+func check(name string, got, want int32) {
+	if got != want {
+		println("FAIL: " | name | ": got ", got, " want ", want)
+		os.Exit(1)
+	}
+}
+
+func checkArray(name string, r *row, base int32) {
+	for j := 0; j < m; j++ {
+		check(name, r[j], base|int32(j))
+	}
+}
+
+// checkParam indexes a pointer-to-array parameter.
+func checkParam(name string, p *[n]row) {
+	for i := 0; i < n; i++ {
+		r := &p[i]
+		checkArray(name, r, int32(i)*1000)
+	}
+}
+
+func main() {
+	var h holder
+	for i := 0; i < n; i++ {
+		for j := 0; j < m; j++ {
+			h.q[i][j] = int32(i*1000 + j)
+		}
+	}
+
+	// Struct field: the address of a row.
+	for i := 0; i < n; i++ {
+		r := &h.q[i]
+		checkArray("field addr", r, int32(i)*1000)
+	}
+
+	// Through a pointer to the struct.
+	hp := &h
+	for i := 0; i < n; i++ {
+		r := &hp.q[i]
+		checkArray("ptr field addr", r, int32(i)*1000)
+	}
+
+	// A pointer-to-array parameter.
+	checkParam("param addr", &h.q)
+
+	// A pointer to the array loaded from a variable.
+	var pa *[n]row
+	pa = &h.q
+	for i := 0; i < n; i++ {
+		r := &pa[i]
+		checkArray("loaded ptr addr", r, int32(i)*1000)
+	}
+
+	// The plain local array keeps working.
+	var q [n]row
+	for i := 0; i < n; i++ {
+		for j := 0; j < m; j++ {
+			q[i][j] = int32(i*5000 + j)
+		}
+	}
+	for i := 0; i < n; i++ {
+		r := &q[i]
+		checkArray("local addr", r, int32(i)*5000)
+	}
+
+	// A slice of arrays addresses rows the same way.
+	s := []row{:n}
+	for i := 0; i < n; i++ {
+		for j := 0; j < m; j++ {
+			s[i][j] = int32(i*7000 + j)
+		}
+	}
+	for i := 0; i < n; i++ {
+		r := &s[i]
+		checkArray("slice addr", r, int32(i)*7000)
+	}
+
+	// Writing back through the row address must reach the row it names.
+	for i := 0; i < n; i++ {
+		r := &h.q[i]
+		r[0] = 9000 | int32(i)
+	}
+	for i := 0; i < n; i++ {
+		check("field row write", h.q[i][0], 9000|int32(i))
+	}
+
+	println("ok")
+}
