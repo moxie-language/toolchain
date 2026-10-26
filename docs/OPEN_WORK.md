@@ -17420,3 +17420,47 @@ string, decoded round trip and base32 encoding is byte-identical. The itoa
 change is covered by the same build path as `strconv`/`fmt`: `Itoa`,
 `FormatUint` and `fmt.Sprint` agree on ten signed and seven unsigned values
 including the extremes.
+
+## Round 224: what is left of the arrays, and the gate's slowest unit
+
+The sweep has converted every buffer in the packages that run: jpeg, gif, png's
+neighbours, zip, mime, fmt, bytes, poly1305, zstd's checksum, secp256k1,
+ed25519, mlkem, base64, base32, itoa. What remains, counted by scanning every
+`.mx` file for fixed-size array types (`[N]T` with N > 9, subscripts excluded):
+
+    211  returned tables and value vectors  func _deBruijn64tab() [64]byte,
+                                            internal/types/errors' code tables,
+                                            x/text unicode/norm and bidi,
+                                            zstd's fse tables
+     63  runtime / syscall                 syscall's Stat_t fields, the allocator
+    111  buffers still to convert          aes/gcm's [gcmBlockSize]byte block
+                                            scratches and [256]byte product
+                                            tables, sha3's state, coverage's
+                                            16-byte hashes, xcoff's headers,
+                                            net/http's http2 ping keys, zstd's
+                                            huff/fse scratch slices
+
+The last row is the same work as the previous rounds and continues one package
+at a time. The first row is a **representation decision**, not a mechanical
+sweep: `func t() [N]uint16 { return [N]uint16{...} }` is compiled into the
+caller's frame for free, while the same literal as `[]uint16` allocates on every
+call. These tables become slices only with somewhere to live that is not a
+per-call allocation, and the tree already has the mechanism: a data file plus
+`//:embed` (or `//moxie:embed_le` for a little-endian typed table) gives a real
+slice with `len` and `cap` generated from the file and no allocation at all -
+which is how `src/unicode/tables.mx` has always carried its tables. Doing that
+per table means generating the data files, so it is its own round per package
+family. `//:embed` is the portable spelling (legacy rewrites it to `//go:embed`);
+`//moxie:embed_le` remains stage4-only.
+
+The second row stays: an array that an external contract fixes - the kernel's
+Stat_t layout, the runtime's own structures - cannot become a slice without a
+shim at the boundary, and the boundary is where the layout is defined.
+
+Gate note, measured: `0a/http_header_api` hit its 1800s unit timeout on a cold
+cache (its `.bc` stage re-runs whenever the tree source hash changes, and the
+clang object stage is serial because `adaptiveJobs` caps at
+`(available/2) / 4GB` workers, which is 1 on a 14GB machine). Re-running the
+same unit with the `.bc` cache warm passed in 1261552ms, and `tree-cleanliness`
+passed. That is a machine-budget artifact, recorded rather than hidden, and not
+a reason to widen the timeout.
