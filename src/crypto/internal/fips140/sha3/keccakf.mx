@@ -11,8 +11,17 @@ import (
 	"unsafe"
 )
 
-func _rc() (ret0 [24]uint64) {
-	return [24]uint64{
+// rcTable holds the round constants. It is a package-level slice filled by
+// the package's init: the permutation runs once per rate-sized block, so a
+// function returning the table as a slice would allocate on every call.
+var rcTable []uint64
+
+func init() {
+	initRcTable()
+}
+
+func initRcTable() {
+	rcTable = []uint64{
 		0x0000000000000001, 0x0000000000008082, 0x800000000000808A, 0x8000000080008000,
 		0x000000000000808B, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
 		0x000000000000008A, 0x0000000000000088, 0x0000000080008009, 0x000000008000000A,
@@ -24,26 +33,27 @@ func _rc() (ret0 [24]uint64) {
 
 // keccakfStoreBack writes the little-endian state words back into the
 // byte array, called deferred by keccakF1600Generic on big-endian hosts.
-func keccakfStoreBack(da *[200]byte, a *[25]uint64) {
+func keccakfStoreBack(da []byte, a *[25]uint64) {
 	for i := range a {
 		byteorder.LEPutUint64(da[i*8:], a[i])
 	}
 }
 
 // keccakF1600Generic applies the Keccak permutation.
-func keccakF1600Generic(da *[200]byte) {
-	rc := _rc()
+func keccakF1600Generic(da []byte) {
+	rc := rcTable
 	var a *[25]uint64
 	if cpu.BigEndian {
-		a = &[25]uint64{}
-		for i := range a {
-			a[i] = byteorder.LEUint64(da[i*8:])
+		lane := &[25]uint64{}
+		for i := range lane {
+			lane[i] = byteorder.LEUint64(da[i*8:])
 		}
+		a = lane
 		// Closures do not capture in Moxie: the deferred write-back is a
 		// plain function call; da and a are evaluated at defer time.
 		defer keccakfStoreBack(da, a)
 	} else {
-		a = (*[25]uint64)(unsafe.Pointer(da))
+		a = (*[25]uint64)(unsafe.Pointer(&da[0]))
 	}
 
 	// Implementation translated from Keccak-inplace.c

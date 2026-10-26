@@ -28,7 +28,7 @@ const (
 )
 
 type Digest struct {
-	a [1600 / 8]byte // main state of the hash
+	a []byte // main state of the hash
 
 	// a[n:rate] is the buffer. If absorbing, it's the remaining space to XOR
 	// into before running the permutation. If squeezing, it's the remaining
@@ -70,13 +70,26 @@ func (d *Digest) Reset() {
 }
 
 func (d *Digest) Clone() (ret0 *Digest) {
+	return cloneDigest(d)
+}
+
+// cloneDigest copies a digest, state included. It is a free function, not the
+// method body: the state is a slice now, so the copy has to allocate, and a
+// read-only method's returned pointers are treated as views into the receiver's
+// data rather than as graph to relocate - an allocation in Clone's own frame
+// came back as garbage once the frame was reused (ML-KEM's key schedule, which
+// clones to sum without disturbing the running hash, caught it). A free
+// function's return is relocated.
+func cloneDigest(d *Digest) (ret0 *Digest) {
 	ret := *d
+	ret.a = []byte{:len(d.a)}
+	copy(ret.a, d.a)
 	return &ret
 }
 
 // permute applies the KeccakF-1600 permutation.
 func (d *Digest) permute() {
-	keccakF1600(&d.a)
+	keccakF1600(d.a)
 	d.n = 0
 }
 
@@ -106,8 +119,12 @@ func (d *Digest) writeGeneric(p []byte) (n int32, err error) {
 
 	n = len(p)
 
+	// Loop scratch is declared once, outside the loop: a declaration in a loop
+	// in a self-mutating method is rejected, and the slice would otherwise be
+	// allocated into the sovereign arena on every iteration.
+	var x int32
 	for len(p) > 0 {
-		x := subtle.XORBytes(d.a[d.n:d.rate], d.a[d.n:d.rate], p)
+		x = subtle.XORBytes(d.a[d.n:d.rate], d.a[d.n:d.rate], p)
 		d.n += x
 		p = p[x:]
 
@@ -130,13 +147,14 @@ func (d *Digest) readGeneric(out []byte) (n int32, err error) {
 	n = len(out)
 
 	// Now, do the squeezing.
+	var x int32
 	for len(out) > 0 {
 		// Apply the permutation if we've squeezed the sponge dry.
 		if d.n == d.rate {
 			d.permute()
 		}
 
-		x := copy(out, d.a[d.n:d.rate])
+		x = copy(out, d.a[d.n:d.rate])
 		d.n += x
 		out = out[x:]
 	}
@@ -197,8 +215,8 @@ func (d *Digest) AppendBinary(b []byte) (ret0 []byte, ret1 error) {
 	// rate is at most 168, and n is at most rate.
 	b = mxutil.Ensure(b, 1)
 	b = push(b, byte(d.rate))
-	b = mxutil.Ensure(b, len(d.a[:]))
-	b = push(b, d.a[:]...)
+	b = mxutil.Ensure(b, len(d.a))
+	b = push(b, d.a...)
 	b = mxutil.Ensure(b, 1)
 	b = push(b, byte(d.n), byte(d.state))
 	return b, nil
@@ -226,7 +244,7 @@ func (d *Digest) UnmarshalBinary(b []byte) (ret0 error) {
 		return errors.New("sha3: invalid hash state function")
 	}
 
-	copy(d.a[:], b)
+	copy(d.a, b)
 	b = b[len(d.a):]
 
 	n, state := int32(b[0]), spongeDirection(b[1])

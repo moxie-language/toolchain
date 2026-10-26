@@ -17511,3 +17511,69 @@ silent buffer overflow rather than a failed push. All three now refuse the
 sentinel before any arithmetic, with the same message. Verified: `Ensure` on
 `check.Linkinfo` dies with it, while `Ensure`/`Reserve`/`GrowCap` on ordinary
 slices still grow exactly as before (2 -> 16 -> 20 -> 20).
+
+## Round 226: the GCM block scratch and sha3's permutation state are slices
+
+Two of the buffer clusters left by round 224.
+
+**AES-GCM.** `[gcmBlockSize]byte` locals and `*[gcmBlockSize]byte` parameters in
+`crypto/internal/fips140/aes/gcm` (both the generic implementation and the
+asm-entry file, whose `gcmAes*` bodies are `panic("gcm: asm not available")`
+stubs because no `.S` ships) and in `crypto/cipher`'s fallback: `H`, `counter`,
+`tagMask`, `mask`, `S`, `tag`, `tagOut`, `expectedTag`, `partialBlock`. The
+GHASH key parameter and `GHASH(key, ...)` are slices now, and
+`gcmPlatformData.productTable [256]byte` is allocated by `initGCM`.
+
+`ghash._ghashReductionTable()` was a function returning a `[16]uint16` table,
+called once per `ghashMul`, which runs once per 16 bytes of input. As a slice it
+would allocate on every call, so it is a package-level slice filled by the
+gcm package's existing `init` (`initGhashReductionTable`). This is the pattern
+for the returned-table arrays counted in round 224, short of a data file.
+
+Verified: AES-GCM against Go 1.25.3 for 3 key sizes (128/192/256) x 6
+plaintext sizes (0, 1, 15, 16, 17, 100) with 32 bytes of additional data - 51
+lines of ciphertext, open and tamper-rejection results, all byte-identical.
+
+**SHA3.** `Digest.a [1600/8]byte` is a slice allocated by `newDigest` (all six
+SHA3/Keccak constructors and both SHAKE constructors go through it) and
+`keccakF1600`/`keccakF1600NEON`/`keccakfStoreBack` take slices. The little-endian
+pun is `(*[25]uint64)(unsafe.Pointer(&da[0]))`; the big-endian branch reads the
+lanes into a local and defers the write-back as before. `_rc()` was a function
+returning the 24 round constants, called once per permutation - another
+per-call allocation as a slice, so `rcTable` is a package-level slice filled by
+the sha3 package's new `init`.
+
+Verified: SHA3-224/256/384/512, SHAKE128 and SHAKE256 plus a streaming SHA3-256
+and SHA3-512 over 9 input sizes (0, 1, 63, 64, 100, 135, 136, 137, 1000), and
+the sum-into-a-destination-then-keep-writing shape - 68 lines, byte-identical to
+Go 1.25.3. `mlkem_vectors` passes again.
+
+`Digest.Clone` was `ret := *d; return &ret` - a struct copy, which duplicated the
+200-byte array but only *shares* it now that `a` is a slice. `sumGeneric` clones
+so the caller can keep writing after `Sum`, so the clone's `read` permuted the
+caller's sponge: `Sum(b)` corrupted the digest. ML-KEM caught it - `g.Sum` is
+called with a destination everywhere in its key schedule, and `mlkem_vectors`
+failed with a wrong encapsulation key while the one-shot SHA3 differential
+passed. The sha3 differential gained the shape that catches it: sum into a
+destination, keep writing, sum again, and compare against a digest fed both
+halves.
+
+Copying the state hit a second, sharper bug. The copy's `[]byte{:200}` was
+allocated inside `Clone`, which is a **read-only method** on a sovereign type,
+and a read-only method's returned pointers are treated as views into the
+receiver's data rather than as a graph to relocate - so the allocation was not
+copied out of the method's frame and the clone read a dead arena. It presented
+as ML-KEM's encapsulation key changing between two runs of the same binary,
+because the garbage was whatever the reused frame held. The allocation moved
+into a free function (`cloneDigest`), whose return *is* relocated; the method is
+a one-line call. That is the same rule round 221 hit from the other side, and it
+is worth stating plainly: a read-only method must not return storage it
+allocated, and a free function must.
+
+The `:=` inside the absorb/squeeze loops had to be hoisted: with the state no
+longer an array, the subslice in `x := subtle.XORBytes(d.a[d.n:d.rate], ...)` is
+an allocation, and the self-mutating-method rule rejects a declaration inside a
+loop. Both loops now declare `x` once above.
+
+The 79-package `crypto` bucket builds, and `mlkem_vectors` passes deterministically
+(three consecutive runs of the rebuilt fixture).

@@ -24,21 +24,21 @@ type gcmFieldElement struct {
 // GHASH is exposed to allow crypto/cipher to implement non-AES GCM modes.
 // It is not allowed as a stand-alone operation in FIPS mode because it
 // is not ACVP tested.
-func GHASH(key *[16]byte, inputs ...[]byte) (ret0 []byte) {
+func GHASH(key []byte, inputs ...[]byte) (ret0 []byte) {
 	fips140.RecordNonApproved()
-	var out [gcmBlockSize]byte
-	ghash(&out, key, inputs...)
-	return out[:]
+	out := []byte{:gcmBlockSize}
+	ghash(out, key, inputs...)
+	return out
 }
 
 // ghash is a variable-time generic implementation of GHASH, which shouldn't
 // be used on any architecture with hardware support for AES-GCM.
 //
 // Each input is zero-padded to 128-bit before being absorbed.
-func ghash(out, H *[gcmBlockSize]byte, inputs ...[]byte) {
+func ghash(out, H []byte, inputs ...[]byte) {
 	// productTable contains the first sixteen powers of the key, H.
 	// However, they are in bit reversed order.
-	var productTable [16]gcmFieldElement
+	productTable := []gcmFieldElement{:16}
 
 	// We precompute 16 multiples of H. However, when we do lookups
 	// into this table we'll be using bits from a field element and
@@ -58,10 +58,10 @@ func ghash(out, H *[gcmBlockSize]byte, inputs ...[]byte) {
 
 	var y gcmFieldElement
 	for _, input := range inputs {
-		ghashUpdate(&productTable, &y, input)
+		ghashUpdate(productTable, &y, input)
 	}
 
-	byteorder.BEPutUint64(out[:], y.low)
+	byteorder.BEPutUint64(out, y.low)
 	byteorder.BEPutUint64(out[8:], y.high)
 }
 
@@ -101,16 +101,23 @@ func ghashDouble(x *gcmFieldElement) (double gcmFieldElement) {
 	return
 }
 
-func _ghashReductionTable() (ret0 [16]uint16) {
-	return [16]uint16{
+// ghashReductionTable holds the sixteen reduction values ghashMul uses for a
+// nibble of the accumulator. It is a package-level slice filled by the
+// package's init: a function returning the table would allocate on every
+// ghashMul, which runs once per 16 bytes of input, and a slice literal in the
+// caller is no cheaper.
+var ghashReductionTable []uint16
+
+func initGhashReductionTable() {
+	ghashReductionTable = []uint16{
 		0x0000, 0x1c20, 0x3840, 0x2460, 0x7080, 0x6ca0, 0x48c0, 0x54e0,
 		0xe100, 0xfd20, 0xd940, 0xc560, 0x9180, 0x8da0, 0xa9c0, 0xb5e0,
 	}
 }
 
 // ghashMul sets y to y*H, where H is the GCM key, fixed during New.
-func ghashMul(productTable *[16]gcmFieldElement, y *gcmFieldElement) {
-	ghashReductionTable := _ghashReductionTable()
+func ghashMul(productTable []gcmFieldElement, y *gcmFieldElement) {
+	rt := ghashReductionTable
 	var z gcmFieldElement
 
 	for i := 0; i < 2; i++ {
@@ -126,7 +133,7 @@ func ghashMul(productTable *[16]gcmFieldElement, y *gcmFieldElement) {
 			z.high >>= 4
 			z.high |= z.low << 60
 			z.low >>= 4
-			z.low ^= uint64(ghashReductionTable[msw]) << 48
+			z.low ^= uint64(rt[msw]) << 48
 
 			// the values in |table| are ordered for little-endian bit
 			// positions. See the comment in New.
@@ -143,7 +150,7 @@ func ghashMul(productTable *[16]gcmFieldElement, y *gcmFieldElement) {
 
 // updateBlocks extends y with more polynomial terms from blocks, based on
 // Horner's rule. There must be a multiple of gcmBlockSize bytes in blocks.
-func updateBlocks(productTable *[16]gcmFieldElement, y *gcmFieldElement, blocks []byte) {
+func updateBlocks(productTable []gcmFieldElement, y *gcmFieldElement, blocks []byte) {
 	for len(blocks) > 0 {
 		y.low ^= byteorder.BEUint64(blocks)
 		y.high ^= byteorder.BEUint64(blocks[8:])
@@ -154,13 +161,13 @@ func updateBlocks(productTable *[16]gcmFieldElement, y *gcmFieldElement, blocks 
 
 // ghashUpdate extends y with more polynomial terms from data. If data is not a
 // multiple of gcmBlockSize bytes long then the remainder is zero padded.
-func ghashUpdate(productTable *[16]gcmFieldElement, y *gcmFieldElement, data []byte) {
+func ghashUpdate(productTable []gcmFieldElement, y *gcmFieldElement, data []byte) {
 	fullBlocks := (len(data) >> 4) << 4
 	updateBlocks(productTable, y, data[:fullBlocks])
 
 	if len(data) != fullBlocks {
-		var partialBlock [gcmBlockSize]byte
-		copy(partialBlock[:], data[fullBlocks:])
-		updateBlocks(productTable, y, partialBlock[:])
+		partialBlock := []byte{:gcmBlockSize}
+		copy(partialBlock, data[fullBlocks:])
+		updateBlocks(productTable, y, partialBlock)
 	}
 }

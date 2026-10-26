@@ -14,23 +14,23 @@ import (
 
 // The following functions are defined in gcm_*.s.
 
-func gcmAesInit(productTable *[256]byte, ks []uint32) {
+func gcmAesInit(productTable []byte, ks []uint32) {
 	panic("gcm: asm not available")
 }
 
-func gcmAesData(productTable *[256]byte, data []byte, T *[16]byte) {
+func gcmAesData(productTable []byte, data []byte, T []byte) {
 	panic("gcm: asm not available")
 }
 
-func gcmAesEnc(productTable *[256]byte, dst, src []byte, ctr, T *[16]byte, ks []uint32) {
+func gcmAesEnc(productTable []byte, dst, src []byte, ctr, T []byte, ks []uint32) {
 	panic("gcm: asm not available")
 }
 
-func gcmAesDec(productTable *[256]byte, dst, src []byte, ctr, T *[16]byte, ks []uint32) {
+func gcmAesDec(productTable []byte, dst, src []byte, ctr, T []byte, ks []uint32) {
 	panic("gcm: asm not available")
 }
 
-func gcmAesFinish(productTable *[256]byte, tagMask, T *[16]byte, pLen, dLen uint64) {
+func gcmAesFinish(productTable []byte, tagMask, T []byte, pLen, dLen uint64) {
 	panic("gcm: asm not available")
 }
 
@@ -50,14 +50,15 @@ func checkGenericIsExpected() {
 }
 
 type gcmPlatformData struct {
-	productTable [256]byte
+	productTable []byte
 }
 
 func initGCM(g *GCM) {
 	if !supportsAESGCM() {
 		return
 	}
-	gcmAesInit(&g.productTable, aes.EncryptionKeySchedule(&g.cipher))
+	g.productTable = []byte{:256}
+	gcmAesInit(g.productTable, aes.EncryptionKeySchedule(&g.cipher))
 }
 
 func seal(g *GCM, nonce, plaintext, data []byte) (out []byte) {
@@ -65,29 +66,30 @@ func seal(g *GCM, nonce, plaintext, data []byte) (out []byte) {
 		return sealGeneric(g, nonce, plaintext, data)
 	}
 
-	var counter, tagMask [gcmBlockSize]byte
+	counter := []byte{:gcmBlockSize}
+	tagMask := []byte{:gcmBlockSize}
 
 	if len(nonce) == gcmStandardNonceSize {
 		// Init counter to nonce||1
-		copy(counter[:], nonce)
+		copy(counter, nonce)
 		counter[gcmBlockSize-1] = 1
 	} else {
 		// Otherwise counter = GHASH(nonce)
-		gcmAesData(&g.productTable, nonce, &counter)
-		gcmAesFinish(&g.productTable, &tagMask, &counter, uint64(len(nonce)), uint64(0))
+		gcmAesData(g.productTable, nonce, counter)
+		gcmAesFinish(g.productTable, tagMask, counter, uint64(len(nonce)), uint64(0))
 	}
 
-	aes.EncryptBlockInternal(&g.cipher, tagMask[:], counter[:])
+	aes.EncryptBlockInternal(&g.cipher, tagMask, counter)
 
-	var tagOut [gcmTagSize]byte
-	gcmAesData(&g.productTable, data, &tagOut)
+	tagOut := []byte{:gcmTagSize}
+	gcmAesData(g.productTable, data, tagOut)
 
 	out = []byte{:len(plaintext) + gcmTagSize}
 	if len(plaintext) > 0 {
-		gcmAesEnc(&g.productTable, out, plaintext, &counter, &tagOut, aes.EncryptionKeySchedule(&g.cipher))
+		gcmAesEnc(g.productTable, out, plaintext, counter, tagOut, aes.EncryptionKeySchedule(&g.cipher))
 	}
-	gcmAesFinish(&g.productTable, &tagMask, &tagOut, uint64(len(plaintext)), uint64(len(data)))
-	copy(out[len(plaintext):], tagOut[:])
+	gcmAesFinish(g.productTable, tagMask, tagOut, uint64(len(plaintext)), uint64(len(data)))
+	copy(out[len(plaintext):], tagOut)
 	return out
 }
 
@@ -100,28 +102,29 @@ func open(g *GCM, nonce, ciphertext, data []byte) (out []byte, err error) {
 	ciphertext = ciphertext[:len(ciphertext)-g.tagSize]
 
 	// See GCM spec, section 7.1.
-	var counter, tagMask [gcmBlockSize]byte
+	counter := []byte{:gcmBlockSize}
+	tagMask := []byte{:gcmBlockSize}
 
 	if len(nonce) == gcmStandardNonceSize {
 		// Init counter to nonce||1
-		copy(counter[:], nonce)
+		copy(counter, nonce)
 		counter[gcmBlockSize-1] = 1
 	} else {
 		// Otherwise counter = GHASH(nonce)
-		gcmAesData(&g.productTable, nonce, &counter)
-		gcmAesFinish(&g.productTable, &tagMask, &counter, uint64(len(nonce)), uint64(0))
+		gcmAesData(g.productTable, nonce, counter)
+		gcmAesFinish(g.productTable, tagMask, counter, uint64(len(nonce)), uint64(0))
 	}
 
-	aes.EncryptBlockInternal(&g.cipher, tagMask[:], counter[:])
+	aes.EncryptBlockInternal(&g.cipher, tagMask, counter)
 
-	var expectedTag [gcmTagSize]byte
-	gcmAesData(&g.productTable, data, &expectedTag)
+	expectedTag := []byte{:gcmTagSize}
+	gcmAesData(g.productTable, data, expectedTag)
 
 	out = []byte{:len(ciphertext)}
 	if len(ciphertext) > 0 {
-		gcmAesDec(&g.productTable, out, ciphertext, &counter, &expectedTag, aes.EncryptionKeySchedule(&g.cipher))
+		gcmAesDec(g.productTable, out, ciphertext, counter, expectedTag, aes.EncryptionKeySchedule(&g.cipher))
 	}
-	gcmAesFinish(&g.productTable, &tagMask, &expectedTag, uint64(len(ciphertext)), uint64(len(data)))
+	gcmAesFinish(g.productTable, tagMask, expectedTag, uint64(len(ciphertext)), uint64(len(data)))
 
 	if subtle.ConstantTimeCompare(expectedTag[:g.tagSize], tag) != 1 {
 		return nil, errOpen
