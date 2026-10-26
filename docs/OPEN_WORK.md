@@ -17400,3 +17400,23 @@ Meanwhile the authoring rule for new code is the one ML-KEM now follows: storage
 a callee hands to a caller through a pointer must already exist - the
 constructor allocates it, the callee `copy`s into it - and never be a slice the
 callee allocated in its own frame.
+
+## Round 223: base64/base32 stream buffers and itoa's scratch are slices
+
+    base64.encoder  buf [3]byte, out [1024]byte        -> []byte (NewEncoder)
+    base64.decoder  buf [1024]byte, outbuf [768]byte   -> []byte (NewDecoder)
+    base32.encoder  buf [5]byte, out [1024]byte        -> []byte (NewEncoder)
+    base32.decoder  buf [1024]byte, outbuf [640]byte   -> []byte (NewDecoder)
+    itoa.Uitoa/Uitox  buf [20]byte                     -> []byte
+
+The stream structs are built by their constructors, so the buffers are allocated
+there and carried out by the return relocation; the locals in itoa are allocated
+per call, which is what an array was doing anyway.
+
+Verified with a streaming differential against Go 1.25.3: for 16 input sizes
+(0, 1, 2, 3, 4, 5, 6, 7, 8, 15, 16, 17, 31, 100, 1000, 5000) the encoder is fed
+in 1-byte writes and the decoder is drained in 3-byte reads, and every encoded
+string, decoded round trip and base32 encoding is byte-identical. The itoa
+change is covered by the same build path as `strconv`/`fmt`: `Itoa`,
+`FormatUint` and `fmt.Sprint` agree on ten signed and seven unsigned values
+including the extremes.
