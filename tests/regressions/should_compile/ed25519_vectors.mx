@@ -1,0 +1,88 @@
+/*
+crypto/ed25519 against a fixed vector rather than a round trip.
+
+The round-trip fixture proves the API hangs together; it cannot tell whether the
+bytes are right, because both sides of every check come from the same code. This
+fixture pins the derivation: seed 0x00..0x1f must give this public key and this
+signature for this message, which is what Go 1.25.3 produces for the same inputs.
+
+It exists because the key structs' byte fields became slices (they were fixed
+arrays), which moves their storage into the constructors. A wrong length, a
+shared buffer or a lost copy shows up here as a changed public key or signature.
+
+Reference (Go 1.25.3, crypto/ed25519.NewKeyFromSeed):
+  pub 03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8
+  sig 8efcf3940fc929b9bb03d770c4d7ba406659c57ded7ad2cb3d74df78fb9e2958fe41b71f704e45e4e42b7582e26671ccec6d68632e7e1b7ad12f1abc1dc0170b
+*/
+package main
+
+import (
+	"crypto/ed25519"
+	"os"
+)
+
+const wantPub = "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
+const wantSig = "8efcf3940fc929b9bb03d770c4d7ba406659c57ded7ad2cb3d74df78fb9e2958fe41b71f704e45e4e42b7582e26671ccec6d68632e7e1b7ad12f1abc1dc0170b"
+
+func hex(b []byte) (s string) {
+	const t = "0123456789abcdef"
+	o := []byte{:len(b) * 2}
+	for i := 0; i < len(b); i++ {
+		o[2*i] = t[b[i]>>4]
+		o[2*i+1] = t[b[i]&0xf]
+	}
+	return string(o)
+}
+
+func check(name string, got, want string) {
+	if got != want {
+		println("FAIL: " | name)
+		println("  got  " | got)
+		println("  want " | want)
+		os.Exit(1)
+	}
+}
+
+func main() {
+	seed := []byte{:32}
+	for i := 0; i < 32; i++ {
+		seed[i] = byte(i)
+	}
+	priv := ed25519.NewKeyFromSeed(seed)
+	check("seed round trip", hex(priv.Seed()), hex(seed))
+
+	pub := priv.Public().(ed25519.PublicKey)
+	check("public key", hex(pub.Bytes()), wantPub)
+
+	msg := []byte("moxie ed25519 differential message")
+	sig := ed25519.Sign(priv, msg)
+	check("signature", hex(sig), wantSig)
+	if !ed25519.Verify(pub, msg, sig) {
+		println("FAIL: Verify rejected the reference signature")
+		os.Exit(1)
+	}
+
+	// A key rebuilt from the public bytes verifies the same signature, and the
+	// private key rebuilt from its seed signs it again identically.
+	again := ed25519.PublicKeyOf(pub.Bytes())
+	if !ed25519.Verify(again, msg, sig) {
+		println("FAIL: a key rebuilt from its bytes does not verify")
+		os.Exit(1)
+	}
+	priv2 := ed25519.NewKeyFromSeed(priv.Seed())
+	check("rebuilt key signature", hex(ed25519.Sign(priv2, msg)), wantSig)
+
+	// Tampering must be visible in both directions: the message and the bytes.
+	if ed25519.Verify(pub, []byte("moxie ed25519 differential messagf"), sig) {
+		println("FAIL: Verify accepted a different message")
+		os.Exit(1)
+	}
+	raw := priv.Bytes()
+	raw[0] = raw[0] ^ 0xff
+	bad := ed25519.NewKeyFromSeed(raw[:32])
+	if ed25519.Verify(again, msg, ed25519.Sign(bad, msg)) {
+		println("FAIL: a different seed produced a verifying signature")
+		os.Exit(1)
+	}
+	println("ok")
+}

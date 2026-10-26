@@ -17270,3 +17270,31 @@ Verified:
     stack overflow), `container`/`log` (no reason given), `syscall` and
     `internal` (import paths that still name `src/...`);
   * the bootstrap reached its fixpoint (s4b == s4c).
+
+## Round 220: ed25519's key bytes are slices, pinned to a Go vector
+
+`PrivateKey` held `seed [32]byte`, `pub [32]byte` and `prefix [32]byte`, and
+`PublicKey` held `aBytes [32]byte` - fixed storage inline in a self-mutating
+type, which is house style only for values that never leave their frame. They
+are slices now, allocated by `newPrivateKeyStorage` / `newPublicKeyStorage` and
+carried out by the return relocation. `aes/gcm`'s `CounterKDF.DeriveKey`
+follows: its 32-byte output and 16-byte CMAC input are slices, and the context
+parameter is a `[]byte` whose length is the caller's obligation (it was a
+`[12]byte`).
+
+Verification, because a key's bytes are the one thing a round-trip test cannot
+check (both sides of the check come from the same code):
+
+  * `tests/regressions/should_compile/ed25519_vectors.mx` pins seed 0x00..0x1f
+    to the public key and signature Go 1.25.3 produces for the same seed and
+    message, then re-derives the key from its seed and from its public bytes and
+    checks the signature is byte-identical in each case.
+  * The same two keys, four signatures and the verify/reject results were
+    compared between a moxie probe and a Go program: byte-identical output.
+  * The 79-package `crypto` bucket (every `src/crypto/...` package) builds.
+
+`//moxie:embed_le` is stage4-only: the bootstrap loader rewrites `//:` pragmas,
+not `//moxie:` ones, so a legacy build of `src/unicode/tables.mx` sees
+zero-valued tables. Nothing in the legacy bootstrap's closure reads them, which
+is why it has never surfaced; recorded here as a bilateral gap, and
+`docs/REFERENCE.md` documents `//:embed` as the portable spelling.

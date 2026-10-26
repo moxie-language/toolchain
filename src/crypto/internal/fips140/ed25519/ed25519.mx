@@ -26,58 +26,75 @@ const (
 	sha512Size     = 64
 )
 
+// PrivateKey's byte fields are slices: the key is a self-mutating type whose
+// state is built by the constructors below, so the storage is allocated once
+// there and the return relocation carries it. An array would have carried its
+// own storage, which is the same thing only for values that never leave the
+// frame.
 type PrivateKey struct {
-	seed   [seedSize]byte
-	pub    [publicKeySize]byte
+	seed   []byte
+	pub    []byte
 	s      edwards25519.Scalar
-	prefix [sha512Size / 2]byte
+	prefix []byte
+}
+
+// newPrivateKeyStorage allocates an empty key and the byte storage its fields
+// need, in this function's frame, so the caller takes the whole thing in one
+// move.
+func newPrivateKeyStorage() (out *PrivateKey) {
+	return &PrivateKey{
+		seed:   []byte{:seedSize},
+		pub:    []byte{:publicKeySize},
+		prefix: []byte{:sha512Size / 2},
+	}
 }
 
 func (priv *PrivateKey) Bytes() (ret0 []byte) {
 	k := []byte{:0:privateKeySize}
-	k = mxutil.Ensure(k, len(priv.seed[:]))
-	k = push(k, priv.seed[:]...)
-	k = mxutil.Ensure(k, len(priv.pub[:]))
-	k = push(k, priv.pub[:]...)
+	k = mxutil.Ensure(k, len(priv.seed))
+	k = push(k, priv.seed...)
+	k = mxutil.Ensure(k, len(priv.pub))
+	k = push(k, priv.pub...)
 	return k
 }
 
 func (priv *PrivateKey) Seed() (ret0 []byte) {
-	seed := priv.seed
-	return seed[:]
+	return priv.seed
 }
 
 func (priv *PrivateKey) PublicKey() (ret0 []byte) {
-	pub := priv.pub
-	return pub[:]
+	return priv.pub
 }
 
 type PublicKey struct {
 	a      edwards25519.Point
-	aBytes [32]byte
+	aBytes []byte
+}
+
+func newPublicKeyStorage() (out *PublicKey) {
+	return &PublicKey{aBytes: []byte{:publicKeySize}}
 }
 
 func (pub *PublicKey) Bytes() (ret0 []byte) {
-	a := pub.aBytes
-	return a[:]
+	return pub.aBytes
 }
 
 // GenerateKey generates a new Ed25519 private key pair.
 func GenerateKey() (ret0 *PrivateKey, ret1 error) {
-	priv := &PrivateKey{}
+	priv := newPrivateKeyStorage()
 	return generateKey(priv)
 }
 
 func generateKey(priv *PrivateKey) (ret0 *PrivateKey, ret1 error) {
 	fips140.RecordApproved()
-	drbg.Read(priv.seed[:])
+	drbg.Read(priv.seed)
 	precomputePrivateKey(priv)
 	fipsPCT(priv)
 	return priv, nil
 }
 
 func NewPrivateKeyFromSeed(seed []byte) (ret0 *PrivateKey, ret1 error) {
-	priv := &PrivateKey{}
+	priv := newPrivateKeyStorage()
 	return newPrivateKeyFromSeed(priv, seed)
 }
 
@@ -86,14 +103,14 @@ func newPrivateKeyFromSeed(priv *PrivateKey, seed []byte) (ret0 *PrivateKey, ret
 	if l := len(seed); l != seedSize {
 		return nil, errors.New("ed25519: bad seed length: " | strconv.Itoa(l))
 	}
-	copy(priv.seed[:], seed)
+	copy(priv.seed, seed)
 	precomputePrivateKey(priv)
 	return priv, nil
 }
 
 func precomputePrivateKey(priv *PrivateKey) {
 	hs := sha512.New()
-	hs.Write(priv.seed[:])
+	hs.Write(priv.seed)
 	h := hs.Sum([]byte{:0:sha512Size})
 
 	s, err := priv.s.SetBytesWithClamping(h[:32])
@@ -101,13 +118,13 @@ func precomputePrivateKey(priv *PrivateKey) {
 		panic("ed25519: internal error: setting scalar failed")
 	}
 	A := (&edwards25519.Point{}).ScalarBaseMult(s)
-	copy(priv.pub[:], A.Bytes())
+	copy(priv.pub, A.Bytes())
 
-	copy(priv.prefix[:], h[32:])
+	copy(priv.prefix, h[32:])
 }
 
 func NewPrivateKey(priv []byte) (ret0 *PrivateKey, ret1 error) {
-	p := &PrivateKey{}
+	p := newPrivateKeyStorage()
 	return newPrivateKey(p, priv)
 }
 
@@ -117,10 +134,10 @@ func newPrivateKey(priv *PrivateKey, privBytes []byte) (ret0 *PrivateKey, ret1 e
 		return nil, errors.New("ed25519: bad private key length: " | strconv.Itoa(l))
 	}
 
-	copy(priv.seed[:], privBytes[:32])
+	copy(priv.seed, privBytes[:32])
 
 	hs := sha512.New()
-	hs.Write(priv.seed[:])
+	hs.Write(priv.seed)
 	h := hs.Sum([]byte{:0:sha512Size})
 
 	if _, err := priv.s.SetBytesWithClamping(h[:32]); err != nil {
@@ -129,15 +146,15 @@ func newPrivateKey(priv *PrivateKey, privBytes []byte) (ret0 *PrivateKey, ret1 e
 	// Note that we are not decompressing the public key point here,
 	// because it takes > 20% of the time of a signature generation.
 	// Signing doesn't use it as a point anyway.
-	copy(priv.pub[:], privBytes[32:])
+	copy(priv.pub, privBytes[32:])
 
-	copy(priv.prefix[:], h[32:])
+	copy(priv.prefix, h[32:])
 
 	return priv, nil
 }
 
 func NewPublicKey(pub []byte) (ret0 *PublicKey, ret1 error) {
-	p := &PublicKey{}
+	p := newPublicKeyStorage()
 	return newPublicKey(p, pub)
 }
 
@@ -149,7 +166,7 @@ func newPublicKey(pub *PublicKey, pubBytes []byte) (ret0 *PublicKey, ret1 error)
 	if _, err := pub.a.SetBytes(pubBytes); err != nil {
 		return nil, errors.New("ed25519: bad public key")
 	}
-	copy(pub.aBytes[:], pubBytes)
+	copy(pub.aBytes, pubBytes)
 	return pub, nil
 }
 
@@ -223,7 +240,7 @@ func signWithDom(signature []byte, priv *PrivateKey, message []byte, domPrefix, 
 		mh.Write([]byte{byte(len(context))})
 		mh.Write([]byte(context))
 	}
-	mh.Write(priv.prefix[:])
+	mh.Write(priv.prefix)
 	mh.Write(message)
 	messageDigest := []byte{:0:sha512Size}
 	messageDigest = mh.Sum(messageDigest)
@@ -241,7 +258,7 @@ func signWithDom(signature []byte, priv *PrivateKey, message []byte, domPrefix, 
 		kh.Write([]byte(context))
 	}
 	kh.Write(R.Bytes())
-	kh.Write(priv.pub[:])
+	kh.Write(priv.pub)
 	kh.Write(message)
 	hramDigest := []byte{:0:sha512Size}
 	hramDigest = kh.Sum(hramDigest)
@@ -306,7 +323,7 @@ func verifyWithDom(pub *PublicKey, message, sig []byte, domPrefix, context strin
 		kh.Write([]byte(context))
 	}
 	kh.Write(sig[:32])
-	kh.Write(pub.aBytes[:])
+	kh.Write(pub.aBytes)
 	kh.Write(message)
 	hramDigest := []byte{:0:sha512Size}
 	hramDigest = kh.Sum(hramDigest)
