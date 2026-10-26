@@ -981,8 +981,8 @@ func (c *conn) readRequest(ctx context.Context) (w *response, err error) {
 		reqBody:       req.Body,
 		handlerHeader: Header{},
 		contentLength: -1,
-		dateBuf:       []byte{:29},
-		clenBuf:       []byte{:10},
+		dateBuf:       []byte{:0:29},
+		clenBuf:       []byte{:0:10},
 		statusBuf:     []byte{:3},
 
 		// We populate these ahead of time so we're not
@@ -1261,7 +1261,12 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	// set a Transfer-Encoding, because they're generally incompatible.
 	if w.handlerDone && !trailers && !hasTE && bodyAllowedForStatus(w.status) && !headerHas(header, "Content-Length") && (!isHEAD || len(p) > 0) {
 		w.contentLength = int64(len(p))
-		setHeader.contentLength = strconv.AppendInt(cw.res.clenBuf[:0], int64(len(p)), 10)
+		// resize, not clenBuf[:0]: a sub-slice is a copy, so appending into one
+		// would write into the copy and leave the field empty. resize keeps the
+		// storage and only changes the length, so the append lands in the field.
+		cw.res.clenBuf = resize(cw.res.clenBuf, 0)
+		cw.res.clenBuf = strconv.AppendInt(cw.res.clenBuf, int64(len(p)), 10)
+		setHeader.contentLength = cw.res.clenBuf
 	}
 
 	// If this was an HTTP/1.0 request with keep-alive and we sent a
@@ -1395,7 +1400,9 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	}
 
 	if !headerHas(header, "Date") {
-		setHeader.date = time.Now().UTC().AppendFormat(cw.res.dateBuf[:0], TimeFormat)
+		cw.res.dateBuf = resize(cw.res.dateBuf, 0)
+		cw.res.dateBuf = time.Now().UTC().AppendFormat(cw.res.dateBuf, TimeFormat)
+		setHeader.date = cw.res.dateBuf
 	}
 
 	if hasCL && hasTE && te != "identity" {
