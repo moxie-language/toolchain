@@ -17577,3 +17577,34 @@ loop. Both loops now declare `x` once above.
 
 The 79-package `crypto` bucket builds, and `mlkem_vectors` passes deterministically
 (three consecutive runs of the rebuilt fixture).
+
+## Round 227: net/http's response buffers are slices, and what stays an array on purpose
+
+    response.dateBuf   [29]byte -> []byte
+    response.clenBuf   [10]byte -> []byte
+    response.statusBuf [3]byte  -> []byte
+    cookie.String      buf [29]byte -> []byte
+
+The three response buffers are allocated by the `&response{...}` literal in
+`readResponse`, because the writer appends into them through a zero-length
+sub-slice (`AppendFormat(w.dateBuf[:0], ...)`), so their storage has to exist
+before the first write.
+
+Two clusters are now deliberately left alone, and the reasons belong in the
+record rather than in a future round's surprise:
+
+  * **On-disk and compiler-emitted layouts.** `internal/coverage`'s
+    `MetaHash [16]byte` / `MetaFileHash [16]byte` describe the coverage file
+    format, and `internal/rtcov`'s `Hash [16]byte` is a layout the compiler
+    emits instrumentation against. Converting those is a format change, not a
+    buffer change - it has to move both compilers and the file reader at once.
+    `internal/xcoff`'s header fields are the same shape: an external file
+    format, parsed field by field.
+  * **ABI-fixed structures.** `syscall`'s `Stat_t` and friends, and the
+    runtime's own structures, are written by the kernel or by the runtime.
+
+The remaining fixed-size array types are therefore: these two categories, the
+returned tables (round 224: they need `//:embed` data or an `init`-filled
+global, the pattern sha3's round constants and GCM's reduction table now use),
+and the polynomial matrices in mlkem/nistec/edwards25519, which are value
+vectors inside the key structures.

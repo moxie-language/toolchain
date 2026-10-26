@@ -437,10 +437,12 @@ type response struct {
 
 	handlerDone bool // set true when the handler exits
 
-	// Buffers for Date, Content-Length, and status code
-	dateBuf   [29]byte // len(TimeFormat)
-	clenBuf   [10]byte
-	statusBuf [3]byte
+	// Buffers for Date, Content-Length, and status code. They are allocated
+	// with the response: the writer appends into them through a zero-length
+	// sub-slice, so their storage has to exist before the first write.
+	dateBuf   []byte // len(TimeFormat)
+	clenBuf   []byte
+	statusBuf []byte
 
 	// closeNotifyCh is the channel returned by CloseNotify.
 	closeNotifyCh chan bool
@@ -979,6 +981,9 @@ func (c *conn) readRequest(ctx context.Context) (w *response, err error) {
 		reqBody:       req.Body,
 		handlerHeader: Header{},
 		contentLength: -1,
+		dateBuf:       []byte{:29},
+		clenBuf:       []byte{:10},
+		statusBuf:     []byte{:3},
 
 		// We populate these ahead of time so we're not
 		// reading from req.Header after their Handler starts
@@ -1092,7 +1097,7 @@ func (w *response) WriteHeader(code int32) {
 	// We shouldn't send any further headers after 101 Switching Protocols,
 	// so it takes the non-informational path.
 	if code >= 100 && code <= 199 && code != StatusSwitchingProtocols {
-		writeStatusLine(w.conn.bufw, w.req.ProtoAtLeast(1, 1), code, w.statusBuf[:])
+		writeStatusLine(w.conn.bufw, w.req.ProtoAtLeast(1, 1), code, w.statusBuf)
 
 		// Per RFC 8297 we must not clear the current header map
 		HeaderWriteSubset(w.handlerHeader, w.conn.bufw, _excludedHeadersNoBody())
@@ -1457,7 +1462,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 		}
 	}
 
-	writeStatusLine(w.conn.bufw, w.req.ProtoAtLeast(1, 1), code, w.statusBuf[:])
+	writeStatusLine(w.conn.bufw, w.req.ProtoAtLeast(1, 1), code, w.statusBuf)
 	HeaderWriteSubset(cw.header, w.conn.bufw, excludeHeader)
 	setHeader.Write(w.conn.bufw)
 	w.conn.bufw.Write(crlf)
