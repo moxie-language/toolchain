@@ -25,64 +25,70 @@ import (
 // Often, ascii85-encoded data is wrapped in <~ and ~> symbols.
 // Encode does not add these.
 func Encode(dst, src []byte) (nout int32) {
-	if len(src) == 0 {
-		return 0
+	return EncodeFrom(dst, src, 0, len(src))
+}
+
+// EncodeFrom encodes src[off:off+n] into dst. It exists so a streaming writer
+// can encode a window of its input without slicing it: a sub-slice is a copy,
+// so `Encode(out, p[off:off+nn])` would allocate nn bytes per chunk.
+func EncodeFrom(dst, src []byte, off, n int32) (nout int32) {
+	dp, sp := int32(0), off
+	end := off + n
+	for sp < end {
+		var dp2 int32
+		dp2, sp = encodeBlock(dst, dp, src, sp, end)
+		nout += dp2 - dp
+		dp = dp2
+	}
+	return
+}
+
+// encodeBlock writes one group of at most 4 source bytes from src[sp:end] into
+// dst at dp and returns the advanced cursors.
+func encodeBlock(dst []byte, dp int32, src []byte, sp, end int32) (dnext, snext int32) {
+	dst[dp+0] = 0
+	dst[dp+1] = 0
+	dst[dp+2] = 0
+	dst[dp+3] = 0
+	dst[dp+4] = 0
+
+	// Unpack 4 bytes into uint32 to repack into base 85 5-byte.
+	var v uint32
+	rem := end - sp
+	switch rem {
+	default:
+		v |= uint32(src[sp+3])
+		v |= uint32(src[sp+2]) << 8
+		v |= uint32(src[sp+1]) << 16
+		v |= uint32(src[sp+0]) << 24
+	case 3:
+		v |= uint32(src[sp+2]) << 8
+		v |= uint32(src[sp+1]) << 16
+		v |= uint32(src[sp+0]) << 24
+	case 2:
+		v |= uint32(src[sp+1]) << 16
+		v |= uint32(src[sp+0]) << 24
+	case 1:
+		v |= uint32(src[sp+0]) << 24
 	}
 
-	n := 0
-	for len(src) > 0 {
-		dst[0] = 0
-		dst[1] = 0
-		dst[2] = 0
-		dst[3] = 0
-		dst[4] = 0
-
-		// Unpack 4 bytes into uint32 to repack into base 85 5-byte.
-		var v uint32
-		switch len(src) {
-		default:
-			v |= uint32(src[3])
-			v |= uint32(src[2]) << 8
-			v |= uint32(src[1]) << 16
-			v |= uint32(src[0]) << 24
-		case 3:
-			v |= uint32(src[2]) << 8
-			v |= uint32(src[1]) << 16
-			v |= uint32(src[0]) << 24
-		case 2:
-			v |= uint32(src[1]) << 16
-			v |= uint32(src[0]) << 24
-		case 1:
-			v |= uint32(src[0]) << 24
-		}
-
-		// Special case: zero (!!!!!) shortens to z.
-		if v == 0 && len(src) >= 4 {
-			dst[0] = 'z'
-			dst = dst[1:]
-			src = src[4:]
-			n++
-			continue
-		}
-
-		// Otherwise, 5 base 85 digits starting at !.
-		for i := 4; i >= 0; i-- {
-			dst[i] = '!' + byte(v%85)
-			v /= 85
-		}
-
-		// If src was short, discard the low destination bytes.
-		m := 5
-		if len(src) < 4 {
-			m -= 4 - len(src)
-			src = nil
-		} else {
-			src = src[4:]
-		}
-		dst = dst[m:]
-		n += m
+	// Special case: zero (!!!!!) shortens to z.
+	if v == 0 && rem >= 4 {
+		dst[dp] = 'z'
+		return dp + 1, sp + 4
 	}
-	return n
+
+	// Otherwise, 5 base 85 digits starting at !.
+	for i := int32(4); i >= 0; i-- {
+		dst[dp+i] = '!' + byte(v%85)
+		v /= 85
+	}
+
+	// If src was short, discard the low destination bytes.
+	if rem < 4 {
+		return dp + 5 - (4 - rem), end
+	}
+	return dp + 5, sp + 4
 }
 
 // MaxEncodedLen returns the maximum length of an encoding of n source bytes.
@@ -110,6 +116,9 @@ func (e *encoder) Write(p []byte) (n int32, err error) {
 		return 0, e.err
 	}
 
+	// off walks p. `p = p[nn:]` per chunk would copy the whole remainder.
+	off := int32(0)
+
 	// Leading fringe.
 	if e.nbuf > 0 {
 		var i int32
@@ -118,12 +127,12 @@ func (e *encoder) Write(p []byte) (n int32, err error) {
 			e.nbuf++
 		}
 		n += i
-		p = p[i:]
+		off = i
 		if e.nbuf < 4 {
 			return
 		}
-		nout := Encode(e.out[0:], e.buf[0:])
-		if _, e.err = e.w.Write(e.out[0:nout]); e.err != nil {
+		nout := Encode(e.out, e.buf)
+		if _, e.err = e.w.Write(e.out[:nout]); e.err != nil {
 			return n, e.err
 		}
 		e.nbuf = 0
@@ -135,26 +144,29 @@ func (e *encoder) Write(p []byte) (n int32, err error) {
 	// allocated into the sovereign arena on every iteration.
 	var nn int32
 	var chunkOut int32
-	for len(p) >= 4 {
+	for len(p)-off >= 4 {
 		nn = len(e.out) / 5 * 4
-		if nn > len(p) {
-			nn = len(p)
+		if nn > len(p)-off {
+			nn = len(p) - off
 		}
 		nn -= nn % 4
 		if nn > 0 {
-			chunkOut = Encode(e.out[0:], p[0:nn])
-			if _, e.err = e.w.Write(e.out[0:chunkOut]); e.err != nil {
+			chunkOut = EncodeFrom(e.out, p, off, nn)
+			if _, e.err = e.w.Write(e.out[:chunkOut]); e.err != nil {
 				return n, e.err
 			}
 		}
 		n += nn
-		p = p[nn:]
+		off += nn
 	}
 
 	// Trailing fringe.
-	copy(e.buf, p)
-	e.nbuf = len(p)
-	n += len(p)
+	rest := len(p) - off
+	for k := int32(0); k < rest; k++ {
+		e.buf[k] = p[off+k]
+	}
+	e.nbuf = rest
+	n += rest
 	return
 }
 
@@ -163,7 +175,7 @@ func (e *encoder) Write(p []byte) (n int32, err error) {
 func (e *encoder) Close() (err error) {
 	// If there's anything left in the buffer, flush it out
 	if e.err == nil && e.nbuf > 0 {
-		nout := Encode(e.out[0:], e.buf[0:e.nbuf])
+		nout := EncodeFrom(e.out, e.buf, 0, e.nbuf)
 		e.nbuf = 0
 		_, e.err = e.w.Write(e.out[0:nout])
 	}
