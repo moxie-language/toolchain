@@ -6,6 +6,7 @@ package zstd
 
 import (
 	"encoding/binary"
+	"internal/byteorder"
 	"math/bits"
 )
 
@@ -62,33 +63,47 @@ func (xh *xxhash64) reset() {
 func (xh *xxhash64) update(b []byte) {
 	xh.len += uint64(len(b))
 
+	// The walk keeps an offset: b = b[32:] would copy the whole remaining
+	// input at every 32-byte lane batch.
+	pos := int32(0)
 	if xh.cnt+len(b) < len(xh.buf) {
-		copy(xh.buf[xh.cnt:], b)
+		for i := int32(0); i < int32(len(b)); i++ {
+			xh.buf[xh.cnt+i] = b[i]
+		}
 		xh.cnt += len(b)
 		return
 	}
 
 	if xh.cnt > 0 {
-		n := copy(xh.buf[xh.cnt:], b)
-		b = b[n:]
-		xh.v[0] = xh.round(xh.v[0], binary.LittleEndian().Uint64(xh.buf))
-		xh.v[1] = xh.round(xh.v[1], binary.LittleEndian().Uint64(xh.buf[8:]))
-		xh.v[2] = xh.round(xh.v[2], binary.LittleEndian().Uint64(xh.buf[16:]))
-		xh.v[3] = xh.round(xh.v[3], binary.LittleEndian().Uint64(xh.buf[24:]))
+		n := int32(len(xh.buf)) - xh.cnt
+		if n > int32(len(b)) {
+			n = int32(len(b))
+		}
+		for i := int32(0); i < n; i++ {
+			xh.buf[xh.cnt+i] = b[i]
+		}
+		pos = n
+		xh.v[0] = xh.round(xh.v[0], byteorder.LEUint64At(xh.buf, 0))
+		xh.v[1] = xh.round(xh.v[1], byteorder.LEUint64At(xh.buf, 8))
+		xh.v[2] = xh.round(xh.v[2], byteorder.LEUint64At(xh.buf, 16))
+		xh.v[3] = xh.round(xh.v[3], byteorder.LEUint64At(xh.buf, 24))
 		xh.cnt = 0
 	}
 
-	for len(b) >= 32 {
-		xh.v[0] = xh.round(xh.v[0], binary.LittleEndian().Uint64(b))
-		xh.v[1] = xh.round(xh.v[1], binary.LittleEndian().Uint64(b[8:]))
-		xh.v[2] = xh.round(xh.v[2], binary.LittleEndian().Uint64(b[16:]))
-		xh.v[3] = xh.round(xh.v[3], binary.LittleEndian().Uint64(b[24:]))
-		b = b[32:]
+	for len(b)-pos >= 32 {
+		xh.v[0] = xh.round(xh.v[0], byteorder.LEUint64At(b, pos+0))
+		xh.v[1] = xh.round(xh.v[1], byteorder.LEUint64At(b, pos+8))
+		xh.v[2] = xh.round(xh.v[2], byteorder.LEUint64At(b, pos+16))
+		xh.v[3] = xh.round(xh.v[3], byteorder.LEUint64At(b, pos+24))
+		pos += 32
 	}
 
-	if len(b) > 0 {
-		copy(xh.buf[:], b)
-		xh.cnt = len(b)
+	if len(b)-pos > 0 {
+		n := int32(len(b)) - pos
+		for i := int32(0); i < n; i++ {
+			xh.buf[i] = b[pos+i]
+		}
+		xh.cnt = n
 	}
 }
 

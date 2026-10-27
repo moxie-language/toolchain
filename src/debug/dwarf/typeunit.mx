@@ -25,37 +25,51 @@ type typeUnit struct {
 // Parse a .debug_types section.
 func (d *Data) parseTypes(name []byte, types []byte) (_r0 error) {
 	b := makeBuf(d, &unknownFormat{}, name, 0, types)
+	// The loop scratch is declared once: this is a self-mutating method
+	// (it stores into d.typeSigs), and a declaration in a loop body in one is
+	// rejected - the allocation would land in the sovereign arena per unit.
+	var base Offset
+	var n Offset
+	var dwarf64 bool
+	var hdroff Offset
+	var vers int32
+	var ao uint64
+	var atable map[uint32]abbrev
+	var err error
+	var asize uint8
+	var sig uint64
+	var toff uint32
+	var to64 uint64
+	var boff Offset
 	for len(b.data) > 0 {
-		base := b.off
-		n, dwarf64 := b.unitLength()
+		base = b.off
+		n, dwarf64 = b.unitLength()
 		if n != Offset(uint32(n)) {
 			b.error("type unit length overflow")
 			return b.err
 		}
-		hdroff := b.off
-		vers := int32(b.uint16())
+		hdroff = b.off
+		vers = int32(b.uint16())
 		if vers != 4 {
 			b.error("unsupported DWARF version " + strconv.Itoa(vers))
 			return b.err
 		}
-		var ao uint64
 		if !dwarf64 {
 			ao = uint64(b.uint32())
 		} else {
 			ao = b.uint64()
 		}
-		atable, err := d.parseAbbrev(ao, vers)
+		atable, err = d.parseAbbrev(ao, vers)
 		if err != nil {
 			return err
 		}
-		asize := b.uint8()
-		sig := b.uint64()
+		asize = b.uint8()
+		sig = b.uint64()
 
-		var toff uint32
 		if !dwarf64 {
 			toff = b.uint32()
 		} else {
-			to64 := b.uint64()
+			to64 = b.uint64()
 			if to64 != uint64(uint32(to64)) {
 				b.error("type unit type offset overflow")
 				return b.err
@@ -63,7 +77,7 @@ func (d *Data) parseTypes(name []byte, types []byte) (_r0 error) {
 			toff = uint32(to64)
 		}
 
-		boff := b.off
+		boff = b.off
 		d.typeSigs[sig] = &typeUnit{
 			unit: unit{
 				base:   base,

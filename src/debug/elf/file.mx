@@ -665,19 +665,21 @@ func (f *File) getSymbols32(typ SectionType) (_r0 []Symbol, _r1 []byte, _r2 erro
 	}
 
 	// The first entry is all zeros.
-	data = data[Sym32Size:]
+	pos := int32(Sym32Size)
 
-	symbols := []Symbol{:len(data)/Sym32Size}
+	symbols := []Symbol{:((len(data) - pos) / Sym32Size)}
 
 	i := 0
 	var sym Sym32
-	for len(data) > 0 {
-		sym.Name = f.ByteOrder.Uint32(data[0:4])
-		sym.Value = f.ByteOrder.Uint32(data[4:8])
-		sym.Size = f.ByteOrder.Uint32(data[8:12])
-		sym.Info = data[12]
-		sym.Other = data[13]
-		sym.Shndx = f.ByteOrder.Uint16(data[14:16])
+	// By offset: data = data[Sym32Size:] in the loop copies the whole
+	// remaining symbol table per symbol.
+	for len(data)-pos >= Sym32Size {
+		sym.Name = f.ByteOrder.Uint32(data[pos+0 : pos+4])
+		sym.Value = f.ByteOrder.Uint32(data[pos+4 : pos+8])
+		sym.Size = f.ByteOrder.Uint32(data[pos+8 : pos+12])
+		sym.Info = data[pos+12]
+		sym.Other = data[pos+13]
+		sym.Shndx = f.ByteOrder.Uint16(data[pos+14 : pos+16])
 		str, _ := getString(strdata, int32(sym.Name))
 		symbols[i].Name = str
 		symbols[i].Info = sym.Info
@@ -686,7 +688,7 @@ func (f *File) getSymbols32(typ SectionType) (_r0 []Symbol, _r1 []byte, _r2 erro
 		symbols[i].Value = uint64(sym.Value)
 		symbols[i].Size = uint64(sym.Size)
 		i++
-		data = data[Sym32Size:]
+		pos += Sym32Size
 	}
 
 	return symbols, strdata, nil
@@ -712,19 +714,21 @@ func (f *File) getSymbols64(typ SectionType) (_r0 []Symbol, _r1 []byte, _r2 erro
 	}
 
 	// The first entry is all zeros.
-	data = data[Sym64Size:]
+	pos := int32(Sym64Size)
 
-	symbols := []Symbol{:len(data)/Sym64Size}
+	symbols := []Symbol{:((len(data) - pos) / Sym64Size)}
 
 	i := 0
 	var sym Sym64
-	for len(data) > 0 {
-		sym.Name = f.ByteOrder.Uint32(data[0:4])
-		sym.Info = data[4]
-		sym.Other = data[5]
-		sym.Shndx = f.ByteOrder.Uint16(data[6:8])
-		sym.Value = f.ByteOrder.Uint64(data[8:16])
-		sym.Size = f.ByteOrder.Uint64(data[16:24])
+	// By offset: data = data[Sym64Size:] in the loop copies the whole
+	// remaining symbol table per symbol.
+	for len(data)-pos >= Sym64Size {
+		sym.Name = f.ByteOrder.Uint32(data[pos+0 : pos+4])
+		sym.Info = data[pos+4]
+		sym.Other = data[pos+5]
+		sym.Shndx = f.ByteOrder.Uint16(data[pos+6 : pos+8])
+		sym.Value = f.ByteOrder.Uint64(data[pos+8 : pos+16])
+		sym.Size = f.ByteOrder.Uint64(data[pos+16 : pos+24])
 		str, _ := getString(strdata, int32(sym.Name))
 		symbols[i].Name = str
 		symbols[i].Info = sym.Info
@@ -733,7 +737,7 @@ func (f *File) getSymbols64(typ SectionType) (_r0 []Symbol, _r1 []byte, _r2 erro
 		symbols[i].Value = sym.Value
 		symbols[i].Size = sym.Size
 		i++
-		data = data[Sym64Size:]
+		pos += Sym64Size
 	}
 
 	return symbols, strdata, nil
@@ -1878,18 +1882,21 @@ func (f *File) DynString(tag DynTag) (_r0 [][]byte, _r1 error) {
 		return nil, err
 	}
 	var all [][]byte
-	for len(d) > 0 {
+	// By offset: d = d[8:] / d[16:] in the loop copies the rest of the
+	// dynamic section per entry.
+	pos := int32(0)
+	for len(d)-pos > 0 {
 		var t DynTag
 		var v uint64
 		switch f.Class {
 		case ELFCLASS32:
-			t = DynTag(f.ByteOrder.Uint32(d[0:4]))
-			v = uint64(f.ByteOrder.Uint32(d[4:8]))
-			d = d[8:]
+			t = DynTag(f.ByteOrder.Uint32(d[pos+0 : pos+4]))
+			v = uint64(f.ByteOrder.Uint32(d[pos+4 : pos+8]))
+			pos += 8
 		case ELFCLASS64:
-			t = DynTag(f.ByteOrder.Uint64(d[0:8]))
-			v = f.ByteOrder.Uint64(d[8:16])
-			d = d[16:]
+			t = DynTag(f.ByteOrder.Uint64(d[pos+0 : pos+8]))
+			v = f.ByteOrder.Uint64(d[pos+8 : pos+16])
+			pos += 16
 		}
 		if t == tag {
 			s, ok := getString(str, int32(v))
@@ -1924,18 +1931,21 @@ func (f *File) DynValue(tag DynTag) (_r0 []uint64, _r1 error) {
 
 	// Parse the .dynamic section as a string of bytes.
 	var vals []uint64
-	for len(d) > 0 {
+	// By offset: d = d[8:] / d[16:] in the loop copies the rest of the
+	// dynamic section per entry.
+	pos := int32(0)
+	for len(d)-pos > 0 {
 		var t DynTag
 		var v uint64
 		switch f.Class {
 		case ELFCLASS32:
-			t = DynTag(f.ByteOrder.Uint32(d[0:4]))
-			v = uint64(f.ByteOrder.Uint32(d[4:8]))
-			d = d[8:]
+			t = DynTag(f.ByteOrder.Uint32(d[pos+0 : pos+4]))
+			v = uint64(f.ByteOrder.Uint32(d[pos+4 : pos+8]))
+			pos += 8
 		case ELFCLASS64:
-			t = DynTag(f.ByteOrder.Uint64(d[0:8]))
-			v = f.ByteOrder.Uint64(d[8:16])
-			d = d[16:]
+			t = DynTag(f.ByteOrder.Uint64(d[pos+0 : pos+8]))
+			v = f.ByteOrder.Uint64(d[pos+8 : pos+16])
+			pos += 16
 		}
 		if t == tag {
 			vals = mxutil.Ensure(vals, 1)

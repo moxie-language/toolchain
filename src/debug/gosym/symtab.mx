@@ -196,12 +196,15 @@ func readSymtab(data []byte) (out []sym, err error) {
 	}
 	var order binary.ByteOrder = binary.BigEndian()
 	newTable := false
+	// pos walks the table: p = p[n:] in the loop would copy the whole
+	// remaining symbol table at every field.
+	pos := int32(0)
 	switch {
 	case bytes.HasPrefix(data, oldLittleEndianSymtab()):
 		// Same as Go 1.0, but little endian.
 		// Format was used during interim development between Go 1.0 and Go 1.1.
 		// Should not be widespread, but easy to support.
-		data = data[6:]
+		pos = 6
 		order = binary.LittleEndian()
 	case bytes.HasPrefix(data, bigEndianSymtab()):
 		newTable = true
@@ -211,119 +214,118 @@ func readSymtab(data []byte) (out []sym, err error) {
 	}
 	var ptrsz int32
 	if newTable {
-		if len(data) < 8 {
+		if len(data)-pos < 8 {
 			return nil, &DecodingError{len(data), "unexpected EOF", nil}
 		}
-		ptrsz = int32(data[7])
+		ptrsz = int32(data[pos+7])
 		if ptrsz != 4 && ptrsz != 8 {
 			return nil, &DecodingError{7, "invalid pointer size", ptrsz}
 		}
-		data = data[8:]
+		pos += 8
 	}
 	var s sym
-	p := data
-	for len(p) >= 4 {
+	for len(data)-pos >= 4 {
 		var typ byte
 		if newTable {
 			// Symbol type, value, Go type.
-			typ = p[0] & 0x3F
-			wideValue := p[0]&0x40 != 0
-			goType := p[0]&0x80 != 0
+			typ = data[pos] & 0x3F
+			wideValue := data[pos]&0x40 != 0
+			goType := data[pos]&0x80 != 0
 			if typ < 26 {
 				typ += 'A'
 			} else {
 				typ += 'a' - 26
 			}
 			s.typ = typ
-			p = p[1:]
+			pos++
 			if wideValue {
-				if len(p) < ptrsz {
+				if len(data)-pos < ptrsz {
 					return nil, &DecodingError{len(data), "unexpected EOF", nil}
 				}
 				// fixed-width value
 				if ptrsz == 8 {
-					s.value = order.Uint64(p[0:8])
-					p = p[8:]
+					s.value = order.Uint64(data[pos : pos+8])
+					pos += 8
 				} else {
-					s.value = uint64(order.Uint32(p[0:4]))
-					p = p[4:]
+					s.value = uint64(order.Uint32(data[pos : pos+4]))
+					pos += 4
 				}
 			} else {
 				// varint value
 				s.value = 0
 				shift := uint32(0)
-				for len(p) > 0 && p[0]&0x80 != 0 {
-					s.value |= uint64(p[0]&0x7F) << shift
+				for len(data)-pos > 0 && data[pos]&0x80 != 0 {
+					s.value |= uint64(data[pos]&0x7F) << shift
 					shift += 7
-					p = p[1:]
+					pos++
 				}
-				if len(p) == 0 {
+				if len(data)-pos == 0 {
 					return nil, &DecodingError{len(data), "unexpected EOF", nil}
 				}
-				s.value |= uint64(p[0]) << shift
-				p = p[1:]
+				s.value |= uint64(data[pos]) << shift
+				pos++
 			}
 			if goType {
-				if len(p) < ptrsz {
+				if len(data)-pos < ptrsz {
 					return nil, &DecodingError{len(data), "unexpected EOF", nil}
 				}
 				// fixed-width go type
 				if ptrsz == 8 {
-					s.gotype = order.Uint64(p[0:8])
-					p = p[8:]
+					s.gotype = order.Uint64(data[pos : pos+8])
+					pos += 8
 				} else {
-					s.gotype = uint64(order.Uint32(p[0:4]))
-					p = p[4:]
+					s.gotype = uint64(order.Uint32(data[pos : pos+4]))
+					pos += 4
 				}
 			}
 		} else {
 			// Value, symbol type.
-			s.value = uint64(order.Uint32(p[0:4]))
-			if len(p) < 5 {
+			s.value = uint64(order.Uint32(data[pos : pos+4]))
+			if len(data)-pos < 5 {
 				return nil, &DecodingError{len(data), "unexpected EOF", nil}
 			}
-			typ = p[4]
+			typ = data[pos+4]
 			if typ&0x80 == 0 {
-				return nil, &DecodingError{len(data) - len(p) + 4, "bad symbol type", typ}
+				return nil, &DecodingError{len(data) - pos + 4, "bad symbol type", typ}
 			}
 			typ &^= 0x80
 			s.typ = typ
-			p = p[5:]
+			pos += 5
 		}
 
 		// Name.
 		var i int32
 		var nnul int32
-		for i = 0; i < len(p); i++ {
-			if p[i] == 0 {
+		for i = 0; i < len(data)-pos; i++ {
+			if data[pos+i] == 0 {
 				nnul = 1
 				break
 			}
 		}
 		switch typ {
 		case 'z', 'Z':
-			p = p[i+nnul:]
-			for i = 0; i+2 <= len(p); i += 2 {
-				if p[i] == 0 && p[i+1] == 0 {
+			pos += i + nnul
+			for i = 0; i+2 <= len(data)-pos; i += 2 {
+				if data[pos+i] == 0 && data[pos+i+1] == 0 {
 					nnul = 2
 					break
 				}
 			}
 		}
-		if len(p) < i+nnul {
+		if len(data)-pos < i+nnul {
 			return nil, &DecodingError{len(data), "unexpected EOF", nil}
 		}
-		s.name = p[0:i]
+		s.name = data[pos : pos+i]
 		i += nnul
-		p = p[i:]
+		pos += i
 
 		if !newTable {
-			if len(p) < 4 {
+			if len(data)-pos < 4 {
 				return nil, &DecodingError{len(data), "unexpected EOF", nil}
 			}
 			// Go type.
-			s.gotype = uint64(order.Uint32(p[:4]))
-			p = p[4:]
+			s.gotype = uint64(order.Uint32(data[pos : pos+4]))
+			pos += 4
 		}
 		out = push(out, s)
 	}

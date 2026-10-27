@@ -83,17 +83,20 @@ func (t *LineTable) parse(targetPC uint64, targetLine int32) (b []byte, pc uint6
 	// Here we process each update individually, which simplifies
 	// the code, but makes the corner cases more confusing.
 	b, pc, line = t.Data, t.PC, t.Line
-	for pc <= targetPC && line != targetLine && len(b) > 0 {
-		code := b[0]
-		b = b[1:]
+	// pos walks b: b = b[1:] in the loop copies the rest of the pc table at
+	// every timestamp. The remainder is returned as one slice at the end.
+	pos := int32(0)
+	for pc <= targetPC && line != targetLine && len(b)-pos > 0 {
+		code := b[pos]
+		pos++
 		switch {
 		case code == 0:
-			if len(b) < 4 {
-				b = b[0:0]
+			if len(b)-pos < 4 {
+				pos = len(b)
 				break
 			}
-			val := binary.BigEndian().Uint32(b)
-			b = b[4:]
+			val := binary.BigEndian().Uint32(b[pos : pos+4])
+			pos += 4
 			line += int32(val)
 		case code <= 64:
 			line += int32(code)
@@ -105,7 +108,7 @@ func (t *LineTable) parse(targetPC uint64, targetLine int32) (b []byte, pc uint6
 		}
 		pc += oldQuantum
 	}
-	return b, pc, line
+	return b[pos:], pc, line
 }
 
 func (t *LineTable) slice(pc uint64) (out *LineTable) {
@@ -339,19 +342,19 @@ func (t *LineTable) findFunc(pc uint64) (out funcData) {
 	return t.funcData(uint32(idx))
 }
 
-// readvarint reads, removes, and returns a varint from *pp.
-func (t *LineTable) readvarint(pp *[]byte) (out uint32) {
+// readvarint reads a varint from p at *pos and advances *pos past it. The
+// cursor is an offset, not a trimmed slice: p = p[1:] would copy the rest of
+// the pc table at every byte.
+func (t *LineTable) readvarint(p []byte, pos *int32) (out uint32) {
 	var v, shift uint32
-	p := *pp
 	for shift = 0; ; shift += 7 {
-		b := p[0]
-		p = p[1:]
+		b := p[*pos]
+		*pos++
 		v |= (uint32(b) & 0x7F) << shift
 		if b&0x80 == 0 {
 			break
 		}
 	}
-	*pp = p
 	return v
 }
 
@@ -483,8 +486,8 @@ func (f *funcData) field(n uint32) (out uint32) {
 }
 
 // step advances to the next pc, value pair in the encoded table.
-func (t *LineTable) step(p *[]byte, pc *uint64, val *int32, first bool) (rok bool) {
-	uvdelta := t.readvarint(p)
+func (t *LineTable) step(p []byte, pos *int32, pc *uint64, val *int32, first bool) (rok bool) {
+	uvdelta := t.readvarint(p, pos)
 	if uvdelta == 0 && !first {
 		return false
 	}
@@ -494,7 +497,7 @@ func (t *LineTable) step(p *[]byte, pc *uint64, val *int32, first bool) (rok boo
 		uvdelta >>= 1
 	}
 	vdelta := int32(uvdelta)
-	pcdelta := t.readvarint(p) * t.quantum
+	pcdelta := t.readvarint(p, pos) * t.quantum
 	*pc += uint64(pcdelta)
 	*val += vdelta
 	return true
@@ -504,11 +507,11 @@ func (t *LineTable) step(p *[]byte, pc *uint64, val *int32, first bool) (rok boo
 // off is the offset to the beginning of the pc-value table,
 // and entry is the start PC for the corresponding function.
 func (t *LineTable) pcvalue(off uint32, entry, targetpc uint64) (out int32) {
-	p := t.pctab[off:]
+	pos := int32(off)
 
 	val := int32(-1)
 	pc := entry
-	for t.step(&p, &pc, &val, pc == entry) {
+	for t.step(t.pctab, &pos, &pc, &val, pc == entry) {
 		if targetpc < pc {
 			return val
 		}
@@ -527,14 +530,14 @@ func (t *LineTable) findFileLine(entry uint64, filetab, linetab uint32, filenum,
 		return 0
 	}
 
-	fp := t.pctab[filetab:]
-	fl := t.pctab[linetab:]
+	fpos := int32(filetab)
+	lpos := int32(linetab)
 	fileVal := int32(-1)
 	filePC := entry
 	lineVal := int32(-1)
 	linePC := entry
 	fileStartPC := filePC
-	for t.step(&fp, &filePC, &fileVal, filePC == entry) {
+	for t.step(t.pctab, &fpos, &filePC, &fileVal, filePC == entry) {
 		fileIndex := fileVal
 		if t.version == ver116 || t.version == ver118 || t.version == ver120 {
 			fileIndex = int32(t.binary.Uint32(cutab[fileVal*4:]))
@@ -545,7 +548,7 @@ func (t *LineTable) findFileLine(entry uint64, filetab, linetab uint32, filenum,
 			// Run the PC table looking for a matching line number
 			// or until we reach filePC.
 			lineStartPC := linePC
-			for linePC < filePC && t.step(&fl, &linePC, &lineVal, linePC == entry) {
+			for linePC < filePC && t.step(t.pctab, &lpos, &linePC, &lineVal, linePC == entry) {
 				// lineVal is in effect until linePC, and lineStartPC < filePC.
 				if lineVal == line {
 					if fileStartPC <= lineStartPC {
