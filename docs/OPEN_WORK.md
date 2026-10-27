@@ -17968,3 +17968,53 @@ float constants through math/big), and the gate.
 After that the flip itself is the 15 lines round 230 recorded, plus the
 fixtures for the rule (empty sub-slice cap 0, a write through a variable
 sub-slice does not reach the parent, resize still reuses a buffer).
+
+## Round 232: time.parse, then the parsers the scan's tail hides
+
+    gate 241 (169 units, phase 2 bootstrap + tree-cleanliness)   169/169 PASS, rc=0
+
+Round 231's list continued. time/format's parse was the one worth doing next and
+the one that needed the most care: its switch consumes a prefix of `value` in
+every std case - skip, getnum/getnum3, lookup, parseNanoseconds, the five
+numeric-TZ windows, and the AM/PM picks - and re-slicing value per case copies
+the rest of the timestamp, so parsing cost grew with (value length x layout
+length). That is the path every log line and every HTTP Date header takes.
+
+`vp` walks value now. The helpers became offset forms with the old signature
+kept as a wrapper where one existed:
+
+    skipAt, cutspaceAt, getnumAt, getnum3At, lookupAt, parseNanosecondsAt,
+    parseTimeZoneAt, parseGMTAt, parseSignedOffsetAt
+
+Two bugs the differential found that a compile would not have: the stdYear
+case had been left reading `value[0:2]` (so a two-digit year came from the front
+of the string - "05 Mar 24" parsed as 2005), and parseSignedOffsetAt compared
+`value[1:] == rem` for its "nothing consumed" test, which only works at offset
+0.
+
+    verified  29 layout/value pairs against Go: RFC3339 with Z and numeric
+              zones, .000 and .999 and comma sub-seconds, named zones, RFC1123
+              and RFC1123Z, the kitchen clock, yday, _2/2 day padding, and four
+              malformed inputs. Every instant to nanosecond precision and every
+              accept/reject verdict identical.
+
+archive/tar's sparse loops and internal/dag's lexer followed (round 231 has the
+tar part): dag's rulesParser trimmed p.text per token, so lexing copied the rest
+of the file once per token; p.pos walks it and text is never trimmed. bytes
+gained IndexAnyFrom for it.
+
+### The scan's tail is mostly bounded, and that is worth recording
+
+The remaining entries from the round-229 scan were checked one by one. Most of
+what is left is *not* quadratic:
+
+    io/pipe, net/pipe      b = b[nw:] with at most two select rounds
+    os/file write loops    one trim per partial write (rare)
+    strconv/ftoaryu        d.d[1:] inside a <=17-iteration zero trim
+    hpack readVarInt       p[1:] per varint byte, at most ten
+
+The ones that are real are the big state machines: cgroup_linux's seven parse
+loops, x509/parser and x509/verify, crypto/tls (ech, conn, key_agreement),
+internal/profile, and crypto/x509's DER walk. Each needs a cursor threaded
+through a function that also builds error values from the remainder, which is
+the same shape as time.parse above.
