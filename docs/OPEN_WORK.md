@@ -18087,3 +18087,45 @@ job. The work is to find what CreateCertificate returns that has an
 unknown-extent pointee (most likely a pointer into a `big.Int`-shaped local)
 and make it own its data.
 """
+
+## Round 235: math/big division has no windows, and the size of the copy rule's bill
+
+    bootstrap   s4a -> s4b -> s4c fixpoint after the natdiv change
+    probe       QuoRem at 64..8192 bits, Rat.Float64 bit patterns, big.Float
+                text: identical to Go
+
+math/big's recursive division was the copy rule's known blocker: natDivRecursive
+Step hands `uu := u[j-B:]` to itself and writes the remainder back through it.
+`u` is passed whole with (uOff, uLen) now, and the division-internal arithmetic
+gained offset forms - natNormLen, addVVAt, subVVAt, addVWAt, subVWAt, addToAt,
+natCmpAt, lshVUAt. v is read-only in this code, so its windows stay slice
+values, and natMul keeps its signature for the same reason.
+
+That is one package of the bill. Turning the rule on again and running the
+math/big probe showed the *next* window-writer within a minute:
+`z[n] = lshVU(z[n-m:n], x, s)` in natLsh - a window handed to a writer - so a
+2^8192 Lsh came back zero and the division that followed panicked. A grep for
+calls with a sub-slice argument over the tree reports **1631** of them:
+
+    math/big        22 left after natdiv: natLsh's lshVU, nat.mx's addVV/subVV/
+                    addVW/subVW/addTo windows, natmul.mx's addTo/mulAddVWW/
+                    lshVU, and natdiv's own qhatv[0:n] windows (a window of an
+                    owned local is a copy too)
+    everything else unknown - read-only windows are safe but indistinguishable
+                    from writing ones without following the callee
+
+The compile-time question is not answerable locally: whether `f(x[a:b])` is safe
+depends on whether f writes through its parameter, which is whole-program
+information. So the flip cannot land as a compiler change with a mechanical
+tail; it lands as a grind, package by package, with the gate and the bootstrap
+as the oracle - which is exactly how math/big was found, twice.
+
+The alternative - a named `sliceview(buf, off, n)` - does not shrink that
+audit: every writing site has to be found either way. It only decides whether
+the site says `sliceview` (a view) or takes an offset (no window at all). The
+offset form is strictly better where it fits, which is why the campaign has been
+converting to it call by call.
+
+The rule stays off. math/big's conversion stays in: it is correct under view
+semantics too - `(u, 0, len(u))` with the At helpers is the same arithmetic -
+and it is a package's worth of the work already done.
