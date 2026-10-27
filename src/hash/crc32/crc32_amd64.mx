@@ -32,8 +32,15 @@ import (
 
 // crcRawUpdate is one reflected CRC register update with no inversion.
 func crcRawUpdate(crc uint32, poly uint32, p []byte) (out uint32) {
-	for _, v := range p {
-		crc = crc ^ uint32(v)
+	return crcRawUpdateAt(crc, poly, p, 0, len(p))
+}
+
+// crcRawUpdateAt is crcRawUpdate over p[off:off+n]. The kernels below take
+// offsets because p[start:] would copy the whole remaining input at every
+// chunk once a sub-slice is a copy.
+func crcRawUpdateAt(crc uint32, poly uint32, p []byte, off int32, n int32) (out uint32) {
+	for i := off; i < off+n; i++ {
+		crc = crc ^ uint32(p[i])
 		for k := 0; k < 8; k++ {
 			if crc&1 != 0 {
 				crc = (crc >> 1) ^ poly
@@ -48,6 +55,10 @@ func crcRawUpdate(crc uint32, poly uint32, p []byte) (out uint32) {
 // castagnoliSSE42 updates one stream with Castagnoli's polynomial.
 func castagnoliSSE42(crc uint32, p []byte) (out uint32) {
 	return crcRawUpdate(crc, Castagnoli, p)
+}
+
+func castagnoliSSE42At(crc uint32, p []byte, off, n int32) (out uint32) {
+	return crcRawUpdateAt(crc, Castagnoli, p, off, n)
 }
 
 // castagnoliSSE42Triple updates three independent streams. The hardware
@@ -65,9 +76,27 @@ func castagnoliSSE42Triple(
 		crcRawUpdate(crcC, Castagnoli, c[:nn])
 }
 
+// castagnoliSSE42TripleAt runs the three streams over a[offA:], a[offB:] and
+// a[offC:] without forming sub-slices of the caller's buffer.
+func castagnoliSSE42TripleAt(
+	crcA, crcB, crcC uint32,
+	a []byte,
+	offA, offB, offC int32,
+	rounds uint32,
+) (retA uint32, retB uint32, retC uint32) {
+	nn := int32(rounds) * 24
+	return crcRawUpdateAt(crcA, Castagnoli, a, offA, nn),
+		crcRawUpdateAt(crcB, Castagnoli, a, offB, nn),
+		crcRawUpdateAt(crcC, Castagnoli, a, offC, nn)
+}
+
 // ieeeCLMUL updates one stream with the IEEE polynomial.
 func ieeeCLMUL(crc uint32, p []byte) (out uint32) {
 	return crcRawUpdate(crc, IEEE, p)
+}
+
+func ieeeCLMULAt(crc uint32, p []byte, off, n int32) (out uint32) {
+	return crcRawUpdateAt(crc, IEEE, p, off, n)
 }
 
 const castagnoliK1 = 168
@@ -131,38 +160,41 @@ func (c *CRC32) archUpdateCastagnoli(crc uint32, p []byte) (out uint32) {
 
 	crc = ^crc
 
+	// pos walks p: p = p[n:] per chunk, and p[K2:] / p[K2*2:] inside the
+	// triple call, would each copy the whole remaining input.
+	pos := int32(0)
 	if len(p) >= castagnoliK1*3 {
 		delta := int32(uintptr(unsafe.Pointer(&p[0])) & 7)
 		if delta != 0 {
 			delta = 8 - delta
-			crc = castagnoliSSE42(crc, p[:delta])
-			p = p[delta:]
+			crc = castagnoliSSE42At(crc, p, 0, delta)
+			pos = delta
 		}
 	}
 
-	for len(p) >= castagnoliK2*3 {
-		crcA, crcB, crcC := castagnoliSSE42Triple(
+	for len(p)-pos >= castagnoliK2*3 {
+		crcA, crcB, crcC := castagnoliSSE42TripleAt(
 			crc, 0, 0,
-			p, p[castagnoliK2:], p[castagnoliK2*2:],
+			p, pos, pos+castagnoliK2, pos+castagnoliK2*2,
 			castagnoliK2/24)
 
 		crcAB := castagnoliShift(c.castagnoliSSE42TableK2, crcA) ^ crcB
 		crc = castagnoliShift(c.castagnoliSSE42TableK2, crcAB) ^ crcC
-		p = p[castagnoliK2*3:]
+		pos += castagnoliK2 * 3
 	}
 
-	for len(p) >= castagnoliK1*3 {
-		crcA, crcB, crcC := castagnoliSSE42Triple(
+	for len(p)-pos >= castagnoliK1*3 {
+		crcA, crcB, crcC := castagnoliSSE42TripleAt(
 			crc, 0, 0,
-			p, p[castagnoliK1:], p[castagnoliK1*2:],
+			p, pos, pos+castagnoliK1, pos+castagnoliK1*2,
 			castagnoliK1/24)
 
 		crcAB := castagnoliShift(c.castagnoliSSE42TableK1, crcA) ^ crcB
 		crc = castagnoliShift(c.castagnoliSSE42TableK1, crcAB) ^ crcC
-		p = p[castagnoliK1*3:]
+		pos += castagnoliK1 * 3
 	}
 
-	crc = castagnoliSSE42(crc, p)
+	crc = castagnoliSSE42At(crc, p, pos, int32(len(p))-pos)
 	return ^crc
 }
 
@@ -182,14 +214,15 @@ func (c *CRC32) archUpdateIEEE(crc uint32, p []byte) (out uint32) {
 		panic("not available")
 	}
 
+	pos := int32(0)
 	if len(p) >= 64 {
-		left := len(p) & 15
-		do := len(p) - left
-		crc = ^ieeeCLMUL(^crc, p[:do])
-		p = p[do:]
+		left := int32(len(p)) & 15
+		do := int32(len(p)) - left
+		crc = ^ieeeCLMULAt(^crc, p, 0, do)
+		pos = do
 	}
-	if len(p) == 0 {
+	if len(p)-pos == 0 {
 		return crc
 	}
-	return slicingUpdate(crc, c.archIeeeTable8, p)
+	return slicingUpdateAt(crc, c.archIeeeTable8, p, pos)
 }

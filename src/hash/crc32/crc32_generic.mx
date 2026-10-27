@@ -42,9 +42,14 @@ func simplePopulateTable(poly uint32, t []uint32) {
 // simpleUpdate uses the simple algorithm to update the CRC, given a table that
 // was previously computed using simpleMakeTable.
 func simpleUpdate(crc uint32, tab []uint32, p []byte) (out uint32) {
+	return simpleUpdateAt(crc, tab, p, 0)
+}
+
+// simpleUpdateAt is simpleUpdate for p[off:].
+func simpleUpdateAt(crc uint32, tab []uint32, p []byte, off int32) (out uint32) {
 	crc = ^crc
-	for _, v := range p {
-		crc = tab[byte(crc)^v] ^ (crc >> 8)
+	for i := off; i < len(p); i++ {
+		crc = tab[byte(crc)^p[i]] ^ (crc >> 8)
 	}
 	return ^crc
 }
@@ -73,19 +78,26 @@ func slicingMakeTable(poly uint32) (tab [][]uint32) {
 // slicingUpdate uses the slicing-by-8 algorithm to update the CRC, given a
 // table that was previously computed using slicingMakeTable.
 func slicingUpdate(crc uint32, tab [][]uint32, p []byte) (out uint32) {
-	if len(p) >= slicing8Cutoff {
+	return slicingUpdateAt(crc, tab, p, 0)
+}
+
+// slicingUpdateAt is slicingUpdate for p[off:]. The remainder walk keeps an
+// offset: p = p[8:] would copy the rest of the input per eight bytes.
+func slicingUpdateAt(crc uint32, tab [][]uint32, p []byte, off int32) (out uint32) {
+	pos := off
+	if len(p)-pos >= slicing8Cutoff {
 		crc = ^crc
-		for len(p) > 8 {
-			crc ^= byteorder.LEUint32(p)
-			crc = tab[0][p[7]] ^ tab[1][p[6]] ^ tab[2][p[5]] ^ tab[3][p[4]] ^
+		for len(p)-pos > 8 {
+			crc ^= byteorder.LEUint32At(p, pos)
+			crc = tab[0][p[pos+7]] ^ tab[1][p[pos+6]] ^ tab[2][p[pos+5]] ^ tab[3][p[pos+4]] ^
 				tab[4][crc>>24] ^ tab[5][(crc>>16)&0xFF] ^
 				tab[6][(crc>>8)&0xFF] ^ tab[7][crc&0xFF]
-			p = p[8:]
+			pos += 8
 		}
 		crc = ^crc
 	}
-	if len(p) == 0 {
+	if len(p)-pos == 0 {
 		return crc
 	}
-	return simpleUpdate(crc, tab[0], p)
+	return simpleUpdateAt(crc, tab[0], p, pos)
 }

@@ -147,7 +147,10 @@ func updateGeneric(state *macState, msg []byte) {
 	h0, h1, h2 := state.h[0], state.h[1], state.h[2]
 	r0, r1 := state.r[0], state.r[1]
 
-	for len(msg) > 0 {
+	// pos walks msg: msg = msg[TagSize:] in the loop copies the whole
+	// remaining message every 16 bytes.
+	pos := int32(0)
+	for len(msg)-pos > 0 {
 		var c uint64
 
 		// For the first step, h + m, we use a chain of bits.Add64 intrinsics.
@@ -157,22 +160,25 @@ func updateGeneric(state *macState, msg []byte) {
 		// The spec requires us to set a bit just above the message size, not to
 		// hide leading zeroes. For full chunks, that's 1 << 128, so we can just
 		// add 1 to the most significant (2¹²⁸) limb, h2.
-		if len(msg) >= TagSize {
-			h0, c = bits.Add64(h0, binary.LittleEndian().Uint64(msg[0:8]), 0)
-			h1, c = bits.Add64(h1, binary.LittleEndian().Uint64(msg[8:16]), c)
+		if len(msg)-pos >= TagSize {
+			h0, c = bits.Add64(h0, binary.LittleEndian().Uint64(msg[pos:pos+8]), 0)
+			h1, c = bits.Add64(h1, binary.LittleEndian().Uint64(msg[pos+8:pos+16]), c)
 			h2 += c + 1
 
-			msg = msg[TagSize:]
+			pos += TagSize
 		} else {
 			var buf [TagSize]byte
-			copy(buf[:], msg)
-			buf[len(msg)] = 1
+			rem := int32(len(msg)) - pos
+			for i := int32(0); i < rem; i++ {
+				buf[i] = msg[pos+i]
+			}
+			buf[rem] = 1
 
 			h0, c = bits.Add64(h0, binary.LittleEndian().Uint64(buf[0:8]), 0)
 			h1, c = bits.Add64(h1, binary.LittleEndian().Uint64(buf[8:16]), c)
 			h2 += c
 
-			msg = nil
+			pos = len(msg)
 		}
 
 		// Multiplication of big number limbs is similar to elementary school

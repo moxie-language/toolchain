@@ -147,15 +147,18 @@ func (d *digest) Clone() (cl hash.Cloner, cerr error) {
 
 func update(crc uint64, tab *Table, p []byte) (out uint64) {
 	crc = ^crc
+	// pos walks p: p = p[8:] inside the loop would copy the rest of the input
+	// every eight bytes.
+	pos := int32(0)
 	// Table comparison is somewhat expensive, so avoid it for small sizes
-	for len(p) >= 64 {
+	for len(p)-pos >= 64 {
 		var helperTable [][]uint64
 		if tab.words == slicing8Tables.ECMA[0] {
 			helperTable = slicing8Tables.ECMA
 		} else if tab.words == slicing8Tables.ISO[0] {
 			helperTable = slicing8Tables.ISO
 			// For smaller sizes creating extended table takes too much time
-		} else if len(p) >= 2048 {
+		} else if len(p)-pos >= 2048 {
 			// According to the tests between various x86 and arm CPUs, 2k is a reasonable
 			// threshold for now. This may change in the future.
 			helperTable = makeSlicingBy8Table(tab)
@@ -163,8 +166,8 @@ func update(crc uint64, tab *Table, p []byte) (out uint64) {
 			break
 		}
 		// Update using slicing-by-8
-		for len(p) > 8 {
-			crc ^= byteorder.LEUint64(p)
+		for len(p)-pos > 8 {
+			crc ^= byteorder.LEUint64At(p, pos)
 			crc = helperTable[7][crc&0xff] ^
 				helperTable[6][(crc>>8)&0xff] ^
 				helperTable[5][(crc>>16)&0xff] ^
@@ -173,12 +176,12 @@ func update(crc uint64, tab *Table, p []byte) (out uint64) {
 				helperTable[2][(crc>>40)&0xff] ^
 				helperTable[1][(crc>>48)&0xff] ^
 				helperTable[0][crc>>56]
-			p = p[8:]
+			pos += 8
 		}
 	}
 	// For reminders or small sizes
-	for _, v := range p {
-		crc = tab.words[byte(crc)^v] ^ (crc >> 8)
+	for i := pos; i < len(p); i++ {
+		crc = tab.words[byte(crc)^p[i]] ^ (crc >> 8)
 	}
 	return ^crc
 }

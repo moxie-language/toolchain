@@ -96,29 +96,32 @@ func (d *digest) Clone() (c hash.Cloner, cerr error) {
 // Add p to the running checksum d.
 func update(d digest, p []byte) (out digest) {
 	s1, s2 := d.s&0xffff, d.s>>16
-	for len(p) > 0 {
-		var q []byte
-		if len(p) > nmax {
-			p, q = p[:nmax], p[nmax:]
+	// pos walks p: p = p[4:] per word would copy the rest of the input at every
+	// four bytes, and the nmax window would copy the remainder per chunk.
+	pos := int32(0)
+	for len(p)-pos > 0 {
+		end := int32(len(p))
+		if end-pos > nmax {
+			end = pos + nmax
 		}
-		for len(p) >= 4 {
-			s1 += uint32(p[0])
+		for end-pos >= 4 {
+			s1 += uint32(p[pos+0])
 			s2 += s1
-			s1 += uint32(p[1])
+			s1 += uint32(p[pos+1])
 			s2 += s1
-			s1 += uint32(p[2])
+			s1 += uint32(p[pos+2])
 			s2 += s1
-			s1 += uint32(p[3])
+			s1 += uint32(p[pos+3])
 			s2 += s1
-			p = p[4:]
+			pos += 4
 		}
-		for _, x := range p {
-			s1 += uint32(x)
+		for pos < end {
+			s1 += uint32(p[pos])
 			s2 += s1
+			pos++
 		}
 		s1 %= mod
 		s2 %= mod
-		p = q
 	}
 	out.s = s2<<16 | s1
 	return out
