@@ -209,6 +209,9 @@ func (d *Digest) BlockSize() (ret0 int32) { return blockSize }
 func (d *Digest) Write(p []byte) (nn int32, err error) {
 	nn = len(p)
 	d.len += uint64(nn)
+	// pos walks p: p = p[n:] / p[maxAsmSize:] would copy the whole remaining
+	// input per chunk.
+	pos := int32(0)
 	if d.nx > 0 {
 		n := len(d.x) - d.nx
 		if n > len(p) {
@@ -222,22 +225,22 @@ func (d *Digest) Write(p []byte) (nn int32, err error) {
 			block(d, d.x[:])
 			d.nx = 0
 		}
-		p = p[n:]
+		pos = n
 	}
-	if len(p) >= chunk {
-		n := len(p) &^ (chunk - 1)
+	if len(p)-pos >= chunk {
+		n := (len(p) - pos) &^ (chunk - 1)
 		for n > maxAsmSize {
-			block(d, p[:maxAsmSize])
-			p = p[maxAsmSize:]
+			block(d, p[pos:pos+maxAsmSize])
+			pos += maxAsmSize
 			n -= maxAsmSize
 		}
-		block(d, p[:n])
-		p = p[n:]
+		block(d, p[pos:pos+n])
+		pos += n
 	}
-	if len(p) > 0 {
-		d.nx = len(p)
+	if len(p)-pos > 0 {
+		d.nx = int32(len(p)) - pos
 		for i := int32(0); i < d.nx; i++ {
-			d.x[i] = p[i]
+			d.x[i] = p[pos+i]
 		}
 	}
 	return

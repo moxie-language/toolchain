@@ -122,11 +122,19 @@ func (d *Digest) writeGeneric(p []byte) (n int32, err error) {
 	// Loop scratch is declared once, outside the loop: a declaration in a loop
 	// in a self-mutating method is rejected, and the slice would otherwise be
 	// allocated into the sovereign arena on every iteration.
+	//
+	// The absorb walks p by offset: p = p[x:] would copy the whole remaining
+	// input at every rate-sized block.
 	var x int32
-	for len(p) > 0 {
-		x = subtle.XORBytes(d.a[d.n:d.rate], d.a[d.n:d.rate], p)
+	pos := int32(0)
+	for len(p)-pos > 0 {
+		x = int32(len(p)) - pos
+		if avail := d.rate - d.n; x > avail {
+			x = avail
+		}
+		subtle.XORBytesAt(d.a, d.n, p, pos, d.a, d.n, x)
 		d.n += x
-		p = p[x:]
+		pos += x
 
 		// If the sponge is full, apply the permutation.
 		if d.n == d.rate {
