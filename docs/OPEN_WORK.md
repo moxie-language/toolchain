@@ -18417,3 +18417,50 @@ The remaining shapes, with the tool that finds them:
 
 What the count says: the rule needs the *class* converted, not every call site
 audited one at a time, and the classes are small.
+
+## Round 241: a scanner for the shape, and the two classes it found
+
+    gate 249 (169 units)   running on the tree at 924def77
+    scanner                114 write-window call sites remain (from ~1900
+                           sub-slice arguments), 396 before same-package
+                           resolution
+
+The bill is small enough to enumerate, so the enumeration is a script: for
+every call whose argument is a slice expression, resolve the callee in the same
+package, map the argument position to the parameter, and ask whether the callee
+writes that parameter (`p[i] = ...`, `clear(p...)`, `copy(p, ...)`,
+`push(p...)`, `mxutil.Copy*`, `resize(p, ...)`). Resolution by name alone
+across packages gives 396 hits, almost all noise (`Write(b=x[:])` where `b` is
+the *reader's* buffer); same-package resolution gives 114, and of those the
+real ones are visible on inspection.
+
+Two of them are now fixed and were real:
+
+    math/big   natBytes(z, buf) wrote buf, and both GobEncode callers passed
+               buf[10:] / buf[:i] - a copy - so Float and Rat GobEncode
+               wrote zeros. natBytesAt(z, buf, off).
+    strconv    digitZero(buf[w:w+n]) padded a copy, so FormatFloat(1e-9, 'f',
+               -1, 64) printed "0." with the zeros missing. digitZeroAt.
+
+and two are recorded rather than fixed:
+
+    crypto/ec/secp256k1  FieldVal.PutBytesUnchecked and
+               ModNScalar.PutBytesUnchecked are written to be handed a
+               b[1:33], and every signature and public key serializer does
+               exactly that, so under the rule the serialized coordinates
+               are zeros. The override (PutBytesUncheckedAt) is written and
+               the call sites converted, but the package does not compile at
+               HEAD (nonce.mx shadows `zb`, and the //:embed blob needs the
+               legacy loader), so it cannot be verified until that package
+               is repaired - which is its own task.
+    crypto/tls   the record layer was converted (round 240's sliceForAppend
+               and the stream/CBC paths) and compiles, but nothing in the
+               test suite performs a handshake, so it is reviewed and
+               compiled, not exercised. A fixture needs two domains over a
+               socketpair, which is a spawn test, not a unit test.
+
+What the scanner also shows is what is *not* broken: most of the remaining
+hits have an array base (`d.tmp[:n]`, `z.buf[:10]`, `[8]byte`), and an array
+slice is a view - the rule has nothing to allocate there. That distinction is
+the one thing the scanner cannot make without types, so the next version wants
+the type checker rather than a regex.
