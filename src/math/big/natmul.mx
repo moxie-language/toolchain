@@ -47,10 +47,10 @@ func natMul(z []Word, stk *stack, x, y []Word) (rnat []Word) {
 	// Let x = x1:x0 where x0 is the same length as y.
 	// Compute z = x0*y and then add in x1*y in sections
 	// if needed.
-	karatsuba(stk, z[:2*n], x[:n], y)
+	karatsuba(stk, z, x, y, 2*n, n)
 
 	if n < m {
-		clear(z[2*n:])
+		zeroWordsAt(z, 2*n, len(z)-2*n)
 		defer stk.restore(stk.save())
 		t := stk.nat(2 * n)
 		for i := n; i < m; i += n {
@@ -126,7 +126,7 @@ func basicSqr(stk *stack, z, x []Word) {
 		// z collects the squares x[i] * x[i]
 		z[2*i+1], z[2*i] = mulWW(d, d)
 		// t collects the products x[i] * x[j] where j < i
-		t[2*i] = addMulVVWW(t[i:2*i], t[i:2*i], x[0:i], d, 0)
+		t[2*i] = addMulVVWWAt(t, i, t, i, x, 0, i, d, 0)
 	}
 	t[2*n-1] = lshVUAt(t, 1, 2*n-2, t, 1, 1) // double the j < i products
 	addVV(z, z, t)                              // combine the result
@@ -149,10 +149,10 @@ func natMulAddWW(z []Word, x []Word, y, r Word) (rnat []Word) {
 // basicMul multiplies x and y and leaves the result in z.
 // The (non-normalized) result is placed in z[0 : len(x) + len(y)].
 func basicMul(z, x, y []Word) {
-	clear(z[0 : len(x)+len(y)]) // initialize z
+	zeroWordsAt(z, 0, len(x)+len(y)) // initialize z
 	for i, d := range y {
 		if d != 0 {
-			z[len(x)+i] = addMulVVWW(z[i:i+len(x)], z[i:i+len(x)], x, d, 0)
+			z[len(x)+i] = addMulVVWWAt(z, i, z, i, x, 0, len(x), d, 0)
 		}
 	}
 }
@@ -161,9 +161,9 @@ func basicMul(z, x, y []Word) {
 // writing the (non-normalized) result to z.
 // x and y must have the same length n,
 // and z must have length twice that.
-func karatsuba(stk *stack, z, x, y []Word) {
+func karatsuba(stk *stack, z, x, y []Word, zn, xn int32) {
 	n := len(y)
-	if len(x) != n || len(z) != 2*n {
+	if int32(len(x)) != xn || int32(len(z)) < zn || zn != 2*n {
 		panic("bad karatsuba length")
 	}
 
@@ -194,27 +194,28 @@ func karatsuba(stk *stack, z, x, y []Word) {
 	//	z1 = (x0-x1)*(y1-y0) + z0 + z2
 
 	n2 := (n + 1) / 2
-	x0, x1 := &Int{abs: natNorm(x[:n2])}, &Int{abs: natNorm(x[n2:])}
+	x0, x1 := &Int{abs: natNorm(x[:n2])}, &Int{abs: natNorm(x[n2 : xn])}
 	y0, y1 := &Int{abs: natNorm(y[:n2])}, &Int{abs: natNorm(y[n2:])}
-	z0 := &Int{abs: z[0 : 2*n2]}
-	z2 := &Int{abs: z[2*n2:]}
 
-	// Allocate temporary storage for z1; repurpose z0 to hold tx and ty.
 	defer stk.restore(stk.save())
 	z1 := &Int{abs: stk.nat(2*n2 + 1)}
-	tx := &Int{abs: z[0:n2]}
-	ty := &Int{abs: z[n2 : 2*n2]}
+	tx := &Int{abs: stk.nat(n2)}
+	ty := &Int{abs: stk.nat(n2)}
 
 	tx.Sub(x0, x1)
 	ty.Sub(y1, y0)
 	z1.mul(stk, tx, ty)
 
-	clear(z)
+	zeroWordsAt(z, 0, zn)
+	z0 := &Int{abs: []Word{:2 * n2}}
+	z2 := &Int{abs: []Word{:2 * (n - n2)}}
 	z0.mul(stk, x0, y0)
 	z2.mul(stk, x1, y1)
 	z1.Add(z1, z0)
 	z1.Add(z1, z2)
-	addToAt(z, n2, len(z)-n2, z1.abs, 0, len(z1.abs))
+	copyWordsAt(z, 0, z0.abs)
+	copyWordsAt(z, 2*n2, z2.abs)
+	addToAt(z, n2, zn-n2, z1.abs, 0, len(z1.abs))
 
 	// Debug mode: double-check answer and print trace on failure.
 	const debug = false
@@ -284,23 +285,24 @@ func karatsubaSqr(stk *stack, z, x []Word) {
 
 	n2 := (n + 1) / 2
 	x0, x1 := &Int{abs: natNorm(x[:n2])}, &Int{abs: natNorm(x[n2:])}
-	z0 := &Int{abs: z[0 : 2*n2]}
-	z2 := &Int{abs: z[2*n2:]}
 
-	// Allocate temporary storage for z1; repurpose z0 to hold tx.
 	defer stk.restore(stk.save())
 	z1 := &Int{abs: stk.nat(2*n2 + 1)}
-	tx := &Int{abs: z[0:n2]}
+	tx := &Int{abs: stk.nat(n2)}
 
 	tx.Sub(x0, x1)
 	z1.abs = natSqr(z1.abs, stk, tx.abs)
 	z1.neg = true
 
-	clear(z)
+	zeroWordsAt(z, 0, len(z))
+	z0 := &Int{abs: []Word{:2 * n2}}
+	z2 := &Int{abs: []Word{:2 * (n - n2)}}
 	z0.abs = natSqr(z0.abs, stk, x0.abs)
 	z2.abs = natSqr(z2.abs, stk, x1.abs)
 	z1.Add(z1, z0)
 	z1.Add(z1, z2)
+	copyWordsAt(z, 0, z0.abs)
+	copyWordsAt(z, 2*n2, z2.abs)
 	addToAt(z, n2, len(z)-n2, z1.abs, 0, len(z1.abs))
 
 	// Debug mode: double-check answer and print trace on failure.

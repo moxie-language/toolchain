@@ -18260,3 +18260,106 @@ compilers, every tree-level window the rule has surfaced so far is fixed
 thunk's negative capacity), and the one allocation left to explain is a direct
 runtime allocation of -64 bytes whose caller has to be named before it can be
 fixed.
+
+## Round 239: the -64 allocation is named, and it is math/big losing writes
+
+    gate 246 (169 units, phase 2 bootstrap + tree-cleanliness)   169/169 PASS, rc=0
+    differential vs Go 1.25.3: Rat.SetString, Int.Text, Exp, Karatsuba Mul,
+                          QuoRem round trip                      identical
+    flipped bootstrap    three generations, no abort, no -64
+
+Round 238 assumed the allocator could not report its caller. It can: the panic
+ends in `abort()`, so `gdb` stops on SIGABRT with the whole Moxie frame chain
+(named functions, no line info - the binaries carry symbols but not DWARF
+lines). One run named the site:
+
+    #6 runtime[ArenaAllocTD]  #7 runtime[alloc]
+    #8 math/big[natConvertWords]  #9 math/big[natConvertWords]
+    #10 math/big[natItoa]  #11 math/big.(*Int).Text
+    #12 math/big.(*Int).String  #13 math/big.(*Rat).RatString
+    #14 pkg/types.(*ConstFloat).MxhText  #15 main[generateMxh]
+
+so the -64 request is `natConvertWords`'s `s[h:]` with `h` negative: `h` is
+`len(s) - table[index].ndigits`, and `len(s)` was 1189 where the value needs
+1432 digits. That made the question "why is the buffer too small", and the
+answer is `math.Log2`:
+
+    println("ln2const=", math.Ln2)      view compiler  +6.931472e-001
+                                        copy compiler  +2.462553e+033
+    println("log2(10)=", math.Log2(10)) view compiler  +3.321928e+000
+                                        copy compiler  +4.000000e+000
+
+`math.Ln2` was wrong by 33 orders of magnitude, so `i := bitLen/Log2(base)+1`
+sized the buffer at 83% of what it needed. `Ln2` is a constant, folded when
+package `math` is compiled, and the folding goes through `big.Rat` - which was
+wrong for the identical reason the rest of math/big was: **the copy rule was
+turning math/big's write windows into copies, so multiplications returned
+stale buffers.**
+
+### The two shapes that lost writes
+
+    basicMul:  z[len(x)+i] = addMulVVWW(z[i:i+len(x)], z[i:i+len(x)], x, d, 0)
+    karatsuba: z0 := &Int{abs: z[0 : 2*n2]}    // then z0.mul(...)
+               clear(z)                        // zeroes a copy
+
+Both are the owned-window shape the campaign has been converting call by call;
+`clear(z[a:b])` is the same bug in one word (it zeroes the copy). The fix is
+the span form: `addMulVVWWAt`, `copyWordsAt`, `zeroWordsAt`, `karatsuba` taking
+`(zn, xn)` lengths and computing its three pieces into temporaries that are
+copied back into `z`, `karatsubaSqr` the same.
+
+There is a second, independent one: `alias(x, y)` was Go's
+
+    &x[0:cap(x)][cap(x)-1] == &y[0:cap(y)][cap(y)-1]
+
+Every destination-reuse decision in math/big (`natMul`, `natSqr`, `natLsh`,
+`natRsh`, `natSet`, `Int.Add/Sub/Exp`) asks it. Under the copy rule both sides
+take the address of a fresh copy, so it always answered "no alias" and the code
+reused buffers that shared storage with an operand. It compares the base
+addresses and the capacities now, which is the same test without a slice
+expression.
+
+### natConvertWords: a parameter that is re-sliced and then written
+
+    h := len(s) - table[index].ndigits
+    natConvertWords(rn, stk, s[h:], ...)   // writes the sub-block
+    s = s[:h]                              // and keeps the low part
+
+Under the rule both the recursive call and the `s = s[:h]` write into copies,
+so a number large enough to split converted to zeros - `Int.Text(10)` of 3^1000
+came back 478 bytes of NUL with the right length. `natConvertWordsAt(q, stk, s,
+so, sn, ...)` carries the span, and its digits are correct again.
+
+### How the differential was built without trusting the printer
+
+`Int.Text` was the thing on trial, so the probes could not use it to report:
+they print `BitLen()` (an integer), the value in 10^9 chunks extracted with
+`QuoRem` (integers), a checksum over the text, and `math.Float64bits`. The
+reference is Go 1.25.3 on the same inputs:
+
+    Rat.SetString("0.693147180559945309417232121458176568")
+        numbits=117 denbits=117  Float64bits=4604418534313441775
+    3^1000   Text(10) len=478  ck=7481157863728586918
+    3^3000   Text(10) len=1432 ck=14764544409399489206
+    5^200    Exp     bits=465  len=140 ck=5487686571965366084
+    3^1000*7^300     len=731  ck=3339259354792272364   (Karatsuba)
+    round trip SetString(Text) cmp=0;  QuoRem leaves remainder < divisor
+
+Both the installed compiler and a copy-rule compiler produce exactly that.
+
+### What this exposes about the bill
+
+Not "some call sites pass sub-slices", but a small set of *shapes* to search
+for, each of which the rule breaks silently:
+
+    f(x[a:b]) where f writes x[a:b]        the owned-window shape
+    clear(x[a:b])                         13 sites tree-wide, math/big's four
+                                          and slices.mx's six included
+    p = p[h:] then write p[*]             a re-sliced parameter, natConvertWords
+    &x[0:cap(x)][cap(x)-1]                an address taken through a sub-slice,
+                                          which is how math/big detected aliasing
+    x = x[a:b] then return x              a trim used as a cursor (round 231-232
+                                          converted the parsers)
+
+The first three are what a mechanical scan can find; the last is the prefix
+trim the cursor directive was about.

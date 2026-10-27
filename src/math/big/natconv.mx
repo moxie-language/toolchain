@@ -402,6 +402,16 @@ func natItoa(x []Word, neg bool, base int32) (rb []byte) {
 // ~30x for 20000 digits. Use nat_test.go's BenchmarkLeafSize tests to optimize leafSize for
 // specific hardware.
 func natConvertWords(q []Word, stk *stack, s []byte, b Word, ndigits int32, bb Word, table []divisor) {
+	natConvertWordsAt(q, stk, s, 0, len(s), b, ndigits, bb, table)
+}
+
+// natConvertWordsAt writes the base-b digits of q into s[so:so+sn].
+//
+// The span form replaces the Go original's `s[h:]` argument and `s = s[:h]`
+// trim: a sub-slice is a copy in Moxie, so the recursive sub-block wrote a
+// buffer nobody read and the iterative part wrote into a shrinking copy. Every
+// number large enough to split came out as zeros.
+func natConvertWordsAt(q []Word, stk *stack, s []byte, so, sn int32, b Word, ndigits int32, bb Word, table []divisor) {
 	// split larger blocks recursively
 	if table != nil {
 		// len(q) > leafSize > 0
@@ -425,21 +435,21 @@ func natConvertWords(q []Word, stk *stack, s []byte, b Word, ndigits int32, bb W
 			q, rn = natDiv(q, stk, rn, q, table[index].bbb)
 
 			// convert subblocks and collect results in s[:h] and s[h:]
-			h := len(s) - table[index].ndigits
-			natConvertWords(rn, stk, s[h:], b, ndigits, bb, table[0:index])
-			s = s[:h] // == q.convertWords(stk, s, b, ndigits, bb, table[0:index+1])
+			h := sn - table[index].ndigits
+			natConvertWordsAt(rn, stk, s, so+h, sn-h, b, ndigits, bb, table[0:index])
+			sn = h // == q.convertWords(stk, s, b, ndigits, bb, table[0:index+1])
 		}
 	}
 
 	// having split any large blocks now process the remaining (small) block iteratively
-	i := len(s)
+	i := so + sn
 	var r Word
 	if b == 10 {
 		// hard-coding for 10 here speeds this up by 1.25x (allows for / and % by constants)
 		for len(q) > 0 {
 			// extract least significant, base bb "digit"
 			q, r = natDivW(q, q, bb)
-			for j := 0; j < ndigits && i > 0; j++ {
+			for j := 0; j < ndigits && i > so; j++ {
 				i--
 				// avoid % computation since r%10 == r - int32(r/10)*10;
 				// this appears to be faster for BenchmarkString10000Base10
@@ -453,7 +463,7 @@ func natConvertWords(q []Word, stk *stack, s []byte, b Word, ndigits int32, bb W
 		for len(q) > 0 {
 			// extract least significant, base bb "digit"
 			q, r = natDivW(q, q, bb)
-			for j := 0; j < ndigits && i > 0; j++ {
+			for j := 0; j < ndigits && i > so; j++ {
 				i--
 				s[i] = digits[r%b]
 				r /= b
@@ -462,7 +472,7 @@ func natConvertWords(q []Word, stk *stack, s []byte, b Word, ndigits int32, bb W
 	}
 
 	// prepend high-order zeros
-	for i > 0 { // while need more leading zeros
+	for i > so { // while need more leading zeros
 		i--
 		s[i] = '0'
 	}

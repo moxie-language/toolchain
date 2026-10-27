@@ -219,12 +219,19 @@ func natMontgomery(z []Word, x, y, m []Word, k Word, n int32) (rnat []Word) {
 
 // alias reports whether x and y share the same base array.
 //
+// The Go original compares the address of the last element of the
+// full-capacity view, x[0:cap(x)][cap(x)-1]. A sub-slice is a copy in Moxie, so
+// that expression takes the address of the copy and two aliasing nats compare
+// unequal - which is how a destination that shares storage with its operand
+// came to be reused and clobbered. Comparing the base addresses and the
+// capacities is the same test without a slice expression.
+//
 // Note: alias assumes that the capacity of underlying arrays
 // is never changed for nat values; i.e. that there are
 // no 3-operand slice expressions in this code (or worse,
 // reflect-based operations to the same effect).
 func alias(x, y []Word) (rok bool) {
-	return cap(x) > 0 && cap(y) > 0 && &x[0:cap(x)][cap(x)-1] == &y[0:cap(y)][cap(y)-1]
+	return cap(x) > 0 && cap(x) == cap(y) && &x[0] == &y[0]
 }
 
 // addTo implements z += x; z must be long enough.
@@ -392,7 +399,7 @@ func natLsh(z []Word, x []Word, s uint32) (rnat []Word) {
 	} else {
 		z[n] = lshVUAt(z, n-m, m, x, 0, s)
 	}
-	clear(z[0 : n-m])
+	zeroWordsAt(z, 0, n-m)
 
 	return natNorm(z)
 }
@@ -444,7 +451,7 @@ func natSetBit(z []Word, x []Word, i uint32, b uint32) (rnat []Word) {
 	case 1:
 		if j >= n {
 			z = natAlloc(z, j + 1)
-			clear(z[n:])
+			zeroWordsAt(z, n, j+1-n)
 		} else {
 			z = natAlloc(z, n)
 		}
