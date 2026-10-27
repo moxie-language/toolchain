@@ -253,15 +253,17 @@ func parseIPv6(in string) (raddr Addr, rerr error) {
 		}
 	}
 
-	// Loop, parsing hex numbers followed by colon.
+	// Loop, parsing hex numbers followed by colon. sp walks s: the loop used
+	// to re-slice s after every field, which copies the rest of the address.
 	i = 0
+	sp := int32(0)
 	for i < 16 {
 		// Hex number. Similar to parseIPv4, inlining the hex number
 		// parsing yields a significant performance increase.
 		off := 0
 		acc := uint32(0)
-		for ; off < len(s); off++ {
-			c := s[off]
+		for ; sp+off < len(s); off++ {
+			c := s[sp+off]
 			if c >= '0' && c <= '9' {
 				acc = (acc << 4) + uint32(c-'0')
 			} else if c >= 'a' && c <= 'f' {
@@ -286,7 +288,7 @@ func parseIPv6(in string) (raddr Addr, rerr error) {
 		}
 
 		// If followed by dot, might be in trailing IPv4.
-		if off < len(s) && s[off] == '.' {
+		if sp+off < len(s) && s[sp+off] == '.' {
 			if ellipsis < 0 && i != 12 {
 				// Not the right place.
 				return Addr{}, &parseAddrError{in: in, msg: "embedded IPv4 address must replace the final 2 fields of the address", at: s}
@@ -300,11 +302,11 @@ func parseIPv6(in string) (raddr Addr, rerr error) {
 			if len(zone) > 0 {
 				end -= len(zone) + 1
 			}
-			err := parseIPv4Fields(in, end-len(s), end, ip[i:i+4])
+			err := parseIPv4Fields(in, end-(len(s)-sp), end, ip[i:i+4])
 			if err != nil {
 				return Addr{}, err
 			}
-			s = ""
+			sp = len(s)
 			i += 4
 			break
 		}
@@ -315,35 +317,35 @@ func parseIPv6(in string) (raddr Addr, rerr error) {
 		i += 2
 
 		// Stop at end of string.
-		s = s[off:]
-		if len(s) == 0 {
+		sp += off
+		if sp == len(s) {
 			break
 		}
 
 		// Otherwise must be followed by colon and more.
-		if s[0] != ':' {
-			return Addr{}, &parseAddrError{in: in, msg: "unexpected character, want colon", at: s}
-		} else if len(s) == 1 {
-			return Addr{}, &parseAddrError{in: in, msg: "colon must be followed by more characters", at: s}
+		if s[sp] != ':' {
+			return Addr{}, &parseAddrError{in: in, msg: "unexpected character, want colon", at: s[sp:]}
+		} else if len(s)-sp == 1 {
+			return Addr{}, &parseAddrError{in: in, msg: "colon must be followed by more characters", at: s[sp:]}
 		}
-		s = s[1:]
+		sp++
 
 		// Look for ellipsis.
-		if s[0] == ':' {
+		if s[sp] == ':' {
 			if ellipsis >= 0 { // already have one
-				return Addr{}, &parseAddrError{in: in, msg: "multiple :: in address", at: s}
+				return Addr{}, &parseAddrError{in: in, msg: "multiple :: in address", at: s[sp:]}
 			}
 			ellipsis = i
-			s = s[1:]
-			if len(s) == 0 { // can be at end
+			sp++
+			if sp == len(s) { // can be at end
 				break
 			}
 		}
 	}
 
 	// Must have used entire string.
-	if len(s) != 0 {
-		return Addr{}, &parseAddrError{in: in, msg: "trailing garbage after address", at: s}
+	if sp != len(s) {
+		return Addr{}, &parseAddrError{in: in, msg: "trailing garbage after address", at: s[sp:]}
 	}
 
 	// If didn't parse enough, expand ellipsis.
