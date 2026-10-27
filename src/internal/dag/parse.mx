@@ -44,7 +44,6 @@ package dag
 import (
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"cmp"
-	"errors"
 	"fmt"
 	"slices"
 	"bytes"
@@ -247,7 +246,8 @@ func parseRules(rules []byte) (out []rule, err error) {
 type rulesParser struct {
 	lineno   int32
 	lastWord []byte
-	text     []byte
+	text     []byte // the whole rules text
+	pos      int32  // cursor into text; text is never trimmed (a trim is a copy)
 }
 
 // syntaxError reports a parsing error.
@@ -287,45 +287,45 @@ func (p *rulesParser) nextToken() (token []byte) {
 	var t []byte
 	var i int32
 	for {
-		if p.text == "" {
+		if p.pos == len(p.text) {
 			return ""
 		}
-		switch p.text[0] {
+		switch p.text[p.pos] {
 		case ';', ',', '<':
-			t = p.text[:1]
-			p.text = p.text[1:]
+			t = p.text[p.pos : p.pos+1]
+			p.pos++
 			return t
 
 		case '!':
-			if len(p.text) < 2 || p.text[1] != '<' {
+			if len(p.text)-p.pos < 2 || p.text[p.pos+1] != '<' {
 				p.syntaxError("unexpected token !")
 			}
-			p.text = p.text[2:]
+			p.pos += 2
 			return "!<"
 
 		case '#':
-			i = bytes.Index(p.text, "\n")
+			i = bytes.IndexByteFrom(p.text, p.pos, '\n')
 			if i < 0 {
 				i = len(p.text)
 			}
-			p.text = p.text[i:]
+			p.pos = i
 			continue
 
 		case '\n':
 			p.lineno++
-			p.text = p.text[1:]
+			p.pos++
 			continue
 		case ' ', '\t':
-			p.text = p.text[1:]
+			p.pos++
 			continue
 
 		default:
-			i = bytes.IndexAny(p.text, "!;,<#\n \t")
+			i = bytes.IndexAnyFrom(p.text, p.pos, "!;,<#\n \t")
 			if i < 0 {
 				i = len(p.text)
 			}
-			t = p.text[:i]
-			p.text = p.text[i:]
+			t = p.text[p.pos:i]
+			p.pos = i
 			p.lastWord = t
 			return t
 		}
