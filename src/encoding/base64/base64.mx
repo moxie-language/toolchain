@@ -6,6 +6,7 @@
 package base64
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"internal/byteorder"
 	"io"
 	"strconv"
@@ -146,7 +147,18 @@ func RawURLEncoding() (enc *Encoding) {
 // so Encode is not appropriate for use on individual blocks
 // of a large data stream. Use [NewEncoder] instead.
 func (enc *Encoding) Encode(dst, src []byte) {
-	if len(src) == 0 {
+	enc.EncodeFrom(dst, 0, src, 0, len(src))
+}
+
+// EncodeFrom encodes src[soff:soff+n] into dst at doff. dst must be at least
+// doff+EncodedLen(n) long, not merely that capacity, because the writes are
+// indexed.
+//
+// It exists so a streaming writer can encode a window of its input without
+// slicing it: a sub-slice is a copy, so Encode(out, p[off:off+nn]) would
+// allocate nn bytes per chunk.
+func (enc *Encoding) EncodeFrom(dst []byte, doff int32, src []byte, soff, n int32) {
+	if n == 0 {
 		return
 	}
 	// enc is a pointer receiver, so the use of enc.encode within the hot
@@ -154,9 +166,10 @@ func (enc *Encoding) Encode(dst, src []byte) {
 	// outside of the loop to speed up the encoder.
 	_ = enc.encode
 
-	di, si := 0, 0
-	n := (len(src) / 3) * 3
-	for si < n {
+	di, si := doff, soff
+	end := soff + n
+	stop := soff + (n/3)*3
+	for si < stop {
 		// Convert 3x 8bit source bytes into 4 bytes
 		v3 := uint32(src[si+0])<<16 | uint32(src[si+1])<<8 | uint32(src[si+2])
 
@@ -169,7 +182,7 @@ func (enc *Encoding) Encode(dst, src []byte) {
 		di += 4
 	}
 
-	remain := len(src) - si
+	remain := end - si
 	if remain == 0 {
 		return
 	}
@@ -203,8 +216,10 @@ func (enc *Encoding) AppendEncode(dst, src []byte) (out []byte) {
 	if cap(dst)-len(dst) < n {
 		dst = push([]byte{:0:len(dst)+n}, dst...)
 	}
-	enc.Encode(dst[len(dst):][:n], src)
-	return dst[:len(dst)+n]
+	base := len(dst)
+	dst = resize(dst, base+n)
+	enc.EncodeFrom(dst, base, src, 0, len(src))
+	return dst
 }
 
 // EncodeToString returns the base64 encoding of src.
@@ -228,6 +243,9 @@ func (e *encoder) Write(p []byte) (n int32, err error) {
 		return 0, e.err
 	}
 
+	// off walks p. `p = p[nn:]` per chunk would copy the whole remainder.
+	off := int32(0)
+
 	// Leading fringe.
 	if e.nbuf > 0 {
 		var i int32
@@ -236,11 +254,11 @@ func (e *encoder) Write(p []byte) (n int32, err error) {
 			e.nbuf++
 		}
 		n += i
-		p = p[i:]
+		off = i
 		if e.nbuf < 3 {
 			return
 		}
-		e.enc.Encode(e.out[:], e.buf[:])
+		e.enc.Encode(e.out, e.buf)
 		if _, e.err = e.w.Write(e.out[:4]); e.err != nil {
 			return n, e.err
 		}
@@ -251,24 +269,27 @@ func (e *encoder) Write(p []byte) (n int32, err error) {
 	// a self-mutating method allocates in the sovereign arena on every
 	// iteration and that allocation is never reclaimed.
 	var nn int32
-	for len(p) >= 3 {
+	for len(p)-off >= 3 {
 		nn = len(e.out) / 4 * 3
-		if nn > len(p) {
-			nn = len(p)
+		if nn > len(p)-off {
+			nn = len(p) - off
 			nn -= nn % 3
 		}
-		e.enc.Encode(e.out[:], p[:nn])
-		if _, e.err = e.w.Write(e.out[0 : nn/3*4]); e.err != nil {
+		e.enc.EncodeFrom(e.out, 0, p, off, nn)
+		if _, e.err = e.w.Write(e.out[:nn/3*4]); e.err != nil {
 			return n, e.err
 		}
 		n += nn
-		p = p[nn:]
+		off += nn
 	}
 
 	// Trailing fringe.
-	copy(e.buf, p)
-	e.nbuf = len(p)
-	n += len(p)
+	rest := len(p) - off
+	for k := int32(0); k < rest; k++ {
+		e.buf[k] = p[off+k]
+	}
+	e.nbuf = rest
+	n += rest
 	return
 }
 
@@ -277,7 +298,7 @@ func (e *encoder) Write(p []byte) (n int32, err error) {
 func (e *encoder) Close() (err error) {
 	// If there's anything left in the buffer, flush it out
 	if e.err == nil && e.nbuf > 0 {
-		e.enc.Encode(e.out[:], e.buf[:e.nbuf])
+		e.enc.EncodeFrom(e.out, 0, e.buf, 0, e.nbuf)
 		_, e.err = e.w.Write(e.out[:e.enc.EncodedLen(e.nbuf)])
 		e.nbuf = 0
 	}
@@ -331,7 +352,8 @@ func corruptInputError(n int32) (cerr error) {
 // source buffer si.
 // It returns the number of bytes read from src, the number of bytes written
 // to dst, and an error, if any.
-func (enc *Encoding) decodeQuantum(dst, src []byte, si int32) (nsi, n int32, err error) {
+// decodeQuantum decodes one quantum from src[0:sn] at si into dst at doff.
+func (enc *Encoding) decodeQuantum(dst []byte, doff int32, src []byte, si int32, sn int32) (nsi, n int32, err error) {
 	// Decode quantum using the base64 alphabet. A slice stands in for the
 	// fixed buffer Go would have used; there is one allocation, sized here.
 	dbuf := []byte{:4}
@@ -341,7 +363,7 @@ func (enc *Encoding) decodeQuantum(dst, src []byte, si int32) (nsi, n int32, err
 	_ = enc.decodeMap
 
 	for j := 0; j < len(dbuf); j++ {
-		if len(src) == si {
+		if sn == si {
 			switch {
 			case j == 0:
 				return si, 0, nil
@@ -377,12 +399,12 @@ func (enc *Encoding) decodeQuantum(dst, src []byte, si int32) (nsi, n int32, err
 		case 2:
 			// "==" is expected, the first "=" is already consumed.
 			// skip over newlines
-			for si < len(src) && (src[si] == '\n' || src[si] == '\r') {
+			for si < sn && (src[si] == '\n' || src[si] == '\r') {
 				si++
 			}
-			if si == len(src) {
+			if si == sn {
 				// not enough padding
-				return si, 0, corruptInputError(len(src))
+				return si, 0, corruptInputError(sn)
 			}
 			if rune(src[si]) != enc.padChar {
 				// incorrect padding
@@ -393,10 +415,10 @@ func (enc *Encoding) decodeQuantum(dst, src []byte, si int32) (nsi, n int32, err
 		}
 
 		// skip over newlines
-		for si < len(src) && (src[si] == '\n' || src[si] == '\r') {
+		for si < sn && (src[si] == '\n' || src[si] == '\r') {
 			si++
 		}
-		if si < len(src) {
+		if si < sn {
 			// trailing garbage
 			err = corruptInputError(si)
 		}
@@ -409,29 +431,29 @@ func (enc *Encoding) decodeQuantum(dst, src []byte, si int32) (nsi, n int32, err
 	dbuf[2], dbuf[1], dbuf[0] = byte(val>>0), byte(val>>8), byte(val>>16)
 	switch dlen {
 	case 4:
-		dst[2] = dbuf[2]
+		dst[doff+2] = dbuf[2]
 		dbuf[2] = 0
-		dst[1] = dbuf[1]
+		dst[doff+1] = dbuf[1]
 		if enc.strict && dbuf[2] != 0 {
 			return si, 0, corruptInputError(si - 1)
 		}
 		dbuf[1] = 0
-		dst[0] = dbuf[0]
+		dst[doff+0] = dbuf[0]
 		if enc.strict && (dbuf[1] != 0 || dbuf[2] != 0) {
 			return si, 0, corruptInputError(si - 2)
 		}
 	case 3:
-		dst[1] = dbuf[1]
+		dst[doff+1] = dbuf[1]
 		if enc.strict && dbuf[2] != 0 {
 			return si, 0, corruptInputError(si - 1)
 		}
 		dbuf[1] = 0
-		dst[0] = dbuf[0]
+		dst[doff+0] = dbuf[0]
 		if enc.strict && (dbuf[1] != 0 || dbuf[2] != 0) {
 			return si, 0, corruptInputError(si - 2)
 		}
 	case 2:
-		dst[0] = dbuf[0]
+		dst[doff+0] = dbuf[0]
 		if enc.strict && (dbuf[1] != 0 || dbuf[2] != 0) {
 			return si, 0, corruptInputError(si - 2)
 		}
@@ -455,8 +477,10 @@ func (enc *Encoding) AppendDecode(dst, src []byte) (out []byte, derr error) {
 	if cap(dst)-len(dst) < n {
 		dst = push([]byte{:0:len(dst)+n}, dst...)
 	}
-	n, err := enc.Decode(dst[len(dst):][:n], src)
-	return dst[:len(dst)+n], err
+	base := len(dst)
+	dst = resize(dst, base+n)
+	n, err := enc.DecodeAt(dst, base, src)
+	return dst[:base+n], err
 }
 
 // DecodeString returns the bytes represented by the base64 string s.
@@ -476,14 +500,15 @@ type decoder struct {
 	buf    []byte // leftover input
 	nbuf    int32
 	out     []byte // leftover decoded output
+	outOff  int32  // read cursor into out
 	outbuf []byte
 }
 
 func (d *decoder) Read(p []byte) (n int32, err error) {
 	// Use leftover decoded output from last read.
-	if len(d.out) > 0 {
-		n = copy(p, d.out)
-		d.out = d.out[n:]
+	if d.outOff < len(d.out) {
+		n = mxutil.CopyFrom(p, d.out, d.outOff)
+		d.outOff += n
 		return n, nil
 	}
 
@@ -516,9 +541,10 @@ func (d *decoder) Read(p []byte) (n int32, err error) {
 			fw, d.err = d.enc.Decode(d.outbuf[:], d.buf[:d.nbuf])
 			d.nbuf = 0
 			d.out = d.outbuf[:fw]
-			n = copy(p, d.out)
-			d.out = d.out[n:]
-			if n > 0 || len(p) == 0 && len(d.out) > 0 {
+			d.outOff = 0
+			n = mxutil.CopyFrom(p, d.out, d.outOff)
+			d.outOff += n
+			if n > 0 || len(p) == 0 && len(d.out)-d.outOff > 0 {
 				return n, nil
 			}
 			if d.err != nil {
@@ -536,12 +562,13 @@ func (d *decoder) Read(p []byte) (n int32, err error) {
 	nr := d.nbuf / 4 * 4
 	nw := d.nbuf / 4 * 3
 	if nw > len(p) {
-		nw, d.err = d.enc.Decode(d.outbuf[:], d.buf[:nr])
+		nw, d.err = d.enc.decodeAtLen(d.outbuf, 0, d.buf, nr)
 		d.out = d.outbuf[:nw]
-		n = copy(p, d.out)
-		d.out = d.out[n:]
+		d.outOff = 0
+		n = mxutil.CopyFrom(p, d.out, d.outOff)
+		d.outOff += n
 	} else {
-		n, d.err = d.enc.Decode(p, d.buf[:nr])
+		n, d.err = d.enc.decodeAtLen(p, 0, d.buf, nr)
 	}
 	d.nbuf -= nr
 	copy(d.buf[:d.nbuf], d.buf[nr:])
@@ -555,7 +582,19 @@ func (d *decoder) Read(p []byte) (n int32, err error) {
 // number of bytes successfully written and [CorruptInputError].
 // New line characters (\r and \n) are ignored.
 func (enc *Encoding) Decode(dst, src []byte) (n int32, err error) {
-	if len(src) == 0 {
+	return enc.DecodeAt(dst, 0, src)
+}
+
+// DecodeAt decodes src into dst at offset doff. dst must be doff+DecodedLen at
+// least long, not merely that capacity: the writes are indexed.
+func (enc *Encoding) DecodeAt(dst []byte, doff int32, src []byte) (n int32, err error) {
+	return enc.decodeAtLen(dst, doff, src, len(src))
+}
+
+// decodeAtLen is DecodeAt over src[0:sn], so a streaming decoder can name a
+// length inside its fixed input buffer without slicing it.
+func (enc *Encoding) decodeAtLen(dst []byte, doff int32, src []byte, sn int32) (n int32, err error) {
+	if sn == 0 {
 		return 0, nil
 	}
 
@@ -564,62 +603,64 @@ func (enc *Encoding) Decode(dst, src []byte) (n int32, err error) {
 	// receiver can't be nil.
 	_ = enc.decodeMap
 
+	// si and n walk src and dst. Every window is indexed: src[si:si+8] is a
+	// copy of the quantum and dst[n:] is a copy of the whole remaining output,
+	// so the slice forms move the same bytes again per quantum.
+	n = doff
 	si := 0
-	for strconv.IntSize >= 64 && len(src)-si >= 8 && len(dst)-n >= 8 {
-		src2 := src[si : si+8]
+	for strconv.IntSize >= 64 && sn-si >= 8 && len(dst)-n >= 8 {
 		if dn, ok := assemble64(
-			enc.decodeMap[src2[0]],
-			enc.decodeMap[src2[1]],
-			enc.decodeMap[src2[2]],
-			enc.decodeMap[src2[3]],
-			enc.decodeMap[src2[4]],
-			enc.decodeMap[src2[5]],
-			enc.decodeMap[src2[6]],
-			enc.decodeMap[src2[7]],
+			enc.decodeMap[src[si+0]],
+			enc.decodeMap[src[si+1]],
+			enc.decodeMap[src[si+2]],
+			enc.decodeMap[src[si+3]],
+			enc.decodeMap[src[si+4]],
+			enc.decodeMap[src[si+5]],
+			enc.decodeMap[src[si+6]],
+			enc.decodeMap[src[si+7]],
 		); ok {
-			byteorder.BEPutUint64(dst[n:], dn)
+			byteorder.BEPutUint64At(dst, n, dn)
 			n += 6
 			si += 8
 		} else {
 			var ninc int32
-			si, ninc, err = enc.decodeQuantum(dst[n:], src, si)
+			si, ninc, err = enc.decodeQuantum(dst, n, src, si, sn)
 			n += ninc
 			if err != nil {
-				return n, err
+				return n - doff, err
 			}
 		}
 	}
 
-	for len(src)-si >= 4 && len(dst)-n >= 4 {
-		src2 := src[si : si+4]
+	for sn-si >= 4 && len(dst)-n >= 4 {
 		if dn, ok := assemble32(
-			enc.decodeMap[src2[0]],
-			enc.decodeMap[src2[1]],
-			enc.decodeMap[src2[2]],
-			enc.decodeMap[src2[3]],
+			enc.decodeMap[src[si+0]],
+			enc.decodeMap[src[si+1]],
+			enc.decodeMap[src[si+2]],
+			enc.decodeMap[src[si+3]],
 		); ok {
-			byteorder.BEPutUint32(dst[n:], dn)
+			byteorder.BEPutUint32At(dst, n, dn)
 			n += 3
 			si += 4
 		} else {
 			var ninc int32
-			si, ninc, err = enc.decodeQuantum(dst[n:], src, si)
+			si, ninc, err = enc.decodeQuantum(dst, n, src, si, sn)
 			n += ninc
 			if err != nil {
-				return n, err
+				return n - doff, err
 			}
 		}
 	}
 
-	for si < len(src) {
+	for si < sn {
 		var ninc int32
-		si, ninc, err = enc.decodeQuantum(dst[n:], src, si)
+		si, ninc, err = enc.decodeQuantum(dst, n, src, si, sn)
 		n += ninc
 		if err != nil {
-			return n, err
+			return n - doff, err
 		}
 	}
-	return n, err
+	return n - doff, err
 }
 
 // assemble32 assembles 4 base64 digits into 3 bytes.

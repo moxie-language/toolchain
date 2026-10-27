@@ -6,6 +6,7 @@
 package base32
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"io"
 	"slices"
 	"strconv"
@@ -124,7 +125,18 @@ func (enc *Encoding) WithPadding(padding rune) (out *Encoding) {
 // so Encode is not appropriate for use on individual blocks
 // of a large data stream. Use [NewEncoder] instead.
 func (enc *Encoding) Encode(dst, src []byte) {
-	if len(src) == 0 {
+	enc.EncodeFrom(dst, 0, src, 0, len(src))
+}
+
+// EncodeFrom encodes src[soff:soff+n] into dst at doff. dst must be at least
+// doff+EncodedLen(n) long, not merely that capacity, because the writes are
+// indexed.
+//
+// It exists so a streaming writer can encode a window of its input without
+// slicing it: a sub-slice is a copy, so Encode(out, p[off:off+nn]) would
+// allocate nn bytes per chunk.
+func (enc *Encoding) EncodeFrom(dst []byte, doff int32, src []byte, soff, n int32) {
+	if n == 0 {
 		return
 	}
 	// enc is a pointer receiver, so the use of enc.encode within the hot
@@ -132,9 +144,10 @@ func (enc *Encoding) Encode(dst, src []byte) {
 	// outside of the loop to speed up the encoder.
 	_ = enc.encode
 
-	di, si := 0, 0
-	n := (len(src) / 5) * 5
-	for si < n {
+	di, si := doff, soff
+	end := soff + n
+	stop := soff + (n/5)*5
+	for si < stop {
 		// Combining two 32 bit loads allows the same code to be used
 		// for 32 and 64 bit platforms.
 		hi := uint32(src[si+0])<<24 | uint32(src[si+1])<<16 | uint32(src[si+2])<<8 | uint32(src[si+3])
@@ -154,7 +167,7 @@ func (enc *Encoding) Encode(dst, src []byte) {
 	}
 
 	// Add the remaining small block
-	remain := len(src) - si
+	remain := end - si
 	if remain == 0 {
 		return
 	}
@@ -210,8 +223,10 @@ func (enc *Encoding) Encode(dst, src []byte) {
 func (enc *Encoding) AppendEncode(dst, src []byte) (out []byte) {
 	n := enc.EncodedLen(len(src))
 	dst = slices.Grow(dst, n)
-	enc.Encode(dst[len(dst):][:n], src)
-	return dst[:len(dst)+n]
+	base := len(dst)
+	dst = resize(dst, base+n)
+	enc.EncodeFrom(dst, base, src, 0, len(src))
+	return dst
 }
 
 // EncodeToString returns the base32 encoding of src.
@@ -235,6 +250,9 @@ func (e *encoder) Write(p []byte) (n int32, err error) {
 		return 0, e.err
 	}
 
+	// off walks p. `p = p[nn:]` per chunk would copy the whole remainder.
+	off := int32(0)
+
 	// Leading fringe.
 	if e.nbuf > 0 {
 		var i int32
@@ -243,12 +261,12 @@ func (e *encoder) Write(p []byte) (n int32, err error) {
 			e.nbuf++
 		}
 		n += i
-		p = p[i:]
+		off = i
 		if e.nbuf < 5 {
 			return
 		}
-		e.enc.Encode(e.out[0:], e.buf[0:])
-		if _, e.err = e.w.Write(e.out[0:8]); e.err != nil {
+		e.enc.Encode(e.out, e.buf)
+		if _, e.err = e.w.Write(e.out[:8]); e.err != nil {
 			return n, e.err
 		}
 		e.nbuf = 0
@@ -259,24 +277,27 @@ func (e *encoder) Write(p []byte) (n int32, err error) {
 	// self-mutating method is rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
 	var nn int32
-	for len(p) >= 5 {
+	for len(p)-off >= 5 {
 		nn = len(e.out) / 8 * 5
-		if nn > len(p) {
-			nn = len(p)
+		if nn > len(p)-off {
+			nn = len(p) - off
 			nn -= nn % 5
 		}
-		e.enc.Encode(e.out[0:], p[0:nn])
-		if _, e.err = e.w.Write(e.out[0 : nn/5*8]); e.err != nil {
+		e.enc.EncodeFrom(e.out, 0, p, off, nn)
+		if _, e.err = e.w.Write(e.out[:nn/5*8]); e.err != nil {
 			return n, e.err
 		}
 		n += nn
-		p = p[nn:]
+		off += nn
 	}
 
 	// Trailing fringe.
-	copy(e.buf, p)
-	e.nbuf = len(p)
-	n += len(p)
+	rest := len(p) - off
+	for k := int32(0); k < rest; k++ {
+		e.buf[k] = p[off+k]
+	}
+	e.nbuf = rest
+	n += rest
 	return
 }
 
@@ -285,7 +306,7 @@ func (e *encoder) Write(p []byte) (n int32, err error) {
 func (e *encoder) Close() (err error) {
 	// If there's anything left in the buffer, flush it out
 	if e.err == nil && e.nbuf > 0 {
-		e.enc.Encode(e.out[0:], e.buf[0:e.nbuf])
+		e.enc.EncodeFrom(e.out, 0, e.buf, 0, e.nbuf)
 		encodedLen := e.enc.EncodedLen(e.nbuf)
 		e.nbuf = 0
 		_, e.err = e.w.Write(e.out[0:encodedLen])
@@ -339,41 +360,46 @@ func corruptInputError(n int32) (cerr error) {
 // indicates if end-of-message padding was encountered and thus any
 // additional data is an error. This method assumes that src has been
 // stripped of all supported whitespace ('\r' and '\n').
-func (enc *Encoding) decode(dst, src []byte) (n int32, end bool, err error) {
+// decode decodes src[0:sn] into dst at doff. sn exists so a streaming decoder
+// can name a length inside its fixed input buffer without slicing it.
+func (enc *Encoding) decode(dst []byte, doff int32, src []byte, sn int32) (n int32, end bool, err error) {
 	// Lift the nil check outside of the loop.
 	_ = enc.decodeMap
 
-	dsti := 0
-	olen := len(src)
+	// si walks src. `src = src[1:]` per digit is a copy of the whole
+	// remaining input, so decoding n bytes moved O(n^2).
+	dsti := doff
+	si := int32(0)
+	olen := sn
 
-	for len(src) > 0 && !end {
+	for si < sn && !end {
 		// Decode quantum using the base32 alphabet
 		var dbuf [8]byte
 		dlen := 8
 
 		for j := 0; j < 8; {
 
-			if len(src) == 0 {
+			if si == sn {
 				if enc.padChar != NoPadding {
 					// We have reached the end and are missing padding
-					return n, false, corruptInputError(olen - len(src) - j)
+					return n, false, corruptInputError(olen - (sn - si) - j)
 				}
 				// We have reached the end and are not expecting any padding
 				dlen, end = j, true
 				break
 			}
-			in := src[0]
-			src = src[1:]
-			if in == byte(enc.padChar) && j >= 2 && len(src) < 8 {
+			in := src[si]
+			si++
+			if in == byte(enc.padChar) && j >= 2 && sn-si < 8 {
 				// We've reached the end and there's padding
-				if len(src)+j < 8-1 {
+				if sn-si+j < 8-1 {
 					// not enough padding
 					return n, false, corruptInputError(olen)
 				}
-				for k := 0; k < 8-1-j; k++ {
-					if len(src) > k && src[k] != byte(enc.padChar) {
+				for k := int32(0); k < 8-1-j; k++ {
+					if sn-si > k && src[si+k] != byte(enc.padChar) {
 						// incorrect padding
-						return n, false, corruptInputError(olen - len(src) + k - 1)
+						return n, false, corruptInputError(olen - (sn - si) + k - 1)
 					}
 				}
 				dlen, end = j, true
@@ -383,13 +409,13 @@ func (enc *Encoding) decode(dst, src []byte) (n int32, end bool, err error) {
 				// Examples" for an illustration for how the 1st, 3rd and 6th base32
 				// src bytes do not yield enough information to decode a dst byte.
 				if dlen == 1 || dlen == 3 || dlen == 6 {
-					return n, false, corruptInputError(olen - len(src) - 1)
+					return n, false, corruptInputError(olen - (sn - si) - 1)
 				}
 				break
 			}
 			dbuf[j] = enc.decodeMap[in]
 			if dbuf[j] == 0xFF {
-				return n, false, corruptInputError(olen - len(src) - 1)
+				return n, false, corruptInputError(olen - (sn - si) - 1)
 			}
 			j++
 		}
@@ -445,9 +471,15 @@ func (enc *Encoding) decode(dst, src []byte) (n int32, end bool, err error) {
 // number of bytes successfully written and [CorruptInputError].
 // Newline characters (\r and \n) are ignored.
 func (enc *Encoding) Decode(dst, src []byte) (n int32, err error) {
+	return enc.DecodeAt(dst, 0, src)
+}
+
+// DecodeAt decodes src into dst at offset doff. dst must be doff+DecodedLen at
+// least long, not merely that capacity: the writes are indexed.
+func (enc *Encoding) DecodeAt(dst []byte, doff int32, src []byte) (n int32, err error) {
 	buf := []byte{:len(src)}
 	l := stripNewlines(buf, src)
-	n, _, err = enc.decode(dst, buf[:l])
+	n, _, err = enc.decode(dst, doff, buf, l)
 	return
 }
 
@@ -464,18 +496,24 @@ func (enc *Encoding) AppendDecode(dst, src []byte) (out []byte, derr error) {
 	n = decodedLen(n, NoPadding)
 
 	dst = slices.Grow(dst, n)
-	n, derr = enc.Decode(dst[len(dst):][:n], src)
-	return dst[:len(dst)+n], derr
+	base := len(dst)
+	dst = resize(dst, base+n)
+	n, derr = enc.DecodeAt(dst, base, src)
+	return dst[:base+n], derr
 }
 
 // DecodeString returns the bytes represented by the base32 string s.
 // If the input is malformed, it returns the partially decoded data and
 // [CorruptInputError]. New line characters (\r and \n) are ignored.
 func (enc *Encoding) DecodeString(s []byte) (out []byte, derr error) {
-	buf := []byte(s)
-	l := stripNewlines(buf, buf)
-	n, _, err := enc.decode(buf, buf[:l])
-	return buf[:n], err
+	// []byte(s) is not a copy in Moxie - string and []byte are one type - so
+	// stripping newlines in place rewrote the caller's bytes and the decode
+	// then read from its own output. Give the decoder its own input.
+	buf := []byte{:len(s)}
+	l := stripNewlines(buf, s)
+	dbuf := []byte{:enc.DecodedLen(l)}
+	n, _, err := enc.decode(dbuf, 0, buf, l)
+	return dbuf[:n], err
 }
 
 type decoder struct {
@@ -486,6 +524,7 @@ type decoder struct {
 	buf    []byte // leftover input
 	nbuf   int32
 	out    []byte // leftover decoded output
+	outOff int32  // read cursor into out
 	outbuf []byte
 }
 
@@ -510,10 +549,10 @@ func readEncodedData(r io.Reader, buf []byte, minLen int32, expectsPadding bool)
 
 func (d *decoder) Read(p []byte) (n int32, err error) {
 	// Use leftover decoded output from last read.
-	if len(d.out) > 0 {
-		n = copy(p, d.out)
-		d.out = d.out[n:]
-		if len(d.out) == 0 {
+	if d.outOff < len(d.out) {
+		n = mxutil.CopyFrom(p, d.out, d.outOff)
+		d.outOff += n
+		if d.outOff == len(d.out) {
 			return n, d.err
 		}
 		return n, nil
@@ -562,12 +601,13 @@ func (d *decoder) Read(p []byte) (n int32, err error) {
 	nw := d.enc.DecodedLen(d.nbuf)
 
 	if nw > len(p) {
-		nw, d.end, err = d.enc.decode(d.outbuf[0:], d.buf[0:nr])
+		nw, d.end, err = d.enc.decode(d.outbuf, 0, d.buf, nr)
 		d.out = d.outbuf[0:nw]
-		n = copy(p, d.out)
-		d.out = d.out[n:]
+		d.outOff = 0
+		n = mxutil.CopyFrom(p, d.out, d.outOff)
+		d.outOff += n
 	} else {
-		n, d.end, err = d.enc.decode(p, d.buf[0:nr])
+		n, d.end, err = d.enc.decode(p, 0, d.buf, nr)
 	}
 	d.nbuf -= nr
 	for i := 0; i < d.nbuf; i++ {
@@ -578,7 +618,7 @@ func (d *decoder) Read(p []byte) (n int32, err error) {
 		d.err = err
 	}
 
-	if len(d.out) > 0 {
+	if d.outOff < len(d.out) {
 		// We cannot return all the decoded bytes to the caller in this
 		// invocation of Read, so we return a nil error to ensure that Read
 		// will be called again.  The error stored in d.err, if any, will be

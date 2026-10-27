@@ -7,6 +7,7 @@
 package ascii85
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"io"
 	"strconv"
 )
@@ -215,9 +216,16 @@ func corruptInputError(n int32) (cerr error) {
 //
 // [NewDecoder] wraps an [io.Reader] interface around Decode.
 func Decode(dst, src []byte, flush bool) (ndst, nsrc int32, err error) {
+	return DecodeFrom(dst, src, len(src), flush)
+}
+
+// DecodeFrom is Decode over src[0:sn], so a streaming decoder can name a
+// length inside its fixed input buffer without slicing it.
+func DecodeFrom(dst, src []byte, sn int32, flush bool) (ndst, nsrc int32, err error) {
 	var v uint32
 	var nb int32
-	for i, b := range src {
+	for i := int32(0); i < sn; i++ {
+		b := src[i]
 		if len(dst)-ndst < 4 {
 			return
 		}
@@ -245,14 +253,14 @@ func Decode(dst, src []byte, flush bool) (ndst, nsrc int32, err error) {
 		}
 	}
 	if flush {
-		nsrc = len(src)
+		nsrc = sn
 		if nb > 0 {
 			// The number of output bytes in the last fragment
 			// is the number of leftover input bytes - 1:
 			// the extra byte provides enough bits to cover
 			// the inefficiency of the encoding for the block.
 			if nb == 1 {
-				return 0, 0, corruptInputError(len(src))
+				return 0, 0, corruptInputError(sn)
 			}
 			for i := nb; i < 5; i++ {
 				// The short encoding truncated the output value.
@@ -282,6 +290,7 @@ type decoder struct {
 	buf     []byte // leftover input
 	nbuf    int32
 	out     []byte // leftover decoded output
+	outOff  int32  // read cursor into out
 	outbuf  []byte
 }
 
@@ -300,20 +309,30 @@ func (d *decoder) Read(p []byte) (n int32, err error) {
 	var nsrc int32
 	var ndst int32
 	var off int32
+	var rest int32
 	for {
 		// Copy leftover output from last decode.
-		if len(d.out) > 0 {
-			n = copy(p, d.out)
-			d.out = d.out[n:]
+		if d.outOff < len(d.out) {
+			n = mxutil.CopyFrom(p, d.out, d.outOff)
+			d.outOff += n
 			return
 		}
 
 		// Decode leftover input from last read.
 		if d.nbuf > 0 {
-			ndst, nsrc, d.err = Decode(d.outbuf[0:], d.buf[0:d.nbuf], d.readErr != nil)
+			ndst, nsrc, d.err = DecodeFrom(d.outbuf, d.buf, d.nbuf, d.readErr != nil)
 			if ndst > 0 {
 				d.out = d.outbuf[0:ndst]
-				d.nbuf = copy(d.buf, d.buf[nsrc:d.nbuf])
+				d.outOff = 0
+				// Compact the unread input to the front by index:
+				// copy(d.buf, d.buf[nsrc:d.nbuf]) reads a sub-slice, which
+				// is a copy, so it would move the remains through a
+				// temporary.
+				rest = d.nbuf - nsrc
+				for k := int32(0); k < rest; k++ {
+					d.buf[k] = d.buf[nsrc+k]
+				}
+				d.nbuf = rest
 				continue // copy out and return
 			}
 			if ndst == 0 && d.err == nil {
