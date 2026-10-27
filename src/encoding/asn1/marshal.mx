@@ -23,8 +23,10 @@ func _byteFFEncoder() (e encoder) { return &byteEncoder{v: 0xff} }
 type encoder interface {
 	// Len returns the number of bytes needed to marshal this element.
 	Len() int32
-	// Encode encodes this element by writing Len() bytes to dst.
-	Encode(dst []byte)
+	// Encode writes this element's Len() bytes at dst[off:]. The offset form
+	// is required: a sub-slice is a copy, so `x.Encode(dst[off:])` wrote the
+	// copy and the marshalled element stayed zero.
+	Encode(dst []byte, off int32)
 }
 
 type byteEncoder struct{ v byte }
@@ -33,8 +35,8 @@ func (c *byteEncoder) Len() (n int32) {
 	return 1
 }
 
-func (c *byteEncoder) Encode(dst []byte) {
-	dst[0] = c.v
+func (c *byteEncoder) Encode(dst []byte, off int32) {
+	dst[off] = c.v
 }
 
 type bytesEncoder struct{ b []byte }
@@ -43,8 +45,8 @@ func (e *bytesEncoder) Len() (n int32) {
 	return len(e.b)
 }
 
-func (e *bytesEncoder) Encode(dst []byte) {
-	if copy(dst, e.b) != len(e.b) {
+func (e *bytesEncoder) Encode(dst []byte, off int32) {
+	if mxutil.CopyAt(dst, off, e.b) != len(e.b) {
 		panic("internal error")
 	}
 }
@@ -55,8 +57,8 @@ func (e *stringEncoder) Len() (n int32) {
 	return len(e.s)
 }
 
-func (e *stringEncoder) Encode(dst []byte) {
-	if copy(dst, e.s) != len(e.s) {
+func (e *stringEncoder) Encode(dst []byte, off int32) {
+	if mxutil.CopyAt(dst, off, e.s) != len(e.s) {
 		panic("internal error")
 	}
 }
@@ -70,10 +72,9 @@ func (e *multiEncoder) Len() (size int32) {
 	return size
 }
 
-func (e *multiEncoder) Encode(dst []byte) {
-	var off int32
+func (e *multiEncoder) Encode(dst []byte, off int32) {
 	for _, x := range e.m {
-		x.Encode(dst[off:])
+		x.Encode(dst, off)
 		off += x.Len()
 	}
 }
@@ -87,7 +88,7 @@ func (e *setEncoder) Len() (size int32) {
 	return size
 }
 
-func (e *setEncoder) Encode(dst []byte) {
+func (e *setEncoder) Encode(dst []byte, off0 int32) {
 	// Per X690 Section 11.6: The encodings of the component values of a
 	// set-of value shall appear in ascending order, the encodings being
 	// compared as octet strings with the shorter components being padded
@@ -99,7 +100,7 @@ func (e *setEncoder) Encode(dst []byte) {
 	l := [][]byte{:len(e.s)}
 	for i, x := range e.s {
 		l[i] = []byte{:x.Len()}
-		x.Encode(l[i])
+		x.Encode(l[i], 0)
 	}
 
 	// Since we are using bytes.Compare to compare TLV encodings we
@@ -110,7 +111,7 @@ func (e *setEncoder) Encode(dst []byte) {
 	// padding step.
 	slices.SortFunc(l, bytes.Compare)
 
-	var off int32
+	off := off0
 	for _, b := range l {
 		mxutil.CopyAt(dst, off, b)
 		off += len(b)
@@ -134,9 +135,9 @@ func (t *taggedEncoder) Len() (n int32) {
 	return t.tag.Len() + t.body.Len()
 }
 
-func (t *taggedEncoder) Encode(dst []byte) {
-	t.tag.Encode(dst)
-	t.body.Encode(dst[t.tag.Len():])
+func (t *taggedEncoder) Encode(dst []byte, off int32) {
+	t.tag.Encode(dst, off)
+	t.body.Encode(dst, off+t.tag.Len())
 }
 
 type int64Encoder struct{ v int64 }
@@ -158,11 +159,11 @@ func (e *int64Encoder) Len() (n int32) {
 	return n
 }
 
-func (e *int64Encoder) Encode(dst []byte) {
+func (e *int64Encoder) Encode(dst []byte, off int32) {
 	n := e.Len()
 
 	for j := 0; j < n; j++ {
-		dst[j] = byte(e.v >> uint32((n-1-j)*8))
+		dst[off+j] = byte(e.v >> uint32((n-1-j)*8))
 	}
 }
 
@@ -287,9 +288,9 @@ func (e *bitStringEncoder) Len() (n int32) {
 	return len(e.b.Bytes) + 1
 }
 
-func (e *bitStringEncoder) Encode(dst []byte) {
-	dst[0] = byte((8 - e.b.BitLength%8) % 8)
-	if mxutil.CopyAt(dst, 1, e.b.Bytes) != len(e.b.Bytes) {
+func (e *bitStringEncoder) Encode(dst []byte, off int32) {
+	dst[off] = byte((8 - e.b.BitLength%8) % 8)
+	if mxutil.CopyAt(dst, off+1, e.b.Bytes) != len(e.b.Bytes) {
 		panic("internal error")
 	}
 }
@@ -326,8 +327,8 @@ func writeBase128Int(dst []byte, off int32, n int64) (next int32) {
 	return off
 }
 
-func (e *oidEncoder) Encode(dst []byte) {
-	off := writeBase128Int(dst, 0, int64(e.oid[0]*40+e.oid[1]))
+func (e *oidEncoder) Encode(dst []byte, off0 int32) {
+	off := writeBase128Int(dst, off0, int64(e.oid[0]*40+e.oid[1]))
 	for i := 2; i < len(e.oid); i++ {
 		off = writeBase128Int(dst, off, int64(e.oid[i]))
 	}
@@ -802,6 +803,6 @@ func MarshalWithParams(typ, data unsafe.Pointer, params []byte) (out []byte, der
 		return nil, err
 	}
 	b := []byte{:e.Len()}
-	e.Encode(b)
+	e.Encode(b, 0)
 	return b, nil
 }
