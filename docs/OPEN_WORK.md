@@ -18363,3 +18363,57 @@ for, each of which the rule breaks silently:
 
 The first three are what a mechanical scan can find; the last is the prefix
 trim the cursor directive was about.
+
+## Round 240: the rule's bill is a handful of shapes, and they are mechanical
+
+    gate 248 (169 units, phase 2 bootstrap + tree-cleanliness)   see below
+    differential vs Go 1.25.3: digests, AES-GCM, big marshalling,
+                          ed25519 fixtures, asn1 DER, netip       identical
+
+Round 239 named the math/big windows from a -64 allocation. With those fixed a
+copy-rule compiler bootstraps to a fixpoint (three generations from the tree
+that has the fixes, and the same binary whether the flip is in stage4 alone or
+in both compilers), so the rule can be measured against the whole test suite
+instead of guessed at. The first failures are in and they sort into five
+shapes, which is the useful result: the bill is not 1900 bespoke edits,
+it is these shapes repeated.
+
+    f(x[a:b]) where f writes x[a:b]     owned window          math/big (239)
+    clear(x[a:b])                       13 sites              done
+    &x[0:cap(x)][cap(x)-1]              address of a window  math/big alias (239)
+    x[off:] as a write destination      byteorder, asn1,     done
+                                        parseIPv4Fields
+    reader.Read(x[a:b])                 read into a window   40 sites, the
+                                                              slice-based ones
+                                                              are done
+
+The largest single class was byteorder: 81 `BEPutUint64(b[8:], v)` sites, each
+writing eight bytes into a copy. sha256/sha512/md5/sha1/sha3 returned 64 zero
+bytes, AES-GCM sealed zero counters, big.Float/big.Rat GobEncode wrote zeros,
+and every one of them looked like a working normal path until the value was
+compared. The At forms already existed for the 32/64-bit reads and writes; the
+16-bit pair was added and the sites pass the buffer whole plus the offset. A
+battery against Go - five digests, GCM Seal/Open, Float and Rat MarshalText
+round trips at 200 bits, ed25519 round trip and RFC 8032 vectors - is
+identical to Go 1.25.3 from a copy-rule compiler, and was zeroes before.
+
+Array bases need nothing: `tr.blk[:]` on a `[512]byte` field is a view of the
+array, which is the rule's carve-out (there is no allocation to make, so there
+is nothing to copy). That is why 26 of the 40 read sites are untouched and the
+nine that were slices - zip's descriptor, h2's frame header, socks' reply,
+rsa's non-zero byte, net/parse's line buffer, saferio, suffixarray, dnsclient -
+became `io.ReadFullIntoN(r, dst, off, n)`, the span form of ReadFull.
+
+The remaining shapes, with the tool that finds them:
+
+    reader.Read(x[a:b])           40 sites; the slice ones are converted, the
+                                  rest are array views
+    cipher.XORKeyStream(dst[a:])  a write destination in a call
+    rand.Read(b[a:])              the same
+    hash.Sum(b[a:])               appends, so the return is used; the copy is
+                                  waste, not a bug
+    byteorder.Get(x[a:])          77 reads: correct, but each copies the rest
+                                  of the buffer
+
+What the count says: the rule needs the *class* converted, not every call site
+audited one at a time, and the classes are small.

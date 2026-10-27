@@ -711,6 +711,31 @@ func ReadIntoN(r Reader, dst []byte, off int32) (n int32, err error) {
 	return ReadInto(r, dst, off, []byte{:free})
 }
 
+// ReadFullInto reads exactly n bytes into dst[off:off+n], looping over Read
+// until it has them. It is ReadFull for a span: passing dst[off:off+n] would
+// copy the buffer, so the bytes would land in the copy and dst would not see
+// them. The scratch is the caller's.
+func ReadFullInto(r Reader, dst []byte, off, n int32, tmp []byte) (got int32, err error) {
+	if off+n > len(dst) || n > cap(tmp) {
+		return 0, ErrShortBuffer
+	}
+	part := resize(tmp, n)
+	got, err = ReadAtLeast(r, part, n)
+	if got > 0 {
+		mxutil.CopyRange(dst, off, part, 0, got)
+	}
+	return
+}
+
+// ReadFullIntoN is ReadFullInto with the scratch allocated here, in this free
+// function's frame, so it is released when the call returns.
+func ReadFullIntoN(r Reader, dst []byte, off, n int32) (got int32, err error) {
+	if n < 0 {
+		return 0, ErrShortBuffer
+	}
+	return ReadFullInto(r, dst, off, n, []byte{:n})
+}
+
 // ReadAll reads from r until an error or EOF and returns the data it read.
 // A successful call returns err == nil, not err == EOF. Because ReadAll is
 // defined to read from src until EOF, it does not treat an EOF from Read
