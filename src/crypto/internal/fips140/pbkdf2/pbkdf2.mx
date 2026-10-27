@@ -51,8 +51,10 @@ func Key[Hash hash.Hash](h func() Hash, password []byte, salt []byte, iter, keyL
 		buf[3] = byte(block)
 		prf.Write(buf[:4])
 		dk = prf.Sum(dk)
-		T := dk[len(dk)-hashLen:]
-		copy(U, T)
+		// T is an offset into dk, not dk[len(dk)-hashLen:]: a sub-slice is a
+		// copy, and the XOR below would land in the copy.
+		toff := int32(len(dk)) - hashLen
+		copy(U, dk[toff:])
 
 		// U_n = PRF(password, U_(n-1))
 		for n := 2; n <= iter; n++ {
@@ -61,11 +63,11 @@ func Key[Hash hash.Hash](h func() Hash, password []byte, salt []byte, iter, keyL
 			U = resize(U, 0)
 			U = prf.Sum(U)
 			for x := range U {
-				T[x] ^= U[x]
+				dk[toff+x] ^= U[x]
 			}
 		}
 	}
-	return dk[:keyLength], nil
+	return resize(dk, keyLength), nil
 }
 
 func setServiceIndicator(salt []byte, keyLength int32) {
