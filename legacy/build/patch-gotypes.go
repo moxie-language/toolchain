@@ -537,19 +537,26 @@ func patchMoxieSliceBuiltins(dir string) {
 		if nargs < 2 {
 			return
 		}
-		switch under(args[0].typ).(type) {
-		case *Slice:
+		// A type parameter constrained by ~[]byte has no *Slice under it, so
+		// the slice-ness test goes through sliceElem, the same way push does:
+		// time.parseNanoseconds[bytes []byte] resizes its value.
+		if _, err := sliceElem(x); err == nil {
 			x.mode = value
 			x.typ = args[0].typ
-		default:
-			if isString(args[0].typ) {
-				x.mode = value
-				x.typ = args[0].typ
-			} else {
-				check.errorf(args[0], InvalidCall, invalidOp+"first argument to resize must be a slice, got %s", args[0])
-			}
+		} else if isString(args[0].typ) {
+			x.mode = value
+			x.typ = args[0].typ
+		} else {
+			check.errorf(args[0], InvalidCall, invalidOp+"first argument to resize must be a slice, got %s", args[0])
 		}
-		sig := makeSig(x.typ, x.typ, Typ[Int32])
+		// The length argument may be any integer type, as a slice index may be:
+		// math/big passes a uint32. Untyped constants keep their untyped kind
+		// and the emitter widens or truncates to the slice header's width.
+		var lenTyp Type = Typ[Int32]
+		if args[1].typ != nil && isInteger(args[1].typ) {
+			lenTyp = args[1].typ
+		}
+		sig := makeSig(x.typ, x.typ, lenTyp)
 		check.arguments(call, sig, nil, nil, args, nil)
 		if check.recordTypes() {
 			check.recordBuiltinType(call.Fun, sig)

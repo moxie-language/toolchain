@@ -1294,6 +1294,7 @@ type ssaFuncBuilder struct {
 	lastConstGroup *syntax.Group // iota tracking: the group of the last const decl
 	iotaVal      int64           // iota position within the current const group
 	quietTypeErr bool            // suppress "undefined" type errors (buildCall conversion probe)
+	pushStmt     bool            // the call being built is a statement-level push/resize
 	freeVarPtrs  map[string]*SSAFreeVar
 	namedResults []*SSAAlloc
 	paramAllocas []*SSAAlloc
@@ -1755,7 +1756,16 @@ func (fb *ssaFuncBuilder) buildStmt(s syntax.Stmt) {
 			}
 			break
 		}
+		// push/resize mutate their first argument only as a statement: the
+		// store-back below is gated on this flag, matching legacy's
+		// ExprStmt-only rewrite.
+		if call, ok := ss.X.(*syntax.CallExpr); ok {
+			if n, ok2 := call.Fun.(*syntax.Name); ok2 && (n.Value == "push" || n.Value == "resize") {
+				fb.pushStmt = true
+			}
+		}
 		fb.buildExpr(ss.X)
+		fb.pushStmt = false
 	case *syntax.AssignStmt:
 		fb.buildAssign(ss)
 	case *syntax.BlockStmt:
@@ -6132,12 +6142,16 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		}
 		callP.name = fb.nextName()
 		fb.emit(callP)
-		// push is an in-place mutation: store the new slice header back
-		// into the slice's storage. The emitter lowers push to slicePush +
-		// memmove and returns the new header as the call result; without
-		// this store, statement-form push (e.g. codecWriteU32's
-		// push(cb.data, ...)) silently drops the appended elements.
-		if len(e.ArgList) > 0 && callP.typ != nil {
+		// push is an in-place mutation in STATEMENT position only: store the
+		// new slice header back into the slice's storage there. The emitter
+		// lowers push to slicePush + memmove and returns the new header as the
+		// call result; without this store, statement-form push (e.g.
+		// codecWriteU32's push(cb.data, ...)) silently drops the appended
+		// elements. In expression position the call is pure, matching legacy,
+		// whose SSABuilder stores back only from an ExprStmt: a resize(x, 0)
+		// used as an argument (H.Sum(resize(dk.h, 0))) must not truncate dk.h,
+		// which is what broke ML-KEM's shared key.
+		if fb.pushStmt && len(e.ArgList) > 0 && callP.typ != nil {
 			if addr := fb.buildPushTargetAddr(e.ArgList[0]); addr != nil {
 				st := &SSAStore{Addr: addr, Val: callP}
 				fb.emit(st)
