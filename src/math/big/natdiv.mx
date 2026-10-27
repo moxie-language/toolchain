@@ -614,7 +614,7 @@ func natDivLarge(z []Word, stk *stack, u, uIn, vIn []Word) (q, r []Word) {
 		u[len(uIn)] = 0
 	} else {
 		lshVU(v, vIn, shift)
-		u[len(uIn)] = lshVU(u[:len(uIn)], uIn, shift)
+		u[len(uIn)] = lshVUAt(u, 0, len(uIn), uIn, 0, shift)
 	}
 
 	// The caller should not pass aliased z and u, since those are
@@ -626,9 +626,9 @@ func natDivLarge(z []Word, stk *stack, u, uIn, vIn []Word) (q, r []Word) {
 
 	// Use basic or recursive long division depending on size.
 	if n < divRecursiveThreshold {
-		natDivBasic(q, stk, u, v)
+		natDivBasic(q, stk, u, 0, len(u), v)
 	} else {
-		natDivRecursive(q, stk, u, v)
+		natDivRecursive(q, stk, u, 0, len(u), v)
 	}
 
 	q = natNorm(q)
@@ -642,12 +642,132 @@ func natDivLarge(z []Word, stk *stack, u, uIn, vIn []Word) (q, r []Word) {
 	return q, r
 }
 
+
+// --- offset-form arithmetic for division ---
+//
+// Long division works on windows of its own buffers: `uu := u[j-B:]` is the
+// 3B-digit section in play, and the callee writes its remainder back into it.
+// A window is a copy once a sub-slice is a copy, so the division code carries
+// an offset into u and these helpers take it. v is only ever read, so its
+// windows can stay slice values.
+
+// natNormLen returns the length of u[off:off+n] with trailing zero words
+// trimmed, which is what natNorm(u[off:]) would return as a length.
+func natNormLen(u []Word, off, n int32) (rn int32) {
+	rn = n
+	for rn > 0 && u[off+rn-1] == 0 {
+		rn--
+	}
+	return
+}
+
+// addVVAt sets z[zo:zo+n] = x[xo:xo+n] + y[yo:yo+n], returning the carry.
+func addVVAt(z []Word, zo int32, x []Word, xo int32, y []Word, yo int32, n int32) (c Word) {
+	for i := int32(0); i < n; i++ {
+		zi, cc := bits.Add(uint32(x[xo+i]), uint32(y[yo+i]), uint32(c))
+		z[zo+i] = Word(zi)
+		c = Word(cc)
+	}
+	return
+}
+
+// subVVAt sets z[zo:zo+n] = x[xo:xo+n] - y[yo:yo+n], returning the borrow.
+func subVVAt(z []Word, zo int32, x []Word, xo int32, y []Word, yo int32, n int32) (c Word) {
+	for i := int32(0); i < n; i++ {
+		zi, cc := bits.Sub(uint32(x[xo+i]), uint32(y[yo+i]), uint32(c))
+		z[zo+i] = Word(zi)
+		c = Word(cc)
+	}
+	return
+}
+
+// addVWAt adds the scalar y to z[zo:zo+n] in place, returning the carry.
+func addVWAt(z []Word, zo int32, x []Word, xo int32, n int32, y Word) (c Word) {
+	for i := int32(0); i < n; i++ {
+		zi, cc := bits.Add(uint32(x[xo+i]), uint32(c), uint32(y))
+		y = 0
+		z[zo+i] = Word(zi)
+		c = Word(cc)
+	}
+	return
+}
+
+// subVWAt subtracts the scalar y from z[zo:zo+n] in place, returning the
+// borrow.
+func subVWAt(z []Word, zo int32, x []Word, xo int32, n int32, y Word) (c Word) {
+	for i := int32(0); i < n; i++ {
+		zi, cc := bits.Sub(uint32(x[xo+i]), uint32(y), uint32(c))
+		y = 0
+		z[zo+i] = Word(zi)
+		c = Word(cc)
+	}
+	return
+}
+
+// addToAt adds x[xo:xo+xn] into z[zo:zo+zn].
+func addToAt(z []Word, zo int32, zn int32, x []Word, xo int32, xn int32) {
+	if xn == 0 {
+		return
+	}
+	if c := addVVAt(z, zo, z, zo, x, xo, xn); c != 0 {
+		if xn < zn {
+			addVWAt(z, zo+xn, z, zo+xn, zn-xn, c)
+		}
+	}
+}
+
+// natCmpAt compares x[xo:xo+xn] with y[yo:yo+yn].
+func natCmpAt(x []Word, xo int32, xn int32, y []Word, yo int32, yn int32) (r int32) {
+	if xn != yn || xn == 0 {
+		switch {
+		case xn < yn:
+			r = -1
+		case xn > yn:
+			r = 1
+		}
+		return
+	}
+	i := xn - 1
+	for i > 0 && x[xo+i] == y[yo+i] {
+		i--
+	}
+	switch {
+	case x[xo+i] < y[yo+i]:
+		r = -1
+	case x[xo+i] > y[yo+i]:
+		r = 1
+	}
+	return
+}
+
+// lshVUAt sets z[zo:zo+n] = x[xo:xo+n] << s, returning the carry word.
+func lshVUAt(z []Word, zo int32, n int32, x []Word, xo int32, s uint32) (c Word) {
+	if s == 0 {
+		for i := int32(0); i < n; i++ {
+			z[zo+i] = x[xo+i]
+		}
+		return
+	}
+	if n == 0 {
+		return
+	}
+	s &= _W - 1
+	sh := _W - s
+	sh &= _W - 1
+	c = x[xo+n-1] >> sh
+	for i := n - 1; i > 0; i-- {
+		z[zo+i] = x[xo+i]<<s | x[xo+i-1]>>sh
+	}
+	z[zo] = x[xo] << s
+	return
+}
+
 // divBasic implements long division as described above.
 // It overwrites q with ⌊u/v⌋ and overwrites u with the remainder r.
 // q must be large enough to hold ⌊u/v⌋.
-func natDivBasic(q []Word, stk *stack, u, v []Word) {
+func natDivBasic(q []Word, stk *stack, u []Word, uOff, uLen int32, v []Word) {
 	n := len(v)
-	m := len(u) - n
+	m := uLen - n
 
 	defer stk.restore(stk.save())
 	qhatv := stk.nat(n + 1)
@@ -678,12 +798,12 @@ func natDivBasic(q []Word, stk *stack, u, v []Word) {
 		// For ujn == vn1, we set q̂ to the max digit M above.
 		// Otherwise, we compute the 2-by-1 guess.
 		if ujn != vn1 {
-			qhat, rhat = divWW(ujn, u[j+n-1], vn1, rec)
+			qhat, rhat = divWW(ujn, u[uOff+j+n-1], vn1, rec)
 
 			// Refine q̂ to a 3-by-2 guess. See "Refining Guesses" above.
 			vn2 = v[n-2]
 			x1, x2 = mulWW(qhat, vn2)
-			ujn2 = u[j+n-2]
+			ujn2 = u[uOff+j+n-2]
 			for greaterThan(x1, x2, rhat, ujn2) { // x1x2 > r̂ u[j+n-2]
 				qhat--
 				prevRhat = rhat
@@ -702,25 +822,25 @@ func natDivBasic(q []Word, stk *stack, u, v []Word) {
 		// Compute q̂·v.
 		qhatv[n] = mulAddVWW(qhatv[0:n], v, qhat, 0)
 		qhl = len(qhatv)
-		if j+qhl > len(u) && qhatv[n] == 0 {
+		if j+qhl > uLen && qhatv[n] == 0 {
 			qhl--
 		}
 
 		// Subtract q̂·v from the current section of u.
 		// If it underflows, q̂·v > u, which we fix up
 		// by decrementing q̂ and adding v back.
-		c = subVV(u[j:j+qhl], u[j:j+qhl], qhatv[:qhl])
+		c = subVVAt(u, uOff+j, u, uOff+j, qhatv, 0, qhl)
 		if c != 0 {
-			c = addVV(u[j:j+n], u[j:j+n], v)
+			c = addVVAt(u, uOff+j, u, uOff+j, v, 0, n)
 			// If n == qhl, the carry from subVV and the carry from addVV
 			// cancel out and don't affect u[j+n].
 			if n < qhl {
-				u[j+n] += c
+				u[uOff+j+n] += c
 			}
 			qhat--
 		}
 
-		ujn = u[j+n-1]
+		ujn = u[uOff+j+n-1]
 
 		// Save quotient digit.
 		// Caller may know the top digit is zero and not leave room for it.
@@ -747,9 +867,9 @@ const divRecursiveThreshold = 40 // see calibrate_test.go
 // z must be large enough to hold ⌊u/v⌋.
 // This function is just for allocating and freeing temporaries
 // around divRecursiveStep, the real implementation.
-func natDivRecursive(z []Word, stk *stack, u, v []Word) {
+func natDivRecursive(z []Word, stk *stack, u []Word, uOff, uLen int32, v []Word) {
 	clear(z)
-	natDivRecursiveStep(z, stk, u, v, 0)
+	natDivRecursiveStep(z, stk, u, uOff, uLen, v, 0)
 }
 
 // divRecursiveStep is the actual implementation of recursive division.
@@ -757,13 +877,13 @@ func natDivRecursive(z []Word, stk *stack, u, v []Word) {
 // z must be large enough to hold ⌊u/v⌋.
 // It uses temps[depth] (allocating if needed) as a temporary live across
 // the recursive call. It also uses tmp, but not live across the recursion.
-func natDivRecursiveStep(z []Word, stk *stack, u, v []Word, depth int32) {
+func natDivRecursiveStep(z []Word, stk *stack, u []Word, uOff, uLen int32, v []Word, depth int32) {
 	// u is a subsection of the original and may have leading zeros.
 	// TODO(rsc): The v = v.norm() is useless and should be removed.
 	// We know (and require) that v's top digit is ≥ B/2.
-	u = natNorm(u)
+	uLen = natNormLen(u, uOff, uLen)
 	v = natNorm(v)
-	if len(u) == 0 {
+	if uLen == 0 {
 		clear(z)
 		return
 	}
@@ -771,12 +891,12 @@ func natDivRecursiveStep(z []Word, stk *stack, u, v []Word, depth int32) {
 	// Fall back to basic division if the problem is now small enough.
 	n := len(v)
 	if n < divRecursiveThreshold {
-		natDivBasic(z, stk, u, v)
+		natDivBasic(z, stk, u, uOff, uLen, v)
 		return
 	}
 
 	// Nothing to do if u is shorter than v (implies u < v).
-	m := len(u) - n
+	m := uLen - n
 	if m < 0 {
 		return
 	}
@@ -815,12 +935,13 @@ func natDivRecursiveStep(z []Word, stk *stack, u, v []Word, depth int32) {
 		s := (B - 1)
 
 		// uu is the up-to-3B-digit section of u we are working on.
-		uu := u[j-B:]
+		uuOff := uOff + j - B
+		uuLen := uLen - (j - B)
 
 		// Compute the 2-by-1 guess q̂, leaving r̂ in uu[s:B+n].
 		qhat := qhat0
 		clear(qhat)
-		natDivRecursiveStep(qhat, stk, uu[s:B+n], v[s:], depth+1)
+		natDivRecursiveStep(qhat, stk, u, uuOff+s, B+n-s, v[s:], depth+1)
 		qhat = natNorm(qhat)
 
 		// Extend to a 3-by-2 quotient and remainder.
@@ -840,7 +961,7 @@ func natDivRecursiveStep(z []Word, stk *stack, u, v []Word, depth int32) {
 		clear(qhatv)
 		qhatv = natMul(qhatv, stk, qhat, v[:s])
 		for i := 0; i < 2; i++ {
-			e := natCmp(qhatv, natNorm(uu))
+			e := natCmpAt(qhatv, 0, len(qhatv), u, uuOff, natNormLen(u, uuOff, uuLen))
 			if e <= 0 {
 				break
 			}
@@ -849,16 +970,16 @@ func natDivRecursiveStep(z []Word, stk *stack, u, v []Word, depth int32) {
 			if len(qhatv) > s {
 				subVW(qhatv[s:], qhatv[s:], cb)
 			}
-			addTo(uu[s:], v[s:])
+			addToAt(u, uuOff+s, uuLen-s, v, s, len(v)-s)
 		}
-		if natCmp(qhatv, natNorm(uu)) > 0 {
+		if natCmpAt(qhatv, 0, len(qhatv), u, uuOff, natNormLen(u, uuOff, uuLen)) > 0 {
 			panic("impossible")
 		}
-		c := subVV(uu[:len(qhatv)], uu[:len(qhatv)], qhatv)
+		c := subVVAt(u, uuOff, u, uuOff, qhatv, 0, len(qhatv))
 		if c > 0 {
-			subVW(uu[len(qhatv):], uu[len(qhatv):], c)
+			subVWAt(u, uuOff+len(qhatv), u, uuOff+len(qhatv), uuLen-len(qhatv), c)
 		}
-		addTo(z[j-B:], qhat)
+		addToAt(z, j-B, len(z)-(j-B), qhat, 0, len(qhat))
 		j -= B
 		stk.restore(mark)
 	}
@@ -870,33 +991,33 @@ func natDivRecursiveStep(z []Word, stk *stack, u, v []Word, depth int32) {
 	sh := B - 1
 	qh := qhat0
 	clear(qh)
-	natDivRecursiveStep(qh, stk, natNorm(u[sh:]), v[sh:], depth+1)
+	natDivRecursiveStep(qh, stk, u, uOff+sh, natNormLen(u, uOff+sh, uLen-sh), v[sh:], depth+1)
 	qh = natNorm(qh)
 	qhv := stk.nat(3 * n)
 	clear(qhv)
 	qhv = natMul(qhv, stk, qh, v[:sh])
 	// Set the correct remainder as before.
 	for i := 0; i < 2; i++ {
-		if e := natCmp(qhv, natNorm(u)); e > 0 {
+		if e := natCmpAt(qhv, 0, len(qhv), u, uOff, natNormLen(u, uOff, uLen)); e > 0 {
 			subVW(qh, qh, 1)
 			c := subVV(qhv[:sh], qhv[:sh], v[:sh])
 			if len(qhv) > sh {
 				subVW(qhv[sh:], qhv[sh:], c)
 			}
-			addTo(u[sh:], v[sh:])
+			addToAt(u, uOff+sh, uLen-sh, v, sh, len(v)-sh)
 		}
 	}
-	if natCmp(qhv, natNorm(u)) > 0 {
+	if natCmpAt(qhv, 0, len(qhv), u, uOff, natNormLen(u, uOff, uLen)) > 0 {
 		panic("impossible")
 	}
-	cw := subVV(u[:len(qhv)], u[:len(qhv)], qhv)
+	cw := subVVAt(u, uOff, u, uOff, qhv, 0, len(qhv))
 	if cw > 0 {
-		cw = subVW(u[len(qhv):], u[len(qhv):], cw)
+		cw = subVWAt(u, uOff+len(qhv), u, uOff+len(qhv), uLen-len(qhv), cw)
 	}
 	if cw > 0 {
 		panic("impossible")
 	}
 
 	// Done!
-	addTo(z, natNorm(qh))
+	addToAt(z, 0, len(z), qh, 0, natNormLen(qh, 0, len(qh)))
 }
