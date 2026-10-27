@@ -486,17 +486,21 @@ func (hc *halfConn) decrypt(record []byte) (rb []byte, rrecordType recordType, r
 }
 
 // sliceForAppend extends the input slice by n bytes. head is the full extended
-// slice, while tail is the appended part. If the original slice has sufficient
-// capacity no allocation is performed.
-func sliceForAppend(in []byte, n int32) (head, tail []byte) {
-	if total := len(in) + n; cap(in) >= total {
-		head = in[:total]
+// slice, while tailOff is where the appended part starts. If the original slice
+// has sufficient capacity no allocation is performed.
+//
+// The Go original also returned the tail as a sub-slice, which the record layer
+// wrote the ciphertext into. A sub-slice is a copy here, so that ciphertext was
+// discarded; resizing head is the same buffer at a new length.
+func sliceForAppend(in []byte, n int32) (head []byte, tailOff int32) {
+	total := len(in) + n
+	if cap(in) >= total {
+		head = resize(in, total)
 	} else {
 		head = []byte{:total}
 		copy(head, in)
 	}
-	tail = head[len(in):]
-	return
+	return head, len(in)
 }
 
 // encrypt encrypts payload, adding the appropriate nonce and/or MAC, and
@@ -506,9 +510,10 @@ func (hc *halfConn) encrypt(record, payload []byte, rnd io.Reader) (rb []byte, r
 		return push(record, payload...), nil
 	}
 
-	var explicitNonce []byte
-	if explicitNonceLen := hc.explicitNonceLen(); explicitNonceLen > 0 {
-		record, explicitNonce = sliceForAppend(record, explicitNonceLen)
+	explicitNonceLen := hc.explicitNonceLen()
+	nonceOff := int32(0)
+	if explicitNonceLen > 0 {
+		record, nonceOff = sliceForAppend(record, explicitNonceLen)
 		if _, isCBC := hc.cipher.(*cbcCipher); !isCBC && explicitNonceLen < 16 {
 			// The AES-GCM construction in TLS has an explicit nonce so that the
 			// nonce can be random. However, the nonce is only 8 bytes which is
@@ -519,25 +524,28 @@ func (hc *halfConn) encrypt(record, payload []byte, rnd io.Reader) (rb []byte, r
 			// 3DES' biggest problem anyway because the birthday bound on block
 			// collision is reached first due to its similarly small block size
 			// (see the Sweet32 attack).
-			copy(explicitNonce, hc.seq)
+			mxutil.CopyAt(record, nonceOff, hc.seq)
 		} else {
-			if _, err := io.ReadFull(rnd, explicitNonce); err != nil {
+			if _, err := io.ReadFullIntoN(rnd, record, nonceOff, explicitNonceLen); err != nil {
 				return nil, err
 			}
 		}
 	}
 
-	var dst []byte
 	switch c := hc.cipher.(type) {
 	case *streamCipher:
 		mac := tls10MAC(hc.mac, recordMacScratch(), hc.seq, record[:recordHeaderLen], payload, nil)
-		record, dst = sliceForAppend(record, len(payload)+len(mac))
-		c.s.XORKeyStream(dst[:len(payload)], payload)
-		c.s.XORKeyStream(dst[len(payload):], mac)
+		// The stream is stateful, so the payload and the MAC are encrypted in
+		// that order, each into its own buffer, and appended: a sub-slice of
+		// record would be a copy and the ciphertext would be discarded.
+		ct := []byte{:len(payload) + len(mac)}
+		c.s.XORKeyStream(resize(ct, len(payload)), payload)
+		c.s.XORKeyStream(ct[len(payload):], mac)
+		record = push(record, ct...)
 	case *aeadCipher:
-		nonce := explicitNonce
-		if len(nonce) == 0 {
-			nonce = hc.seq
+		nonce := hc.seq
+		if explicitNonceLen > 0 {
+			nonce = record[nonceOff : nonceOff+explicitNonceLen]
 		}
 
 		if hc.version == VersionTLS13 {
@@ -566,16 +574,17 @@ func (hc *halfConn) encrypt(record, payload []byte, rnd io.Reader) (rb []byte, r
 		blockSize := c.b.BlockSize()
 		plaintextLen := len(payload) + len(mac)
 		paddingLen := blockSize - plaintextLen%blockSize
-		record, dst = sliceForAppend(record, plaintextLen+paddingLen)
-		copy(dst, payload)
-		mxutil.CopyAt(dst, len(payload), mac)
-		for i := plaintextLen; i < len(dst); i++ {
-			dst[i] = byte(paddingLen - 1)
+		block := []byte{:plaintextLen + paddingLen}
+		mxutil.CopyAt(block, 0, payload)
+		mxutil.CopyAt(block, len(payload), mac)
+		for i := plaintextLen; i < len(block); i++ {
+			block[i] = byte(paddingLen - 1)
 		}
-		if len(explicitNonce) > 0 {
-			c.b.SetIV(explicitNonce)
+		if explicitNonceLen > 0 {
+			c.b.SetIV(record[nonceOff : nonceOff+explicitNonceLen])
 		}
-		c.b.CryptBlocks(dst, dst)
+		c.b.CryptBlocks(block, block)
+		record = push(record, block...)
 	default:
 		panic("unknown cipher type")
 	}
@@ -1023,7 +1032,7 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte) (rn int32, rerr er
 			m = maxPayload
 		}
 
-		_, outBuf = sliceForAppend(resize(outBuf, 0), recordHeaderLen)
+		outBuf, _ = sliceForAppend(resize(outBuf, 0), recordHeaderLen)
 		outBuf[0] = byte(typ)
 		vers := c.vers
 		if vers == 0 {
