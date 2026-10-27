@@ -374,12 +374,21 @@ func match(s1, s2 []byte) (rok bool) {
 }
 
 func lookup(tab [][]byte, val []byte) (rn int32, rb []byte, rerr error) {
+	rn, n, rerr := lookupAt(tab, val, 0)
+	if rerr != nil {
+		return -1, val, rerr
+	}
+	return rn, val[n:], nil
+}
+
+// lookupAt is lookup at byte offset vp of val.
+func lookupAt(tab [][]byte, val []byte, vp int32) (rn int32, nvp int32, rerr error) {
 	for i, v := range tab {
-		if len(val) >= len(v) && match(val[:len(v)], v) {
-			return i, val[len(v):], nil
+		if len(val)-vp >= len(v) && match(val[vp:vp+len(v)], v) {
+			return i, vp + len(v), nil
 		}
 	}
-	return -1, val, errBad
+	return -1, vp, errBad
 }
 
 // appendInt appends the decimal form of x to b and returns the result.
@@ -942,58 +951,95 @@ func isDigit[bytes []byte](s bytes, i int32) (rok bool) {
 // as a decimal integer and returns the integer and the
 // remainder of the string.
 func getnum(s []byte, fixed bool) (rn int32, rb []byte, rerr error) {
-	if !isDigit(s, 0) {
-		return 0, s, errBad
+	rn, n, rerr := getnumAt(s, 0, fixed)
+	if rerr != nil {
+		return 0, s, rerr
 	}
-	if !isDigit(s, 1) {
+	return rn, s[n:], nil
+}
+
+// getnumAt is getnum at byte offset i, returning the offset after the number.
+func getnumAt(s []byte, i int32, fixed bool) (rn int32, ni int32, rerr error) {
+	if !isDigit(s, i) {
+		return 0, i, errBad
+	}
+	if !isDigit(s, i+1) {
 		if fixed {
-			return 0, s, errBad
+			return 0, i, errBad
 		}
-		return int32(s[0] - '0'), s[1:], nil
+		return int32(s[i] - '0'), i + 1, nil
 	}
-	return int32(s[0]-'0')*10 + int32(s[1]-'0'), s[2:], nil
+	return int32(s[i]-'0')*10 + int32(s[i+1]-'0'), i + 2, nil
 }
 
 // getnum3 parses s[0:1], s[0:2], or s[0:3] (fixed forces s[0:3])
 // as a decimal integer and returns the integer and the remainder
 // of the string.
 func getnum3(s []byte, fixed bool) (rn int32, rb []byte, rerr error) {
-	var n, i int32
-	for i = 0; i < 3 && isDigit(s, i); i++ {
+	rn, n, rerr := getnum3At(s, 0, fixed)
+	if rerr != nil {
+		return 0, s, rerr
+	}
+	return rn, s[n:], nil
+}
+
+// getnum3At is getnum3 at byte offset i.
+func getnum3At(s []byte, at int32, fixed bool) (rn int32, ni int32, rerr error) {
+	var n int32
+	i := at
+	for i-at < 3 && isDigit(s, i) {
 		n = n*10 + int32(s[i]-'0')
+		i++
 	}
-	if i == 0 || fixed && i != 3 {
-		return 0, s, errBad
+	if i == at || fixed && i-at != 3 {
+		return 0, at, errBad
 	}
-	return n, s[i:], nil
+	return n, i, nil
 }
 
 func cutspace(s []byte) (rb []byte) {
-	for len(s) > 0 && s[0] == ' ' {
-		s = s[1:]
+	return s[cutspaceAt(s, 0):]
+}
+
+// cutspaceAt is cutspace as an offset, for a cursor that walks the value.
+func cutspaceAt(s []byte, i int32) (ni int32) {
+	for i < len(s) && s[i] == ' ' {
+		i++
 	}
-	return s
+	return i
 }
 
 // skip removes the given prefix from value,
 // treating runs of space characters as equivalent.
 func skip(value, prefix []byte) (rb []byte, rerr error) {
-	for len(prefix) > 0 {
-		if prefix[0] == ' ' {
-			if len(value) > 0 && value[0] != ' ' {
-				return value, errBad
+	n, rerr := skipAt(value, 0, prefix)
+	if rerr != nil {
+		return value, rerr
+	}
+	return value[n:], nil
+}
+
+// skipAt is skip at byte offset vp of value, returning the offset after the
+// prefix. The prefix is short and fixed by the layout, so it is walked in
+// place; the value is not trimmed.
+func skipAt(value []byte, vp int32, prefix []byte) (nvp int32, rerr error) {
+	pp := int32(0)
+	for pp < len(prefix) {
+		if prefix[pp] == ' ' {
+			if vp < len(value) && value[vp] != ' ' {
+				return vp, errBad
 			}
-			prefix = cutspace(prefix)
-			value = cutspace(value)
+			pp = cutspaceAt(prefix, pp)
+			vp = cutspaceAt(value, vp)
 			continue
 		}
-		if len(value) == 0 || value[0] != prefix[0] {
-			return value, errBad
+		if vp == len(value) || value[vp] != prefix[pp] {
+			return vp, errBad
 		}
-		prefix = prefix[1:]
-		value = value[1:]
+		pp++
+		vp++
 	}
-	return value, nil
+	return vp, nil
 }
 
 // Parse parses a formatted string and returns the time value it represents.
@@ -1084,31 +1130,35 @@ func parse(layout, value []byte, defaultLocation, local *Location) (rtime Time, 
 		zoneName   []byte
 	)
 
-	// Each iteration processes one std value.
+	// Each iteration processes one std value. vp walks value: every case used
+	// to trim value by the prefix it consumed, and a trim is a copy of the rest
+	// of the value, so parsing cost grew with the square of the input.
+	vp := int32(0)
 	for {
 		var err error
 		prefix, std, suffix := nextStdChunk(layout)
 		stdstr := layout[len(prefix) : len(layout)-len(suffix)]
-		value, err = skip(value, prefix)
+		vp, err = skipAt(value, vp, prefix)
 		if err != nil {
-			return Time{}, newParseError(alayout, avalue, prefix, value, "")
+			return Time{}, newParseError(alayout, avalue, prefix, value[vp:], "")
 		}
 		if std == 0 {
-			if len(value) != 0 {
-				return Time{}, newParseError(alayout, avalue, "", value, ": extra text: "|quote(value))
+			if vp != len(value) {
+				return Time{}, newParseError(alayout, avalue, "", value[vp:], ": extra text: "|quote(value[vp:]))
 			}
 			break
 		}
 		layout = suffix
 		var p []byte
-		hold := value
+		hold := value[vp:]
 		switch std & stdMask {
 		case stdYear:
-			if len(value) < 2 {
+			if len(value)-vp < 2 {
 				err = errBad
 				break
 			}
-			p, value = value[0:2], value[2:]
+			p = value[vp : vp+2]
+			vp += 2
 			year, err = atoi(p)
 			if err != nil {
 				break
@@ -1119,64 +1169,65 @@ func parse(layout, value []byte, defaultLocation, local *Location) (rtime Time, 
 				year += 2000
 			}
 		case stdLongYear:
-			if len(value) < 4 || !isDigit(value, 0) {
+			if len(value)-vp < 4 || !isDigit(value, vp) {
 				err = errBad
 				break
 			}
-			p, value = value[0:4], value[4:]
+			p = value[vp : vp+4]
+			vp += 4
 			year, err = atoi(p)
 		case stdMonth:
 			smn := _shortMonthNames()
-			month, value, err = lookup(smn[:], value)
+			month, vp, err = lookupAt(smn[:], value, vp)
 			month++
 		case stdLongMonth:
 			lmn := _longMonthNames()
-			month, value, err = lookup(lmn[:], value)
+			month, vp, err = lookupAt(lmn[:], value, vp)
 			month++
 		case stdNumMonth, stdZeroMonth:
-			month, value, err = getnum(value, std == stdZeroMonth)
+			month, vp, err = getnumAt(value, vp, std == stdZeroMonth)
 			if err == nil && (month <= 0 || 12 < month) {
 				rangeErrString = "month"
 			}
 		case stdWeekDay:
 			sdn := _shortDayNames()
-			_, value, err = lookup(sdn[:], value)
+			_, vp, err = lookupAt(sdn[:], value, vp)
 		case stdLongWeekDay:
 			ldn := _longDayNames()
-			_, value, err = lookup(ldn[:], value)
+			_, vp, err = lookupAt(ldn[:], value, vp)
 		case stdDay, stdUnderDay, stdZeroDay:
-			if std == stdUnderDay && len(value) > 0 && value[0] == ' ' {
-				value = value[1:]
+			if std == stdUnderDay && vp < len(value) && value[vp] == ' ' {
+				vp++
 			}
-			day, value, err = getnum(value, std == stdZeroDay)
+			day, vp, err = getnumAt(value, vp, std == stdZeroDay)
 			// Note that we allow any one- or two-digit day here.
 			// The month, day, year combination is validated after we've completed parsing.
 		case stdUnderYearDay, stdZeroYearDay:
 			for i := 0; i < 2; i++ {
-				if std == stdUnderYearDay && len(value) > 0 && value[0] == ' ' {
-					value = value[1:]
+				if std == stdUnderYearDay && vp < len(value) && value[vp] == ' ' {
+					vp++
 				}
 			}
-			yday, value, err = getnum3(value, std == stdZeroYearDay)
+			yday, vp, err = getnum3At(value, vp, std == stdZeroYearDay)
 			// Note that we allow any one-, two-, or three-digit year-day here.
 			// The year-day, year combination is validated after we've completed parsing.
 		case stdHour:
-			hour, value, err = getnum(value, false)
+			hour, vp, err = getnumAt(value, vp, false)
 			if hour < 0 || 24 <= hour {
 				rangeErrString = "hour"
 			}
 		case stdHour12, stdZeroHour12:
-			hour, value, err = getnum(value, std == stdZeroHour12)
+			hour, vp, err = getnumAt(value, vp, std == stdZeroHour12)
 			if hour < 0 || 12 < hour {
 				rangeErrString = "hour"
 			}
 		case stdMinute, stdZeroMinute:
-			minute, value, err = getnum(value, std == stdZeroMinute)
+			minute, vp, err = getnumAt(value, vp, std == stdZeroMinute)
 			if minute < 0 || 60 <= minute {
 				rangeErrString = "minute"
 			}
 		case stdSecond, stdZeroSecond:
-			sec, value, err = getnum(value, std == stdZeroSecond)
+			sec, vp, err = getnumAt(value, vp, std == stdZeroSecond)
 			if err != nil {
 				break
 			}
@@ -1186,7 +1237,7 @@ func parse(layout, value []byte, defaultLocation, local *Location) (rtime Time, 
 			}
 			// Special case: do we have a fractional second but no
 			// fractional second in the format?
-			if len(value) >= 2 && commaOrPeriod(value[0]) && isDigit(value, 1) {
+			if len(value)-vp >= 2 && commaOrPeriod(value[vp]) && isDigit(value, vp+1) {
 				_, std, _ = nextStdChunk(layout)
 				std &= stdMask
 				if std == stdFracSecond0 || std == stdFracSecond9 {
@@ -1195,17 +1246,18 @@ func parse(layout, value []byte, defaultLocation, local *Location) (rtime Time, 
 				}
 				// No fractional second in the layout but we have one in the input.
 				n := 2
-				for ; n < len(value) && isDigit(value, n); n++ {
+				for ; vp+n < len(value) && isDigit(value, vp+n); n++ {
 				}
-				nsec, rangeErrString, err = parseNanoseconds(value, n)
-				value = value[n:]
+				nsec, rangeErrString, err = parseNanosecondsAt(value, vp, n)
+				vp += n
 			}
 		case stdPM:
-			if len(value) < 2 {
+			if len(value)-vp < 2 {
 				err = errBad
 				break
 			}
-			p, value = value[0:2], value[2:]
+			p = value[vp : vp+2]
+			vp += 2
 			switch p {
 			case "PM":
 				pmSet = true
@@ -1215,11 +1267,12 @@ func parse(layout, value []byte, defaultLocation, local *Location) (rtime Time, 
 				err = errBad
 			}
 		case stdpm:
-			if len(value) < 2 {
+			if len(value)-vp < 2 {
 				err = errBad
 				break
 			}
-			p, value = value[0:2], value[2:]
+			p = value[vp : vp+2]
+			vp += 2
 			switch p {
 			case "pm":
 				pmSet = true
@@ -1233,50 +1286,55 @@ func parse(layout, value []byte, defaultLocation, local *Location) (rtime Time, 
 			// ISO8601 variants accept 'Z' as UTC marker.
 			if (std == stdISO8601TZ || std == stdISO8601ShortTZ || std == stdISO8601ColonTZ ||
 				std == stdISO8601SecondsTZ || std == stdISO8601ColonSecondsTZ) &&
-				len(value) >= 1 && value[0] == 'Z' {
-				value = value[1:]
+				len(value)-vp >= 1 && value[vp] == 'Z' {
+				vp++
 				z = UTC()
 				break
 			}
 			var sign, hb, mb, seconds []byte
 			if std == stdISO8601ColonTZ || std == stdNumColonTZ {
-				if len(value) < 6 {
+				if len(value)-vp < 6 {
 					err = errBad
 					break
 				}
-				if value[3] != ':' {
+				if value[vp+3] != ':' {
 					err = errBad
 					break
 				}
-				sign, hb, mb, seconds, value = value[0:1], value[1:3], value[4:6], "00", value[6:]
+				sign, hb, mb, seconds = value[vp:vp+1], value[vp+1:vp+3], value[vp+4:vp+6], "00"
+				vp += 6
 			} else if std == stdNumShortTZ || std == stdISO8601ShortTZ {
-				if len(value) < 3 {
+				if len(value)-vp < 3 {
 					err = errBad
 					break
 				}
-				sign, hb, mb, seconds, value = value[0:1], value[1:3], "00", "00", value[3:]
+				sign, hb, mb, seconds = value[vp:vp+1], value[vp+1:vp+3], "00", "00"
+				vp += 3
 			} else if std == stdISO8601ColonSecondsTZ || std == stdNumColonSecondsTZ {
-				if len(value) < 9 {
+				if len(value)-vp < 9 {
 					err = errBad
 					break
 				}
-				if value[3] != ':' || value[6] != ':' {
+				if value[vp+3] != ':' || value[vp+6] != ':' {
 					err = errBad
 					break
 				}
-				sign, hb, mb, seconds, value = value[0:1], value[1:3], value[4:6], value[7:9], value[9:]
+				sign, hb, mb, seconds = value[vp:vp+1], value[vp+1:vp+3], value[vp+4:vp+6], value[vp+7:vp+9]
+				vp += 9
 			} else if std == stdISO8601SecondsTZ || std == stdNumSecondsTz {
-				if len(value) < 7 {
+				if len(value)-vp < 7 {
 					err = errBad
 					break
 				}
-				sign, hb, mb, seconds, value = value[0:1], value[1:3], value[3:5], value[5:7], value[7:]
+				sign, hb, mb, seconds = value[vp:vp+1], value[vp+1:vp+3], value[vp+3:vp+5], value[vp+5:vp+7]
+				vp += 7
 			} else {
-				if len(value) < 5 {
+				if len(value)-vp < 5 {
 					err = errBad
 					break
 				}
-				sign, hb, mb, seconds, value = value[0:1], value[1:3], value[3:5], "00", value[5:]
+				sign, hb, mb, seconds = value[vp:vp+1], value[vp+1:vp+3], value[vp+3:vp+5], "00"
+				vp += 5
 			}
 			var hr, mm, ss int32
 			hr, _, err = getnum(hb, true)
@@ -1310,45 +1368,46 @@ func parse(layout, value []byte, defaultLocation, local *Location) (rtime Time, 
 			}
 		case stdTZ:
 			// Does it look like a time zone?
-			if len(value) >= 3 && value[0:3] == "UTC" {
+			if len(value)-vp >= 3 && value[vp:vp+3] == "UTC" {
 				z = UTC()
-				value = value[3:]
+				vp += 3
 				break
 			}
-			n, ok := parseTimeZone(value)
+			n, ok := parseTimeZoneAt(value, vp)
 			if !ok {
 				err = errBad
 				break
 			}
-			zoneName, value = value[:n], value[n:]
+			zoneName = value[vp : vp+n]
+			vp += n
 
 		case stdFracSecond0:
 			// stdFracSecond0 requires the exact number of digits as specified in
 			// the layout.
 			ndigit := 1 + digitsLen(std)
-			if len(value) < ndigit {
+			if len(value)-vp < ndigit {
 				err = errBad
 				break
 			}
-			nsec, rangeErrString, err = parseNanoseconds(value, ndigit)
-			value = value[ndigit:]
+			nsec, rangeErrString, err = parseNanosecondsAt(value, vp, ndigit)
+			vp += ndigit
 
 		case stdFracSecond9:
-			if len(value) < 2 || !commaOrPeriod(value[0]) || value[1] < '0' || '9' < value[1] {
+			if len(value)-vp < 2 || !commaOrPeriod(value[vp]) || value[vp+1] < '0' || '9' < value[vp+1] {
 				// Fractional second omitted.
 				break
 			}
 			// Take any number of digits, even more than asked for,
 			// because it is what the stdSecond case would do.
 			i := 0
-			for i+1 < len(value) && '0' <= value[i+1] && value[i+1] <= '9' {
+			for vp+i+1 < len(value) && '0' <= value[vp+i+1] && value[vp+i+1] <= '9' {
 				i++
 			}
-			nsec, rangeErrString, err = parseNanoseconds(value, 1+i)
-			value = value[1+i:]
+			nsec, rangeErrString, err = parseNanosecondsAt(value, vp, 1+i)
+			vp += 1 + i
 		}
 		if rangeErrString != "" {
-			return Time{}, newParseError(alayout, avalue, stdstr, value, ": "|rangeErrString|" out of range")
+			return Time{}, newParseError(alayout, avalue, stdstr, value[vp:], ": "|rangeErrString|" out of range")
 		}
 		if err != nil {
 			return Time{}, newParseError(alayout, avalue, stdstr, hold, "")
@@ -1464,31 +1523,36 @@ func parse(layout, value []byte, defaultLocation, local *Location) (rtime Time, 
 // Otherwise, other than special cases, it's not a time zone.
 // GMT is special because it can have an hour offset.
 func parseTimeZone(value []byte) (length int32, ok bool) {
-	if len(value) < 3 {
+	return parseTimeZoneAt(value, 0)
+}
+
+// parseTimeZoneAt is parseTimeZone at byte offset vp.
+func parseTimeZoneAt(value []byte, vp int32) (length int32, ok bool) {
+	if len(value)-vp < 3 {
 		return 0, false
 	}
 	// Special case 1: ChST and MeST are the only zones with a lower-case letter.
-	if len(value) >= 4 && (value[:4] == "ChST" || value[:4] == "MeST") {
+	if len(value)-vp >= 4 && (value[vp:vp+4] == "ChST" || value[vp:vp+4] == "MeST") {
 		return 4, true
 	}
 	// Special case 2: GMT may have an hour offset; treat it specially.
-	if value[:3] == "GMT" {
-		length = parseGMT(value)
+	if value[vp:vp+3] == "GMT" {
+		length = parseGMTAt(value, vp)
 		return length, true
 	}
 	// Special Case 3: Some time zones are not named, but have +/-00 format
-	if value[0] == '+' || value[0] == '-' {
-		length = parseSignedOffset(value)
+	if value[vp] == '+' || value[vp] == '-' {
+		length = parseSignedOffsetAt(value, vp)
 		ok = length > 0 // parseSignedOffset returns 0 in case of bad input
 		return length, ok
 	}
 	// How many upper-case letters are there? Need at least three, at most five.
 	var nUpper int32
 	for nUpper = 0; nUpper < 6; nUpper++ {
-		if nUpper >= len(value) {
+		if vp+nUpper >= len(value) {
 			break
 		}
-		if c := value[nUpper]; c < 'A' || 'Z' < c {
+		if c := value[vp+nUpper]; c < 'A' || 'Z' < c {
 			break
 		}
 	}
@@ -1514,26 +1578,36 @@ func parseTimeZone(value []byte) (length int32, ok bool) {
 // The function checks whether that is followed by a sign and a number in the
 // range -23 through +23 excluding zero.
 func parseGMT(value []byte) (rn int32) {
-	value = value[3:]
-	if len(value) == 0 {
+	return parseGMTAt(value, 0)
+}
+
+// parseGMTAt is parseGMT at byte offset vp.
+func parseGMTAt(value []byte, vp int32) (rn int32) {
+	vp += 3
+	if vp == len(value) {
 		return 3
 	}
 
-	return 3 + parseSignedOffset(value)
+	return 3 + parseSignedOffsetAt(value, vp)
 }
 
 // parseSignedOffset parses a signed timezone offset (e.g. "+03" or "-04").
 // The function checks for a signed number in the range -23 through +23 excluding zero.
 // Returns length of the found offset string or 0 otherwise.
 func parseSignedOffset(value []byte) (rn int32) {
-	sign := value[0]
+	return parseSignedOffsetAt(value, 0)
+}
+
+// parseSignedOffsetAt is parseSignedOffset at byte offset vp.
+func parseSignedOffsetAt(value []byte, vp int32) (rn int32) {
+	sign := value[vp]
 	if sign != '-' && sign != '+' {
 		return 0
 	}
-	x, rem, err := leadingInt(value[1:])
+	x, rem, err := leadingInt(value[vp+1:])
 
 	// fail if nothing consumed by leadingInt
-	if err != nil || value[1:] == rem {
+	if err != nil || len(rem) == len(value)-(vp+1) {
 		return 0
 	}
 	if x > 23 {
@@ -1547,15 +1621,19 @@ func commaOrPeriod(b byte) (rok bool) {
 }
 
 func parseNanoseconds[bytes []byte](value bytes, nbytes int32) (ns int32, rangeErrString []byte, err error) {
-	if !commaOrPeriod(value[0]) {
+	return parseNanosecondsAt(value, 0, nbytes)
+}
+
+// parseNanosecondsAt is parseNanoseconds at byte offset vp.
+func parseNanosecondsAt[bytes []byte](value bytes, vp int32, nbytes int32) (ns int32, rangeErrString []byte, err error) {
+	if !commaOrPeriod(value[vp]) {
 		err = errBad
 		return
 	}
 	if nbytes > 10 {
-		value = resize(value, 10)
 		nbytes = 10
 	}
-	if ns, err = atoi(value[1:nbytes]); err != nil {
+	if ns, err = atoi(value[vp+1 : vp+nbytes]); err != nil {
 		return
 	}
 	if ns < 0 {
