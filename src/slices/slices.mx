@@ -230,7 +230,8 @@ func Insert[S ~[]E, E comparable](s S, i int32, v ...E) (out S) {
 // Delete panics if j > len(s) or s[i:j] is not a valid slice of s.
 // Delete is O(len(s)-i), so if many items must be deleted, it is better to
 // make a single call deleting them all together than to delete one at a time.
-// Delete zeroes the elements s[len(s)-(j-i):len(s)].
+// The elements it removed from the end of the buffer are left as they are:
+// there is no garbage collector to keep honest.
 // If the result is empty, it has the same nilness as s.
 func Delete[S ~[]E, E comparable](s S, i, j int32) (out S) {
 	_ = s[i:j:len(s)] // bounds check
@@ -239,15 +240,12 @@ func Delete[S ~[]E, E comparable](s S, i, j int32) (out S) {
 		return s
 	}
 
-	oldlen := len(s)
 	s = push(s[:i], s[j:]...)
-	clear(s[len(s):oldlen]) // zero/nil out the obsolete elements, for GC
 	return s
 }
 
 // DeleteFunc removes any elements from s for which del returns true,
 // returning the modified slice.
-// DeleteFunc zeroes the elements between the new length and the original length.
 // If the result is empty, it has the same nilness as s.
 func DeleteFunc[S ~[]E, E comparable](s S, del func(E) bool) (out S) {
 	i := IndexFunc(s, del)
@@ -261,14 +259,12 @@ func DeleteFunc[S ~[]E, E comparable](s S, del func(E) bool) (out S) {
 			i++
 		}
 	}
-	clear(s[i:]) // zero/nil out the obsolete elements, for GC
 	return s[:i]
 }
 
 // Replace replaces the elements s[i:j] by the given v, and returns the
 // modified slice.
 // Replace panics if j > len(s) or s[i:j] is not a valid slice of s.
-// When len(v) < (j-i), Replace zeroes the elements between the new length and the original length.
 // If the result is empty, it has the same nilness as s.
 func Replace[S ~[]E, E comparable](s S, i, j int32, v ...E) (out S) {
 	_ = s[i:j] // bounds check
@@ -277,11 +273,7 @@ func Replace[S ~[]E, E comparable](s S, i, j int32, v ...E) (out S) {
 		return Insert(s, i, v...)
 	}
 	if j == len(s) {
-		s2 := push(s[:i], v...)
-		if len(s2) < len(s) {
-			clear(s[len(s2):]) // zero/nil out the obsolete elements, for GC
-		}
-		return s2
+		return push(s[:i], v...)
 	}
 
 	tot := len(s[:i]) + len(v) + len(s[j:])
@@ -307,7 +299,6 @@ func Replace[S ~[]E, E comparable](s S, i, j int32, v ...E) (out S) {
 		for ci := int32(0); ci < int32(len(s))-j; ci++ {
 			r[i+len(v)+ci] = s[j+ci]
 		}
-		clear(s[tot:]) // zero/nil out the obsolete elements, for GC
 		return r
 	}
 
@@ -398,7 +389,6 @@ func Clone[S ~[]E, E comparable](s S) (out S) {
 // This is like the uniq command found on Unix.
 // Compact modifies the contents of the slice s and returns the modified slice,
 // which may have a smaller length.
-// Compact zeroes the elements between the new length and the original length.
 // The result preserves the nilness of s.
 func Compact[S ~[]E, E comparable](s S) (out S) {
 	if len(s) < 2 {
@@ -414,7 +404,6 @@ func Compact[S ~[]E, E comparable](s S) (out S) {
 				}
 			}
 
-			clear(s[k:]) // zero/nil out the obsolete elements, for GC
 			return s[:k]
 		}
 	}
@@ -423,7 +412,6 @@ func Compact[S ~[]E, E comparable](s S) (out S) {
 
 // CompactFunc is like [Compact] but uses an equality function to compare elements.
 // For runs of elements that compare equal, CompactFunc keeps the first one.
-// CompactFunc zeroes the elements between the new length and the original length.
 // The result preserves the nilness of s.
 func CompactFunc[S ~[]E, E comparable](s S, eq func(E, E) bool) (out S) {
 	if len(s) < 2 {
@@ -439,7 +427,6 @@ func CompactFunc[S ~[]E, E comparable](s S, eq func(E, E) bool) (out S) {
 				}
 			}
 
-			clear(s[k:]) // zero/nil out the obsolete elements, for GC
 			return s[:k]
 		}
 	}
