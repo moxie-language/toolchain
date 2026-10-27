@@ -739,24 +739,35 @@ func (sr *sparseFileReader) Read(b []byte) (n int32, err error) {
 	var sp0 sparseEntry
 	var holeStart, holeEnd int64
 	var bf []byte
+	// bo walks b: `b = b[nf:]` per fragment is a copy of the rest of the
+	// caller's buffer.
+	var bo int32
+	var k int32
 	for endPos > sr.pos && err == nil {
 		sp0 = sr.sp[0]
 		holeStart, holeEnd = sp0.Offset, sp0.endOffset()
+		k = len(b) - bo
 		if sr.pos < holeStart { // In a data fragment
-			bf = b[:min(int64(len(b)), holeStart-sr.pos)]
+			if int64(k) > holeStart-sr.pos {
+				k = int32(holeStart - sr.pos)
+			}
+			bf = b[bo : bo+k]
 			nf, err = tryReadFull(sr.fr, bf)
 		} else { // In a hole fragment
-			bf = b[:min(int64(len(b)), holeEnd-sr.pos)]
+			if int64(k) > holeEnd-sr.pos {
+				k = int32(holeEnd - sr.pos)
+			}
+			bf = b[bo : bo+k]
 			nf, err = tryReadFull(&zeroReader{}, bf)
 		}
-		b = b[nf:]
+		bo += nf
 		sr.pos += int64(nf)
 		if sr.pos >= holeEnd && len(sr.sp) > 1 {
 			sr.sp = sr.sp[1:] // Ensure last fragment always remains
 		}
 	}
 
-	n = len(b0) - len(b)
+	n = bo
 	switch {
 	case err == io.EOF:
 		return n, errMissData // Less data in dense file than sparse file
