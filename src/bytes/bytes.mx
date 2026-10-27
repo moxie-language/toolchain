@@ -88,15 +88,16 @@ func explode(s []byte, n int32) (ret [][]byte) {
 	a := [][]byte{:n}
 	var size int32
 	na := 0
-	for len(s) > 0 {
+	off := int32(0)
+	for off < len(s) {
 		if na+1 >= n {
-			a[na] = s
+			a[na] = s[off:]
 			na++
 			break
 		}
-		_, size = utf8.DecodeRune(s)
-		a[na] = s[0:size:size]
-		s = s[size:]
+		_, size = utf8.DecodeRuneInStringAt(s, off)
+		a[na] = s[off : off+size : off+size]
+		off += size
 		na++
 	}
 	return a[0:na]
@@ -113,13 +114,15 @@ func Count(s, sep []byte) (ret int32) {
 		return bytealg.Count(s, sep[0])
 	}
 	n := 0
+	// off walks s: `s = s[i+len(sep):]` per match is a copy of the rest.
+	off := int32(0)
 	for {
-		i := Index(s, sep)
+		i := bytealg.IndexFrom(s, sep, off)
 		if i == -1 {
 			return n
 		}
 		n++
-		s = s[i+len(sep):]
+		off = i + len(sep)
 	}
 }
 
@@ -209,7 +212,7 @@ func IndexRune(s []byte, r rune) (ret int32) {
 		return IndexByte(s, byte(r))
 	case r == utf8.RuneError:
 		for i := 0; i < len(s); {
-			r1, n := utf8.DecodeRune(s[i:])
+			r1, n := utf8.DecodeRuneInStringAt(s, i)
 			if r1 == utf8.RuneError {
 				return i
 			}
@@ -293,8 +296,8 @@ func IndexAny(s []byte, chars []byte) (ret int32) {
 		r := rune(s[0])
 		if r >= utf8.RuneSelf {
 			// search utf8.RuneError.
-			for ci := 0; ci < len(chars); {
-				cr, cw := utf8.DecodeRune(chars[ci:])
+			for ci := int32(0); ci < len(chars); {
+				cr, cw := utf8.DecodeRuneInStringAt(chars, ci)
 				if cr == utf8.RuneError {
 					return 0
 				}
@@ -334,7 +337,7 @@ func IndexAny(s []byte, chars []byte) (ret int32) {
 			width = 1
 			continue
 		}
-		r, width = utf8.DecodeRune(s[i:])
+		r, width = utf8.DecodeRuneInStringAt(s, i)
 		if r != utf8.RuneError {
 			// r is 2 to 4 bytes
 			if len(chars) == width {
@@ -351,8 +354,8 @@ func IndexAny(s []byte, chars []byte) (ret int32) {
 				continue
 			}
 		}
-		for ci := 0; ci < len(chars); {
-			ch, cw := utf8.DecodeRune(chars[ci:])
+		for ci := int32(0); ci < len(chars); {
+			ch, cw := utf8.DecodeRuneInStringAt(chars, ci)
 			if r == ch {
 				return i
 			}
@@ -384,8 +387,8 @@ func LastIndexAny(s []byte, chars []byte) (ret int32) {
 	if len(s) == 1 {
 		r := rune(s[0])
 		if r >= utf8.RuneSelf {
-			for ci := 0; ci < len(chars); {
-				cr, cw := utf8.DecodeRune(chars[ci:])
+			for ci := int32(0); ci < len(chars); {
+				cr, cw := utf8.DecodeRuneInStringAt(chars, ci)
 				if cr == utf8.RuneError {
 					return 0
 				}
@@ -404,7 +407,7 @@ func LastIndexAny(s []byte, chars []byte) (ret int32) {
 			cr = utf8.RuneError
 		}
 		for i := len(s); i > 0; {
-			r, size := utf8.DecodeLastRune(s[:i])
+			r, size := utf8.DecodeLastRuneInStringAt(s, i)
 			i -= size
 			if r == cr {
 				return i
@@ -421,7 +424,7 @@ func LastIndexAny(s []byte, chars []byte) (ret int32) {
 			i--
 			continue
 		}
-		r, size := utf8.DecodeLastRune(s[:i])
+		r, size := utf8.DecodeLastRuneInStringAt(s, i)
 		i -= size
 		if r != utf8.RuneError {
 			// r is 2 to 4 bytes
@@ -439,8 +442,8 @@ func LastIndexAny(s []byte, chars []byte) (ret int32) {
 				continue
 			}
 		}
-		for ci := 0; ci < len(chars); {
-			ch, cw := utf8.DecodeRune(chars[ci:])
+		for ci := int32(0); ci < len(chars); {
+			ch, cw := utf8.DecodeRuneInStringAt(chars, ci)
 			if r == ch {
 				return i
 			}
@@ -469,16 +472,17 @@ func genSplit(s, sep []byte, sepSave, n int32) (ret [][]byte) {
 	a := [][]byte{:n}
 	n--
 	i := 0
+	off := int32(0)
 	for i < n {
-		m := Index(s, sep)
+		m := bytealg.IndexFrom(s, sep, off)
 		if m < 0 {
 			break
 		}
-		a[i] = s[: m+sepSave : m+sepSave]
-		s = s[m+len(sep):]
+		a[i] = s[off : m+sepSave : m+sepSave]
+		off = m + len(sep)
 		i++
 	}
-	a[i] = s
+	a[i] = s[off:]
 	return a[:i+1]
 }
 

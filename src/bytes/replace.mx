@@ -234,12 +234,27 @@ func trieAdd(t *trieNode, key, val []byte, priority int32, r *genericReplacer) {
 	}
 }
 
+// hasPrefixAt reports whether s[ip:] starts with prefix, without slicing s.
+func hasPrefixAt(s []byte, ip int32, prefix []byte) (ok bool) {
+	if len(s)-ip < len(prefix) {
+		return false
+	}
+	for k := int32(0); k < len(prefix); k++ {
+		if s[ip+k] != prefix[k] {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *genericReplacer) lookup(s []byte, ignoreRoot bool) (val []byte, keylen int32, found bool) {
 	// Iterate down the trie to the end, and grab the value and keylen with
-	// the highest priority.
+	// the highest priority. ip walks s: the trie descent trimmed one key at a
+	// time, and a trim is a copy of the whole remaining input.
 	bestPriority := 0
 	node := &r.root
 	n := 0
+	ip := int32(0)
 	for node != nil {
 		if node.priority > bestPriority && !(ignoreRoot && node == &r.root) {
 			bestPriority = node.priority
@@ -248,20 +263,20 @@ func (r *genericReplacer) lookup(s []byte, ignoreRoot bool) (val []byte, keylen 
 			found = true
 		}
 
-		if s == "" {
+		if ip == len(s) {
 			break
 		}
 		if node.table != nil {
-			index := r.mapping[s[0]]
+			index := r.mapping[s[ip]]
 			if int32(index) == r.tableSize {
 				break
 			}
 			node = node.table[index]
-			s = s[1:]
+			ip++
 			n++
-		} else if node.prefix != "" && HasPrefix(s, node.prefix) {
+		} else if node.prefix != "" && hasPrefixAt(s, ip, node.prefix) {
 			n += len(node.prefix)
-			s = s[len(node.prefix):]
+			ip += len(node.prefix)
 			node = node.next
 		} else {
 			break
