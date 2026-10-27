@@ -1,7 +1,6 @@
 package mxutil
 
 import (
-	"internal/byteorder"
 	"unsafe"
 
 	"git.smesh.lol/moxie/pkg/mxregexp"
@@ -727,11 +726,32 @@ func CopyRange(dst []byte, dstOff int32, src []byte, srcOff int32, n int32) (m i
 	if avail := int32(len(src)) - srcOff; m > avail {
 		m = avail
 	}
-	// Eight bytes at a time through a uint64 register: a byte loop moves one
-	// byte and does one bounds check per byte. The tail is under 8 bytes.
+	// Eight bytes at a time through a uint64 register. Writing it as
+	// LEPutUint64At(LEUint64At(...)) was measured *slower* than a byte loop
+	// (177 MB/s against 230 MB/s over 64 MiB): the byte-assembly is only
+	// folded into a single machine move when the optimizer sees the plain
+	// loads and stores, and these went through two calls that were not
+	// inlined. A uint64 store through unsafe is the machine move.
 	i := int32(0)
+	for i+32 <= m {
+		d := (*uint64)(unsafe.Pointer(&dst[dstOff+i]))
+		s := (*uint64)(unsafe.Pointer(&src[srcOff+i]))
+		*d = *s
+		d = (*uint64)(unsafe.Pointer(&dst[dstOff+i+8]))
+		s = (*uint64)(unsafe.Pointer(&src[srcOff+i+8]))
+		*d = *s
+		d = (*uint64)(unsafe.Pointer(&dst[dstOff+i+16]))
+		s = (*uint64)(unsafe.Pointer(&src[srcOff+i+16]))
+		*d = *s
+		d = (*uint64)(unsafe.Pointer(&dst[dstOff+i+24]))
+		s = (*uint64)(unsafe.Pointer(&src[srcOff+i+24]))
+		*d = *s
+		i += 32
+	}
 	for i+8 <= m {
-		byteorder.LEPutUint64At(dst, dstOff+i, byteorder.LEUint64At(src, srcOff+i))
+		d := (*uint64)(unsafe.Pointer(&dst[dstOff+i]))
+		s := (*uint64)(unsafe.Pointer(&src[srcOff+i]))
+		*d = *s
 		i += 8
 	}
 	for i < m {
