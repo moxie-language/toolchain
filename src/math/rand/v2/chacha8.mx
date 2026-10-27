@@ -54,20 +54,27 @@ func (c *ChaCha8) Uint64() (rn uint64) {
 // returned by the two is undefined, and Read may return bits generated before
 // the last call to Uint64.
 func (c *ChaCha8) Read(p []byte) (n int32, err error) {
+	// The walk keeps offsets: a sub-slice of p is a copy, so p = p[n:] would
+	// write every word after the first into a throwaway.
+	pos := int32(0)
 	if c.readLen > 0 {
-		n = copy(p, c.readBuf[len(c.readBuf)-c.readLen:])
+		n = copy(p, c.readBuf[int32(len(c.readBuf))-c.readLen:])
 		c.readLen -= n
-		p = p[n:]
+		pos = n
 	}
-	for len(p) >= 8 {
-		byteorder.LEPutUint64(p, c.Uint64())
-		p = p[8:]
+	for int32(len(p))-pos >= 8 {
+		byteorder.LEPutUint64At(p, pos, c.Uint64())
+		pos += 8
 		n += 8
 	}
-	if len(p) > 0 {
+	if int32(len(p)) > pos {
 		byteorder.LEPutUint64(c.readBuf, c.Uint64())
-		n += copy(p, c.readBuf)
-		c.readLen = 8 - len(p)
+		rem := int32(len(p)) - pos
+		for i := int32(0); i < rem; i++ {
+			p[pos+i] = c.readBuf[i]
+		}
+		n += rem
+		c.readLen = 8 - rem
 	}
 	return
 }
