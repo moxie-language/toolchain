@@ -240,9 +240,11 @@ func AppendQuoteRuneToGraphic(dst []byte, r rune) (ret []byte) {
 // unchanged as a single-line backquoted string without control
 // characters other than tab.
 func CanBackquote(s []byte) (okay bool) {
-	for len(s) > 0 {
-		r, wid := utf8.DecodeRuneInString(s)
-		s = s[wid:]
+	// ip walks s: `s = s[wid:]` per rune is a copy of the whole remaining
+	// input once per rune.
+	for ip := int32(0); ip < len(s); {
+		r, wid := utf8.DecodeRuneInStringAt(s, ip)
+		ip += wid
 		if wid > 1 {
 			if r == '\ufeff' {
 				return false // BOMs are invisible and should not be quoted.
@@ -287,29 +289,44 @@ func unhex(b byte) (v rune, ok bool) {
 // If set to a double quote, it permits \" and disallows unescaped ".
 // If set to zero, it does not permit either escape and allows both quote characters to appear unescaped.
 func UnquoteChar(s []byte, quote byte) (value rune, multibyte bool, tail []byte, err error) {
+	var n int32
+	value, multibyte, n, err = UnquoteCharAt(s, 0, quote)
+	if err != nil {
+		return
+	}
+	tail = s[n:]
+	return
+}
+
+// UnquoteCharAt is UnquoteChar at byte offset i, returning the number of bytes
+// consumed instead of a tail. A tail would be a sub-slice of the input, and a
+// sub-slice is a copy, so a loop that unquoted character by character would
+// copy the whole remaining input once per character.
+func UnquoteCharAt(s []byte, i int32, quote byte) (value rune, multibyte bool, n int32, err error) {
+	start := i
 	// easy cases
-	if len(s) == 0 {
+	if i == len(s) {
 		err = ErrSyntax
 		return
 	}
-	switch c := s[0]; {
+	switch c := s[i]; {
 	case c == quote && (quote == '\'' || quote == '"'):
 		err = ErrSyntax
 		return
 	case c >= utf8.RuneSelf:
-		r, size := utf8.DecodeRuneInString(s)
-		return r, true, s[size:], nil
+		r, size := utf8.DecodeRuneInStringAt(s, i)
+		return r, true, size, nil
 	case c != '\\':
-		return rune(s[0]), false, s[1:], nil
+		return rune(s[i]), false, 1, nil
 	}
 
 	// hard case: c is backslash
-	if len(s) <= 1 {
+	if len(s)-i <= 1 {
 		err = ErrSyntax
 		return
 	}
-	esc := s[1]
-	s = s[2:]
+	esc := s[i+1]
+	i += 2
 
 	switch esc {
 	case 'a':
@@ -327,33 +344,34 @@ func UnquoteChar(s []byte, quote byte) (value rune, multibyte bool, tail []byte,
 	case 'v':
 		value = '\v'
 	case 'x', 'u', 'U':
-		n := 0
+		nhex := int32(0)
 		switch esc {
 		case 'x':
-			n = 2
+			nhex = 2
 		case 'u':
-			n = 4
+			nhex = 4
 		case 'U':
-			n = 8
+			nhex = 8
 		}
 		var v rune
-		if len(s) < n {
+		if len(s)-i < nhex {
 			err = ErrSyntax
 			return
 		}
-		for j := 0; j < n; j++ {
-			x, ok := unhex(s[j])
+		for j := int32(0); j < nhex; j++ {
+			x, ok := unhex(s[i+j])
 			if !ok {
 				err = ErrSyntax
 				return
 			}
 			v = v<<4 | x
 		}
-		s = s[n:]
+		i += nhex
 		if esc == 'x' {
 			// single-byte string, possibly not UTF-8
 			value = v
-			break
+			n = i - start
+			return
 		}
 		if !utf8.ValidRune(v) {
 			err = ErrSyntax
@@ -363,19 +381,19 @@ func UnquoteChar(s []byte, quote byte) (value rune, multibyte bool, tail []byte,
 		multibyte = true
 	case '0', '1', '2', '3', '4', '5', '6', '7':
 		v := rune(esc) - '0'
-		if len(s) < 2 {
+		if len(s)-i < 2 {
 			err = ErrSyntax
 			return
 		}
-		for j := 0; j < 2; j++ { // one digit already; two more
-			x := rune(s[j]) - '0'
+		for j := int32(0); j < 2; j++ { // one digit already; two more
+			x := rune(s[i+j]) - '0'
 			if x < 0 || x > 7 {
 				err = ErrSyntax
 				return
 			}
 			v = (v << 3) | x
 		}
-		s = s[2:]
+		i += 2
 		if v > 255 {
 			err = ErrSyntax
 			return
@@ -393,7 +411,7 @@ func UnquoteChar(s []byte, quote byte) (value rune, multibyte bool, tail []byte,
 		err = ErrSyntax
 		return
 	}
-	tail = s
+	n = i - start
 	return
 }
 
@@ -479,21 +497,23 @@ func unquote(in []byte, unescape bool) (out, rem []byte, err error) {
 			}
 		}
 
-		// Handle quoted strings with escape sequences.
+		// Handle quoted strings with escape sequences. ip walks in: the
+		// loop used to re-slice in per character, which is a copy of the
+		// whole remaining input once per character.
 		var buf []byte
 		in0 := in
-		in = in[1:] // skip starting quote
+		ip := int32(1) // skip starting quote
 		if unescape {
 			buf = []byte{:0:3*end/2} // try to avoid more allocations
 		}
-		for len(in) > 0 && in[0] != quote {
+		for ip < len(in) && in[ip] != quote {
 			// Process the next character,
 			// rejecting any unescaped newline characters which are invalid.
-			ch, mb, rest, uerr := UnquoteChar(in, quote)
-			if in[0] == '\n' || uerr != nil {
+			ch, mb, nch, uerr := UnquoteCharAt(in, ip, quote)
+			if in[ip] == '\n' || uerr != nil {
 				return "", in0, ErrSyntax
 			}
-			in = rest
+			ip += nch
 
 			// Append the character if unescaping the input.
 			if unescape {
@@ -512,15 +532,15 @@ func unquote(in []byte, unescape bool) (out, rem []byte, err error) {
 		}
 
 		// Verify that the string ends with a terminating quote.
-		if !(len(in) > 0 && in[0] == quote) {
+		if !(ip < len(in) && in[ip] == quote) {
 			return "", in0, ErrSyntax
 		}
-		in = in[1:] // skip terminating quote
+		ip++ // skip terminating quote
 
 		if unescape {
-			return []byte(buf), in, nil
+			return []byte(buf), in[ip:], nil
 		}
-		return in0[:len(in0)-len(in)], in, nil
+		return in0[:ip], in[ip:], nil
 	default:
 		return "", in, ErrSyntax
 	}
