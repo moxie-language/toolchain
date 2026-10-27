@@ -95,13 +95,19 @@ func (sig *Signature) Serialize() (buf []byte) {
 	// Ensure the encoded bytes for the R and S components are canonical per DER
 	// by trimming all leading zero bytes so long as the next byte does not have
 	// the high bit set and it's not the final byte.
-	canonR, canonS := rBuf[:], sBuf[:]
-	for len(canonR) > 1 && canonR[0] == 0x00 && canonR[1]&0x80 == 0 {
-		canonR = canonR[1:]
+	// Find the first non-redundant byte by index, then take one slice of the
+	// ARRAY (a view of fixed storage). Trimming a slice with canonR = canonR[1:]
+	// would copy the remaining bytes once a sub-slice is a copy.
+	rStart := int32(0)
+	for int32(len(rBuf))-rStart > 1 && rBuf[rStart] == 0x00 && rBuf[rStart+1]&0x80 == 0 {
+		rStart++
 	}
-	for len(canonS) > 1 && canonS[0] == 0x00 && canonS[1]&0x80 == 0 {
-		canonS = canonS[1:]
+	sStart := int32(0)
+	for int32(len(sBuf))-sStart > 1 && sBuf[sStart] == 0x00 && sBuf[sStart+1]&0x80 == 0 {
+		sStart++
 	}
+	canonR := rBuf[rStart:]
+	canonS := sBuf[sStart:]
 	// Total length of returned signature is 1 byte for each magic and length
 	// (6 total), plus lengths of R and S.
 	totalLen := 6 + len(canonR) + len(canonS)
@@ -468,10 +474,11 @@ func ParseDERSignature(sig []byte) (out *Signature, derr error) {
 	// that do not conform to the ECDSA spec.
 	//
 	// Strip leading zeroes from R.
-	rBytes := sig[rOffset : rOffset+rLen]
-	for len(rBytes) > 0 && rBytes[0] == 0x00 {
-		rBytes = rBytes[1:]
+	rStart := rOffset
+	for rStart < rOffset+rLen && sig[rStart] == 0x00 {
+		rStart++
 	}
+	rBytes := sig[rStart : rOffset+rLen]
 	// R must be in the range [1, N-1].  Notice the check for the maximum number
 	// of bytes is required because SetByteSlice truncates as noted in its
 	// comment so it could otherwise fail to detect the overflow.
@@ -489,10 +496,11 @@ func ParseDERSignature(sig []byte) (out *Signature, derr error) {
 		return nil, signatureError(ErrSigRIsZero, str)
 	}
 	// Strip leading zeroes from S.
-	sBytes := sig[sOffset : sOffset+sLen]
-	for len(sBytes) > 0 && sBytes[0] == 0x00 {
-		sBytes = sBytes[1:]
+	sStart := sOffset
+	for sStart < sOffset+sLen && sig[sStart] == 0x00 {
+		sStart++
 	}
+	sBytes := sig[sStart : sOffset+sLen]
 	// S must be in the range [1, N-1].  Notice the check for the maximum number
 	// of bytes is required because SetByteSlice truncates as noted in its
 	// comment so it could otherwise fail to detect the overflow.

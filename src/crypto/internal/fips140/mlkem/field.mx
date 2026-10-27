@@ -296,11 +296,13 @@ func ringCompressAndEncode10(s []byte, f ringElement) (ret0 []byte) {
 // It implements ByteDecode₁₀, according to FIPS 203, Algorithm 6,
 // followed by Decompress₁₀, according to FIPS 203, Definition 4.8.
 func ringDecodeAndDecompress10(bb []byte) (ret0 ringElement) {
-	b := bb
 	var f ringElement
+	// By offset: b = b[5:] in the loop copies the whole remaining input at
+	// every four coefficients.
+	pos := int32(0)
 	for i := 0; i < n; i += 4 {
-		x := uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 | uint64(b[4])<<32
-		b = b[5:]
+		x := uint64(bb[pos+0]) | uint64(bb[pos+1])<<8 | uint64(bb[pos+2])<<16 | uint64(bb[pos+3])<<24 | uint64(bb[pos+4])<<32
+		pos += 5
 		f[i] = fieldElement(decompress(uint16(x>>0&0b11_1111_1111), 10))
 		f[i+1] = fieldElement(decompress(uint16(x>>10&0b11_1111_1111), 10))
 		f[i+2] = fieldElement(decompress(uint16(x>>20&0b11_1111_1111), 10))
@@ -347,23 +349,27 @@ func ringCompressAndEncode(s []byte, f ringElement, d uint8) (ret0 []byte) {
 func ringDecodeAndDecompress(b []byte, d uint8) (ret0 ringElement) {
 	var f ringElement
 	var bIdx uint8
+	// By offset: b = b[1:] at every byte boundary copies the whole remaining
+	// input each time.
+	pos := int32(0)
+	var bits uint8
 	for i := 0; i < n; i++ {
 		var c uint16
 		var cIdx uint8
 		for cIdx < d {
-			c |= uint16(b[0]>>bIdx) << cIdx
+			c |= uint16(b[pos]>>bIdx) << cIdx
 			c &= (1 << d) - 1
-			bits := min(8-bIdx, d-cIdx)
+			bits = min(8-bIdx, d-cIdx)
 			bIdx += bits
 			cIdx += bits
 			if bIdx == 8 {
-				b = b[1:]
+				pos++
 				bIdx = 0
 			}
 		}
 		f[i] = fieldElement(decompress(c, d))
 	}
-	if len(b) != 0 {
+	if int32(len(b))-pos != 0 {
 		panic("mlkem: internal error: leftover bytes")
 	}
 	return f

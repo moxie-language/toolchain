@@ -7,7 +7,6 @@ package aes
 import (
 	"crypto/internal/fips140"
 	"crypto/internal/fips140/alias"
-	"crypto/internal/fips140/subtle"
 )
 
 type CBCEncrypter struct {
@@ -48,20 +47,23 @@ func (x *CBCEncrypter) SetIV(iv []byte) {
 }
 
 func cryptBlocksEncGeneric(b *Block, civ *[BlockSize]byte, dst, src []byte) {
-	iv := civ[:]
-	for len(src) > 0 {
-		// Write the xor to dst, then encrypt in place.
-		subtle.XORBytes(dst[:BlockSize], src[:BlockSize], iv)
-		encryptBlock(b, dst[:BlockSize], dst[:BlockSize])
-
-		// Move to the next block with this block as the next iv.
-		iv = dst[:BlockSize]
-		src = src[BlockSize:]
-		dst = dst[BlockSize:]
+	// The block walks by offset and stages the ciphertext in an array: a
+	// sub-slice of dst or src is a copy, so dst[pos:pos+16] passed to the
+	// block function would be a throwaway.
+	var blk [BlockSize]byte
+	pos := int32(0)
+	for int32(len(src))-pos > 0 {
+		for j := int32(0); j < BlockSize; j++ {
+			blk[j] = src[pos+j] ^ civ[j]
+		}
+		encryptBlock(b, blk[:], blk[:])
+		// The ciphertext is both the output and the next iv.
+		for j := int32(0); j < BlockSize; j++ {
+			dst[pos+j] = blk[j]
+			civ[j] = blk[j]
+		}
+		pos += BlockSize
 	}
-
-	// Save the iv for the next CryptBlocks call.
-	copy(civ[:], iv)
 }
 
 type CBCDecrypter struct {
@@ -105,22 +107,33 @@ func cryptBlocksDecGeneric(b *Block, civ *[BlockSize]byte, dst, src []byte) {
 	// For each block, we need to xor the decrypted data with the previous
 	// block's ciphertext (the iv). To avoid making a copy each time, we loop
 	// over the blocks backwards.
-	end := len(src)
+	end := int32(len(src))
 	start := end - BlockSize
 	prev := start - BlockSize
 
 	// Copy the last block of ciphertext as the IV of the next call.
-	iv := *civ
-	copy(civ[:], src[start:end])
+	var iv [BlockSize]byte
+	for j := int32(0); j < BlockSize; j++ {
+		iv[j] = civ[j]
+		civ[j] = src[start+j]
+	}
 
+	var blk [BlockSize]byte
 	for start >= 0 {
-		decryptBlock(b, dst[start:end], src[start:end])
+		for j := int32(0); j < BlockSize; j++ {
+			blk[j] = src[start+j]
+		}
+		decryptBlock(b, blk[:], blk[:])
 
 		if start > 0 {
-			subtle.XORBytes(dst[start:end], dst[start:end], src[prev:start])
+			for j := int32(0); j < BlockSize; j++ {
+				dst[start+j] = blk[j] ^ src[prev+j]
+			}
 		} else {
 			// The first block is special because it uses the saved iv.
-			subtle.XORBytes(dst[start:end], dst[start:end], iv[:])
+			for j := int32(0); j < BlockSize; j++ {
+				dst[start+j] = blk[j] ^ iv[j]
+			}
 		}
 
 		end -= BlockSize

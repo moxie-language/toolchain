@@ -1414,13 +1414,17 @@ func (m *certificateMsg) marshal() (rb []byte, rerr error) {
 	x[5] = uint8(certificateOctets >> 8)
 	x[6] = uint8(certificateOctets)
 
-	y := x[7:]
+	// By offset: y := x[7:] would be a copy once a sub-slice is a copy, and
+	// the per-certificate writes would be lost.
+	off := int32(7)
 	for _, slice := range m.certificates {
-		y[0] = uint8(len(slice) >> 16)
-		y[1] = uint8(len(slice) >> 8)
-		y[2] = uint8(len(slice))
-		copy(y[3:], slice)
-		y = y[3+len(slice):]
+		x[off+0] = uint8(len(slice) >> 16)
+		x[off+1] = uint8(len(slice) >> 8)
+		x[off+2] = uint8(len(slice))
+		for j := int32(0); j < int32(len(slice)); j++ {
+			x[off+3+j] = slice[j]
+		}
+		off += 3 + int32(len(slice))
 	}
 
 	return x, nil
@@ -1436,28 +1440,31 @@ func (m *certificateMsg) unmarshal(data []byte) (rok bool) {
 		return false
 	}
 
+	// d stays whole and off walks it: trimming d would copy the remainder of
+	// the handshake message at every certificate.
 	numCerts := 0
-	d := data[7:]
+	d := data
+	off := int32(7)
 	var certLen uint32
 	for certsLen > 0 {
-		if len(d) < 4 {
+		if int32(len(d))-off < 4 {
 			return false
 		}
-		certLen = uint32(d[0])<<16 | uint32(d[1])<<8 | uint32(d[2])
-		if uint32(len(d)) < 3+certLen {
+		certLen = uint32(d[off+0])<<16 | uint32(d[off+1])<<8 | uint32(d[off+2])
+		if uint32(int32(len(d))-off) < 3+certLen {
 			return false
 		}
-		d = d[3+certLen:]
+		off += 3 + int32(certLen)
 		certsLen -= 3 + certLen
 		numCerts++
 	}
 
 	m.certificates = [][]byte{:numCerts}
-	d = data[7:]
+	off = 7
 	for i := 0; i < numCerts; i++ {
-		certLen = uint32(d[0])<<16 | uint32(d[1])<<8 | uint32(d[2])
-		m.certificates[i] = d[3 : 3+certLen]
-		d = d[3+certLen:]
+		certLen = uint32(d[off+0])<<16 | uint32(d[off+1])<<8 | uint32(d[off+2])
+		m.certificates[i] = d[off+3 : off+3+int32(certLen)]
+		off += 3 + int32(certLen)
 	}
 
 	return true
@@ -1749,30 +1756,37 @@ func (m *certificateRequestMsg) marshal() (rb []byte, rerr error) {
 
 	x[4] = uint8(len(m.certificateTypes))
 
-	copy(x[5:], m.certificateTypes)
-	y := x[5+len(m.certificateTypes):]
+	// By offset: y := x[5+len(...):] would be a copy once a sub-slice is a
+	// copy, and every write below would be lost.
+	off := int32(5)
+	for j := int32(0); j < int32(len(m.certificateTypes)); j++ {
+		x[off+j] = m.certificateTypes[j]
+	}
+	off += int32(len(m.certificateTypes))
 
 	if m.hasSignatureAlgorithm {
 		n := len(m.supportedSignatureAlgorithms) * 2
-		y[0] = uint8(n >> 8)
-		y[1] = uint8(n)
-		y = y[2:]
+		x[off+0] = uint8(n >> 8)
+		x[off+1] = uint8(n)
+		off += 2
 		for _, sigAlgo := range m.supportedSignatureAlgorithms {
-			y[0] = uint8(sigAlgo >> 8)
-			y[1] = uint8(sigAlgo)
-			y = y[2:]
+			x[off+0] = uint8(sigAlgo >> 8)
+			x[off+1] = uint8(sigAlgo)
+			off += 2
 		}
 	}
 
-	y[0] = uint8(casLength >> 8)
-	y[1] = uint8(casLength)
-	y = y[2:]
+	x[off+0] = uint8(casLength >> 8)
+	x[off+1] = uint8(casLength)
+	off += 2
 	for _, ca := range m.certificateAuthorities {
-		y[0] = uint8(len(ca) >> 8)
-		y[1] = uint8(len(ca))
-		y = y[2:]
-		copy(y, ca)
-		y = y[len(ca):]
+		x[off+0] = uint8(len(ca) >> 8)
+		x[off+1] = uint8(len(ca))
+		off += 2
+		for j := int32(0); j < int32(len(ca)); j++ {
+			x[off+j] = ca[j]
+		}
+		off += int32(len(ca))
 	}
 
 	return x, nil
@@ -1788,70 +1802,71 @@ func (m *certificateRequestMsg) unmarshal(data []byte) (rok bool) {
 		return false
 	}
 
+	// data stays whole and off walks it: trimming data would copy the rest of
+	// the message at every field.
 	numCertTypes := int32(data[4])
-	data = data[5:]
-	if numCertTypes == 0 || len(data) <= numCertTypes {
+	off := int32(5)
+	if numCertTypes == 0 || int32(len(data))-off <= numCertTypes {
 		return false
 	}
 
 	m.certificateTypes = []byte{:numCertTypes}
-	if copy(m.certificateTypes, data) != numCertTypes {
-		return false
+	for j := int32(0); j < numCertTypes; j++ {
+		m.certificateTypes[j] = data[off+j]
 	}
-
-	data = data[numCertTypes:]
+	off += numCertTypes
 
 	if m.hasSignatureAlgorithm {
-		if len(data) < 2 {
+		if int32(len(data))-off < 2 {
 			return false
 		}
-		sigAndHashLen := uint16(data[0])<<8 | uint16(data[1])
-		data = data[2:]
+		sigAndHashLen := uint16(data[off])<<8 | uint16(data[off+1])
+		off += 2
 		if sigAndHashLen&1 != 0 || sigAndHashLen == 0 {
 			return false
 		}
-		if len(data) < int32(sigAndHashLen) {
+		if int32(len(data))-off < int32(sigAndHashLen) {
 			return false
 		}
 		numSigAlgos := sigAndHashLen / 2
 		m.supportedSignatureAlgorithms = []SignatureScheme{:numSigAlgos}
 		for i := range m.supportedSignatureAlgorithms {
-			m.supportedSignatureAlgorithms[i] = SignatureScheme(data[0])<<8 | SignatureScheme(data[1])
-			data = data[2:]
+			m.supportedSignatureAlgorithms[i] = SignatureScheme(data[off])<<8 | SignatureScheme(data[off+1])
+			off += 2
 		}
 	}
 
-	if len(data) < 2 {
+	if int32(len(data))-off < 2 {
 		return false
 	}
-	casLength := uint16(data[0])<<8 | uint16(data[1])
-	data = data[2:]
-	if len(data) < int32(casLength) {
+	casLength := uint16(data[off])<<8 | uint16(data[off+1])
+	off += 2
+	if int32(len(data))-off < int32(casLength) {
 		return false
 	}
-	cas := []byte{:casLength}
-	copy(cas, data)
-	data = data[casLength:]
+	casOff := off
+	casEnd := off + int32(casLength)
+	off = casEnd
 
 	m.certificateAuthorities = nil
 	var caLen uint16
-	for len(cas) > 0 {
-		if len(cas) < 2 {
+	for casOff < casEnd {
+		if casEnd-casOff < 2 {
 			return false
 		}
-		caLen = uint16(cas[0])<<8 | uint16(cas[1])
-		cas = cas[2:]
+		caLen = uint16(data[casOff])<<8 | uint16(data[casOff+1])
+		casOff += 2
 
-		if len(cas) < int32(caLen) {
+		if casEnd-casOff < int32(caLen) {
 			return false
 		}
 
 		m.certificateAuthorities = mxutil.Ensure(m.certificateAuthorities, 1)
-		m.certificateAuthorities = push(m.certificateAuthorities, cas[:caLen])
-		cas = cas[caLen:]
+		m.certificateAuthorities = push(m.certificateAuthorities, data[casOff:casOff+int32(caLen)])
+		casOff += int32(caLen)
 	}
 
-	return len(data) == 0
+	return int32(len(data))-off == 0
 }
 
 type certificateVerifyMsg struct {
