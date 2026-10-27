@@ -118,8 +118,14 @@ func trimOWS(x []byte) []byte {
 	// if and when it's fast enough. See issue 10292.
 	// But this ASCII-only code will probably always beat UTF-8
 	// aware code.
-	for len(x) > 0 && isOWS(x[0]) {
-		x = x[1:]
+	// One prefix slice for the leading run: `x = x[1:]` per space is a copy of
+	// the rest of the value.
+	ip := int32(0)
+	for ip < len(x) && isOWS(x[ip]) {
+		ip++
+	}
+	if ip > 0 {
+		x = x[ip:]
 	}
 	for len(x) > 0 && isOWS(x[len(x)-1]) {
 		x = resize(x, len(x)-1)
@@ -132,13 +138,15 @@ func trimOWS(x []byte) []byte {
 // contains token amongst its comma-separated tokens, ASCII
 // case-insensitively.
 func headerValueContainsToken(v []byte, token []byte) bool {
-	for comma := bytes.IndexByte(v, ','); comma != -1; comma = bytes.IndexByte(v, ',') {
-		if tokenEqual(trimOWS(v[:comma]), token) {
+	// off walks v: `v = v[comma+1:]` per value is a copy of the rest.
+	off := int32(0)
+	for comma := bytes.IndexByteFrom(v, off, ','); comma != -1; comma = bytes.IndexByteFrom(v, off, ',') {
+		if tokenEqual(trimOWS(v[off:comma]), token) {
 			return true
 		}
-		v = v[comma+1:]
+		off = comma + 1
 	}
-	return tokenEqual(trimOWS(v), token)
+	return tokenEqual(trimOWS(v[off:]), token)
 }
 
 // lowerASCII returns the ASCII lowercase version of b.
