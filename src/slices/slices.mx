@@ -150,8 +150,14 @@ func Insert[S ~[]E, E comparable](s S, i int32, v ...E) (out S) {
 		// This is what Grow does but we don't call Grow because
 		// that might copy the values twice.
 		s2 := push(s[:i], S{:n+m-i}...)
-		copy(s2[i:], v)
-		copy(s2[i+m:], s[i:])
+		// Index loops, not copy(s2[i:], v): a sub-slice is a copy, so the
+		// writes would land in a throwaway.
+		for ci := int32(0); ci < int32(len(v)); ci++ {
+			s2[i+ci] = v[ci]
+		}
+		for ci := int32(0); ci < int32(len(s))-i; ci++ {
+			s2[i+m+ci] = s[i+ci]
+		}
 		return s2
 	}
 	s = resize(s, n+m)
@@ -175,7 +181,9 @@ func Insert[S ~[]E, E comparable](s S, i int32, v ...E) (out S) {
 		// (It might be in some of a or b, or elsewhere entirely.)
 		// The data we copy up doesn't write to v at all, so just do it.
 
-		copy(s[i+m:], s[i:])
+		for ci := int32(0); ci < int32(len(s))-i; ci++ {
+			s[i+m+ci] = s[i+ci]
+		}
 
 		// Now we have
 		// s: aaaaaaaabbbbbbbbcccccccc
@@ -183,7 +191,9 @@ func Insert[S ~[]E, E comparable](s S, i int32, v ...E) (out S) {
 		//            i  i+m      n  n+m
 		// Note the b values are duplicated.
 
-		copy(s[i:], v)
+		for ci := int32(0); ci < int32(len(v)); ci++ {
+			s[i+ci] = v[ci]
+		}
 
 		// Now we have
 		// s: aaaaaaaavvvvbbbbcccccccc
@@ -197,7 +207,9 @@ func Insert[S ~[]E, E comparable](s S, i int32, v ...E) (out S) {
 	// the data because we'd move or clobber the values we're trying
 	// to insert.
 	// So instead, write v on top of d, then rotate.
-	copy(s[n:], v)
+	for ci := int32(0); ci < int32(len(v)); ci++ {
+		s[n+ci] = v[ci]
+	}
 
 	// Now we have
 	// s: aaaaaaaabbbbccccccccvvvv
@@ -276,8 +288,12 @@ func Replace[S ~[]E, E comparable](s S, i, j int32, v ...E) (out S) {
 	if tot > cap(s) {
 		// Too big to fit, allocate and copy over.
 		s2 := push(s[:i], S{:tot-i}...) // See Insert
-		copy(s2[i:], v)
-		copy(s2[i+len(v):], s[j:])
+		for ci := int32(0); ci < int32(len(v)); ci++ {
+			s2[i+ci] = v[ci]
+		}
+		for ci := int32(0); ci < int32(len(s))-j; ci++ {
+			s2[i+len(v)+ci] = s[j+ci]
+		}
 		return s2
 	}
 
@@ -285,8 +301,12 @@ func Replace[S ~[]E, E comparable](s S, i, j int32, v ...E) (out S) {
 
 	if i+len(v) <= j {
 		// Easy, as v fits in the deleted portion.
-		copy(r[i:], v)
-		copy(r[i+len(v):], s[j:])
+		for ci := int32(0); ci < int32(len(v)); ci++ {
+			r[i+ci] = v[ci]
+		}
+		for ci := int32(0); ci < int32(len(s))-j; ci++ {
+			r[i+len(v)+ci] = s[j+ci]
+		}
 		clear(s[tot:]) // zero/nil out the obsolete elements, for GC
 		return r
 	}
@@ -304,8 +324,12 @@ func Replace[S ~[]E, E comparable](s S, i, j int32, v ...E) (out S) {
 
 	if !overlaps(r[i+len(v):], v) {
 		// Easy, as v is not clobbered by the first copy.
-		copy(r[i+len(v):], s[j:])
-		copy(r[i:], v)
+		for ci := int32(0); ci < int32(len(s))-j; ci++ {
+			r[i+len(v)+ci] = s[j+ci]
+		}
+		for ci := int32(0); ci < int32(len(v)); ci++ {
+			r[i+ci] = v[ci]
+		}
 		return r
 	}
 
@@ -324,14 +348,22 @@ func Replace[S ~[]E, E comparable](s S, i, j int32, v ...E) (out S) {
 	y := len(v) - (j - i) // length of y portion
 
 	if !overlaps(r[i:j], v) {
-		copy(r[i:j], v[y:])
-		copy(r[len(s):], v[:y])
+		for ci := int32(0); ci < j-i; ci++ {
+			r[i+ci] = v[y+ci]
+		}
+		for ci := int32(0); ci < y; ci++ {
+			r[len(s)+ci] = v[ci]
+		}
 		rotateRight(r[i:], y)
 		return r
 	}
 	if !overlaps(r[len(s):], v) {
-		copy(r[len(s):], v[:y])
-		copy(r[i:j], v[y:])
+		for ci := int32(0); ci < y; ci++ {
+			r[len(s)+ci] = v[ci]
+		}
+		for ci := int32(0); ci < j-i; ci++ {
+			r[i+ci] = v[y+ci]
+		}
 		rotateRight(r[i:], y)
 		return r
 	}
@@ -342,8 +374,12 @@ func Replace[S ~[]E, E comparable](s S, i, j int32, v ...E) (out S) {
 	// can copy v first, then copy the b part of v out of
 	// v to the right destination.
 	k := startIdx(v, s[j:])
-	copy(r[i:], v)
-	copy(r[i+len(v):], r[i+k:])
+	for ci := int32(0); ci < int32(len(v)); ci++ {
+		r[i+ci] = v[ci]
+	}
+	for ci := int32(0); ci < len(r)-i-len(v); ci++ {
+		r[i+len(v)+ci] = r[i+k+ci]
+	}
 	return r
 }
 
@@ -522,7 +558,14 @@ func Repeat[S ~[]E, E comparable](x S, count int32) (out S) {
 	newslice := S{:int32(lo}) // lo = len(x) * count
 	n := copy(newslice, x)
 	for n < len(newslice) {
-		n += copy(newslice[n:], newslice[:n])
+		c := int32(len(newslice)) - n
+		if c > n {
+			c = n
+		}
+		for ci := int32(0); ci < c; ci++ {
+			newslice[n+ci] = newslice[ci]
+		}
+		n += c
 	}
 	return newslice
 }

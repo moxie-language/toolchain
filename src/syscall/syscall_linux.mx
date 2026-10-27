@@ -12,6 +12,7 @@
 package syscall
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"internal/itoa"
 	runtimesyscall "internal/runtime/syscall"
 	"unsafe"
@@ -879,26 +880,27 @@ func ptracePeek(req int32, pid int32, addr uintptr, out []byte) (count int32, er
 	// boundary and not get the bytes leading up to the page
 	// boundary.
 	n := 0
+	pos := int32(0)
 	if addr%sizeofPtr != 0 {
 		err = ptracePtr(req, pid, addr-addr%sizeofPtr, unsafe.Pointer(&buf[0]))
 		if err != nil {
 			return 0, err
 		}
-		n += copy(out, buf[addr%sizeofPtr:])
-		out = out[n:]
+		n += mxutil.CopyFrom(out, buf[:], int32(addr%sizeofPtr))
+		pos = n
 	}
 
 	// Remainder.
-	for len(out) > 0 {
+	for len(out)-pos > 0 {
 		// We use an internal buffer to guarantee alignment.
 		// It's not documented if this is necessary, but we're paranoid.
 		err = ptracePtr(req, pid, addr+uintptr(n), unsafe.Pointer(&buf[0]))
 		if err != nil {
 			return n, err
 		}
-		copied := copy(out, buf[0:])
+		copied := mxutil.CopyAt(out, pos, buf[:])
 		n += copied
-		out = out[copied:]
+		pos += copied
 	}
 
 	return n, nil
@@ -924,7 +926,7 @@ func ptracePoke(pokeReq int32, peekReq int32, pid int32, addr uintptr, data []by
 		if err != nil {
 			return 0, err
 		}
-		n += copy(buf[addr%sizeofPtr:], data)
+		n += mxutil.CopyAt(buf[:], int32(addr%sizeofPtr), data)
 		word := *((*uintptr)(unsafe.Pointer(&buf[0])))
 		err = ptrace(pokeReq, pid, addr-addr%sizeofPtr, word)
 		if err != nil {
@@ -934,24 +936,25 @@ func ptracePoke(pokeReq int32, peekReq int32, pid int32, addr uintptr, data []by
 	}
 
 	// Interior.
-	for len(data) > sizeofPtr {
-		word := *((*uintptr)(unsafe.Pointer(&data[0])))
+	pos := 0
+	for len(data)-pos > sizeofPtr {
+		word := *((*uintptr)(unsafe.Pointer(&data[pos])))
 		err = ptrace(pokeReq, pid, addr+uintptr(n), word)
 		if err != nil {
 			return n, err
 		}
 		n += sizeofPtr
-		data = data[sizeofPtr:]
+		pos += sizeofPtr
 	}
 
 	// Trailing edge.
-	if len(data) > 0 {
+	if len(data)-pos > 0 {
 		var buf [sizeofPtr]byte
 		err = ptracePtr(peekReq, pid, addr+uintptr(n), unsafe.Pointer(&buf[0]))
 		if err != nil {
 			return n, err
 		}
-		copy(buf[0:], data)
+		mxutil.CopyAt(buf[:], 0, data)
 		word := *((*uintptr)(unsafe.Pointer(&buf[0])))
 		err = ptrace(pokeReq, pid, addr+uintptr(n), word)
 		if err != nil {

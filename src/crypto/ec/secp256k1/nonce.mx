@@ -6,6 +6,7 @@
 package secp256k1
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"bytes"
 	"hash"
 
@@ -43,8 +44,8 @@ func (h *hmacsha256) initKey(key []byte) {
 		h.outer.Write(key)
 		key = h.outer.Sum(nil)
 	}
-	copy(h.ipad[:], key)
-	copy(h.opad[:], key)
+	copy(h.ipad, key)
+	copy(h.opad, key)
 	for i := range h.ipad {
 		h.ipad[i] ^= 0x36
 	}
@@ -60,8 +61,8 @@ func (h *hmacsha256) initKey(key []byte) {
 func (h *hmacsha256) ResetKey(key []byte) {
 	h.inner.Reset()
 	h.outer.Reset()
-	copy(h.ipad[:], _zeroInitializer())
-	copy(h.opad[:], _zeroInitializer())
+	copy(h.ipad, _zeroInitializer())
+	copy(h.opad, _zeroInitializer())
 	h.initKey(key)
 }
 
@@ -124,19 +125,19 @@ func NonceRFC6979(
 		digest = resize(digest, hashLen)
 	}
 	offset := secKeyLen - len(secKey) // Zero left padding if needed.
-	offset += copy(keyBuf[offset:], secKey)
+	offset += mxutil.CopyAt(keyBuf, offset, secKey)
 	offset += hashLen - len(digest) // Zero left padding if needed.
-	offset += copy(keyBuf[offset:], digest)
+	offset += mxutil.CopyAt(keyBuf, offset, digest)
 	if len(extra) == extraLen {
-		offset += copy(keyBuf[offset:], extra)
+		offset += mxutil.CopyAt(keyBuf, offset, extra)
 		if len(version) == versionLen {
-			offset += copy(keyBuf[offset:], version)
+			offset += mxutil.CopyAt(keyBuf, offset, version)
 		}
 	} else if len(version) == versionLen {
 		// When the version was specified, but not the extra data, leave the
 		// extra data portion all zero.
 		offset += secKeyLen
-		offset += copy(keyBuf[offset:], version)
+		offset += mxutil.CopyAt(keyBuf, offset, version)
 	}
 	key := keyBuf[:offset]
 	// Step B.
@@ -166,7 +167,8 @@ func NonceRFC6979(
 	// with potential additional data as described by section 3.6 of the RFC.
 	hasher := newHMACSHA256(k)
 	hasher.Write(_oneInitializer())
-	hasher.Write(_singleZero()[:])
+	zb := _singleZero()
+	hasher.Write(zb[:])
 	hasher.Write(key)
 	k = hasher.Sum()
 	// Step E.
@@ -183,7 +185,8 @@ func NonceRFC6979(
 	// with potential additional data as described by section 3.6 of the RFC.
 	hasher.Reset()
 	hasher.Write(v)
-	hasher.Write(_singleOne()[:])
+	ob := _singleOne()
+	hasher.Write(ob[:])
 	hasher.Write(key[:])
 	k = hasher.Sum()
 	// Step G.
@@ -231,7 +234,8 @@ func NonceRFC6979(
 		// K = HMAC_K(V || 0x00)
 		hasher.Reset()
 		hasher.Write(v)
-		hasher.Write(_singleZero()[:])
+		zb := _singleZero()
+	hasher.Write(zb[:])
 		k = hasher.Sum()
 		// V = HMAC_K(V)
 		hasher.ResetKey(k)
