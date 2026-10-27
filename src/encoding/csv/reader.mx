@@ -293,6 +293,21 @@ func nextRune(b []byte) (out rune) {
 	return r
 }
 
+// nextRuneAt is nextRune at byte offset i, for the record parser's cursor.
+func nextRuneAt(b []byte, i int32) (out rune) {
+	r, _ := utf8.DecodeRuneInStringAt(b, i)
+	return r
+}
+
+// lengthNLFrom is lengthNL for the window b[off:]: the trailing byte is the
+// same one, so only the emptiness test changes.
+func lengthNLFrom(b []byte, off int32) (n int32) {
+	if len(b) > off && b[len(b)-1] == '\n' {
+		return 1
+	}
+	return 0
+}
+
 func (r *Reader) readRecord(dst [][]byte) (out [][]byte, rerr error) {
 	if r.Comma == r.Comment || !validDelim(r.Comma) || (r.Comment != 0 && !validDelim(r.Comment)) {
 		return nil, errInvalidDelim
@@ -333,88 +348,95 @@ func (r *Reader) readRecord(dst [][]byte) (out [][]byte, rerr error) {
 	// than `i` because the field-index loop below uses `i` as its range
 	// variable.
 	var bidx int32
+	var fend int32
 	var field []byte
 	var col int32
 	var fieldPos position
 	var ch rune
 	var sz int32
+	// lp walks line. The parser used to re-slice line per space, per comma and
+	// per closing quote, and every one of those is a copy of the rest of the
+	// line, so a record's cost grew with the square of its length.
+	lp := int32(0)
 parseField:
 	for {
 		if r.TrimLeadingSpace {
 			bidx = 0
-			for bidx < len(line) {
-				ch, sz = utf8.DecodeRune(line[bidx:])
+			for lp+bidx < len(line) {
+				ch, sz = utf8.DecodeRuneInStringAt(line, lp+bidx)
 				if !t.IsSpace(ch) {
 					break
 				}
 				bidx += sz
 			}
-			if bidx >= len(line) {
-				bidx = len(line)
-				pos.col -= lengthNL(line)
+			if lp+bidx >= len(line) {
+				bidx = len(line) - lp
+				pos.col -= lengthNLFrom(line, lp)
 			}
-			line = line[bidx:]
+			lp += bidx
 			pos.col += bidx
 		}
-		if len(line) == 0 || line[0] != '"' {
+		if lp == len(line) || line[lp] != '"' {
 			// Non-quoted string field
-			bidx = bytes.IndexRune(line, r.Comma)
-			field = line
+			bidx = bytes.IndexRuneFrom(line, lp, r.Comma)
+			fend = len(line) - lengthNLFrom(line, lp)
 			if bidx >= 0 {
-				field = resize(field, bidx)
-			} else {
-				field = resize(field, len(field)-lengthNL(field))
+				fend = bidx
 			}
 			// Check to make sure a quote does not appear in field.
 			if !r.LazyQuotes {
-				if j := bytes.IndexByte(field, '"'); j >= 0 {
-					col = pos.col + j
+				if j := bytes.IndexByteFrom(line, lp, '"'); j >= 0 && j < fend {
+					col = pos.col + (j - lp)
 					err = &ParseError{StartLine: recLine, Line: r.numLine, Column: col, Err: ErrBareQuote}
 					break parseField
 				}
 			}
-			r.recordBuffer = mxutil.Ensure(r.recordBuffer, len(field))
-			r.recordBuffer = push(r.recordBuffer, field...)
+			if fend > lp {
+				r.recordBuffer = mxutil.Ensure(r.recordBuffer, fend-lp)
+				r.recordBuffer = push(r.recordBuffer, line[lp:fend]...)
+			}
 			r.fieldIndexes = mxutil.Ensure(r.fieldIndexes, 1)
 			r.fieldIndexes = push(r.fieldIndexes, len(r.recordBuffer))
 			r.fieldPositions = mxutil.Ensure(r.fieldPositions, 1)
 			r.fieldPositions = push(r.fieldPositions, pos)
 			if bidx >= 0 {
-				line = line[bidx+commaLen:]
-				pos.col += bidx + commaLen
+				pos.col += (bidx - lp) + commaLen
+				lp = bidx + commaLen
 				continue parseField
 			}
 			break parseField
 		} else {
 			// Quoted string field
 			fieldPos = pos
-			line = line[quoteLen:]
+			lp += quoteLen
 			pos.col += quoteLen
 			for {
-				bidx = bytes.IndexByte(line, '"')
+				bidx = bytes.IndexByteFrom(line, lp, '"')
 				if bidx >= 0 {
 					// Hit next quote.
-					r.recordBuffer = mxutil.Ensure(r.recordBuffer, len(line[:bidx]))
-					r.recordBuffer = push(r.recordBuffer, line[:bidx]...)
-					line = line[bidx+quoteLen:]
-					pos.col += bidx + quoteLen
-					switch rn := nextRune(line); {
+					if bidx > lp {
+						r.recordBuffer = mxutil.Ensure(r.recordBuffer, bidx-lp)
+						r.recordBuffer = push(r.recordBuffer, line[lp:bidx]...)
+					}
+					pos.col += (bidx - lp) + quoteLen
+					lp = bidx + quoteLen
+					switch rn := nextRuneAt(line, lp); {
 					case rn == '"':
 						// `""` sequence (append quote).
 						r.recordBuffer = mxutil.Ensure(r.recordBuffer, 1)
 						r.recordBuffer = push(r.recordBuffer, '"')
-						line = line[quoteLen:]
+						lp += quoteLen
 						pos.col += quoteLen
 					case rn == r.Comma:
 						// `",` sequence (end of field).
-						line = line[commaLen:]
+						lp += commaLen
 						pos.col += commaLen
 						r.fieldIndexes = mxutil.Ensure(r.fieldIndexes, 1)
 						r.fieldIndexes = push(r.fieldIndexes, len(r.recordBuffer))
 						r.fieldPositions = mxutil.Ensure(r.fieldPositions, 1)
 						r.fieldPositions = push(r.fieldPositions, fieldPos)
 						continue parseField
-					case lengthNL(line) == len(line):
+					case lengthNLFrom(line, lp) == len(line)-lp:
 						// `"\n` sequence (end of line).
 						r.fieldIndexes = mxutil.Ensure(r.fieldIndexes, 1)
 						r.fieldIndexes = push(r.fieldIndexes, len(r.recordBuffer))
@@ -430,15 +452,16 @@ parseField:
 						err = &ParseError{StartLine: recLine, Line: r.numLine, Column: pos.col - quoteLen, Err: ErrQuote}
 						break parseField
 					}
-				} else if len(line) > 0 {
+				} else if lp < len(line) {
 					// Hit end of line (copy all data so far).
-					r.recordBuffer = mxutil.Ensure(r.recordBuffer, len(line))
-					r.recordBuffer = push(r.recordBuffer, line...)
+					r.recordBuffer = mxutil.Ensure(r.recordBuffer, len(line)-lp)
+					r.recordBuffer = push(r.recordBuffer, line[lp:]...)
 					if errRead != nil {
 						break parseField
 					}
-					pos.col += len(line)
+					pos.col += len(line) - lp
 					line, errRead = r.readLine()
+					lp = 0
 					if len(line) > 0 {
 						pos.line++
 						pos.col = 1
