@@ -22,8 +22,12 @@ type format struct {
 }
 
 // Decoder holds registered image formats and dispatches decoding.
+//
+// Pointer elements: a format holds func fields, so a []format is not a slice
+// mxutil.Ensure (constraint comparable) can take, and push's lazy growth path
+// goes through it.
 type Decoder struct {
-	formats []format
+	formats []*format
 }
 
 // NewDecoder returns a Decoder with no registered formats.
@@ -35,7 +39,7 @@ func NewDecoder() (out *Decoder) {
 // Magic is the prefix that identifies the encoding; "?" matches any byte.
 func (d *Decoder) Register(name, magic []byte, decode func(io.Reader) (Image, error), decodeConfig func(io.Reader) (Config, error)) {
 	d.formats = mxutil.Ensure(d.formats, 1)
-	d.formats = push(d.formats, format{name, magic, decode, decodeConfig})
+	d.formats = push(d.formats, &format{name, magic, decode, decodeConfig})
 }
 
 // A reader is an io.Reader that can also peek ahead.
@@ -65,14 +69,14 @@ func match(magic []byte, b []byte) (ok bool) {
 	return true
 }
 
-func (d *Decoder) sniff(r reader) (out format) {
+func (d *Decoder) sniff(r reader) (out *format) {
 	for _, f := range d.formats {
 		b, err := r.Peek(len(f.magic))
 		if err == nil && match(f.magic, b) {
 			return f
 		}
 	}
-	return format{}
+	return nil
 }
 
 // Decode decodes an image in one of the registered formats.
@@ -80,7 +84,7 @@ func (d *Decoder) sniff(r reader) (out format) {
 func (d *Decoder) Decode(r io.Reader) (img Image, name []byte, derr error) {
 	rr := asReader(r)
 	f := d.sniff(rr)
-	if f.decode == nil {
+	if f == nil || f.decode == nil {
 		return nil, "", ErrFormat
 	}
 	m, err := f.decode(rr)
@@ -92,7 +96,7 @@ func (d *Decoder) Decode(r io.Reader) (img Image, name []byte, derr error) {
 func (d *Decoder) DecodeConfig(r io.Reader) (cfg Config, name []byte, derr error) {
 	rr := asReader(r)
 	f := d.sniff(rr)
-	if f.decodeConfig == nil {
+	if f == nil || f.decodeConfig == nil {
 		return Config{}, "", ErrFormat
 	}
 	c, err := f.decodeConfig(rr)

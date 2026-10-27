@@ -13,6 +13,7 @@
 package io
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"errors"
 )
 
@@ -317,9 +318,10 @@ func ReadAtLeast(r Reader, buf []byte, minLen int32) (n int32, err error) {
 	if len(buf) < minLen {
 		return 0, ErrShortBuffer
 	}
+	tmp := []byte{:len(buf)}
 	for n < minLen && err == nil {
 		var nn int32
-		nn, err = r.Read(buf[n:])
+		nn, err = ReadInto(r, buf, n, tmp)
 		n += nn
 	}
 	if n >= minLen {
@@ -679,15 +681,47 @@ func (c *nopCloserWriterTo) WriteTo(w Writer) (n int64, err error) {
 	return c.Reader.(WriterTo).WriteTo(w)
 }
 
+// ReadInto reads into dst at off, up to len(tmp) bytes, and returns how many
+// arrived. A Reader needs a destination slice, and a sub-slice of dst is a
+// copy, so the bytes land in tmp - which the caller owns, and must be at least
+// len(dst)-off long - and are then walked into dst by index. Without this,
+// r.Read(dst[off:]) would write into a throwaway once a sub-slice copies.
+func ReadInto(r Reader, dst []byte, off int32, tmp []byte) (n int32, err error) {
+	free := len(dst) - off
+	if free <= 0 {
+		return 0, nil
+	}
+	if free > cap(tmp) {
+		free = cap(tmp)
+	}
+	src := resize(tmp, free)
+	n, err = r.Read(src)
+	mxutil.CopyRange(dst, off, src, 0, n)
+	return
+}
+
+// ReadIntoN is ReadInto with the scratch allocated here, for a caller that has
+// no buffer of its own. The scratch lives in this free function's frame, so it
+// is released when the call returns - it never reaches the caller's arena.
+func ReadIntoN(r Reader, dst []byte, off int32) (n int32, err error) {
+	free := len(dst) - off
+	if free <= 0 {
+		return 0, nil
+	}
+	return ReadInto(r, dst, off, []byte{:free})
+}
+
 // ReadAll reads from r until an error or EOF and returns the data it read.
 // A successful call returns err == nil, not err == EOF. Because ReadAll is
 // defined to read from src until EOF, it does not treat an EOF from Read
 // as an error to be reported.
 func ReadAll(r Reader) (data []byte, rerr error) {
 	b := []byte{:0:512}
+	tmp := []byte{:512}
 	for {
-		n, err := r.Read(b[len(b):cap(b)])
-		b = resize(b, len(b)+n)
+		lb := len(b)
+		n, err := ReadInto(r, resize(b, cap(b)), lb, tmp)
+		b = resize(b, lb+n)
 		if err != nil {
 			if err == EOF {
 				err = nil

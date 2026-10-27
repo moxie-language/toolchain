@@ -34,6 +34,7 @@ var (
 // on it.
 type Reader struct {
 	buf          []byte
+	tmp          []byte // scratch a Read lands in before being walked into buf
 	rd           io.Reader // reader provided by the client
 	r, w         int32       // buf read and write positions
 	err          error
@@ -87,6 +88,7 @@ func (b *Reader) Reset(r io.Reader) {
 func (b *Reader) reset(buf []byte, r io.Reader) {
 	*b = Reader{
 		buf:          buf,
+		tmp:          []byte{:len(buf)},
 		rd:           r,
 		lastByte:     -1,
 		lastRuneSize: -1,
@@ -111,10 +113,13 @@ func (b *Reader) fill() {
 	// Read new data: try a limited number of times. n and err are declared
 	// outside the loop: a declaration in the body of a self-mutating method
 	// allocates in the sovereign arena on every iteration.
+	//
+	// io.ReadInto, not b.rd.Read(b.buf[b.w:]): a sub-slice of b.buf is a copy,
+	// so the read would land in one and the bytes would never reach the buffer.
 	var n int32
 	var err error
 	for i := maxConsecutiveEmptyReads; i > 0; i-- {
-		n, err = b.rd.Read(b.buf[b.w:])
+		n, err = io.ReadInto(b.rd, b.buf, b.w, b.tmp)
 		if n < 0 {
 			panic(errNegativeRead.Error())
 		}
@@ -591,6 +596,7 @@ func (b *Reader) writeBuf(w io.Writer) (written int64, rerr error) {
 type Writer struct {
 	err error
 	buf []byte
+	tmp []byte // scratch a Read lands in before being walked into buf
 	n   int32
 	wr  io.Writer
 }
@@ -609,6 +615,7 @@ func NewWriterSize(w io.Writer, size int32) (out *Writer) {
 	}
 	return &Writer{
 		buf: []byte{:size},
+		tmp: []byte{:size},
 		wr:  w,
 	}
 }
@@ -637,6 +644,7 @@ func (b *Writer) Reset(w io.Writer) {
 	}
 	if b.buf == nil {
 		b.buf = []byte{:defaultBufSize}
+		b.tmp = []byte{:defaultBufSize}
 	}
 	b.err = nil
 	b.n = 0
@@ -815,7 +823,7 @@ func (b *Writer) ReadFrom(r io.Reader) (n int64, err error) {
 		}
 		nr = 0
 		for nr < maxConsecutiveEmptyReads {
-			m, err = r.Read(b.buf[b.n:])
+			m, err = io.ReadInto(r, b.buf, b.n, b.tmp)
 			if m != 0 || err != nil {
 				break
 			}
