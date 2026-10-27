@@ -18054,3 +18054,36 @@ lengths 100..140 that cross the 32-byte block at every remainder. 0 mismatches.
 CopyRange is a forward copy, not a memmove. Overlapping ranges are shifted by a
 loop that knows its direction - math/big's natLsh walks backward, bufio's and
 flate's compactions walk forward - and there is a comment saying so.
+
+## Round 234: BMPString walks its code units, and CreateCertificate cannot run
+
+    gate 243 (169 units, phase 2 bootstrap + tree-cleanliness)   169/169 PASS, rc=0
+
+x509/parser's BMPString decoder did `value = value[2:]` once per UCS-2 code
+unit, which copies the rest of the string once per unit. `off` walks it now.
+Small in absolute terms (an attribute string is short) but it is on the
+certificate path and the fix is two lines.
+
+It was verified end to end rather than by inspection: a certificate generated
+with Go's encoding/asn1 that carries organizationName as a BMPString
+(tag 30, UTF-16BE) parses in moxie and comes back as
+Organization = ["BMP Org"], with the UTF8String fields next to it unchanged
+(CN "bmp test"). That is the only way to be sure the tag-30 branch still reads
+big-endian pairs after the change.
+
+### Found while testing, not fixed
+
+`x509.CreateCertificate` is not usable from moxie code today:
+
+    moxie: codec arena escape: pointer into a transient frame arena preserved
+    instead of copied (unknown-extent pointee); that frame arena is leaked for
+    the pointer's lifetime
+
+The call returns an error instead of a DER blob. Parsing is unaffected (that is
+what the tree does - TLS servers verify, they do not mint), so this is recorded
+rather than patched: it is a codec/relocation diagnostic, not an x509 one, and
+"the compiler refuses a pointer into a dead frame" is the compiler doing its
+job. The work is to find what CreateCertificate returns that has an
+unknown-extent pointee (most likely a pointer into a `big.Int`-shaped local)
+and make it own its data.
+"""
