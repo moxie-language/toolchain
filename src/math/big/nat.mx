@@ -47,12 +47,16 @@ func natNorm(z []Word) (rnat []Word) {
 	for i > 0 && z[i-1] == 0 {
 		i--
 	}
-	return z[0:i]
+	// resize, not z[0:i]: a sub-slice is a copy, and the caller wants the
+	// same storage with a shorter length.
+	return resize(z, i)
 }
 
 func natAlloc(z []Word, n int32) (rnat []Word) {
 	if n <= cap(z) {
-		return z[:n]
+		// resize, not z[:n]: a sub-slice is a copy and the point of reuse is
+		// the same storage at a new length.
+		return resize(z, n)
 	}
 	if n == 1 {
 		return []Word{:1}
@@ -105,9 +109,9 @@ func natAdd(z []Word, x, y []Word) (rnat []Word) {
 	// m > 0
 
 	z = natAlloc(z, m + 1)
-	c := addVV(z[:n], x[:n], y[:n])
+	c := addVVAt(z, 0, x, 0, y, 0, n)
 	if m > n {
-		c = addVW(z[n:m], x[n:], c)
+		c = addVWAt(z, n, x, n, m-n, c)
 	}
 	z[m] = c
 
@@ -131,9 +135,9 @@ func natSub(z []Word, x, y []Word) (rnat []Word) {
 	// m > 0
 
 	z = natAlloc(z, m)
-	c := subVV(z[:n], x[:n], y[:n])
+	c := subVVAt(z, 0, x, 0, y, 0, n)
 	if m > n {
-		c = subVW(z[n:], x[n:], c)
+		c = subVWAt(z, n, x, n, m-n, c)
 	}
 	if c != 0 {
 		panic("underflow")
@@ -204,7 +208,7 @@ func natMontgomery(z []Word, x, y, m []Word, k Word, n int32) (rnat []Word) {
 		}
 	}
 	if c != 0 {
-		subVV(z[:n], z[n:], m)
+		subVVAt(z, 0, z, n, m, 0, n)
 	} else {
 		for i := int32(0); i < n && n+i < int32(len(z)); i++ {
 			z[i] = z[n+i]
@@ -227,13 +231,7 @@ func alias(x, y []Word) (rok bool) {
 // (we don't use nat.add because we need z to stay the same
 // slice, and we don't need to normalize z after each addition)
 func addTo(z, x []Word) {
-	if n := len(x); n > 0 {
-		if c := addVV(z[:n], z[:n], x[:n]); c != 0 {
-			if n < len(z) {
-				addVW(z[n:], z[n:], c)
-			}
-		}
-	}
+	addToAt(z, 0, len(z), x, 0, len(x))
 }
 
 // mulRange computes the product of all the unsigned integers in the
@@ -392,7 +390,7 @@ func natLsh(z []Word, x []Word, s uint32) (rnat []Word) {
 		}
 		z[n] = 0
 	} else {
-		z[n] = lshVU(z[n-m:n], x, s)
+		z[n] = lshVUAt(z, n-m, m, x, 0, s)
 	}
 	clear(z[0 : n-m])
 
