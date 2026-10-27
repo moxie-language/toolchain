@@ -18227,3 +18227,36 @@ faults, and `-print-allocs` accumulates counters that are only printed at exit
 construction (`resize`/`Ensure` instead of a literal), which costs nothing and
 removes two candidates, or teach the slice check to fire (a real bounds check in
 both compilers, which the language says it does not have).
+
+## Round 238: the bad alloc has no site, and that is the clue
+
+Four diagnostics were built and none of them caught it, which narrows the cause
+rather than muddying it. With `-print-allocs .` armed on a build of the compiler,
+`logAlloc` taught to print any size over 2^40, the site log moved ahead of the
+allocation in both the copy path and `emitMakeSlice`, and `slicePush` printing
+any capacity over 2^28, a flipped bootstrap still dies with
+
+    alloc: implausible size 18446744073709551552 arena=... sovereign=0
+
+and *no* site id, *no* push report. So the request is not:
+  - a slice copy (would print its site),
+  - a `[]T{:n}` literal (would print its site),
+  - a `push` growth (would print the big capacity),
+and the two make-slices with a subtraction that could be negative at all are
+guarded (`ssa_builder`'s thunk, now fixed; `sovMergeSortRecs`'s hi-lo, which is
+>= 2 by its entry guard).
+
+What is left is a direct `runtime.alloc`/`ArenaAlloc` from the runtime itself -
+the hashmap's bucket growth is the only one on the type-checking path - fed a
+size computed from something the flip changed. `ArenaAllocTD`'s own print
+carries no caller, `returnAddress` faults when called from inside the allocator,
+and `-print-allocs` counters die with the process, so the next attempt needs a
+caller address taken *outside* the allocator (a per-call-site argument, e.g. an
+extra i32 site id threaded through `runtime.alloc`), not a frame walk.
+
+That is the state: the rule's codegen is proven correct on 25+ shapes by both
+compilers, every tree-level window the rule has surfaced so far is fixed
+(natdiv, natmul, nat's add/sub/lsh, natNorm/natAlloc, slices.Grow/Clip, the
+thunk's negative capacity), and the one allocation left to explain is a direct
+runtime allocation of -64 bytes whose caller has to be named before it can be
+fixed.
