@@ -18018,3 +18018,39 @@ loops, x509/parser and x509/verify, crypto/tls (ech, conn, key_agreement),
 internal/profile, and crypto/x509's DER walk. Each needs a cursor threaded
 through a function that also builds error values from the remainder, which is
 the same shape as time.parse above.
+
+## Round 233: the register copy, measured - the byte assembly was the slow version
+
+    bootstrap   s4a -> s4b -> s4c, s4b == s4c == d30278e5...
+    gate 242    169/169 PASS, rc=0
+
+Round 230 added CopyRange's eight-bytes-at-a-time loop as
+LEPutUint64At(LEUint64At(...)), on the reasoning that LLVM folds the byte
+assembly into one machine move. It does - when it can see the plain loads and
+stores. Measured over 64 MiB through the package boundary it was worse than the
+byte loop it replaced:
+
+    byte loop                        64 MiB in 273 ms    245 MB/s
+    LEUint64At -> LEPutUint64At      64 MiB in 361 ms    177 MB/s
+
+Two calls the optimizer did not inline, with the eight shifts and ors on each
+side still there. A uint64 store through unsafe *is* the machine move, and
+unrolling it is what makes it fast:
+
+    uint64,           8 B/iteration  64 MiB in  27 ms    2.4 GB/s
+    uint64 x4,       32 B/iteration  64 MiB in   8 ms    8.0 GB/s
+    uint64 x8,       64 B/iteration  64 MiB in   7 ms    8.6 GB/s
+
+x4 is kept (x8 buys 2% for twice the block), with a byte loop for the tail under
+32 bytes so every length is exact. This is the copy every offset-write in the
+tree goes through, so the 34x over the byte loop is the number that matters, and
+it is now a measurement rather than a claim about codegen.
+
+Correctness for the new form: every length 0..80 through CopyRange, CopyAt and
+CopyFrom with a non-zero destination offset; guard bytes on both sides verified
+untouched; truncation when dst is short; a request starting past the end; and
+lengths 100..140 that cross the 32-byte block at every remainder. 0 mismatches.
+
+CopyRange is a forward copy, not a memmove. Overlapping ranges are shifted by a
+loop that knows its direction - math/big's natLsh walks backward, bufio's and
+flate's compactions walk forward - and there is a comment saying so.
