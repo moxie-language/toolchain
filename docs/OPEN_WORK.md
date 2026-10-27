@@ -18464,3 +18464,50 @@ hits have an array base (`d.tmp[:n]`, `z.buf[:10]`, `[8]byte`), and an array
 slice is a view - the rule has nothing to allocate there. That distinction is
 the one thing the scanner cannot make without types, so the next version wants
 the type checker rather than a regex.
+
+## Round 242: what the copy rule still costs, and one pre-existing crash
+
+    gate 251 (169 units)   167/169: http_header_api failed on a compile error
+                            this round's utf8 change introduced (fixed and
+                            committed as 1d7f7165), tree-cleanliness tripped
+                            by that same uncommitted edit; phase 2 bootstrap
+                            PASSED, so the tree still reproduces itself
+    battery vs Go 1.25.3    digests, GCM, Float/Rat marshalling, ed25519
+                            vectors, asn1 DER, netip, FormatFloat, escaping,
+                            utf8 encoding                            identical
+
+The classes keep being the same shape and keep being mechanical:
+
+    utf8    EncodeRune(p[off:], r) wrote a copy. bufio/bytes WriteRune,
+            html escaping, fmt's %c padding and the normalizers all produced
+            NULs. EncodeRuneAt(p, off, r); 11 call sites.
+    fmt     writePadding filled buf[oldLen:newLen], a copy, so every padded
+            verb came out with NULs where the spaces belonged.
+    saferio ReadAt(buf1[:next], off) - a read destination as a window.
+    chainhash  hex.Decode into reversedHash[HashSize-n:].
+
+`norm` needed the array form (`rb.byte` is a [128]byte field, so `[:]`), and
+that cost a gate re-run: the package is only reached through
+net/http -> idna, so a probe that imports bytes/bufio/fmt/html does not
+compile it. Lesson for the next round: build the *transitive* closure of
+the package touched, not a probe that looks related.
+
+### A pre-existing crash, found on the way
+
+    golang.org/x/text/unicode/norm.NFC.IsNormal([]byte("abc")) -> SIGSEGV
+
+in `quickSpan`, and it reproduces on the tree *before* this round's changes
+(checked out 6c00cdbe and built the same probe), so it is not a copy-rule
+regression. It matters because net/http reaches idna -> norm for
+internationalized host names. Not fixed here; recorded.
+
+### What is left under the rule
+
+    compress/flate   zlib.Writer produces a DIFFERENT stream under the copy
+                     rule (41 bytes against 53 for the same input), so the
+                     deflate compressor still writes through a window
+                     somewhere. This is the next class.
+    secp256k1        serializers converted, package still does not compile
+                     (nonce.mx shadows zb), so unverified.
+    tls              record layer converted and compiled; no handshake
+                     fixture exists, so unexercised.
