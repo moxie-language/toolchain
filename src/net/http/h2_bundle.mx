@@ -1252,7 +1252,7 @@ func (b *http2dataBuffer) Read(p []byte) (rn int32, rerr error) {
 			end = len(b.chunks) - 1
 			copy(b.chunks[:end], b.chunks[1:])
 			b.chunks[end] = nil
-			b.chunks = b.chunks[:end]
+			b.chunks = resize(b.chunks, end)
 			b.r = 0
 		}
 	}
@@ -3264,7 +3264,7 @@ func http2summarizeFrame(f http2Frame) (rs string) {
 		data := fr.Data()
 		const maxLen = 256
 		if len(data) > maxLen {
-			data = data[:maxLen]
+			data = resize(data, maxLen)
 		}
 		fmt.Fprintf(&buf, " data=%q", data)
 		if len(fr.Data()) > maxLen {
@@ -3319,14 +3319,14 @@ const http2goroutineSpace = "goroutine "
 
 func http2curGoroutineID() (rn uint64) {
 	b := []byte{:64}
-	b = b[:runtime.Stack(b, false)]
+	b = resize(b, runtime.Stack(b, false))
 	// Parse the 4707 out of "goroutine 4707 ["
 	b = bytes.TrimPrefix(b, http2goroutineSpace)
 	i := bytes.IndexByte(b, ' ')
 	if i < 0 {
 		panic(fmt.Sprintf("No space found in %q", b))
 	}
-	b = b[:i]
+	b = resize(b, i)
 	n, err := http2parseUintBytes(b, 10, 64)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to parse goroutine ID out of %q: %v", b, err))
@@ -9099,7 +9099,7 @@ func (cc *http2ClientConn) writeHeaders(streamID uint32, endStream bool, maxFram
 	for len(hdrs) > 0 && cc.werr == nil {
 		chunk := hdrs
 		if len(chunk) > maxFrameSize {
-			chunk = chunk[:maxFrameSize]
+			chunk = resize(chunk, maxFrameSize)
 		}
 		hdrs = hdrs[len(chunk):]
 		endHeaders := len(hdrs) == 0
@@ -10623,7 +10623,7 @@ func http2splitHeaderBlock(ctx http2writeContext, headerBlock []byte, sink heade
 	for len(headerBlock) > 0 {
 		frag := headerBlock
 		if len(frag) > maxFrameSize {
-			frag = frag[:maxFrameSize]
+			frag = resize(frag, maxFrameSize)
 		}
 		headerBlock = headerBlock[len(frag):]
 		if err := sink.writeHeaderBlock(ctx, frag, first, len(headerBlock) == 0); err != nil {
@@ -11029,7 +11029,7 @@ func (q *http2writeQueue) shift() (rhttp2FrameWriteRequest http2FrameWriteReques
 	// TODO: less copy-happy queue.
 	copy(q.s, q.s[1:])
 	q.s[len(q.s)-1] = http2FrameWriteRequest{}
-	q.s = q.s[:len(q.s)-1]
+	q.s = resize(q.s, len(q.s)-1)
 	return wr
 }
 
@@ -11065,7 +11065,7 @@ func (p *http2writeQueuePool) put(q *http2writeQueue) {
 	for i := range q.s {
 		q.s[i] = http2FrameWriteRequest{}
 	}
-	q.s = q.s[:0]
+	q.s = resize(q.s, 0)
 	p.q = mxutil.Ensure(p.q, 1)
 	p.q = push(p.q, q)
 }
@@ -11079,7 +11079,7 @@ func (p *http2writeQueuePool) get() (rhttp2writeQueue *http2writeQueue) {
 	x := ln - 1
 	q := p.q[x]
 	p.q[x] = nil
-	p.q = p.q[:x]
+	p.q = resize(p.q, x)
 	return q
 }
 
