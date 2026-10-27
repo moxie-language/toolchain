@@ -18183,3 +18183,47 @@ semantics - the arithmetic is the same - and they are the packages the rule
 needs first. math/big is bit-identical to Go with them in (QuoRem 64..8192 bits
 across both division paths, Rat.Float64, big.Float text), csv's differential is
 unchanged, the bootstrap reaches 3361eec0, and gate 245 is green.
+
+## Round 237: the negative length is a make-slice, and neither compiler checks bounds
+
+The hunt for the `2^64-64` allocation narrowed to the shapes that can produce a
+negative length at all. Both compilers treat `createSliceBoundsCheck` as a no-op
+(asserts.go: "Moxie: no slice bounds checks"), so a negative bound is undefined
+behaviour in both - and the view form of a sub-slice made it *harmless*: no
+allocation, and a huge length that nothing read. The copy form hands that length
+to the allocator directly, which is why the failure is an `alloc` message and
+not a slice panic.
+
+The rule's own codegen is not the problem: an eleven-shape probe compiled by
+both flipped compilers - constant and variable bounds, `s[:n]`, `s[a:]`,
+`s[a:n]`, `s[len(s):]`, `s[:0]`, sub-slice of a function result, of a variable,
+through a pointer to a slice, of a slice-of-slices element, a `[]string`
+element window, a struct field, and `resize` reuse - is identical and correct.
+Adding the harder shapes from round 236 (strings, `f()[2:4]`, re-slicing a
+sub-slice) did not move the needle either.
+
+What is left is a `[]T{:expr}` whose expr can be negative. The make-slices with
+a subtraction in the compiled tree, in the packages the compiler itself uses:
+
+    _mxc_stage4/ssa_builder.mx:4793   []SSAValue{:0:len(thunk.Params) - 1}
+                                      (an invoke thunk with no params gives -1)
+    src/runtime/alloc.mx:1019         []*sovRecord{:hi-lo}
+                                      (guarded: hi-lo >= 2 on entry)
+    pkg/...                           guarded reads
+
+and, in packages the compiler does not import, two more with the same shape:
+`src/internal/coverage/slicewriter` and `src/internal/trace/internal/tracev1`.
+
+ssa_builder's `- 1` is the first real suspect: an invoke thunk with an empty
+parameter list would allocate `-1` SSAValues. SSAValue is an interface, so the
+byte size is -16, not -64, which means either a different element size (a 64-byte
+`[]byte` capacity, -64) or another site - the sizes have not been pinned to a
+line yet.
+
+Pinning them needs a caller address, and there is no working one: the panic is
+inlined into the runtime, `returnAddress` called from inside the arena allocator
+faults, and `-print-allocs` accumulates counters that are only printed at exit
+(the crash prevents it). Next step: either make those two make-slices safe by
+construction (`resize`/`Ensure` instead of a literal), which costs nothing and
+removes two candidates, or teach the slice check to fire (a real bounds check in
+both compilers, which the language says it does not have).
