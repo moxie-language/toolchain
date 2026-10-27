@@ -41,22 +41,26 @@ var ErrBadPattern error
 // On Windows, escaping is disabled. Instead, '\\' is treated as
 // path separator.
 func Match(pattern, name []byte) (matched bool, err error) {
+	// ppos and npos walk pattern and name. Neither is ever trimmed: a
+	// sub-slice is a copy, so `pattern = pattern[n:]` in a match loop would
+	// allocate the rest of the input once per chunk.
+	var ppos, npos int32
 Pattern:
-	for len(pattern) > 0 {
+	for ppos < len(pattern) {
 		var star bool
-		var chunk []byte
-		star, chunk, pattern = scanChunk(pattern)
-		if star && chunk == "" {
+		var cstart, cend int32
+		star, cstart, cend, ppos = scanChunk(pattern, ppos)
+		if star && cend == cstart {
 			// Trailing * matches rest of string unless it has a /.
-			return !bytes.Contains(name, []byte{byte(Separator)}), nil
+			return bytes.IndexByteFrom(name, npos, byte(Separator)) < 0, nil
 		}
 		// Look for match at current position.
-		t, ok, cerr := matchChunk(chunk, name)
+		tpos, ok, cerr := matchChunk(pattern, cstart, cend, name, npos)
 		// if we're the last chunk, make sure we've exhausted the name
 		// otherwise we'll give a false result even if we could still match
 		// using the star
-		if ok && (len(t) == 0 || len(pattern) > 0) {
-			name = t
+		if ok && (tpos == len(name) || ppos < len(pattern)) {
+			npos = tpos
 			continue
 		}
 		if cerr != nil {
@@ -65,14 +69,14 @@ Pattern:
 		if star {
 			// Look for match skipping i+1 bytes.
 			// Cannot skip /.
-			for i := 0; i < len(name) && name[i] != Separator; i++ {
-				nt, nok, nerr := matchChunk(chunk, name[i+1:])
+			for i := npos; i < len(name) && name[i] != Separator; i++ {
+				nt, nok, nerr := matchChunk(pattern, cstart, cend, name, i+1)
 				if nok {
 					// if we're the last chunk, make sure we exhausted the name
-					if len(pattern) == 0 && len(nt) > 0 {
+					if ppos == len(pattern) && nt < len(name) {
 						continue
 					}
-					name = nt
+					npos = nt
 					continue Pattern
 				}
 				if nerr != nil {
@@ -82,20 +86,22 @@ Pattern:
 		}
 		return false, nil
 	}
-	return len(name) == 0, nil
+	return npos == len(name), nil
 }
 
 // scanChunk gets the next segment of pattern, which is a non-star string
-// possibly preceded by a star.
-func scanChunk(pattern []byte) (star bool, chunk, rest []byte) {
-	for len(pattern) > 0 && pattern[0] == '*' {
-		pattern = pattern[1:]
+// possibly preceded by a star. The chunk is pattern[cstart:cend] and the next
+// chunk starts at rest.
+func scanChunk(pattern []byte, pos int32) (star bool, cstart, cend, rest int32) {
+	for pos < len(pattern) && pattern[pos] == '*' {
+		pos++
 		star = true
 	}
 	inrange := false
 	var i int32
+	cstart = pos
 Scan:
-	for i = 0; i < len(pattern); i++ {
+	for i = pos; i < len(pattern); i++ {
 		switch pattern[i] {
 		case '\\':
 			// error check handled in matchChunk: bad pattern.
@@ -112,53 +118,54 @@ Scan:
 			}
 		}
 	}
-	return star, pattern[0:i], pattern[i:]
+	return star, cstart, i, i
 }
 
-// matchChunk checks whether chunk matches the beginning of s.
-// If so, it returns the remainder of s (after the match).
-// Chunk is all single-character operators: literals, char classes, and ?.
-func matchChunk(chunk, s []byte) (rest []byte, ok bool, err error) {
+// matchChunk checks whether pattern[pstart:pend] matches the beginning of s at
+// byte offset spos. If so, it returns the offset after the match. Chunk is all
+// single-character operators: literals, char classes, and ?.
+func matchChunk(pattern []byte, pstart, pend int32, s []byte, spos int32) (rest int32, ok bool, err error) {
 	// failed records whether the match has failed.
 	// After the match fails, the loop continues on processing chunk,
 	// checking that the pattern is well-formed but no longer reading s.
 	failed := false
-	for len(chunk) > 0 {
-		if !failed && len(s) == 0 {
+	cp, sp := pstart, spos
+	for cp < pend {
+		if !failed && sp == len(s) {
 			failed = true
 		}
-		switch chunk[0] {
+		switch pattern[cp] {
 		case '[':
 			// character class
 			var r rune
 			if !failed {
 				var n int32
-				r, n = utf8.DecodeRuneInString(s)
-				s = s[n:]
+				r, n = utf8.DecodeRuneInStringAt(s, sp)
+				sp += n
 			}
-			chunk = chunk[1:]
+			cp++
 			// possibly negated
 			negated := false
-			if len(chunk) > 0 && chunk[0] == '^' {
+			if cp < pend && pattern[cp] == '^' {
 				negated = true
-				chunk = chunk[1:]
+				cp++
 			}
 			// parse all ranges
 			match := false
 			nrange := 0
 			for {
-				if len(chunk) > 0 && chunk[0] == ']' && nrange > 0 {
-					chunk = chunk[1:]
+				if cp < pend && pattern[cp] == ']' && nrange > 0 {
+					cp++
 					break
 				}
 				var lo, hi rune
-				if lo, chunk, err = getEsc(chunk); err != nil {
-					return "", false, err
+				if lo, cp, err = getEsc(pattern, cp, pend); err != nil {
+					return 0, false, err
 				}
 				hi = lo
-				if chunk[0] == '-' {
-					if hi, chunk, err = getEsc(chunk[1:]); err != nil {
-						return "", false, err
+				if pattern[cp] == '-' {
+					if hi, cp, err = getEsc(pattern, cp+1, pend); err != nil {
+						return 0, false, err
 					}
 				}
 				if lo <= r && r <= hi {
@@ -172,62 +179,63 @@ func matchChunk(chunk, s []byte) (rest []byte, ok bool, err error) {
 
 		case '?':
 			if !failed {
-				if s[0] == Separator {
+				if s[sp] == Separator {
 					failed = true
 				}
-				_, n := utf8.DecodeRuneInString(s)
-				s = s[n:]
+				_, n := utf8.DecodeRuneInStringAt(s, sp)
+				sp += n
 			}
-			chunk = chunk[1:]
+			cp++
 
 		case '\\':
-			chunk = chunk[1:]
-			if len(chunk) == 0 {
-				return "", false, ErrBadPattern
+			cp++
+			if cp == pend {
+				return 0, false, ErrBadPattern
 			}
 			if !failed {
-				if chunk[0] != s[0] {
+				if pattern[cp] != s[sp] {
 					failed = true
 				}
-				s = s[1:]
+				sp++
 			}
-			chunk = chunk[1:]
+			cp++
 
 		default:
 			if !failed {
-				if chunk[0] != s[0] {
+				if pattern[cp] != s[sp] {
 					failed = true
 				}
-				s = s[1:]
+				sp++
 			}
-			chunk = chunk[1:]
+			cp++
 		}
 	}
 	if failed {
-		return "", false, nil
+		return 0, false, nil
 	}
-	return s, true, nil
+	return sp, true, nil
 }
 
-// getEsc gets a possibly-escaped character from chunk, for a character class.
-func getEsc(chunk []byte) (r rune, nchunk []byte, err error) {
-	if len(chunk) == 0 || chunk[0] == '-' || chunk[0] == ']' {
+// getEsc gets a possibly-escaped character from pattern[pos:end], for a
+// character class. It returns the rune and the offset after it.
+func getEsc(pattern []byte, pos, end int32) (r rune, npos int32, err error) {
+	if pos == end || pattern[pos] == '-' || pattern[pos] == ']' {
 		err = ErrBadPattern
 		return
 	}
-	if chunk[0] == '\\' {
-		chunk = chunk[1:]
-		if len(chunk) == 0 {
+	if pattern[pos] == '\\' {
+		pos++
+		if pos == end {
 			err = ErrBadPattern
 			return
 		}
 	}
-	r, n := utf8.DecodeRuneInString(chunk)
+	r, n := utf8.DecodeRuneInStringAt(pattern, pos)
 	if r == utf8.RuneError && n == 1 {
 		err = ErrBadPattern
 	}
-	nchunk = chunk[n:]
-	if len(nchunk) == 0 {
+	npos = pos + n
+	if npos == end {
 		err = ErrBadPattern
 	}
 	return
