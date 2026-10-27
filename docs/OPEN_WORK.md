@@ -17666,3 +17666,223 @@ Two documentation claims fell over while writing the reference section:
     `src/bytes/reader.mx` are the model - an offset field over the whole
     buffer), because `x = x[n:]` in a loop copies the whole remainder per
     step once the copy rule is enforced.
+
+## Round 229: the copy conversion's own damage, and 182 trims still standing
+
+    legacy typecheck, 51 packages + crypto closure   clean
+    stage4 build of the same main (/tmp/audit.s4)   links
+    0a units re-run after the encoding work         8/8 PASS
+
+The previous round's 245 sub-slice destinations were converted by a mechanical
+pass, and a mechanical pass cannot tell a slice from an array or a byte from a
+`[]edge`. What it produced compiled in the packages the 45-package sweep names
+and broke everywhere else. The receipts came from the legacy compiler, which
+type-checks with go/types and reports the exact expression:
+
+    invalid copy: argument must be a slice; have sum384 (variable of type [48]byte)
+    cannot use d.block (variable of type [128]byte) as []byte value in argument to mxutil.CopyAt
+    cannot use newSorted (variable of type []edge) as []byte value in argument to mxutil.CopyAt
+    invalid copy: argument must be a slice; have ev.base.args (variable of array type timedEventArgs)
+
+19 sites in 16 files. Two classes:
+
+  * **Array bases lost their `[:]`.** blake2b's blocks and key, the
+    chacha20poly1305 keys, chainhash's `*Hash`, secp256k1's ipad/opad and
+    keyBuf, tls's nonce fields, lzw's 8 KiB window, x/text's norm buffers and
+    the trace package's `timedEventArgs`. Slicing an ARRAY is a view of fixed
+    storage and stays one; only slicing a slice becomes a copy. The commit
+    that flipped the rule has to keep that distinction, and this is the
+    evidence for why.
+  * **Non-byte element types reached for a byte helper.** `mxutil.CopyAt`
+    writes bytes. hpack's table shift (`[]HeaderField`), bidi's `[]level`,
+    punycode's `[]rune` insert, trace/mud's merge and trace/order's queue grow
+    (`[]T`) became index loops.
+
+Reading the audit output also surfaced breaks that had nothing to do with that
+commit, in packages no phase compiled:
+
+  * `src/html/entity.mx` held `entity = map[string]rune{` twice. A syntax
+    error, so the whole `html` package had not compiled for some time - which
+    is why `html/escape.mx` still had an `x` and a `dst1` shadowing the
+    enclosing scope, and why its last `copy(b[dst:dst1], b[src:src1])` was
+    still a sub-slice destination.
+  * `text/scanner` converted a rune with `[]byte(tok)`, which is not a
+    conversion that exists, and dropped the `[:]` from an array base.
+  * `crypto/internal/fips140/bigmod` declared `d, c1, Y, c2` with `:=` inside
+    the four multiplication loops of a self-mutating method.
+  * `base32.DecodeString` decoded **in place** over `buf := []byte(s)`.
+    `[]byte(s)` is not a copy in Moxie - string and `[]byte` are one type - so
+    decoding a string rewrote the caller's bytes and then read its own output:
+    a 5-byte string came back holding the decoded bytes.
+
+### The cursor conversions that came with it
+
+The remedy is the same everywhere: carry the offset, name the length, never
+slice a buffer to move a cursor. Each file needed a different missing
+primitive, so those were added first and are now shared:
+
+    internal/bytealg   IndexFrom(a, b, from), IndexByteFrom(s, from, c)
+    unicode/utf8       DecodeRuneInStringAt(s, i), DecodeLastRuneInStringAt(s, end)
+    path, filepath     scanChunk/matchChunk/getEsc over (pattern, [cstart, cend))
+    ascii85            EncodeFrom(dst, src, off, n), DecodeFrom(dst, src, sn, flush)
+    base32, base64     EncodeFrom(dst, doff, src, soff, n), DecodeAt(dst, doff, src)
+    bytes              Count/genSplit/explode/Index* over an offset, replacer lookup
+    strconv            UnquoteCharAt(s, i, quote) -> bytes consumed
+    net, textproto     leading trim counted, one prefix slice
+
+The stream decoders also stopped truncating their own output buffer
+(`d.out = d.out[n:]` per Read, which is quadratic in the number of reads) for an
+`outOff` cursor, and ascii85's input compaction lost
+`copy(d.buf, d.buf[nsrc:d.nbuf])` - a sub-slice source, so a temporary - for an
+index loop.
+
+### What is still standing, measured
+
+A scan of every `.mx` file for `x = x[...:]` at brace depth inside a `for`
+reports **182 sites in 120 functions**. They are not one problem:
+
+  * **Quadratic, hot, worth converting now**: the parsers. `time.parse` (10),
+    `csv.readRecord` (6), `encoding/hex` (1), `encoding/base58` (1),
+    `net/netip` (3), `archive/tar` reader+writer (7), `archive/zip` (3),
+    `compress/flate`, `compress/lzw`, `mime/multipart`, `mime/quotedprintable`,
+    `internal/dag/parse` (6), `internal/profile`, `internal/trace` parser.
+  * **Bounded to a few bytes or one pass**: `strconv/atoi`'s prefix trims
+    (1-2 bytes, once per call), `net/url.unescape`'s error-path slice (3
+    bytes), `xxhash`'s 31-byte tail walk, `encoding/asn1`'s BMPString.
+  * **State cursors over an owned buffer**: `flate`'s `f.toRead`, `lzw`'s
+    `r.toRead`, `mime/quotedprintable`'s `r.line`, `tar`'s `sr.sp`/`sw.sp`.
+    These are one trim per Read call, not per byte.
+
+The scan is the measure for the next rounds: a regex over every `.mx` file for
+`x = x[...:]` at brace depth inside a `for`, with the loop stack popped when
+the depth returns. It is kept here rather than as a test, so a red suite never
+depends on a heuristic.
+
+### The flip needs a window primitive, and that is the real blocker
+
+Converting the trims is necessary but not sufficient. The copy rule also
+breaks every place that hands a **tail of a buffer to a reader**:
+
+    src/bufio/bufio.mx:117        b.rd.Read(b.buf[b.w:])
+    src/encoding/ascii85          d.r.Read(d.buf[d.nbuf:])
+    src/encoding/base32, base64   d.r.Read(d.buf[d.nbuf:nn])
+
+After the flip each of those passes a temporary and the read lands in it.
+`resize(buf, cap)` does not help: the free space is at the tail, not at index 0.
+That is the "proper cursor mechanism ... it needs to be an api" the cursor
+directive asked for: a way to name `buf[off:off+n]` as a *view* explicitly,
+distinct from the copying `buf[a:b]`. Until it exists the flip cannot land
+without breaking every streaming reader in the tree, so the order is:
+
+  1. the window primitive (slice header over existing content, aliasing, by
+     construction only - never as a side effect of `[a:b]`),
+  2. the flip in both compilers: `s[a:b]` allocates len `b-a`, copies, cap
+     `b-a`; `s[:0]` is a header that refers to nothing; array and
+     pointer-to-array slicing stay views,
+  3. the fixtures: empty sub-slice has cap 0 and pushing into it does not reach
+     the parent; a write through a variable sub-slice does not reach the parent;
+     `resize` still reuses a buffer.
+
+## Round 230: the copy rule, measured against the tree that has to survive it
+
+    legacy typecheck     51-package audit, crypto closure, io/image closure: clean
+    bootstrap            s4a -> s4b -> s4c, s4b == s4c == 68d9bb99...
+    math/big probe       Rat.Float64: 0.333..., 0.666..., 0.5 (as Go)
+
+This round set out to flip the rule - a sub-slice of a slice allocates, copies
+and takes cap = len - and built it in both compilers to find out what it costs.
+The answer is in the tree now, in the shape of every site the flip broke, and
+it is worth recording before the rule goes in, because the list is the work.
+
+### What the flip is, in IR
+
+A slice value in stage4 is `{ptr, i64, i64}` (`sliceType`, ir_types.mx:283).
+`x := []byte{:8}` is one `runtime.alloc(8)` and three `insertvalue`s, so the
+header is a value - registers or a stack slot - not an object. Today
+`x[2:5]` is `extractvalue` x3, a `getelementptr` and three `insertvalue`s: the
+header moves, the bytes do not. The flip makes that block:
+
+    %n  = sub i64 5, 2
+    %p  = call ptr @runtime.alloc(i64 %n, ptr null, ptr null)
+    call ipt @runtime.sliceCopy(ptr %p, ptr %sp, ipt %n, ipt %n, ipt 1, ptr null)
+    %y  = { %p, %n, %n }
+
+and `x[:0]` becomes `{null, 0, 0}` (runtime alloc already turns a 0-byte
+request into a 1-byte one; returning nil instead makes the empty header refer
+to nothing, which is the rule the cursor directive asked for).
+
+Both compilers were changed, bootstrapped, and run. What follows is what it
+took to get a *compiler* to start, in the order the failures appeared.
+
+### 1. `x[:0]` and `x[:n]` are the buffer-reuse idiom, everywhere
+
+The runtime's own sovereign-group bookkeeping does
+
+    nb := unsafe.Slice(sovRootAlloc(nc*8), nc)
+    g.recs = nb[:len(g.recs)]
+
+`nb[:len]` under the flip is a *fresh* slice with cap == len, so the capacity
+just carved out of the root arena is thrown away and the next push grows
+again: `slicePush -> alloc -> ArenaAllocTD -> sovAddRec -> push` recursed until
+the stack died. Every such site is `resize(nb, len)` - same buffer, new length.
+Sites: g.recs, g.slots, g.batchStart, a.sovGroupList, mxutil
+Ensure/Reserve/GrowCap, mxregexp's grow, fmt's growBuf, bip39's padding grow.
+
+### 2. A reader has to be given somewhere to write
+
+Every buffered reader passed a tail window:
+
+    bufio.Reader.fill        b.rd.Read(b.buf[b.w:])
+    bytes.Buffer.ReadFrom    r.Read(b.buf[i:cap(b.buf)])
+    ascii85/base32/base64    d.r.Read(d.buf[d.nbuf:])
+    os, io/fs, io.ReadAll    f.Read(data[len(data):cap(data)])
+    image/jpeg, png, mime/multipart, x/text/transform, pkg/syntax
+
+Under the flip the read lands in a temporary and the bytes never arrive. The
+answer is the one the cursor directive named - a scratch plus a forward walk
+into the destination - so io gains
+
+    io.ReadInto(r, dst, off, tmp)   tmp owned by the caller (bufio passes a field)
+    io.ReadIntoN(r, dst, off)       scratch allocated in ReadIntoN's frame
+
+and mxutil.CopyRange is the walk, eight bytes at a time through a uint64
+register.
+
+### 3. `copy(dst[a:b], src)` is never a fast path
+
+24 sites, none quadratic, all wrong: math/big's tail shifts (natLsh has to walk
+*backward* because z may alias x shifted up), flate's back-reference copies,
+bufio's partial-write shift, base64's input compaction, h2's chunk advance,
+x/text's prefix merge, image draw/gif rows, ed25519, chacha20, RSA. All index
+loops or CopyRange now. `slices.mx`, `servemux121.mx`, `move_to_front.mx` and
+`gcm.mx` already carried the comment explaining why.
+
+### 4. The blocker: a function that writes through a window it was handed
+
+math/big's recursive division does
+
+    uu := u[j-B:]
+    natDivRecursiveStep(qhat, stk, uu[s:B+n], v[s:], depth+1)
+
+and the callee writes its remainder *into uu*. A copy there is not slow, it is
+wrong: `Rat.Float64(1/3)` panicked "expected exactly 54 bits of result"
+because the quotient came out of a buffer nobody looked at. The same shape is
+natNorm's returned tail, and it is the reason the flip needs either
+
+  * every such function to take (parent, offset) instead of a window - the
+    offset rewrite this campaign has been doing call by call, and math/big's
+    division recursion is the worst of them, or
+  * a named aliasing constructor (`sliceview(buf, off, n)`) that both
+    compilers lower to the header-only block, documented as same-frame-only.
+
+The measurement is the argument: the flip itself is 15 lines per compiler, and
+what it costs is this list, of which exactly one item (4) has no mechanical
+answer.
+
+### Reverted, not abandoned
+
+The two compiler changes and the runtime's `alloc(0) -> nil` are out of the
+tree again, because a half-applied rule compiles and lies. What stays is
+everything above: the resize conversions, io.ReadInto, the copy-destination
+loops, the 8-byte CopyRange, and the array views and non-byte loops from round
+229. None of it depends on the rule; all of it is what the rule will need.
