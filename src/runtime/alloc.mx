@@ -512,11 +512,17 @@ func sovRangeRegister(base, size uintptr, owner *sovGroup) {
 		}
 		nb := unsafe.Slice((*uintptr)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(uintptr(0)))), nc)
 		copy(nb, r)
-		domainRoot.sovRanges = nb[:len(r)]
+		// resize, not nb[:len(r)]: a bounded sub-slice copies and would drop
+		// the doubled capacity the next insert needs.
+		domainRoot.sovRanges = resize(nb, len(r))
 		r = domainRoot.sovRanges
 	}
 	r = resize(r, len(r)+2)
-	copy(r[(i+1)*2:], r[i*2:len(r)-2])
+	// Shift the entries above i up one slot, backwards and by index: a
+	// sub-slice destination would be a copy and the shift would not land.
+	for k := len(r) - 2 - 1; k >= i*2; k-- {
+		r[k+2] = r[k]
+	}
 	r[i*2] = lo
 	r[i*2+1] = hi
 	domainRoot.sovRanges = r
@@ -532,7 +538,9 @@ func sovRangeRegister(base, size uintptr, owner *sovGroup) {
 		o = nb
 	}
 	o = resize(o, n)
-	copy(o[i+1:], o[i:n-1])
+	for k := n - 2; k >= i; k-- {
+		o[k+1] = o[k]
+	}
 	o[i] = owner
 	domainRoot.sovRangeOwners = o
 }
@@ -553,12 +561,16 @@ func sovRangeUnregister(base uintptr) {
 	if i*2+1 >= len(r) || r[i*2] != base {
 		return
 	}
-	copy(r[i*2:], r[(i+1)*2:])
-	domainRoot.sovRanges = r[:len(r)-2]
+	for k := i * 2; k+2 < len(r); k++ {
+		r[k] = r[k+2]
+	}
+	domainRoot.sovRanges = resize(r, len(r)-2)
 	o := domainRoot.sovRangeOwners
 	if i < len(o) {
-		copy(o[i:], o[i+1:])
-		domainRoot.sovRangeOwners = o[:len(o)-1]
+		for k := i; k+1 < len(o); k++ {
+			o[k] = o[k+1]
+		}
+		domainRoot.sovRangeOwners = resize(o, len(o)-1)
 	}
 }
 

@@ -234,15 +234,19 @@ func (ka *ecdheKeyAgreement) generateServerKeyExchange(config *Config, cert *Cer
 	}
 	skx.key = []byte{:len(serverECDHEParams)+sigAndHashLen+2+len(sig)}
 	copy(skx.key, serverECDHEParams)
-	k := skx.key[len(serverECDHEParams):]
+	// Written by offset: k := skx.key[len(serverECDHEParams):] would be a copy
+	// once a sub-slice is a copy, and every k[...] write would be lost.
+	off := int32(len(serverECDHEParams))
 	if ka.version >= VersionTLS12 {
-		k[0] = byte(ka.signatureAlgorithm >> 8)
-		k[1] = byte(ka.signatureAlgorithm)
-		k = k[2:]
+		skx.key[off] = byte(ka.signatureAlgorithm >> 8)
+		skx.key[off+1] = byte(ka.signatureAlgorithm)
+		off += 2
 	}
-	k[0] = byte(len(sig) >> 8)
-	k[1] = byte(len(sig))
-	copy(k[2:], sig)
+	skx.key[off] = byte(len(sig) >> 8)
+	skx.key[off+1] = byte(len(sig))
+	for i := int32(0); i < len(sig); i++ {
+		skx.key[off+2+i] = sig[i]
+	}
 
 	return skx, nil
 }

@@ -186,32 +186,35 @@ func (s *Cipher) XORKeyStream(dst, src []byte) {
 	if len(dst) < len(src) {
 		panic("chacha20: output smaller than input")
 	}
-	dst = resize(dst, len(src))
-	if alias.InexactOverlap(dst, src) {
+	if alias.InexactOverlapLen(dst, len(src), src, len(src)) {
 		panic("chacha20: invalid buffer overlap")
 	}
 
+	// The walk keeps offsets: a sub-slice is a copy, so dst = dst[n:] would
+	// write everything after the first chunk into a throwaway.
+	pos := int32(0)
+
 	// First, drain any remaining key stream from a previous XORKeyStream.
 	if s.len != 0 {
-		keyStream := s.buf[bufSize-s.len:]
-		if len(src) < len(keyStream) {
-			keyStream = resize(keyStream, len(src))
+		n := int32(len(src))
+		if avail := int32(bufSize) - s.len; n > avail {
+			n = avail
 		}
-		_ = src[len(keyStream)-1] // bounds check elimination hint
-		for i, b := range keyStream {
-			dst[i] = src[i] ^ b
+		for i := int32(0); i < n; i++ {
+			dst[i] = src[i] ^ s.buf[int32(bufSize)-s.len+i]
 		}
-		s.len -= len(keyStream)
-		dst, src = dst[len(keyStream):], src[len(keyStream):]
+		s.len -= n
+		pos = n
 	}
-	if len(src) == 0 {
+	if pos == int32(len(src)) {
 		return
 	}
 
 	// If we'd need to let the counter overflow and keep generating output,
 	// panic immediately. If instead we'd only reach the last block, remember
 	// not to generate any more output after the buffer is drained.
-	numBlocks2 := (uint64(len(src)) + blockSize - 1) / blockSize
+	rem := int32(len(src)) - pos
+	numBlocks2 := (uint64(rem) + blockSize - 1) / blockSize
 	if s.overflow || uint64(s.counter)+numBlocks2 > 1<<32 {
 		panic("chacha20: counter overflow")
 	} else if uint64(s.counter)+numBlocks2 == 1<<32 {
@@ -222,37 +225,49 @@ func (s *Cipher) XORKeyStream(dst, src []byte) {
 	// multiple of bufSize. Platform-specific ones process multiple blocks at a
 	// time, so have bufSizes that are a multiple of blockSize.
 
-	full := len(src) - len(src)%bufSize
+	full := rem - rem%bufSize
 	if full > 0 {
-		s.xorKeyStreamBlocks(dst[:full], src[:full])
+		s.xorKeyStreamBlocks(dst, pos, src, pos, full)
 	}
-	dst, src = dst[full:], src[full:]
+	pos += full
 
 	// If using a multi-block xorKeyStreamBlocks would overflow, use the generic
 	// one that does one block at a time.
 	const blocksPerBuf = bufSize / blockSize
 	if uint64(s.counter)+blocksPerBuf > 1<<32 {
 		s.buf = [bufSize]byte{}
-		numBlocks1 := (len(src) + blockSize - 1) / blockSize
-		buf := s.buf[bufSize-numBlocks1*blockSize:]
-		copy(buf, src)
-		s.xorKeyStreamBlocksGeneric(buf, buf)
-		s.len = len(buf) - copy(dst, buf)
+		rem1 := int32(len(src)) - pos
+		numBlocks1 := (rem1 + blockSize - 1) / blockSize
+		off := int32(bufSize) - numBlocks1*blockSize
+		for i := int32(0); i < rem1; i++ {
+			s.buf[off+i] = src[pos+i]
+		}
+		s.xorKeyStreamBlocksGeneric(s.buf[:], off, s.buf[:], off, numBlocks1*blockSize)
+		for i := int32(0); i < rem1; i++ {
+			dst[pos+i] = s.buf[off+i]
+		}
+		s.len = numBlocks1*blockSize - rem1
 		return
 	}
 
 	// If we have a partial (multi-)block, pad it for xorKeyStreamBlocks, and
 	// keep the leftover keystream for the next XORKeyStream invocation.
-	if len(src) > 0 {
+	if int32(len(src)) > pos {
 		s.buf = [bufSize]byte{}
-		copy(s.buf[:], src)
-		s.xorKeyStreamBlocks(s.buf[:], s.buf[:])
-		s.len = bufSize - copy(dst, s.buf[:])
+		rem2 := int32(len(src)) - pos
+		for i := int32(0); i < rem2; i++ {
+			s.buf[i] = src[pos+i]
+		}
+		s.xorKeyStreamBlocks(s.buf[:], 0, s.buf[:], 0, bufSize)
+		for i := int32(0); i < rem2; i++ {
+			dst[pos+i] = s.buf[i]
+		}
+		s.len = int32(bufSize) - rem2
 	}
 }
 
-func (s *Cipher) xorKeyStreamBlocksGeneric(dst, src []byte) {
-	if len(dst) != len(src) || len(dst)%blockSize != 0 {
+func (s *Cipher) xorKeyStreamBlocksGeneric(dst []byte, dstOff int32, src []byte, srcOff int32, n int32) {
+	if n%blockSize != 0 || n > int32(len(dst))-dstOff || n > int32(len(src))-srcOff {
 		panic("chacha20: internal error: wrong dst and/or src length")
 	}
 
@@ -284,9 +299,10 @@ func (s *Cipher) xorKeyStreamBlocksGeneric(dst, src []byte) {
 		s.precompDone = true
 	}
 
-	// A condition of len(src) > 0 would be sufficient, but this also
-	// acts as a bounds check elimination hint.
-	for len(src) >= 64 && len(dst) >= 64 {
+	// The walk keeps offsets: a sub-slice is a copy, so dst = dst[64:] would
+	// write every block after the first into a throwaway.
+	pos := int32(0)
+	for pos < n {
 		// The remainder of the first column round.
 		fcr0, fcr4, fcr8, fcr12 := quarterRound(c0, c4, c8, s.counter)
 
@@ -313,26 +329,25 @@ func (s *Cipher) xorKeyStreamBlocksGeneric(dst, src []byte) {
 
 		// Add back the initial state to generate the key stream, then
 		// XOR the key stream with the source and write out the result.
-		addXor(dst[0:4], src[0:4], x0, c0)
-		addXor(dst[4:8], src[4:8], x1, c1)
-		addXor(dst[8:12], src[8:12], x2, c2)
-		addXor(dst[12:16], src[12:16], x3, c3)
-		addXor(dst[16:20], src[16:20], x4, c4)
-		addXor(dst[20:24], src[20:24], x5, c5)
-		addXor(dst[24:28], src[24:28], x6, c6)
-		addXor(dst[28:32], src[28:32], x7, c7)
-		addXor(dst[32:36], src[32:36], x8, c8)
-		addXor(dst[36:40], src[36:40], x9, c9)
-		addXor(dst[40:44], src[40:44], x10, c10)
-		addXor(dst[44:48], src[44:48], x11, c11)
-		addXor(dst[48:52], src[48:52], x12, s.counter)
-		addXor(dst[52:56], src[52:56], x13, c13)
-		addXor(dst[56:60], src[56:60], x14, c14)
-		addXor(dst[60:64], src[60:64], x15, c15)
+		addXor(dst, dstOff+pos+0, src, srcOff+pos+0, x0, c0)
+		addXor(dst, dstOff+pos+4, src, srcOff+pos+4, x1, c1)
+		addXor(dst, dstOff+pos+8, src, srcOff+pos+8, x2, c2)
+		addXor(dst, dstOff+pos+12, src, srcOff+pos+12, x3, c3)
+		addXor(dst, dstOff+pos+16, src, srcOff+pos+16, x4, c4)
+		addXor(dst, dstOff+pos+20, src, srcOff+pos+20, x5, c5)
+		addXor(dst, dstOff+pos+24, src, srcOff+pos+24, x6, c6)
+		addXor(dst, dstOff+pos+28, src, srcOff+pos+28, x7, c7)
+		addXor(dst, dstOff+pos+32, src, srcOff+pos+32, x8, c8)
+		addXor(dst, dstOff+pos+36, src, srcOff+pos+36, x9, c9)
+		addXor(dst, dstOff+pos+40, src, srcOff+pos+40, x10, c10)
+		addXor(dst, dstOff+pos+44, src, srcOff+pos+44, x11, c11)
+		addXor(dst, dstOff+pos+48, src, srcOff+pos+48, x12, s.counter)
+		addXor(dst, dstOff+pos+52, src, srcOff+pos+52, x13, c13)
+		addXor(dst, dstOff+pos+56, src, srcOff+pos+56, x14, c14)
+		addXor(dst, dstOff+pos+60, src, srcOff+pos+60, x15, c15)
 
 		s.counter += 1
-
-		src, dst = src[blockSize:], dst[blockSize:]
+		pos += blockSize
 	}
 }
 
