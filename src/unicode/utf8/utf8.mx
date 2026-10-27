@@ -297,41 +297,49 @@ func RuneLen(r rune) (n int32) {
 // If the rune is out of range, it writes the encoding of [RuneError].
 // It returns the number of bytes written.
 func EncodeRune(p []byte, r rune) (n int32) {
+	return EncodeRuneAt(p, 0, r)
+}
+
+// EncodeRuneAt writes the UTF-8 encoding of r at p[off:]. The offset form is
+// what a cursor needs: p[off:] is a copy under the slice rule, so the encoding
+// written through it was discarded (bufio and bytes WriteRune, html escaping,
+// fmt's padding, the normalizers).
+func EncodeRuneAt(p []byte, off int32, r rune) (n int32) {
 	// This function is inlineable for fast handling of ASCII.
 	if uint32(r) <= rune1Max {
-		p[0] = byte(r)
+		p[off] = byte(r)
 		return 1
 	}
-	return encodeRuneNonASCII(p, r)
+	return encodeRuneAtNonASCII(p, off, r)
 }
 
 
-func encodeRuneNonASCII(p []byte, r rune) (n int32) {
+func encodeRuneAtNonASCII(p []byte, off int32, r rune) (n int32) {
 	// Negative values are erroneous. Making it unsigned addresses the problem.
 	switch i := uint32(r); {
 	case i <= rune2Max:
-		_ = p[1] // eliminate bounds checks
-		p[0] = t2 | byte(r>>6)
-		p[1] = tx | byte(r)&maskx
+		_ = p[off+1] // eliminate bounds checks
+		p[off+0] = t2 | byte(r>>6)
+		p[off+1] = tx | byte(r)&maskx
 		return 2
 	case i < surrogateMin, surrogateMax < i && i <= rune3Max:
-		_ = p[2] // eliminate bounds checks
-		p[0] = t3 | byte(r>>12)
-		p[1] = tx | byte(r>>6)&maskx
-		p[2] = tx | byte(r)&maskx
+		_ = p[off+2] // eliminate bounds checks
+		p[off+0] = t3 | byte(r>>12)
+		p[off+1] = tx | byte(r>>6)&maskx
+		p[off+2] = tx | byte(r)&maskx
 		return 3
 	case i > rune3Max && i <= MaxRune:
-		_ = p[3] // eliminate bounds checks
-		p[0] = t4 | byte(r>>18)
-		p[1] = tx | byte(r>>12)&maskx
-		p[2] = tx | byte(r>>6)&maskx
-		p[3] = tx | byte(r)&maskx
+		_ = p[off+3] // eliminate bounds checks
+		p[off+0] = t4 | byte(r>>18)
+		p[off+1] = tx | byte(r>>12)&maskx
+		p[off+2] = tx | byte(r>>6)&maskx
+		p[off+3] = tx | byte(r)&maskx
 		return 4
 	default:
-		_ = p[2] // eliminate bounds checks
-		p[0] = runeErrorByte0
-		p[1] = runeErrorByte1
-		p[2] = runeErrorByte2
+		_ = p[off+2] // eliminate bounds checks
+		p[off+0] = runeErrorByte0
+		p[off+1] = runeErrorByte1
+		p[off+2] = runeErrorByte2
 		return 3
 	}
 }

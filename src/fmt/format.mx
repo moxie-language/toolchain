@@ -81,12 +81,14 @@ func (f *fmt) writePadding(n int32) {
 	if f.zero && !f.minus {
 		padByte = byte('0')
 	}
-	// Fill padding with padByte.
-	padding := buf[oldLen:newLen]
-	for i := range padding {
-		padding[i] = padByte
+	// Fill padding with padByte. The span is written through a resized header,
+	// not buf[oldLen:newLen]: a sub-slice is a copy, so the padding bytes were
+	// written into one and the caller saw NULs.
+	buf = resize(buf, newLen)
+	for i := oldLen; i < newLen; i++ {
+		buf[i] = padByte
 	}
-	*f.buf = buf[:newLen]
+	*f.buf = buf
 }
 
 // pad appends b to f.buf, padded on left (!f.minus) or right (f.minus).
@@ -159,7 +161,7 @@ func (f *fmt) fmtUnicode(u uint64) {
 		i--
 		buf[i] = '\''
 		i -= utf8.RuneLen(rune(u))
-		utf8.EncodeRune(buf[i:], rune(u))
+		utf8.EncodeRuneAt(buf, i, rune(u))
 		i--
 		buf[i] = '\''
 		i--
