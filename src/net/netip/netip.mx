@@ -173,42 +173,48 @@ func (err *parseAddrError) Error() (rs string) {
 func (err *parseAddrError) String() (rs string) { return err.Error() }
 
 func parseIPv4Fields(in string, off, end int32, fields []uint8) (rerr error) {
+	return parseIPv4FieldsAt(in, off, end, fields, 0)
+}
+
+// parseIPv4FieldsAt writes the four octets at fields[foff:foff+4]. The span
+// form exists because a sub-slice is a copy: the caller used to pass
+// ip[i:i+4], which wrote the copy and left the address zeroed.
+func parseIPv4FieldsAt(in string, off, end int32, fields []uint8, foff int32) (rerr error) {
 	var val, pos int32
 	var digLen int32 // number of digits in current octet
-	s := in[off:end]
-	for i := 0; i < len(s); i++ {
-		if s[i] >= '0' && s[i] <= '9' {
+	for i := off; i < end; i++ {
+		if in[i] >= '0' && in[i] <= '9' {
 			if digLen == 1 && val == 0 {
 				return &parseAddrError{in: in, msg: "IPv4 field has octet with leading zero"}
 			}
-			val = val*10 + int32(s[i]) - '0'
+			val = val*10 + int32(in[i]) - '0'
 			digLen++
 			if val > 255 {
 				return &parseAddrError{in: in, msg: "IPv4 field has value >255"}
 			}
-		} else if s[i] == '.' {
+		} else if in[i] == '.' {
 			// .1.2.3
 			// 1.2.3.
 			// 1..2.3
-			if i == 0 || i == len(s)-1 || s[i-1] == '.' {
-				return &parseAddrError{in: in, msg: "IPv4 field must have at least one digit", at: s[i:]}
+			if i == off || i == end-1 || in[i-1] == '.' {
+				return &parseAddrError{in: in, msg: "IPv4 field must have at least one digit", at: in[i:]}
 			}
 			// 1.2.3.4.5
 			if pos == 3 {
 				return &parseAddrError{in: in, msg: "IPv4 address too long"}
 			}
-			fields[pos] = uint8(val)
+			fields[foff+pos] = uint8(val)
 			pos++
 			val = 0
 			digLen = 0
 		} else {
-			return &parseAddrError{in: in, msg: "unexpected character", at: s[i:]}
+			return &parseAddrError{in: in, msg: "unexpected character", at: in[i:]}
 		}
 	}
 	if pos < 3 {
 		return &parseAddrError{in: in, msg: "IPv4 address too short"}
 	}
-	fields[3] = uint8(val)
+	fields[foff+3] = uint8(val)
 	return nil
 }
 
@@ -302,7 +308,7 @@ func parseIPv6(in string) (raddr Addr, rerr error) {
 			if len(zone) > 0 {
 				end -= len(zone) + 1
 			}
-			err := parseIPv4Fields(in, end-(len(s)-sp), end, ip[i:i+4])
+			err := parseIPv4FieldsAt(in, end-(len(s)-sp), end, ip, i)
 			if err != nil {
 				return Addr{}, err
 			}
@@ -357,7 +363,9 @@ func parseIPv6(in string) (raddr Addr, rerr error) {
 		for j := i - 1; j >= ellipsis; j-- {
 			ip[j+n] = ip[j]
 		}
-		clear(ip[ellipsis : ellipsis+n])
+		for j := ellipsis; j < ellipsis+n; j++ {
+			ip[j] = 0
+		}
 	} else if ellipsis >= 0 {
 		// Ellipsis must represent at least one 0 group.
 		return Addr{}, &parseAddrError{in: in, msg: "the :: must expand to at least one field of zeros"}
@@ -719,8 +727,8 @@ func (ip *Addr) Prefix(b int32) (rprefix Prefix, rerr error) {
 // consumers are the syscall sockaddr structures, whose fields are fixed arrays
 // because their layout is the kernel's. AsSlice is the slice form.
 func (ip *Addr) As16() (a16 [16]byte) {
-	byteorder.BEPutUint64(a16[:8], ip.addr.hi)
-	byteorder.BEPutUint64(a16[8:], ip.addr.lo)
+	byteorder.BEPutUint64At(a16[:], 0, ip.addr.hi)
+	byteorder.BEPutUint64At(a16[:], 8, ip.addr.lo)
 	return a16
 }
 
@@ -730,7 +738,7 @@ func (ip *Addr) As16() (a16 [16]byte) {
 // As4 returns the address as a fixed 4-byte array; see As16.
 func (ip *Addr) As4() (a4 [4]byte) {
 	if ip.z == z4 || ip.Is4In6() {
-		byteorder.BEPutUint32(a4[:], uint32(ip.addr.lo))
+		byteorder.BEPutUint32At(a4[:], 0, uint32(ip.addr.lo))
 		return a4
 	}
 	if ip.z == z0 {
@@ -746,12 +754,12 @@ func (ip *Addr) AsSlice() (rb []byte) {
 		return nil
 	case z4:
 		var ret [4]byte
-		byteorder.BEPutUint32(ret[:], uint32(ip.addr.lo))
+		byteorder.BEPutUint32At(ret[:], 0, uint32(ip.addr.lo))
 		return ret[:]
 	default:
 		var ret [16]byte
-		byteorder.BEPutUint64(ret[:8], ip.addr.hi)
-		byteorder.BEPutUint64(ret[8:], ip.addr.lo)
+		byteorder.BEPutUint64At(ret[:], 0, ip.addr.hi)
+		byteorder.BEPutUint64At(ret[:], 8, ip.addr.lo)
 		return ret[:]
 	}
 }
