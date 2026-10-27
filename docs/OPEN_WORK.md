@@ -17886,3 +17886,85 @@ tree again, because a half-applied rule compiles and lies. What stays is
 everything above: the resize conversions, io.ReadInto, the copy-destination
 loops, the 8-byte CopyRange, and the array views and non-byte loops from round
 229. None of it depends on the rule; all of it is what the rule will need.
+
+## Round 231: five more parsers keep a cursor, and the flip's remaining plan
+
+    gate 240 (169 units, phase 2 bootstrap + tree-cleanliness)   169/169 PASS, rc=0
+
+The offset conversions continued from round 230's list. Five files, each one a
+loop that re-sliced its input per element and therefore copied the rest of the
+input per element:
+
+    encoding/csv   readRecord: per leading space, per comma, per closing quote
+                   and per end-of-line continuation. lp is a cursor now; the
+                   field ends are indices; readLine is the only place the line
+                   is genuinely replaced (and it resets lp).
+    encoding/csv   writeField: two trims per special character.
+    net/netip      parseIPv6: two trims per field plus the embedded-IPv4
+                   offset, which is end-(len(s)-sp) from the cursor.
+    archive/tar    sparseFileReader.Read and sparseFileWriter.Write:
+                   `b = b[nf:]` per fragment, on the caller's buffer.
+    x/net/httpguts trimOWS's leading run, and the token walk that re-sliced v
+                   after every comma.
+    archive/zip    toValidName's `p = p[len("../"):]` per parent reference.
+
+Two primitives came out of it: bytes.IndexRuneFrom (ascii path via
+IndexByteFrom) and csv's nextRuneAt/lengthNLFrom.
+
+### The verification that mattered
+
+Both of the parsers with subtle state (csv's record machine, netip's IPv6
+grammar) were diffed against Go itself, byte for byte:
+
+    csv      16 inputs: plain, no trailing newline, empty field, quoted,
+             doubled quote, embedded comma, embedded newline, TrimLeadingSpace,
+             comment lines, unterminated quote, quote-then-text, trailing
+             comma, single field, empty quoted, CRLF, bare quote.
+             Field lists AND ParseError line/column numbers identical.
+    netip    16 addresses: compressed, full, ::, ::1, 1::, zone, IPv4-mapped
+             both notations, and the rejects (double ellipsis, nine fields,
+             five hex digits, short/long embedded IPv4, empty, empty zone).
+             String forms and accept/reject identical.
+
+tar was round-tripped (three entries, one empty) instead: the sparse loops only
+run for GNU sparse entries and a differential against Go would need a sparse
+archive to compare against.
+
+### What is left, with the plan per file
+
+The scan from round 229 reports the remaining in-loop self-trims. The ones
+worth doing, and the shape each needs:
+
+  time/format.mx   parse carries `value` through a switch of ~20 std cases;
+                   every case consumes a prefix. Needs a vp cursor plus
+                   getnumAt/getnum3At/skipAt/lookupAt/parseNanosecondsAt, and
+                   the five TZ cases that currently build
+                   (`sign, hb, mb, seconds, value = value[0:1], value[1:3], ...`)
+                   become window reads at vp. ~60 edits, then diff against Go
+                   over a layout/value table (the strongest check available).
+  internal/dag/parse.mx   p.text trims in the lexer loop.
+  cgroup_linux.mx   line trims across seven small parse loops.
+  hpack            the huffman decoder's input walk.
+  x509/parser, x509/verify, crypto/tls/(ech|conn|key_agreement),
+  internal/profile, flate, lzw   state cursors over an owned buffer; one trim
+                   per Read call rather than per byte, so they are last.
+
+### The copy rule: the remaining plan is one function
+
+Round 230 left the flip blocked on math/big's recursive division, which is the
+only code found so far that *writes through a window it was handed*:
+
+    uu := u[j-B:]
+    natDivRecursiveStep(qhat, stk, uu[s:B+n], v[s:], depth+1)   // writes uu
+
+The conversion is mechanical but touches every arithmetic helper at once:
+natDivRecursiveStep takes (u, uOff, uLen, v, vOff, vLen) and calls
+natNormAt, addToAt, subVVAt, subVWAt, natCmpAt, natMulAt. 34 call sites in
+natdiv.mx, of which natDivLarge/natDivBasic/natDivRecursive/natDivRecursiveStep
+are the four that matter. Verification is already in place:
+math/big Rat.Float64(1/3) as a probe, the bootstrap (the compiler converts
+float constants through math/big), and the gate.
+
+After that the flip itself is the 15 lines round 230 recorded, plus the
+fixtures for the rule (empty sub-slice cap 0, a write through a variable
+sub-slice does not reach the parent, resize still reuses a buffer).
