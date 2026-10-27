@@ -18129,3 +18129,57 @@ converting to it call by call.
 The rule stays off. math/big's conversion stays in: it is correct under view
 semantics too - `(u, 0, len(u))` with the At helpers is the same arithmetic -
 and it is a package's worth of the work already done.
+
+## Round 236: the rule's codegen is right, and the tree has a negative-length slice
+
+    bootstrap   s4a -> s4b -> s4c, s4b == s4c == 3361eec0 (new fixpoint)
+    gate 245    169/169 PASS
+    probe       eleven slice shapes compiled by the flipped LEGACY compiler and
+                by the flipped STAGE4 compiler: identical, all correct
+
+The rule went back on with the math/big and slices.Grow conversions in place.
+This time the codegen itself was put on trial first, with a probe covering what
+the compiler's own code does with slices - `s[1:]`, `s[:2]`, `s[len(s):]`,
+`s[0:0]`, a sub-slice returned from a function, one passed to a mutator, one
+stored in a struct field, a `[]string` sub-slice, and `resize` reuse:
+
+    tail=[bcde] len=4 cap=4          copy, cap = len
+    after t[0]='Z': base=[abcde]     the write did not reach the parent
+    empty len=0 cap=0                alloc(0) is nil
+    suffix len=0 cap=0
+    after mutate(base[1:3]): base=[abcde]
+    after struct write: base=[abcde] name=[Pb]
+    resize base=[abNde] rr=[abN] cap=16
+
+Both the flipped legacy compiler and the flipped stage4 compiler produce exactly
+that. So the copy emission is not the problem.
+
+### What is
+
+The bootstrap got two generations and then s4b died compiling `math`:
+
+    alloc: implausible size 18446744073709551552 arena=... sovereign=0
+    panic: runtime error at 0x...: alloc: implausible allocation size
+
+2^64 - 64. That is a negative length times an element size: the flip's
+`byteLen = newLen * elemSz` with `newLen` wrapped. The view form does not
+allocate, so the same slice expression produced a huge-length view and the code
+that received it must simply never have touched it; the copy form hands the
+length to `alloc` and dies. A latent negative-length `s[:n]` in the compiler's
+own code, exposed rather than caused.
+
+Finding it needs a caller address, and the panic path is fully inlined into the
+runtime (`returnAddress` reports a runtime address, gdb shows only runtime
+frames). The next step is to build the flipped stage4 with a `returnAddress` +
+`addr2line` diagnostic in the arena allocator, which names the tree function
+and line that asked for -64 bytes.
+
+### Kept
+
+math/big's remaining window destinations (natNorm/natAlloc returning resize,
+natAdd/natSub/natSub-fixup/addTo/natLsh, natmul's addTo/lshVU/mulAddVWW, and
+natdiv's own qhatv windows) and slices.Grow/Clip. All are correct under view
+semantics - the arithmetic is the same - and they are the packages the rule
+needs first. math/big is bit-identical to Go with them in (QuoRem 64..8192 bits
+across both division paths, Rat.Float64, big.Float text), csv's differential is
+unchanged, the bootstrap reaches 3361eec0, and gate 245 is green.
