@@ -99,6 +99,7 @@ package net
 import (
 	"context"
 	"errors"
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"internal/poll"
 	"io"
 	"os"
@@ -873,10 +874,12 @@ func (v *Buffers) WriteTo(w io.Writer) (n int64, err error) {
 // Read modifies v.Runs as well as v.Runs[i] for 0 <= i < len(v.Runs),
 // but does not modify v.Runs[i][j] for any i, j.
 func (v *Buffers) Read(p []byte) (n int32, err error) {
-	for len(p) > 0 && len(v.Runs) > 0 {
-		n0 := copy(p, v.Runs[0])
+	// The destination is p at an offset, not p[n0:]: a sub-slice is a COPY under
+	// the slice rule, so only the first run reached the caller's buffer and the
+	// rest of the drained runs were lost.
+	for n < int32(len(p)) && len(v.Runs) > 0 {
+		n0 := mxutil.CopyAt(p, n, v.Runs[0])
 		v.consume(int64(n0))
-		p = p[n0:]
 		n += n0
 	}
 	if len(v.Runs) == 0 {
