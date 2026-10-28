@@ -34,10 +34,12 @@ func sais_8_64(text []byte, textMax int32, sa, tmp []int64) {
 	// the character frequency each time we need it.
 	var freq, bucket []int64
 	if len(tmp) >= 2*textMax {
-		freq, bucket = tmp[:textMax], tmp[textMax:2*textMax]
+		freq = []int64{:textMax}
+		bucket = []int64{:textMax}
 		freq[0] = -1 // mark as uninitialized
 	} else {
-		freq, bucket = nil, tmp[:textMax]
+		freq = nil
+		bucket = []int64{:textMax}
 	}
 
 	// The SAIS algorithm.
@@ -98,10 +100,12 @@ func sais_32(text []int32, textMax int32, sa, tmp []int32) {
 	// the character frequency each time we need it.
 	var freq, bucket []int32
 	if len(tmp) >= 2*textMax {
-		freq, bucket = tmp[:textMax], tmp[textMax:2*textMax]
+		freq = []int32{:textMax}
+		bucket = []int32{:textMax}
 		freq[0] = -1 // mark as uninitialized
 	} else {
-		freq, bucket = nil, tmp[:textMax]
+		freq = nil
+		bucket = []int32{:textMax}
 	}
 
 	// The SAIS algorithm.
@@ -162,10 +166,12 @@ func sais_64(text []int64, textMax int32, sa, tmp []int64) {
 	// the character frequency each time we need it.
 	var freq, bucket []int64
 	if len(tmp) >= 2*textMax {
-		freq, bucket = tmp[:textMax], tmp[textMax:2*textMax]
+		freq = []int64{:textMax}
+		bucket = []int64{:textMax}
 		freq[0] = -1 // mark as uninitialized
 	} else {
-		freq, bucket = nil, tmp[:textMax]
+		freq = nil
+		bucket = []int64{:textMax}
 	}
 
 	// The SAIS algorithm.
@@ -213,7 +219,7 @@ func freq_8_64(text []byte, freq, bucket []int64) (out []int64) {
 		freq = bucket
 	}
 
-	freq = freq[:256] // eliminate bounds check for freq[c] below
+	freq = resize(freq, 256) // eliminate bounds check for freq[c] below
 	clear(freq)
 	for _, c := range text {
 		freq[c]++
@@ -253,8 +259,8 @@ func freq_64(text []int64, freq, bucket []int64) (out []int64) {
 
 func bucketMin_8_64(text []byte, freq, bucket []int64) {
 	freq = freq_8_64(text, freq, bucket)
-	freq = freq[:256]     // establish len(freq) = 256, so 0 ≤ i < 256 below
-	bucket = bucket[:256] // eliminate bounds check for bucket[i] below
+	freq = resize(freq, 256)     // establish len(freq) = 256, so 0 ≤ i < 256 below
+	bucket = resize(bucket, 256) // eliminate bounds check for bucket[i] below
 	total := int64(0)
 	for i, n := range freq {
 		bucket[i] = total
@@ -282,8 +288,8 @@ func bucketMin_64(text []int64, freq, bucket []int64) {
 
 func bucketMax_8_64(text []byte, freq, bucket []int64) {
 	freq = freq_8_64(text, freq, bucket)
-	freq = freq[:256]     // establish len(freq) = 256, so 0 ≤ i < 256 below
-	bucket = bucket[:256] // eliminate bounds check for bucket[i] below
+	freq = resize(freq, 256)     // establish len(freq) = 256, so 0 ≤ i < 256 below
+	bucket = resize(bucket, 256) // eliminate bounds check for bucket[i] below
 	total := int64(0)
 	for i, n := range freq {
 		total += n
@@ -314,7 +320,7 @@ func placeLMS_8_64(text []byte, sa, freq, bucket []int64) (out int32) {
 
 	numLMS := 0
 	lastB := int64(-1)
-	bucket = bucket[:256] // eliminate bounds check for bucket[c1] below
+	bucket = resize(bucket, 256) // eliminate bounds check for bucket[c1] below
 
 	// The next stanza of code (until the blank line) loop backward
 	// over text, stopping to execute a code body at each position i
@@ -508,7 +514,7 @@ func placeLMS_64(text []int64, sa, freq, bucket []int64) (out int32) {
 func induceSubL_8_64(text []byte, sa, freq, bucket []int64) {
 	// Initialize positions for left side of character buckets.
 	bucketMin_8_64(text, freq, bucket)
-	bucket = bucket[:256] // eliminate bounds check for bucket[cB] below
+	bucket = resize(bucket, 256) // eliminate bounds check for bucket[cB] below
 
 	// As we scan the array left-to-right, each sa[i] = j > 0 is a correctly
 	// sorted suffix array entry (for text[j:]) for which we know that j-1 is type L.
@@ -740,7 +746,7 @@ func induceSubL_64(text []int64, sa, freq, bucket []int64) {
 func induceSubS_8_64(text []byte, sa, freq, bucket []int64) {
 	// Initialize positions for right side of character buckets.
 	bucketMax_8_64(text, freq, bucket)
-	bucket = bucket[:256] // eliminate bounds check for bucket[cB] below
+	bucket = resize(bucket, 256) // eliminate bounds check for bucket[cB] below
 
 	// Analogous to induceSubL_8_64 above,
 	// as we scan the array right-to-left, each sa[i] = j > 0 is a correctly
@@ -1191,7 +1197,15 @@ func map_64(sa []int64, numLMS int32) {
 }
 
 func recurse_64(sa, oldTmp []int64, numLMS, maxID int32) {
-	dst, saTmp, text := sa[:numLMS], sa[numLMS:len(sa)-numLMS], sa[len(sa)-numLMS:]
+	// dst and text are the two ends of sa, and both are written by the
+	// recursion, so they are real buffers here (a sub-slice is a copy) and are
+	// copied back below. saTmp is scratch, so a copy of it is fine.
+	dst := []int64{:numLMS}
+	text := []int64{:numLMS}
+	for i := int32(0); i < numLMS; i++ {
+		text[i] = sa[len(sa)-numLMS+i]
+	}
+	saTmp := sa[numLMS : len(sa)-numLMS]
 
 	// Set up temporary space for recursive call.
 	// We must pass sais_64 a tmp buffer with at least maxID entries.
@@ -1248,13 +1262,17 @@ func recurse_64(sa, oldTmp []int64, numLMS, maxID int32) {
 	// sais_64 requires that the caller arrange to clear dst,
 	// because in general the caller may know dst is
 	// freshly-allocated and already cleared. But this one is not.
-	clear(dst)
 	sais_64(text, maxID, dst, tmp)
+	for i := int32(0); i < numLMS; i++ {
+		sa[i] = dst[i]
+	}
 }
 
 func unmap_8_64(text []byte, sa []int64, numLMS int32) {
-	unmap := sa[len(sa)-numLMS:]
-	j := len(unmap)
+	// By offset: sa[len(sa)-numLMS:] is a copy under the slice rule, so the
+	// inverse map was written into it and read back as zeros.
+	unmapOff := len(sa) - numLMS
+	j := numLMS
 
 	// "LMS-substring iterator" (see placeLMS_8_64 above).
 	c0, c1, isTypeS := byte(0), byte(0), false
@@ -1267,20 +1285,25 @@ func unmap_8_64(text []byte, sa []int64, numLMS int32) {
 
 			// Populate inverse map.
 			j--
-			unmap[j] = int64(i + 1)
+			sa[unmapOff+j] = int64(i + 1)
 		}
 	}
 
 	// Apply inverse map to subproblem suffix array.
+	// full keeps the longer length: the inverse map lives above numLMS, and
+	// indexing past a resized header is bounds-checked against its new length.
+	full := sa
 	sa = resize(sa, numLMS)
 	for i := 0; i < len(sa); i++ {
-		sa[i] = unmap[sa[i]]
+		sa[i] = full[unmapOff+full[i]]
 	}
 }
 
 func unmap_32(text []int32, sa []int32, numLMS int32) {
-	unmap := sa[len(sa)-numLMS:]
-	j := len(unmap)
+	// By offset: sa[len(sa)-numLMS:] is a copy under the slice rule, so the
+	// inverse map was written into it and read back as zeros.
+	unmapOff := len(sa) - numLMS
+	j := numLMS
 
 	// "LMS-substring iterator" (see placeLMS_32 above).
 	c0, c1, isTypeS := int32(0), int32(0), false
@@ -1293,20 +1316,25 @@ func unmap_32(text []int32, sa []int32, numLMS int32) {
 
 			// Populate inverse map.
 			j--
-			unmap[j] = int32(i + 1)
+			sa[unmapOff+j] = int32(i + 1)
 		}
 	}
 
 	// Apply inverse map to subproblem suffix array.
+	// full keeps the longer length: the inverse map lives above numLMS, and
+	// indexing past a resized header is bounds-checked against its new length.
+	full := sa
 	sa = resize(sa, numLMS)
 	for i := 0; i < len(sa); i++ {
-		sa[i] = unmap[sa[i]]
+		sa[i] = full[unmapOff+full[i]]
 	}
 }
 
 func unmap_64(text []int64, sa []int64, numLMS int32) {
-	unmap := sa[len(sa)-numLMS:]
-	j := len(unmap)
+	// By offset: sa[len(sa)-numLMS:] is a copy under the slice rule, so the
+	// inverse map was written into it and read back as zeros.
+	unmapOff := len(sa) - numLMS
+	j := numLMS
 
 	// "LMS-substring iterator" (see placeLMS_64 above).
 	c0, c1, isTypeS := int64(0), int64(0), false
@@ -1319,20 +1347,23 @@ func unmap_64(text []int64, sa []int64, numLMS int32) {
 
 			// Populate inverse map.
 			j--
-			unmap[j] = int64(i + 1)
+			sa[unmapOff+j] = int64(i + 1)
 		}
 	}
 
 	// Apply inverse map to subproblem suffix array.
+	// full keeps the longer length: the inverse map lives above numLMS, and
+	// indexing past a resized header is bounds-checked against its new length.
+	full := sa
 	sa = resize(sa, numLMS)
 	for i := 0; i < len(sa); i++ {
-		sa[i] = unmap[sa[i]]
+		sa[i] = full[unmapOff+full[i]]
 	}
 }
 
 func expand_8_64(text []byte, freq, bucket, sa []int64, numLMS int32) {
 	bucketMax_8_64(text, freq, bucket)
-	bucket = bucket[:256] // eliminate bound check for bucket[c] below
+	bucket = resize(bucket, 256) // eliminate bound check for bucket[c] below
 
 	// Loop backward through sa, always tracking
 	// the next index to populate from sa[:numLMS].
@@ -1427,7 +1458,7 @@ func expand_64(text []int64, freq, bucket, sa []int64, numLMS int32) {
 func induceL_8_64(text []byte, sa, freq, bucket []int64) {
 	// Initialize positions for left side of character buckets.
 	bucketMin_8_64(text, freq, bucket)
-	bucket = bucket[:256] // eliminate bounds check for bucket[cB] below
+	bucket = resize(bucket, 256) // eliminate bounds check for bucket[cB] below
 
 	// This scan is similar to the one in induceSubL_8_64 above.
 	// That one arranges to clear all but the leftmost L-type indexes.
@@ -1608,7 +1639,7 @@ func induceL_64(text []int64, sa, freq, bucket []int64) {
 func induceS_8_64(text []byte, sa, freq, bucket []int64) {
 	// Initialize positions for right side of character buckets.
 	bucketMax_8_64(text, freq, bucket)
-	bucket = bucket[:256] // eliminate bounds check for bucket[cB] below
+	bucket = resize(bucket, 256) // eliminate bounds check for bucket[cB] below
 
 	cB := byte(0)
 	b := bucket[cB]
