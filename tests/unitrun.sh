@@ -5,6 +5,8 @@
 #   tests/unitrun.sh --phases 0a,0b,1,1b      selected phases
 #   tests/unitrun.sh --failed                 re-run only what failed
 #   tests/unitrun.sh --phases 0a --only asn1  units matching a pattern
+#   tests/unitrun.sh --units a,b,c            exactly these units, whatever
+#                                             phase they belong to
 #   tests/unitrun.sh --phases 0a -j 6         six units at a time
 #   tests/unitrun.sh --cold                   drop the package cache first
 #                                             (always serial: a cold run has no
@@ -66,6 +68,7 @@ declare -A UNIT_TIMEOUT=(
 TIMEOUT_EXPLICIT=0
 PHASES=""
 ONLY=""
+UNITS_LIST=""
 FAILED_ONLY=0
 FORCE=0
 VERBOSE=0
@@ -113,6 +116,10 @@ while [ $# -gt 0 ]; do
 		;;
 	--jobs | -j) JOBS="${2:-}"; shift 2 ;;
 	--timeout) TIMEOUT="${2:-}"; TIMEOUT_EXPLICIT=1; shift 2 ;;
+	--units)
+		UNITS_LIST="${2:-}"
+		shift 2
+		;;
 	--failed) FAILED_ONLY=1; shift ;;
 	--force) FORCE=1; shift ;;
 	--fail-fast) FAIL_FAST=1; shift ;;

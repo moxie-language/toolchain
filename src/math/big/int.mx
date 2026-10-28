@@ -550,6 +550,33 @@ func (x *Int) FillBytes(buf []byte) (rb []byte) {
 	return buf
 }
 
+// FillBytesAt stores x into buf[off:off+n], big-endian and zero-padded.
+//
+// It exists because FillBytes(buf[off:off+n]) writes into a COPY - a sub-slice is
+// a copy - so every caller that encoded a coordinate into a prefixed buffer wrote
+// nothing. That is what broke ECDSA: crypto/elliptic's nistPointFromAffine built
+// the uncompressed point encoding that way, SetBytes saw sixteen zero bytes
+// instead of a point, and every P-256 public key was rejected as "point not on
+// curve" - which took out x509 certificate creation and ECDSA verification with
+// it. Five call sites, all in this path.
+func (x *Int) FillBytesAt(buf []byte, off, n int32) {
+	for i := int32(0); i < n; i++ {
+		buf[off+i] = 0
+	}
+	w := n
+	for _, d := range x.abs {
+		for j := 0; j < _S; j++ {
+			w--
+			if w >= 0 {
+				buf[off+w] = byte(d)
+			} else if byte(d) != 0 {
+				panic("math/big: buffer too small to fit value")
+			}
+			d >>= 8
+		}
+	}
+}
+
 // BitLen returns the length of the absolute value of x in bits.
 // The bit length of 0 is 0.
 func (x *Int) BitLen() (rn int32) {
