@@ -530,19 +530,23 @@ func (d *decoder) reconstructBlock(b block, bx, by, compIndex int32) (out error)
 		b[unzig[zig]] *= qt[zig]
 	}
 	idct(b)
-	dst, stride := []byte(nil), 0
+	// The destination is the whole plane plus the block's offset into it, not
+	// img3.Y[off:]: a sub-slice is a COPY under the slice rule, so every
+	// reconstructed pixel was written into a throwaway and a decoded image came
+	// out of the decoder as one constant colour.
+	dst, dstOff, stride := []byte(nil), int32(0), int32(0)
 	if d.nComp == 1 {
-		dst, stride = d.img1.Pix[8*(by*d.img1.Stride+bx):], d.img1.Stride
+		dst, dstOff, stride = d.img1.Pix, 8*(by*d.img1.Stride+bx), d.img1.Stride
 	} else {
 		switch compIndex {
 		case 0:
-			dst, stride = d.img3.Y[8*(by*d.img3.YStride+bx):], d.img3.YStride
+			dst, dstOff, stride = d.img3.Y, 8*(by*d.img3.YStride+bx), d.img3.YStride
 		case 1:
-			dst, stride = d.img3.Cb[8*(by*d.img3.CStride+bx):], d.img3.CStride
+			dst, dstOff, stride = d.img3.Cb, 8*(by*d.img3.CStride+bx), d.img3.CStride
 		case 2:
-			dst, stride = d.img3.Cr[8*(by*d.img3.CStride+bx):], d.img3.CStride
+			dst, dstOff, stride = d.img3.Cr, 8*(by*d.img3.CStride+bx), d.img3.CStride
 		case 3:
-			dst, stride = d.blackPix[8*(by*d.blackStride+bx):], d.blackStride
+			dst, dstOff, stride = d.blackPix, 8*(by*d.blackStride+bx), d.blackStride
 		default:
 			return newUnsupportedError("too many components")
 		}
@@ -563,7 +567,7 @@ func (d *decoder) reconstructBlock(b block, bx, by, compIndex int32) (out error)
 			} else {
 				c += 128
 			}
-			dst[yStride+x] = uint8(c)
+			dst[dstOff+yStride+x] = uint8(c)
 		}
 	}
 	return nil

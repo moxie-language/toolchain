@@ -79,19 +79,20 @@ func idct(src block) {
 	// Horizontal 1-D IDCT.
 	for y := 0; y < 8; y++ {
 		y8 := y * 8
-		s := src[y8 : y8+8 : y8+8] // Small cap improves performance, see https://golang.org/issue/27857
+		// The row is loaded into an array and written back at the end of the
+		// iteration: `s := src[y8:y8+8:y8+8]` is a COPY under the slice rule, so
+		// the horizontal pass wrote its results into a throwaway.
+		var s [8]int32
+		for i := 0; i < 8; i++ {
+			s[i] = src[y8+i]
+		}
 		// If all the AC components are zero, then the IDCT is trivial.
 		if s[1] == 0 && s[2] == 0 && s[3] == 0 &&
 			s[4] == 0 && s[5] == 0 && s[6] == 0 && s[7] == 0 {
 			dc := s[0] << 3
-			s[0] = dc
-			s[1] = dc
-			s[2] = dc
-			s[3] = dc
-			s[4] = dc
-			s[5] = dc
-			s[6] = dc
-			s[7] = dc
+			for i := 0; i < 8; i++ {
+				src[y8+i] = dc
+			}
 			continue
 		}
 
@@ -141,6 +142,9 @@ func idct(src block) {
 		s[5] = (x0 - x4) >> 8
 		s[6] = (x3 - x2) >> 8
 		s[7] = (x7 - x1) >> 8
+		for i := 0; i < 8; i++ {
+			src[y8+i] = s[i]
+		}
 	}
 
 	// Vertical 1-D IDCT.
@@ -148,17 +152,22 @@ func idct(src block) {
 		// Similar to the horizontal 1-D IDCT case, if all the AC components are zero, then the IDCT is trivial.
 		// However, after performing the horizontal 1-D IDCT, there are typically non-zero AC components, so
 		// we do not bother to check for the all-zero case.
-		s := src[x : x+57 : x+57] // Small cap improves performance, see https://golang.org/issue/27857
+		// Column x is gathered from the eight rows and written back below, for
+		// the same reason as the horizontal pass.
+		var s [8]int32
+		for i := 0; i < 8; i++ {
+			s[i] = src[x+8*i]
+		}
 
 		// Prescale.
-		y0 := (s[8*0] << 8) + 8192
-		y1 := s[8*4] << 8
-		y2 := s[8*6]
-		y3 := s[8*2]
-		y4 := s[8*1]
-		y5 := s[8*7]
-		y6 := s[8*5]
-		y7 := s[8*3]
+		y0 := (s[0] << 8) + 8192
+		y1 := s[4] << 8
+		y2 := s[6]
+		y3 := s[2]
+		y4 := s[1]
+		y5 := s[7]
+		y6 := s[5]
+		y7 := s[3]
 
 		// Stage 1.
 		y8 := w7*(y4+y5) + 4
@@ -188,13 +197,16 @@ func idct(src block) {
 		y4 = (r2*(y4-y5) + 128) >> 8
 
 		// Stage 4.
-		s[8*0] = (y7 + y1) >> 14
-		s[8*1] = (y3 + y2) >> 14
-		s[8*2] = (y0 + y4) >> 14
-		s[8*3] = (y8 + y6) >> 14
-		s[8*4] = (y8 - y6) >> 14
-		s[8*5] = (y0 - y4) >> 14
-		s[8*6] = (y3 - y2) >> 14
-		s[8*7] = (y7 - y1) >> 14
+		s[0] = (y7 + y1) >> 14
+		s[1] = (y3 + y2) >> 14
+		s[2] = (y0 + y4) >> 14
+		s[3] = (y8 + y6) >> 14
+		s[4] = (y8 - y6) >> 14
+		s[5] = (y0 - y4) >> 14
+		s[6] = (y3 - y2) >> 14
+		s[7] = (y7 - y1) >> 14
+		for i := 0; i < 8; i++ {
+			src[x+8*i] = s[i]
+		}
 	}
 }

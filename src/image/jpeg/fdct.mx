@@ -87,7 +87,15 @@ func fdct(b block) {
 	// Pass 1: process rows.
 	for y := 0; y < 8; y++ {
 		y8 := y * 8
-		s := b[y8 : y8+8 : y8+8] // Small cap improves performance, see https://golang.org/issue/27857
+		// The row is loaded into an array and written back at the end of the
+		// iteration. `s := b[y8:y8+8:y8+8]` - the Go idiom, whose comment cites a
+		// performance issue - is a COPY under the slice rule, so every row of
+		// the transformed block kept its input value and the encoder emitted
+		// different bytes for the same image.
+		var s [8]int32
+		for i := 0; i < 8; i++ {
+			s[i] = b[y8+i]
+		}
 		x0 := s[0]
 		x1 := s[1]
 		x2 := s[2]
@@ -140,6 +148,9 @@ func fdct(b block) {
 		s[3] = (tmp1 + tmp11 + tmp13) >> (constBits - pass1Bits)
 		s[5] = (tmp2 + tmp11 + tmp12) >> (constBits - pass1Bits)
 		s[7] = (tmp3 + tmp10 + tmp13) >> (constBits - pass1Bits)
+		for i := 0; i < 8; i++ {
+			b[y8+i] = s[i]
+		}
 	}
 	// Pass 2: process columns.
 	// We remove pass1Bits scaling, but leave results scaled up by an overall factor of 8.
