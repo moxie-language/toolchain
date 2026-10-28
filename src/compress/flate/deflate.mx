@@ -70,7 +70,7 @@ type compressor struct {
 	bulkHasher func([]byte, []uint32)
 
 	// compression algorithm
-	fill      func(*compressor, []byte) int32 // copy data to window
+	fill      func(*compressor, []byte, int32) int32 // copy data to window, at an offset
 	step      func(*compressor)             // process window
 	bestSpeed *deflateFast                  // Encoder for BestSpeed
 
@@ -106,7 +106,7 @@ type compressor struct {
 	hashMatch [maxMatchLength - 1]uint32
 }
 
-func (d *compressor) fillDeflate(b []byte) (n int32) {
+func (d *compressor) fillDeflate(b []byte, off int32) (n int32) {
 	if d.index >= 2*windowSize-(minMatchLength+maxMatchLength) {
 		// shift the window by windowSize
 		copy(d.window, d.window[windowSize:2*windowSize])
@@ -141,7 +141,7 @@ func (d *compressor) fillDeflate(b []byte) (n int32) {
 			}
 		}
 	}
-	n := mxutil.CopyAt(d.window, d.windowEnd, b)
+	n = mxutil.CopyRange(d.window, d.windowEnd, b, off, int32(len(b))-off)
 	d.windowEnd += n
 	return n
 }
@@ -229,10 +229,17 @@ func (d *compressor) findMatch(pos int32, prevHead int32, prevLength int32, look
 		minMatchLook = lookahead
 	}
 
-	win := d.window[0 : pos+minMatchLook]
+	// The search indexes d.window directly. `win := d.window[0 : pos+minMatchLook]`
+	// copied up to a whole window at every candidate position, which is where a
+	// level-6 256 KiB deflate spent its 248 ms against Go's 1 ms.
+	//
+	// In-bounds is guaranteed by the caller: pos + minMatchLook <= windowEnd <=
+	// len(d.window), because minMatchLook is min(maxMatchLength, lookahead) and
+	// lookahead is windowEnd - index.
+	win := d.window
 
 	// We quit when we get a match that's at least nice long
-	nice := len(win) - pos
+	nice := pos + minMatchLook - pos
 	if d.nice < nice {
 		nice = d.nice
 	}
@@ -245,12 +252,11 @@ func (d *compressor) findMatch(pos int32, prevHead int32, prevLength int32, look
 	}
 
 	wEnd := win[pos+length]
-	wPos := win[pos:]
 	minIndex := pos - windowSize
 
 	for i := prevHead; tries > 0; tries-- {
 		if wEnd == win[i+length] {
-			n := matchLen(win[i:], wPos, minMatchLook)
+			n := matchLenAt(win, i, win, pos, minMatchLook)
 
 			if n > length && (n > minMatchLength || pos-i <= 4096) {
 				length = n
@@ -289,7 +295,16 @@ const hashmul = 0x1e35a7bd
 // of the supplied slice.
 // The caller must ensure that len(b) >= 4.
 func hash4(b []byte) (h uint32) {
-	return ((uint32(b[3]) | uint32(b[2])<<8 | uint32(b[1])<<16 | uint32(b[0])<<24) * hashmul) >> (32 - hashBits)
+	return hash4At(b, 0)
+}
+
+// hash4At hashes the four bytes at b[off:].
+//
+// The deflate loop called hash4(d.window[d.index:d.index+4]) once per input
+// position, and a sub-slice is a COPY under the slice rule: a 256 KiB deflate at
+// level 6 took 248 ms against Go's 1 ms, almost all of it in this allocation.
+func hash4At(b []byte, off int32) (h uint32) {
+	return ((uint32(b[off+3]) | uint32(b[off+2])<<8 | uint32(b[off+1])<<16 | uint32(b[off])<<24) * hashmul) >> (32 - hashBits)
 }
 
 // bulkHash4 will compute hashes using the same
@@ -311,12 +326,20 @@ func bulkHash4(b []byte, dst []uint32) {
 // up to length 'limit'. Both slices must be at least 'limit'
 // bytes in size.
 func matchLen(a, b []byte, limit int32) (n int32) {
-	a = resize(a, limit)
-	b = resize(b, len(a))
-	for i, av := range a {
-		if b[i] != av {
-			return i
+	return matchLenAt(a, 0, b, 0, limit)
+}
+
+// matchLenAt compares a[aOff:] with b[bOff:] for at most limit bytes.
+//
+// The match search passed two sub-slices per candidate position; a sub-slice is
+// a COPY under the slice rule, so both operands of the comparison were copied
+// before the comparison started.
+func matchLenAt(a []byte, aOff int32, b []byte, bOff int32, limit int32) (n int32) {
+	for n < limit {
+		if a[aOff+n] != b[bOff+n] {
+			return n
 		}
+		n++
 	}
 	return limit
 }
@@ -426,7 +449,7 @@ Loop:
 		}
 		if d.index < d.maxInsertIndex {
 			// Update the hash
-			hv = hash4(d.window[d.index : d.index+minMatchLength])
+			hv = hash4At(d.window, d.index)
 			hh = &d.hashHead[hv&hashMask]
 			d.chainHead = int32(*hh)
 			d.hashPrev[d.index&windowMask] = uint32(d.chainHead)
@@ -473,7 +496,7 @@ Loop:
 				index = d.index
 				for index++; index < newIndex; index++ {
 					if index < d.maxInsertIndex {
-						hv2 = hash4(d.window[index : index+minMatchLength])
+						hv2 = hash4At(d.window, index)
 						// Get previous value with the same hash.
 						// Our chain should point to the previous value.
 						hh = &d.hashHead[hv2&hashMask]
@@ -523,8 +546,8 @@ Loop:
 	}
 }
 
-func (d *compressor) fillStore(b []byte) (n int32) {
-	n := mxutil.CopyAt(d.window, d.windowEnd, b)
+func (d *compressor) fillStore(b []byte, off int32) (n int32) {
+	n = mxutil.CopyRange(d.window, d.windowEnd, b, off, int32(len(b))-off)
 	d.windowEnd += n
 	return n
 }
@@ -553,9 +576,14 @@ func (d *compressor) write(b []byte) (n int32, err error) {
 		return 0, d.err
 	}
 	n = len(b)
-	for len(b) > 0 {
+	// The cursor is an offset into b, not `b = b[n:]`: a sub-slice is a COPY
+	// under the slice rule, so each refill copied the entire remaining input -
+	// compressing 1 MiB took 1050 ms against Go's 3 ms, and the cost grew with
+	// the square of the chunk count.
+	off := int32(0)
+	for off < int32(len(b)) {
 		d.step(d)
-		b = b[d.fill(d, b):]
+		off += d.fill(d, b, off)
 		if d.err != nil {
 			return 0, d.err
 		}
