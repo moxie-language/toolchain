@@ -17,7 +17,7 @@ The compiler is release-candidate. The browser of record is
 
 ```
 bash tests/quickcheck.sh          bootstrap (phase 2) + 13 fixtures   ~5 min
-bash tests/quickcheck.sh --fast   13 fixtures only                    ~1 min warm
+bash tests/quickcheck.sh --fast   14 fixtures only                    ~1 min warm
 bash tests/unitrun.sh --phases 0a,0b,2 --force   the full sweep, 170 units, ~2.5 h
 ```
 
@@ -72,7 +72,17 @@ cp /tmp/s4c ./moxie
 
 ---
 
-## W1. TLS handshake under the copy rule (functional gap)
+## W1. TLS handshake under the copy rule (functional gap) — DONE, round 253
+
+The fixture exists (`tests/regressions/should_compile/tls_handshake.mx`), is in
+`tests/quickcheck.sh`, and passes: TLS 1.3, a 1 KiB echo, wrong CA rejected. It
+found five bugs on the way - cryptobyte's cursor handing back dead frames, the
+asn1 tagged encoder pointing into itself, nine slices written by index with no
+length, and two record-cipher type switches that could never match. All five are
+fixed; `docs/OPEN_WORK.md` round 253 has the detail. One bug is left: the
+X25519MLKEM768 share (W9), which the fixture pins X25519 to route around.
+
+The original brief, for the record:
 
 **Why.** `crypto/tls` is linked into every server in the tree and **no fixture
 exercises the record layer**. Rounds 240-246 converted `tls/conn.mx` blind
@@ -342,7 +352,7 @@ green.
 | # | item | why now | cost |
 |---|---|---|---|
 | 1 | W4 ring | 5 minutes, unblocks "everything compiles" | trivial |
-| 2 | W1 TLS handshake | only unexercised subsystem, biggest signal | 1 session |
+| 2 | ~~W1 TLS handshake~~ | done (round 253): five bugs, and the record layer works | — |
 | 3 | W2 codec escape warning | leaks per certificate, instrument for a class of bugs | 1 session |
 | 4 | W3 scanner offsets | 14x on a hot path, contained API change | half session |
 | 5 | W5 read windows | allocation only | half session |
