@@ -43,6 +43,9 @@ type ByteOrder interface {
 	PutUint16([]byte, uint16)
 	PutUint32([]byte, uint32)
 	PutUint64([]byte, uint64)
+	PutUint16At([]byte, int32, uint16)
+	PutUint32At([]byte, int32, uint32)
+	PutUint64At([]byte, int32, uint64)
 	String() string
 }
 
@@ -241,6 +244,65 @@ func (b *bigEndian) AppendUint64(bin []byte, v uint64) (out []byte) {
 		byte(v>>8),
 		byte(v),
 	)
+}
+
+
+// PutUint16At, PutUint32At and PutUint64At store v at b[off:].
+//
+// A caller with a buffer and an offset - a decoder writing a field at a known
+// position - used to pass b[off:off+n], which under the slice rule is a COPY, so
+// the write went into a throwaway. Every one of those call sites silently wrote
+// nothing (poly1305's tag, argon2's parameter block, binary.Write's own field
+// store), which is why the forms exist.
+func (l *littleEndian) PutUint16At(b []byte, off int32, v uint16) {
+	b[off] = byte(v)
+	b[off+1] = byte(v >> 8)
+}
+
+// PutUint32At stores v into b[off:off+4].
+func (l *littleEndian) PutUint32At(b []byte, off int32, v uint32) {
+	b[off] = byte(v)
+	b[off+1] = byte(v >> 8)
+	b[off+2] = byte(v >> 16)
+	b[off+3] = byte(v >> 24)
+}
+
+// PutUint64At stores v into b[off:off+8].
+func (l *littleEndian) PutUint64At(b []byte, off int32, v uint64) {
+	b[off] = byte(v)
+	b[off+1] = byte(v >> 8)
+	b[off+2] = byte(v >> 16)
+	b[off+3] = byte(v >> 24)
+	b[off+4] = byte(v >> 32)
+	b[off+5] = byte(v >> 40)
+	b[off+6] = byte(v >> 48)
+	b[off+7] = byte(v >> 56)
+}
+
+// PutUint16At stores v into b[off:off+2].
+func (b *bigEndian) PutUint16At(bin []byte, off int32, v uint16) {
+	bin[off] = byte(v >> 8)
+	bin[off+1] = byte(v)
+}
+
+// PutUint32At stores v into b[off:off+4].
+func (b *bigEndian) PutUint32At(bin []byte, off int32, v uint32) {
+	bin[off] = byte(v >> 24)
+	bin[off+1] = byte(v >> 16)
+	bin[off+2] = byte(v >> 8)
+	bin[off+3] = byte(v)
+}
+
+// PutUint64At stores v into b[off:off+8].
+func (b *bigEndian) PutUint64At(bin []byte, off int32, v uint64) {
+	bin[off] = byte(v >> 56)
+	bin[off+1] = byte(v >> 48)
+	bin[off+2] = byte(v >> 40)
+	bin[off+3] = byte(v >> 32)
+	bin[off+4] = byte(v >> 24)
+	bin[off+5] = byte(v >> 16)
+	bin[off+6] = byte(v >> 8)
+	bin[off+7] = byte(v)
 }
 
 func (b *bigEndian) String() (s string) { return "BigEndian" }
@@ -465,13 +527,13 @@ func (e *encoder) value(bs []byte, typ *runtime.RawType, ptr unsafe.Pointer) {
 		bs[e.off] = *(*uint8)(ptr)
 		e.off++
 	case runtime.Int16, runtime.Uint16:
-		e.order.PutUint16(bs[e.off:], *(*uint16)(ptr))
+		e.order.PutUint16At(bs, e.off, *(*uint16)(ptr))
 		e.off += 2
 	case runtime.Int32, runtime.Uint32, runtime.Float32:
-		e.order.PutUint32(bs[e.off:], *(*uint32)(ptr))
+		e.order.PutUint32At(bs, e.off, *(*uint32)(ptr))
 		e.off += 4
 	case runtime.Int64, runtime.Uint64, runtime.Float64:
-		e.order.PutUint64(bs[e.off:], *(*uint64)(ptr))
+		e.order.PutUint64At(bs, e.off, *(*uint64)(ptr))
 		e.off += 8
 	case runtime.KindStruct:
 		nf := typ.NumField()
