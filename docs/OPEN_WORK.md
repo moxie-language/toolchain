@@ -18985,3 +18985,50 @@ What is left in the 79 ms against Go's 3 ms is allocation volume, not algorithm:
 every block still copies `d.window[:d.windowEnd]` into the writer, and the
 writer's own buffers are grown per block. A profile would be the next step, and
 this is the first path where a profile is worth the time.
+
+## Round 251: the compiler is release-candidate, and the gate says so in ten minutes
+
+    tests/quickcheck.sh              14 units, 52 s warm (bootstrap + 13 fixtures)
+    tests/quickcheck.sh --fast        13 units, 52 s
+    tests/unitrun.sh                 170 units, ~2.5 h - still there, now opt-in
+
+The full sweep exists to answer "where did this regress". Once the compiler is
+expected to work, the question is "does it still build usable code", and the
+answer is one fixture per subsystem plus the bootstrap: a runtime regression
+takes out a whole subsystem, so a second fixture from the same subsystem buys
+its own edge cases rather than a new class of failure. The bootstrap is the
+compiler's own test and stays in.
+
+Two of the last four bugs would have been caught by this gate and were not
+caught by anything for weeks, because no fixture touched them at all:
+
+    ECDSA P-256       IsOnCurve(G) was false: FillBytes(buf[off:off+n]) wrote
+                      into a copy, so the point encoding was zeros. Every P-256
+                      verification, every CSR and every ECDSA certificate.
+    crypto/rand       returned zeros; nothing tests random output.
+
+### What this round fixed, in one pass
+
+    Int.FillBytesAt            5 sites in elliptic/ecdsa/nistec. P-256 verifies,
+                               x509.CreateCertificate produces a 302-byte DER.
+    secp256k1                  the nonce loop shadowed a name, so the package did
+                               not compile at all.
+    flate                      hash4/findMatch/fill windows: 1 MiB gzip 1008 ms
+                               → 79 ms, output byte-identical to Go.
+
+The x509 certificate path still warns "codec arena escape ... unknown-extent
+pointee" - it works and leaks one frame arena per certificate. That is the one
+open defect this gate cannot see, because it is a warning, not a failure.
+
+### What is deliberately not in the gate
+
+    phase 8 (network smoke)    needs ~1.5 h of builds; it found the RFC 6724
+                               literal bug, which is fixed, and is now a job for
+                               a quiet afternoon rather than every commit
+    http_header_api            26 minutes on its own
+    the TLS record layer       no fixture at all: a handshake needs two domains
+                               over a socketpair (recorded since round 240)
+    debug/gosym, tls decrypt   read windows: allocation, not wrong answers
+    float64 Stringer           println(1.5) prints +1.500000e+000; fmt is
+                               correct, so this is cosmetic and stays at the
+                               bottom of the list
