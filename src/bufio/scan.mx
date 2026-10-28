@@ -5,7 +5,7 @@
 package bufio
 
 import (
-	"bytes"
+	"internal/bytealg"
 	"io"
 	"unicode/utf8"
 )
@@ -40,10 +40,16 @@ type Scanner struct {
 }
 
 // SplitFunc is the signature of the split function used to tokenize the
-// input. The arguments are an initial substring of the remaining unprocessed
-// data and a flag, atEOF, that reports whether the [Reader] has no more data
-// to give. The return values are the number of bytes to advance the input
-// and the next token to return to the user, if any, plus an error, if any.
+// input. The arguments are the scanner's buffer, the live region [start, end)
+// in it, and a flag, atEOF, that reports whether the [Reader] has no more data
+// to give. The return values are the number of bytes to advance the input and
+// the next token to return to the user, if any, plus an error, if any.
+//
+// The window is offsets rather than a sub-slice because a sub-slice is a copy:
+// a split function handed data[start:end] gets a fresh copy of up to the whole
+// 64 KiB buffer on every token, which measured 711 ms for 4 MiB of 64-byte
+// lines against Go's 20 ms. A token may be a copy - the caller keeps it, and it
+// is one short line.
 //
 // Scanning stops if the function returns an error, in which case some of
 // the input may be discarded. If that error is [ErrFinalToken], scanning
@@ -63,7 +69,7 @@ type Scanner struct {
 // The function is never called with an empty data slice unless atEOF
 // is true. If atEOF is true, however, data may be non-empty and,
 // as always, holds unprocessed text.
-type SplitFunc func(data []byte, atEOF bool) (advance int32, token []byte, err error)
+type SplitFunc func(data []byte, start, end int32, atEOF bool) (advance int32, token []byte, err error)
 
 // Errors returned by Scanner.
 var (
@@ -154,7 +160,7 @@ func (s *Scanner) Scan() (ok bool) {
 		// If we've run out of data but have an error, give the split function
 		// a chance to recover any remaining, possibly empty token.
 		if s.end > s.start || s.err != nil {
-			advance, token, err = s.split(s.buf[s.start:s.end], s.err != nil)
+			advance, token, err = s.split(s.buf, s.start, s.end, s.err != nil)
 			if err != nil {
 				if err == ErrFinalToken {
 					s.token = token
@@ -304,11 +310,11 @@ func (s *Scanner) Split(split SplitFunc) {
 // Split functions
 
 // ScanBytes is a split function for a [Scanner] that returns each byte as a token.
-func ScanBytes(data []byte, atEOF bool) (advance int32, token []byte, err error) {
-	if atEOF && len(data) == 0 {
+func ScanBytes(data []byte, start, end int32, atEOF bool) (advance int32, token []byte, err error) {
+	if atEOF && end == start {
 		return 0, nil, nil
 	}
-	return 1, data[0:1], nil
+	return 1, data[start : start+1], nil
 }
 
 func errorRune() (b []byte) { return []byte(string(utf8.RuneError)) }
@@ -319,28 +325,28 @@ func errorRune() (b []byte) { return []byte(string(utf8.RuneError)) }
 // means that erroneous UTF-8 encodings translate to U+FFFD = "\xef\xbf\xbd".
 // Because of the Scan interface, this makes it impossible for the client to
 // distinguish correctly encoded replacement runes from encoding errors.
-func ScanRunes(data []byte, atEOF bool) (advance int32, token []byte, err error) {
-	if atEOF && len(data) == 0 {
+func ScanRunes(data []byte, start, end int32, atEOF bool) (advance int32, token []byte, err error) {
+	if atEOF && end == start {
 		return 0, nil, nil
 	}
 
 	// Fast path 1: ASCII.
-	if data[0] < utf8.RuneSelf {
-		return 1, data[0:1], nil
+	if data[start] < utf8.RuneSelf {
+		return 1, data[start : start+1], nil
 	}
 
 	// Fast path 2: Correct UTF-8 decode without error.
-	_, width := utf8.DecodeRune(data)
+	_, width := utf8.DecodeRuneAt(data, start, end)
 	if width > 1 {
 		// It's a valid encoding. Width cannot be one for a correctly encoded
 		// non-ASCII rune.
-		return width, data[0:width], nil
+		return width, data[start : start+width], nil
 	}
 
 	// We know it's an error: we have width==1 and implicitly r==utf8.RuneError.
 	// Is the error because there wasn't a full rune to be decoded?
 	// FullRune distinguishes correctly between erroneous and incomplete encodings.
-	if !atEOF && !utf8.FullRune(data) {
+	if !atEOF && !utf8.FullRuneAt(data, start, end) {
 		// Incomplete; get more bytes.
 		return 0, nil, nil
 	}
@@ -351,12 +357,13 @@ func ScanRunes(data []byte, atEOF bool) (advance int32, token []byte, err error)
 	return 1, errorRune(), nil
 }
 
-// dropCR drops a terminal \r from the data.
-func dropCR(data []byte) (out []byte) {
-	if len(data) > 0 && data[len(data)-1] == '\r' {
-		return data[0 : len(data)-1]
+// dropCR drops a terminal \r from the window: it is the token the caller keeps,
+// so this is one of the two places a token copy is correct.
+func dropCR(data []byte, start, end int32) (out []byte) {
+	if end > start && data[end-1] == '\r' {
+		return data[start : end-1]
 	}
-	return data
+	return data[start:end]
 }
 
 // ScanLines is a split function for a [Scanner] that returns each line of
@@ -365,17 +372,17 @@ func dropCR(data []byte) (out []byte) {
 // by one mandatory newline. In regular expression notation, it is `\r?\n`.
 // The last non-empty line of input will be returned even if it has no
 // newline.
-func ScanLines(data []byte, atEOF bool) (advance int32, token []byte, err error) {
-	if atEOF && len(data) == 0 {
+func ScanLines(data []byte, start, end int32, atEOF bool) (advance int32, token []byte, err error) {
+	if atEOF && end == start {
 		return 0, nil, nil
 	}
-	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+	if i := bytealg.IndexByteFromTo(data, start, end, '\n'); i >= 0 {
 		// We have a full newline-terminated line.
-		return i + 1, dropCR(data[0:i]), nil
+		return i + 1 - start, dropCR(data, start, i), nil
 	}
 	// If we're at EOF, we have a final, non-terminated line. Return it.
 	if atEOF {
-		return len(data), dropCR(data), nil
+		return end - start, dropCR(data, start, end), nil
 	}
 	// Request more data.
 	return 0, nil, nil
@@ -410,28 +417,30 @@ func isSpace(r rune) (space bool) {
 // space-separated word of text, with surrounding spaces deleted. It will
 // never return an empty string. The definition of space is set by
 // unicode.IsSpace.
-func ScanWords(data []byte, atEOF bool) (advance int32, token []byte, err error) {
+func ScanWords(data []byte, start, end int32, atEOF bool) (advance int32, token []byte, err error) {
 	// Skip leading spaces.
-	start := 0
-	for width := 0; start < len(data); start += width {
+	first := start
+	for width := int32(0); first < end; first += width {
 		var r rune
-		r, width = utf8.DecodeRune(data[start:])
+		r, width = utf8.DecodeRuneAt(data, first, end)
 		if !isSpace(r) {
 			break
 		}
 	}
+	// scan advances from first. A variable rather than the parameter: start may
+	// not be reassigned, and the advance the caller needs is measured from it.
 	// Scan until space, marking end of word.
-	for width, i := 0, start; i < len(data); i += width {
+	for width, i := int32(0), first; i < end; i += width {
 		var r rune
-		r, width = utf8.DecodeRune(data[i:])
+		r, width = utf8.DecodeRuneAt(data, i, end)
 		if isSpace(r) {
-			return i + width, data[start:i], nil
+			return i + width - start, data[first:i], nil
 		}
 	}
 	// If we're at EOF, we have a final, non-empty, non-terminated word. Return it.
-	if atEOF && len(data) > start {
-		return len(data), data[start:], nil
+	if atEOF && end > first {
+		return end - start, data[first:end], nil
 	}
 	// Request more data.
-	return start, nil, nil
+	return first - start, nil, nil
 }

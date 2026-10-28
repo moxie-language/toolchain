@@ -19186,3 +19186,48 @@ escape and nothing to leak, and the invariant from Go's comment moves with them
 Measured: the certificate probe from round 251 prints no warning and all four
 variants (no extensions, EKU only, SAN only, both) build a leaf signed by a
 separate CA. `encoding/asn1`'s two fixtures stay green in the gate.
+
+## Round 255: the scanner walks a window instead of copying one
+
+`bufio.Scanner` passed its live region to the split function as a sub-slice:
+
+    advance, token, err = s.split(s.buf[s.start:s.end], s.err != nil)
+
+Under the copy rule that is a fresh copy of the live region - up to the whole
+64 KiB buffer - on every token, and then the split function sliced *that* again
+for the token. The API is now offsets:
+
+    type SplitFunc func(data []byte, start, end int32, atEOF bool) (advance int32, token []byte, err error)
+
+`s.buf` is passed whole, the four split functions (`ScanBytes`, `ScanRunes`,
+`ScanLines`, `ScanWords`) walk `data[start:end]`, and the two helpers they need
+did not exist: `bytealg.IndexByteFromTo` (a bounded search - `IndexByteFrom`
+scans to the end of the buffer, which would read the stale bytes past the live
+region) and `utf8.DecodeRuneAt` / `utf8.FullRuneAt` (a decode bounded by `end`,
+so a window that stops mid-rune still decodes as RuneError). A token is still a
+copy: it is what the caller keeps, and it is one line.
+
+Two callers, `mime/type_unix.mx` and `internal/trace/raw/textreader.mx`, use the
+default split and did not change. There is no custom `SplitFunc` anywhere in the
+tree, which is why the signature could move at all.
+
+### Measured, and the part that is not finished
+
+4 MiB of 64-byte lines, 65536 tokens:
+
+    before (round 249, same shape)                        711 ms
+    after                                                 356 ms
+    the same work with no Scanner: search + copy           29 ms
+    65536 tokens over 512 KB (8-byte lines, after)        247 ms
+
+The last two lines are the interesting pair: halving the bytes barely moves the
+time, so the 64 KiB-per-token copy was only half the cost and what is left is
+per-`Scan` overhead of about 3.8 us. Ruled out by direct measurement, each in its
+own probe: `bytes.Reader.Read` and `io.ReadIntoN` (3 ms and 8 ms for 512 KB in
+128-byte reads), a self-mutating method call (2 ms for 65536), a nested receiver
+store-back and a function-value call through a struct field (4 ms each), and the
+scanner buffer size (128 bytes against 4096: no change). That leaves the
+sovereign-arena acquire and the store-back walk inside `Scan` itself, which is
+W3b in docs/PLAN_REMAINING.md: the acceptance this item set (< 50 ms) is not met,
+the copies that caused the memory churn are gone, and the remaining factor is a
+runtime cost with a benchmark to chase it.

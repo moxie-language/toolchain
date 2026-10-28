@@ -130,6 +130,25 @@ func FullRune(p []byte) (full bool) {
 	return false
 }
 
+// FullRuneAt is FullRune bounded by end, for a window of a larger buffer.
+func FullRuneAt(s []byte, i, end int32) (full bool) {
+	n := end - i
+	if n <= 0 {
+		return false
+	}
+	x := _firstTable[s[i]]
+	if n >= int32(x&7) {
+		return true // ASCII, invalid or valid.
+	}
+	accept := _acceptRangesTable[x>>4]
+	if n > 1 && (s[i+1] < accept.lo || accept.hi < s[i+1]) {
+		return true
+	} else if n > 2 && (s[i+2] < locb || hicb < s[i+2]) {
+		return true
+	}
+	return false
+}
+
 // FullRuneInString is like FullRune but its input is a string.
 func FullRuneInString(s []byte) (full bool) {
 	n := len(s)
@@ -165,7 +184,15 @@ func DecodeRune(p []byte) (r rune, size int32) {
 // DecodeRuneInStringAt is DecodeRuneInString at byte offset i, for a cursor that
 // walks a buffer instead of trimming it.
 func DecodeRuneInStringAt(s []byte, i int32) (r rune, size int32) {
-	n := len(s) - i
+	return DecodeRuneAt(s, i, int32(len(s)))
+}
+
+// DecodeRuneAt is DecodeRuneInStringAt bounded by end: the encoding must end at
+// or before end, so a window that stops mid-rune decodes as (RuneError, 1)
+// rather than reading the stale bytes that sit past the window in a buffer that
+// is being refilled.
+func DecodeRuneAt(s []byte, i, end int32) (r rune, size int32) {
+	n := end - i
 	if n < 1 {
 		return RuneError, 0
 	}
