@@ -18511,3 +18511,38 @@ internationalized host names. Not fixed here; recorded.
                      (nonce.mx shadows zb), so unverified.
     tls              record layer converted and compiled; no handshake
                      fixture exists, so unexercised.
+
+## Round 243: flate, and the second shape the scanner finds
+
+    flate     deflate produced a stream its own inflater rejected under the
+              copy rule (zlib 41 bytes against 53). Three windows:
+              generate's `list := h.freqcache[:len(freq)+1]`,
+              bitCounts' `bitCount := h.bitCount[:maxBits+1]`, and
+              writeBlockHuff's `cgnl := codegen[:numLiterals]` /
+              `codegen[numLiterals:...]`. Each filled a copy, so the code
+              lengths were zeros and the dynamic header encoded nothing.
+              resize() keeps the buffer; the codegen arrays are now written
+              by offset. After the fix the deflate bytes are identical to the
+              view compiler's for all three modes, and zlib/base64/pem/
+              time.Format match byte for byte.
+    fmt       checked and left alone: `num = num[1:]` then `num[0] = ' '` is
+              NOT a bug, because num's own buffer is what pad() consumes. A
+              window is only a bug when the parent has to see the write.
+
+### The scanner needed a second shape
+
+Round 241's scanner looked at call arguments. flate's bugs never crossed a
+call: a local `t := x[a:b]` followed by `t[i] = ...`. The second scan (decl ->
+write in the same function body) reports 119 sites across the tree:
+
+    22 src/index/suffixarray    14 src/image (+14 image/draw)
+     6 src/crypto/tls            4 src/fmt          4 src/debug/gosym
+     4 crypto/internal/fips140/rsa   3 bigmod   3 mlkem   3 norm
+     3 compress/flate (the ones fixed above)
+
+and, on inspection, most of them are the fmt case - the alias is the value
+being formatted or parsed, and its buffer is what the caller reads next.
+The ones that are bugs are the ones whose result must reach a *field* or a
+caller: image's pixel rows, suffixarray's index writes, tls's decrypt into
+`record`, rsa/bigmod/mlkem's limb buffers. That is the worklist, in that
+order, and the test for each is "does the value the caller keeps change".
