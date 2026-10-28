@@ -18823,3 +18823,73 @@ The rule is landed and the gate is green, but it is not free:
 The next round is the math/big operand side: a span-read form for the arithmetic
 kernels (`x []Word, xOff, xLen`) so `x[1:]` stops being an allocation. That is
 the last thing between the rule and crypto.
+
+## Round 247: RSA under the rule was two bugs, and neither was allocation volume
+
+    rsa.GenerateKey(1024) + SignPSS + VerifyPSS under the rule    4.5s (was:
+                                                                  19-22 min, then
+                                                                  arena full)
+    rand.Prime(512)                                               519ms
+    drbg.Read(32), drbg.Read(200)                                 non-zero (was
+                                                                  all zeros)
+    differential vs Go 1.25.3: modexp, ModInverse, Mod (1- and 4-limb),
+        Rsh, QuoRem, rat/power round trips                        identical
+
+Round 246 ended with "the copy rule's bill is math/big's operand reads". That was
+wrong, and the way it was wrong is worth recording: two of the three bugs were in
+the *random* path, not in the arithmetic, and the third was pre-existing.
+
+### crypto/rand returned zeros
+
+Three windows on the way from the kernel to the caller:
+
+  sysrand read      unix.GetRandom(b[:size], 0)  then  b = b[n:]
+  sysrand urandom   the same re-slice after a short read
+  sysrand js        the same in the wasm bridge
+  drbg Read         drbg.Generate(b[:size], additionalInput) then b = b[size:]
+
+Every one of them fills a copy under the rule, so `rand.Read` returned zero
+bytes and did it silently - no error, no panic, just zeros. That is the worst
+possible failure for a CSPRNG, and it only surfaced because RSA keygen loops:
+every Miller-Rabin base was zero, was rejected as out-of-range, and the prime
+search never terminated. 19 minutes later the arena filled and died, which is
+exactly the symptom that had been read as "allocation volume".
+
+GetRandomAt(p, off, n, flags) is the syscall's span form, and the loops carry an
+offset now. drbg.Read generates into a scratch and copies back with CopyRange.
+
+### Random tests hid it, and RSA found it
+
+Nothing in the gate reads random bytes and checks them, because "random" has no
+expected value. The fixture that would have caught this is `rand.Read` into two
+buffers and assert neither is all zero, plus a DRBG read of length > 512 (the
+buffer size boundary). That is now the shape to add when rand grows tests.
+
+### The third bug was pre-existing, and it was the crash
+
+`big.Int.Mod` was broken on the tree from *before* this campaign:
+
+    m := &big.Int{}
+    m.Mod(p, mod)
+    m.BitLen()          // SIGSEGV
+
+`Int.QuoRem` wrote the remainder through an out-parameter (`r.abs = ...`). Only
+the receiver's fields and the return values are serialized at return, so memory
+allocated for r inside the call - in the receiver's borrowed arena, which for
+`q := Int{}` inside Mod is a temporary - dangles as soon as that temporary dies.
+The view compiler reproduces it exactly; it simply never got anything allocated
+between the write and the read, so a keygen that "worked" was reading recycled
+memory and getting away with it.
+
+QuoRem and DivMod return the remainder now instead of writing a parameter, which
+is what the parameter model demands anyway: parameters are immutable borrows, so
+an out-parameter can never receive arena memory. Five call sites changed.
+
+### The lesson that generalises
+
+Three bugs, three shapes, one property: the write went to a slice the callee did
+not own and could not relocate. Sub-slices, empty windows, out-parameters and
+`b = b[n:]` cursors are all the same mistake wearing different clothes. The
+diagnostic that found them was instrumentation - a counter printed from inside
+`isPrime` - not a differential, because a CSPRNG and a prime search have no
+reference output to diff.
