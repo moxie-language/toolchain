@@ -51,18 +51,25 @@ func incCounter(c *[4]byte) {
 // mgf1XOR XORs the bytes in out with a mask generated using the MGF1 function
 // specified in PKCS #1 v2.1.
 func mgf1XOR(out []byte, hasher hash.Hash, seed []byte) {
+	mgf1XORAt(out, 0, len(out), hasher, seed)
+}
+
+// mgf1XORAt XORs the MGF1 mask of seed into out[off:off+n]. The span form
+// exists because out[off:] is a copy under the slice rule, so the mask was
+// XORed into the copy and the caller's block kept its padding bytes.
+func mgf1XORAt(out []byte, off, n int32, hasher hash.Hash, seed []byte) {
 	var counter [4]byte
 	var digest []byte
 
-	done := 0
-	for done < len(out) {
+	done := int32(0)
+	for done < n {
 		hasher.Reset()
 		hasher.Write(seed)
 		hasher.Write(counter[0:4])
 		digest = hasher.Sum(resize(digest, 0))
 
-		for i := 0; i < len(digest) && done < len(out); i++ {
-			out[done] ^= digest[i]
+		for i := 0; i < len(digest) && done < n; i++ {
+			out[off+done] ^= digest[i]
 			done++
 		}
 		incCounter(&counter)
@@ -94,7 +101,9 @@ func emsaPSSEncode(mHash []byte, emBits int32, salt []byte, hasher hash.Hash) (r
 
 	em := []byte{:emLen}
 	psLen := emLen - sLen - hLen - 2
-	db := em[:psLen+1+sLen]
+	// resize, not em[:...]: db is written (the 0x01 delimiter, the salt, the
+	// mask), and a sub-slice is a copy.
+	db := resize(em, psLen+1+sLen)
 	h := em[psLen+1+sLen : emLen-1]
 
 	// 4.  Generate a random octet string salt of length sLen; if sLen = 0,
@@ -116,6 +125,8 @@ func emsaPSSEncode(mHash []byte, emBits int32, salt []byte, hasher hash.Hash) (r
 	hasher.Write(salt)
 
 	h = hasher.Sum(resize(h, 0))
+	// Sum wrote H into its own buffer (h was a sub-slice of em); put it back.
+	mxutil.CopyAt(em, psLen+1+sLen, h)
 
 	// 7.  Generate an octet string PS consisting of emLen - sLen - hLen - 2
 	//     zero octets. The length of PS may be 0.
@@ -177,7 +188,7 @@ func emsaPSSVerify(mHash, em []byte, emBits, sLen int32, hasher hash.Hash) (ret0
 
 	// 5.  Let maskedDB be the leftmost emLen - hLen - 1 octets of EM, and
 	//     let H be the next hLen octets.
-	db := em[:emLen-hLen-1]
+	db := resize(em, emLen-hLen-1)
 	h := em[emLen-hLen-1 : emLen-1]
 
 	// 6.  If the leftmost 8 * emLen - emBits bits of the leftmost octet in
@@ -395,19 +406,25 @@ func EncryptOAEP(hasher, mgfHash hash.Hash, random io.Reader, pub *PublicKey, ms
 	lHash := hasher.Sum(nil)
 
 	em := []byte{:k}
-	seed := em[1 : 1+hasher.Size()]
-	db := em[1+hasher.Size():]
+	hLen := hasher.Size()
+	seedOff := int32(1)
+	dbOff := 1 + hLen
+	// By offset: em[dbOff:] is a copy under the slice rule, so the label hash,
+	// the 0x01 delimiter and the message never reached the block.
+	mxutil.CopyAt(em, dbOff, lHash)
+	em[k-len(msg)-1] = 1
+	mxutil.CopyAt(em, k-len(msg), msg)
 
-	mxutil.CopyAt(db, 0, lHash)
-	db[len(db)-len(msg)-1] = 1
-	mxutil.CopyAt(db, len(db)-len(msg), msg)
-
+	seed := []byte{:hLen}
 	if err := drbg.ReadWithReaderDeterministic(random, seed); err != nil {
 		return nil, err
 	}
+	mxutil.CopyAt(em, seedOff, seed)
 
-	mgf1XOR(db, mgfHash, seed)
-	mgf1XOR(seed, mgfHash, db)
+	// maskDB and maskSeed are XORed into em, not into sub-slices: db and seed
+	// as slices are copies, and the function returns em.
+	mgf1XORAt(em, dbOff, k-dbOff, mgfHash, seed)
+	mgf1XORAt(em, seedOff, hLen, mgfHash, em[dbOff:k])
 
 	return encrypt(pub, em)
 }
