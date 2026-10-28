@@ -17,9 +17,43 @@
 // started.
 package cryptobyte
 
+import "unsafe"
+
 // String represents a string of bytes. It provides methods for parsing
 // fixed-length and length-prefixed values from it.
 type String []byte
+
+// A String is a CURSOR over bytes the caller owns, not a slice the cursor
+// takes a piece of. The difference is not style: x[a:b] in Moxie allocates and
+// copies, so `v := (*s)[:n]` puts the window in THIS frame's arena and
+// `*s = (*s)[n:]` puts the remainder there too, and both are released when
+// read returns. Every value a cryptobyte read ever handed back was dead on
+// arrival - x509.ParseCertificate's SubjectKeyId pointed into the released
+// frame of the call that sliced it, and marshalling a certificate with that
+// extension read freed memory. The cursor also copied the whole remainder on
+// every read, which is O(n^2) over a certificate.
+//
+// The two views below are the sanctioned exception to "a sub-slice is a copy":
+// a parser must not copy the bytes it is walking, and both halves of a read
+// have to point into the same backing array. unsafe.Slice is the only thing in
+// the language that says that, and it is confined to these two functions.
+
+// viewOf returns n bytes at the start of b, as a window into b.
+func viewOf(b []byte, n int32) (v []byte) {
+	if n <= 0 {
+		return nil
+	}
+	return unsafe.Slice((*byte)(unsafe.Pointer(&b[0])), n)
+}
+
+// viewFrom returns b advanced by n, as a window into the same backing array.
+func viewFrom(b []byte, n int32) (v []byte) {
+	rest := int32(len(b)) - n
+	if rest <= 0 {
+		return nil
+	}
+	return unsafe.Slice((*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(&b[0]))+uintptr(n))), rest)
+}
 
 // read advances a String by n bytes and returns them. If less than n bytes
 // remain, it returns nil.
@@ -27,8 +61,8 @@ func (s *String) read(n int32) []byte {
 	if len(*s) < n || n < 0 {
 		return nil
 	}
-	v := (*s)[:n]
-	*s = (*s)[n:]
+	v := viewOf(*s, n)
+	*s = viewFrom(*s, n)
 	return v
 }
 
@@ -37,8 +71,8 @@ func (s *String) readOK(n int32) ([]byte, bool) {
 	if len(*s) < n || n < 0 {
 		return nil, false
 	}
-	v := (*s)[:n]
-	*s = (*s)[n:]
+	v := viewOf(*s, n)
+	*s = viewFrom(*s, n)
 	return v, true
 }
 

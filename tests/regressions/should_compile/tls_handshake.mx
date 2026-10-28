@@ -1,0 +1,368 @@
+// A real TLS handshake, both ends running at once, over a loopback socket.
+//
+// crypto/tls is linked into every server in this tree and had no fixture at
+// all: the record layer was converted to the copy rule blind (rounds 240-246),
+// and a handshake is the only test that exercises encrypt, decrypt, readRecord
+// and writeRecord together. It needs two domains because a domain is
+// single-threaded and a handshake is a conversation: the server end lives in a
+// spawned domain and reports the port it bound, so the two sides really do
+// interleave over the wire instead of alternating in one frame.
+//
+// The certificates are built at run time rather than embedded, so the same
+// fixture covers x509.CreateCertificate, ParseCertificate, ECDSA signing and
+// chain verification - four subsystems that no fixture covers on their own
+// either. The child builds its own CA and leaf and sends the CA back over a
+// channel, which is also why there are no package globals here: a main package
+// has no init() to write them in, and the child cannot see the parent's frame.
+//
+// What it asserts:
+//
+//   1. a client rooted in the issuing CA completes a handshake, and both sides
+//      agree on version and cipher suite
+//   2. 1 KiB of application data round trips byte-identically through the
+//      record layer, in both directions
+//   3. a client rooted in a DIFFERENT CA is rejected, with an error on both
+//      sides - not a hang, which is how a record layer usually fails
+//
+// Both configs pin CurvePreferences to X25519. The default preference list
+// starts with the post-quantum hybrids (X25519MLKEM768), and that path has an
+// open bug: the client's key share is 1184 bytes of ML-KEM followed by 32 bytes
+// of X25519, and the 32 arrive as zeros, so the server answers "invalid client
+// key share". The pin keeps this fixture measuring the record layer rather than
+// repeating that failure; docs/PLAN_REMAINING.md carries it as item W9.
+//
+// usage: tls_handshake        exit 0 when every case holds
+package main
+
+import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"io"
+	"math/big"
+	"net"
+	"os"
+	"strconv"
+	"time"
+)
+
+// two connections: one that must succeed, one that must be refused.
+const nConns = 2
+
+// bytes of application data in the echo: several records' worth of state,
+// which is the point.
+const payloadLen = 1024
+
+func newKey() (key *ecdsa.PrivateKey, err error) {
+	return ecdsa.GenerateKey(elliptic.P256(), rand.Reader())
+}
+
+// caDERFor makes a self-signed CA. IsCA and KeyUsageCertSign are not
+// decoration: Verify refuses to use a root that is not one, and a fixture whose
+// root is rejected fails for the wrong reason.
+func caDERFor(key *ecdsa.PrivateKey, cn []byte, serial int64) (der []byte, err error) {
+	var tmpl *x509.Certificate
+	tmpl = &x509.Certificate{
+		SerialNumber:          big.NewInt(serial),
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+	}
+	return x509.CreateCertificate(rand.Reader(), tmpl, tmpl, &key.PublicKey, key)
+}
+
+// leafDERFor issues the leaf the server presents: SANs for both names the
+// client may verify, EKU serverAuth, signed by the CA.
+func leafDERFor(caKey *ecdsa.PrivateKey, caDER []byte, leafKey *ecdsa.PrivateKey) (der []byte, err error) {
+	var caCert *x509.Certificate
+	var tmpl *x509.Certificate
+
+	caCert, err = x509.ParseCertificate(caDER)
+	if err != nil {
+		return nil, err
+	}
+	tmpl = &x509.Certificate{
+		SerialNumber:          big.NewInt(3),
+		Subject:               pkix.Name{CommonName: "localhost"},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+	return x509.CreateCertificate(rand.Reader(), tmpl, caCert, &leafKey.PublicKey, caKey)
+}
+
+// serveOne accepts one connection, handshakes, and (for the first) echoes the
+// payload back. Every failure is reported over resCh so the parent can assert
+// on both sides of the conversation: a server error the client cannot see is
+// exactly the failure mode this fixture exists to catch.
+func serveOne(ln net.Listener, cfg *tls.Config, i int32, resCh chan []byte) {
+	var nc net.Conn
+	var err error
+	var c *tls.Conn
+	var st tls.ConnectionState
+	var buf []byte
+	var n int32
+	var w int32
+
+	nc, err = ln.Accept()
+	if err != nil {
+		resCh <- []byte("conn" | strconv.Itoa(i) | " accept err: " | err.Error())
+		return
+	}
+	// A hang in the record layer must fail the fixture, not the suite.
+	nc.SetDeadline(time.Now().Add(30 * time.Second))
+	c = tls.Server(nc, cfg)
+	err = c.Handshake()
+	if err != nil {
+		resCh <- []byte("conn" | strconv.Itoa(i) | " handshake err: " | err.Error())
+		c.Close()
+		return
+	}
+	st = c.ConnectionState()
+	resCh <- []byte("conn" | strconv.Itoa(i) | " ok ver=" | strconv.Itoa(int32(st.Version)) | " suite=" | strconv.Itoa(int32(st.CipherSuite)))
+	if i != 0 {
+		c.Close()
+		return
+	}
+	buf = []byte{:payloadLen}
+	n, err = io.ReadFull(c, buf)
+	if err != nil {
+		resCh <- []byte("conn0 read err: " | err.Error())
+		c.Close()
+		return
+	}
+	w, err = c.Write(buf[0:n])
+	if err != nil {
+		resCh <- []byte("conn0 write err: " | err.Error())
+		c.Close()
+		return
+	}
+	resCh <- []byte("conn0 echo " | strconv.Itoa(w))
+	c.Close()
+}
+
+// serverDomain is the child: it owns the certificate, the listener and both
+// connections. It reports the CA first, then the bound address, so the parent
+// can never dial a port whose root it does not have yet.
+func serverDomain(caCh chan []byte, addrCh chan []byte, resCh chan []byte) {
+	var caKey *ecdsa.PrivateKey
+	var caDER []byte
+	var leafKey *ecdsa.PrivateKey
+	var leafDER []byte
+	var cert tls.Certificate
+	var cfg tls.Config
+	var ln net.Listener
+	var err error
+	var keyErr error
+
+	caKey, err = newKey()
+	if err != nil {
+		addrCh <- []byte("ERR ca key: " | err.Error())
+		return
+	}
+	caDER, err = caDERFor(caKey, []byte("moxie fixture CA"), 1)
+	if err != nil {
+		addrCh <- []byte("ERR ca: " | err.Error())
+		return
+	}
+	leafKey, keyErr = newKey()
+	if keyErr != nil {
+		addrCh <- []byte("ERR leaf key: " | keyErr.Error())
+		return
+	}
+	leafDER, err = leafDERFor(caKey, caDER, leafKey)
+	if err != nil {
+		addrCh <- []byte("ERR leaf: " | err.Error())
+		return
+	}
+	cert = tls.Certificate{}
+	cert.Certificate = [][]byte{leafDER, caDER}
+	cert.PrivateKey = leafKey
+	caCh <- caDER
+	ln, err = net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		addrCh <- []byte("ERR listen: " | err.Error())
+		return
+	}
+	// The port is ephemeral, so the child is the only side that can name it.
+	addrCh <- []byte(ln.Addr().String())
+	cfg = tls.Config{Certificates: []tls.Certificate{cert}, CurvePreferences: []tls.CurveID{tls.X25519}}
+	serveOne(ln, &cfg, 0, resCh)
+	serveOne(ln, &cfg, 1, resCh)
+	ln.Close()
+}
+
+func goodCase(addr []byte, roots *x509.CertPool, resCh chan []byte) (fails int32) {
+	var nc net.Conn
+	var err error
+	var cfg tls.Config
+	var c *tls.Conn
+	var st tls.ConnectionState
+	var srvMsg []byte
+	var send []byte
+	var got []byte
+	var n int32
+
+	nc, err = net.Dial("tcp", addr)
+	if err != nil {
+		println("FAIL dial:", err.Error())
+		return 1
+	}
+	nc.SetDeadline(time.Now().Add(30 * time.Second))
+	cfg = tls.Config{RootCAs: roots, ServerName: []byte("localhost"), CurvePreferences: []tls.CurveID{tls.X25519}}
+	c = tls.Client(nc, &cfg)
+	err = c.Handshake()
+	if err != nil {
+		println("FAIL client handshake:", err.Error())
+		return 1
+	}
+	st = c.ConnectionState()
+	println("ok   client handshake ver=" | int32(st.Version).String() | " suite=" | int32(st.CipherSuite).String())
+	srvMsg = <-resCh
+	println("srv  " | string(srvMsg))
+	if !bytes.HasPrefix(srvMsg, []byte("conn0 ok")) {
+		return 1
+	}
+	// Every byte follows a stride, so a one-byte shift in the record layer
+	// changes the comparison.
+	send = []byte{:payloadLen}
+	for i := int32(0); i < payloadLen; i++ {
+		send[i] = byte((i*31 + 7) & 0xff)
+	}
+	_, err = c.Write(send)
+	if err != nil {
+		println("FAIL write:", err.Error())
+		return 1
+	}
+	got = []byte{:payloadLen}
+	n, err = io.ReadFull(c, got)
+	if err != nil {
+		println("FAIL read:", err.Error())
+		return 1
+	}
+	srvMsg = <-resCh
+	println("srv  " | string(srvMsg))
+	if n != payloadLen {
+		println("FAIL echo short read:", n.String())
+		return 1
+	}
+	for i := int32(0); i < payloadLen; i++ {
+		if got[i] != send[i] {
+			println("FAIL echo differs at byte", i.String())
+			return 1
+		}
+	}
+	c.Close()
+	println("ok   echo " | payloadLen.String() | " bytes identical")
+	return 0
+}
+
+func badCase(addr []byte, roots *x509.CertPool, resCh chan []byte) (fails int32) {
+	var nc net.Conn
+	var err error
+	var cfg tls.Config
+	var c *tls.Conn
+	var srvMsg []byte
+
+	nc, err = net.Dial("tcp", addr)
+	if err != nil {
+		println("FAIL dial(2):", err.Error())
+		return 1
+	}
+	nc.SetDeadline(time.Now().Add(30 * time.Second))
+	cfg = tls.Config{RootCAs: roots, ServerName: []byte("localhost")}
+	c = tls.Client(nc, &cfg)
+	err = c.Handshake()
+	if err == nil {
+		println("FAIL handshake against the wrong CA succeeded")
+		c.Close()
+		<-resCh
+		return 1
+	}
+	println("ok   wrong CA rejected: " | err.Error())
+	c.Close()
+	srvMsg = <-resCh
+	println("srv  " | string(srvMsg))
+	if !bytes.HasPrefix(srvMsg, []byte("conn1 handshake err")) {
+		println("FAIL server did not report the rejected handshake")
+		return 1
+	}
+	return 0
+}
+
+func main() {
+	var caCh chan []byte
+	var addrCh chan []byte
+	var resCh chan []byte
+	var caDER []byte
+	var addr []byte
+	var caCert *x509.Certificate
+	var goodRoots *x509.CertPool
+	var badKey *ecdsa.PrivateKey
+	var badDER []byte
+	var badCert *x509.Certificate
+	var badRoots *x509.CertPool
+	var err error
+	var fails int32
+
+	caCh = chan []byte{}
+	addrCh = chan []byte{}
+	resCh = chan []byte{}
+	spawn(serverDomain, caCh, addrCh, resCh)
+
+	// The CA the child issued: this client must be able to verify the leaf.
+	caDER = <-caCh
+	caCert, err = x509.ParseCertificate(caDER)
+	if err != nil {
+		println("FAIL parse child ca:", err.Error())
+		os.Exit(1)
+	}
+	goodRoots = x509.NewCertPool()
+	goodRoots.AddCert(caCert)
+
+	// An unrelated CA: this client must NOT be able to verify the leaf.
+	badKey, err = newKey()
+	if err != nil {
+		println("FAIL other ca key:", err.Error())
+		os.Exit(1)
+	}
+	badDER, err = caDERFor(badKey, []byte("moxie fixture other CA"), 2)
+	if err != nil {
+		println("FAIL other ca:", err.Error())
+		os.Exit(1)
+	}
+	badCert, err = x509.ParseCertificate(badDER)
+	if err != nil {
+		println("FAIL parse other ca:", err.Error())
+		os.Exit(1)
+	}
+	badRoots = x509.NewCertPool()
+	badRoots.AddCert(badCert)
+
+	addr = <-addrCh
+	if bytes.HasPrefix(addr, []byte("ERR")) {
+		println("FAIL " | string(addr))
+		os.Exit(1)
+	}
+	println("srv  listening on " | string(addr))
+
+	fails = fails + goodCase(addr, goodRoots, resCh)
+	fails = fails + badCase(addr, badRoots, resCh)
+
+	if fails != 0 {
+		println("tls_handshake:", fails.String(), "case(s) failed")
+		os.Exit(1)
+	}
+	println("tls_handshake ok")
+}

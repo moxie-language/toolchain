@@ -124,11 +124,17 @@ func newMultiEncoder(m []encoder) (e *multiEncoder) { return &multiEncoder{m: m}
 func newSetEncoder(m []encoder) (e *setEncoder)    { return &setEncoder{s: m} }
 
 type taggedEncoder struct {
-	// scratch contains temporary space for encoding the tag and length of
-	// an element in order to avoid extra allocations.
-	scratch [8]byte
-	tag     encoder
-	body    encoder
+	// The tag and length bytes are their own allocation, NOT a slice of an
+	// array field of this struct. A struct-field scratch buffer makes the tag
+	// encoder point into the struct that owns it, and a pointer into the
+	// middle of a struct is an interior pointer the arena codec cannot
+	// rewrite: the struct is copied into the caller's arena at return and
+	// `tag` keeps pointing at the copy in the frame being released. The codec
+	// cannot know the pointee's extent, so it preserves the address and leaks
+	// that frame - one leaked frame per tag, per Marshal. Sixteen bytes from
+	// Ensure costs nothing next to that.
+	tag  encoder
+	body encoder
 }
 
 func (t *taggedEncoder) Len() (n int32) {
@@ -682,7 +688,7 @@ func makeField(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enc
 			return newBytesEncoder(rv.FullBytes), nil
 		}
 		rt := &taggedEncoder{}
-		rt.tag = newBytesEncoder(appendTagAndLength(rt.scratch[:0], tagAndLength{rv.Class, rv.Tag, len(rv.Bytes), rv.IsCompound}))
+		rt.tag = newBytesEncoder(appendTagAndLength(nil, tagAndLength{rv.Class, rv.Tag, len(rv.Bytes), rv.IsCompound}))
 		rt.body = newBytesEncoder(rv.Bytes)
 		return rt, nil
 	}
@@ -762,11 +768,11 @@ func makeField(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enc
 		}
 
 		if params.explicit {
-			t.tag = newBytesEncoder(appendTagAndLength(t.scratch[:0], tagAndLength{ClassUniversal, tag, bodyLen, isCompound}))
+			t.tag = newBytesEncoder(appendTagAndLength(nil, tagAndLength{ClassUniversal, tag, bodyLen, isCompound}))
 
 			tt := &taggedEncoder{}
 			tt.body = t
-			tt.tag = newBytesEncoder(appendTagAndLength(tt.scratch[:0], tagAndLength{
+			tt.tag = newBytesEncoder(appendTagAndLength(nil, tagAndLength{
 				class:      class,
 				tag:        *params.tag,
 				length:     bodyLen + t.tag.Len(),
@@ -780,7 +786,7 @@ func makeField(typ *_rawType, ptr unsafe.Pointer, params fieldParameters) (e enc
 		tag = *params.tag
 	}
 
-	t.tag = newBytesEncoder(appendTagAndLength(t.scratch[:0], tagAndLength{class, tag, bodyLen, isCompound}))
+	t.tag = newBytesEncoder(appendTagAndLength(nil, tagAndLength{class, tag, bodyLen, isCompound}))
 
 	return t, nil
 }

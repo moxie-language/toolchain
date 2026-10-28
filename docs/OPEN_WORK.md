@@ -19065,3 +19065,95 @@ compile and are green sweep entries; `ring` was the last one.
 That file is a generated snapshot and its count is now hand-maintained; it was
 already one package behind before this round, so treat the list as a guide to
 dependency order rather than as a manifest.
+
+## Round 253: the TLS record layer, and the five bugs standing between it and a handshake
+
+Round 251 wrote the plan and left W1 - a TLS handshake fixture - as the first
+item, on the argument that crypto/tls is linked into every server in the tree
+and no fixture had ever exercised the record layer. The fixture took six bugs to
+reach. None of them is in the record layer.
+
+### 1. cryptobyte handed back views of dead frames (the big one)
+
+`cryptobyte.String` is a cursor, but it was implemented as arithmetic on a
+slice:
+
+    v := (*s)[:n]      // a COPY, in this frame's arena
+    *s = (*s)[n:]      // another COPY, and the remainder is re-copied per read
+
+Two consequences, both fatal. Every value a read handed back lived in the
+callee's frame arena, so it died at that callee's return: `x509.ParseCertificate`
+returned a `SubjectKeyId` pointing into the released frame of the `readASN1`
+call that produced it, and marshalling a certificate with an extension read
+freed memory - the SIGSEGV in `asn1.(*bytesEncoder).Encode` that every
+`CreateCertificate` with SAN, EKU or a path length hit. And the cursor copied the
+whole remainder on every read, which is O(n^2) over a certificate.
+
+The fix is the one the model demands and the one the language makes impossible
+to write as a slice expression: a String is a window of caller-owned bytes, so
+both halves of a read must point into that same backing array. `viewOf` and
+`viewFrom`, ten lines apart, are the only two `unsafe.Slice` calls in the
+package, and they are the package's contract now.
+
+### 2. asn1's tagged encoder pointed into itself
+
+`taggedEncoder.scratch [8]byte` held the tag and length bytes, and the encoder
+for them was built as `appendTagAndLength(t.scratch[:0], ...)` - a slice of an
+array field of the struct that owns the encoder. Interior pointers into a struct
+cannot be rewritten by the codec, so every relocation left `tag` pointing at the
+copy in the frame being released; the codec's only option is the unknown-extent
+path, which leaks that frame. One leaked frame per tag, per Marshal.
+
+### 3. Nine slices written by index that had no length
+
+The copy rule sweep converted `make([]T, 0, n)` to `[]T{:0:n}` - correct for the
+push idiom it was written for, wrong for the other idiom it was copied onto: a
+filter loop that counts as it goes and numbers the slots itself.
+
+    filtered := []SignatureScheme{:0:len(sigAlgs)}   // len 0, cap n
+    filtered[n] = s                                 // index out of range
+
+Nine sites: the TLS cipher suite list (the first panic a handshake hit), the
+signature algorithm list, two in `selectSignatureScheme`, the deadline
+scheduler's two compaction passes, the coverage counter clone, AES-GCM's
+`growFor`, and `utf8.AppendRune`'s growth. Every one is `[]T{:n}`: the slots are
+written by index, so they must exist. The scan that found them is worth
+repeating after any sweep that rewrites slice allocation.
+
+### 4. The record cipher field is wrapped, and two switches still asked for the interface
+
+Go held `cipher.Stream`, `cipher.AEAD` or `cbcMode` in `halfConn.cipher`. This
+port wraps each in a struct (`streamCipher`, `aeadCipher`, `cbcCipher`) so the
+field has one marker interface, `recordCipher`. Two places kept Go's case types:
+
+    maxPayloadSizeForWrite   switch c.out.cipher.(type) { case cipher.AEAD: ... }
+                             - no case could match, so every connection that
+                             wrote an application-data record hit the default
+                             arm and panicked "unknown cipher type". This is the
+                             first thing a working handshake does.
+    write (TLS 1.0 BEAST)    c.out.cipher.(cipher.BlockMode)
+                             - never true, so the CBC IV-splitting mitigation
+                             silently stopped applying.
+
+### What now works
+
+    handshake          TLS 1.3, TLS_CHACHA20_POLY1305_SHA256, both sides nil error
+    application data   1 KiB round trips byte-identically through the record layer
+    wrong CA           rejected with "certificate signed by unknown authority",
+                       and the server sees the alert instead of hanging
+
+The fixture is W1 itself: `tests/regressions/should_compile/tls_handshake.mx`,
+two domains over a loopback listener, certificates built at run time so the same
+fixture covers CreateCertificate, ParseCertificate, ECDSA signing and chain
+verification.
+
+### Open: the post-quantum hybrid key share
+
+With the default curve preferences the handshake fails: the client's share is
+1184 bytes of ML-KEM encapsulation key followed by 32 bytes of X25519, and those
+32 arrive as zeros, so the server answers "tls: invalid client key share". The
+bytes are valid immediately before `push(mlkemBytes, ecdhShare...)` and zeros
+after it, with `len == cap == 1184` on the destination - the growth path - which
+is the shape of an aliased slice being recycled rather than a copy failing. The
+fixture pins X25519 so that it measures the record layer; the hybrid is W9 in
+docs/PLAN_REMAINING.md.
