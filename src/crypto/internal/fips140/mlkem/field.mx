@@ -163,13 +163,13 @@ func polyByteEncode[T ~[n]fieldElement](b []byte, f T) (ret0 []byte) {
 // step of ML-KEM Encapsulation.
 //
 // It implements ByteDecode₁₂, according to FIPS 203, Algorithm 6.
-func polyByteDecode[T ~[n]fieldElement](b []byte) (ret0 T, ret1 error) {
-	if len(b) != encodingSize12 {
+func polyByteDecode[T ~[n]fieldElement](b []byte, off int32) (ret0 T, ret1 error) {
+	if len(b)-off < encodingSize12 {
 		return T{}, errors.New("mlkem: invalid encoding length")
 	}
 	var f T
 	for i := 0; i < n; i += 2 {
-		d := uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16
+		d := uint32(b[off]) | uint32(b[off+1])<<8 | uint32(b[off+2])<<16
 		const mask12 = 0b1111_1111_1111
 		var err error
 		if f[i], err = fieldCheckReduced(uint16(d & mask12)); err != nil {
@@ -178,7 +178,7 @@ func polyByteDecode[T ~[n]fieldElement](b []byte) (ret0 T, ret1 error) {
 		if f[i+1], err = fieldCheckReduced(uint16(d >> 12)); err != nil {
 			return T{}, errors.New("mlkem: invalid polynomial encoding")
 		}
-		b = b[3:]
+		off += 3
 	}
 	return f, nil
 }
@@ -198,7 +198,9 @@ func polyByteDecode[T ~[n]fieldElement](b []byte) (ret0 T, ret1 error) {
 func growFor(in []byte, nb int32) (out []byte) {
 	total := len(in) + nb
 	if cap(in) >= total {
-		out = in[:total]
+		// resize, not in[:total]: a subslice is a copy, so the tail would be a
+		// fresh throwaway instead of the capacity the caller already has.
+		out = resize(in, total)
 		return out
 	}
 	out = []byte{:total}
@@ -477,12 +479,10 @@ func ntt(f ringElement) (ret0 nttElement) {
 		for start := 0; start < 256; start += 2 * nb {
 			zeta := zetas[idx]
 			idx++
-			// Bounds check elimination hint.
-			fs, flen := f[start:start+nb], f[start+nb:start+nb+nb]
 			for j := 0; j < nb; j++ {
-				t := fieldMul(zeta, flen[j])
-				flen[j] = fieldSub(fs[j], t)
-				fs[j] = fieldAdd(fs[j], t)
+				t := fieldMul(zeta, f[start+nb+j])
+				f[start+nb+j] = fieldSub(f[start+j], t)
+				f[start+j] = fieldAdd(f[start+j], t)
 			}
 		}
 	}
@@ -499,12 +499,10 @@ func inverseNTT(f nttElement) (ret0 ringElement) {
 		for start := 0; start < 256; start += 2 * nb {
 			zeta := zetas[idx]
 			idx--
-			// Bounds check elimination hint.
-			fs, flen := f[start:start+nb], f[start+nb:start+nb+nb]
 			for j := 0; j < nb; j++ {
-				t := fs[j]
-				fs[j] = fieldAdd(t, flen[j])
-				flen[j] = fieldMulSub(zeta, flen[j], t)
+				t := f[start+j]
+				f[start+j] = fieldAdd(t, f[start+nb+j])
+				f[start+nb+j] = fieldMulSub(zeta, f[start+nb+j], t)
 			}
 		}
 	}
