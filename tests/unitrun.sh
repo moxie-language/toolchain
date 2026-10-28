@@ -260,6 +260,12 @@ for i in "${!UNITS[@]}"; do
 		*) continue ;;
 		esac
 	fi
+	if [ -n "$UNITS_LIST" ]; then
+		case ",$UNITS_LIST," in
+		*",$name,"*) ;;
+		*) continue ;;
+		esac
+	fi
 	rc="$(unit_verdict_of "$u")"
 	[ -n "$rc" ] || rc="$(unit_rc "$u")"
 	if [ "$FAILED_ONLY" = 1 ]; then
@@ -434,7 +440,12 @@ total=0
 passed=0
 failed=0
 skipped=0
-for unit in "${UNITS[@]}"; do
+# Only the units this run selected count towards the exit code. A unit filtered
+# out by --units or --only keeps whatever verdict it had from an earlier run, and
+# counting those made a targeted run report - and fail on - work it never ran
+# (a stale FAIL from a killed sweep turned a 13-fixture quickcheck red).
+for sel in "${SELECTED[@]}"; do
+	unit="${UNITS[$sel]}"
 	rc="$(unit_verdict_of "$unit")"
 	[ -n "$rc" ] || rc="$(unit_rc "$unit")"
 	[ -n "$rc" ] || continue
