@@ -42,14 +42,20 @@ func paeth(a, b, c uint8) (out uint8) {
 	return c
 }
 
-// filterPaeth applies the Paeth filter to the cdat slice.
-// cdat is the current row's data, pdat is the previous row's data.
-func filterPaeth(cdat, pdat []byte, bytesPerPixel int32) {
+// filterPaeth applies the Paeth filter to the row starting at data[off].
+// data is the current row, prev is the previous row, both with the filter-type
+// byte first and so both read and written at off+.
+//
+// It takes an offset, not two trimmed slices: a sub-slice is a COPY under the
+// slice rule, so cdat[j] = ... wrote the unfiltered bytes into a throwaway and
+// every filtered PNG decoded to its raw compressed bytes.
+func filterPaeth(data, prev []byte, off, bytesPerPixel int32) {
 	var a, b, c, pa, pb, pc int32
+	n := int32(len(data)) - off
 	for i := 0; i < bytesPerPixel; i++ {
 		a, c = 0, 0
-		for j := i; j < len(cdat); j += bytesPerPixel {
-			b = int32(pdat[j])
+		for j := i; j < n; j += bytesPerPixel {
+			b = int32(prev[off+j])
 			pa = b - c
 			pb = a - c
 			pc = abs(pa + pb)
@@ -62,9 +68,9 @@ func filterPaeth(cdat, pdat []byte, bytesPerPixel int32) {
 			} else {
 				a = c
 			}
-			a += int32(cdat[j])
+			a += int32(data[off+j])
 			a &= 0xff
-			cdat[j] = uint8(a)
+			data[off+j] = uint8(a)
 			c = b
 		}
 	}

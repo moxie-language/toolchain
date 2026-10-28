@@ -545,31 +545,33 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 		}
 
 		// Apply the filter.
-		cdat := cr[1:]
-		pdat := pr[1:]
+		// The filtered bytes are cr[1:] and pr[1:]. Slicing them - a sub-slice is
+		// a COPY, not a view - unfiltered into a throwaway, so every filtered
+		// PNG decoded to the raw bytes it came with. Reads and writes take the
+		// +1 explicitly instead.
 		switch cr[0] {
 		case ftNone:
 			// No-op.
 		case ftSub:
-			for i := bytesPerPixel; i < len(cdat); i++ {
-				cdat[i] += cdat[i-bytesPerPixel]
+			for i := bytesPerPixel; i < (len(cr) - 1); i++ {
+				cr[1+i] += cr[1+i-bytesPerPixel]
 			}
 		case ftUp:
-			for i, p := range pdat {
-				cdat[i] += p
+			for i := int32(0); i < len(cr)-1; i++ {
+				cr[1+i] += pr[1+i]
 			}
 		case ftAverage:
 			// The first column has no column to the left of it, so it is a
 			// special case. We know that the first column exists because we
-			// check above that width != 0, and so len(cdat) != 0.
+			// check above that width != 0, and so the row is not empty.
 			for i := 0; i < bytesPerPixel; i++ {
-				cdat[i] += pdat[i] / 2
+				cr[1+i] += pr[1+i] / 2
 			}
-			for i := bytesPerPixel; i < len(cdat); i++ {
-				cdat[i] += uint8((int32(cdat[i-bytesPerPixel]) + int32(pdat[i])) / 2)
+			for i := bytesPerPixel; i < (len(cr) - 1); i++ {
+				cr[1+i] += uint8((int32(cr[1+i-bytesPerPixel]) + int32(pr[1+i])) / 2)
 			}
 		case ftPaeth:
-			filterPaeth(cdat, pdat, bytesPerPixel)
+			filterPaeth(cr, pr, 1, bytesPerPixel)
 		default:
 			return nil, newFormatError("bad filter type")
 		}
@@ -580,7 +582,7 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 			if d.useTransparent {
 				ty := d.transparent[1]
 				for x := 0; x < width; x += 8 {
-					b := cdat[x/8]
+					b := cr[1+x/8]
 					for x2 := 0; x2 < 8 && x+x2 < width; x2++ {
 						ycol := (b >> 7) * 0xff
 						acol := uint8(0xff)
@@ -593,7 +595,7 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 				}
 			} else {
 				for x := 0; x < width; x += 8 {
-					b := cdat[x/8]
+					b := cr[1+x/8]
 					for x2 := 0; x2 < 8 && x+x2 < width; x2++ {
 						gray.SetGray(x+x2, y, color.Gray{(b >> 7) * 0xff})
 						b <<= 1
@@ -604,7 +606,7 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 			if d.useTransparent {
 				ty := d.transparent[1]
 				for x := 0; x < width; x += 4 {
-					b := cdat[x/4]
+					b := cr[1+x/4]
 					for x2 := 0; x2 < 4 && x+x2 < width; x2++ {
 						ycol := (b >> 6) * 0x55
 						acol := uint8(0xff)
@@ -617,7 +619,7 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 				}
 			} else {
 				for x := 0; x < width; x += 4 {
-					b := cdat[x/4]
+					b := cr[1+x/4]
 					for x2 := 0; x2 < 4 && x+x2 < width; x2++ {
 						gray.SetGray(x+x2, y, color.Gray{(b >> 6) * 0x55})
 						b <<= 2
@@ -628,7 +630,7 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 			if d.useTransparent {
 				ty := d.transparent[1]
 				for x := 0; x < width; x += 2 {
-					b := cdat[x/2]
+					b := cr[1+x/2]
 					for x2 := 0; x2 < 2 && x+x2 < width; x2++ {
 						ycol := (b >> 4) * 0x11
 						acol := uint8(0xff)
@@ -641,7 +643,7 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 				}
 			} else {
 				for x := 0; x < width; x += 2 {
-					b := cdat[x/2]
+					b := cr[1+x/2]
 					for x2 := 0; x2 < 2 && x+x2 < width; x2++ {
 						gray.SetGray(x+x2, y, color.Gray{(b >> 4) * 0x11})
 						b <<= 4
@@ -652,7 +654,7 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 			if d.useTransparent {
 				ty := d.transparent[1]
 				for x := 0; x < width; x++ {
-					ycol := cdat[x]
+					ycol := cr[1+x]
 					acol := uint8(0xff)
 					if ycol == ty {
 						acol = 0x00
@@ -660,22 +662,22 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 					nrgba.SetNRGBA(x, y, color.NRGBA{ycol, ycol, ycol, acol})
 				}
 			} else {
-				mxutil.CopyAt(gray.Pix, pixOffset, cdat)
+				mxutil.CopyRange(gray.Pix, pixOffset, cr, 1, len(cr)-1)
 				pixOffset += gray.Stride
 			}
 		case cbGA8:
 			for x := 0; x < width; x++ {
-				ycol := cdat[2*x+0]
-				nrgba.SetNRGBA(x, y, color.NRGBA{ycol, ycol, ycol, cdat[2*x+1]})
+				ycol := cr[1+2*x+0]
+				nrgba.SetNRGBA(x, y, color.NRGBA{ycol, ycol, ycol, cr[1+2*x+1]})
 			}
 		case cbTC8:
 			if d.useTransparent {
 				pix, i, j := nrgba.Pix, pixOffset, 0
 				tr, tg, tb := d.transparent[1], d.transparent[3], d.transparent[5]
 				for x := 0; x < width; x++ {
-					rr := cdat[j+0]
-					g := cdat[j+1]
-					b := cdat[j+2]
+					rr := cr[1+j+0]
+					g := cr[1+j+1]
+					b := cr[1+j+2]
 					a := uint8(0xff)
 					if rr == tr && g == tg && b == tb {
 						a = 0x00
@@ -691,9 +693,9 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 			} else {
 				pix, i, j := rgba.Pix, pixOffset, 0
 				for x := 0; x < width; x++ {
-					pix[i+0] = cdat[j+0]
-					pix[i+1] = cdat[j+1]
-					pix[i+2] = cdat[j+2]
+					pix[i+0] = cr[1+j+0]
+					pix[i+1] = cr[1+j+1]
+					pix[i+2] = cr[1+j+2]
 					pix[i+3] = 0xff
 					i += 4
 					j += 3
@@ -702,7 +704,7 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 			}
 		case cbP1:
 			for x := 0; x < width; x += 8 {
-				b := cdat[x/8]
+				b := cr[1+x/8]
 				for x2 := 0; x2 < 8 && x+x2 < width; x2++ {
 					idx := b >> 7
 					if len(paletted.Palette.Element) <= int32(idx) {
@@ -714,7 +716,7 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 			}
 		case cbP2:
 			for x := 0; x < width; x += 4 {
-				b := cdat[x/4]
+				b := cr[1+x/4]
 				for x2 := 0; x2 < 4 && x+x2 < width; x2++ {
 					idx := b >> 6
 					if len(paletted.Palette.Element) <= int32(idx) {
@@ -726,7 +728,7 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 			}
 		case cbP4:
 			for x := 0; x < width; x += 2 {
-				b := cdat[x/2]
+				b := cr[1+x/2]
 				for x2 := 0; x2 < 2 && x+x2 < width; x2++ {
 					idx := b >> 4
 					if len(paletted.Palette.Element) <= int32(idx) {
@@ -739,21 +741,21 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 		case cbP8:
 			if len(paletted.Palette.Element) != 256 {
 				for x := 0; x < width; x++ {
-					if len(paletted.Palette.Element) <= int32(cdat[x]) {
-						resize(paletted.Palette.Element, int32(cdat[x])+1)
+					if len(paletted.Palette.Element) <= int32(cr[1+x]) {
+						resize(paletted.Palette.Element, int32(cr[1+x])+1)
 					}
 				}
 			}
-			mxutil.CopyAt(paletted.Pix, pixOffset, cdat)
+			mxutil.CopyRange(paletted.Pix, pixOffset, cr, 1, len(cr)-1)
 			pixOffset += paletted.Stride
 		case cbTCA8:
-			mxutil.CopyAt(nrgba.Pix, pixOffset, cdat)
+			mxutil.CopyRange(nrgba.Pix, pixOffset, cr, 1, len(cr)-1)
 			pixOffset += nrgba.Stride
 		case cbG16:
 			if d.useTransparent {
 				ty := uint16(d.transparent[0])<<8 | uint16(d.transparent[1])
 				for x := 0; x < width; x++ {
-					ycol := uint16(cdat[2*x+0])<<8 | uint16(cdat[2*x+1])
+					ycol := uint16(cr[1+2*x+0])<<8 | uint16(cr[1+2*x+1])
 					acol := uint16(0xffff)
 					if ycol == ty {
 						acol = 0x0000
@@ -762,14 +764,14 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 				}
 			} else {
 				for x := 0; x < width; x++ {
-					ycol := uint16(cdat[2*x+0])<<8 | uint16(cdat[2*x+1])
+					ycol := uint16(cr[1+2*x+0])<<8 | uint16(cr[1+2*x+1])
 					gray16.SetGray16(x, y, color.Gray16{ycol})
 				}
 			}
 		case cbGA16:
 			for x := 0; x < width; x++ {
-				ycol := uint16(cdat[4*x+0])<<8 | uint16(cdat[4*x+1])
-				acol := uint16(cdat[4*x+2])<<8 | uint16(cdat[4*x+3])
+				ycol := uint16(cr[1+4*x+0])<<8 | uint16(cr[1+4*x+1])
+				acol := uint16(cr[1+4*x+2])<<8 | uint16(cr[1+4*x+3])
 				nrgba64.SetNRGBA64(x, y, color.NRGBA64{ycol, ycol, ycol, acol})
 			}
 		case cbTC16:
@@ -778,9 +780,9 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 				tg := uint16(d.transparent[2])<<8 | uint16(d.transparent[3])
 				tb := uint16(d.transparent[4])<<8 | uint16(d.transparent[5])
 				for x := 0; x < width; x++ {
-					rcol := uint16(cdat[6*x+0])<<8 | uint16(cdat[6*x+1])
-					gcol := uint16(cdat[6*x+2])<<8 | uint16(cdat[6*x+3])
-					bcol := uint16(cdat[6*x+4])<<8 | uint16(cdat[6*x+5])
+					rcol := uint16(cr[1+6*x+0])<<8 | uint16(cr[1+6*x+1])
+					gcol := uint16(cr[1+6*x+2])<<8 | uint16(cr[1+6*x+3])
+					bcol := uint16(cr[1+6*x+4])<<8 | uint16(cr[1+6*x+5])
 					acol := uint16(0xffff)
 					if rcol == tr && gcol == tg && bcol == tb {
 						acol = 0x0000
@@ -789,18 +791,18 @@ func (d *decoder) readImagePass(r io.Reader, pass int32, allocateOnly bool) (out
 				}
 			} else {
 				for x := 0; x < width; x++ {
-					rcol := uint16(cdat[6*x+0])<<8 | uint16(cdat[6*x+1])
-					gcol := uint16(cdat[6*x+2])<<8 | uint16(cdat[6*x+3])
-					bcol := uint16(cdat[6*x+4])<<8 | uint16(cdat[6*x+5])
+					rcol := uint16(cr[1+6*x+0])<<8 | uint16(cr[1+6*x+1])
+					gcol := uint16(cr[1+6*x+2])<<8 | uint16(cr[1+6*x+3])
+					bcol := uint16(cr[1+6*x+4])<<8 | uint16(cr[1+6*x+5])
 					rgba64.SetRGBA64(x, y, color.RGBA64{rcol, gcol, bcol, 0xffff})
 				}
 			}
 		case cbTCA16:
 			for x := 0; x < width; x++ {
-				rcol := uint16(cdat[8*x+0])<<8 | uint16(cdat[8*x+1])
-				gcol := uint16(cdat[8*x+2])<<8 | uint16(cdat[8*x+3])
-				bcol := uint16(cdat[8*x+4])<<8 | uint16(cdat[8*x+5])
-				acol := uint16(cdat[8*x+6])<<8 | uint16(cdat[8*x+7])
+				rcol := uint16(cr[1+8*x+0])<<8 | uint16(cr[1+8*x+1])
+				gcol := uint16(cr[1+8*x+2])<<8 | uint16(cr[1+8*x+3])
+				bcol := uint16(cr[1+8*x+4])<<8 | uint16(cr[1+8*x+5])
+				acol := uint16(cr[1+8*x+6])<<8 | uint16(cr[1+8*x+7])
 				nrgba64.SetNRGBA64(x, y, color.NRGBA64{rcol, gcol, bcol, acol})
 			}
 		}
