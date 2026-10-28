@@ -8,6 +8,7 @@
 package jpeg
 
 import (
+	"git.smesh.lol/moxie/pkg/mxutil"
 	"image"
 	"image/color"
 	"image/internal/imageutil"
@@ -293,9 +294,16 @@ func (d *decoder) readByteStuffedByte() (x byte, err error) {
 	return 0xff, nil
 }
 
-// readFull reads exactly len(p) bytes into p. It does not care about byte
+// readFullAt fills p[off:off+n] from the stream. It does not care about byte
 // stuffing.
-func (d *decoder) readFull(p []byte) (out error) {
+//
+// The destination is a span, not p[off:] : a sub-slice is a copy, so filling
+// one left the caller's buffer untouched - every JPEG header, Huffman table and
+// scan restart marker read through d.tmp[:n] landed in a throwaway. Reading the
+// buffered bytes through mxutil.CopyRange keeps the source a span too, so
+// d.bytes.buf[d.bytes.i:d.bytes.j] stops allocating on every iteration of a
+// self-mutating method's loop.
+func (d *decoder) readFullAt(p []byte, off, n int32) (out error) {
 	// Unread the overshot bytes, if any.
 	if d.bytes.nUnreadable != 0 {
 		if d.bits.n >= 8 {
@@ -307,12 +315,17 @@ func (d *decoder) readFull(p []byte) (out error) {
 	// Loop scratch is declared once, outside the loop: a declaration in a loop
 	// in a self-mutating method is rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
-	var n int32
-	for {
-		n = copy(p, d.bytes.buf[d.bytes.i:d.bytes.j])
-		p = p[n:]
-		d.bytes.i += n
-		if len(p) == 0 {
+	var m int32
+	for n > 0 {
+		m = d.bytes.j - d.bytes.i
+		if m > n {
+			m = n
+		}
+		mxutil.CopyRange(p, off, d.bytes.buf, d.bytes.i, m)
+		d.bytes.i += m
+		off += m
+		n -= m
+		if n == 0 {
 			break
 		}
 		if err := d.fill(); err != nil {
@@ -368,7 +381,7 @@ func (d *decoder) processSOF(n int32) (out error) {
 	default:
 		return newUnsupportedError("number of components")
 	}
-	if err := d.readFull(d.tmp[:n]); err != nil {
+	if err := d.readFullAt(d.tmp, 0, n); err != nil {
 		return err
 	}
 	// We only support 8-bit precision.
@@ -509,7 +522,7 @@ loop:
 				break loop
 			}
 			n -= blockSize
-			if rerr := d.readFull(d.tmp[:blockSize]); rerr != nil {
+			if rerr := d.readFullAt(d.tmp, 0, blockSize); rerr != nil {
 				return rerr
 			}
 			for i := range d.quant[tq] {
@@ -520,7 +533,7 @@ loop:
 				break loop
 			}
 			n -= 2 * blockSize
-			if rerr := d.readFull(d.tmp[:2*blockSize]); rerr != nil {
+			if rerr := d.readFullAt(d.tmp, 0, 2*blockSize); rerr != nil {
 				return rerr
 			}
 			for i := range d.quant[tq] {
@@ -539,7 +552,7 @@ func (d *decoder) processDRI(n int32) (out error) {
 	if n != 2 {
 		return newFormatError("DRI has wrong length")
 	}
-	if err := d.readFull(d.tmp[:2]); err != nil {
+	if err := d.readFullAt(d.tmp, 0, 2); err != nil {
 		return err
 	}
 	d.ri = int32(d.tmp[0])<<8 + int32(d.tmp[1])
@@ -550,7 +563,7 @@ func (d *decoder) processApp0Marker(n int32) (out error) {
 	if n < 5 {
 		return d.ignore(n)
 	}
-	if err := d.readFull(d.tmp[:5]); err != nil {
+	if err := d.readFullAt(d.tmp, 0, 5); err != nil {
 		return err
 	}
 	n -= 5
@@ -567,7 +580,7 @@ func (d *decoder) processApp14Marker(n int32) (out error) {
 	if n < 12 {
 		return d.ignore(n)
 	}
-	if err := d.readFull(d.tmp[:12]); err != nil {
+	if err := d.readFullAt(d.tmp, 0, 12); err != nil {
 		return err
 	}
 	n -= 12
@@ -595,7 +608,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (img image.Image, derr er
 	var n int32
 
 	// Check for the Start Of Image marker.
-	if err = d.readFull(d.tmp[:2]); err != nil {
+	if err = d.readFullAt(d.tmp, 0, 2); err != nil {
 		return nil, err
 	}
 	if d.tmp[0] != 0xff || d.tmp[1] != soiMarker {
@@ -604,7 +617,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (img image.Image, derr er
 
 	// Process the remaining segments until the End Of Image marker.
 	for {
-		err = d.readFull(d.tmp[:2])
+		err = d.readFullAt(d.tmp, 0, 2)
 		if err != nil {
 			return nil, err
 		}
@@ -663,7 +676,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (img image.Image, derr er
 
 		// Read the 16-bit length of the segment. The value includes the 2 bytes for the
 		// length itself, so we subtract 2 to get the number of remaining bytes.
-		if err = d.readFull(d.tmp[:2]); err != nil {
+		if err = d.readFullAt(d.tmp, 0, 2); err != nil {
 			return nil, err
 		}
 		n = int32(d.tmp[0])<<8 + int32(d.tmp[1]) - 2

@@ -97,7 +97,7 @@ func (d *decoder) processSOS(n int32) (out error) {
 	if n < 6 || 4+2*d.nComp < n || n%2 != 0 {
 		return newFormatError("SOS has wrong length")
 	}
-	if err = d.readFull(d.tmp[:n]); err != nil {
+	if err = d.readFullAt(d.tmp, 0, n); err != nil {
 		return err
 	}
 	nComp := int32(d.tmp[0])
@@ -109,8 +109,10 @@ func (d *decoder) processSOS(n int32) (out error) {
 	for i := 0; i < nComp; i++ {
 		cs = d.tmp[1+2*i] // Component selector.
 		compIndex = -1
-		for j, comp := range d.comp[:d.nComp] {
-			if cs == comp.c {
+		// Indexed, not `range d.comp[:d.nComp]`: the window is a copy, so the
+		// scan rebuild allocated the whole component array per selector.
+		for j := int32(0); j < d.nComp; j++ {
+			if cs == d.comp[j].c {
 				compIndex = j
 			}
 		}
@@ -351,7 +353,7 @@ func (d *decoder) processSOS(n int32) (out error) {
 				// For well-formed input, the RST[0-7] restart marker follows
 				// immediately. For corrupt input, call findRST to try to
 				// resynchronize.
-				if err = d.readFull(d.tmp[:2]); err != nil {
+				if err = d.readFullAt(d.tmp, 0, 2); err != nil {
 					return err
 				} else if d.tmp[0] != 0xff || d.tmp[1] != expectedRST {
 					if err = d.findRST(expectedRST); err != nil {
@@ -609,7 +611,7 @@ func (d *decoder) findRST(expectedRST uint8) (out error) {
 			i = 1
 		}
 
-		if err := d.readFull(d.tmp[i:2]); err != nil {
+		if err := d.readFullAt(d.tmp, i, 2-i); err != nil {
 			return err
 		}
 	}
