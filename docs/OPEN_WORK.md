@@ -18959,3 +18959,29 @@ helper; a value the caller must outlive is returned, not written through a
 parameter" - and the three places that broke it (big.Int.QuoRem/DivMod,
 big.Float.Int) are converted. What would catch the next one is not a type error
 but a lifetime check the memory model does not have.
+
+## Round 250: the copy rule's bill, measured, on the compress path
+
+    gzip 1 MiB under the rule        1008 ms  →  79 ms      (Go 1.25.3: 3 ms)
+    flate level 6, 256 KiB           248 ms   →  36 ms      (Go: 1 ms)
+    flate output vs Go               byte-identical at levels 1, 6, 9
+
+The rule turned four "bounds-check hints" in compress/flate into per-position
+allocations, and this is the first place where the cost was big enough to see
+without a profiler:
+
+  hash4(window[i:i+4])                once per input position
+  findMatch: win := window[0:pos+minMatchLook]
+                                      up to a whole window, per candidate
+  matchLen(win[i:], wPos, ...)        two copies, per chain entry
+  write: b = b[n:]                    the whole remaining input, per refill
+
+Fixing them in that order measured each one: hash4 was 75 ms of the 248, and
+findMatch was the remaining 137. The fixes are the shape the campaign has used
+throughout - index the buffer, thread the offset - and the compressed bytes are
+unchanged to the last one.
+
+What is left in the 79 ms against Go's 3 ms is allocation volume, not algorithm:
+every block still copies `d.window[:d.windowEnd]` into the writer, and the
+writer's own buffers are grown per block. A profile would be the next step, and
+this is the first path where a profile is worth the time.
