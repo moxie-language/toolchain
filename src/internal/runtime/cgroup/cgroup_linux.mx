@@ -19,7 +19,12 @@ var (
 	_cgroupInitDone bool
 )
 
-func cgroupInit() {
+// initCgroup builds the two errors kept in package globals.
+//
+// init-prefixed because only initialisation code allocates in the root arena; a
+// stringError built in an ordinarily-named helper was recycled on return while
+// these globals kept pointing at it.
+func initCgroup() {
 	if _cgroupInitDone { return }
 	_cgroupInitDone = true
 	ErrNoCgroup = stringError("not in a cgroup")
@@ -108,7 +113,7 @@ func checkBufferSize(s []byte, size int32) {
 //
 // scratch must have length ScratchSize.
 func OpenCPU(scratch []byte) (CPU, error) {
-	cgroupInit()
+	initCgroup()
 	checkBufferSize(scratch, ScratchSize)
 
 	base := scratch[:PathSize]
@@ -173,7 +178,7 @@ func OpenCPU(scratch []byte) (CPU, error) {
 // Returns average CPU throughput limit from the cgroup, or ok false if there
 // is no limit.
 func ReadCPULimit(c CPU) (float64, bool, error) {
-	cgroupInit()
+	initCgroup()
 	switch c.version {
 	case 1:
 		quota, err := readV1Number(c.quotaFD)
@@ -314,7 +319,7 @@ func parseV2Limit(buf []byte) (float64, bool, error) {
 //
 // Returns ErrNoCgroup if the process is not in a CPU cgroup.
 func FindCPU(out []byte, scratch []byte) (int32, Version, error) {
-	cgroupInit()
+	initCgroup()
 	checkBufferSize(out, PathSize)
 	checkBufferSize(scratch, ParseSize)
 
@@ -357,7 +362,7 @@ func FindCPU(out []byte, scratch []byte) (int32, Version, error) {
 //
 // Returns ErrNoCgroup if the process is not in a CPU cgroup.
 func FindCPURelativePath(out []byte, scratch []byte) (int32, Version, error) {
-	cgroupInit()
+	initCgroup()
 	path := []byte("/proc/self/cgroup\x00")
 	fd, errno := syscall.Open(&path[0], syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 	if errno == syscall.ENOENT {
@@ -499,7 +504,7 @@ func containsCPU(b []byte) bool {
 //
 // Returns ErrNoCgroup if the process is not in a CPU cgroup.
 func FindCPUMountPoint(out []byte, scratch []byte) (int32, error) {
-	cgroupInit()
+	initCgroup()
 	checkBufferSize(out, PathSize)
 	checkBufferSize(scratch, ParseSize)
 
