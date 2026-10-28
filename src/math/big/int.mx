@@ -296,7 +296,14 @@ func (z *Int) Rem(x, y *Int) (rint *Int) {
 //
 // (See Daan Leijen, "Division and Modulus for Computer Scientists".)
 // See [Int.DivMod] for Euclidean division and modulus (unlike Go).
-func (z *Int) QuoRem(x, y, r *Int) (rint *Int, rint2 *Int) {
+func (z *Int) QuoRem(x, y *Int) (q *Int, r *Int) {
+	// The remainder is RETURNED, not written through an out-parameter. A write
+	// to another object's field cannot be relocated - only the receiver's fields
+	// and the return values are serialized at return - so a remainder allocated
+	// in this call's borrowed arena (the receiver's) dangled as soon as the
+	// caller's temporary receiver died: big.Int.Mod returned an Int whose abs
+	// pointed at recycled memory, and crypto/rand.Prime died reading it.
+	r = &Int{}
 	z.abs, r.abs = natDiv(z.abs, nil, r.abs, x.abs, y.abs)
 	z.neg, r.neg = len(z.abs) > 0 && x.neg != y.neg, len(r.abs) > 0 && x.neg // 0 has no sign
 	return z, r
@@ -307,8 +314,7 @@ func (z *Int) QuoRem(x, y, r *Int) (rint *Int, rint2 *Int) {
 // Div implements Euclidean division (unlike Go); see [Int.DivMod] for more details.
 func (z *Int) Div(x, y *Int) (rint *Int) {
 	y_neg := y.neg // z may be an alias for y
-	var r Int
-	z.QuoRem(x, y, &r)
+	_, r := z.QuoRem(x, y)
 	if r.neg {
 		if y_neg {
 			z.Add(z, _intOne())
@@ -328,7 +334,8 @@ func (z *Int) Mod(x, y *Int) (rint *Int) {
 		y0 = (&Int{}).Set(y)
 	}
 	var q Int
-	q.QuoRem(x, y, z)
+	_, r := q.QuoRem(x, y)
+	z.abs, z.neg = r.abs, r.neg
 	if z.neg {
 		if y0.neg {
 			z.Sub(z, y0)
@@ -353,12 +360,12 @@ func (z *Int) Mod(x, y *Int) (rint *Int) {
 // Systems (TOPLAS), 14(2):127-144, New York, NY, USA, 4/1992.
 // ACM press.)
 // See [Int.QuoRem] for T-division and modulus (like Go).
-func (z *Int) DivMod(x, y, m *Int) (rint *Int, rint2 *Int) {
+func (z *Int) DivMod(x, y *Int) (q *Int, m *Int) {
 	y0 := y // save y
 	if z == y || alias(z.abs, y.abs) {
 		y0 = (&Int{}).Set(y)
 	}
-	z.QuoRem(x, y, m)
+	_, m = z.QuoRem(x, y)
 	if m.neg {
 		if y0.neg {
 			z.Add(z, _intOne())
@@ -734,7 +741,7 @@ func mulW(z, x *Int, neg bool, w Word) {
 // if extended is true, it also updates the cosequence Ua, Ub.
 // q and r are used as temporaries; the initial values are ignored.
 func euclidUpdate(A, B, Ua, Ub, q, r *Int, extended bool) (nA, nB, nr, nUa, nUb *Int) {
-	q.QuoRem(A, B, r)
+	_, r = q.QuoRem(A, B)
 
 	if extended {
 		// Ua, Ub = Ub, Ua-q*Ub
