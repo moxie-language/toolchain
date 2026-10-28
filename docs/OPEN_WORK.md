@@ -18893,3 +18893,26 @@ not own and could not relocate. Sub-slices, empty windows, out-parameters and
 diagnostic that found them was instrumentation - a counter printed from inside
 `isPrime` - not a differential, because a CSPRNG and a prime search have no
 reference output to diff.
+
+## Round 248: a slice literal is not a zero-filled array
+
+    net.LookupHost("localhost")       127.0.0.1 and ::1 (was: index out of range)
+    phase 8 netsmoke                  see below
+
+The RFC 6724 policy table is written in Go with `[16]byte{...}` composites that
+spell out the leading bytes and let the rest be zero. Porting the parameter from
+`[16]byte` to `[]byte` - Moxie has no array parameters - turned each of those into
+a slice literal of exactly the bytes written, so
+
+    [16]byte{0,0,0,0,0,0,0,0,0,0,0xff,0xff}     // 16 bytes, ten implied zeros
+    []byte{0,0,0,0,0,0,0,0,0,0,0xff,0xff}       // 12 bytes
+
+and AddrFrom16's addr[8:16] read past the end. Every host lookup goes through
+sortByRFC6724, so `LookupHost("localhost")` panicked, the phase 8 client fell
+through to a DNS query for "localhost" and reported "no such host".
+
+This is the array-shaped half of the same conversion work the copy rule forced:
+`[N]byte{...}` is a value with a fixed length; `[]byte{...}` is a variable-length
+value and the length is whatever was spelled. Every port from an array literal to
+a slice literal has to spell out all N bytes (or use the indexed form, whose
+length is the highest index plus one, which is why `[]byte{15: 0x01}` was fine).
