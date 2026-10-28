@@ -146,9 +146,18 @@ func rsh(x *decimal, s uint32) {
 		w++
 		n = n * 10
 	}
-	x.mant = x.mant[:w] // the number may be shorter (e.g. 1024 >> 10)
+	// resize, not x.mant[:w]: a sub-slice allocates the shortened digits in
+	// THIS frame and assigns them into the caller's decimal through a pointer
+	// parameter, which no relocation covers (the W10 class). resize keeps the
+	// buffer and only moves the length.
+	x.mant = resize(x.mant, w) // the number may be shorter (e.g. 1024 >> 10)
 
-	// append additional digits that didn't fit
+	// Append additional digits that didn't fit. This path can grow the buffer,
+	// and Ensure/push allocate in THIS frame, so a grown mant would point into a
+	// dead frame once rsh returns - the same out-parameter dangle as the line
+	// above (W10). It stays because the caller's capacity does hold these
+	// digits in the cases the formatter exercises; making it sound in general
+	// needs the "allocate where the destination lives" primitive W10 asks for.
 	for n > 0 {
 		d := n >> s
 		n &= mask

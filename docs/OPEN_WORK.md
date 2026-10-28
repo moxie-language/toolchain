@@ -19355,3 +19355,39 @@ on there actually being a nonce. The line above it,
 caller's record buffer unmodified while the AEAD decrypts in place through
 `resize(payload, 0)`, and switching it to an offset would mean decrypting into
 the input, which is a semantics change this item did not ask for.
+
+## Round 258: W7a was already enforced, and two slices in decimal.rsh
+
+Two corrections rather than two features.
+
+### The array check the plan asked for already exists
+
+W7a said "an array passed where a slice is expected must be a clean type error
+naming both types, in both compilers ... today a `[4]byte` argument to a
+`[]byte` parameter is accepted somewhere and produces undefined behaviour". It
+is rejected by both, in argument position and in assignment:
+
+    stage4  main.mx:19: cannot use value of type [4]byte as []byte in argument to function
+    legacy  main.mx:19:31: cannot use a (variable of type [4]byte) as []byte value in
+            argument to takesSlice
+
+So the array campaign gets no compiler-driven checklist; W7b is a manual sweep
+of the 823 sites, and W7c (rejecting the array TYPE) is still the only compiler
+change in it.
+
+### decimal.rsh, and where the hardening stops
+
+`rsh(x *decimal, s)` writes into the decimal through a pointer parameter, so
+everything it allocates dies with its frame. The unconditional one is gone:
+
+    x.mant = x.mant[:w]        ->   x.mant = resize(x.mant, w)
+
+A sub-slice allocated the shortened digits in rsh's arena and assigned them into
+the caller's decimal; `resize` keeps the caller's buffer and only moves the
+length. The remaining one is the "append digits that didn't fit" loop, which can
+still grow the buffer through `Ensure`/`push` into rsh's own arena. It is left
+in place with a comment saying why: the caller's capacity covers the digits the
+formatter produces, and making it sound in general needs the same
+"allocate where the destination lives" primitive W10 asks for. This is the third
+site in one round that reduces to that primitive, which is the argument for
+doing W10 before the rest of the array campaign.
