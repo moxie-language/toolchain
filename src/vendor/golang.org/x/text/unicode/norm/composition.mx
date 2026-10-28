@@ -202,22 +202,24 @@ func (rb *reorderBuffer) flushCopy(buf []byte) int32 {
 // It is used internally by insert and insertString only.
 func (rb *reorderBuffer) insertOrdered(info Properties) {
 	n := rb.nrune
-	b := rb.rune[:]
+	// rb.rune is indexed directly, never trimmed to a local window: a sub-slice
+	// is a COPY under the slice rule, so the shift below moved runes inside a
+	// throwaway and the reorder buffer kept its old order.
 	cc := info.ccc
 	if cc > 0 {
 		// Find insertion position + move elements to make room.
 		for ; n > 0; n-- {
-			if b[n-1].ccc <= cc {
+			if rb.rune[n-1].ccc <= cc {
 				break
 			}
-			b[n] = b[n-1]
+			rb.rune[n] = rb.rune[n-1]
 		}
 	}
 	rb.nrune += 1
 	pos := uint8(rb.nbyte)
 	rb.nbyte += utf8.UTFMax
 	info.pos = pos
-	b[n] = info
+	rb.rune[n] = info
 }
 
 // insertErr is an error code returned by insert. Using this type instead
@@ -441,7 +443,6 @@ func (rb *reorderBuffer) decomposeHangul(r rune) {
 // combineHangul algorithmically combines Jamo character components into Hangul.
 // See https://unicode.org/reports/tr15/#Hangul for details on combining Hangul.
 func (rb *reorderBuffer) combineHangul(s, i, k int32) {
-	b := rb.rune[:]
 	bn := rb.nrune
 	// Declared once, outside the loop: declarations in a loop in a
 	// self-mutating method are rejected, and the scratch would otherwise be
@@ -451,14 +452,14 @@ func (rb *reorderBuffer) combineHangul(s, i, k int32) {
 	var l rune
 	var v rune
 	for ; i < bn; i++ {
-		cccB = b[k-1].ccc
-		cccC = b[i].ccc
+		cccB = rb.rune[k-1].ccc
+		cccC = rb.rune[i].ccc
 		if cccB == 0 {
 			s = k - 1
 		}
 		if s != k-1 && cccB >= cccC {
-			// b[i] is blocked by greater-equal cccX below it
-			b[k] = b[i]
+			// rb.rune[i] is blocked by greater-equal cccX below it
+			rb.rune[k] = rb.rune[i]
 			k++
 		} else {
 			l = rb.runeAt(s) // also used to compare to hangulBase
@@ -475,7 +476,7 @@ func (rb *reorderBuffer) combineHangul(s, i, k int32) {
 				// ACxx plus 11Ax to LVT
 				rb.assignRune(s, l+v-jamoTBase)
 			default:
-				b[k] = b[i]
+				rb.rune[k] = rb.rune[i]
 				k++
 			}
 		}
@@ -504,7 +505,6 @@ func (rb *reorderBuffer) compose() {
 		return
 	}
 	k := 1
-	b := rb.rune[:]
 	// Declared once, outside the loop: declarations in a loop in a
 	// self-mutating method are rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
@@ -520,15 +520,15 @@ func (rb *reorderBuffer) compose() {
 			rb.combineHangul(s, i, k)
 			return
 		}
-		ii = b[i]
+		ii = rb.rune[i]
 		// We can only use combineForward as a filter if we later
 		// get the info for the combined character. This is more
 		// expensive than using the filter. Using combinesBackward()
 		// is safe.
 		if ii.combinesBackward() {
-			cccB = b[k-1].ccc
+			cccB = rb.rune[k-1].ccc
 			cccC = ii.ccc
-			blocked = false // b[i] blocked by starter or greater or equal CCC?
+			blocked = false // rb.rune[i] blocked by starter or greater or equal CCC?
 			if cccB == 0 {
 				s = k - 1
 			} else {
@@ -542,7 +542,7 @@ func (rb *reorderBuffer) compose() {
 				}
 			}
 		}
-		b[k] = b[i]
+		rb.rune[k] = rb.rune[i]
 		k++
 	}
 	rb.nrune = k
