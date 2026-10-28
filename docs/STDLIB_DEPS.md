@@ -1,12 +1,11 @@
 # Moxie Stdlib Dependency Order
 
-Generated 2026-05-30. 306 sub-packages across 47 top-level packages.
+Generated 2026-05-30. 305 sub-packages across 47 top-level packages.
 
 ## Tier 0: Zero Dependencies (leaves)
 
   cmp
   container/list
-  container/ring
   crypto/internal/boring/sig
   crypto/internal/boring/syso
   crypto/internal/fips140/aes/gcm/_asm/gcm

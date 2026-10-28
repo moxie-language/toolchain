@@ -10330,12 +10330,13 @@ Still open, and this is now the whole of it:
    no build constraint of their own, `os/user` compiles and is a green sweep
    entry without them, and their job is done by the non-cgo implementations
    beside them. The standing rule is to remove dead references, not keep them.
-4. **`any` in generic signatures** (`iter`, `weak`,
-   `crypto/internal/fips140cache`, and generic functions across
-   `maps`/`slices`/`bytes`/`internal/trace`): the compiler still SKIPS any file
-   importing those three packages (`discoverPkg`'s skip-list), which silently
-   drops symbols. The real fix is the concrete-constraint refactor plus deleting
-   the skip-list; the skip-list's removal is the completion condition.
+4. **`any` in generic signatures - RESOLVED in round 252.** `iter`, `weak`,
+   `crypto/internal/fips140cache` and the generic functions across
+   `maps`/`slices`/`bytes`/`internal/trace` all compile, the loader's skip-list
+   is gone, and the tree's last `any` was `container/ring`, which is deleted.
+   A heterogeneous container has no shape without an empty interface; a `Ring`
+   of `T` needs `Ring[T C]` with a concrete constraint, and there was no
+   importer to choose `C` for.
 
 ## FIXED in round 125: the cgo-gated `os/user` files were dead references, and are gone
 
@@ -19032,3 +19033,35 @@ open defect this gate cannot see, because it is a warning, not a failure.
     float64 Stringer           println(1.5) prints +1.500000e+000; fmt is
                                correct, so this is cosmetic and stays at the
                                bottom of the list
+
+## Round 252: the last `any` was a container nobody imported
+
+`src/container/ring` was the tree's only remaining package that could not
+compile, and it failed for the reason the language removed the feature:
+
+    ring.mx:  Value any            -> undefined: any
+              Do(f func(any))      -> undefined: any
+
+The port of Go's circular list carries its element in an empty interface,
+because Go's version does. Without `any` there is no field type that can hold
+"whatever the client puts there", so there is nothing to patch: the shape the
+package is written in is the shape the language forbids.
+
+The replacement shape would be `Ring[T C]` with a concrete constraint, and the
+first question that raises is which constraint - which is the question that
+tells you whether the package has a caller. It does not: `container/ring` had
+no importer anywhere in `src/`, `pkg/`, `tests/` or `_mxc_stage4/`. A generic
+container with no instantiation is a template nobody fills in, so it is gone
+rather than reshaped.
+
+What this closes: every sub-package in the tree now compiles, and the `any`
+campaign has no remaining instance. The stale "still open" entry from round 125
+that listed `iter`, `weak`, `fips140cache`, `maps`, `slices`, `bytes` and
+`internal/trace` as still carrying `any` is corrected in place - all of those
+compile and are green sweep entries; `ring` was the last one.
+
+    docs/STDLIB_DEPS.md   container/ring removed from tier 0; 305 sub-packages
+
+That file is a generated snapshot and its count is now hand-maintained; it was
+already one package behind before this round, so treat the list as a guide to
+dependency order rather than as a manifest.
