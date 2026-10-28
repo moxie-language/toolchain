@@ -60,7 +60,16 @@ type formInfo struct {
 
 var formTable []*formInfo
 
-func ensureFormTable() []*formInfo {
+// initFormTable builds the per-form table.
+//
+// The name is not decoration: the compiler switches the current arena to the
+// root for initialisation code, because memory stored into a global has to
+// outlive every frame. Built in an ordinarily-named function, these formInfos
+// land in the caller's frame arena and are recycled the moment it returns, so
+// the next reader of a func-value field jumps through reused memory -
+// norm.NFC.Bytes on non-ASCII input died with SIGSEGV at a corrupted code
+// pointer.
+func initFormTable() []*formInfo {
 	if formTable != nil {
 		return formTable
 	}
@@ -190,7 +199,13 @@ func (p Properties) TrailCCC() uint8 {
 	return _ccc()[p.tccc]
 }
 
-func buildRecompMap() {
+// initRecompMap fills the recomposition map.
+//
+// init-named for the same reason as initFormTable: the map and its runes are
+// stored into a package global, so they must be allocated while the root arena
+// is current. Built lazily by an ordinarily-named function the map was recycled
+// on return and Hangul recomposition read whatever had taken its place.
+func initRecompMap() {
 	recompMap = map[uint32]rune{}
 	var buf [8]byte
 	for i := 0; i < len(recompMapPacked); i += 8 {
@@ -211,7 +226,7 @@ func buildRecompMap() {
 // combine returns the combined rune or 0 if it doesn't exist.
 //
 // The caller is responsible for calling
-// recompMapOnce.Do(buildRecompMap) sometime before this is called.
+// recompMapOnce.Do(initRecompMap) sometime before this is called.
 func combine(a, b rune) rune {
 	key := uint32(uint16(a))<<16 + uint32(uint16(b))
 	if recompMap == nil {
