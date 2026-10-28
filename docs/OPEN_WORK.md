@@ -18733,3 +18733,93 @@ landed is the read side of the math/big arithmetic (RSA keygen under the rule
 dies with "arena: region table full", which is the allocator being honest about
 a million persistent operand copies), plus the packages whose windows are reads
 only and therefore cost allocations rather than wrong answers.
+
+## Round 246: the rule is on, and the tree it broke
+
+    gate, both phases under the rule (170 units)        167 pass, 3 fixed since
+    phase 2 bootstrap with the rule in both compilers   PASS, fixpoint 0e85af88
+    differential vs Go 1.25.3 after the rule: jpeg, png, gzip, zlib, rc4,
+        poly1305/ChaCha20-Poly1305 (RFC 8439), math/big modexp and marshalling,
+        norm, netip, byteorder                          identical
+    1024-bit RSA keygen under the rule                  22 min, then
+                                                        "arena: region table full"
+
+`x[a:b]` allocates now: len elements copied, cap = len, `x[:0]` is the empty
+slice, array bases stay views, and `resize` is the capacity-preserving form that
+is not a sub-slice. Both compilers in one commit - stage4's emitSliceOp and
+legacy's case *types.Slice, which already did exactly this for TCString, so the
+string path was the model. The fixture is
+tests/regressions/should_compile/slice_copy_rule.mx: eleven assertions about
+capacity, write-through, sub-slices of sub-slices, sub-slices of returned
+buffers and resize. It exits 0 here and 1 without the commit.
+
+The point of the eight rounds before this one was to arrive at a tree where that
+commit could be measured instead of guessed at. It still broke six packages, and
+the shape of what it broke is the useful result.
+
+### The shape that was left: a destination window
+
+Every round 239-245 conversion was a *call argument* - `f(x[off:])`,
+`readInto(x[off:])`, `Put(b[off:], v)`. What none of them caught is the same
+thing done locally:
+
+    dst := plane[off:]              // a copy
+    dst[i] = v                      // writes the copy
+
+Six packages did that, and each one is a whole feature dead:
+
+  jpeg/fdct, idct   s := b[y8:y8+8] then s[0] = ...
+                    the three-index Go idiom ("small cap improves performance")
+                    turned the DCT into an identity: encode produced 688 bytes
+                    instead of Go's 658, decode produced one flat colour.
+  jpeg/scan         dst, stride := img3.Y[off:] then dst[yStride+x] = ...
+                    every reconstructed pixel went into a throwaway.
+  rc4               dst = dst[:len(src)] then dst[k] = ...
+                    XORKeyStream became the identity function.
+  imageutil         dpix := dst.Pix[row:] then rgba := dpix[x:x+4] then writes
+                    image/draw's YCbCr fast paths drew nothing.
+  png               cdat := cr[1:] / filterPaeth(cdat, ...) / cdat0..4 := cr[k][1:]
+                    unfiltering lost, filtering emitted unfiltered bytes under
+                    filter names that said otherwise.
+  norm              b := rb.rune[:] then b[n] = b[n-1]
+                    the combining-mark shift, the Hangul recomposition and the
+                    compose compaction all wrote into copies.
+
+The conversions are all the same: take the buffer whole plus an offset. That is
+also the form the array ban needs, which is why the DCT rows load into an
+[8]int32 and write back rather than indexing through a helper.
+
+### Two more classes the rule named
+
+An EMPTY window is always a write. `msg[lenOff:lenOff]` has no other use, and
+under the rule it is a zero-capacity copy, so the append lands in a throwaway:
+
+  dnsmessage   b.header.pack(b.msg[b.start:b.start]) and
+               packUint16(msg[lenOff:lenOff], conLen)
+               every message the Go resolver built carried ID 0 and RDLENGTH 0
+               (the fixture failed on "builder header id").
+
+And `PutUint64(b[off:off+8], v)` - the binary package's own store - was sixty
+sites: poly1305's tag was sixteen zero bytes, argon2's parameter block, chacha20's
+keystream, blake2b's digest, debug/elf's relocation offsets, gzip/zlib's header
+and checksum, png's chunk length and CRC, and `binary.Write` itself, whose
+internal `bs[e.off:]` store meant every struct written through it wrote its
+integers nowhere. PutUint16/32/64At are on ByteOrder now; where the buffer is an
+ARRAY the call passes `a[:]`, because an array base is a view and the conversion
+only has to keep the type.
+
+### What the rule still costs
+
+The rule is landed and the gate is green, but it is not free:
+
+    arithmetic operands   math/big takes `x []Word` and callers pass x[1:], so a
+                          1024-bit RSA keygen allocates on every limb operation,
+                          fills the frame arena and dies in the allocator after
+                          22 minutes. Nothing in the gate does RSA keygen, which
+                          is why the gate can be green while this is true.
+    read-only windows     debug/gosym, tls decrypt, slices.Grow's neighbours and
+                          the ftoa cursor cost allocations, not wrong answers.
+
+The next round is the math/big operand side: a span-read form for the arithmetic
+kernels (`x []Word, xOff, xLen`) so `x[1:]` stops being an allocation. That is
+the last thing between the rule and crypto.
