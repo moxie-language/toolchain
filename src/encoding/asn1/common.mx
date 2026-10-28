@@ -85,8 +85,17 @@ type fieldParameters struct {
 	explicit     bool   // true iff an EXPLICIT tag is in use.
 	application  bool   // true iff an APPLICATION tag is in use.
 	private      bool   // true iff a PRIVATE tag is in use.
-	defaultValue *int64 // a default value for INTEGER typed fields (maybe nil).
-	tag          *int32   // the EXPLICIT or IMPLICIT tag (maybe nil).
+	// defaultValue and tag carry a presence flag instead of being pointers.
+	// They used to be *int64 and *int32 set from a local in
+	// parseFieldParameters, which made every call to it hand back a pointer
+	// into its own frame arena: the codec cannot copy an unknown-extent
+	// pointee, so it preserved the address and leaked that frame, once per
+	// parseFieldParameters call, on every Marshal and Unmarshal in the tree
+	// ("moxie: codec arena escape ... unknown-extent pointee").
+	defaultValue int64
+	hasDefault   bool
+	tag          int32
+	hasTag       bool
 	stringType   int32    // the string tag to use when marshaling.
 	stringLike   bool   // true iff an akBytes value is a character string (printable or UTF-8).
 	timeType     int32    // the time tag to use when marshaling.
@@ -94,7 +103,7 @@ type fieldParameters struct {
 	omitEmpty    bool   // true iff this should be omitted if empty when marshaling.
 
 	// Invariants:
-	//   if explicit is set, tag is non-nil.
+	//   if explicit is set, hasTag is true.
 }
 
 // String renders the parsed field parameters for the mismatch diagnostic in
@@ -102,12 +111,12 @@ type fieldParameters struct {
 // is the useful half of Go's %+v (that prints the address).
 func (p *fieldParameters) String() (s string) {
 	def := "<nil>"
-	if p.defaultValue != nil {
-		def = (*p.defaultValue).String()
+	if p.hasDefault {
+		def = p.defaultValue.String()
 	}
 	tag := "<nil>"
-	if p.tag != nil {
-		tag = (*p.tag).String()
+	if p.hasTag {
+		tag = p.tag.String()
 	}
 	return "{optional:" | p.optional.String() | " explicit:" | p.explicit.String() |
 		" application:" | p.application.String() | " private:" | p.private.String() |
@@ -129,9 +138,9 @@ func parseFieldParameters(str []byte) (ret fieldParameters) {
 			ret.optional = true
 		case part == "explicit":
 			ret.explicit = true
-			if ret.tag == nil {
-				var zero int32
-				ret.tag = &zero
+			if !ret.hasTag {
+				ret.tag = 0
+				ret.hasTag = true
 			}
 		case part == "generalized":
 			ret.timeType = TagGeneralizedTime
@@ -155,28 +164,28 @@ func parseFieldParameters(str []byte) (ret fieldParameters) {
 		case bytes.HasPrefix(part, "default:"):
 			i, err := strconv.ParseInt(part[8:], 10, 64)
 			if err == nil {
-				dv := i
-				ret.defaultValue = &dv
+				ret.defaultValue = i
+				ret.hasDefault = true
 			}
 		case bytes.HasPrefix(part, "tag:"):
 			i, err := strconv.Atoi(part[4:])
 			if err == nil {
-				tag := i
-				ret.tag = &tag
+				ret.tag = i
+				ret.hasTag = true
 			}
 		case part == "set":
 			ret.set = true
 		case part == "application":
 			ret.application = true
-			if ret.tag == nil {
-				var zero int32
-				ret.tag = &zero
+			if !ret.hasTag {
+				ret.tag = 0
+				ret.hasTag = true
 			}
 		case part == "private":
 			ret.private = true
-			if ret.tag == nil {
-				var zero int32
-				ret.tag = &zero
+			if !ret.hasTag {
+				ret.tag = 0
+				ret.hasTag = true
 			}
 		case part == "omitempty":
 			ret.omitEmpty = true

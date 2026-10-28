@@ -19157,3 +19157,32 @@ after it, with `len == cap == 1184` on the destination - the growth path - which
 is the shape of an aliased slice being recycled rather than a copy failing. The
 fixture pins X25519 so that it measures the record layer; the hybrid is W9 in
 docs/PLAN_REMAINING.md.
+
+## Round 254: the escape warning was a pointer to a local, twice over
+
+Round 251 recorded the x509 path printing, once per certificate,
+
+    moxie: codec arena escape: pointer into a transient frame arena preserved
+    instead of copied (unknown-extent pointee); that frame arena is leaked
+
+and called it the one open defect the gate could not see. It was two fields:
+
+    type fieldParameters struct {
+        defaultValue *int64   // set from a local in parseFieldParameters
+        tag          *int32   // ditto, for "explicit"/"tag:N"/"application"
+    }
+
+Every call to `parseFieldParameters` therefore returned a struct containing
+pointers into its own frame arena. `*int64` has no known extent, so the codec
+cannot deep-copy the pointee; its only safe move is to preserve the address and
+leak that frame - which it does, with the warning above, on every `Marshal`
+and every `Unmarshal` in the tree, since asn1 parses field parameters for every
+field it walks.
+
+Both are now `int64` + `bool` and `int32` + `bool`. There is no pointer to
+escape and nothing to leak, and the invariant from Go's comment moves with them
+("if explicit is set, hasTag is true").
+
+Measured: the certificate probe from round 251 prints no warning and all four
+variants (no extensions, EKU only, SAN only, both) build a leaf signed by a
+separate CA. `encoding/asn1`'s two fixtures stay green in the gate.
