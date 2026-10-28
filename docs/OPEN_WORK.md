@@ -18916,3 +18916,46 @@ This is the array-shaped half of the same conversion work the copy rule forced:
 value and the length is whatever was spelled. Every port from an array literal to
 a slice literal has to spell out all N bytes (or use the indexed form, whose
 length is the highest index plus one, which is why `[]byte{15: 0x01}` was fine).
+
+## Round 249: what can be enforced, and what only measurement can catch
+
+    rand_fill.mx (new fixture)        passes; it fails on the pre-fix tree at the
+                                      first drbg.Read
+    big.Float Text('g'/'f'/'e') vs Go 1.25.3, eight magnitudes at 200 bits
+                                      identical (the one open decimal.rsh risk is
+                                      not observable)
+
+### The fixture that was missing for nine rounds
+
+Round 247 found that every random read returned zeros. Nothing caught it for a
+good reason and a bad one: a CSPRNG has no reference output, so there is nothing
+to diff - but there *are* properties, and three of them are one line each. The
+new fixture asserts them: 64 bytes from crypto/rand are not all zero, two reads
+differ, drbg.Read fills 32 bytes, and a 70000-byte drbg.Read - past the DRBG's
+64 KiB request boundary - fills its tail as well as its head. That last one is
+the chunking loop, which is where the re-slicing cursor lives.
+
+The general shape, worth applying to every remaining "no expected value" area:
+assert the property that distinguishes "worked" from "did nothing". A buffer
+that came back untouched, a count that is zero, a length that did not change.
+
+### The parameter-write ban is not the fix, and now we can say why
+
+Round 247 ended with "the compiler should reject writes through parameter
+pointers". Measured: **570 sites** write through a pointer parameter's fields -
+`fillFileStatFromSys(st)`, `readDirectoryHeader(f)`, `processExtensions(out)`,
+`sysStat(h)`, every `FillX(out *T)` in the tree. Filling a caller's struct is the
+idiom the stdlib is written in, and a ban would demand rewriting all 570 into
+return-value form before the tree compiled again.
+
+The ban would also be aimed at the wrong thing. Writing a scalar field through a
+parameter is safe; what is unsafe is storing a *pointer-carrying value that this
+call allocated* into caller-owned storage, because only the receiver's fields and
+the return values are relocated at return. That is an escape question, and Moxie
+has no escape analysis on purpose.
+
+So the rule stays an authoring rule - "a mutating method's scratch belongs in a
+helper; a value the caller must outlive is returned, not written through a
+parameter" - and the three places that broke it (big.Int.QuoRem/DivMod,
+big.Float.Int) are converted. What would catch the next one is not a type error
+but a lifetime check the memory model does not have.
