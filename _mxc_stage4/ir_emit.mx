@@ -3570,15 +3570,24 @@ func (e *irEmitter) emitSliceOp(s *SSASlice) {
 			if elemType == "void" { elemType = "i8" }
 		}
 	}
-	// View: sub-slice aliases the parent (no shared memory, so no
-	// aliasing hazard; the runtime codec copies on return).
+	// Copy rule: a sub-slice allocates len elements and copies. Array bases
+	// (and pointers to arrays) stay views - they are not slices and have no
+	// allocation to make.
 	//
 	// No bounds check is emitted - Moxie leaves the indices to the programmer
 	// - but an exhausted cursor must not produce a negative length: the
 	// tree's `for ; len(r) > 0; r = r[1:]` loops leave `r` empty and the
-	// `if len(r) == 0` guards that follow have to fire (a truncated REQ
-	// filter read past the end and killed the relay). Clamp the low bound
+	// `if len(r) == 0` guards that follow have to fire. Clamp the low bound
 	// only, so every valid slice (0 <= low <= high <= len) is untouched.
+	isArr := false
+	if _, okA := SafeUnderlying(s.X.SSAType()).(*Array); okA {
+		isArr = true
+	}
+	if pA, okP := SafeUnderlying(s.X.SSAType()).(*Pointer); okP && pA.Base != nil {
+		if _, okA2 := SafeUnderlying(pA.Base).(*Array); okA2 {
+			isArr = true
+		}
+	}
 	lowC := e.uminIpt(ipt, low, oldLen)
 	lowC = e.uminIpt(ipt, lowC, high)
 	newLen := e.nextReg2("sl")
@@ -3589,10 +3598,26 @@ func (e *irEmitter) emitSliceOp(s *SSASlice) {
 	e.w("  ") ; e.w(srcOff) ; e.w(" = mul ") ; e.w(ipt) ; e.w(" ") ; e.w(lowC) ; e.w(", ") ; e.w(elemSz) ; e.w("\n")
 	srcPtr := e.nextReg2("sl")
 	e.w("  ") ; e.w(srcPtr) ; e.w(" = getelementptr inbounds i8, ptr ") ; e.w(oldPtr) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(srcOff) ; e.w("\n")
+	basePtr := srcPtr
 	newCap := e.nextReg2("sl")
-	e.w("  ") ; e.w(newCap) ; e.w(" = sub ") ; e.w(ipt) ; e.w(" ") ; e.w(oldCap) ; e.w(", ") ; e.w(lowC) ; e.w("\n")
+	if isArr {
+		e.w("  ") ; e.w(newCap) ; e.w(" = sub ") ; e.w(ipt) ; e.w(" ") ; e.w(oldCap) ; e.w(", ") ; e.w(lowC) ; e.w("\n")
+	} else {
+		byteLen := e.nextReg2("sl")
+		e.w("  ") ; e.w(byteLen) ; e.w(" = mul ") ; e.w(ipt) ; e.w(" ") ; e.w(elemSz) ; e.w(", ") ; e.w(newLen) ; e.w("\n")
+		buf := e.nextReg2("sl")
+		e.w("  ") ; e.w(buf) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(byteLen) ; e.w(", ptr null, ptr null)\n")
+		e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr")
+		e.w("  call ") ; e.w(ipt) ; e.w(" @runtime.sliceCopy(ptr ") ; e.w(buf) ; e.w(", ptr ") ; e.w(srcPtr) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(newLen) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(newLen) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(elemSz) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.sliceCopy", ipt, "ptr, ptr, " | ipt | ", " | ipt | ", " | ipt)
+		isZero := e.nextReg2("sl")
+		e.w("  ") ; e.w(isZero) ; e.w(" = icmp eq ") ; e.w(ipt) ; e.w(" ") ; e.w(newLen) ; e.w(", 0\n")
+		basePtr = e.nextReg2("sl")
+		e.w("  ") ; e.w(basePtr) ; e.w(" = select i1 ") ; e.w(isZero) ; e.w(", ptr null, ptr ") ; e.w(buf) ; e.w("\n")
+		e.w("  ") ; e.w(newCap) ; e.w(" = add ") ; e.w(ipt) ; e.w(" ") ; e.w(newLen) ; e.w(", 0\n")
+	}
 	s1 := e.nextReg2("sl")
-	e.w("  ") ; e.w(s1) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" undef, ptr ") ; e.w(srcPtr) ; e.w(", 0\n")
+	e.w("  ") ; e.w(s1) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" undef, ptr ") ; e.w(basePtr) ; e.w(", 0\n")
 	s2 := e.nextReg2("sl")
 	e.w("  ") ; e.w(s2) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s1) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(newLen) ; e.w(", 1\n")
 	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s2) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(newCap) ; e.w(", 2\n")

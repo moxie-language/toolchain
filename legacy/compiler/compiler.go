@@ -3178,25 +3178,23 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			ptrElemType := b.getLLVMType(typ.Elem())
 			newLen := b.CreateSub(high, low, "")
 
-			if expr.Low == nil {
-				// s[:high] - reslice with implicit low=0.
-				// Same base pointer, no aliasing, preserve cap.
-				newCap := b.CreateSub(max, low, "")
-				slice := llvm.Undef(b.getLLVMType(typ))
-				slice = b.CreateInsertValue(slice, oldPtr, 0, "")
-				slice = b.CreateInsertValue(slice, newLen, 1, "")
-				slice = b.CreateInsertValue(slice, newCap, 2, "")
-				return slice, nil
-			}
-
-			// s[low:high] - Moxie: view (no shared memory; codec copies at
-			// return, so aliasing is not a hazard).
+			// Copy rule: a sub-slice allocates len elements, copies them, and
+			// takes cap = len. Moxie has no shared memory, so a sub-slice that
+			// aliased its parent was the only aliasing in the language; a write
+			// through it must not reach the parent, and a nil empty slice is
+			// the empty value.
 			srcPtr := b.CreateInBoundsGEP(ptrElemType, oldPtr, []llvm.Value{low}, "")
-			newCap := b.CreateSub(max, low, "slice.cap")
+			elemSize := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(ptrElemType), false)
+			byteLen := b.CreateMul(newLen, elemSize, "slice.bytes")
+			layoutValue := llvm.ConstNull(b.dataPtrType)
+			newPtr := b.createRuntimeCall("alloc", []llvm.Value{byteLen, layoutValue}, "slice.copy.buf")
+			b.createRuntimeCall("memcpy", []llvm.Value{newPtr, srcPtr, byteLen}, "")
+			isEmpty := b.CreateICmp(llvm.IntEQ, newLen, llvm.ConstInt(b.uintptrType, 0, false), "slice.empty")
+			buf := b.CreateSelect(isEmpty, llvm.ConstNull(b.dataPtrType), newPtr, "")
 			slice := llvm.Undef(b.getLLVMType(typ))
-			slice = b.CreateInsertValue(slice, srcPtr, 0, "")
+			slice = b.CreateInsertValue(slice, buf, 0, "")
 			slice = b.CreateInsertValue(slice, newLen, 1, "")
-			slice = b.CreateInsertValue(slice, newCap, 2, "")
+			slice = b.CreateInsertValue(slice, newLen, 2, "")
 			return slice, nil
 
 		case *types.Basic:

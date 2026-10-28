@@ -1,0 +1,89 @@
+// The slice rule: a sub-slice is a fresh slice. It allocates, copies, and its
+// capacity is its length; a write through it does not reach the parent, and an
+// empty sub-slice refers to nothing. resize is the capacity-preserving form
+// and is not a sub-slice.
+//
+// This is the rule the cursor directive asked for: `x[n:]` is a copy, so it
+// cannot be used as a cursor. Read with an index or an offset, write into the
+// destination with push, and grow with resize.
+package main
+
+import "os"
+
+func tailOf() (t []byte) {
+	b := []byte{:3}
+	b[0] = 'x'
+	b[1] = 'y'
+	b[2] = 'z'
+	t = b[1:]
+	return t
+}
+
+func main() {
+	base := []byte{:5}
+	base[0] = 'a'
+	base[1] = 'b'
+	base[2] = 'c'
+	base[3] = 'd'
+	base[4] = 'e'
+
+	tail := base[1:4]
+	if len(tail) != 3 || cap(tail) != 3 {
+		os.Exit(1)
+	}
+	tail[0] = 'Z'
+	if base[1] != 'b' {
+		os.Exit(2) // the write reached the parent
+	}
+
+	empty := base[:0]
+	if len(empty) != 0 || cap(empty) != 0 {
+		os.Exit(3)
+	}
+
+	whole := base[:]
+	if len(whole) != 5 || cap(whole) != 5 {
+		os.Exit(4)
+	}
+	whole[0] = 'Q'
+	if base[0] != 'a' {
+		os.Exit(5)
+	}
+
+	// a sub-slice of a sub-slice copies again
+	mid := base[1:4]
+	sub := mid[1:3]
+	sub[0] = 'W'
+	if mid[1] != 'c' {
+		os.Exit(6)
+	}
+
+	// a sub-slice of a returned buffer is a copy of the callee's buffer
+	got := tailOf()
+	if len(got) != 2 || got[0] != 'y' || got[1] != 'z' {
+		os.Exit(7)
+	}
+
+	// resize keeps the buffer: capacity survives and writes are shared
+	buf := []byte{:0:8}
+	buf = push(buf, 'x')
+	buf = push(buf, 'y')
+	r := resize(buf, 1)
+	if len(r) != 1 || cap(r) != 8 {
+		os.Exit(8)
+	}
+	r[0] = 'z'
+	if buf[0] != 'z' {
+		os.Exit(9) // resize copied instead of reusing
+	}
+
+	// slicing a slice value held in a variable, not just a name
+	cur := base
+	step := cur[2:5]
+	step[0] = 'R'
+	if base[2] != 'c' {
+		os.Exit(10)
+	}
+
+	os.Exit(0)
+}
