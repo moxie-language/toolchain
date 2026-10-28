@@ -413,13 +413,28 @@ func (h *header) count(sec section) uint16 {
 }
 
 // pack appends the wire format of the header to msg.
-func (h *header) pack(msg []byte) []byte {
-	msg = packUint16(msg, h.id)
-	msg = packUint16(msg, h.bits)
-	msg = packUint16(msg, h.questions)
-	msg = packUint16(msg, h.answers)
-	msg = packUint16(msg, h.authorities)
-	return packUint16(msg, h.additionals)
+// packAppend appends the wire header to msg.
+//
+// Message.pack builds into a caller buffer that may be empty, so the header has
+// to grow it; Builder.Finish reserves the space in NewBuilder and patches it in
+// place with pack.
+func (h *header) packAppend(msg []byte) (out []byte) {
+	msg = push(msg, byte(h.id>>8), byte(h.id))
+	msg = push(msg, byte(h.bits>>8), byte(h.bits))
+	msg = push(msg, byte(h.questions>>8), byte(h.questions))
+	msg = push(msg, byte(h.answers>>8), byte(h.answers))
+	msg = push(msg, byte(h.authorities>>8), byte(h.authorities))
+	return push(msg, byte(h.additionals>>8), byte(h.additionals))
+}
+
+// pack writes the header at msg[off].
+func (h *header) pack(msg []byte, off int32) (noff int32) {
+	off = packUint16At(msg, off, h.id)
+	off = packUint16At(msg, off, h.bits)
+	off = packUint16At(msg, off, h.questions)
+	off = packUint16At(msg, off, h.answers)
+	off = packUint16At(msg, off, h.authorities)
+	return packUint16At(msg, off, h.additionals)
 }
 
 
@@ -1118,7 +1133,7 @@ func (m *Message) AppendPack(b []byte) ([]byte, error) {
 	h.additionals = uint16(len(m.Additionals))
 
 	compressionOff := len(b)
-	msg := h.pack(b)
+	msg := h.packAppend(b)
 
 	// RFC 1035 allows (but does not require) compression for packing. RFC
 	// 1035 requires unpacking implementations to support compression, so
@@ -1630,7 +1645,7 @@ func (b *Builder) Finish() ([]byte, error) {
 	}
 	b.section = sectionDone
 	// Space for the header was allocated in NewBuilder.
-	b.header.pack(b.msg[b.start:b.start])
+	b.header.pack(b.msg, int32(b.start))
 	return b.msg, nil
 }
 
@@ -1726,7 +1741,7 @@ func (h *ResourceHeader) fixLen(msg []byte, lenOff int32, preLen int32) error {
 	}
 
 	// Fill in the length now that we know how long the content is.
-	packUint16(msg[lenOff:lenOff], uint16(conLen))
+	packUint16At(msg, lenOff, uint16(conLen))
 	h.Length = uint16(conLen)
 
 	return nil
@@ -1797,6 +1812,28 @@ func skipResource(msg []byte, off int32) (int32, error) {
 // packUint16 appends the wire format of field to msg.
 func packUint16(msg []byte, field uint16) []byte {
 	return push(msg, byte(field>>8), byte(field))
+}
+
+// packUint16At and packUint32At write at an offset.
+//
+// They exist because a DNS header is packed into space that is already
+// accounted for: the Builder reserves it in NewBuilder and the ResourceHeader
+// length is filled in after its body is known. Both did it with an EMPTY
+// window - b.msg[b.start:b.start] and msg[lenOff:lenOff] - which under the slice
+// rule is a zero-capacity copy, so push() appended into a throwaway and the
+// header stayed zeroed (a built query carried ID 0 and RDLENGTH 0).
+func packUint16At(msg []byte, off int32, field uint16) (noff int32) {
+	msg[off] = byte(field >> 8)
+	msg[off+1] = byte(field)
+	return off + 2
+}
+
+func packUint32At(msg []byte, off int32, field uint32) (noff int32) {
+	msg[off] = byte(field >> 24)
+	msg[off+1] = byte(field >> 16)
+	msg[off+2] = byte(field >> 8)
+	msg[off+3] = byte(field)
+	return off + 4
 }
 
 
