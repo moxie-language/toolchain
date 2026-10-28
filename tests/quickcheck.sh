@@ -41,6 +41,7 @@ FIXTURES=(
 	gosym_pclntab       # the codec/relocation path over tables
 	bytes_replacer      # the trie builder, generic push/resize
 	bessel_large_x       # math/big float formatting through ftoa
+	tls_handshake        # the whole record layer: two domains, a real handshake
 )
 
 DO_FIXTURES=1

@@ -335,6 +335,8 @@ green.
 
 ---
 
+**W9 — the post-quantum hybrid key share** (found by W1, round 253). With the default `CurvePreferences` the client's 1216-byte share is 1184 bytes of ML-KEM encapsulation key followed by zeros where the 32-byte X25519 share belongs, and the server answers `tls: invalid client key share`. The bytes are correct immediately before `push(mlkemBytes, ecdhShare...)` and zero after it, with `len == cap == 1184` on the destination (the growth path). Either the growth copied the source into a recycled buffer or the source was an alias of a dead frame; the TLS fixture pins X25519 so it does not depend on the answer. Accept: the fixture with `CurvePreferences` unset passes.
+
 ## Suggested order
 
 | # | item | why now | cost |
