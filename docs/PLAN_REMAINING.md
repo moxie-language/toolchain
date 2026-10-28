@@ -349,12 +349,14 @@ green.
 
 **W3b — where the scanner's remaining 3.8 us per call goes** (found by W3, round 255). The window copies are gone and 4 MiB of 64-byte lines went 711 ms -> 356 ms, but the search-and-copy work is 29 ms, so ~327 ms is per-`Scan` overhead that does not scale with token size. Ruled out by probe: the reader, method calls, nested store-backs, function values, buffer size. Left: the sovereign-arena acquire and the store-back walk inside `Scan`. The benchmark recipe is in round 255. Accept: a repeat of that benchmark under 50 ms.
 
+**W10 — a callee that writes a slice through a pointer parameter leaves it in its own frame** (found by W1's verification case, round 256). `x509.processExtensions(out *Certificate)` builds `ExtKeyUsage`, `Policies`, the key ids and the name constraints with `push` and stores them through the parameter; nothing relocates them at its return, so the outer encode sees a pointer into a released arena, classifies it as an ancestor's, and aliases it. `x509.Verify` then reads it and dies. Reproducer: parse a leaf with an EKU extension and verify it against its CA in ONE domain (`/tmp/xcv` shape in round 256). Two candidate fixes, both started and neither finished: make the function a receiver method (blocked by the loop-declaration rule in self-mutating methods) or add a runtime "copy into the arena that owns the destination" primitive and use it at every slice write through a parameter. Accept: the reproducer verifies 20 times with no crash, and the TLS fixture's wrong-CA case comes back.
+
 ## Suggested order
 
 | # | item | why now | cost |
 |---|---|---|---|
 | 1 | W4 ring | 5 minutes, unblocks "everything compiles" | trivial |
-| 2 | ~~W1 TLS handshake~~ | done (round 253): five bugs, and the record layer works | — |
+| 2 | ~~W1 TLS handshake~~ | done (round 253): five bugs, and the record layer works. The wrong-CA case is W10 | — |
 | 3 | W2 codec escape warning | leaks per certificate, instrument for a class of bugs | 1 session |
 | 4 | W3 scanner offsets | 14x on a hot path, contained API change | half session |
 | 5 | W5 read windows | allocation only | half session |

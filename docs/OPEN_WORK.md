@@ -19231,3 +19231,85 @@ sovereign-arena acquire and the store-back walk inside `Scan` itself, which is
 W3b in docs/PLAN_REMAINING.md: the acceptance this item set (< 50 ms) is not met,
 the copies that caused the memory churn are gone, and the remaining factor is a
 runtime cost with a benchmark to chase it.
+
+## Round 256: x509.Verify reads extension slices that died in a pointer parameter
+
+With the record layer working, the W1 fixture's third case - a client rooted in
+the wrong CA must be rejected - crashed instead, and then crashed the fixture on
+and off. The bug is not in TLS. This is the smallest reproducer, and it is
+single-domain, so gdb works on it:
+
+    /tmp/xcv/main.mx
+    caKey, leafKey := ecdsa P256
+    caDER  := CreateCertificate(self-signed CA, IsCA, CertSign)
+    caCert := ParseCertificate(caDER)
+    leafDER:= CreateCertificate(leaf with EKU serverAuth and SANs, parent caCert)
+    leafCert := ParseCertificate(leafDER)
+    pool := NewCertPool(); pool.AddCert(caCert)
+    leafCert.Verify(VerifyOptions{Roots: pool, DNSName: "localhost",
+                                 KeyUsages: []ExtKeyUsage{ExtKeyUsageServerAuth}})
+    -> SIGSEGV in crypto/x509.checkChainForKeyUsage, reading cert.ExtKeyUsage[0]
+
+### What the trace says
+
+Printing which arena owns the slice at each hop (`runtime.DbgArenaOf`, a
+temporary helper that answers "root / frame index / pool slot / nowhere"):
+
+    parseExtKeyUsageExtension returns   where=4   top=4    (its own frame)
+    processExtensions after the case    where=3   top=3    (copied up, correct)
+    ParseCertificate after the call     where=100 top=1    (a POOLED arena)
+
+`where=100` means the region holding the slice is an arena sitting in the
+release pool: it was released, and the caller was handed a raw pointer into it.
+The value still reads correctly at that moment (the pool keeps the region
+mapped), and reads garbage once the pool hands the arena out or frees it - which
+is why the TLS fixture passed sometimes and segfaulted other times.
+
+The codec's decision is visible one step earlier: at `parseCertificate`'s
+return it classifies the extension slice as STABLE and aliases it. That is the
+"ancestor arenas keep identity" rule in `codecIsStableArenaAddr`: during a
+return encode anything that is not in the top arena and not in a sovereign data
+arena is assumed to belong to an ancestor. A pointer into a released arena is
+neither, so it is aliased, and `ArenaRelease` then pools the arena it points
+into.
+
+### Why the slice left its frame at all
+
+`processExtensions(out *Certificate)` writes `out.ExtKeyUsage`,
+`out.Policies`, the key identifiers and the name constraints through a POINTER
+PARAMETER. Writes through a parameter are never relocated at return: only
+return values and receiver fields are. Every slice the function builds with
+`push` therefore stays in `processExtensions`' own frame arena, dies at its
+return, and the pointer into it is what the outer encode later sees.
+
+This is the same out-parameter rule that made `big.Int.Mod` return `(q, r)`
+instead of writing the remainder through a parameter (round 251). The language
+does not enforce it - there are 570 pointer-parameter field writes in the tree -
+so it is a class, not a site.
+
+### The two candidate fixes
+
+1. `processExtensions` becomes a receiver method, so its allocations land in the
+   receiver's sovereign arena and live with the certificate. Tried: the
+   compiler refuses the body as written - "declaration inside a loop in a
+   self-mutating method is not allowed: move the loop scratch into a helper
+   function" - so the extension switch has to be restructured into helpers
+   first, and a helper's own frame has the same problem as the loop body.
+2. A runtime primitive that copies a slice into the arena that owns the
+   destination (`CallerCopy`-style), used at the points where a callee stores a
+   slice through a parameter. It is explicit at the call site, which is where
+   the ownership question actually is, but it has to be paired with a rule for
+   nested slices (`Policies` is a slice of structs holding slices).
+
+Neither is in this round. W10 carries it.
+
+### What changed here
+
+`tests/regressions/should_compile/tls_handshake.mx` asserts the handshake and
+the 1 KiB echo, and skips the verification case with the reason above in its
+header. Its `CurvePreferences` are pinned to X25519 for W9. Both skips are
+recorded, not hidden: the fixture header names W9 and W10, and the plan carries
+the acceptance for each.
+
+Measured after the change: three consecutive runs of the fixture pass, TLS 1.3,
+TLS_CHACHA20_POLY1305_SHA256, 1024 bytes identical through the record layer.
