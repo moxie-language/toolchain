@@ -1,0 +1,71 @@
+// Regression: random bytes must actually land in the buffer the caller passed.
+//
+// There is no expected value for a random byte, which is exactly why this went
+// unnoticed: three windows on the way from the kernel to the caller (sysrand's
+// getrandom and urandom paths, the wasm bridge, and the DRBG's Generate call)
+// filled a COPY of the destination under the slice rule, so every read returned
+// zeros - silently, with no error, no panic and no short count. RSA key
+// generation was the first thing to notice: its Miller-Rabin bases were zero,
+// every base was rejected as out-of-range, and the prime search never
+// terminated (19 minutes, then "arena: region table full").
+//
+// The assertions are "not all zero" and "two reads differ", which is all a test
+// without a reference output can say. The DRBG read crosses its 64 KiB request
+// boundary so the chunking loop is exercised, not just the first call.
+package main
+
+import (
+	"bytes"
+	"crypto/internal/fips140/drbg"
+	"crypto/rand"
+	"os"
+)
+
+func allZero(b []byte) (z bool) {
+	z = true
+	for i := 0; i < len(b); i++ {
+		if b[i] != 0 {
+			return false
+		}
+	}
+	return z
+}
+
+func main() {
+	// crypto/rand: the /dev/urandom reader and io.ReadFull.
+	a := []byte{:64}
+	n, err := rand.Read(a)
+	if err != nil || n != 64 {
+		os.Exit(1)
+	}
+	if allZero(a) {
+		os.Exit(2) // 64 zero bytes: the read filled something else
+	}
+	b := []byte{:64}
+	if _, err = rand.Read(b); err != nil {
+		os.Exit(3)
+	}
+	if bytes.Equal(a, b) {
+		os.Exit(4) // two reads agree: nothing was read
+	}
+
+	// The DRBG directly, under the request size and past it.
+	c := []byte{:32}
+	drbg.Read(c)
+	if allZero(c) {
+		os.Exit(5)
+	}
+	d := []byte{:70000}
+	drbg.Read(d)
+	if allZero(d) {
+		os.Exit(6)
+	}
+	// The tail of a multi-chunk read must be filled too: a chunking loop that
+	// re-slices its destination fills only the first chunk.
+	tail := d[65536:]
+	if allZero(tail) {
+		os.Exit(7)
+	}
+
+	os.Exit(0)
+}
