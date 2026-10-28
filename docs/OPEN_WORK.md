@@ -18589,3 +18589,25 @@ be a performance test.
           on whether the parent must see the write)
      26  reader.Read into a window - all array bases, nothing to do
     114  sub-slice passed to a same-package writer (round 241 list)
+
+### RSA under the rule: the arena fills up
+
+The backgrounded copy-rule RSA probe did not finish in 25 minutes; after
+1479 s it died in the allocator:
+
+    panic: runtime error: arena: region table full
+
+That is the arena's fail-loud path, not a logic bug: a 1024-bit keygen under
+the rule allocates on every limb operation, the frame arena grows a region at
+a time, and the region registry (`arenaMaxRegions`) fills. So the copy rule
+as it stands does not merely make RSA slow, it makes it die - which means
+math/big needs its hot paths to stop allocating before the rule can be
+landed on crypto code. The offset conversions in nat/natdiv/natmul are the
+start of that; what is left is the operand side, where `x[1:]`-style reads
+are still copies. A span-read form for the arithmetic kernels
+(`x []Word, xOff, xLen`) is the shape that removes them without
+reintroducing aliasing.
+
+This is the honest state of the rule's bill: the write windows are nearly
+all converted, and the remaining work is the read side of the same kernels,
+driven by allocation rate rather than by wrong answers.
