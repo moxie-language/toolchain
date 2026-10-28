@@ -83,9 +83,13 @@ func (x *Nat) expand(n int32) (ret0 *Nat) {
 		x.limbs = newLimbs
 		return x
 	}
-	extraLimbs := x.limbs[len(x.limbs):n]
-	clear(extraLimbs)
+	// Zero the newly announced limbs by index. clear(x.limbs[old:n]) would zero
+	// a copy: a subslice is not a view.
+	old := len(x.limbs)
 	x.limbs = resize(x.limbs, n)
+	for i := old; i < n; i++ {
+		x.limbs[i] = 0
+	}
 	return x
 }
 
@@ -95,8 +99,14 @@ func (x *Nat) reset(n int32) (ret0 *Nat) {
 		x.limbs = []uint32{:n}
 		return x
 	}
-	// Clear both the returned limbs and the previously used ones.
-	clear(x.limbs[:max(n, len(x.limbs))])
+	// Clear both the returned limbs and the previously used ones: widen to the
+	// wider of the two lengths, zero all of it by index, then trim to n.
+	if n > len(x.limbs) {
+		x.limbs = resize(x.limbs, n)
+	}
+	for i := int32(0); i < len(x.limbs); i++ {
+		x.limbs[i] = 0
+	}
 	x.limbs = resize(x.limbs, n)
 	return x
 }
@@ -242,14 +252,11 @@ func (x *Nat) SetUint(y uint32) (ret0 *Nat) {
 //
 //:norace
 func (x *Nat) Equal(y *Nat) (ret0 choice) {
-	// Eliminate bounds checks in the loop.
 	size := len(x.limbs)
-	xLimbs := x.limbs[:size]
-	yLimbs := y.limbs[:size]
 
 	equal := yes
 	for i := 0; i < size; i++ {
-		equal &= ctEq(xLimbs[i], yLimbs[i])
+		equal &= ctEq(x.limbs[i], y.limbs[i])
 	}
 	return equal
 }
@@ -258,13 +265,11 @@ func (x *Nat) Equal(y *Nat) (ret0 choice) {
 //
 //:norace
 func (x *Nat) IsZero() (ret0 choice) {
-	// Eliminate bounds checks in the loop.
 	size := len(x.limbs)
-	xLimbs := x.limbs[:size]
 
 	zero := yes
 	for i := 0; i < size; i++ {
-		zero &= ctEq(xLimbs[i], 0)
+		zero &= ctEq(x.limbs[i], 0)
 	}
 	return zero
 }
@@ -273,17 +278,15 @@ func (x *Nat) IsZero() (ret0 choice) {
 //
 //:norace
 func (x *Nat) IsOne() (ret0 choice) {
-	// Eliminate bounds checks in the loop.
 	size := len(x.limbs)
-	xLimbs := x.limbs[:size]
 
-	if len(xLimbs) == 0 {
+	if size == 0 {
 		return no
 	}
 
-	one := ctEq(xLimbs[0], 1)
+	one := ctEq(x.limbs[0], 1)
 	for i := 1; i < size; i++ {
-		one &= ctEq(xLimbs[i], 0)
+		one &= ctEq(x.limbs[i], 0)
 	}
 	return one
 }
@@ -329,14 +332,11 @@ func (x *Nat) TrailingZeroBitsVarTime() (ret0 uint32) {
 //
 //:norace
 func (x *Nat) cmpGeq(y *Nat) (ret0 choice) {
-	// Eliminate bounds checks in the loop.
 	size := len(x.limbs)
-	xLimbs := x.limbs[:size]
-	yLimbs := y.limbs[:size]
 
 	var c uint32
 	for i := 0; i < size; i++ {
-		_, c = bits.Sub(xLimbs[i], yLimbs[i], c)
+		_, c = bits.Sub(x.limbs[i], y.limbs[i], c)
 	}
 	// If there was a carry, then subtracting y underflowed, so
 	// x is not greater than or equal to y.
@@ -349,14 +349,11 @@ func (x *Nat) cmpGeq(y *Nat) (ret0 choice) {
 //
 //:norace
 func (x *Nat) assign(on choice, y *Nat) (ret0 *Nat) {
-	// Eliminate bounds checks in the loop.
 	size := len(x.limbs)
-	xLimbs := x.limbs[:size]
-	yLimbs := y.limbs[:size]
 
 	mask := ctMask(on)
 	for i := 0; i < size; i++ {
-		xLimbs[i] ^= mask & (xLimbs[i] ^ yLimbs[i])
+		x.limbs[i] ^= mask & (x.limbs[i] ^ y.limbs[i])
 	}
 	return x
 }
@@ -367,13 +364,10 @@ func (x *Nat) assign(on choice, y *Nat) (ret0 *Nat) {
 //
 //:norace
 func (x *Nat) add(y *Nat) (c uint32) {
-	// Eliminate bounds checks in the loop.
 	size := len(x.limbs)
-	xLimbs := x.limbs[:size]
-	yLimbs := y.limbs[:size]
 
 	for i := 0; i < size; i++ {
-		xLimbs[i], c = bits.Add(xLimbs[i], yLimbs[i], c)
+		x.limbs[i], c = bits.Add(x.limbs[i], y.limbs[i], c)
 	}
 	return
 }
@@ -384,13 +378,10 @@ func (x *Nat) add(y *Nat) (c uint32) {
 //
 //:norace
 func (x *Nat) sub(y *Nat) (c uint32) {
-	// Eliminate bounds checks in the loop.
 	size := len(x.limbs)
-	xLimbs := x.limbs[:size]
-	yLimbs := y.limbs[:size]
 
 	for i := 0; i < size; i++ {
-		xLimbs[i], c = bits.Sub(xLimbs[i], yLimbs[i], c)
+		x.limbs[i], c = bits.Sub(x.limbs[i], y.limbs[i], c)
 	}
 	return
 }
@@ -401,27 +392,24 @@ func (x *Nat) sub(y *Nat) (c uint32) {
 //
 //:norace
 func (x *Nat) ShiftRightVarTime(n uint32) (ret0 *Nat) {
-	// Eliminate bounds checks in the loop.
 	size := len(x.limbs)
-	xLimbs := x.limbs[:size]
 
 	shift := int32(n % _W)
 	shiftLimbs := int32(n / _W)
 
-	var shiftedLimbs []uint32
-	if shiftLimbs < size {
-		shiftedLimbs = xLimbs[shiftLimbs:]
-	}
-
-	for i := range xLimbs {
-		if i >= len(shiftedLimbs) {
-			xLimbs[i] = 0
+	// Limb i is written before limbs i and i+1 are read as the source, so the
+	// shift runs in place without a snapshot of the input.
+	var j int32
+	for i := int32(0); i < size; i++ {
+		j = i + shiftLimbs
+		if j >= size {
+			x.limbs[i] = 0
 			continue
 		}
 
-		xLimbs[i] = shiftedLimbs[i] >> shift
-		if i+1 < len(shiftedLimbs) {
-			xLimbs[i] |= shiftedLimbs[i+1] << (_W - shift)
+		x.limbs[i] = x.limbs[j] >> shift
+		if j+1 < size {
+			x.limbs[i] |= x.limbs[j+1] << (_W - shift)
 		}
 	}
 
@@ -433,13 +421,11 @@ func (x *Nat) ShiftRightVarTime(n uint32) (ret0 *Nat) {
 // The actual size of x (but nothing more) leaks through timing side-channels.
 // Note that this is ordinarily secret, as opposed to the announced size of x.
 func (x *Nat) BitLenVarTime() (ret0 int32) {
-	// Eliminate bounds checks in the loop.
 	size := len(x.limbs)
-	xLimbs := x.limbs[:size]
 
 	for i := size - 1; i >= 0; i-- {
-		if xLimbs[i] != 0 {
-			return i*_W + bitLen(xLimbs[i])
+		if x.limbs[i] != 0 {
+			return i*_W + bitLen(x.limbs[i])
 		}
 	}
 	return 0
@@ -606,11 +592,7 @@ func (m *Modulus) Nat() (ret0 *Nat) {
 func (x *Nat) shiftIn(y uint32, m *Modulus) (ret0 *Nat) {
 	d := NewNat().resetFor(m)
 
-	// Eliminate bounds checks in the loop.
 	size := len(m.nat.limbs)
-	xLimbs := x.limbs[:size]
-	dLimbs := d.limbs[:size]
-	mLimbs := m.nat.limbs[:size]
 
 	// Each iteration of this loop computes x = 2x + b mod m, where b is a bit
 	// from y. Effectively, it left-shifts x and adds y one bit at a time,
@@ -628,10 +610,10 @@ func (x *Nat) shiftIn(y uint32, m *Modulus) (ret0 *Nat) {
 		carry = (y >> i) & 1
 		borrow = 0
 		mask = ctMask(needSubtraction)
-		for j := 0; j < size; j++ {
-			l = xLimbs[j] ^ (mask & (xLimbs[j] ^ dLimbs[j]))
-			xLimbs[j], carry = bits.Add(l, l, carry)
-			dLimbs[j], borrow = bits.Sub(xLimbs[j], mLimbs[j], borrow)
+		for j := int32(0); j < size; j++ {
+			l = x.limbs[j] ^ (mask & (x.limbs[j] ^ d.limbs[j]))
+			x.limbs[j], carry = bits.Add(l, l, carry)
+			d.limbs[j], borrow = bits.Sub(x.limbs[j], m.nat.limbs[j], borrow)
 		}
 		// Like in maybeSubtractModulus, we need the subtraction if either it
 		// didn't underflow (meaning 2x + b > m) or if computing 2x + b
@@ -781,9 +763,6 @@ func (x *Nat) montgomeryReduction(m *Modulus) (ret0 *Nat) {
 //:norace
 func (x *Nat) montgomeryMul(a *Nat, b *Nat, m *Modulus) (ret0 *Nat) {
 	n := len(m.nat.limbs)
-	mLimbs := m.nat.limbs[:n]
-	aLimbs := a.limbs[:n]
-	bLimbs := b.limbs[:n]
 
 	switch n {
 	default:
@@ -803,8 +782,8 @@ func (x *Nat) montgomeryMul(a *Nat, b *Nat, m *Modulus) (ret0 *Nat) {
 			// wanted to produce 2n-wide T, we would do
 			//
 			//   for i := 0; i < n; i++ {
-			//       d := bLimbs[i]
-			//       T[n+i] = addMulVVW(T[i:n+i], aLimbs, d)
+			//       d := b.limbs[i]
+			//       T[n+i] = addMulVVW(T, i, a.limbs, d)
 			//   }
 			//
 			// where d is a digit of the multiplier, T[i:n+i] is the shifted
@@ -815,8 +794,8 @@ func (x *Nat) montgomeryMul(a *Nat, b *Nat, m *Modulus) (ret0 *Nat) {
 			// the result of Step 1 is computed during the next loop. This is
 			// possible because each iteration only uses T[i] in Step 2 and then
 			// discards it in Step 6.
-			d = bLimbs[i]
-			c1 = addMulVVW(T, i, aLimbs, d)
+			d = b.limbs[i]
+			c1 = addMulVVW(T, i, a.limbs, d)
 
 			// Step 6 is replaced by shifting the virtual window we operate
 			// over: T of the algorithm is T[i:] for us. That means that T1 in
@@ -827,7 +806,7 @@ func (x *Nat) montgomeryMul(a *Nat, b *Nat, m *Modulus) (ret0 *Nat) {
 			// at T[i:]. The two carries (from a × d and Y × m) are added up in
 			// the next word T[n+i], and the carry bit from that addition is
 			// brought forward to the next iteration.
-			c2 = addMulVVW(T, i, mLimbs, Y)
+			c2 = addMulVVW(T, i, m.nat.limbs, Y)
 			T[n+i], c = bits.Add(c1, c2, c)
 		}
 
@@ -862,10 +841,10 @@ func (x *Nat) montgomeryMul(a *Nat, b *Nat, m *Modulus) (ret0 *Nat) {
 		T := []uint32{:nLimbs*2}
 		var c, d, c1, c2, Y uint32
 		for i := 0; i < nLimbs; i++ {
-			d = bLimbs[i]
-			c1 = addMulVVW1024(&T[i], &aLimbs[0], d)
+			d = b.limbs[i]
+			c1 = addMulVVW1024(&T[i], &a.limbs[0], d)
 			Y = T[i] * m.m0inv
-			c2 = addMulVVW1024(&T[i], &mLimbs[0], Y)
+			c2 = addMulVVW1024(&T[i], &m.nat.limbs[0], Y)
 			T[nLimbs+i], c = bits.Add(c1, c2, c)
 		}
 		// See the default case: split the reset from the copy, because the
@@ -885,10 +864,10 @@ func (x *Nat) montgomeryMul(a *Nat, b *Nat, m *Modulus) (ret0 *Nat) {
 		T := []uint32{:nLimbs*2}
 		var c, d, c1, c2, Y uint32
 		for i := 0; i < nLimbs; i++ {
-			d = bLimbs[i]
-			c1 = addMulVVW1536(&T[i], &aLimbs[0], d)
+			d = b.limbs[i]
+			c1 = addMulVVW1536(&T[i], &a.limbs[0], d)
 			Y = T[i] * m.m0inv
-			c2 = addMulVVW1536(&T[i], &mLimbs[0], Y)
+			c2 = addMulVVW1536(&T[i], &m.nat.limbs[0], Y)
 			T[nLimbs+i], c = bits.Add(c1, c2, c)
 		}
 		// See the default case: split the reset from the copy, because the
@@ -908,10 +887,10 @@ func (x *Nat) montgomeryMul(a *Nat, b *Nat, m *Modulus) (ret0 *Nat) {
 		T := []uint32{:nLimbs*2}
 		var c, d, c1, c2, Y uint32
 		for i := 0; i < nLimbs; i++ {
-			d = bLimbs[i]
-			c1 = addMulVVW2048(&T[i], &aLimbs[0], d)
+			d = b.limbs[i]
+			c1 = addMulVVW2048(&T[i], &a.limbs[0], d)
 			Y = T[i] * m.m0inv
-			c2 = addMulVVW2048(&T[i], &mLimbs[0], Y)
+			c2 = addMulVVW2048(&T[i], &m.nat.limbs[0], Y)
 			T[nLimbs+i], c = bits.Add(c1, c2, c)
 		}
 		// See the default case: split the reset from the copy, because the
@@ -969,8 +948,6 @@ func (x *Nat) Mul(y *Nat, m *Modulus) (ret0 *Nat) {
 	}
 
 	n := len(m.nat.limbs)
-	xLimbs := x.limbs[:n]
-	yLimbs := y.limbs[:n]
 
 	switch n {
 	default:
@@ -979,7 +956,7 @@ func (x *Nat) Mul(y *Nat, m *Modulus) (ret0 *Nat) {
 
 		// T = x * y
 		for i := 0; i < n; i++ {
-			T[n+i] = addMulVVW(T, i, xLimbs, yLimbs[i])
+			T[n+i] = addMulVVW(T, i, x.limbs, y.limbs[i])
 		}
 
 		// x = T mod m
@@ -991,21 +968,21 @@ func (x *Nat) Mul(y *Nat, m *Modulus) (ret0 *Nat) {
 		const nLimbs = 1024 / _W // compiler hint
 		T := []uint32{:nLimbs*2}
 		for i := 0; i < nLimbs; i++ {
-			T[nLimbs+i] = addMulVVW1024(&T[i], &xLimbs[0], yLimbs[i])
+			T[nLimbs+i] = addMulVVW1024(&T[i], &x.limbs[0], y.limbs[i])
 		}
 		return x.Mod(&Nat{limbs: T}, m)
 	case 1536 / _W:
 		const nLimbs = 1536 / _W // compiler hint
 		T := []uint32{:nLimbs*2}
 		for i := 0; i < nLimbs; i++ {
-			T[nLimbs+i] = addMulVVW1536(&T[i], &xLimbs[0], yLimbs[i])
+			T[nLimbs+i] = addMulVVW1536(&T[i], &x.limbs[0], y.limbs[i])
 		}
 		return x.Mod(&Nat{limbs: T}, m)
 	case 2048 / _W:
 		const nLimbs = 2048 / _W // compiler hint
 		T := []uint32{:nLimbs*2}
 		for i := 0; i < nLimbs; i++ {
-			T[nLimbs+i] = addMulVVW2048(&T[i], &xLimbs[0], yLimbs[i])
+			T[nLimbs+i] = addMulVVW2048(&T[i], &x.limbs[0], y.limbs[i])
 		}
 		return x.Mod(&Nat{limbs: T}, m)
 	}
@@ -1242,14 +1219,13 @@ func extendedGCD(a, m *Nat) (u, A *Nat, err error) {
 //:norace
 func rshift1(a *Nat, carry uint32) {
 	size := len(a.limbs)
-	aLimbs := a.limbs[:size]
 
-	for i := range size {
-		aLimbs[i] >>= 1
+	for i := int32(0); i < size; i++ {
+		a.limbs[i] >>= 1
 		if i+1 < size {
-			aLimbs[i] |= aLimbs[i+1] << (_W - 1)
+			a.limbs[i] |= a.limbs[i+1] << (_W - 1)
 		} else {
-			aLimbs[i] |= carry << (_W - 1)
+			a.limbs[i] |= carry << (_W - 1)
 		}
 	}
 }
