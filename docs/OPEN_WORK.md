@@ -18546,3 +18546,46 @@ The ones that are bugs are the ones whose result must reach a *field* or a
 caller: image's pixel rows, suffixarray's index writes, tls's decrypt into
 `record`, rsa/bigmod/mlkem's limb buffers. That is the worklist, in that
 order, and the test for each is "does the value the caller keeps change".
+
+## Round 244: three more classes, and the rule's cost on big numbers
+
+    image        34 sites: image's Set*/At and draw's row loops wrote pixels
+                 through p.Pix[i:i+4] and dpix[i:i+4]. A Set left the pixel
+                 at 0,0,0,0 and draw.Over left the destination untouched.
+                 Writes index Pix at row+pixel offset now; source-side
+                 aliases stay (a read through a copy is the same read).
+    rsa          OAEP and PSS padded through em[...] windows: mgf1XOR's mask,
+                 the 0x01 delimiter, the salt, the seed and the label hash
+                 all went into copies. mgf1XORAt takes the span, emsaPSS*
+                 resize em, and EncryptOAEP writes at dbOff/seedOff.
+    suffixarray  SAIS built its buckets (tmp[:textMax]),
+                 inverse map (sa[len-numLMS:]) and subproblem
+                 (sa[:numLMS], sa[len-numLMS:]) as windows - the index found
+                 no hits at all. Real buffers for freq/bucket/dst/text,
+                 resize for the [:256] trims, and the unmap indexes sa at
+                 unmapOff through a header that keeps the longer length.
+
+### The measurement nobody wanted
+
+A 1024-bit RSA keygen plus OAEP and PSS round trip takes **minutes** under
+the copy rule (the same probe is instant on the view compiler). Nothing is
+wrong; the rule is doing what it says. Every operand that is a sub-slice -
+and in math/big almost all of them are, `x[1:]`, `qhatv[:n]`, `u[off:]` -
+now allocates and copies. That is the price of "a sub-slice is a copy" on
+code that was written against aliasing, and it is the strongest argument
+for the offset conversions this campaign has been landing: the conversions
+are not tidiness, they are what keeps big-number code from allocating per
+limb operation.
+
+The same effect is why the RSA probe's copy-rule run is backgrounded and
+not claimed as a pass: it is a correctness test that takes long enough to
+be a performance test.
+
+### Remaining scanner hits, by shape
+
+    119  local `x := buf[a:b]` then write x[...]
+         (image/draw and image fixed; tls's decrypt, bigmod's limb caches,
+          mlkem, debug/gosym, norm still open - each needs its own decision
+          on whether the parent must see the write)
+     26  reader.Read into a window - all array bases, nothing to do
+    114  sub-slice passed to a same-package writer (round 241 list)
