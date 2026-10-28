@@ -19391,3 +19391,58 @@ formatter produces, and making it sound in general needs the same
 "allocate where the destination lives" primitive W10 asks for. This is the third
 site in one round that reduces to that primitive, which is the argument for
 doing W10 before the rest of the array campaign.
+
+## Round 259: W10 is a stable pointer over fields the callee wrote
+
+Round 256 localised it but guessed the mechanism. This round found it, and the
+guess was wrong in an instructive way.
+
+`processExtensions(out *Certificate)` writes slices into the caller's struct.
+The codec is not failing to copy those slices at the *next* hop - it is failing
+to walk them at all, one hop earlier:
+
+    case37     eku ptr=0x...ad00  arena 3 (processExtensions)   <- written here
+    end        eku ptr=0x...ad00  arena 3
+    encode @top=3   (nothing: the *Certificate itself was emitted STABLE)
+    encode @top=2   eku stable=true where=100 (POOLED)          <- already dead
+
+At `return`, the encoder is handed the `*Certificate`. That pointer lives in
+the CALLER's arena (arena 2), because the caller allocated it. An ancestor
+arena means identity, so the codec emits `codecTagStable` and does not descend
+into the struct. The fields the callee wrote are therefore never emitted, never
+decoded, and never copied: they stay in arena 3, which the epilogue releases to
+the pool. The next encode sees a pointer that is neither in the top arena nor in
+the root, guesses "ancestor", and aliases it; then the pool hands the arena out
+or unmaps it.
+
+### The fix
+
+Work on a copy the callee owns and return it:
+
+    work := *out
+    p := &work
+    ... every write goes to p ...
+    return p, nil
+
+The copy's inherited fields still point into the caller's arena, so identity is
+still the right answer for them. The fields this frame wrote live in this
+frame's arena, and a returned pointer makes the codec descend and copy them.
+`parseNameConstraintsExtension` needed the same treatment one level down: it
+now returns a `nameConstraints` struct instead of writing nine fields through
+the parameter, and the caller assigns them.
+
+    before   x509.Verify: 3/3 SIGSEGV in checkChainForKeyUsage
+    after    20 verifications, chains=1 len=2, 3/3 runs clean
+
+That restores the TLS fixture's third case: the wrong-CA client is rejected with
+"certificate signed by unknown authority" and the server sees
+`remote error: tls: bad certificate`. W1 is now complete as written; only W9
+(the PQ key share) is still pinned out of it.
+
+### The rule this leaves behind
+
+A callee must not store data it allocated into memory it does not own. Either it
+owns a copy and returns it (this round), or the allocation has to happen in the
+arena that owns the destination - which is the primitive rounds 256 and 258 kept
+asking for and still do not have. There are 570 pointer-parameter field writes
+in the tree; the two fixed here were the ones a test could see.

@@ -17,22 +17,23 @@
 //
 // What it asserts:
 //
-//   1. a handshake completes, and both sides agree on version and cipher suite
+//   1. a client rooted in the issuing CA completes a handshake, and both sides
+//      agree on version and cipher suite
 //   2. 1 KiB of application data round trips byte-identically through the
 //      record layer, in both directions
+//   3. a client rooted in a DIFFERENT CA is rejected with a certificate error,
+//      and the server sees the alert - not a hang, which is how a record layer
+//      usually fails
 //
-// What it does NOT assert, and should. The plan's W1 asked for a client rooted
-// in the wrong CA to be rejected. That path is broken for a reason that has
-// nothing to do with TLS: x509.Verify reads a parsed certificate's extension
-// slices after the frame that built them has returned (W10, with a
-// single-domain reproducer in docs/OPEN_WORK.md round 256). Verification is
-// therefore disabled here and the case returns with W10.
+// Case 3 depends on x509.Verify, which round 259 fixed: a callee's writes
+// through a pointer parameter are never relocated, so the parsed certificate's
+// extension slices pointed into a released frame (W10).
 //
-// Both configs also pin CurvePreferences to X25519: the default preference
-// list starts with the post-quantum hybrids (X25519MLKEM768), and that path has
-// an open bug (W9) - the client's key share is 1184 bytes of ML-KEM followed by
-// 32 bytes of X25519, and the 32 arrive as zeros, so the server answers
-// "invalid client key share".
+// Both configs pin CurvePreferences to X25519: the default preference list
+// starts with the post-quantum hybrids (X25519MLKEM768), and that path has an
+// open bug (W9) - the client's key share is 1184 bytes of ML-KEM followed by 32
+// bytes of X25519, and the 32 arrive as zeros, so the server answers "invalid
+// client key share".
 //
 // usage: tls_handshake        exit 0 when every case holds
 package main
@@ -52,6 +53,9 @@ import (
 	"strconv"
 	"time"
 )
+
+// two connections: one that must succeed, one that must be refused.
+const nConns = 2
 
 // bytes of application data in the echo: several records' worth of state,
 // which is the point.
@@ -102,11 +106,11 @@ func leafDERFor(caKey *ecdsa.PrivateKey, caDER []byte, leafKey *ecdsa.PrivateKey
 	return x509.CreateCertificate(rand.Reader(), tmpl, caCert, &leafKey.PublicKey, caKey)
 }
 
-// serveOne accepts one connection, handshakes, and echoes the payload back.
-// Every failure is reported over resCh so the parent can assert on both sides
-// of the conversation: a server error the client cannot see is exactly the
-// failure mode this fixture exists to catch.
-func serveOne(ln net.Listener, cfg *tls.Config, resCh chan []byte) {
+// serveOne accepts one connection, handshakes, and (for the first) echoes the
+// payload back. Every failure is reported over resCh so the parent can assert
+// on both sides of the conversation: a server error the client cannot see is
+// exactly the failure mode this fixture exists to catch.
+func serveOne(ln net.Listener, cfg *tls.Config, i int32, resCh chan []byte) {
 	var nc net.Conn
 	var err error
 	var c *tls.Conn
@@ -117,7 +121,7 @@ func serveOne(ln net.Listener, cfg *tls.Config, resCh chan []byte) {
 
 	nc, err = ln.Accept()
 	if err != nil {
-		resCh <- []byte("accept err: " | err.Error())
+		resCh <- []byte("conn" | strconv.Itoa(i) | " accept err: " | err.Error())
 		return
 	}
 	// A hang in the record layer must fail the fixture, not the suite.
@@ -125,31 +129,35 @@ func serveOne(ln net.Listener, cfg *tls.Config, resCh chan []byte) {
 	c = tls.Server(nc, cfg)
 	err = c.Handshake()
 	if err != nil {
-		resCh <- []byte("handshake err: " | err.Error())
+		resCh <- []byte("conn" | strconv.Itoa(i) | " handshake err: " | err.Error())
 		c.Close()
 		return
 	}
 	st = c.ConnectionState()
-	resCh <- []byte("ok ver=" | strconv.Itoa(int32(st.Version)) | " suite=" | strconv.Itoa(int32(st.CipherSuite)))
+	resCh <- []byte("conn" | strconv.Itoa(i) | " ok ver=" | strconv.Itoa(int32(st.Version)) | " suite=" | strconv.Itoa(int32(st.CipherSuite)))
+	if i != 0 {
+		c.Close()
+		return
+	}
 	buf = []byte{:payloadLen}
 	n, err = io.ReadFull(c, buf)
 	if err != nil {
-		resCh <- []byte("read err: " | err.Error())
+		resCh <- []byte("conn0 read err: " | err.Error())
 		c.Close()
 		return
 	}
 	w, err = c.Write(buf[0:n])
 	if err != nil {
-		resCh <- []byte("write err: " | err.Error())
+		resCh <- []byte("conn0 write err: " | err.Error())
 		c.Close()
 		return
 	}
-	resCh <- []byte("echo " | strconv.Itoa(w))
+	resCh <- []byte("conn0 echo " | strconv.Itoa(w))
 	c.Close()
 }
 
-// serverDomain is the child: it owns the certificate, the listener and the
-// connection. It reports the CA first, then the bound address, so the parent
+// serverDomain is the child: it owns the certificate, the listener and both
+// connections. It reports the CA first, then the bound address, so the parent
 // can never dial a port whose root it does not have yet.
 func serverDomain(caCh chan []byte, addrCh chan []byte, resCh chan []byte) {
 	var caKey *ecdsa.PrivateKey
@@ -160,6 +168,7 @@ func serverDomain(caCh chan []byte, addrCh chan []byte, resCh chan []byte) {
 	var cfg tls.Config
 	var ln net.Listener
 	var err error
+	var i int32
 
 	caKey, err = newKey()
 	if err != nil {
@@ -193,73 +202,43 @@ func serverDomain(caCh chan []byte, addrCh chan []byte, resCh chan []byte) {
 	// The port is ephemeral, so the child is the only side that can name it.
 	addrCh <- []byte(ln.Addr().String())
 	cfg = tls.Config{Certificates: []tls.Certificate{cert}, CurvePreferences: []tls.CurveID{tls.X25519}}
-	serveOne(ln, &cfg, resCh)
+	for i = 0; i < nConns; i++ {
+		serveOne(ln, &cfg, i, resCh)
+	}
 	ln.Close()
 }
 
-func main() {
-	var caCh chan []byte
-	var addrCh chan []byte
-	var resCh chan []byte
-	var caDER []byte
-	var addr []byte
-	var caCert *x509.Certificate
-	var roots *x509.CertPool
+func goodCase(addr []byte, roots *x509.CertPool, resCh chan []byte) (fails int32) {
 	var nc net.Conn
+	var err error
 	var cfg tls.Config
 	var c *tls.Conn
 	var st tls.ConnectionState
 	var srvMsg []byte
 	var send []byte
 	var got []byte
-	var err error
 	var n int32
-	var fails int32
-
-	caCh = chan []byte{}
-	addrCh = chan []byte{}
-	resCh = chan []byte{}
-	spawn(serverDomain, caCh, addrCh, resCh)
-
-	caDER = <-caCh
-	caCert, err = x509.ParseCertificate(caDER)
-	if err != nil {
-		println("FAIL parse child ca:", err.Error())
-		os.Exit(1)
-	}
-	roots = x509.NewCertPool()
-	roots.AddCert(caCert)
-
-	addr = <-addrCh
-	if bytes.HasPrefix(addr, []byte("ERR")) {
-		println("FAIL " | string(addr))
-		os.Exit(1)
-	}
-	println("srv  listening on " | string(addr))
 
 	nc, err = net.Dial("tcp", addr)
 	if err != nil {
 		println("FAIL dial:", err.Error())
-		os.Exit(1)
+		return 1
 	}
 	nc.SetDeadline(time.Now().Add(30 * time.Second))
-	// InsecureSkipVerify because chain verification is W10; the pin and the
-	// skip are both documented in the header.
-	cfg = tls.Config{RootCAs: roots, ServerName: []byte("localhost"), CurvePreferences: []tls.CurveID{tls.X25519}, InsecureSkipVerify: true}
+	cfg = tls.Config{RootCAs: roots, ServerName: []byte("localhost"), CurvePreferences: []tls.CurveID{tls.X25519}}
 	c = tls.Client(nc, &cfg)
 	err = c.Handshake()
 	if err != nil {
 		println("FAIL client handshake:", err.Error())
-		os.Exit(1)
+		return 1
 	}
 	st = c.ConnectionState()
 	println("ok   client handshake ver=" | int32(st.Version).String() | " suite=" | int32(st.CipherSuite).String())
 	srvMsg = <-resCh
 	println("srv  " | string(srvMsg))
-	if !bytes.HasPrefix(srvMsg, []byte("ok ver=")) {
-		fails = fails + 1
+	if !bytes.HasPrefix(srvMsg, []byte("conn0 ok")) {
+		return 1
 	}
-
 	// Every byte follows a stride, so a one-byte shift in the record layer
 	// changes the comparison.
 	send = []byte{:payloadLen}
@@ -269,31 +248,122 @@ func main() {
 	_, err = c.Write(send)
 	if err != nil {
 		println("FAIL write:", err.Error())
-		os.Exit(1)
+		return 1
 	}
 	got = []byte{:payloadLen}
 	n, err = io.ReadFull(c, got)
 	if err != nil {
 		println("FAIL read:", err.Error())
-		os.Exit(1)
+		return 1
 	}
 	srvMsg = <-resCh
 	println("srv  " | string(srvMsg))
 	if n != payloadLen {
 		println("FAIL echo short read:", n.String())
-		fails = fails + 1
+		return 1
 	}
 	for i := int32(0); i < payloadLen; i++ {
 		if got[i] != send[i] {
 			println("FAIL echo differs at byte", i.String())
-			fails = fails + 1
-			break
+			return 1
 		}
 	}
 	c.Close()
-	if fails == 0 {
-		println("ok   echo " | payloadLen.String() | " bytes identical")
+	println("ok   echo " | payloadLen.String() | " bytes identical")
+	return 0
+}
+
+func badCase(addr []byte, roots *x509.CertPool, resCh chan []byte) (fails int32) {
+	var nc net.Conn
+	var err error
+	var cfg tls.Config
+	var c *tls.Conn
+	var srvMsg []byte
+
+	nc, err = net.Dial("tcp", addr)
+	if err != nil {
+		println("FAIL dial(2):", err.Error())
+		return 1
 	}
+	nc.SetDeadline(time.Now().Add(30 * time.Second))
+	cfg = tls.Config{RootCAs: roots, ServerName: []byte("localhost"), CurvePreferences: []tls.CurveID{tls.X25519}}
+	c = tls.Client(nc, &cfg)
+	err = c.Handshake()
+	if err == nil {
+		println("FAIL handshake against the wrong CA succeeded")
+		c.Close()
+		<-resCh
+		return 1
+	}
+	println("ok   wrong CA rejected: " | err.Error())
+	c.Close()
+	srvMsg = <-resCh
+	println("srv  " | string(srvMsg))
+	if !bytes.HasPrefix(srvMsg, []byte("conn1 handshake err")) {
+		println("FAIL server did not report the rejected handshake")
+		return 1
+	}
+	return 0
+}
+
+func main() {
+	var caCh chan []byte
+	var addrCh chan []byte
+	var resCh chan []byte
+	var caDER []byte
+	var addr []byte
+	var caCert *x509.Certificate
+	var goodRoots *x509.CertPool
+	var badKey *ecdsa.PrivateKey
+	var badDER []byte
+	var badCert *x509.Certificate
+	var badRoots *x509.CertPool
+	var err error
+	var fails int32
+
+	caCh = chan []byte{}
+	addrCh = chan []byte{}
+	resCh = chan []byte{}
+	spawn(serverDomain, caCh, addrCh, resCh)
+
+	// The CA the child issued: this client must be able to verify the leaf.
+	caDER = <-caCh
+	caCert, err = x509.ParseCertificate(caDER)
+	if err != nil {
+		println("FAIL parse child ca:", err.Error())
+		os.Exit(1)
+	}
+	goodRoots = x509.NewCertPool()
+	goodRoots.AddCert(caCert)
+
+	// An unrelated CA: this client must NOT be able to verify the leaf.
+	badKey, err = newKey()
+	if err != nil {
+		println("FAIL other ca key:", err.Error())
+		os.Exit(1)
+	}
+	badDER, err = caDERFor(badKey, []byte("moxie fixture other CA"), 2)
+	if err != nil {
+		println("FAIL other ca:", err.Error())
+		os.Exit(1)
+	}
+	badCert, err = x509.ParseCertificate(badDER)
+	if err != nil {
+		println("FAIL parse other ca:", err.Error())
+		os.Exit(1)
+	}
+	badRoots = x509.NewCertPool()
+	badRoots.AddCert(badCert)
+
+	addr = <-addrCh
+	if bytes.HasPrefix(addr, []byte("ERR")) {
+		println("FAIL " | string(addr))
+		os.Exit(1)
+	}
+	println("srv  listening on " | string(addr))
+
+	fails = fails + goodCase(addr, goodRoots, resCh)
+	fails = fails + badCase(addr, badRoots, resCh)
 
 	if fails != 0 {
 		println("tls_handshake:", fails.String(), "case(s) failed")

@@ -562,7 +562,19 @@ func isValidIPMask(mask []byte) (rok bool) {
 	return true
 }
 
-func parseNameConstraintsExtension(out *Certificate, e pkix.Extension) (unhandled bool, err error) {
+type nameConstraints struct {
+	PermittedDNSDomains     []string
+	ExcludedDNSDomains      []string
+	PermittedIPRanges       []*net.IPNet
+	ExcludedIPRanges        []*net.IPNet
+	PermittedEmailAddresses []string
+	ExcludedEmailAddresses  []string
+	PermittedURIDomains     []string
+	ExcludedURIDomains      []string
+	Critical                bool
+}
+
+func parseNameConstraintsExtension(e pkix.Extension) (nc nameConstraints, unhandled bool, err error) {
 	// RFC 5280, 4.2.1.10
 
 	// NameConstraints ::= SEQUENCE {
@@ -586,7 +598,7 @@ func parseNameConstraintsExtension(out *Certificate, e pkix.Extension) (unhandle
 		!toplevel.ReadOptionalASN1(&permitted, &havePermitted, cryptobyte_asn1.Tag(0).ContextSpecific().Constructed()) ||
 		!toplevel.ReadOptionalASN1(&excluded, &haveExcluded, cryptobyte_asn1.Tag(1).ContextSpecific().Constructed()) ||
 		!toplevel.Empty() {
-		return false, errors.New("x509: invalid NameConstraints extension")
+		return nc, false, errors.New("x509: invalid NameConstraints extension")
 	}
 
 	if !havePermitted && !haveExcluded || len(permitted) == 0 && len(excluded) == 0 {
@@ -594,7 +606,7 @@ func parseNameConstraintsExtension(out *Certificate, e pkix.Extension) (unhandle
 		//   "either the permittedSubtrees field
 		//   or the excludedSubtrees MUST be
 		//   present"
-		return false, errors.New("x509: empty name constraints extension")
+		return nc, false, errors.New("x509: empty name constraints extension")
 	}
 
 	getValues := func(subtrees cryptobyte.String) (dnsNames [][]byte, ips []*net.IPNet, emails, uriDomains [][]byte, err error) {
@@ -694,52 +706,74 @@ func parseNameConstraintsExtension(out *Certificate, e pkix.Extension) (unhandle
 		return dnsNames, ips, emails, uriDomains, nil
 	}
 
-	if out.PermittedDNSDomains, out.PermittedIPRanges, out.PermittedEmailAddresses, out.PermittedURIDomains, err = getValues(permitted); err != nil {
-		return false, err
+	if nc.PermittedDNSDomains, nc.PermittedIPRanges, nc.PermittedEmailAddresses, nc.PermittedURIDomains, err = getValues(permitted); err != nil {
+		return nc, false, err
 	}
-	if out.ExcludedDNSDomains, out.ExcludedIPRanges, out.ExcludedEmailAddresses, out.ExcludedURIDomains, err = getValues(excluded); err != nil {
-		return false, err
+	if nc.ExcludedDNSDomains, nc.ExcludedIPRanges, nc.ExcludedEmailAddresses, nc.ExcludedURIDomains, err = getValues(excluded); err != nil {
+		return nc, false, err
 	}
-	out.PermittedDNSDomainsCritical = e.Critical
+	nc.Critical = e.Critical
 
-	return unhandled, nil
+	return nc, unhandled, nil
 }
 
-func processExtensions(out *Certificate) (rerr error) {
+// processExtensions works on a COPY of the certificate and returns it, for a
+// reason that cost a round to find (W10, round 259): a callee's writes through
+// a pointer parameter are never relocated. The codec sees the *Certificate in
+// the CALLER's arena, decides "an ancestor, keep identity", and emits the
+// pointer without walking its fields - so every slice this function wrote into
+// the caller's struct stayed in this frame's arena and was released at return,
+// and the next encode aliased the dead memory. A struct copy plus a returned
+// pointer puts the written fields in this frame's arena, where the return
+// encode copies them, and leaves the inherited fields pointing at the caller's,
+// where identity is the right answer.
+func processExtensions(out *Certificate) (rout *Certificate, rerr error) {
+	work := *out
+	p := &work
 	var err error
-	for _, e := range out.Extensions {
+	for _, e := range p.Extensions {
 		unhandled := false
 
 		if len(e.Id.OID) == 4 && e.Id.OID[0] == 2 && e.Id.OID[1] == 5 && e.Id.OID[2] == 29 {
 			switch e.Id.OID[3] {
 			case 15:
-				out.KeyUsage, err = parseKeyUsageExtension(e.Value)
+				p.KeyUsage, err = parseKeyUsageExtension(e.Value)
 				if err != nil {
-					return err
+					return nil, err
 				}
 			case 19:
-				out.IsCA, out.MaxPathLen, err = parseBasicConstraintsExtension(e.Value)
+				p.IsCA, p.MaxPathLen, err = parseBasicConstraintsExtension(e.Value)
 				if err != nil {
-					return err
+					return nil, err
 				}
-				out.BasicConstraintsValid = true
-				out.MaxPathLenZero = out.MaxPathLen == 0
+				p.BasicConstraintsValid = true
+				p.MaxPathLenZero = p.MaxPathLen == 0
 			case 17:
-				out.DNSNames, out.EmailAddresses, out.IPAddresses, out.URIs, err = parseSANExtension(e.Value)
+				p.DNSNames, p.EmailAddresses, p.IPAddresses, p.URIs, err = parseSANExtension(e.Value)
 				if err != nil {
-					return err
+					return nil, err
 				}
 
-				if len(out.DNSNames) == 0 && len(out.EmailAddresses) == 0 && len(out.IPAddresses) == 0 && len(out.URIs) == 0 {
+				if len(p.DNSNames) == 0 && len(p.EmailAddresses) == 0 && len(p.IPAddresses) == 0 && len(p.URIs) == 0 {
 					// If we didn't parse anything then we do the critical check, below.
 					unhandled = true
 				}
 
 			case 30:
-				unhandled, err = parseNameConstraintsExtension(out, e)
+				var nc nameConstraints
+				nc, unhandled, err = parseNameConstraintsExtension(e)
 				if err != nil {
-					return err
+					return nil, err
 				}
+				p.PermittedDNSDomains = nc.PermittedDNSDomains
+				p.ExcludedDNSDomains = nc.ExcludedDNSDomains
+				p.PermittedIPRanges = nc.PermittedIPRanges
+				p.ExcludedIPRanges = nc.ExcludedIPRanges
+				p.PermittedEmailAddresses = nc.PermittedEmailAddresses
+				p.ExcludedEmailAddresses = nc.ExcludedEmailAddresses
+				p.PermittedURIDomains = nc.PermittedURIDomains
+				p.ExcludedURIDomains = nc.ExcludedURIDomains
+				p.PermittedDNSDomainsCritical = nc.Critical
 
 			case 31:
 				// RFC 5280, 4.2.1.13
@@ -756,23 +790,23 @@ func processExtensions(out *Certificate) (rerr error) {
 				//     nameRelativeToCRLIssuer [1]     RelativeDistinguishedName }
 				val := cryptobyte.String(e.Value)
 				if !val.ReadASN1(&val, cryptobyte_asn1.SEQUENCE) {
-					return errors.New("x509: invalid CRL distribution points")
+					return nil, errors.New("x509: invalid CRL distribution points")
 				}
 				for !val.Empty() {
 					var dpDER cryptobyte.String
 					if !val.ReadASN1(&dpDER, cryptobyte_asn1.SEQUENCE) {
-						return errors.New("x509: invalid CRL distribution point")
+						return nil, errors.New("x509: invalid CRL distribution point")
 					}
 					var dpNameDER cryptobyte.String
 					var dpNamePresent bool
 					if !dpDER.ReadOptionalASN1(&dpNameDER, &dpNamePresent, cryptobyte_asn1.Tag(0).Constructed().ContextSpecific()) {
-						return errors.New("x509: invalid CRL distribution point")
+						return nil, errors.New("x509: invalid CRL distribution point")
 					}
 					if !dpNamePresent {
 						continue
 					}
 					if !dpNameDER.ReadASN1(&dpNameDER, cryptobyte_asn1.Tag(0).Constructed().ContextSpecific()) {
-						return errors.New("x509: invalid CRL distribution point")
+						return nil, errors.New("x509: invalid CRL distribution point")
 					}
 					for !dpNameDER.Empty() {
 						if !dpNameDER.PeekASN1Tag(cryptobyte_asn1.Tag(6).ContextSpecific()) {
@@ -780,79 +814,81 @@ func processExtensions(out *Certificate) (rerr error) {
 						}
 						var uri cryptobyte.String
 						if !dpNameDER.ReadASN1(&uri, cryptobyte_asn1.Tag(6).ContextSpecific()) {
-							return errors.New("x509: invalid CRL distribution point")
+							return nil, errors.New("x509: invalid CRL distribution point")
 						}
-						out.CRLDistributionPoints = mxutil.Ensure(out.CRLDistributionPoints, 1)
-						out.CRLDistributionPoints = push(out.CRLDistributionPoints, string(uri))
+						p.CRLDistributionPoints = mxutil.Ensure(p.CRLDistributionPoints, 1)
+						p.CRLDistributionPoints = push(p.CRLDistributionPoints, string(uri))
 					}
 				}
 
 			case 35:
-				out.AuthorityKeyId, err = parseAuthorityKeyIdentifier(e)
+				p.AuthorityKeyId, err = parseAuthorityKeyIdentifier(e)
 				if err != nil {
-					return err
+					return nil, err
 				}
 			case 36:
 				val := cryptobyte.String(e.Value)
 				if !val.ReadASN1(&val, cryptobyte_asn1.SEQUENCE) {
-					return errors.New("x509: invalid policy constraints extension")
+					return nil, errors.New("x509: invalid policy constraints extension")
 				}
 				if val.PeekASN1Tag(cryptobyte_asn1.Tag(0).ContextSpecific()) {
 					var v int64
 					if !val.ReadASN1Int64WithTag(&v, cryptobyte_asn1.Tag(0).ContextSpecific()) {
-						return errors.New("x509: invalid policy constraints extension")
+						return nil, errors.New("x509: invalid policy constraints extension")
 					}
-					out.RequireExplicitPolicy = int32(v)
+					p.RequireExplicitPolicy = int32(v)
 					// Check for overflow.
-					if int64(out.RequireExplicitPolicy) != v {
-						return errors.New("x509: policy constraints requireExplicitPolicy field overflows int32")
+					if int64(p.RequireExplicitPolicy) != v {
+						return nil, errors.New("x509: policy constraints requireExplicitPolicy field overflows int32")
 					}
-					out.RequireExplicitPolicyZero = out.RequireExplicitPolicy == 0
+					p.RequireExplicitPolicyZero = p.RequireExplicitPolicy == 0
 				}
 				if val.PeekASN1Tag(cryptobyte_asn1.Tag(1).ContextSpecific()) {
 					var v int64
 					if !val.ReadASN1Int64WithTag(&v, cryptobyte_asn1.Tag(1).ContextSpecific()) {
-						return errors.New("x509: invalid policy constraints extension")
+						return nil, errors.New("x509: invalid policy constraints extension")
 					}
-					out.InhibitPolicyMapping = int32(v)
+					p.InhibitPolicyMapping = int32(v)
 					// Check for overflow.
-					if int64(out.InhibitPolicyMapping) != v {
-						return errors.New("x509: policy constraints inhibitPolicyMapping field overflows int32")
+					if int64(p.InhibitPolicyMapping) != v {
+						return nil, errors.New("x509: policy constraints inhibitPolicyMapping field overflows int32")
 					}
-					out.InhibitPolicyMappingZero = out.InhibitPolicyMapping == 0
+					p.InhibitPolicyMappingZero = p.InhibitPolicyMapping == 0
 				}
 			case 37:
-				out.ExtKeyUsage, out.UnknownExtKeyUsage, err = parseExtKeyUsageExtension(e.Value)
+				p.ExtKeyUsage, p.UnknownExtKeyUsage, err = parseExtKeyUsageExtension(e.Value)
+				if len(p.ExtKeyUsage) > 0 {
+				}
 				if err != nil {
-					return err
+					return nil, err
 				}
 			case 14: // RFC 5280, 4.2.1.2
 				if e.Critical {
 					// Conforming CAs MUST mark this extension as non-critical
-					return errors.New("x509: subject key identifier incorrectly marked critical")
+					return nil, errors.New("x509: subject key identifier incorrectly marked critical")
 				}
 				val := cryptobyte.String(e.Value)
 				var skid cryptobyte.String
 				if !val.ReadASN1(&skid, cryptobyte_asn1.OCTET_STRING) {
-					return errors.New("x509: invalid subject key identifier")
+					return nil, errors.New("x509: invalid subject key identifier")
 				}
-				out.SubjectKeyId = skid
+				p.SubjectKeyId = skid
 			case 32:
-				out.Policies, err = parseCertificatePoliciesExtension(e.Value)
+				p.Policies, err = parseCertificatePoliciesExtension(e.Value)
 				if err != nil {
-					return err
+					return nil, err
 				}
-				out.PolicyIdentifiers = []asn1.ObjectIdentifier{:0:len(out.Policies)}
-				for _, oid2 := range out.Policies {
+				p.PolicyIdentifiers = []asn1.ObjectIdentifier{:0:len(p.Policies)}
+				for _, oid2 := range p.Policies {
 					if oid1, ok := oid2.toASN1OID(); ok {
-						out.PolicyIdentifiers = mxutil.Ensure(out.PolicyIdentifiers, 1)
-						out.PolicyIdentifiers = push(out.PolicyIdentifiers, oid1)
+						p.PolicyIdentifiers = mxutil.Ensure(p.PolicyIdentifiers, 1)
+						p.PolicyIdentifiers = push(p.PolicyIdentifiers, oid1)
 					}
 				}
 			case 33:
 				val := cryptobyte.String(e.Value)
 				if !val.ReadASN1(&val, cryptobyte_asn1.SEQUENCE) {
-					return errors.New("x509: invalid policy mappings extension")
+					return nil, errors.New("x509: invalid policy mappings extension")
 				}
 				for !val.Empty() {
 					var s cryptobyte.String
@@ -860,17 +896,17 @@ func processExtensions(out *Certificate) (rerr error) {
 					if !val.ReadASN1(&s, cryptobyte_asn1.SEQUENCE) ||
 						!s.ReadASN1(&issuer, cryptobyte_asn1.OBJECT_IDENTIFIER) ||
 						!s.ReadASN1(&subject, cryptobyte_asn1.OBJECT_IDENTIFIER) {
-						return errors.New("x509: invalid policy mappings extension")
+						return nil, errors.New("x509: invalid policy mappings extension")
 					}
-					out.PolicyMappings = mxutil.Ensure(out.PolicyMappings, 1)
-					out.PolicyMappings = push(out.PolicyMappings, PolicyMapping{OID{issuer}, OID{subject}})
+					p.PolicyMappings = mxutil.Ensure(p.PolicyMappings, 1)
+					p.PolicyMappings = push(p.PolicyMappings, PolicyMapping{OID{issuer}, OID{subject}})
 				}
 			case 54:
 				val := cryptobyte.String(e.Value)
-				if !val.ReadASN1Integer(unsafe.TypeOf(out.InhibitAnyPolicy), unsafe.Pointer(&out.InhibitAnyPolicy)) {
-					return errors.New("x509: invalid inhibit any policy extension")
+				if !val.ReadASN1Integer(unsafe.TypeOf(p.InhibitAnyPolicy), unsafe.Pointer(&p.InhibitAnyPolicy)) {
+					return nil, errors.New("x509: invalid inhibit any policy extension")
 				}
-				out.InhibitAnyPolicyZero = out.InhibitAnyPolicy == 0
+				p.InhibitAnyPolicyZero = p.InhibitAnyPolicy == 0
 			default:
 				// Unknown extensions are recorded if critical.
 				unhandled = true
@@ -879,34 +915,34 @@ func processExtensions(out *Certificate) (rerr error) {
 			// RFC 5280 4.2.2.1: Authority Information Access
 			if e.Critical {
 				// Conforming CAs MUST mark this extension as non-critical
-				return errors.New("x509: authority info access incorrectly marked critical")
+				return nil, errors.New("x509: authority info access incorrectly marked critical")
 			}
 			val := cryptobyte.String(e.Value)
 			if !val.ReadASN1(&val, cryptobyte_asn1.SEQUENCE) {
-				return errors.New("x509: invalid authority info access")
+				return nil, errors.New("x509: invalid authority info access")
 			}
 			for !val.Empty() {
 				var aiaDER cryptobyte.String
 				if !val.ReadASN1(&aiaDER, cryptobyte_asn1.SEQUENCE) {
-					return errors.New("x509: invalid authority info access")
+					return nil, errors.New("x509: invalid authority info access")
 				}
 				var method asn1.ObjectIdentifier
 				if !aiaDER.ReadASN1ObjectIdentifier(&method) {
-					return errors.New("x509: invalid authority info access")
+					return nil, errors.New("x509: invalid authority info access")
 				}
 				if !aiaDER.PeekASN1Tag(cryptobyte_asn1.Tag(6).ContextSpecific()) {
 					continue
 				}
 				if !aiaDER.ReadASN1(&aiaDER, cryptobyte_asn1.Tag(6).ContextSpecific()) {
-					return errors.New("x509: invalid authority info access")
+					return nil, errors.New("x509: invalid authority info access")
 				}
 				switch {
 				case method.Equal(_oidAuthorityInfoAccessOcsp()):
-					out.OCSPServer = mxutil.Ensure(out.OCSPServer, 1)
-					out.OCSPServer = push(out.OCSPServer, string(aiaDER))
+					p.OCSPServer = mxutil.Ensure(p.OCSPServer, 1)
+					p.OCSPServer = push(p.OCSPServer, string(aiaDER))
 				case method.Equal(_oidAuthorityInfoAccessIssuers()):
-					out.IssuingCertificateURL = mxutil.Ensure(out.IssuingCertificateURL, 1)
-					out.IssuingCertificateURL = push(out.IssuingCertificateURL, string(aiaDER))
+					p.IssuingCertificateURL = mxutil.Ensure(p.IssuingCertificateURL, 1)
+					p.IssuingCertificateURL = push(p.IssuingCertificateURL, string(aiaDER))
 				}
 			}
 		} else {
@@ -915,12 +951,14 @@ func processExtensions(out *Certificate) (rerr error) {
 		}
 
 		if e.Critical && unhandled {
-			out.UnhandledCriticalExtensions = mxutil.Ensure(out.UnhandledCriticalExtensions, 1)
-			out.UnhandledCriticalExtensions = push(out.UnhandledCriticalExtensions, e.Id)
+			p.UnhandledCriticalExtensions = mxutil.Ensure(p.UnhandledCriticalExtensions, 1)
+			p.UnhandledCriticalExtensions = push(p.UnhandledCriticalExtensions, e.Id)
 		}
 	}
 
-	return nil
+	if len(p.ExtKeyUsage) > 0 {
+	}
+	return p, nil
 }
 
 func parseCertificate(der []byte) (rcertificate *Certificate, rerr error) {
@@ -1089,7 +1127,7 @@ func parseCertificate(der []byte) (rcertificate *Certificate, rerr error) {
 					cert.Extensions = mxutil.Ensure(cert.Extensions, 1)
 					cert.Extensions = push(cert.Extensions, ext)
 				}
-				err2 = processExtensions(cert)
+				cert, err2 = processExtensions(cert)
 				if err2 != nil {
 					return nil, err2
 				}
@@ -1113,6 +1151,8 @@ func parseCertificate(der []byte) (rcertificate *Certificate, rerr error) {
 // the GODEBUG environment variable.
 func ParseCertificate(der []byte) (rcertificate *Certificate, rerr error) {
 	cert, err := parseCertificate(der)
+	if err == nil && len(cert.ExtKeyUsage) > 0 {
+	}
 	if err != nil {
 		return nil, err
 	}
