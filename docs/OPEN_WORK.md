@@ -19313,3 +19313,45 @@ the acceptance for each.
 
 Measured after the change: three consecutive runs of the fixture pass, TLS 1.3,
 TLS_CHACHA20_POLY1305_SHA256, 1024 bytes identical through the record layer.
+
+## Round 257: the read-side windows gosym paid per symbol
+
+Round 251 opened W5 with "allocation only, low priority" and told the reader to
+measure before converting. Measured, the gosym half is not allocation only: a
+symbol table decode touches every one of these, and each was a copy of the rest
+of its section.
+
+    funcData(i)            t.funcdata[funcOff(i):]        per FUNCTION
+    field(n)/entryPC()     f.data[off:]                   per field, per function
+    funcOff(i)             f.functab[(2*i+1)*sz:]         per function
+    pcToFile / file lookup t.filetab[4*fno:]              per lookup
+    file lookup (ver118)   t.cutab[(cuoff+fno)*4:]        per lookup
+    funcName(off)          t.funcnametab[off:]            per name
+    stringFrom(arr, off)   arr[off:]                      per name
+    pclnOffset(word)       t.Data[8+word*ptrsize:]        per header word
+
+`funcData` now carries an offset into the funcdata section instead of a window
+of it, the two `funcTab` field reads take offsets, and the four name/offset
+lookups use `bytealg.IndexByteFrom`. The one-shot section bases (`t.functab`,
+`t.filetab`, `t.funcdata`, `t.pclnData`) still slice once at parse time, which
+is what the plan allowed.
+
+To make the offset reads possible at all, `binary.ByteOrder` gained the reader
+trio: `Uint16At`, `Uint32At`, `Uint64At`. It already had `PutUint16At` and
+friends, and the missing mirror is exactly why these call sites reached for a
+sub-slice in the first place. `nativeEndian` embeds `littleEndian`, so it gets
+them for free.
+
+### The TLS half, decided by reading rather than measuring
+
+`halfConn.decrypt` had the same shape one line after the nonce:
+
+    payload = payload[explicitNonceLen:]
+
+For TLS 1.3 `explicitNonceLen` is 0, so that was `payload[0:]` - a copy of the
+whole record body, up to 16 KiB, per record, for nothing. It is now conditional
+on there actually being a nonce. The line above it,
+`payload := record[recordHeaderLen:]`, stays: it is the copy that keeps the
+caller's record buffer unmodified while the AEAD decrypts in place through
+`resize(payload, 0)`, and switching it to an offset would mean decrypting into
+the input, which is a semantics change this item did not ask for.

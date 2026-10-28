@@ -9,7 +9,7 @@
 package gosym
 
 import (
-	"bytes"
+	"internal/bytealg"
 	"encoding/binary"
 )
 
@@ -182,15 +182,22 @@ const (
 // uintptr returns the pointer-sized value encoded at b.
 // The pointer size is dictated by the table being read.
 func (t *LineTable) uintptr(b []byte) (out uint64) {
+	return t.uintptrAt(b, 0)
+}
+
+// uintptrAt is uintptr at an offset into b. Every per-symbol read in this file
+// is an offset read: b[off:] is a copy of the rest of the table, and a symbol
+// table decode touches every one of them.
+func (t *LineTable) uintptrAt(b []byte, off int32) (out uint64) {
 	if t.ptrsize == 4 {
-		return uint64(t.binary.Uint32(b))
+		return uint64(t.binary.Uint32At(b, off))
 	}
-	return t.binary.Uint64(b)
+	return t.binary.Uint64At(b, off)
 }
 
 // pclnOffset returns the word'th pointer-sized header word.
 func (t *LineTable) pclnOffset(word uint32) (out uint64) {
-	return t.uintptr(t.Data[8+word*t.ptrsize:])
+	return t.uintptrAt(t.Data, int32(8+word*t.ptrsize))
 }
 
 // pclnData returns the section starting at the word'th header word.
@@ -279,7 +286,7 @@ func (t *LineTable) parsePclnTab() {
 		t.functab = t.Data[8+t.ptrsize:]
 		t.pctab = t.Data
 		functabsize := (int32(t.nfunctab)*2 + 1) * t.functabFieldSize()
-		fileoff := t.binary.Uint32(t.functab[functabsize:])
+		fileoff := t.binary.Uint32At(t.functab, functabsize)
 		t.functab = resize(t.functab, functabsize)
 		t.filetab = t.Data[fileoff:]
 		t.nfiletab = t.binary.Uint32(t.filetab)
@@ -363,7 +370,7 @@ func (t *LineTable) funcName(off uint32) (name string) {
 	if s, ok := t.funcNames[off]; ok {
 		return s
 	}
-	i := bytes.IndexByte(t.funcnametab[off:], 0)
+	i := bytealg.IndexByteFrom(t.funcnametab, int32(off), 0)
 	name = string(t.funcnametab[off : off+uint32(i)])
 	t.funcNames[off] = name
 	return name
@@ -374,7 +381,9 @@ func (t *LineTable) stringFrom(arr []byte, off uint32) (name string) {
 	if s, ok := t.strings[off]; ok {
 		return s
 	}
-	i := bytes.IndexByte(arr[off:], 0)
+	// IndexByteFrom, not arr[off:]: a sub-slice would copy the rest of the
+	// file table for every name lookup.
+	i := bytealg.IndexByteFrom(arr, int32(off), 0)
 	name = string(arr[off : off+uint32(i)])
 	t.strings[off] = name
 	return name
@@ -421,32 +430,43 @@ func (f *funcTab) pc(i int32) (out uint64) {
 
 // funcOff returns the funcdata offset of the i'th func in f.
 func (f *funcTab) funcOff(i int32) (out uint64) {
-	return f.uint32(f.functab[(2*i+1)*f.sz:])
+	return f.fieldAt((2*i + 1) * f.sz)
 }
 
 // uint32 returns the uint32 stored at b.
 func (f *funcTab) uint32(b []byte) (out uint64) {
-	if f.sz == 4 {
-		return uint64(f.binary.Uint32(b))
-	}
-	return f.binary.Uint64(b)
+	return f.fieldAt0(b, 0)
 }
 
-// funcData is memory corresponding to an _func struct.
+// fieldAt reads one functab field at a byte offset into the table.
+func (f *funcTab) fieldAt(off int32) (out uint64) {
+	return f.fieldAt0(f.functab, off)
+}
+
+func (f *funcTab) fieldAt0(b []byte, off int32) (out uint64) {
+	if f.sz == 4 {
+		return uint64(f.binary.Uint32At(b, off))
+	}
+	return f.binary.Uint64At(b, off)
+}
+
+// funcData is memory corresponding to an _func struct. It carries an offset
+// into the funcdata section rather than a window of it: the window was a copy
+// of the whole rest of the section, once per function, which is O(n^2) over a
+// symbol table.
 type funcData struct {
-	t    *LineTable // LineTable this data is a part of
-	data []byte     // raw memory for the function
+	t   *LineTable // LineTable this data is a part of
+	off int32      // offset of the _func struct in t.funcdata
 }
 
 // funcData returns the ith funcData in t.functab.
 func (t *LineTable) funcData(i uint32) (out funcData) {
-	data := t.funcdata[t.funcTab().funcOff(int32(i)):]
-	return funcData{t: t, data: data}
+	return funcData{t: t, off: int32(t.funcTab().funcOff(int32(i)))}
 }
 
 // IsZero reports whether f is the zero value.
 func (f *funcData) IsZero() (rok bool) {
-	return f.t == nil && f.data == nil
+	return f.t == nil
 }
 
 // entryPC returns the func's entry PC.
@@ -456,9 +476,9 @@ func (f *funcData) entryPC() (out uint64) {
 	if f.t.version >= ver118 {
 		// TODO: support multiple text sections.
 		// See runtime/symtab.go:(*moduledata).textAddr.
-		return uint64(f.t.binary.Uint32(f.data)) + f.t.textStart
+		return uint64(f.t.binary.Uint32At(f.t.funcdata, f.off)) + f.t.textStart
 	}
-	return f.t.uintptr(f.data)
+	return f.t.uintptrAt(f.t.funcdata, f.off)
 }
 
 func (f *funcData) nameOff() (out uint32)     { return f.field(1) }
@@ -481,8 +501,7 @@ func (f *funcData) field(n uint32) (out uint32) {
 		sz0 = 4
 	}
 	off := sz0 + (n-1)*4 // subsequent fields are 4 bytes each
-	data := f.data[off:]
-	return f.t.binary.Uint32(data)
+	return f.t.binary.Uint32At(f.t.funcdata, f.off+off)
 }
 
 // step advances to the next pc, value pair in the encoded table.
@@ -592,14 +611,14 @@ func (t *LineTable) go12PCToFile(pc uint64) (file string) {
 		if fno <= 0 {
 			return ""
 		}
-		return t.string(t.binary.Uint32(t.filetab[4*fno:]))
+		return t.string(t.binary.Uint32At(t.filetab, 4*fno))
 	}
 	// Go ≥ 1.16
 	if fno < 0 { // 0 is valid for ≥ 1.16
 		return ""
 	}
 	cuoff := f.cuOffset()
-	if fnoff := t.binary.Uint32(t.cutab[(cuoff+uint32(fno))*4:]); fnoff != ^uint32(0) {
+	if fnoff := t.binary.Uint32At(t.cutab, int32(cuoff+uint32(fno))*4); fnoff != ^uint32(0) {
 		return t.stringFrom(t.filetab, fnoff)
 	}
 	return ""
@@ -656,7 +675,7 @@ func (t *LineTable) initFileMap() {
 	var s string
 	if t.version == ver12 {
 		for i := uint32(1); i < t.nfiletab; i++ {
-			s = t.string(t.binary.Uint32(t.filetab[4*i:]))
+			s = t.string(t.binary.Uint32At(t.filetab, 4*i))
 			m[s] = i
 		}
 	} else {
