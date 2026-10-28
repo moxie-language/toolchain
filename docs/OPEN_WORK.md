@@ -19446,3 +19446,69 @@ owns a copy and returns it (this round), or the allocation has to happen in the
 arena that owns the destination - which is the primitive rounds 256 and 258 kept
 asking for and still do not have. There are 570 pointer-parameter field writes
 in the tree; the two fixed here were the ones a test could see.
+
+## Round 260: phase 8 is red, and a fixture can pass on a stale object
+
+Round 251's plan says phase 8 "found the RFC 6724 literal bug in round 248, which
+is fixed, so it should now pass". It does not. Run after the round-259 fixes:
+
+    netsmoke:mux-match          FAIL  7 of 10 shapes, all pattern=[]
+    netsmoke:no-accumulation    FAIL  loop=200 bad=200
+    netsmoke:client-sync        FAIL  body mismatch: wanted hello path=/smoke
+    netsmoke:curl-spawned       FAIL  curl got: (empty)
+    netsmoke:client-spawned     FAIL  unexpected EOF on /smoke
+    build, spawn-bytes, spawn-cost, listen-inline, curl-inline,
+    keepalive-inline, repeatable-inline, client-inline,
+    repeatable-spawned          PASS
+
+`mux-match` is the one to chase: it is a plain program with no network. Built
+cold and run:
+
+    ok   identity         stored child is the returned child
+    ok   subtree-root     GET /  -> [/]
+    ok   subtree-root-deep GET /a/b/c -> [/]
+    ok   exact-miss       GET /other -> []
+    FAIL exact            GET /smoke      pattern=[] want [/smoke]
+    FAIL subtree-api      GET /api/v1/x   pattern=[] want [/api/]
+    FAIL method           GET /x          pattern=[] want [GET /x]
+    FAIL host             GET /y          pattern=[] want [example.com/y]
+    FAIL host-method-path POST /z/deep    pattern=[] want [POST example.com/z/deep]
+    FAIL pkg-default      GET /pkg        pattern=[] want [/pkg]
+
+Matching works (the handler is found and the "miss" cases are right), but the
+node's pattern string reads empty. The node lives in the root arena; the pattern
+is built by parsePattern in the registering frame. Three attempts, each built and
+run cold, none of them moved the result:
+
+1. copy the child keys into the root arena in `addChild` (the mapping stores
+   them by slice header);
+2. copy the whole pattern - str, method, host, loc and every segment name - into
+   the root arena in `addPattern`, via a new `rootPattern`;
+3. do (2) into a NEW local instead of assigning back to the parameter, in case a
+   parameter assignment is not a rebinding.
+
+All three are plausible and none of them is evidence, so they are reverted rather
+than committed. What is needed next is a diagnostic that prints, at match time,
+the node's address, its `pattern` pointer and that pattern's `str` header, so the
+question "is the node we matched the node we registered" is answered with data
+instead of three guesses. W11 carries it.
+
+### The fixture did not compile, and phase 8 said it passed
+
+`muxmatch` assigned a package-level counter from a function:
+
+    var fails int32
+    ... fails = fails + 1 ...
+
+which the current compiler rejects - "package globals are immutable outside init:
+mutate through the methods of a sovereign self-mutating type". Yet the phase-8
+build of that fixture succeeded and produced a binary. The reason is the build
+cache: it is keyed on the source and its path, not on the compiler that produced
+the object, so a fixture whose source has not changed keeps linking an object
+compiled by an older compiler that accepted it. Copying the same file to another
+directory and building it there re-checks and fails.
+
+That makes every fixture that was ever accepted able to "pass" forever. The
+fixture is fixed here (the counter is a sovereign type reached through its
+initialiser), and W12 records the cache-key fix: an object must be invalidated
+when the compiler's identity changes, or the whole suite can pass on history.

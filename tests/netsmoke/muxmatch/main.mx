@@ -33,7 +33,17 @@ func (x *rec) add(key string) (c *rec) {
 	return c
 }
 
-var fails int32
+// tally counts failures. A package global may not be written outside init, so
+// the counter is a sovereign type reached through its initialiser.
+type tally struct {
+	n int32
+}
+
+func (c *tally) fail() {
+	c.n = c.n + 1
+}
+
+var fails = &tally{}
 
 func body(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("ok\n"))
@@ -44,18 +54,18 @@ func probe(label string, mux *http.ServeMux, method, rawurl, wantPat string) {
 	req, err := http.NewRequest(method, rawurl, nil)
 	if err != nil {
 		fmt.Printf("FAIL %-16s request: %v\n", label, err)
-		fails = fails + 1
+		fails.fail()
 		return
 	}
 	h, pat := mux.Handler(req)
 	if h == nil {
 		fmt.Printf("FAIL %-16s %s %s: no handler, pattern=[%s]\n", label, method, req.URL.Path, pat)
-		fails = fails + 1
+		fails.fail()
 		return
 	}
 	if pat != wantPat {
 		fmt.Printf("FAIL %-16s %s %s: pattern=[%s] want [%s]\n", label, method, req.URL.Path, pat, wantPat)
-		fails = fails + 1
+		fails.fail()
 		return
 	}
 	fmt.Printf("ok   %-16s %s %s -> [%s]\n", label, method, req.URL.Path, pat)
@@ -73,7 +83,7 @@ func identity() {
 	runtime.SetCurrentArena(saved)
 	if a.child != b {
 		fmt.Printf("FAIL %-16s stored child and returned child differ\n", "identity")
-		fails = fails + 1
+		fails.fail()
 		return
 	}
 	fmt.Printf("ok   %-16s stored child is the returned child\n", "identity")
@@ -119,8 +129,8 @@ func main() {
 	http.HandleFunc("/pkg", body)
 	probe("pkg-default", http.DefaultServeMux, "GET", "http://host/pkg", "/pkg")
 
-	if fails != 0 {
-		fmt.Printf("muxmatch: %d shape(s) did not match\n", fails)
+	if fails.n != 0 {
+		fmt.Printf("muxmatch: %d shape(s) did not match\n", fails.n)
 		os.Exit(1)
 	}
 	fmt.Printf("muxmatch ok\n")
