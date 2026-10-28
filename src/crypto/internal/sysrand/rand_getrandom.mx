@@ -26,12 +26,16 @@ func read(b []byte) (gerr error) {
 	// use of that.
 	maxSize := math.MaxInt32
 
-	for len(b) > 0 {
-		size := len(b)
+	// The cursor is an offset into b, not b[n:]: a sub-slice is a COPY under the
+	// slice rule, so GetRandom(b[:size]) filled a throwaway and every
+	// crypto/rand read returned zeros.
+	off := int32(0)
+	for off < int32(len(b)) {
+		size := int32(len(b)) - off
 		if size > maxSize {
 			size = maxSize
 		}
-		n, err := unix.GetRandom(b[:size], 0)
+		n, err := unix.GetRandomAt(b, off, size, 0)
 		if errors.Is(err, syscall.ENOSYS) {
 			// If getrandom(2) is not available, presumably on Linux versions
 			// earlier than 3.17, fall back to reading from /dev/urandom.
@@ -46,7 +50,7 @@ func read(b []byte) (gerr error) {
 		if err != nil {
 			return err
 		}
-		b = b[n:]
+		off += n
 	}
 	return nil
 }

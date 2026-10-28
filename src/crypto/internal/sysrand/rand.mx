@@ -7,6 +7,7 @@
 package sysrand
 
 import (
+	"io"
 	"os"
 	"time"
 )
@@ -69,15 +70,9 @@ func urandomRead(b []byte) (uerr error) {
 	if err != nil {
 		return err
 	}
-	for len(b) > 0 {
-		n, rerr := urandomFile.Read(b)
-		// Note that we don't ignore EAGAIN because it should not be possible to
-		// hit for a blocking read from urandom, although there were
-		// unreproducible reports of it at https://go.dev/issue/9205.
-		if rerr != nil {
-			return rerr
-		}
-		b = b[n:]
-	}
-	return nil
+	// A single ReadFullInto covers the whole buffer. The original loop re-sliced
+	// b after each short read, and `b = b[n:]` is a COPY under the slice rule, so
+	// a short read left the rest of the buffer unfilled.
+	_, uerr = io.ReadFullIntoN(urandomFile, b, 0, int32(len(b)))
+	return uerr
 }

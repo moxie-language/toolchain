@@ -15,6 +15,10 @@ func vgetrandom(p []byte, flags uint32) (ret int32, supported bool) {
 	return -1, false
 }
 
+func vgetrandomAt(p []byte, off, n int32, flags uint32) (ret int32, supported bool) {
+	return -1, false
+}
+
 // getrandomState memoises whether the running kernel lacks getrandom;
 // the ENOSYS result is latched after the first failing call.
 type getrandomState struct {
@@ -29,6 +33,36 @@ func (s *getrandomState) markUnsupported() {
 
 // GetRandomFlag is a flag supported by the getrandom system call.
 type GetRandomFlag uintptr
+
+// GetRandomAt fills n bytes of p starting at off.
+//
+// It exists because a caller with an offset used to pass p[off:off+n], which
+// under the slice rule is a COPY: crypto/rand read straight into a throwaway and
+// returned zeros, so every RSA Miller-Rabin base was zero and the prime search
+// never terminated.
+func GetRandomAt(p []byte, off, n int32, flags GetRandomFlag) (rn int32, rerr error) {
+	ret, supported := vgetrandomAt(p, off, n, uint32(flags))
+	if supported {
+		if ret < 0 {
+			return 0, syscall.Errno(-ret)
+		}
+		return ret, nil
+	}
+	if grState.unsupported {
+		return 0, syscall.ENOSYS
+	}
+	r1, _, errno := syscall.Syscall(getrandomTrap,
+		uintptr(unsafe.Pointer(&p[off])),
+		uintptr(n),
+		uintptr(flags))
+	if errno != 0 {
+		if errno == syscall.ENOSYS {
+			grState.markUnsupported()
+		}
+		return 0, errno
+	}
+	return int32(r1), nil
+}
 
 // GetRandom calls the getrandom system call.
 func GetRandom(p []byte, flags GetRandomFlag) (n int32, err error) {
