@@ -18611,3 +18611,125 @@ reintroducing aliasing.
 This is the honest state of the rule's bill: the write windows are nearly
 all converted, and the remaining work is the read side of the same kernels,
 driven by allocation rate rather than by wrong answers.
+
+## Round 245: the window nobody looks at is the one the compiler reads
+
+    differential vs Go 1.25.3: modexp (Montgomery), ModInverse, Rsh across
+                          every word boundary, 128-bit QuoRem      identical
+    rsa 1024-bit keygen + OAEP + PSS round trip                    passes
+    0a/mlkem_vectors (FIPS 203 keygen/encaps/decaps/NTT)           PASS
+    jpeg encode+decode, 24x16 RGBA gradient vs Go 1.25.3           identical
+                          (658 bytes, 24 out of 384 pixels outside +/-3000)
+    norm NFC/NFD over ASCII, combining marks, Hangul               was SIGSEGV
+
+Six classes, and all but one of them were invisible before the rule.
+
+### bigmod: the limb loops were windows the compiler reads
+
+The `xLimbs := x.limbs[:size]` idiom is a Go bounds-check hint - "eliminate
+bounds checks in the loop" - and it buys nothing here, because every Moxie
+index is checked. Half of those windows are written: assign, add, sub,
+ShiftRightVarTime, shiftIn, rshift1. Under the rule a Montgomery product, an
+Add, a Sub, a right shift and the extended-GCD halving each wrote their result
+into a throwaway, and reset/expand `clear()`ed a copy so the limbs they had just
+announced kept whatever was there. They index the field directly now. The
+in-place shifts stay in place because limb i is written before limbs i and i+1
+are read as the source; reset keeps the upstream hygiene (clear the wider of the
+announced and used lengths) with a widen-then-trim, since indexing past a
+header's length is checked against that length. Dropping aLimbs/bLimbs/mLimbs
+from montgomeryMul also removes six allocations per multiplication, which is the
+hot path of RSA and ECDSA.
+
+### mlkem: array views that are about to become copies
+
+`ntt` and `inverseNTT` wrote through `fs, flen := f[start:start+nb],
+f[start+nb:start+nb+nb]`. f is a ringElement *array* today, so those are views and
+the transform is right - but arrays are going away, and the first thing that
+turns into a slice makes every butterfly write land in a throwaway and ML-KEM
+return a wrong shared key. The butterflies index f directly now. polyByteDecode
+walked `b = b[3:]` over 128 iterations (a copy per iteration, so a 384-byte
+decode allocated 128 times) and takes an offset; the two key parsers stop
+re-slicing per polynomial; growFor's `in[:total]` became `resize(in, total)`, which
+is the capacity-preserving form the branch actually means.
+
+### math/big: the Montgomery accumulator was still a window
+
+natMontgomery passed `z[i:n+i]` as both the destination and one operand of
+addMulVVWW. Round 239 converted basicMul, basicSqr and karatsuba and missed this
+one, which is the one modular exponentiation uses: the product accumulated into a
+copy, so `Int.Exp(x, y, m)` returned 0. addMulVVWWAt(z, i, z, i, x, 0, n, ...)
+fixes it. Two read windows went with it: natRsh copied its operand per shift
+(there is a rshVUAt beside lshVUAt now) and natSticky ranged over x[:j].
+
+### Round 242's norm segfault was not in quickSpan
+
+`norm.NFC.String("한글")` died with SIGSEGV at a corrupted code pointer, and the
+frame it died in was quickSpan, which is why the crash looked like an arithmetic
+bug. Both compilers produced the identical crash, which is the signature of a
+source pattern that violates the memory model rather than a codegen divergence.
+The pattern is:
+
+    package-level global that holds pointers, built lazily by an
+    ordinarily-named function
+
+The compiler only switches the current arena to the root for initialisation code
+(`__varinit` and `init`-prefixed names, the mechanism that already covers
+ecdsa's initP256). Built anywhere else, the memory lands in the caller's frame
+arena and is recycled when the caller returns; the global then points into a
+block that has been reused, and the next read of a func-value field jumps
+through it. norm had two: the four `*formInfo` (two func values each) and
+recompMap. Renaming the builders to initFormTable/initRecompMap was the whole
+fix, and `IsNormal`/`String` over ASCII, combining marks and Hangul is correct
+again.
+
+### The same bug, twenty more times
+
+Once the shape was named it was worth asking what else had it. Twenty lazy
+initialisers did: html's entity maps, net's confVal/zone maps/thread limiter/
+protocol and service tables/fakeNet, net/http's DefaultClient, DefaultTransport,
+envProxyFunc, ErrNotSupported+multipartByReader, DefaultServeMux, the h2 server
+messages and the csrf sentinel, httpcommon's two header maps, hpack's static
+table and Huffman tree, log's default Logger, syscall's js fd table, and
+cgroup's two errors. Each keeps its Done flag and its laziness; the guarded body
+moved into an init-named function so the allocation lands in the root arena.
+
+Two shapes that are NOT bugs, and it is worth writing down why: a function that
+returns nothing and takes no receiver pushes no arena of its own
+(`funcNeedsArenaCopy` is false), so it inherits the caller's - that is why
+nistec's `buildP224GeneratorTable()` and friends are correct as they stand,
+called from an init() that has already switched to root. And a map insert
+allocates in the map's owner arena, so `p[k] = v` on a root-owned map stays in
+root no matter which frame runs it.
+
+### jpeg: a read destination is a window too
+
+`d.readFull(d.tmp[:n])` filled a copy of d.tmp, so every JPEG header, SOF/SOS/
+DQT/DHT payload, scan restart marker and 8x8 block read kept whatever the buffer
+held before; `h.vals` was never filled; `clear(h.lut[:])` cleared a copy. All of
+it was invisible on the view compiler. readFull is readFullAt(p, off, n) now and
+fills through mxutil.CopyRange, so the destination and the buffered source are
+both spans. The writer had the mirror-image cost: `pix := m.Pix[off:]` per pixel
+meant 64 image copies per 8x8 block, and indexes `m.Pix[n]` now. Encode+decode
+of a gradient is byte-identical to Go.
+
+### A bilateral gap the rule exposed
+
+Chasing a probe that didn't print, stage4 turned out to accept a non-boolean
+`if` condition and emit `icmp ne ptr %ife4, null` where %ife4 was an i64 data
+word. clang refused the module and named an LLVM register instead of a line.
+Legacy never saw it: go/types rejects the source with "non-boolean condition in
+if statement". buildIf and the for-condition path call requireBool now, which
+reports the go/types wording at the source position. This is the general hazard
+of two compilers that share a language: the reference implementation's
+front-end errors are part of the specification, and every one of them that
+stage4 does not implement is a miscompile waiting for the right program.
+
+### The flip's bill, honestly
+
+The write windows are converted: byteorder, asn1, netip, io read windows,
+cipher, tls, strconv, utf8/fmt, flate, image, image/draw, jpeg, rsa, suffixarray,
+bigmod, mlkem, and math/big's own kernels. What remains before the rule can be
+landed is the read side of the math/big arithmetic (RSA keygen under the rule
+dies with "arena: region table full", which is the allocator being honest about
+a million persistent operand copies), plus the packages whose windows are reads
+only and therefore cost allocations rather than wrong answers.
