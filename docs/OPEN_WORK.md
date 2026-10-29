@@ -19827,3 +19827,56 @@ generic struct, written through a composite literal in an instantiated method an
 carried across a sovereign store-back, can end up holding the receiver address.
 The reproducer is a large package that instantiates the generic type; reads the
 same shape from a small package are correct.
+
+## Round 268: W9 - the element size of a spread push
+
+The post-quantum hybrid key share was 1184 bytes of ML-KEM followed by 32 zeros.
+Reproduced with the fixture's `CurvePreferences` pin removed, printing inside
+`hybridKeyExchange.keyShares`:
+
+    dst len=1184 cap=1184   src len=32 cap=133   src bytes 205 142 173 45 …
+    out len=1216 cap=2368   out[1184]=208   out[1215]=0
+
+The same two slices through a free function, `push(a, b...)` with `a`, `b`
+parameters, produced the correct tail - so the push implementation was not the
+problem and the call site was. Disassembling the cached bitcode settled it
+(`llvm-dis-22 tmp/mxc-build-*/crypto_tls.bc`, at the inline `keyShares` push):
+
+    %ap396 = ptrtoint ptr getelementptr ({ ptr, i64, i64 }, ptr null, i32 1) to i64   ; 24
+    %ap397 = call { ptr, i64, i64 } @runtime.slicePush(ptr %ap391, i64 %ap392, i64 %ap393, i64 %ap395, i64 %ap396, ptr null)
+    %ap401 = getelementptr inbounds { ptr, i64, i64 }, ptr %ap398, i64 %ap392          ; newPtr + 1184*24
+    %ap402 = mul i64 %ap395, %ap396                                                   ; 32*24 = 768
+    call void @runtime.memmove(ptr %ap401, ptr %ap394, i64 %ap402, ptr null)
+
+and the inlined helper's identical push in the same function used
+`getelementptr (i8, ptr null, i32 1)` and `getelementptr inbounds i8`. So the
+element type was resolved to the whole slice type, 24 bytes, instead of `i8`:
+`slicePush` allocated 2368*24 bytes, the length arithmetic stayed numerically
+right (1184+32), and the memmove landed at `newPtr+28416`. Nothing faults - the
+buffer is 24x too big - the share is simply written 27 KB away from where the
+header says it is.
+
+The element type comes from the destination's SSA type, and when that has no
+element under it the emitter fell through to `llvmType(args[1])`, which for a
+spread is the SOURCE SLICE, not its element. The destination here is
+`priv.mlkem.Encapsulator().Bytes()`, an interface method result, and that is the
+shape that reaches the emitter unresolved.
+
+Fix (ir_call.mx): for `push(dst, src...)` the fallback is the spread source's
+ELEMENT type - the builder has already checked that the two element types are
+assignable, so it is the only sound inference. The non-spread case keeps its own
+fallback, where `args[1]`'s type IS the element type.
+
+Measured, same fixture, both `CurvePreferences` pins now removed:
+
+    before   FAIL client handshake: local error: tls: bad record MAC
+             (and a SIGSEGV on the second connection)
+    after    ok   client handshake ver=772 suite=4867      (X25519MLKEM768)
+             ok   echo 1024 bytes identical
+             ok   wrong CA rejected: x509: certificate signed by unknown authority
+             tls_handshake ok
+
+Bootstrap after the change: legacy -> s4a -> build-runtime -> s4b -> s4c, and
+`s4b == s4c` (`a5252ae7…`). The fix is stage4-only by construction: legacy takes
+the element type from go/types, where a `[]byte` expression always has its
+element, so there is no equivalent inference to mirror.

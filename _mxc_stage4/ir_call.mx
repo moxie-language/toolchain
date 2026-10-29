@@ -701,9 +701,28 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 				elemType = e.llvmType(sl.Elem)
 			}
 			if elemType == "" || elemType == "void" {
-				et := e.llvmType(c.Call.Args[1].SSAType())
-				if et != "" && et != "void" {
-					elemType = et
+				// A spread source's ELEMENT type is the destination's element
+				// type - the builder has already checked assignability - so for
+				// push(dst, src...) it, and never the source's own type, is the
+				// only sound fallback. The destination expression can reach here
+				// with an SSA type that has no element under it:
+				// push(priv.mlkem.Encapsulator().Bytes(), ecdhShares[0].data...)
+				// fell through with the destination unresolved, so the element
+				// type became the SOURCE SLICE type (24 bytes), slicePush grew
+				// to 1184*24 bytes and the memmove landed at newPtr+28416
+				// instead of newPtr+1184. The 32-byte X25519 share arrived as
+				// zeros and every post-quantum handshake died with "tls: invalid
+				// client key share" (OPEN_WORK round 268, W9).
+				fallback := ""
+				if c.Call.HasDots {
+					if sl1, ok1 := SafeUnderlying(c.Call.Args[1].SSAType()).(*Slice); ok1 {
+						fallback = e.llvmType(sl1.Elem)
+					}
+				} else {
+					fallback = e.llvmType(c.Call.Args[1].SSAType())
+				}
+				if fallback != "" && fallback != "void" {
+					elemType = fallback
 				} else {
 					elemType = "i8"
 				}

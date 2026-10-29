@@ -29,11 +29,12 @@
 // through a pointer parameter are never relocated, so the parsed certificate's
 // extension slices pointed into a released frame (W10).
 //
-// Both configs pin CurvePreferences to X25519: the default preference list
-// starts with the post-quantum hybrids (X25519MLKEM768), and that path has an
-// open bug (W9) - the client's key share is 1184 bytes of ML-KEM followed by 32
-// bytes of X25519, and the 32 arrive as zeros, so the server answers "invalid
-// client key share".
+// Neither config pins CurvePreferences, so the handshake negotiates the first
+// entry of the default list - X25519MLKEM768 - and covers the post-quantum
+// hybrid key exchange end to end. Round 268 fixed the bug that made it
+// impossible: push's spread element type was resolved to the source SLICE type,
+// so the 32-byte X25519 share was written 24x past its slot and arrived as
+// zeros.
 //
 // usage: tls_handshake        exit 0 when every case holds
 package main
@@ -201,7 +202,7 @@ func serverDomain(caCh chan []byte, addrCh chan []byte, resCh chan []byte) {
 	}
 	// The port is ephemeral, so the child is the only side that can name it.
 	addrCh <- []byte(ln.Addr().String())
-	cfg = tls.Config{Certificates: []tls.Certificate{cert}, CurvePreferences: []tls.CurveID{tls.X25519}}
+	cfg = tls.Config{Certificates: []tls.Certificate{cert}}
 	for i = 0; i < nConns; i++ {
 		serveOne(ln, &cfg, i, resCh)
 	}
@@ -225,7 +226,7 @@ func goodCase(addr []byte, roots *x509.CertPool, resCh chan []byte) (fails int32
 		return 1
 	}
 	nc.SetDeadline(time.Now().Add(30 * time.Second))
-	cfg = tls.Config{RootCAs: roots, ServerName: []byte("localhost"), CurvePreferences: []tls.CurveID{tls.X25519}}
+	cfg = tls.Config{RootCAs: roots, ServerName: []byte("localhost")}
 	c = tls.Client(nc, &cfg)
 	err = c.Handshake()
 	if err != nil {
@@ -286,7 +287,7 @@ func badCase(addr []byte, roots *x509.CertPool, resCh chan []byte) (fails int32)
 		return 1
 	}
 	nc.SetDeadline(time.Now().Add(30 * time.Second))
-	cfg = tls.Config{RootCAs: roots, ServerName: []byte("localhost"), CurvePreferences: []tls.CurveID{tls.X25519}}
+	cfg = tls.Config{RootCAs: roots, ServerName: []byte("localhost")}
 	c = tls.Client(nc, &cfg)
 	err = c.Handshake()
 	if err == nil {
