@@ -19784,3 +19784,46 @@ The rule to apply at each site is the one this session has measured three times:
 a slice literal inside a function is an allocation on that function's code path;
 a constant table belongs at package level (once, root arena) and a fixed-size
 schedule belongs to the struct that owns the state.
+
+## Round 267: W11 - the child map stored the receiver in the value slot
+
+`tests/netsmoke/muxmatch` at HEAD failed 7 of 12 registration shapes (every
+shape whose last segment is a literal key; `subtree-root` passed because a
+trailing-slash pattern is stored as `multiChild`). Instrumenting
+`addChild`/`findChild` and reading the stored entry directly, without going
+through the lookup:
+
+    dbg add   parent=…3030 key=[smoke] empty=0 nent=0
+    dbg raws  parent=…3030 key=[smoke] c=…3360 s0key=[smoke] s0val=…3048
+    dbg set   n=…3360 pat=…2230 str=[/smoke]
+    dbg mfind h=…3048 len=1 k=[smoke]
+    dbg find  parent=…3030 key=[smoke] -> …3048 nent=1
+
+`newNode()` returned 0x…3360 and `set` wrote the pattern into 0x…3360, but the
+entry's value slot holds 0x…3048 - which is exactly `&n.children`, the receiver
+`h` of `mapping.add`. The slot is already wrong when read back immediately after
+the call, so this is the store, not the lookup: `n.children.add(key, c)` stored
+`h` where `c` belonged. Every leaf the tree held was therefore an orphan node
+nobody had filled in, and every literal-keyed pattern answered `pattern=[]`.
+
+The store is `h.s = push(h.s, entry[K, V]{k, v})` in the generic
+`mapping[K, V]` (mapping.mx). The same code in a standalone package - same field
+order (including the 16-byte `Handler` interface field that shifts `children` to
++24), same sovereign nesting, same `SetCurrentArena(RootArena())` swap - stores
+`c` correctly. A second symptom points the same way: passing `h` to a generic
+helper declared `func maddr(h *mapping[K, V])` is rejected with "cannot use value
+of type *net/http.mapping as *net/http.mapping", i.e. the package ends up with
+two distinct types for one instantiation. So the defect needs the instantiation
+inside the large package; it is not the code shape.
+
+What landed is not a compiler fix. Children are now a concrete `childMap`
+(`[]childEntry` up to 8, then `map[string]*routingNode`) declared in
+routing_tree.mx, and mapping.mx is deleted: the container had exactly one
+instantiation, sits on the per-request hot path, and the generics bought nothing
+here. `muxmatch` passes all 12 shapes.
+
+Open compiler item, recorded rather than fixed: a pointer-valued field of a
+generic struct, written through a composite literal in an instantiated method and
+carried across a sovereign store-back, can end up holding the receiver address.
+The reproducer is a large package that instantiates the generic type; reads the
+same shape from a small package are correct.

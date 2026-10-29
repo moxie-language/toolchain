@@ -44,6 +44,56 @@ func newNode() (n *routingNode) {
 	return (*routingNode)(p)
 }
 
+// A childMap holds a node's children: a slice while there are few, a map once
+// there are many. It is concrete rather than the generic mapping[K, V] it
+// replaces because it has exactly one instantiation and that instantiation
+// stored the receiver in the value slot (see addChild's parent print in
+// OPEN_WORK round 267).
+type childMap struct {
+	s []childEntry
+	m map[string]*routingNode
+}
+
+type childEntry struct {
+	key   string
+	value *routingNode
+}
+
+// maxChildSlice is the largest child count kept in the slice representation.
+const maxChildSlice = 8
+
+func (h *childMap) add(k string, v *routingNode) {
+	if h.m == nil && len(h.s) < maxChildSlice {
+		h.s = mxutil.Ensure(h.s, 1)
+		h.s = push(h.s, childEntry{k, v})
+		return
+	}
+	if h.m == nil {
+		h.m = map[string]*routingNode{}
+		for _, e := range h.s {
+			h.m[e.key] = e.value
+		}
+		h.s = nil
+	}
+	h.m[k] = v
+}
+
+func (h *childMap) find(k string) (v *routingNode, found bool) {
+	if h == nil {
+		return nil, false
+	}
+	if h.m != nil {
+		v, found = h.m[k]
+		return v, found
+	}
+	for _, e := range h.s {
+		if e.key == k {
+			return e.value, true
+		}
+	}
+	return nil, false
+}
+
 // A routingNode is a node in the decision tree.
 // The same struct is used for leaf and interior nodes.
 type routingNode struct {
@@ -56,7 +106,7 @@ type routingNode struct {
 	// special children keys:
 	//     "/"	trailing slash (resulting from {$})
 	//	   ""   single wildcard
-	children   mapping[string, *routingNode]
+	children   childMap
 	multiChild *routingNode // child with multi wildcard
 	emptyChild *routingNode // optimization: child with key ""
 }
