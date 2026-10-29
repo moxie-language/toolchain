@@ -19713,3 +19713,41 @@ allocation on that function's code path.** If the function returns a constant
 table, or fills a fixed-size schedule, the table belongs at package level and the
 schedule belongs to the struct that owns the state. The next grep is
 `return []T{` in `src/` and `pkg/`.
+
+## Round 265: W11 - the child is created, and the matcher cannot reach it
+
+Round 262 narrowed the ServeMux bug to "the leaf's pattern pointer is dead".
+This round traced the matching itself, printing at registration, at
+`matchMethodAndPath` and at `matchPath`:
+
+    dbg set  node=0x…2c40 pat=0x…2910 str=[/smoke]     registration makes the leaf
+    dbg mMAP node=nil          method=[GET] pat=[/smoke]   root.findChild(host) nil
+    dbg mMAP node=0x…2a10      method=[GET] pat=[/smoke]   the host-level emptyChild
+    dbg mPath node=nil         pat=[/smoke]                .findChild("GET") nil
+    dbg mPath node=0x…2a90     pat=[/smoke]                the method-level emptyChild
+    dbg mPath node=nil         pat=[]                      .findChild("smoke") MISSES
+
+So the leaf is built and `set` stores the pattern (that print reads `[/smoke]`
+correctly), and the matcher walks host → method → path correctly, but the
+method-level node it reaches has no "smoke" child. The child was attached to a
+node the tree cannot reach. `subtree-root` still works because a pattern ending
+in `/` is stored as `multiChild`, not as a key in the child mapping - which is
+why the bug looked like "only / matches".
+
+The registration write in question is `n.emptyChild = newNode()` /
+`n.children.add(key, c)` inside `addChild`, a mutating method on `*routingNode`,
+reached through `ServeMux.tree` - a struct field of a sovereign type. The
+isolated version of that nesting (a mutating method calling a mutating method on
+its own field, then reading the field back) works, so the difference is the
+owner: the node is only reachable through a pointer field of the mux.
+
+Two candidate fixes were re-tried together this round - rootBytes for the child
+keys and rootPattern for the pattern struct - and the trace above is WITH both
+applied: the lookup misses anyway. So the keys are not the miss.
+
+Next: print the parent node address inside `addChild` (registration) and compare
+it with the node reached at match time. If they differ, the tree's
+`emptyChild`/`children` write went into a copy of the node, and the question
+becomes why the sovereign store-back of a node reached through a pointer field
+loses the write. If they are equal, the mapping's slice header itself is stale
+and the question is in `mapping.add`.
