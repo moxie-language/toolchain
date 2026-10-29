@@ -19607,3 +19607,48 @@ docs/PLAN_REMAINING.md:
 Measured facts this round rests on: the 522/83/135/221/83 and 329 counts (grep,
 excluding `src/vendor`), and the view test above, which is a 12-line program
 against three array bases.
+
+## Round 263: the per-block literals, and why an incremental build lied about them
+
+The array-to-slice conversions in `crypto/internal/fips140/sha256` and `sha512`
+left the round-constant table and the message schedule as per-call literals:
+
+    func _sha256K() {
+        return []uint32{ ...64 entries... }   // 256 bytes, every 64-byte block
+    }
+    w := []uint32{:64}                        // 256 bytes, every block
+
+512 MB of arena churn to hash 64 MiB, and the same shape in sha512 (640 bytes
+per 128-byte block). Both now have one owner:
+
+    var _sha256KTable = []uint32{ ... }       // package init, root arena
+    type Digest struct { h, x, w []uint32 }   // w allocated with the state
+    w := dig.w                                // scratch, per digest
+
+Measured, 64 MiB through sha256/sha512:
+
+    sha256   3117/3093 ms  ->  2821/2745 ms
+    sha512   2130/2070 ms  ->  1957/1879 ms
+
+### The incremental build was wrong about the new field
+
+The first attempt crashed in `blockGeneric` at the first store through `w`, with
+`len(w)==64`, `cap(w)==64` and a garbage data pointer - a three-word slice
+header whose pointer had been read at the wrong offset. It builds and runs
+correctly under `./moxie build -a`. The package cache had reused an object
+compiled against the OLD `Digest` layout (three slice fields before the change,
+four after), so the codec's field offsets for the new struct came from the old
+descriptor: the length and capacity words were right and the pointer word was
+whatever sat at the old offset.
+
+That is the same phenomenon as the muxmatch fixture in round 260 (a fixture the
+compiler rejects was still built and passed), and this instance names the
+mechanism: **an incremental build does not invalidate consumers of a type whose
+layout changed**. It is silent, it survives any amount of testing, and `-a`
+hides it. W12 is upgraded from "discrepancy" to this, with a reproducible case:
+add a field to `fips140/sha256.Digest`, build incrementally, and the hash
+crashes; build with `-a` and it is correct.
+
+**Until the cache is fixed, a change to any type's layout needs a cold build of
+everything that touches it.** The gate does not do that, so the gate can pass on
+objects that no longer match the source.

@@ -370,7 +370,9 @@ down.
 
 **W11 — the routing tree loses its patterns** (round 260). phase 8 is red; `tests/netsmoke/muxmatch` fails 7 of 10 shapes with `pattern=[]` while the handler resolves, so matching works and the stored pattern reads empty. Three frame-lifetime hypotheses (root-owned child keys, root-owned pattern struct, rebinding into a new local) were each built cold and changed nothing; they are reverted. What is now measured: registration stores the child, `findChild` finds it at match time (`hit=true`), and reading the matched node's `pattern.str` faults - so the leaf's pattern pointer is into released memory. Four candidate fixes (root-owned keys, root-owned pattern, rebinding into a new local) were each built cold and changed nothing, and one further build that printed `n.pattern.str` in `matchPath` segfaulted at that read. Next: print node/pattern/str at `set` time and again in `matchPath`, and check `ServeMux.register` for its own copy of the pattern. Accept: `muxmatch` prints `ok` for all ten shapes, then phase 8 green.
 
-**W12 — a fixture the compiler rejects was built and passed** (rounds 260-261). Established, with the SAME `./moxie` binary (mtime 08:13, unchanged all session) and the SAME source:
+**W12 — the build cache does not invalidate on a type-layout change** (rounds 260-263, NOW WITH A REPRODUCER). Adding a field to `crypto/internal/fips140/sha256.Digest` and building incrementally produces a binary whose codec reads the new struct with the old field offsets: `len`/`cap` of the new slice are correct, its data pointer is garbage, and the hash segfaults on the first block. `./moxie build -a` is correct. The same class explains round 260's fixture. Accept: changing a struct's layout invalidates every object that embeds or imports it, and the gate passes only cold-consistent objects.
+
+Original observation, still true: Established, with the SAME `./moxie` binary (mtime 08:13, unchanged all session) and the SAME source:
 
     tests/netsmoke/muxmatch as phase 8 built it     build OK, binary linked, fixture ran
     the same source in a fresh directory, cold      "; probe: package globals are immutable
