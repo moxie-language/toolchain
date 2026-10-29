@@ -19685,3 +19685,31 @@ import was satisfied from the cache before that import's hash is memoized. The
 fix is to memoize every package's hash up front on every path - a missing dep
 hash must be computed, never skipped - and then to add the reproducer as a
 fixture that builds twice: incrementally after a layout change, and cold.
+
+## Round 264: the tables that were rebuilt per call
+
+Round 263 fixed the hash round tables and schedule. The same shape was in three
+more places, all introduced by the array-to-slice conversion: a function that
+returns a big slice literal, called on a code path that runs often.
+
+    aes/const.mx        _sbox0, _te0..3, _td0..3   8 x 256 entries, 8 KiB,
+                                                    rebuilt on every key expansion
+    rsa/keygen.mx       _primes                    255 entries per key generation
+    sha1/sha1block_arm64 _k                        4 entries per block (arm64 only)
+
+All three are package-level slices now, allocated once at init in the root arena.
+
+Measured, 20000 key expansions:
+
+    AES-128   4093/4072 ms  ->  1626/1647 ms   (2.5x)
+    AES-256   4504/4699 ms  ->  1961/1873 ms   (2.4x)
+
+AES key setup is not a per-byte path, but it is a per-connection one: every TLS
+handshake pays it, which is why a 2.5x here is worth more than a 10% in the
+block function.
+
+The pattern, for the rest of the sweep: **a slice literal inside a function is an
+allocation on that function's code path.** If the function returns a constant
+table, or fills a fixed-size schedule, the table belongs at package level and the
+schedule belongs to the struct that owns the state. The next grep is
+`return []T{` in `src/` and `pkg/`.
