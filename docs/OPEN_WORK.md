@@ -19652,3 +19652,33 @@ crashes; build with `-a` and it is correct.
 **Until the cache is fixed, a change to any type's layout needs a cold build of
 everything that touches it.** The gate does not do that, so the gate can pass on
 objects that no longer match the source.
+
+### The suspect, for the next session
+
+`pkgHash` builds a package's cache key as `own source hash | dep hash | dep hash
+| ...`, and the dep hashes come from `bst.pkgKeyMemo`. The lookup is a conditional:
+
+    for _, imp := range sorted {
+        if dh, ok := bst.pkgKeyMemo[imp]; ok {
+            acc = acc | []byte("|") | dh
+        }
+    }
+
+A dependency whose hash is not yet memoized contributes **nothing** to the key,
+so that caller's key is the same as if it had no such dependency. Two paths fill
+the memo:
+
+    worker path   computes pkgHash for every package in meta.pkgs order, before
+                  any job runs (main.mx:7988), which is dependency order
+    serial paths  call pkgHash(pkg) as each package is compiled (4657, 5078,
+                  5256, 5479, 5734, 5783, 6328, 6353, 6935)
+
+The reproducer from this round (add a field to `fips140/sha256.Digest`, build
+incrementally, hash a few blocks) is the case that fails, so one of those two
+paths is handing out a key without its dependency in it. The first check is
+whether `meta.pkgs` on the worker path is really dependency-ordered for a
+`go.mod`-rooted build, and whether the serial path can compile a package whose
+import was satisfied from the cache before that import's hash is memoized. The
+fix is to memoize every package's hash up front on every path - a missing dep
+hash must be computed, never skipped - and then to add the reproducer as a
+fixture that builds twice: incrementally after a layout change, and cold.
