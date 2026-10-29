@@ -19541,11 +19541,13 @@ compiled by an older compiler that accepted it. Copying the same file to another
 directory and building it there re-checks and fails.
 
 The fixture is fixed here (the counter is a sovereign type reached through its
-initialiser). What is NOT established is why the two builds differed: the cache
-directory name already carries `compilerHash()` and `compilerBuildID()`, so
-"the cache ignores the compiler" does not fit the code. Both builds used the
-same `./moxie`; one accepted the source and one rejected it. W12 records the
-discrepancy and the experiment that settles it (same source, canonical path,
-cold cache, then a copy, and diff the logs) rather than a conclusion this round
-did not earn. What IS established: a fixture the compiler rejects did not stop
-the phase, and that alone is enough to distrust its pass.
+initialiser). Round 261 confirmed the contradiction with the original source in
+a fresh directory, cold: it fails with four errors ("package globals are
+immutable outside init") and exit 1, with the SAME `./moxie` binary phase 8 used
+(mtime 08:13, unchanged all session). The cache directory is keyed on
+`compilerHash()` (the compiler's sources under MOXIEROOT) and
+`compilerBuildID()` (a hash of the running binary), so neither "old compiler"
+nor "different tree" explains the canonical build succeeding. What is established
+is enough to distrust the pass: a fixture the compiler rejects did not stop the
+phase. W12 carries the experiment that settles it (canonical path cold, then a
+copy cold, diff both logs and the resolved cache dirs).
