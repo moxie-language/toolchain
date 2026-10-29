@@ -558,14 +558,36 @@ answers nothing at all. So there are two questions, not one: what the shell
 client and the Moxie sync client each parse (inline), and why the spawned
 handler pool produces no response (spawned).
 
+Reproduced by hand, `server 127.0.0.1:49991 spawned` + one `curl`, with
+`strace -f` on the whole tree (5 processes: the parent plus 4 workers):
+
+    parent  fork() x4 -> 4 children
+    parent  accept4() = 9
+    parent  read(9, "GET /smoke HTTP/1.1\r\nHost: 127.0...", 4096) = 84
+    parent  (nothing further on fd 9; back to accept4 -> EAGAIN)
+    child   futex(0x7f114b400000, FUTEX_WAIT, 0, {tv_nsec=20000000})   x4, looping
+
+so the request is accepted and read by the manager, and the four workers sit in
+their 20 ms futex waits seeing no ring data. No child crashed (no core), no
+workers were left unspawned (`spawn-cost` passes: 16 spawns, 158 us each). The
+defect is between "manager has the request bytes" and "a worker sees a ring
+entry" - or the reply never comes back. `inline` mode serves the same request
+correctly on the same binary, so the socket and the handler are both fine.
+
+Also worth fixing in the fixture: `repeatable-spawned` PASSES while every
+response is empty, because it compares three responses to each other and
+`"" == "" == ""`. It should assert the body first, as `curl-*` does, or it can
+never fail.
+
 Not yet bisected against the commits between round 267 (when phase 8 was last
 recorded green) and now: `9914050d` W11 childMap, `4f403191` W9 spread push,
 `41b5aa3d` table hoists, `37a48343` object cache, `7e15d493` fingerprint hash,
-`7a822254` sovereign arena pool. The sovereign pool is the only one that
-touches the allocator, so it is the first suspect and the cheapest to check:
-build `tests/netsmoke/server` with a compiler from before `7a822254` and run
-`server 127.0.0.1:PORT spawned` by hand (the fixture builds its closure cold in
-about ten minutes).
+`7a822254` sovereign arena pool, `145c1c42`/`8fc33f05` the net fixes. The net
+fixes cannot be it: `curl` needs no Moxie resolver, and inline mode - which uses
+the same resolver - answers. The sovereign pool is the only session change that
+touches runtime behavior a worker uses, so it is the first to check: build
+`tests/netsmoke/server` with the runtime from before `7a822254` and run it in
+spawned mode by hand.
 
 **Accept**: every netsmoke fixture green in both modes, and the inline body
 mismatch explained.
