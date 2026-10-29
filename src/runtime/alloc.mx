@@ -778,11 +778,114 @@ func SovDrainCompactions(budget int32) (n int32) {
 	return
 }
 
-// sovNewArena creates a fresh non-pooled arena of the given capacity.
+// Sovereign data arena pool. A sovereign arena is created per group and freed
+// when the receiver's arena dies, so a mutating method called on a receiver
+// that is itself a frame-local - the receiver a method builds and mutates
+// inside its own frame - created and freed one 8KB mmap per call: measured on
+// `time.Time.Add` as 200,000 mmap + 200,000 munmap for 200,000 calls, and on
+// `UTC` as two of each, which was 11us and 16.8us per call (round 275). The
+// model's guarantee is that the arena lives as long as the receiver; a frame's
+// receiver dies at the frame's exit either way, so the arena goes back to a
+// pool rather than to the kernel.
+//
+// Separate from the function-arena pool on purpose: a function frame must never
+// be handed an arena that carries the sovereign flag (its region ranges are
+// registered in sovRanges and its allocations are recorded in a group), and the
+// two pools have different size profiles.
+const sovPoolMax = int32(32)
+const sovPoolMaxBytes = uintptr(4 << 20)
+
+var sovPool []*Arena
+var sovPoolN int32
+var sovPoolBytes uintptr
+
+// sovPoolSlots carves the freelist out of the root arena, once. It is a fixed
+// array of pointers: a growing slice here would be reallocated in whatever
+// arena happened to be current, and the pool outlives every frame.
+func sovPoolSlots() (s []*Arena) {
+	if sovPool != nil {
+		return sovPool
+	}
+	n := uintptr(sovPoolMax) * unsafe.Sizeof(unsafe.Pointer(nil))
+	sovPool = unsafe.Slice((**Arena)(sovRootAlloc(n)), sovPoolMax)
+	return sovPool
+}
+
+// sovNewArena allocates a sovereign data arena, reusing a pooled one when a
+// free arena is large enough for the request.
 func sovNewArena(capacity uintptr) (a *Arena) {
+	capacity = (capacity + 4095) &^ 4095
+	headerSz := arenaHeaderSize()
+	if capacity < headerSz+arenaDataOffset()+4096 {
+		capacity = (headerSz + arenaDataOffset() + 4096 + 4095) &^ 4095
+	}
+	s := sovPoolSlots()
+	for i := int32(0); i < sovPoolN; i++ {
+		if s[i] == nil || s[i].regions[0].cap < capacity {
+			continue
+		}
+		a = s[i]
+		sovPoolBytes -= a.regions[0].cap
+		sovPoolN--
+		s[i] = s[sovPoolN]
+		s[sovPoolN] = nil
+		a.nregions = 1
+		a.regions[0].off = arenaDataOffset()
+		a.alloc = 0
+		a.owner = nil
+		a.sovGroupList = resize(a.sovGroupList, 0)
+		a.sovGroups = 0
+		a.sovereign = 1
+		a.growDouble = 1
+		return a
+	}
 	a = ArenaNew(capacity)
 	a.growDouble = 1
 	return a
+}
+
+// sovReleaseArena retires a sovereign data arena: every one of its region
+// ranges is unregistered (codecSovereignArena registers region 0 again for
+// whichever group borrows the arena next), its overflow regions are unmapped,
+// and the primary region goes back to the pool when there is room for it.
+func sovReleaseArena(a *Arena) {
+	if a == nil {
+		return
+	}
+	for i := int32(0); i < a.nregions; i++ {
+		if a.sovereign != 0 {
+			sovRangeUnregister(a.regions[i].base)
+		}
+	}
+	arenaScopeFreed(a.scope, uintptr(a.alloc))
+	a.alloc = 0
+	if a.nregions > 1 {
+		rb := uintptr(0)
+		for i := int32(1); i < a.nregions; i++ {
+			rb += a.regions[i].cap
+		}
+		RecordRegionFree(a.scope, uintptr(a.nregions-1), rb)
+		if a.growDouble != 0 {
+			RecordSovRegionFree(uintptr(a.nregions-1), rb)
+		}
+		for i := a.nregions - 1; i > 0; i-- {
+			sysUnmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
+		}
+		a.nregions = 1
+	}
+	tooBig := sovPoolBytes+a.regions[0].cap > sovPoolMaxBytes
+	s := sovPoolSlots()
+	if sovPoolN >= sovPoolMax || tooBig {
+		sysUnmap(unsafe.Pointer(a.regions[0].base), a.regions[0].cap)
+		return
+	}
+	a.regions[0].off = arenaDataOffset()
+	a.owner = nil
+	a.sovGroupList = resize(a.sovGroupList, 0)
+	a.sovGroups = 0
+	sovPoolBytes += a.regions[0].cap
+	s[sovPoolN] = a
+	sovPoolN++
 }
 
 // codecSovereignArena returns the receiver's sovereign group, lazily
@@ -1636,7 +1739,7 @@ func codecSovereignCompact(g *sovGroup, needed uintptr) {
 			domainRoot.manualStack[i] = nd
 		}
 	}
-	ArenaFree(oldTbl)
+	sovReleaseArena(oldTbl)
 	ArenaFree(oldData)
 	g.compacting = false
 }
@@ -1806,13 +1909,13 @@ func codecSovereignFree(recv unsafe.Pointer) {
 	}
 	g.ctxArena = nil
 	if g.data != nil {
-		ArenaFree(g.data)
+		sovReleaseArena(g.data)
 	}
 	if g.allocTbl != nil {
-		ArenaFree(g.allocTbl)
+		sovReleaseArena(g.allocTbl)
 	}
 	if g.refTbl != nil {
-		ArenaFree(g.refTbl)
+		sovReleaseArena(g.refTbl)
 	}
 	hashmapDelete(m, unsafe.Pointer(&keyv), h)
 	sovRecycleGroup(g)

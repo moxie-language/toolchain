@@ -20271,3 +20271,39 @@ in the sovereign borrow/store-back path of `Scan` and the per-call protocol.
 Tools built for this round, and worth keeping: the one-loop-per-shape bench
 (`/tmp/tb`), and `strace -f -c` restricted to mmap/munmap, which turns "it feels
 slow" into a per-call syscall count.
+
+## Round 276: the sovereign arena mmap per call is a pool
+
+Round 275 found that a mutating method whose receiver lives in the callee's own
+frame created and destroyed a sovereign data arena per call: 1 mmap + 1 munmap
+for `time.Time.Add`, 2 of each for `UTC`, and 11 us / 16.8 us per call. The
+model's guarantee is that the group's arena lives as long as the receiver, and a
+frame-local receiver dies at its frame's exit either way - so the arena does not
+need to go back to the kernel, only back to a freelist.
+
+`sovNewArena` now first-fits a pooled sovereign arena (32 slots, 4 MiB, carved
+as a fixed array out of the root arena, and kept separate from the function
+frame pool so a frame can never be handed an arena that carries the sovereign
+flag and its registered ranges). `sovReleaseArena` replaces the three
+`ArenaFree` calls on a group's data/alloc/ref arenas and on a rebuilt alloc
+table: it unregisters every region range (region 0 is registered again for
+whichever group borrows the arena next), unmaps overflow regions, and pools the
+primary region.
+
+Measured with the round-275 bench, before -> after:
+
+    t.Add(0)              10995 -> 5005 ns      (200,000 mmap+munmap -> 9 mmaps total)
+    t.UTC()               16785 -> 5470 ns      (400,000 of each -> 0)
+    time.Now()             4155 -> 4045 ns      (unchanged: it never mmap'd)
+    time.Unix            7280 -> 6890 ns
+    time.Local()            640 -> 640 ns       (unchanged)
+    struct+ptr local         15 -> 15 ns
+
+The remaining ~5 us of `Add`/`UTC` is pure CPU - the sovereign bookkeeping and
+the return protocol - which is W17 items 2 and 3. The pool does not touch the
+`time.FixedZone` shape (28830 ns), because that one allocates a Location per
+call; its arenas are not a group's data arena.
+
+quickcheck --fast: 15 of 15, including the TLS handshake fixture, which is the
+heaviest user of sovereign state in the tree (tls.Conn, the record layer and
+crypto/ecdh all mutate through receiver methods).
