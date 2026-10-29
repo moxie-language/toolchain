@@ -19751,3 +19751,36 @@ it with the node reached at match time. If they differ, the tree's
 becomes why the sovereign store-back of a node reached through a pointer field
 loses the write. If they are equal, the mapping's slice header itself is stale
 and the question is in `mapping.add`.
+
+## Round 266: the rest of the per-call tables, and why a bulk rewrite is the wrong tool
+
+A scan for the same shape found 27 more zero-argument functions that return a
+constant slice literal, several on hot paths:
+
+    tls/common.mx           _supportedVersionsList          409 lines, per handshake
+    tls/cipher_suites.mx    two preference-order lists        48 lines, per handshake
+    tls/defaults.mx         defaultCurvePreferences           23 lines, per handshake
+    net/http/sniff.mx       _sniffSignatures                 128 lines, per sniff
+    net/addrselect.mx       _rfc6724policyTable               57 lines, per dial
+    crypto/rand/util.mx     _smallPrimes                      84 lines, per key generation
+    crypto/des/const.mx     _permutedChoice2                  44 lines, per key setup
+    image/jpeg/writer.mx    _theHuffmanSpec                   64 lines, per encode
+    math/bits/*             _ntz8tab/_pop8tab/_rev8tab/_len8tab   per limb, on the
+                            non-optimized path
+
+Three attempts to rewrite all 27 with one transformer failed the same way: the
+regex that finds `func f() []T { return []T{ ... } }` cannot tell a literal's
+closing brace from the function's, so each attempt ate one brace per table and
+the tree stopped parsing. Every attempt was reverted; nothing from this round is
+committed.
+
+What that leaves: the scan and the list are the useful part. The conversions are
+mechanical but the tool has to read braces, not pattern-match lines - a small
+brace-counting rewriter, or 27 hand edits in batches of five with the gate after
+each. The verified hoists from rounds 263-264 (sha256, sha512, AES, RSA primes,
+sha1/arm64, base58, asn1.NullBytes, gosym magic sequences) stay as they are.
+
+The rule to apply at each site is the one this session has measured three times:
+a slice literal inside a function is an allocation on that function's code path;
+a constant table belongs at package level (once, root arena) and a fixed-size
+schedule belongs to the struct that owns the state.
