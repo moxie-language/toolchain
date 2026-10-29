@@ -390,11 +390,22 @@ made W3b's earlier probes measure the clock instead of the code.
 64-byte lines, 65536 tokens) under 50 ms, both measured with the recipe in round
 269. Profiling needs an in-tree counter: ptrace is blocked in this environment.
 
+**Round 275 split it into three costs** (see W17): the return-value protocol on
+every pointer-containing return (640 ns for `time.Local()` returning one stable
+pointer), the per-call sovereign group when a receiver is created in the
+callee's frame (1-2 mmap+munmap per call), and an unexplained ~3.5 us in the
+protocol for a `Time` specifically. `time.Now()` under 200 ns needs all three.
+
 ## W14. bufio.Scanner is 5.6 us per token regardless of token size (W3b, unresolved)
 
 See W3b above and round 269: the measurement instrument is now known to be
 4.3 us per call, so the earlier attribution to the sovereign arena is void.
 Re-measure first, then bisect with counters rather than timers.
+
+**Round 275 rules out the mmap churn for the scanner**: 65536 tokens with 66
+mmaps in the whole run, so the 5.6 us per token is CPU on the per-call path
+(sovereign borrow, store-back, return protocol), not syscalls. W17 is the list
+of per-call costs to cut.
 
 ## W15. The compiler needs 7.5 GB to build the net/http closure (found by round 270)
 
@@ -460,6 +471,47 @@ cold 1532 s, warm **42 s**, byte-identical binaries. The next warm-build item is
 that the root package is never cached (1 of 148 compiled every time), which is
 the 42 s.
 
+## W17. A method call on a frame-local receiver, and the return-value protocol (found by round 275)
+
+Round 275's table is the evidence; the three costs are independent and each has
+its own fix.
+
+1. **Sovereign group per call when the receiver lives in the callee's frame.**
+   `codecSovereignArena` keys groups by receiver address; a receiver created
+   inside the callee has a new address every call, so every call runs the create
+   path: `sovNewArena(8192)` mmaps an 8 KB arena, registers its range, inserts
+   into the root hashmap, and munmaps it when the frame dies. Measured with
+   strace: `t.Add(0)` 200,000 mmap + 200,000 munmap for 200,000 calls (11 us
+   each), `t.UTC()` 400,000 of each (16.8 us), `time.FixedZone` 30 us. The same
+   mutating method on a receiver that outlives the call is 10 ns. **Accept**:
+   `t.Add(0)` under 300 ns and no mmap in `strace -f -c`. The fix has to keep the
+   model's guarantee (the arena lives as long as the receiver) while not paying
+   an mmap for a receiver whose whole life is one call - the group's data arena
+   comes from the arena pool, and the group is recycled rather than leaked when
+   the frame dies.
+
+2. **The return-value protocol is entered for every pointer-containing return**
+   even when the value needs no relocation: `time.Local()` returns one stable
+   pointer and costs 640 ns, of which every step is visible in its disassembly
+   (FnArenaPush, codecBufInit, codecSeenInit, codecSetRetTransient x2,
+   codecEncodeValue, codecDecodeSeenInit, codecDecodeValue, codecEscapeOccurred,
+   FnArenaPop, ArenaRelease). A local struct with a pointer to a scalar global
+   costs 15 ns, so the difference is the protocol, not the pointer.
+   **Accept**: a function returning one stable pointer under 50 ns, and
+   `time.Local()` under 100 ns. This is codegen in both compilers (wood law): a
+   shallow "does any pointer field point into the current frame" test, with the
+   codec kept for the case that answers yes.
+
+3. **`time.Now()`'s own 3.5 us is not yet explained.** It has no mmap and
+   nothing to copy, and with `loc` set to nil it is still 3.3 us, so it is in
+   the protocol for a `Time` specifically - five times the same protocol for a
+   bare pointer. **Accept**: explained, then folded into (2).
+
+Order: (1) first, because it is contained in the runtime and it is 10-30 us per
+call on every mutating method that builds its receiver; then (2) with the
+bilateral codegen change; then re-measure W14's scanner bench, which round 275
+showed is CPU on this same path.
+
 ## Suggested order
 
 | # | item | why now | cost |
@@ -468,13 +520,14 @@ the 42 s.
 | 2 | ~~W1 TLS handshake~~ | done (rounds 253, 259): record layer, echo, and the wrong-CA case | — |
 | 3 | ~~W16 object cache~~ | done (round 273): warm builds 36x faster, which makes every later item cheaper | — |
 | 4 | ~~W15 compiler memory~~ | done (round 274): a concatenation built the fingerprint, not a data structure | — |
-| 5 | W13 time.Now | 4.3 us on every call is a runtime defect, and W14 cannot be measured without it | 1 session |
-| 6 | W2 codec escape warning | leaks per certificate, instrument for a class of bugs | 1 session |
-| 7 | W3/W14 scanner | 5.6 us per token, re-measure with counters first | half session |
-| 8 | W5 read windows | allocation only | half session |
-| 9 | W6 float Stringer | cosmetic, self-contained | half session |
-| 10 | W7 array campaign | the last big one; W7a first | multi-session |
-| 11 | W8 cleanups | opportunistic | - |
+| 5 | W17 per-call costs | 10-30 us per mutating call that builds its receiver; W13, W14 and W3b are all this | 1-2 sessions |
+| 6 | W13 time.Now | needs W17 (1) and (2); the remaining 3.5 us is unexplained | after W17 |
+| 7 | W2 codec escape warning | leaks per certificate, instrument for a class of bugs | 1 session |
+| 8 | W3/W14 scanner | 5.6 us per token, re-measure with counters first | half session |
+| 9 | W5 read windows | allocation only | half session |
+| 10 | W6 float Stringer | cosmetic, self-contained | half session |
+| 11 | W7 array campaign | the last big one; W7a first | multi-session |
+| 12 | W8 cleanups | opportunistic | - |
 
 After each item: `bash tests/quickcheck.sh`, commit, push. After W7c: the full
 sweep, then a release tag.

@@ -20208,3 +20208,66 @@ Still residential, and now the rest of W15: the `cached-bc` step adds ~800MB -
 `mem2reg` reads every freshly compiled package's bitcode into a frame that
 outlives the loop - and the fingerprint phase still keeps ~1.1GB of per-impl
 identity strings for the life of the build.
+
+## Round 275: what a method call costs, and why time.Now is 4.2 us
+
+W13 said `time.Now()` costs 4.3 us and blamed the return-value codec plus the
+clock read, without separating them. A bench with one loop per shape (200k
+iterations, AMD64 musl static, best of three) separates them:
+
+    shape                                                  ns/call
+    empty loop                                                  15
+    time.Time{} then UnixNano()                                 15
+    local pair, pointer-receiver method returning a scalar      15
+    local pair, pointer-receiver method, non-mutating            15
+    local pair, pointer-receiver MUTATING method                 10
+    struct{2 int64; *int64} built locally and returned          15
+    time.Time passed through a free function                    95
+    time.Unix(1700000000, 0)                                  7280
+    time.Local()                                               640
+    time.Now()                                                4155
+    time.Now().UnixNano()                                     4170
+    t.UTC() on a hoisted Time                                16785
+    t.Add(0) on a hoisted Time                               10995
+    time.FixedZone("x", 0)                                   29985
+
+So the shape of the problem is not "returns cost money". A struct with a
+pointer into a package global, built in a local and returned, costs 15 ns, and a
+mutating method on a frame-local receiver of a plain type costs 10 ns. Three
+different things are expensive:
+
+1. **`time.Local()` is 640 ns to return `&localLoc`.** Its disassembly is the
+   whole return-value protocol for one stable pointer:
+   FnArenaPush(0x10000), codecBufInit, codecSeenInit, codecSetRetTransient x2,
+   codecEncodeValue, codecDecodeSeenInit, codecDecodeValue,
+   codecEscapeOccurred, FnArenaPop, ArenaRelease. `codecIsStableArenaAddr` does
+   return true for a root-arena pointer, so nothing is copied - the 640 ns is
+   the protocol itself, entered for every function whose return value contains
+   a pointer whether or not anything needs relocating.
+
+2. **A receiver that is created in the callee's own frame is a new sovereign
+   group per call.** `codecSovereignArena` keys groups by receiver address, and
+   a frame-local receiver's address changes every call, so each call takes the
+   create path: `sovNewArena(8192)` = a fresh mmap, a range registration, a
+   root hashmap insert, and a munmap when the frame dies. strace on the shapes
+   counts it: `t.Add(0)` does 200,000 mmap + 200,000 munmap for 200,000 calls,
+   `t.UTC()` does 400,000 of each, and their time is 11 us and 16.8 us
+   respectively. `time.FixedZone` - which builds a Location and mutates it - is
+   30 us. A mutating method on a receiver that outlives the call (the bench's
+   own local in `main`) is 10 ns: one group, then a hashmap hit.
+
+3. **`time.Now()` is 4.2 us with no mmap and no deep copy.** It calls
+   `Local()` (0.64 us), `initStartNano()`, and `runtimeNow()` (the vDSO read),
+   and then returns a Time through the protocol of (1) with `loc` pointing at
+   `&localLoc`. The protocol for the Time is ~3.5 us, five times what the same
+   protocol costs for a bare pointer, and the difference is not the Location
+   walk Round 269 measured (1 us) - with `loc` set to nil it is still 3.3 us.
+   Not yet explained; the shapes above are what an explanation has to fit.
+
+The scanner bench (W3b/W14) is the same family and is NOT the mmap churn: 393
+ms for 65536 tokens with 66 mmaps in the whole run, i.e. pure CPU per token,
+in the sovereign borrow/store-back path of `Scan` and the per-call protocol.
+
+Tools built for this round, and worth keeping: the one-loop-per-shape bench
+(`/tmp/tb`), and `strace -f -c` restricted to mmap/munmap, which turns "it feels
+slow" into a per-call syscall count.
