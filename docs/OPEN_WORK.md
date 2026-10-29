@@ -20350,3 +20350,53 @@ rather than fixed here: `net.IP.String()` returns the raw 16-byte form instead
 of a dotted quad (`ParseIP("8.8.8.8").String()` prints bytes), `net.Dial` on a
 hosts name answers "no suitable address found" although the name resolves, and
 `net.LookupIP`/`Dial` on a DNS name dies with SIGSEGV.
+
+## Round 278: the resolver's answer outlived the wrong frame
+
+Round 277 made /etc/hosts parse, and the next layer was three failures:
+`net.IP.String()` printing bytes, `Dial` on a hosts name answering "no suitable
+address found", and `Dial`/`LookupIP` on a DNS name dying with SIGSEGV.
+
+The crash first, because a crash has a core. VmHWM-style memory work does not
+need ptrace, but a backtrace does - and ptrace_scope is 1 here, so gdb cannot
+attach. gdb can still read a core file, and systemd-coredump had kept them:
+
+    #0  net[lookupIPReturn] ()
+    #1  net.(*Resolver).lookupIPAddr ()
+    #2  net.(*Resolver).internetAddrList ()
+    #3  net.(*Resolver).resolveAddrList ()
+    #4  net.(*Dialer).DialContext ()
+    #5  net.(*Dialer).Dial ()
+
+`lookupIPReturn` dereferences `unsafe.Pointer` with `*(*[]IPAddr)(val)`, and the
+pointer came from `lookupIPCall.Call`:
+
+    addrs, err := l.r.lookupIP(...)
+    ...
+    return unsafe.Pointer(&addrs), nil
+
+`&addrs` is the address of a local. In Go that escapes to the heap and outlives
+the call; in Moxie it points into the call's frame arena, which is released when
+the call returns, and singleflight hands it to a collector in a different frame.
+So the fix is not in the deref: the publisher has to put the value somewhere both
+frames can reach. `Call` now builds the header and a copy of every address in the
+root arena (`SetCurrentArena(RootArena())`, the idiom readHosts and time.initLocal
+already use) and returns a pointer to that.
+
+After: `Dial("tcp", "example.com:80")` connects, `Dial("tcp", "localhost:1")`
+reaches the connect (`connect: cannot assign requested address` on ::1, which is
+this machine having no IPv6 loopback - no longer a resolver failure), and
+`LookupIP` returns addresses for hosts names and DNS names alike.
+
+`net.IP.String()` is not a bug to fix and is now a documented trap instead: `IP`
+is an alias for `[]byte` because the language has no named slice types (the
+compiler says so itself: "named slice type 'MyBytes' is not allowed: use []T
+directly") and an alias cannot carry methods, so the Go method set is a set of
+free functions - `net.IPString`, `IPIsLoopback`, and so on. `ip.String()` on an
+`IP` therefore resolves to the *builtin* `[]byte` Stringer and prints the raw
+16-byte form. It compiles, it is not the Go method, and nothing warns. Ported
+code must call `net.IPString(ip)`.
+
+Cost of the fix, stated plainly: a resolved name's addresses stay in the root
+arena forever. Go frees the equivalent when the singleflight call is collected;
+with no heap there is nowhere to put it that a different frame can free.

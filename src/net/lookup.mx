@@ -11,6 +11,7 @@ import (
 	"internal/singleflight"
 	"internal/stringslite"
 	"net/netip"
+	"runtime"
 	"unsafe"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -360,7 +361,32 @@ func (l *lookupIPCall) Call() (rval unsafe.Pointer, rerr error) {
 	if err != nil {
 		return nil, err
 	}
-	return unsafe.Pointer(&addrs), nil
+	// The pointer leaves this frame: singleflight stores it in the call record
+	// and the collector dereferences it from a different (or later) call. A
+	// pointer to a local lives in THIS frame's arena, which is released at
+	// return, so lookupIPReturn's *(*[]IPAddr)(val) read a released header -
+	// the SIGSEGV in net[lookupIPReturn] behind Dial("tcp", "example.com:80")
+	// (round 278). Publish the header and every address in the root arena,
+	// which is the only arena that outlives both frames.
+	//
+	// The cost is that a resolved name's addresses are never reclaimed. Go
+	// drops the equivalent data when the singleflight call is collected; with
+	// no heap there is nowhere to put it that the collector could free from
+	// another frame.
+	saved := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
+	cp := []IPAddr{:len(addrs)}
+	for i := int32(0); i < int32(len(addrs)); i++ {
+		ip := []byte{:len(addrs[i].IP)}
+		copy(ip, addrs[i].IP)
+		zone := []byte{:len(addrs[i].Zone)}
+		copy(zone, addrs[i].Zone)
+		cp[i] = IPAddr{IP: ip, Zone: zone}
+	}
+	hp := (*[]IPAddr)(runtime.ArenaAlloc(runtime.RootArena(), unsafe.Sizeof(cp)))
+	*hp = cp
+	runtime.SetCurrentArena(saved)
+	return unsafe.Pointer(hp), nil
 }
 
 // lookupIPReturn turns the return values from singleflight.Do into

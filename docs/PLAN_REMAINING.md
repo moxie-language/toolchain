@@ -512,27 +512,29 @@ call on every mutating method that builds its receiver; then (2) with the
 bilateral codegen change; then re-measure W14's scanner bench, which round 275
 showed is CPU on this same path.
 
-## W18. The net package's IP layer (found by round 277)
+## W18. The net package's IP layer (found by round 277, mostly fixed by round 278)
 
 Round 277 fixed `parseFile.readLine`, which is why /etc/hosts, /etc/resolv.conf,
 /etc/nsswitch.conf and /etc/services parse at all now. Behind it:
 
-1. **`net.IP.String()` returns the raw 16-byte form.** `ParseIP("8.8.8.8")` is
-   non-nil and its String() prints bytes, not `8.8.8.8`. Everything that formats
-   a resolved address inherits it.
-2. **`net.Dial` on a hosts name answers `no suitable address found`** although
-   `LookupHost` returns the address - the address-list build or its filter
-   drops it.
-3. **`net.LookupIP` and `Dial` on a DNS name die with SIGSEGV** (a crash, not an
-   error): `Dial("tcp", "example.com:80")` is enough to reproduce, and so is
-   `Dial("tcp", "smesh.lol:1")` now that a hosts entry stops it being a DNS name.
+1. **`net.IP.String()` returns the raw 16-byte form.** Not fixable, and now
+   documented: `IP` is an alias for `[]byte` because the language has no named
+   slice types and an alias cannot carry methods, so the method set is free
+   functions (`net.IPString`, `IPIsLoopback`, ...). `ip.String()` compiles and
+   calls the *builtin* `[]byte` Stringer instead. Ported code must call
+   `net.IPString(ip)`. Anything that can warn about it (a lint pass) is worth
+   more than a fix here.
+2. ~~**`Dial` on a hosts name answers `no suitable address found`**~~ - fixed by
+   round 278: it reaches the connect now.
+3. ~~**`LookupIP`/`Dial` on a DNS name die with SIGSEGV**~~ - fixed by round 278:
+   `lookupIPCall.Call` returned the address of its own local, and singleflight
+   dereferenced it from another frame after the arena was released. The value is
+   published in the root arena now, which also means a resolved name's addresses
+   are never reclaimed - the remaining item here.
 
-**Accept**: `muxmatch`-grade netsmoke green (phase 8), plus
-`LookupHost`/`LookupIP`/`Dial` over a hosts name, a DNS name and a literal, with
-`IP.String()` printing dotted quads. These three are the same code (`netip`,
-`addrselect`, `lookup`), so they are one session's work, taken in this order:
-String first (it is what makes the other two visible), then the crash (a crash
-is never a diagnostic), then the hosts-name dial filter.
+**Open**: the root-arena residency of resolved addresses (bounded per distinct
+name, unbounded over a long-running process resolving many names - W2's leak
+class), and phase 8 re-run to confirm the whole netsmoke passes.
 
 ## Suggested order
 
@@ -542,7 +544,7 @@ is never a diagnostic), then the hosts-name dial filter.
 | 2 | ~~W1 TLS handshake~~ | done (rounds 253, 259): record layer, echo, and the wrong-CA case | — |
 | 3 | ~~W16 object cache~~ | done (round 273): warm builds 36x faster, which makes every later item cheaper | — |
 | 4 | ~~W15 compiler memory~~ | done (round 274): a concatenation built the fingerprint, not a data structure | — |
-| 5 | W18 net IP layer | every web request needs it: DNS crashes and no address formats | 1 session |
+| 5 | ~~W18 net IP layer~~ | done (round 278): DNS/Dial crash fixed, hosts and services parse; the leak and the `IP.String` trap remain | — |
 | 6 | W17 per-call costs | 10-30 us per mutating call that builds its receiver; W13, W14 and W3b are all this | 1-2 sessions |
 | 7 | W13 time.Now | needs W17 (1) and (2); the remaining 3.5 us is unexplained | after W17 |
 | 8 | W2 codec escape warning | leaks per certificate, instrument for a class of bugs | 1 session |
