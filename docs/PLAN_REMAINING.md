@@ -398,6 +398,18 @@ See W3b above and round 269: the measurement instrument is now known to be
 4.3 us per call, so the earlier attribution to the sovereign arena is void.
 Re-measure first, then bisect with counters rather than timers.
 
+## W15. The compiler needs 7.5 GB to build the net/http closure (found by round 270)
+
+`moxie build ./src/net/http` (library target) panics "arena: region table full"
+at the root arena's cap (128 regions x 64 MiB = 8 GB), with peak RSS 7.2 GB; the
+same closure as a main package peaks at 7.66 GB and passes. Round 270 has the
+numbers and the bisect (not the round-268 fix, not the round-271 hoists).
+
+**Accept**: `moxie build -o /dev/null ./src/net/http` completes (the
+`undefined symbol: main.main` linker error is the success shape) on a 16 GB
+machine with room to spare - which means per-package discovery data is released,
+not that the cap was raised.
+
 ## Suggested order
 
 | # | item | why now | cost |

@@ -19932,3 +19932,81 @@ Two consequences:
 - **Any timing code in this tree is paying this**: a server that stamps a
   request or an event with `time.Now()` pays 4.3 us per stamp, which is more
   than most of the work it is timing. That is docs/PLAN_REMAINING.md W13.
+
+## Round 270: compiling net/http as a library hits the root arena's 8 GB cap
+
+`./moxie build -o /tmp/httplib.bin ./src/net/http` - the "does this library
+compile" check the plan uses everywhere - dies in discovery:
+
+    discover golang.org/x/net/http2/hpack [hpack.mx, huffman.mx, static_table.mx, encode.mx, tables.mx]
+    panic: runtime error at 0x28e144: arena: region table full
+
+Measured, watching `/proc/<pid>` while it ran:
+
+    library build   peak VSZ 8,666,680 KB   peak RSS 7,244,628 KB   panic
+    muxmatch build  peak VSZ 8,031,592 KB   peak RSS (see log)      ok
+
+The cap is arithmetic: `arenaMaxRegions` 128 x `arenaDefaultRegion` 64 MiB is
+exactly 8 GB (src/runtime/alloc.mx), and the root arena is the arena that
+matters because it is process-lifetime - the compiler keeps every discovered
+package's parse and symbol data for the whole run and releases only per function
+frame. Compiling the net/http closure as a main package peaks at 7.66 GB, i.e.
+96% of the cap, which is why the failure looks sudden: the same closure one way
+completes, the other way crosses the line.
+
+Not the cause: the spread-push fix (round 268). Reproduced with
+`/tmp/s4old`, a stage4 built from 9914050d - the commit before it - and with the
+per-call table hoists of round 271 stashed.
+
+Two things to fix, in this order:
+
+1. **Residency.** The compiler keeps everything for the life of the process. The
+   scope mechanism exists (`src/runtime/arena_scope.mx`, `arenaScopeArena` in
+   `FnArenaPush`) and per-package IR is emitted then discarded; the discovery
+   data (ASTs, symbol tables, type graphs) is what is never released. A per
+   package scope that is released after that package's IR is written would take
+   the peak down by a large factor, and that is the fix that makes big builds
+   safe on a 16 GB machine.
+2. **The cap.** Raising `arenaMaxRegions` for the root arena only (the registry
+   is carved from the first region, so a large arena can afford the entries -
+   the 24 KB cost the comment cites is for 1024 entries and it is small arenas
+   that cannot) turns a hard "region table full" panic into an ordinary OOM,
+   which is honest but is not a fix on its own.
+
+Until then: `moxie build -o /dev/null ./src/<pkg>` is only a usable check for
+closures below the cap. For net/http-sized packages, build a fixture that
+imports them, which compiles the same code and links.
+
+## Round 271: the last 14 per-call tables, and the tool that could do it
+
+Round 266 listed the sites and recorded why three bulk rewrites failed: the
+regex that finds `func f() []T { return []T{ ... } }` cannot tell the literal's
+closing brace from the function's, so each attempt ate one brace per table and
+the tree stopped parsing. The tool has to count braces, and it is thirty lines:
+find the function, take the literal's opening brace, walk to its match, and emit
+`var fTable = <literal>` plus `func f() (r []T) { return fTable }`.
+
+Applied to 14 tables in nine files:
+
+    crypto/tls/common.mx          _supportedVersionsList        409 entries
+    crypto/tls/cipher_suites.mx   _cipherSuitesPreferenceOrder   48
+                                  _cipherSuitesPreferenceOrderNoAES
+    crypto/tls/defaults.mx        defaultCurvePreferences        7
+    net/http/sniff.mx             _sniffSignatures             128 lines
+    net/addrselect.mx             _rfc6724policyTable           57 lines
+    crypto/rand/util.mx           _smallPrimes                  84
+    crypto/des/const.mx           _permutedChoice2, _ksRotations
+    image/jpeg/writer.mx          _theHuffmanSpec              64 lines
+    math/bits/bits_tables.mx      _ntz8tab _pop8tab _rev8tab _len8tab
+
+No call site changed: the function stays as a one-line accessor, so `len(f())`
+and `f()[i]` compile as before. The accessor returns a root-arena slice, which
+the codec keeps by identity, so the accessor is an address load and the table is
+built once.
+
+Not measured this round: these are per-call or per-connection costs that are
+small in absolute terms compared with the AES and hash tables of rounds 263-264,
+and the fixtures that exercise them do not time the relevant paths. The reason
+to do it anyway is that it is the same defect the earlier rounds measured at
+2.5x - a slice literal inside a function is an allocation on that function's
+code path - and it is now the last of them.
