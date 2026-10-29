@@ -19154,9 +19154,23 @@ With the default curve preferences the handshake fails: the client's share is
 32 arrive as zeros, so the server answers "tls: invalid client key share". The
 bytes are valid immediately before `push(mlkemBytes, ecdhShare...)` and zeros
 after it, with `len == cap == 1184` on the destination - the growth path - which
-is the shape of an aliased slice being recycled rather than a copy failing. The
-fixture pins X25519 so that it measures the record layer; the hybrid is W9 in
-docs/PLAN_REMAINING.md.
+is the shape of an aliased slice being recycled rather than a copy failing.
+
+Round 261 measured it with arena ownership (`DbgArenaOf`) inside
+`hybridKeyExchange.keyShares`:
+
+    ml len=1184 cap=1184 where=7   ecdh len=32 where=7   top=7   ec[0]=26
+    after push: where=7   last4=0,0,0,0
+
+Both operands are in the SAME frame arena as the push, so this is not the
+dead-frame aliasing of W10 and not the growth path's own copy - the identical
+shape (`push(local1184, localStructSlice[0].data...)`, len==cap on the
+destination) copies correctly in an isolated probe, twice over: with the source a
+parameter and with it a local from a call. The difference that remains is that
+the destination here comes from an interface method chain
+(`priv.mlkem.Encapsulator().Bytes()`). That is where the next session starts;
+the fixture pins X25519 so that it measures the record layer, and W9 carries the
+measurement.
 
 ## Round 254: the escape warning was a pointer to a local, twice over
 
