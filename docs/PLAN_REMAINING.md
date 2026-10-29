@@ -378,7 +378,9 @@ down.
 
 So the compiler rejects the source, and a phase built it anyway. The cache dir name carries `compilerHash()` (a hash of the compiler's own sources under MOXIEROOT) and `compilerBuildID()` (a hash of the running binary), so "a stale object from an older compiler" does not explain it either - unless the per-package content key, not the directory, is what went stale. Next experiment: build the canonical path cold (`-a`), then in a copy with `-a`, and diff the two logs and the resolved cache dirs; `pkgCacheDir()` and `buildScratchDir("./tmp", "mxc-build")` are the two places to look. Accept: a fixture the compiler rejects fails the phase that builds it, from any directory, with a cold cache.
 
-Round 263 added a second sighting of the same *shape* and no reproducer: one incremental build produced a binary whose slice header was read at the old offset after a `Digest` field was added, `-a` was correct, and a clean rebuild of the same change recompiled the dependents properly and ran correctly. The state that caused it was cleared before it could be repeated. Keep both sightings in view; the cache-key code path is `pkgHash`/`pkgCacheKey`, and the dependency-hash lookup there skips a dep it has not memoized, which is the one place a dependent's key can lose its dependency.
+Round 263 added a second sighting of the same *shape* and no reproducer: one incremental build produced a binary whose slice header was read at the old offset after a `Digest` field was added, `-a` was correct, and a clean rebuild of the same change recompiled the dependents properly and ran correctly. The state that caused it was cleared before it could be repeated. Keep both sightings in view.
+
+**Round 272 closed the one place a dependent's key could lose its dependency**: `pkgHash` dropped an import the memo did not hold instead of computing it, and not every call site hashes in dependency order. The key now resolves the import through `pkgByPath` and recurses, with `"|?" + path` only for an import that is no package at all. That does not *explain* either sighting (no key was captured), so the state to look for next is a stale object whose key came from somewhere other than `pkgHash`: `pkgCacheKey` hashes the package's own files alone, and `compilerHash()`/`compilerBuildID()` only name the directory.
 
 ## W13. time.Now is 4.3 us (found by round 269 while chasing W3b)
 
@@ -409,6 +411,27 @@ numbers and the bisect (not the round-268 fix, not the round-271 hoists).
 `undefined symbol: main.main` linker error is the success shape) on a 16 GB
 machine with room to spare - which means per-package discovery data is released,
 not that the cap was raised.
+
+## W16. A warm build still re-compiles every object, which is the whole wall time (found by round 272)
+
+Build 2 of round 272 had 147 of 147 packages cached, wrote no `.bc` at all, and
+still took 1218 s. The time is in `compile objects`: `clangCompileToObj`
+(`_mxc_stage4/main.mx`) execs `clang -c <hash>.bc -o <hash>.bc.o` for every
+module on every build, and the `<hash>.bc.o` it overwrites is already sitting
+next to the `.bc` from the previous build. Nothing checks it, so 147 LLVM
+modules - including the generated Unicode tables, which are minutes of clang
+each - are recompiled to identical objects.
+
+This is why a one-line change to a fixture costs twenty minutes: the package
+cache is fine, the object cache does not exist. It also makes W15 worse: the
+compiler holds the whole build's IR while it does the work.
+
+**Accept**: a second build of the same source with nothing changed completes in
+under two minutes, i.e. the object for a `.bc` whose hash is unchanged is
+reused. The `.o` name must carry what can invalidate it (the clang that produced
+it), and `-a` must still discard it. This is a build-cache detail of stage4's
+driver, not language semantics, so there is no legacy mirror: legacy's build
+cache is cmd/go's and already keys objects on the compiler and its inputs.
 
 ## Suggested order
 

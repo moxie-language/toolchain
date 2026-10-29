@@ -20010,3 +20010,60 @@ and the fixtures that exercise them do not time the relevant paths. The reason
 to do it anyway is that it is the same defect the earlier rounds measured at
 2.5x - a slice literal inside a function is an allocation on that function's
 code path - and it is now the last of them.
+
+## Round 272: a dependency that is not in the memo was not in the key
+
+`pkgHash` is the stage4 package content key: own sources plus the hashes of the
+imports, memoized per package path in `pkgKeyMemo`. The import loop was
+
+    if dh, ok := bst.pkgKeyMemo[imp]; ok {
+        acc = acc | []byte("|") | dh
+    }
+
+- an import that was not memoized yet contributed **nothing**. That is not a
+matter of build order being what we think it is: `pkgHash` has twenty call
+sites, and while the serial package loop and the worker's hash loop both walk
+resolver order (dependencies first), six of those sites hash a *dependency* to
+compare or report it, and the memo is then filled in whatever order those
+reached. A key computed while a dependency was unmemoized was byte-identical to
+the key of the same package with that import deleted from the source, and a
+dependency's layout change does not change it - so the dependent's cached `.bc`
+survives an ABI change in exactly the case the key exists to prevent. That is
+the shape of the W12 sightings (rounds 260-263: a slice header read at the old
+offset after a field was added, correct under `-a`).
+
+The fix: resolve the import through `pkgByPath` and recurse into `pkgHash`,
+guarded by `pkgHashBusy` so a cycle cannot loop; only an import that resolves
+to no package at all - a baked package, `C`, a builtin-only path that the
+resolver intentionally does not push - falls back to `"|?" + path`. The
+fallback still enters the key, so the key changes when the import set changes,
+and the key is now a function of the package graph rather than of the order the
+hashes happened to be computed in.
+
+Wood law, direction reversed: legacy already had this property.
+`legacy/builder/build.go` sets `actionID.Imports[imported.Path()] =
+importedPackages[i].result` - the dependency's action ID - and the dependency's
+key job is a job dependency, so legacy's key has always chained the whole
+dependency graph transitively. Nothing to mirror; the stage4 side is what
+diverged, and now does not.
+
+Measured, `tests/netsmoke/muxmatch` (147 packages), the compiler built with the
+fix and installed:
+
+    build 1  cold   147 packages compiled, 147 .bc written       1316 s
+    build 2  warm   147/147 cached, 0 .bc rewritten              1218 s
+    build 3  warm, -j 2 workers  147/147 cached, 0 .bc rewritten
+
+Build 2 reported rc=1, and not because of this change: `/tmp/mm2` existed as a
+directory from an older session, so ld.lld refused the output path after the
+whole build had succeeded. Build 3 is the clean rerun. That the serial build's
+147 keys are hit by the parallel build's 147 keys is the point: the worker path
+computes hashes from `meta.pkgs` in whatever order that array holds, and it now
+resolves a dependency's hash through `pkgByPath` instead of dropping it, so the
+two paths agree.
+
+The interesting number is in build 2's wall time. With every package cached it
+still took 1218 s, and the phase it spent the time in is `compile objects`:
+`clangCompileToObj` execs clang for every `.bc` on every build, so a warm build
+re-compiles 147 LLVM modules to objects that already exist on disk next to
+them (`<hash>.bc.o`). Found and recorded as W16 rather than fixed here.

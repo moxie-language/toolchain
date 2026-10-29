@@ -42,6 +42,10 @@ type buildState struct {
 	wasmRtPkgs      map[string]bool
 	builtinOnly     []string
 	pkgKeyMemo      map[string]string
+	// pkgByPath resolves an import path to its package, so a cache key can
+	// hash a dependency that the memo does not hold yet (pkgHash).
+	pkgByPath   map[string]*pkgInfo
+	pkgHashBusy map[string]bool
 	linkSetKey      string // hash of the whole link set; interface dispatch impls depend on it
 	// llSubDir is a stable subdirectory of the per-process scratch dir, derived
 	// from the link set. The path of a package's .ll file is embedded in the
@@ -1951,7 +1955,30 @@ func pkgHash(p *pkgInfo) (s string) {
 	for _, imp := range sorted {
 		if dh, ok := bst.pkgKeyMemo[imp]; ok {
 			acc = acc | []byte("|") | dh
+			continue
 		}
+		// A dependency whose hash is not memoized yet must be COMPUTED, never
+		// skipped. A key that omits it is byte-identical to the key of a
+		// package with no such import, so the cached .bc survives a layout
+		// change in the dependency - the one way a cache key can hand back a
+		// stale object across an ABI change. The package loops do run in
+		// resolver order, but six of this function's call sites hash a
+		// dependency to compare or report it, which leaves the memo filled in
+		// whatever order those reached; the key must not depend on that.
+		if dp, found := bst.pkgByPath[imp]; found && dp != nil && dp != p {
+			if bst.pkgHashBusy == nil {
+				bst.pkgHashBusy = map[string]bool{}
+			}
+			if !bst.pkgHashBusy[imp] {
+				bst.pkgHashBusy[imp] = true
+				acc = acc | []byte("|") | pkgHash(dp)
+				bst.pkgHashBusy[imp] = false
+				continue
+			}
+		}
+		// Unresolvable (a baked package, "C", a builtin) or cyclic: the path
+		// still enters the key, so the key changes when the import set does.
+		acc = acc | []byte("|?") | []byte(imp)
 	}
 	// Interface dispatch arms are emitted into the package that makes the
 	// call, and they enumerate the impls of each invoked method across the
@@ -3352,6 +3379,11 @@ func (r *resolver) walk(path, importer string) {
 	}
 	r.order = mxutil.Ensure(r.order, 1)
 	push(r.order, pkg)
+	if bst.pkgByPath == nil {
+		bst.pkgByPath = map[string]*pkgInfo{}
+	}
+	bst.pkgByPath[path] = pkg
+	bst.pkgByPath[pkg.path] = pkg
 }
 
 func resolveAll(rootPkg string, root string) (ss []*pkgInfo) {
@@ -7982,6 +8014,13 @@ func workerEntryExport(arg unsafe.Pointer) {
 	idxByPath := map[string]int32{}
 	for i := int32(0); i < int32(len(meta.pkgs)); i++ {
 		idxByPath[meta.pkgs[i].path] = i
+	}
+
+	// The worker's pkgHash must be able to resolve an import to its package,
+	// exactly as the serial path can (resolver.walk fills pkgByPath there).
+	bst.pkgByPath = map[string]*pkgInfo{}
+	for i := int32(0); i < int32(len(meta.pkgs)); i++ {
+		bst.pkgByPath[meta.pkgs[i].path] = meta.pkgs[i]
 	}
 
 	// Compute hashes for all packages (worker's own bst.pkgKeyMemo)
