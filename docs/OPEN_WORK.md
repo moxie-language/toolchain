@@ -20138,3 +20138,9 @@ into the binary. The same pair on the compiler's own closure (44 packages) was
 36x on the loop this project actually runs - edit, build, run - and it is the
 round-272 finding that made the number visible: with the package cache working,
 the only thing left in a warm build was codegen nobody had cached.
+
+The gate shows it without a special test. `tests/quickcheck.sh --fast` on the
+cold cache of a compiler that has the object cache ran 275 s; the same command
+on the same tree, warm, ran 67 s, with the per-fixture times dropping from
+42-180 s to 2-19 s. The two runs differ in one thing only: whether the objects
+their closures need were already on disk.
