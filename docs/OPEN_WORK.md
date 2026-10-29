@@ -20400,3 +20400,55 @@ code must call `net.IPString(ip)`.
 Cost of the fix, stated plainly: a resolved name's addresses stay in the root
 arena forever. Go frees the equivalent when the singleflight call is collected;
 with no heap there is nowhere to put it that a different frame can free.
+
+## Round 279: the shared slot ring was written into a private copy
+
+Phase 8's spawned modes answered nothing. Round 278's strace already showed the
+shape: the manager forks 4 workers, accepts, reads `GET /smoke`, wakes a worker,
+gets a result back - and closes the connection without writing a byte. With a
+temporary print in the worker, the worker said both things at once:
+
+    DBG worker: slot decode failed
+    DBG worker: no route for -1
+
+`routeID = -1` is `chanSlotGetReq`'s failure sentinel, and it fails when
+`chanSlotGetI32(slot, 0)` - the frame length the shell wrote - is out of range.
+The shell had written a valid length. The slot the worker read was all zeros.
+
+The queue boundary is a MAP_SHARED ring of preallocated slots, and both sides
+named one slot with a bounded sub-slice:
+
+    slot := chanSlotBuf[chanSlotBase(i) : chanSlotBase(i)+chanSlotBytes]
+
+**A bounded sub-slice allocates and copies in this language.** The shell wrote the
+request into its private copy, the worker took its own copy of an untouched ring,
+and every frame arrived zeroed - which the decoder rejects, and the worker then
+wrote an abort frame the shell discards, so the client saw a connection that
+closed with no response. The mechanism was correct in Go (a sub-slice is a view
+there) and is wrong here by exactly the rule this project keeps repeating.
+
+`chanSlotWindow` builds a real window with `unsafe.Add` over
+`unsafe.SliceData(chanSlotBuf)`, and the three sites (shell write, worker read,
+shell response read) use it. One slot, four processes, the same bytes.
+
+Phase 8 after the fix - 14 of 18 fixtures pass, both modes:
+
+    PASS  build, mux-match, spawn-bytes, spawn-cost
+    PASS  listen-inline, curl-inline, keepalive-inline, repeatable-inline, client-inline
+    PASS  listen-spawned, curl-spawned, keepalive-spawned, repeatable-spawned, client-spawned
+    FAIL  no-accumulation-inline, client-sync, no-accumulation-spawned
+
+`client-spawned` passing is the one that matters most here: the whole Moxie
+client stack - Transport, dial, request, response - completed a real request
+against a worker in another domain for the first time.
+
+The four remaining failures are one defect, and it is not the spawn path:
+`client-sync` prints `status=200` and then `body=[        ]` - eighteen ZERO
+bytes, where the body should be `hello path=/smoke` (eighteen bytes). A body
+reader allocated in a frame that is released, then zeroed by the next
+allocation in the reused arena, reads back as zeros of the right length. That
+is W20.
+
+Also fixed here: `repeatable-spawned` compared three responses to each other, so
+three identical EMPTY responses passed it - which is how a spawned mode that
+answered nothing was recorded green. It now asserts the body first.

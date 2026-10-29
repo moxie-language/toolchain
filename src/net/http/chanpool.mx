@@ -33,6 +33,7 @@ package http
 import (
 	"errors"
 	"runtime"
+	"unsafe"
 )
 
 // chanGlobalMux is the table the pool workers read.
@@ -153,6 +154,23 @@ func chanSlotGetHeaders(b []byte, off int32) (h Header, next int32) {
 }
 
 // chanSlotPutReq is THE request copy: the shell's message into its slot.
+// chanSlotWindow is a VIEW of one slot in the shared ring.
+//
+// A bounded sub-slice (buf[a:b]) allocates and copies in this language, and a
+// copy is the one thing a shared-memory ring cannot have: the shell writes the
+// request into its private copy, the worker reads the untouched ring, and
+// chanSlotGetReq answers "decode failed" for every request. That is what
+// spawned mode did until round 279 - the manager accepted and read the request,
+// the four workers were alive and polling, and every frame arrived empty.
+// unsafe.Add is the only way to name the same bytes without copying them.
+func chanSlotWindow(base int32) (slot []byte) {
+	if base < 0 || base+chanSlotBytes > int32(len(chanSlotBuf)) {
+		panic("chanpool: slot window out of range")
+	}
+	p := unsafe.Add(unsafe.Pointer(unsafe.SliceData(chanSlotBuf)), uintptr(base))
+	return unsafe.Slice((*byte)(p), chanSlotBytes)
+}
+
 func chanSlotPutReq(slot []byte, routeID int32, rq *Req) (n int32) {
 	off := chanSlotFrame
 	off = chanSlotPutRaw(slot, off, rq.Method)
@@ -260,7 +278,7 @@ func chanWorkerLoop(jobs chan int32, results chan int32) {
 		if i >= chanSlotCount {
 			panic("chanpool: slot index out of range")
 		}
-		slot := chanSlotBuf[chanSlotBase(i) : chanSlotBase(i)+chanSlotBytes]
+		slot := chanSlotWindow(chanSlotBase(i))
 		routeID, rq, ok := chanSlotGetReq(slot)
 		h := chanRouteHandler(routeID)
 		var resp *Resp
@@ -311,14 +329,14 @@ func (p *chanPool) call(routeID int32, rq *Req) (resp *Resp) {
 	if chanSlotInFlight > chanSlotInFlightMax {
 		chanSlotInFlightMax = chanSlotInFlight
 	}
-	slot := chanSlotBuf[chanSlotBase(i) : chanSlotBase(i)+chanSlotBytes]
+	slot := chanSlotWindow(chanSlotBase(i))
 	chanSlotPutReq(slot, routeID, rq)
 	p.jobs[i] <- i
 	j := <-p.results[i]
 	if j < 0 || j >= chanSlotCount {
 		panic("chanpool: slot index out of range")
 	}
-	out := chanSlotBuf[chanSlotBase(j) : chanSlotBase(j)+chanSlotBytes]
+	out := chanSlotWindow(chanSlotBase(j))
 	resp, _ = chanSlotGetResp(out)
 	chanSlotInFlight--
 	return resp

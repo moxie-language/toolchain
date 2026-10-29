@@ -133,7 +133,10 @@ hello path=/two"
 	# produce byte-identical responses, every time.
 	out2="$(curl -s -m 15 "http://127.0.0.1:$port/smoke" 2>&1 || true)"
 	out3="$(curl -s -m 15 "http://127.0.0.1:$port/smoke" 2>&1 || true)"
-	if [ "$out1" = "$out2" ] && [ "$out2" = "$out3" ]; then
+	# Compared to each other AND to the expected body: three identical EMPTY
+	# responses used to pass this unit, which is how a spawned mode that
+	# answered nothing was recorded green (round 279).
+	if [ "$out1" = "hello path=/smoke" ] && [ "$out1" = "$out2" ] && [ "$out2" = "$out3" ]; then
 		log_pass "netsmoke:repeatable-$mode" "three identical requests, identical responses"
 	else
 		log_fail "netsmoke:repeatable-$mode" "responses differ: [$out1] [$out2] [$out3]"
