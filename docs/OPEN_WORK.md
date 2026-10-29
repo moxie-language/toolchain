@@ -20307,3 +20307,46 @@ call; its arenas are not a group's data arena.
 quickcheck --fast: 15 of 15, including the TLS handshake fixture, which is the
 heaviest user of sovereign state in the tree (tls.Conn, the record layer and
 crypto/ecdh all mutate through receiver methods).
+
+## Round 277: every /etc file the net package reads was empty
+
+Phase 8 failed at `lookup failed: lookup localhost on 127.0.0.1:53: no such
+host`, for a name that is in /etc/hosts. `hostLookupOrder` was not the problem -
+instrumenting it printed `files,dns`, the right order - and `readHosts` printed
+`/etc/hosts openErr false byName 0 byAddr 0`: the file opened, was read, and
+produced nothing.
+
+`io.ReadFullInto` validates its window against `len(dst)`, not `cap(dst)`:
+
+    if off+n > len(dst) || n > cap(tmp) { return 0, ErrShortBuffer }
+
+and `parseFile.readLine` passed `f.data` - whose length is the bytes already
+buffered and whose capacity is the buffer - with `off = len(f.data)` and `n =
+cap(f.data)-len(f.data)`. `off+n` is exactly `cap(f.data)`, which is greater than
+`len(f.data)` on every call, so every read answered ErrShortBuffer with got=0,
+`readLine` returned ok=false on its first call, and the caller's loop never ran.
+`readLine` now passes `resize(f.data, cap(f.data))`, the idiom `io.ReadAll` next
+door already uses.
+
+One caller, and it is the reader behind every fixed-path file in the package:
+/etc/hosts, /etc/resolv.conf, /etc/nsswitch.conf, /etc/services, /proc/net/unix
+(sock_linux), the interface list and lookup_unix. What that costs, measured on
+this machine before and after:
+
+    net.LookupHost("localhost")   lookup ... 127.0.0.1:53: no such host  -> 127.0.0.1 ::1
+    net.LookupHost("smesh")       same failure                          -> 127.0.0.1
+    net.LookupPort("tcp","http")  (was unreachable: same reader)         -> 80
+    net.LookupPort("udp","domain")                                      -> 53
+    net.LookupPort("tcp","ssh")                                          -> 22
+
+The DNS half was never reading /etc/resolv.conf either: it ran on the resolver's
+built-in default, which is 127.0.0.1 - the same as this machine's nameserver,
+which is why nobody noticed. /etc/nsswitch.conf's source list was empty too, so
+`hostLookupOrder` silently took its fallback branch (`files,dns`), which happens
+to be right here and would not be everywhere.
+
+Three defects are now visible behind it, and are tracked as W18 in the plan
+rather than fixed here: `net.IP.String()` returns the raw 16-byte form instead
+of a dotted quad (`ParseIP("8.8.8.8").String()` prints bytes), `net.Dial` on a
+hosts name answers "no suitable address found" although the name resolves, and
+`net.LookupIP`/`Dial` on a DNS name dies with SIGSEGV.

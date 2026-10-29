@@ -56,7 +56,15 @@ func (f *parseFile) readLine() (s string, ok bool) {
 	}
 	if len(f.data) < cap(f.data) {
 		ln := len(f.data)
-		n, err := io.ReadFullIntoN(f.file, f.data, ln, cap(f.data)-ln)
+		// resize, not a bounded sub-slice: ReadFullInto validates off+n against
+		// len(dst), and f.data's length is the bytes already buffered, not the
+		// room left. Passing f.data itself made every read answer
+		// io.ErrShortBuffer with got=0, so readLine returned ok=false on the
+		// first call and every /etc file this package parses came back empty -
+		// /etc/hosts (no hosts-file name resolved, localhost included),
+		// /etc/resolv.conf (DNS ran on the 127.0.0.1 default), and
+		// /etc/nsswitch.conf (the lookup order silently took its fallback).
+		n, err := io.ReadFullIntoN(f.file, resize(f.data, cap(f.data)), ln, cap(f.data)-ln)
 		if n >= 0 {
 			f.data = f.data[0 : ln+n]
 		}
