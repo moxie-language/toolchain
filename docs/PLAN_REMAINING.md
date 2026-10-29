@@ -536,6 +536,40 @@ Round 277 fixed `parseFile.readLine`, which is why /etc/hosts, /etc/resolv.conf,
 name, unbounded over a long-running process resolving many names - W2's leak
 class), and phase 8 re-run to confirm the whole netsmoke passes.
 
+## W19. Phase 8's spawned-mode handlers answer nothing (found by the round-278 run)
+
+With the resolver fixed, phase 8 reaches every fixture. The current state, from
+one run of `unitrun --phases 8` (log kept at `tmp/unitrun/8/whole-phase_/out`):
+
+    PASS  build, mux-match, spawn-bytes, spawn-cost
+    PASS  listen-inline, curl-inline, keepalive-inline, repeatable-inline, client-inline
+    FAIL  no-accumulation-inline   addr=127.0.0.1 addr=::1 loop=200 bad=200
+    FAIL  client-sync              status=200 body=body mismatch: wanted hello path=/smoke
+    PASS  listen-spawned
+    FAIL  curl-spawned             curl got: (empty)
+    FAIL  keepalive-spawned        got: []
+    PASS  repeatable-spawned
+    FAIL  client-spawned           Get "http://127.0.0.1:39129/smoke": unexpected EOF
+
+The shape: the inline server answers curl correctly (`curl-inline` PASS with
+`hello path=/smoke`) but the shell's second exchange and the Moxie client see a
+body of `body`, and in spawned mode the server accepts the connection and then
+answers nothing at all. So there are two questions, not one: what the shell
+client and the Moxie sync client each parse (inline), and why the spawned
+handler pool produces no response (spawned).
+
+Not yet bisected against the commits between round 267 (when phase 8 was last
+recorded green) and now: `9914050d` W11 childMap, `4f403191` W9 spread push,
+`41b5aa3d` table hoists, `37a48343` object cache, `7e15d493` fingerprint hash,
+`7a822254` sovereign arena pool. The sovereign pool is the only one that
+touches the allocator, so it is the first suspect and the cheapest to check:
+build `tests/netsmoke/server` with a compiler from before `7a822254` and run
+`server 127.0.0.1:PORT spawned` by hand (the fixture builds its closure cold in
+about ten minutes).
+
+**Accept**: every netsmoke fixture green in both modes, and the inline body
+mismatch explained.
+
 ## Suggested order
 
 | # | item | why now | cost |
