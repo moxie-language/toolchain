@@ -579,15 +579,26 @@ response is empty, because it compares three responses to each other and
 `"" == "" == ""`. It should assert the body first, as `curl-*` does, or it can
 never fail.
 
-Not yet bisected against the commits between round 267 (when phase 8 was last
-recorded green) and now: `9914050d` W11 childMap, `4f403191` W9 spread push,
-`41b5aa3d` table hoists, `37a48343` object cache, `7e15d493` fingerprint hash,
-`7a822254` sovereign arena pool, `145c1c42`/`8fc33f05` the net fixes. The net
-fixes cannot be it: `curl` needs no Moxie resolver, and inline mode - which uses
-the same resolver - answers. The sovereign pool is the only session change that
-touches runtime behavior a worker uses, so it is the first to check: build
-`tests/netsmoke/server` with the runtime from before `7a822254` and run it in
-spawned mode by hand.
+Bisected so far:
+
+- **The sovereign arena pool is not it.** The same fixture built with
+  `src/runtime/alloc.mx` from `7e15d493` - the version before the pool - fails
+  identically (`curl` rc=52, empty reply). That was the only commit of this
+  session that changes runtime behavior a worker uses.
+- **The net fixes are not it.** `curl` needs no Moxie resolver, and inline mode,
+  which uses the same resolver, answers.
+- **A pre-session compiler cannot even build the fixture**: `/tmp/s4old` (stage4
+  built from `9914050d`) aborts with the region-table panic on this closure,
+  which is W15 before round 274 fixed it. So the remaining bisect needs a
+  compiler that has the fingerprint fix but not the pool - `7e15d493` or
+  `bc4e9b4e` - bootstrapped in about ten minutes, then one fixture build and one
+  `curl`.
+
+Still candidates: `4f403191` (W9 spread push - the chan framing path uses
+`push(dst, src...)`), `9914050d` (W11 childMap, but `muxmatch` passes 12/12),
+and something older than this session: the plan's "phase 8 green" at round 267
+was recorded for `muxmatch`, and it is not clear the spawned modes were ever
+green since.
 
 **Accept**: every netsmoke fixture green in both modes, and the inline body
 mismatch explained.
