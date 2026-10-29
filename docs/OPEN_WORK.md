@@ -19488,10 +19488,28 @@ run cold, none of them moved the result:
    parameter assignment is not a rebinding.
 
 All three are plausible and none of them is evidence, so they are reverted rather
-than committed. What is needed next is a diagnostic that prints, at match time,
-the node's address, its `pattern` pointer and that pattern's `str` header, so the
-question "is the node we matched the node we registered" is answered with data
-instead of three guesses. W11 carries it.
+than committed.
+
+A fourth instrumented build (prints in `addChild` and `findChild`, built cold)
+narrowed it one step: registration DOES store the child and the lookup DOES find
+it.
+
+    dbg find key=[smoke] count=0 hit=false      (before the add: build grew here)
+    dbg add  key=[smoke] count=1 child=0x…3e0
+    dbg find key=[smoke] count=1 hit=true       (at match time)
+
+So the tree holds the route and matchPath reaches the leaf; what fails is the
+leaf's `pattern`. A fifth build printing `n.pattern.str` inside `matchPath`
+segfaults at exactly that read, which says the node's pattern pointer is into
+released memory - and says it with a fault instead of a debug string.
+
+That is where this round stops. `rootPattern` was supposed to fix precisely this
+and did not, so the next session must not re-derive it blindly: the first build
+to make should print, at registration, the node address, `n.pattern` and
+`n.pattern.str` right after `set`, and the same three inside `matchPath`. If they
+differ, the node found is not the node registered; if the pointer is the same and
+the str is dead, `rootPattern` is not being reached (check the caller of
+`addPattern`, which is `ServeMux.register`, for its own copy of the pattern).
 
 ### The fixture did not compile, and phase 8 said it passed
 
