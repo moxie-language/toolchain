@@ -19526,7 +19526,12 @@ the object, so a fixture whose source has not changed keeps linking an object
 compiled by an older compiler that accepted it. Copying the same file to another
 directory and building it there re-checks and fails.
 
-That makes every fixture that was ever accepted able to "pass" forever. The
-fixture is fixed here (the counter is a sovereign type reached through its
-initialiser), and W12 records the cache-key fix: an object must be invalidated
-when the compiler's identity changes, or the whole suite can pass on history.
+The fixture is fixed here (the counter is a sovereign type reached through its
+initialiser). What is NOT established is why the two builds differed: the cache
+directory name already carries `compilerHash()` and `compilerBuildID()`, so
+"the cache ignores the compiler" does not fit the code. Both builds used the
+same `./moxie`; one accepted the source and one rejected it. W12 records the
+discrepancy and the experiment that settles it (same source, canonical path,
+cold cache, then a copy, and diff the logs) rather than a conclusion this round
+did not earn. What IS established: a fixture the compiler rejects did not stop
+the phase, and that alone is enough to distrust its pass.
