@@ -19630,28 +19630,31 @@ Measured, 64 MiB through sha256/sha512:
     sha256   3117/3093 ms  ->  2821/2745 ms
     sha512   2130/2070 ms  ->  1957/1879 ms
 
-### The incremental build was wrong about the new field
+### The first attempt crashed, and the cache explanation did not survive testing
 
 The first attempt crashed in `blockGeneric` at the first store through `w`, with
-`len(w)==64`, `cap(w)==64` and a garbage data pointer - a three-word slice
-header whose pointer had been read at the wrong offset. It builds and runs
-correctly under `./moxie build -a`. The package cache had reused an object
-compiled against the OLD `Digest` layout (three slice fields before the change,
-four after), so the codec's field offsets for the new struct came from the old
-descriptor: the length and capacity words were right and the pointer word was
-whatever sat at the old offset.
+`len(w)==64`, `cap(w)==64` and a garbage data pointer. It was correct under
+`./moxie build -a`, which looked exactly like a stale type descriptor: a
+three-word slice header whose pointer word came from the old layout.
 
-That is the same phenomenon as the muxmatch fixture in round 260 (a fixture the
-compiler rejects was still built and passed), and this instance names the
-mechanism: **an incremental build does not invalidate consumers of a type whose
-layout changed**. It is silent, it survives any amount of testing, and `-a`
-hides it. W12 is upgraded from "discrepancy" to this, with a reproducible case:
-add a field to `fips140/sha256.Digest`, build incrementally, and the hash
-crashes; build with `-a` and it is correct.
+The follow-up says otherwise. With the cache rebuilt, the same class of change
+(add a field to `Digest`, rebuild incrementally) recompiles the dependents:
 
-**Until the cache is fixed, a change to any type's layout needs a cold build of
-everything that touches it.** The gate does not do that, so the gate can pass on
-objects that no longer match the source.
+    compile crypto/internal/fips140/sha256
+    compile crypto/sha256
+    compile /tmp/shabench
+
+and the incrementally built binary is correct. So the cache DOES key dependents
+on their dependencies' hashes, and the crash is not reproducible. It happened
+once, between two builds that differed only in cache state, and the cache was
+cleared before the investigation could repeat it.
+
+Recorded as an open observation, not a mechanism: **one incremental build
+produced a binary whose slice header was read at the wrong offset, `-a` was
+correct, and the state that caused it is gone.** W12 stays what round 260 left it
+as - a fixture the compiler rejects was built and passed - with this as a second,
+unexplained sighting. It is written down because a silent layout disagreement is
+the worst class of bug in a self-hosted toolchain, not because it is understood.
 
 ### The suspect, for the next session
 

@@ -370,15 +370,15 @@ down.
 
 **W11 — the routing tree loses its patterns** (round 260). phase 8 is red; `tests/netsmoke/muxmatch` fails 7 of 10 shapes with `pattern=[]` while the handler resolves, so matching works and the stored pattern reads empty. Three frame-lifetime hypotheses (root-owned child keys, root-owned pattern struct, rebinding into a new local) were each built cold and changed nothing; they are reverted. What is now measured: registration stores the child, `findChild` finds it at match time (`hit=true`), and reading the matched node's `pattern.str` faults - so the leaf's pattern pointer is into released memory. Four candidate fixes (root-owned keys, root-owned pattern, rebinding into a new local) were each built cold and changed nothing, and one further build that printed `n.pattern.str` in `matchPath` segfaulted at that read. Next: print node/pattern/str at `set` time and again in `matchPath`, and check `ServeMux.register` for its own copy of the pattern. Accept: `muxmatch` prints `ok` for all ten shapes, then phase 8 green.
 
-**W12 — the build cache does not invalidate on a type-layout change** (rounds 260-263, NOW WITH A REPRODUCER). Adding a field to `crypto/internal/fips140/sha256.Digest` and building incrementally produces a binary whose codec reads the new struct with the old field offsets: `len`/`cap` of the new slice are correct, its data pointer is garbage, and the hash segfaults on the first block. `./moxie build -a` is correct. The same class explains round 260's fixture. Accept: changing a struct's layout invalidates every object that embeds or imports it, and the gate passes only cold-consistent objects.
-
-Original observation, still true: Established, with the SAME `./moxie` binary (mtime 08:13, unchanged all session) and the SAME source:
+**W12 — a fixture the compiler rejects was built and passed** (rounds 260-263). Established, with the SAME `./moxie` binary (mtime 08:13, unchanged all session) and the SAME source:
 
     tests/netsmoke/muxmatch as phase 8 built it     build OK, binary linked, fixture ran
     the same source in a fresh directory, cold      "; probe: package globals are immutable
                                                     outside init ..." -> compile error, exit 1
 
 So the compiler rejects the source, and a phase built it anyway. The cache dir name carries `compilerHash()` (a hash of the compiler's own sources under MOXIEROOT) and `compilerBuildID()` (a hash of the running binary), so "a stale object from an older compiler" does not explain it either - unless the per-package content key, not the directory, is what went stale. Next experiment: build the canonical path cold (`-a`), then in a copy with `-a`, and diff the two logs and the resolved cache dirs; `pkgCacheDir()` and `buildScratchDir("./tmp", "mxc-build")` are the two places to look. Accept: a fixture the compiler rejects fails the phase that builds it, from any directory, with a cold cache.
+
+Round 263 added a second sighting of the same *shape* and no reproducer: one incremental build produced a binary whose slice header was read at the old offset after a `Digest` field was added, `-a` was correct, and a clean rebuild of the same change recompiled the dependents properly and ran correctly. The state that caused it was cleared before it could be repeated. Keep both sightings in view; the cache-key code path is `pkgHash`/`pkgCacheKey`, and the dependency-hash lookup there skips a dep it has not memoized, which is the one place a dependent's key can lose its dependency.
 
 ## Suggested order
 
