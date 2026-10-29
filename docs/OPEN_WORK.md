@@ -20144,3 +20144,67 @@ cold cache of a compiler that has the object cache ran 275 s; the same command
 on the same tree, warm, ran 67 s, with the per-fixture times dropping from
 42-180 s to 2-19 s. The two runs differ in one thing only: whether the objects
 their closures need were already on disk.
+
+## Round 274: the fingerprint that was built by concatenation
+
+Phase 1b (the 45-package stdlib sweep) was red: the compiler panicked `arena:
+region table full` with the peak region count in the ROOT arena while every mem
+line before it reported RSS 719 MB and five regions. Two things had to be added
+to see it.
+
+`ArenaAllocTD` panicked with no diagnostic at all - the ordinary allocation path,
+unlike `arenaAllocRaw`, which prints the region table when it overflows. It now
+prints the same line plus the arena's `alloc` total, its scope, `growDouble`,
+`sovereign` and whether it is the root. And `memLine` gained `root=<nregions>/
+<MB>` (from a new `runtime.ArenaRootUsage()`), because the root arena is the one
+that is never reset, so its numbers are the entire residency story. A process
+watcher for VmHWM settled the last contradiction: the 719 MB was the reading
+*before* the allocations, and the real peak was 8147 MB.
+
+Phase tags in the build path then put the bytes in one place:
+
+    phase          before                 after
+    dispindex      5 regions /   471MB     5 /   471MB
+    fingerprints 141 regions /  9189MB    23 /  1624MB
+    loop-end     144 regions /  9351MB    25 /  1786MB
+    objs-pre     157 regions / 10163MB    39 /  2599MB
+
+`measureDispFingerprints` runs for every package before the first `pkgHash`,
+because the key it produces is what the build is about to look up. The
+measurement deliberately has no arena of its own - an earlier attempt at one
+crashed the self-build with "alloc: nil arena", the reason is in the comment -
+so everything it allocates is root-lifetime. And
+`dispFingerprintForMethods` built the text it hashes by string concatenation:
+
+    acc = acc | "|" | methods[mi] | "="
+    for ii := 0; ii < len(ids); ii++ { acc = acc | ids[ii] | "," }
+
+Every `|` allocates a fresh string of the accumulated length. One package with a
+few hundred invoked methods and a few thousand impls for them copies tens of
+megabytes a few thousand times: 7.6GB for 173 packages, retained to the end of
+the process because the root arena is never released. That is where the 8.7GB
+came from, from a function whose entire output is an 8-hex-digit hash.
+
+It now hashes as it produces, through `fnvState` (a running form of `fnvHash`).
+The byte sequence is exactly the one the concatenation used to build, so the
+fingerprint value is unchanged - only the input string is gone.
+
+After: fingerprints 1624 MB, whole build 2599 MB, the sweep links, the binary
+runs. The 45-package closure went from "cannot be built" to 2.6GB of root arena.
+
+Tried first and reverted: giving the root arena a bigger region registry
+(1024 entries, `arenaRootMaxRegions`). It does let the build finish - root
+10163 MB over 157 regions - but the bytes are still retained, so it is the
+ceiling round 270 already said is not a fix. Reverted once the real cause was
+measured; the diagnostic and `ArenaRootUsage` stayed.
+
+Wood law: nothing to mirror. The fingerprint is stage4's own cache device
+(`legacy/builder/build.go` keys a package on its file hashes, its imports' action
+IDs and the link set, and folds the whole link set in because it has no
+per-package arm measurement), so the loop that had to change does not exist on
+the legacy side.
+
+Still residential, and now the rest of W15: the `cached-bc` step adds ~800MB -
+`mem2reg` reads every freshly compiled package's bitcode into a frame that
+outlives the loop - and the fingerprint phase still keeps ~1.1GB of per-impl
+identity strings for the life of the build.

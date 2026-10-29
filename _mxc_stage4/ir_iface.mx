@@ -979,7 +979,13 @@ func (e *irEmitter) dispFingerprintForMethods(methods []string) (s string) {
 			methods[j], methods[j-1] = methods[j-1], methods[j]
 		}
 	}
-	var acc string
+	// Hashed as it is produced, never concatenated. The byte sequence is
+	// exactly what string concatenation used to build and fnvHash used to
+	// hash, so the value is unchanged; what changes is that the 8.7GB of
+	// abandoned intermediate strings (round 274) is gone - this runs once per
+	// package on every build, in the root arena, and the intermediate strings
+	// were the root arena's whole residency.
+	var hs fnvState = fnvBegin()
 	for mi := 0; mi < len(methods); mi++ {
 		impls := e.findIfaceImpls(methods[mi])
 		var ids []string
@@ -992,12 +998,15 @@ func (e *irEmitter) dispFingerprintForMethods(methods []string) (s string) {
 				ids[j], ids[j-1] = ids[j-1], ids[j]
 			}
 		}
-		acc = acc | "|" | methods[mi] | "="
+		hs.add("|")
+		hs.add(methods[mi])
+		hs.add("=")
 		for ii := 0; ii < len(ids); ii++ {
-			acc = acc | ids[ii] | ","
+			hs.add(ids[ii])
+			hs.add(",")
 		}
 	}
-	return fnvHash([]byte(acc))
+	return hs.hex()
 }
 
 func (e *irEmitter) findEmbedMethod(t Type, methodName string, depth int32) (chain []int32, fn *SSAFunction, embedT Type) {

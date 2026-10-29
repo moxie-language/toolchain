@@ -228,18 +228,14 @@ bytes (write the corpus to a file, scan it in both, checksum the lines).
 
 ---
 
-## W4. container/ring does not compile (trivial)
+## W4. container/ring does not compile - DONE (commit 703be634)
 
-`src/container/ring/ring.mx` declares `Value any` and `Do(f func(any))`, and
-Moxie has no `any`: the package fails with `undefined: any`. Nothing in the tree
-imports it (`grep -rn "container/ring" src/ pkg/ tests/` finds only itself).
-
-**Decision.** Delete it: `git rm -r src/container/ring`, and note in
-`docs/OPEN_WORK.md` that a heterogeneous container has no shape in a language
-without an empty interface - a Ring of T needs `Ring[T C]` with a concrete
-constraint, and there is no caller to choose C for.
-
-**Acceptance.** Package gone, no references, quickcheck green.
+`src/container/ring/ring.mx` declared `Value any` and `Do(f func(any))`, and
+Moxie has no `any`: the package failed with `undefined: any`. Nothing in the
+tree imported it (`grep -rn "container/ring" src/ pkg/ tests/` found only
+itself), and it is deleted - a heterogeneous container has no shape in a
+language without an empty interface. OPEN_WORK records it as the tree's last
+`any`.
 
 ---
 
@@ -412,6 +408,29 @@ numbers and the bisect (not the round-268 fix, not the round-271 hoists).
 machine with room to spare - which means per-package discovery data is released,
 not that the cap was raised.
 
+**DONE (round 274)**: the residency was one function.
+`dispFingerprintForMethods` built the text it hashes by string concatenation -
+once per invoked method and once per impl - and each `|` allocated a fresh copy
+of everything accumulated so far, in the root arena, for every package. 8.7 GB
+of the 10.2 GB peak was those abandoned intermediates. It now hashes as it
+produces (`fnvState`), with the same byte sequence and therefore the same
+fingerprint value.
+
+    tests/netsmoke closure   root arena 10163MB / 157 regions (panic)
+                             ->            2599MB /  39 regions
+    the 45-package sweep     panicked -> links, and the binary runs
+    moxie build -o /dev/null ./src/net/http
+                             10163MB and a panic -> 2687MB, linker says only
+                             `undefined symbol: main.main`, which is success
+
+Rejected on the way there: giving the root arena a 1024-entry region registry.
+It lets the build finish (10163 MB over 157 regions) but retains the same bytes,
+which is the ceiling this section already called "not a fix".
+
+**Still residential**, now small enough not to block: `cached-bc` adds ~800 MB
+(mem2reg reads every compiled package's bitcode into a frame that outlives the
+loop) and the fingerprint phase keeps ~1.1 GB of per-impl identity strings.
+
 ## W16. A warm build still re-compiles every object, which is the whole wall time - DONE (round 273)
 
 Build 2 of round 272 had 147 of 147 packages cached, wrote no `.bc` at all, and
@@ -445,14 +464,17 @@ the 42 s.
 
 | # | item | why now | cost |
 |---|---|---|---|
-| 1 | W4 ring | 5 minutes, unblocks "everything compiles" | trivial |
+| 1 | ~~W4 ring~~ | done (703be634): the package is gone | — |
 | 2 | ~~W1 TLS handshake~~ | done (rounds 253, 259): record layer, echo, and the wrong-CA case | — |
-| 3 | W2 codec escape warning | leaks per certificate, instrument for a class of bugs | 1 session |
-| 4 | W3 scanner offsets | 14x on a hot path, contained API change | half session |
-| 5 | W5 read windows | allocation only | half session |
-| 6 | W6 float Stringer | cosmetic, self-contained | half session |
-| 7 | W7 array campaign | the last big one; W7a first | multi-session |
-| 8 | W8 cleanups | opportunistic | - |
+| 3 | ~~W16 object cache~~ | done (round 273): warm builds 36x faster, which makes every later item cheaper | — |
+| 4 | ~~W15 compiler memory~~ | done (round 274): a concatenation built the fingerprint, not a data structure | — |
+| 5 | W13 time.Now | 4.3 us on every call is a runtime defect, and W14 cannot be measured without it | 1 session |
+| 6 | W2 codec escape warning | leaks per certificate, instrument for a class of bugs | 1 session |
+| 7 | W3/W14 scanner | 5.6 us per token, re-measure with counters first | half session |
+| 8 | W5 read windows | allocation only | half session |
+| 9 | W6 float Stringer | cosmetic, self-contained | half session |
+| 10 | W7 array campaign | the last big one; W7a first | multi-session |
+| 11 | W8 cleanups | opportunistic | - |
 
 After each item: `bash tests/quickcheck.sh`, commit, push. After W7c: the full
 sweep, then a release tag.

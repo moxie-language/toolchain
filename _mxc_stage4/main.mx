@@ -2019,6 +2019,10 @@ func fnvHash(data []byte) (s string) {
 		h ^= uint32(data[i])
 		h *= uint32(16777619)
 	}
+	return fnvHex(h)
+}
+
+func fnvHex(h uint32) (s string) {
 	digits := "0123456789abcdef"
 	buf := []byte{:8}
 	for i := int32(7); i >= 0; i-- {
@@ -2026,6 +2030,32 @@ func fnvHash(data []byte) (s string) {
 		h >>= 4
 	}
 	return string(buf)
+}
+
+// fnvState is fnvHash as a running hash, for a caller whose input is produced
+// token by token and never needs to exist. String concatenation to build the
+// input instead is quadratic in the arena AND permanent: every intermediate
+// string is a new allocation that the frame never gives back. Measured on the
+// 45-package stdlib sweep, dispFingerprintForMethods built its input that way
+// and 8.7GB of the root arena was those abandoned intermediates (round 274).
+type fnvState struct {
+	h uint32
+}
+
+func fnvBegin() (st fnvState) {
+	st.h = uint32(2166136261)
+	return st
+}
+
+func (st *fnvState) add(s string) {
+	for i := int32(0); i < int32(len(s)); i++ {
+		st.h ^= uint32(s[i])
+		st.h *= uint32(16777619)
+	}
+}
+
+func (st *fnvState) hex() (s string) {
+	return fnvHex(st.h)
 }
 
 func pkgCacheDir() (s string) {
@@ -7144,11 +7174,13 @@ func main() {
 	// The dispatch index must be complete before anything is emitted: see
 	// prepareDispatchIndex.
 	prepareDispatchIndex(pkgs, cacheBase, nil)
+	memLine("  dispindex")
 
 	// With the index built, every package's dispatch arms can be measured - and
 	// the measurement has to happen before the first pkgHash, because that is
 	// the key the build is about to look up.
 	measureDispFingerprints(pkgs)
+	memLine("  fingerprints")
 
 	// Whole-link registry pre-pass: interface dispatch emits a typeID switch
 	// over impls found in cctx.universe.Registry, which is populated in
@@ -7228,6 +7260,7 @@ func main() {
 		allBcFiles = a
 		hasRuntimePkg = h
 	}
+	memLine("  built")
 	// Link order is the resolver's order, which depends only on the package
 	// set. Sorting these paths instead mixed two path spaces - a .bc read
 	// from the cache against one compiled into the scratch dir - and the
@@ -7331,6 +7364,7 @@ func main() {
 	}
 	initAllFile := mxutil.JoinPath(tmpdir, "initall.ll")
 	writeFile(initAllFile, []byte(initAllIR), 0644)
+	memLine("  initall-pre")
 	initAllBc := mxutil.JoinPath(tmpdir, "initall.bc")
 	rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", initAllFile, "-o", initAllBc})
 	if rc != 0 {
@@ -7340,6 +7374,7 @@ func main() {
 	if isWasm {
 		// wasm: compile each .bc to .o individually, then wasm-ld
 		mxutil.WriteStr(2, "  compile objects\n")
+		memLine("  objs-pre")
 		wasmTriple := "wasm32-unknown-wasi"
 		objList := objFiles(clang, wasmTriple, allBcFiles)
 		objList = mxutil.Ensure(objList, 1)
@@ -7403,6 +7438,7 @@ func main() {
 	} else {
 		// native: compile each .bc to .o, then ld.lld
 		mxutil.WriteStr(2, "  compile objects\n")
+		memLine("  objs-pre")
 		var objList []string
 		if !hasRuntimePkg {
 			runtimeGoBc := ensureRuntimeBake(sysroot, root)
@@ -7562,7 +7598,8 @@ func memLine(tag string) {
 		iren = int32(len(cctx.irResults))
 	}
 	maps, mapKB := mapCensus()
-	mxutil.WriteStr(2, "  mem "|tag|" rss="|simpleItoa(int32(rssKB()/1024))|"MB maps="|simpleItoa(maps)|" mapMB="|simpleItoa(int32(mapKB/1024))|" reg="|simpleItoa(reg)|" byname="|simpleItoa(byname)|" mxhg="|simpleItoa(mxhg)|" scang="|simpleItoa(scang)|" genS="|simpleItoa(genS)|" genF="|simpleItoa(genF)|" genM="|simpleItoa(genM)|" iren="|simpleItoa(iren)|"\n")
+	rnreg, ralloc := runtime.ArenaRootUsage()
+	mxutil.WriteStr(2, "  mem "|tag|" rss="|simpleItoa(int32(rssKB()/1024))|"MB maps="|simpleItoa(maps)|" mapMB="|simpleItoa(int32(mapKB/1024))|" root="|simpleItoa(int32(rnreg))|"/"|simpleItoa(int32(ralloc/1048576))|"MB reg="|simpleItoa(reg)|" byname="|simpleItoa(byname)|" mxhg="|simpleItoa(mxhg)|" scang="|simpleItoa(scang)|" genS="|simpleItoa(genS)|" genF="|simpleItoa(genF)|" genM="|simpleItoa(genM)|" iren="|simpleItoa(iren)|"\n")
 }
 
 // buildPkgsSerial type-checks and compiles each package in dependency order
@@ -7774,6 +7811,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		if int32(len(deferredClang)) < nproc {
 			nproc = int32(len(deferredClang))
 		}
+		memLine("  loop-end")
 		mxutil.WriteStr(2, "  clang: " | simpleItoa(len(deferredClang)) | " files, " | simpleItoa(nproc) | " parallel\n")
 		if !runPool(deferredClang, nproc) {
 			fatal("clang failed")
@@ -7782,6 +7820,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		for _, pkg := range pkgs {
 			cacheCompiledBc(cacheBase, tmpdir, pkg.path, pkgHash(pkg), pkg.version)
 		}
+		memLine("  cached-bc")
 	}
 	return bcs, hasRT
 }
