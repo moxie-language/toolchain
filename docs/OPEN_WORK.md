@@ -19551,3 +19551,59 @@ nor "different tree" explains the canonical build succeeding. What is establishe
 is enough to distrust the pass: a fixture the compiler rejects did not stop the
 phase. W12 carries the experiment that settles it (canonical path cold, then a
 copy cold, diff both logs and the resolved cache dirs).
+
+## Round 262: the array campaign is about the view, not the type
+
+Round 251 sized W7 as "823 array-type sites, convert them, then ban the array
+type". Counting it properly before spending a session on it:
+
+    array-type sites in src/ (no vendor)        522
+      package-level var                           83
+      in a function signature                     135
+      composite literal                           221
+      other                                        83
+    sites that slice an array base, `arr[:]`    329
+    syscall ABI structs (ztypes_linux_*)         99
+    fiat/nistec field elements                   24
+
+Three groups are load-bearing, and none of them is a Go slice bypass:
+
+**The ABI.** `ztypes_linux_amd64.mx` and `ztypes_linux_arm64.mx` mirror the
+kernel's struct layout - 49 and 50 sites. `[16]byte` inside a `RawSockaddr` is
+not a container, it is the ABI; a slice field would change the struct's size and
+every `//sys` call with it.
+
+**Inline arithmetic.** `fiat.P224Element` and friends are `[4]uint64` (or
+`[6]uint64`, `[8]uint64`) in the hottest code the tree has. Inline storage costs
+nothing; a slice field costs an allocation per element and a bounds check per
+limb.
+
+**The view.** Measured, on a global array, a struct-field array and a local one:
+
+    writeFirst(a[:])   ->  a[0] == 0xAB
+
+An array base is a *write-through view*, which is exactly the carve-out in "an
+array base is still a view". 329 call sites depend on it, most in the shape
+`Read(fd, b[:])` where the callee writes into a fixed buffer. (`copy(arr[a:b],
+...)` is already a **compile error** - the compiler refuses a copy destination
+that is a sub-slice - so the carve-out that remains is the array base itself.)
+
+### What this changes
+
+The defect is not the array type, it is the view. W7 is rewritten in
+docs/PLAN_REMAINING.md:
+
+- **W7b** converts only pure data holders (coverage counters, code tables,
+  metadata) that are never sliced as a view and never part of a wire or ABI
+  layout, allocating once in the owner rather than per call;
+- **W7c** removes the *view*: `arr[:]` on an array base becomes a copy or a named
+  compile error in both compilers, and the 329 sites are fixed by giving each
+  buffer an owner. The six array fixtures are the evidence for how the view is
+  used and become the reject fixtures for the new rule;
+- the acceptance is "no array-base slicing remains, the exceptions are written
+  down", not "the array type count reaches zero" - that count cannot reach zero
+  without breaking the kernel ABI and slowing the field arithmetic.
+
+Measured facts this round rests on: the 522/83/135/221/83 and 329 counts (grep,
+excluding `src/vendor`), and the view test above, which is a 12-line program
+against three array bases.

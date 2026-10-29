@@ -283,49 +283,66 @@ integers, negatives, denormals) prints identically to
 
 ---
 
-## W7. The array ban (the campaign)
+## W7. The array campaign - revised in round 262 after measuring it
 
-**Scale, measured now:** 823 occurrences of a constant-length array type in
-`src/`, `pkg/` and `_mxc_stage4/` (`[N]byte`, `[CacheLinePadSize]byte`,
-`[32]rune`, ...), plus 6 fixtures that test array semantics and 2 real array
-*keys* (`map[[8]byte]chan struct{}` in `src/net/http/h2_bundle.mx:7799,8227` and
-`[][4]int32` in `src/image/draw/draw.mx:952-972`).
+The round-251 version of this item said "convert the 823 sites, then ban the
+array type". Measured, that cannot be done and should not be:
 
-This is a campaign, not a task. Order matters:
+    array-type sites, src/ without vendor           522
+      package-level vars                             83
+      in a function signature                       135
+      composite literals                            221
+      other                                          83
+    sites that slice an array base (`arr[:]`)       329
+    syscall ABI structs (ztypes_linux_amd64/arm64)   99
+    fiat/nistec field elements (inline math)         24
 
-**W7a - the smaller compiler change first (independent).** An array passed where
-a slice is expected must be a clean type error naming both types, in **both**
-compilers, with a `tests/restrictions/reject_array_as_slice.mx` fixture. Today a
-`[4]byte` argument to a `[]byte` parameter is accepted somewhere and produces
-undefined behaviour. This can land on its own and is worth doing first because it
-turns the array campaign's remaining sites into compiler errors you can follow.
+Three of those groups are load-bearing:
 
-**W7b - convert the tree, leaf packages first.** Batch by package, ~50-100 sites
-per commit, `tests/quickcheck.sh` after each batch. Order: `src/` leaf packages
-(`encoding/*`, `hash/*`, `compress/*`, `image/*`), then `crypto/*`, then `net/*`
-and `net/http/*`, then `runtime/` (only where the array is not load-bearing for
-layout), then `pkg/*`, then `_mxc_stage4/` **last** - the compiler must keep
-building with the current compiler, so its arrays can only go after everything
-it depends on is converted, and each compiler-side batch needs the bootstrap
-protocol and a quickcheck.
-Conventions: `[N]byte` buffers become `[]byte{:N}` and are written by index or
-with the offset forms above; fixed-size keys become `[]byte` (hashed) or a
-`string` of the same bytes; `[32]rune` tables become `[]rune{...}` with an
-explicit length check where the code used `len()` on the array.
+1. **The ABI.** `src/syscall/ztypes_linux_*.mx` mirrors the kernel's struct
+   layout. `[16]byte` in a `RawSockaddr` is the ABI; a slice field would change
+   the struct's size and every `//sys` call with it. 99 sites.
+2. **Inline arithmetic.** A `[4]uint64` field element in fiat/nistec is inline
+   storage with no allocation. As a slice field it needs an allocation per
+   element and a bounds check per limb, in the hottest code the tree has.
+3. **The view.** `arr[:]` is a *write-through view* - measured on a global, a
+   struct field and a local array, each `writeFirst(a[:])` leaving 0xAB in the
+   array. That is the carve-out in "an array base is still a view", and 329 call
+   sites depend on it, most of them the `Read(fd, b[:])` shape where the callee
+   writes into a fixed buffer. (`copy(arr[a:b], ...)` is already a **compile
+   error**: the compiler refuses a copy destination that is a sub-slice.)
 
-**W7c - flip the ban.** When the count is zero, add the array-type rejection to
-both compilers (`legacy/compiler/` type checking, `_mxc_stage4/ir_typecheck.mx`),
-bootstrap, and convert the six array fixtures
+So the array *type* is not the defect; **the view is**. Revised items:
+
+**W7a - done (round 258).** Both compilers already reject an array where a slice
+is expected, naming both types, in argument position and in assignment. There is
+no compiler-driven checklist for this campaign.
+
+**W7b - convert data holders only.** Arrays that are pure data (coverage
+counters, error-code tables, metadata), where the value is never sliced as a
+view and never part of a wire/ABI layout. Allocate once in the owner (a
+constructor or `init`), not per call. Batch by package, ~50-100 sites per
+commit, `tests/quickcheck.sh` after each. Do **not** touch `syscall/ztypes_*`,
+`crypto/internal/fips140/nistec/fiat`, or anything whose layout is read by a
+syscall.
+
+**W7c - remove the view, not the type.** Make `arr[:]` on an array base a
+**copy** (or a named compile error) in both compilers, then fix the 329 sites by
+giving each buffer an owner that allocates it once - `[]byte{:N}` in the struct,
+or a `resize`-preserved field. This is the change that removes the last carve-out
+from the copy rule: every slice expression then copies, and an array is only ever
+a value you index. It is also where the fixtures live: the six array fixtures
 (`abi_arrays_pipe_times`, `array_elem_addr`, `array_of_slices_layout`,
-`nested_array_field_addr`, `ptr_recv_array_elem`, `ptr_to_array_pun`) into
-`tests/restrictions/reject_array_*` fixtures or delete them with the reason
-recorded. The array *slicing stays a view* carve-out disappears with them: every
-remaining slice expression then copies.
+`nested_array_field_addr`, `ptr_recv_array_elem`, `ptr_to_array_pun`) are the
+evidence for how the view is used today, and they become the reject fixtures for
+whatever the new rule forbids.
 
-**Acceptance.** `grep -c '\[N\]T'` forms reach 0 in `src/`, `pkg/`,
-`_mxc_stage4/`; both compilers reject `var x [4]byte` with a named error; the
-full sweep (`tests/unitrun.sh --phases 0a,0b,2 --force`) is green; quickcheck
-green.
+**Acceptance, revised.** No `arr[:]`/`arr[a:b]` on an array base remains in `src/`,
+`pkg/`, `_mxc_stage4/`; both compilers reject it with a named error; the two
+exceptions (ABI structs, inline field elements) are documented in one place with
+the reason; the full sweep is green; quickcheck green. The array *type* count is
+allowed to stay above zero, and the reason for each remaining group is written
+down.
 
 ---
 
