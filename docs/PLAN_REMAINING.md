@@ -380,6 +380,24 @@ So the compiler rejects the source, and a phase built it anyway. The cache dir n
 
 Round 263 added a second sighting of the same *shape* and no reproducer: one incremental build produced a binary whose slice header was read at the old offset after a `Digest` field was added, `-a` was correct, and a clean rebuild of the same change recompiled the dependents properly and ran correctly. The state that caused it was cleared before it could be repeated. Keep both sightings in view; the cache-key code path is `pkgHash`/`pkgCacheKey`, and the dependency-hash lookup there skips a dep it has not memoized, which is the one place a dependent's key can lose its dependency.
 
+## W13. time.Now is 4.3 us (found by round 269 while chasing W3b)
+
+`time.Now()` costs 4.3 us; the same-shape codec boundary costs 105 ns and a
+vDSO clock read costs tens of ns. Round 269 has the measurement table, the
+disassembly (FnArenaPush(64 KiB) + codecEncodeValue/codecDecodeValue per call)
+and the ruled-out list. Every timing instrument in this tree pays it, and it
+made W3b's earlier probes measure the clock instead of the code.
+
+**Accept**: `time.Now()` under 200 ns and the W3b scanner benchmark (4 MiB of
+64-byte lines, 65536 tokens) under 50 ms, both measured with the recipe in round
+269. Profiling needs an in-tree counter: ptrace is blocked in this environment.
+
+## W14. bufio.Scanner is 5.6 us per token regardless of token size (W3b, unresolved)
+
+See W3b above and round 269: the measurement instrument is now known to be
+4.3 us per call, so the earlier attribution to the sovereign arena is void.
+Re-measure first, then bisect with counters rather than timers.
+
 ## Suggested order
 
 | # | item | why now | cost |

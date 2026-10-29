@@ -19880,3 +19880,55 @@ Bootstrap after the change: legacy -> s4a -> build-runtime -> s4b -> s4c, and
 `s4b == s4c` (`a5252ae7…`). The fix is stage4-only by construction: legacy takes
 the element type from go/types, where a `[]byte` expression always has its
 element, so there is no equivalent inference to mirror.
+
+## Round 269: time.Now costs 4.3 us, and that invalidates the W3b probes
+
+W3b's per-call numbers were taken by calling `time.Now()` inside the code being
+measured. That instrument costs more than the code: `time.Now()` is 4.3 us on
+this runtime. The instrumented scanner run took 3.11 s for a loop that takes
+0.37 s uninstrumented, so the six clock reads per `Scan` accounted for all of the
+"per-Scan overhead" that round 255 attributed to the sovereign arena.
+
+Measured with 200k iterations per shape, same binary, AMD64 musl static
+(`/tmp/retbench`):
+
+    function returning int32                                     1 ns
+    returning a pointer to a parameter                           2 ns
+    returning a struct with a pointer field, from a parameter    8 ns
+    returning a struct with a pointer from a local literal      104 ns   codec runs
+    returning a struct with a pointer from a callee             106 ns   codec runs
+    returning (int32, []byte, error)                            20 ns
+    indirect call through a function value, struct+ptr          21 ns
+    time.Now()                                                 4300 ns
+    time.Now().UnixNano() on a copy of a Time                    74 ns
+
+What it is not: syscalls (strace -f -c over 400k clock reads shows 119 syscalls
+total, so the vDSO path is taken), the generic codec boundary (~105 ns for the
+same shape), `UnixNano` (74 ns), or the time zone (TZ=UTC, Europe/London and
+America/New_York are identical to within noise; `Local()` alone does not load a
+zone - only `Location.get()` does).
+
+What it is: `time.Now`'s disassembly (`objdump -d --disassemble='time.Now'`)
+calls `runtime.FnArenaPush(0x10000)`, `codecBufInit`, `codecEncodeValue`,
+`codecDecodeValue`, `codecSetRetTransient`, `FnArenaPop`, `ArenaRelease`,
+`time.initStartNano` (which itself calls `runtime.InitArenaRestore`) and
+`time.runtimeNow` (two vDSO clock reads). Replacing `Local()` with a nil
+*Location* in its return drops it to 3.3 us, so the `*Location` walk is about
+1 us and the remaining 3.3 us is in the return-value codec machinery and the
+clock read, not in any part that the earlier probes covered.
+
+Sampling is blocked in this environment (`/proc/sys/kernel/yama/ptrace_scope` is
+1, so gdb cannot attach to a running bench and perf is not installed). The next
+step is an in-tree counter or a `-print-allocs`-style sample rather than an
+external profiler.
+
+Two consequences:
+
+- **The scanner benchmark is unchanged and still unexplained**: 4 MiB of 64-byte
+  lines is 366-397 ms (65536 tokens, ~5.6 us each) and the same token count in
+  8-byte lines is 270-288 ms, so the cost scales with neither token size nor
+  byte count. The 29 ms figure for the same search-and-copy work without a
+  Scanner still stands.
+- **Any timing code in this tree is paying this**: a server that stamps a
+  request or an event with `time.Now()` pays 4.3 us per stamp, which is more
+  than most of the work it is timing. That is docs/PLAN_REMAINING.md W13.
