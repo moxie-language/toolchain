@@ -20067,3 +20067,74 @@ still took 1218 s, and the phase it spent the time in is `compile objects`:
 `clangCompileToObj` execs clang for every `.bc` on every build, so a warm build
 re-compiles 147 LLVM modules to objects that already exist on disk next to
 them (`<hash>.bc.o`). Found and recorded as W16 rather than fixed here.
+
+## Round 273: the object a build already made
+
+Round 272 measured a warm build of `tests/netsmoke/muxmatch` at 1218 s with 147
+of 147 packages cached and no `.bc` written. None of that time was compilation
+in any sense the cache understood: it was `compile objects`, where
+`clangCompileToObj` execs `clang -c <hash>.bc -o <hash>.bc.o` for every module,
+every build, over the `<hash>.bc.o` the previous build left sitting next to the
+bitcode. Every build paid for the whole closure's codegen.
+
+An object is now reused when it is there and was made by the same toolchain:
+
+    <hash>.bc.o          unchanged, next to the bitcode
+    <hash>.bc.o.stamp    "<clang --version line>|<triple>|-O0 -ffunction-sections -fdata-sections"
+
+Nothing about the source belongs in the stamp. The object lives at its
+bitcode's path, and that name carries the package's content hash (`pkgHash`), so
+a source change, a `-print-allocs` instrumented build, a different link set or a
+different dispatch fingerprint all land on a different `.bc` and therefore a
+different `.o`. The toolchain and the flags are the only inputs left that can
+change while the path stays the same. If the version cannot be read the stamp is
+empty and nothing is reused - a cache that cannot say what it holds must not
+answer.
+
+Four things had to be right for that to be worth having:
+
+- **One flag set.** The serial path compiled without `-O0` and the wasm path
+  without the section flags, and all three of them wrote to the same
+  `<hash>.bc.o`, so the object's contents depended on which caller made it. All
+  three call sites (cmdTest's native link, main's wasm link, main's native link)
+  are now one `objFiles` and one `objFlags`. `-O0` is clang's default, so
+  spelling it changes no object; the section flags are what `--gc-sections`
+  needs.
+- **Publish by rename.** clang writes `<o>.tmp<pid>`, then the object is renamed
+  into place and the stamp written with `cacheWrite`. A build killed mid-clang
+  otherwise leaves a truncated object that the next build would stamp as
+  complete - the torn-cache-entry failure `cacheWrite` was written for.
+  (`objFiles` publishes at the end of the batch, so a killed build leaves only
+  `.tmp` files: no published object, nothing to trust wrongly.)
+- **Objects follow the bitcode into the cache.** A package this build compiled
+  has its bitcode in the scratch directory, which the build deletes; its object
+  would be built there and thrown away, so the build *after* a cold build was
+  still cold for objects. `cacheCompiledBc` records the cached copy (byte
+  identical - mem2reg runs before the copy) and `objFiles` builds from that, so
+  the object lands beside it and survives.
+- **-a rebuilds objects but still stamps them.** `-a` does not delete the
+  package cache, it only stops reading it, so a package's `.bc` keeps its path
+  and an object from the previous `.bc` would look reusable. `objReusable`
+  refuses under `forceRebuild`; `objPublish` still stamps, so the build after a
+  bootstrap starts warm.
+
+Wood law: nothing to mirror. Legacy's cache is cmd/go's, whose action IDs
+already include the compiler build ID and every input file; the missing step is
+in stage4's own driver, which legacy does not have (legacy emits objects from
+LLVM in process).
+
+Measured, `tests/netsmoke/muxmatch`, 148 packages, no source changes between the
+two builds:
+
+    build 1  cold   148 compiled, 0 cached, 191 objects+stamps   1532 s
+    build 2  warm   147 cached, 1 compiled (the root package)      42 s
+
+and the two binaries are byte-identical (`b8663454...`), which also settles a
+worry the stamp raises: two full builds with different scratch directories and
+different pids produce the same output, so nothing of the scratch path survives
+into the binary. The same pair on the compiler's own closure (44 packages) was
+94 s -> 30 s, also byte-identical.
+
+36x on the loop this project actually runs - edit, build, run - and it is the
+round-272 finding that made the number visible: with the package cache working,
+the only thing left in a warm build was codegen nobody had cached.

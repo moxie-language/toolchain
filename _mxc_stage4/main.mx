@@ -46,6 +46,18 @@ type buildState struct {
 	// hash a dependency that the memo does not hold yet (pkgHash).
 	pkgByPath   map[string]*pkgInfo
 	pkgHashBusy map[string]bool
+	// clangVer is the toolchain's version line, read once. The object cache
+	// keys on it, so an object made by one clang is never reused by another
+	// (objStampFor).
+	clangVer    string
+	clangVerSet bool
+	// forceRebuild is -a: the package cache is ignored, so the objects made
+	// from those packages must be rebuilt too rather than trusted.
+	forceRebuild bool
+	// bcTwin maps a package's scratch bitcode path to the cached copy written
+	// this build, so its object is built (and kept) beside the cached one
+	// rather than in the scratch directory (objFiles).
+	bcTwin map[string]string
 	linkSetKey      string // hash of the whole link set; interface dispatch impls depend on it
 	// llSubDir is a stable subdirectory of the per-process scratch dir, derived
 	// from the link set. The path of a package's .ll file is embedded in the
@@ -239,17 +251,163 @@ func mem2regBc(bcFile string) {
 	}
 }
 
+// objFlags is the one command line for bitcode -> object. Before this was
+// unified, the serial path omitted -O0 and the wasm path omitted the section
+// flags, and all of them wrote the same <hash>.bc.o next to the bitcode, so
+// the object file's contents depended on which caller happened to make it.
+// One flag set means an object is a function of (.bc, clang) alone, which is
+// what makes it reusable across builds.
+var objFlags = []string{"-O0", "-ffunction-sections", "-fdata-sections"}
+
+// toolVersion returns a tool's version line, or "" when it cannot be read.
+func toolVersion(tool string) (s string) {
+	dir := pkgCacheDir()
+	mkdirAll(dir, 0755)
+	tmp := mxutil.JoinPath(dir, "ver-" | simpleItoa(os.Getpid()) | ".tmp")
+	ok := run([]string{"sh", "-c", tool | " --version > '" | tmp | "' 2>/dev/null"}) == 0
+	data, read := mxutil.ReadFile(tmp)
+	os.Remove(tmp)
+	if !ok || !read {
+		return ""
+	}
+	for i := int32(0); i < int32(len(data)); i++ {
+		if data[i] == '\n' {
+			return string(data[:i])
+		}
+	}
+	return string(data)
+}
+
+// objStampFor names what produced an object: the clang that ran, its flags and
+// the target. It is written beside the object after a compile succeeds and
+// compared before the object is reused, so a cached object outlives a build
+// but not the toolchain or the flags that made it. An empty stamp means the
+// version could not be read, and then nothing is reused or stamped - a cache
+// that cannot say what it holds must not answer.
+//
+// Nothing about the source belongs in the stamp: an object lives at its
+// bitcode's own path, and that name carries the package's content hash
+// (pkgHash), so a source change, a -print-allocs instrumented build, a different
+// link set or a different interface-dispatch fingerprint all land on a
+// different .bc and therefore a different .o. The toolchain and the flags are
+// the only inputs left that can change while the path stays the same.
+func objStampFor(clang, triple string) (s string) {
+	if !bst.clangVerSet {
+		bst.clangVerSet = true
+		bst.clangVer = toolVersion(clang)
+	}
+	if bst.clangVer == "" {
+		return ""
+	}
+	flags := ""
+	for i, f := range objFlags {
+		if i > 0 {
+			flags = flags | " "
+		}
+		flags = flags | f
+	}
+	return bst.clangVer | "|" | triple | "|" | flags
+}
+
+func objReusable(oFile, stamp string) (ok bool) {
+	if bst.forceRebuild {
+		// -a does not delete the package cache, only stop reading it, so a
+		// package's .bc keeps its path and an object made from the previous
+		// .bc would look reusable. Rebuild it - and still stamp it below, so
+		// the build after a bootstrap starts warm.
+		return false
+	}
+	if stamp == "" || !mxutil.FileExists(oFile) {
+		return false
+	}
+	data, got := mxutil.ReadFile(oFile | ".stamp")
+	return got && string(data) == stamp
+}
+
+func objCmd(clang, triple, bcFile, oFile string) (a []string) {
+	a = []string{:0:12}
+	push(a, clang)
+	push(a, "--target=" | triple)
+	push(a, "-c")
+	for _, f := range objFlags {
+		push(a, f)
+	}
+	push(a, bcFile)
+	push(a, "-o")
+	push(a, oFile)
+	return a
+}
+
+// objFiles compiles each bitcode file to an object beside it and returns the
+// object paths, in the order given. Every bitcode -> object step in the build
+// goes through here, because the objects already exist on disk from the
+// previous build: re-running clang on all of them cost 1218 s for a warm build
+// of the net/http closure with all 147 packages cached (round 272, W16).
+//
+// The batch form matters as much as the reuse: one clang per module is the
+// whole wall time, and it is the only thing left that scales with the build
+// after the package cache hits.
+// objTmpPath is where clang writes before the object is published. The rename
+// is what makes a reused object honest: a build killed mid-clang otherwise
+// leaves a truncated .o, and the next build would stamp it as if it were
+// complete - the torn-cache-entry failure cacheWrite exists to prevent.
+func objTmpPath(oFile string) (s string) {
+	return oFile | ".tmp" | simpleItoa(os.Getpid())
+}
+
+func objPublish(oFile, stamp string) {
+	os.Rename(objTmpPath(oFile), oFile)
+	if stamp != "" {
+		cacheWrite(oFile | ".stamp", []byte(stamp))
+	}
+}
+
+func objFiles(clang, triple string, bcFiles []string) (objs []string) {
+	stamp := objStampFor(clang, triple)
+	objs = []string{:0:len(bcFiles)}
+	var todo [][]string
+	var todoObj []string
+	for _, bf := range bcFiles {
+		// A package compiled by this build has its bitcode in the scratch
+		// directory, which dies with the build. Cache the objects with the
+		// cached copy of that bitcode instead, or every build after a change
+		// pays for all of them again (round 273).
+		src := bf
+		if twin, ok := bst.bcTwin[bf]; ok && mxutil.FileExists(twin) {
+			src = twin
+		}
+		o := src | ".o"
+		push(objs, o)
+		if objReusable(o, stamp) {
+			continue
+		}
+		todo = mxutil.Ensure(todo, 1)
+		push(todo, objCmd(clang, triple, src, objTmpPath(o)))
+		todoObj = mxutil.Ensure(todoObj, 1)
+		push(todoObj, o)
+	}
+	if len(todo) == 0 {
+		return objs
+	}
+	if !runPool(todo, bst.buildJobs) {
+		fatal("clang -c failed")
+	}
+	for _, o := range todoObj {
+		objPublish(o, stamp)
+	}
+	return objs
+}
+
 func clangCompileToObj(clang, triple, bcFile string) (s string) {
 	oFile := bcFile | ".o"
-	// Function/data sections so --gc-sections drops unreferenced code -
-	// without this, one .bc module becomes one .text section and every
-	// extern it declares (e.g. mxutil's host-bridge mxc_* calls) must
-	// resolve even when unused.
-	rc := run([]string{clang, "--target=" | triple, "-c",
-		"-ffunction-sections", "-fdata-sections", bcFile, "-o", oFile})
-	if rc != 0 {
+	stamp := objStampFor(clang, triple)
+	if objReusable(oFile, stamp) {
+		return oFile
+	}
+	if run(objCmd(clang, triple, bcFile, objTmpPath(oFile))) != 0 {
 		fatal("clang -c failed for " | bcFile)
 	}
+	objPublish(oFile, stamp)
 	return oFile
 }
 
@@ -5576,6 +5734,7 @@ func cmdTest(args []string) {
 	for i < int32(len(args)) {
 		if args[i] == "-a" {
 			forceRebuild = true
+	bst.forceRebuild = true
 			i++
 		} else if args[i] == "-v" {
 			// Test output already streams per test, which is all -v selects
@@ -5620,6 +5779,7 @@ func cmdTest(args []string) {
 		// The site table is built while packages are emitted, so a package
 		// taken from the build cache would be missing from it.
 		forceRebuild = true
+	bst.forceRebuild = true
 	}
 
 	root := moxieRoot()
@@ -5993,25 +6153,9 @@ func cmdTest(args []string) {
 			push(objList, clangCompileToObj(clang, triple,rtShims))
 		}
 	}
-	if bst.buildJobs > 1 {
-		var objCmds [][]string
-		for _, bf := range allBcFiles {
-			objCmds = mxutil.Ensure(objCmds, 1)
-			push(objCmds, []string{clang, "--target=" | triple,
-				"-c", "-O0", "-ffunction-sections", "-fdata-sections", bf, "-o", bf | ".o"})
-		}
-		if !runPool(objCmds, bst.buildJobs) {
-			fatal("clang -c failed")
-		}
-		for _, bf := range allBcFiles {
-			objList = mxutil.Ensure(objList, 1)
-			push(objList, bf|".o")
-		}
-	} else {
-		for _, bf := range allBcFiles {
-			objList = mxutil.Ensure(objList, 1)
-			push(objList, clangCompileToObj(clang, triple,bf))
-		}
+	for _, o := range objFiles(clang, triple, allBcFiles) {
+		objList = mxutil.Ensure(objList, 1)
+		push(objList, o)
 	}
 	objList = mxutil.Ensure(objList, 1)
 	push(objList, clangCompileToObj(clang, triple,initAllBc))
@@ -6767,6 +6911,7 @@ func main() {
 			i++
 		} else if args[i] == "-a" {
 			forceRebuild = true
+	bst.forceRebuild = true
 			i++
 		} else if args[i] == "-j" {
 			if i+1 >= int32(len(args)) {
@@ -6842,6 +6987,7 @@ func main() {
 		// The site table is built while packages are emitted, so a package
 		// taken from the build cache would be missing from it.
 		forceRebuild = true
+	bst.forceRebuild = true
 	}
 	if pkgPath == "" {
 		fatal("no package specified")
@@ -7195,27 +7341,7 @@ func main() {
 		// wasm: compile each .bc to .o individually, then wasm-ld
 		mxutil.WriteStr(2, "  compile objects\n")
 		wasmTriple := "wasm32-unknown-wasi"
-		var objList []string
-		if bst.buildJobs > 1 {
-			var objCmds [][]string
-			for _, bf := range allBcFiles {
-				objCmds = mxutil.Ensure(objCmds, 1)
-				push(objCmds, []string{clang, "--target=" | wasmTriple,
-					"-c", bf, "-o", bf | ".o"})
-			}
-			if !runPool(objCmds, bst.buildJobs) {
-				fatal("clang -c failed")
-			}
-			for _, bf := range allBcFiles {
-				objList = mxutil.Ensure(objList, 1)
-				push(objList, bf|".o")
-			}
-		} else {
-			for _, bf := range allBcFiles {
-				objList = mxutil.Ensure(objList, 1)
-				push(objList, clangCompileToObj(clang, wasmTriple,bf))
-			}
-		}
+		objList := objFiles(clang, wasmTriple, allBcFiles)
 		objList = mxutil.Ensure(objList, 1)
 		push(objList, clangCompileToObj(clang, wasmTriple,initAllBc))
 		// Stubs for symbols not provided by stage4-compiled runtime
@@ -7288,25 +7414,9 @@ func main() {
 			objList = mxutil.Ensure(objList, 1)
 			push(objList, clangCompileToObj(clang, triple,rtShims))
 		}
-		if bst.buildJobs > 1 {
-			var objCmds [][]string
-			for _, bf := range allBcFiles {
-				objCmds = mxutil.Ensure(objCmds, 1)
-				push(objCmds, []string{clang, "--target=" | triple,
-					"-c", "-O0", "-ffunction-sections", "-fdata-sections", bf, "-o", bf | ".o"})
-			}
-			if !runPool(objCmds, bst.buildJobs) {
-				fatal("clang -c failed")
-			}
-			for _, bf := range allBcFiles {
-				objList = mxutil.Ensure(objList, 1)
-				push(objList, bf|".o")
-			}
-		} else {
-			for _, bf := range allBcFiles {
-				objList = mxutil.Ensure(objList, 1)
-				push(objList, clangCompileToObj(clang, triple,bf))
-			}
+		for _, o := range objFiles(clang, triple, allBcFiles) {
+			objList = mxutil.Ensure(objList, 1)
+			push(objList, o)
 		}
 		objList = mxutil.Ensure(objList, 1)
 		push(objList, clangCompileToObj(clang, triple,initAllBc))
@@ -7690,7 +7800,17 @@ func cacheCompiledBc(cacheBase, tmpdir, pkgPath, hash, version string) {
 	mkdirAll(mxutil.JoinPath(cacheBase, safeName(pkgPath)), 0755)
 	data, rok := mxutil.ReadFile(bcFile)
 	if rok {
-		cacheWrite(cachedBcPath(cacheBase, pkgPath, hash, version), data)
+		cp := cachedBcPath(cacheBase, pkgPath, hash, version)
+		cacheWrite(cp, data)
+		// The package was just compiled, so its bitcode is in the scratch
+		// directory and its object would be built there and thrown away with
+		// it - leaving the next build to compile all objects again. The cached
+		// copy is byte-identical (mem2reg ran above, before the copy), so the
+		// object can be built from the copy and published beside it.
+		if bst.bcTwin == nil {
+			bst.bcTwin = map[string]string{}
+		}
+		bst.bcTwin[bcFile] = cp
 	}
 }
 

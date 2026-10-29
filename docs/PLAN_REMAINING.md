@@ -412,7 +412,7 @@ numbers and the bisect (not the round-268 fix, not the round-271 hoists).
 machine with room to spare - which means per-package discovery data is released,
 not that the cap was raised.
 
-## W16. A warm build still re-compiles every object, which is the whole wall time (found by round 272)
+## W16. A warm build still re-compiles every object, which is the whole wall time - DONE (round 273)
 
 Build 2 of round 272 had 147 of 147 packages cached, wrote no `.bc` at all, and
 still took 1218 s. The time is in `compile objects`: `clangCompileToObj`
@@ -432,6 +432,14 @@ reused. The `.o` name must carry what can invalidate it (the clang that produced
 it), and `-a` must still discard it. This is a build-cache detail of stage4's
 driver, not language semantics, so there is no legacy mirror: legacy's build
 cache is cmd/go's and already keys objects on the compiler and its inputs.
+
+**Done, round 273**: object reused when `<hash>.bc.o.stamp` matches the clang
+version line, the triple and the flags; `-a` rebuilds and re-stamps; objects are
+published by rename; an object is built from the cached copy of the bitcode so
+it outlives the scratch directory. `tests/netsmoke/muxmatch`, 148 packages:
+cold 1532 s, warm **42 s**, byte-identical binaries. The next warm-build item is
+that the root package is never cached (1 of 148 compiled every time), which is
+the 42 s.
 
 ## Suggested order
 
