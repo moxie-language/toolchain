@@ -1,0 +1,58 @@
+//:build linux
+
+package syscall
+
+// struct utsname is six fixed 65-byte fields on every Linux ABI Moxie targets
+// (390 bytes). The kernel writes them in place, so Utsname is a buffer and the
+// fields are windows over it.
+const (
+	utsnameSize     = 390
+	utsnameFieldLen = 65
+	utsnameSysname  = 0
+	utsnameNodename = 65
+	utsnameRelease  = 130
+	utsnameVersion  = 195
+	utsnameMachine  = 260
+	utsnameDomain   = 325
+)
+
+// Utsname is a kernel-filled buffer. Use NewUtsname, then Uname, then the
+// field accessors.
+type Utsname struct {
+	raw []byte
+}
+
+// NewUtsname allocates the buffer the kernel fills.
+func NewUtsname() (u Utsname) {
+	u.raw = []byte{:utsnameSize}
+	return u
+}
+
+func (u *Utsname) Sysname() (s []byte)    { return abiWindow(u.raw, utsnameSysname, utsnameFieldLen) }
+func (u *Utsname) Nodename() (s []byte)   { return abiWindow(u.raw, utsnameNodename, utsnameFieldLen) }
+func (u *Utsname) Release() (s []byte)    { return abiWindow(u.raw, utsnameRelease, utsnameFieldLen) }
+func (u *Utsname) Version() (s []byte)    { return abiWindow(u.raw, utsnameVersion, utsnameFieldLen) }
+func (u *Utsname) Machine() (s []byte)    { return abiWindow(u.raw, utsnameMachine, utsnameFieldLen) }
+func (u *Utsname) Domainname() (s []byte) { return abiWindow(u.raw, utsnameDomain, utsnameFieldLen) }
+
+// SysnameText, NodenameText, ... are the fields as NUL-terminated text.
+func (u *Utsname) SysnameText() (s []byte)    { return abiCString(u.Sysname()) }
+func (u *Utsname) NodenameText() (s []byte)   { return abiCString(u.Nodename()) }
+func (u *Utsname) ReleaseText() (s []byte)    { return abiCString(u.Release()) }
+func (u *Utsname) VersionText() (s []byte)    { return abiCString(u.Version()) }
+func (u *Utsname) MachineText() (s []byte)    { return abiCString(u.Machine()) }
+func (u *Utsname) DomainnameText() (s []byte) { return abiCString(u.Domainname()) }
+
+// Uname fills u from struct utsname. The kernel writes 390 bytes at the
+// buffer's base, so the call is given that base - not a pointer to a slice
+// header, which is what a *Utsname used to be.
+func Uname(u *Utsname) (err error) {
+	if len(u.raw) != utsnameSize {
+		u.raw = []byte{:utsnameSize}
+	}
+	_, _, e1 := RawSyscall(SYS_UNAME, uintptr(abiBufferOf(u.raw)), 0, 0)
+	if e1 != 0 {
+		err = errnoErr(e1)
+	}
+	return
+}

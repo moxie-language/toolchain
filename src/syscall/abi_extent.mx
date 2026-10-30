@@ -1,0 +1,48 @@
+//:build linux
+
+package syscall
+
+import (
+	"unsafe"
+)
+
+// Fixed extents in the ABI: buffers, not array fields.
+//
+// An array is a slice in Moxie, and a slice is a three-word header, while the
+// kernel writes bytes at fixed offsets in a struct it is handed. The two cannot
+// be the same memory. So the ABI's fixed extents are spelled out the way the
+// kernel sees them: a BYTE BUFFER whose size is the struct's size, passed by
+// address, with each field a window over its range. That is the same
+// information an `[N]T` field carried (extent and offset), written where the
+// boundary is rather than in the type system (docs/PLAN_REMAINING.md W7a).
+//
+// A window is a VIEW. `b[off : off+n]` would copy under the copy rule, and the
+// whole point of these is that a later read sees what the kernel wrote.
+
+// abiWindow returns a view of n bytes at off in b, or nil when b is too short.
+func abiWindow(b []byte, off, n int32) (w []byte) {
+	if off < 0 || n < 0 || int32(len(b)) < off+n {
+		return nil
+	}
+	p := unsafe.Add(unsafe.Pointer(unsafe.SliceData(b)), uintptr(off))
+	return unsafe.Slice((*byte)(p), n)
+}
+
+// abiCString returns the bytes of a fixed field up to its first NUL. The
+// fields are NUL-padded C strings, and every reader of one wants exactly this.
+func abiCString(w []byte) (s []byte) {
+	for i := int32(0); i < int32(len(w)); i++ {
+		if w[i] == 0 {
+			return w[:i]
+		}
+	}
+	return w
+}
+
+// abiBufferOf is the base address a kernel call is given for a buffer.
+func abiBufferOf(b []byte) (p unsafe.Pointer) {
+	if len(b) == 0 {
+		return nil
+	}
+	return unsafe.Pointer(unsafe.SliceData(b))
+}

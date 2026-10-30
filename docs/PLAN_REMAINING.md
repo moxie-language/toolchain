@@ -365,7 +365,65 @@ Inventory for W7a, counted rather than guessed (the campaign has a map now):
       KindArray in 6 files (alloc, codec, hashmap, interface, typekind,
       type_render), 15 sites
 
-Order of work, all bilateral (legacy first, then stage4):
+**Chosen design (round 295): A - one representation, the ABI spells out its
+extents.** The user chose the header-everywhere design, so the order is the
+reverse of the one written below: the kernel-mirror layer is converted FIRST
+(while arrays still exist, so each family is independently verifiable), then the
+representation switch lands with the remaining ordinary-code conversions, and
+then `[N]T` can be deleted from the language outright.
+
+A kernel-filled struct cannot carry a header: the kernel writes bytes at fixed
+offsets, and a header puts three words where the kernel writes the first field.
+So an ABI extent is a BYTE BUFFER plus windows over its ranges, which is the
+same information `[N]T` carried (offset and extent) written where the boundary
+is. The pattern is proved in the tree by `struct utsname`:
+
+    src/syscall/abi_extent.mx   abiWindow(b, off, n) - a VIEW of n bytes at off
+                                (b[off:off+n] would copy under the copy rule)
+                                abiCString(w) - the field up to its first NUL
+                                abiBufferOf(buf) - the base a kernel call gets
+    src/syscall/utsname_linux.mx  Utsname { raw []byte }, one accessor per
+                                field, a *Text accessor per NUL string, and
+                                Uname(u) passing abiBufferOf(u.raw)
+
+`syscall.Uname` now returns `sysname=Linux nodename=<host> release=7.3.0-4-garuda
+machine=x86_64` on this host, matching `uname -snrm`, and the two callers
+(`internal/syscall/unix.KernelVersion`, `x/sys/cpu`) read the windows.
+
+Inventory for the campaign, counted from the tree (82 types, 184 fields):
+
+    kernel mirrors         ~25 types, 148 fields   src/syscall/ztypes_*,
+                                                    src/internal/runtime/syscall
+    on-disk/other formats  ~12 types              src/internal/coverage/defs,
+                                                    src/internal/xcoff/ar, ...
+    ordinary code          ~45 types, 36 fields   compress/gzip.Reader [512]byte,
+                                                    crypto/rc4.Cipher [256]byte,
+                                                    compress/bzip2.reader,
+                                                    image/gif.encoder, ...
+
+Order, mirror families first, each landed and verified on its own:
+
+1. **Utsname / Uname** - DONE (round 295).
+2. **sockaddr family**: RawSockaddrInet4/Inet6/Unix, SockaddrInet4/6/Unix,
+   IPMreq, IPMreqn, Msghdr, Inet4Pktinfo - the net package's whole address path,
+   exercised by phase 8. Input directions (bind/connect) build the buffer from
+   the caller's value; output directions (getsockname/recvmsg) allocate, pass,
+   then expose windows.
+3. **termios/ioctl family**: Termios, Winsize, EpollEvent, Flock_t, Ifreq-ish.
+4. **file/stat family**: Stat_t, Statfs_t, Dirent, Ustat_t, Sysinfo_t, Timex,
+   Fsid. These are read-only outputs: allocate, call, then parse windows.
+5. **on-disk formats**: internal/coverage/defs (3 types), internal/xcoff/ar
+   (2 types) - these are not kernel calls at all; they are byte layouts read
+   from files, so they convert straight to `[]byte` + windows with no syscall
+   involvement.
+6. **representation + ordinary code**: `[N]T` becomes the slice header in both
+   compilers, and the ~45 ordinary array buffers convert to slices (the gzip
+   window, rc4 sbox, bzip2, gif, ...). This is the step that must land whole,
+   because a header changes every layout that contains one.
+7. **A3 - delete the type**: `[N]T` is a compile error naming slices, and the
+   array fixtures become reject fixtures.
+
+Original ordering (superseded, kept for the accounting it lists):
 
 - **W7a - representation.** `llvmType([N]T)` becomes the slice header (ptr to
   N*sizeof(T) bytes, len = N, cap = -N); array literals allocate their storage in

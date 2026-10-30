@@ -21102,3 +21102,44 @@ the bytes.
 
 Gates: bootstrap fixpoint `s4b == s4c == b838bcb8`; the probe above is the
 test for all three verbs in both compilers.
+
+## Round 295: the ABI's fixed extents are buffers, not array fields (W7a starts)
+
+The array campaign's design was decided this round: `[N]T` becomes a slice
+header in ALL positions, the kernel-mirror layer is converted first (while
+arrays still exist, so each family can be verified on its own), and then the
+array type is deleted from the language. The reason the mirrors must move first
+is physical: the kernel writes bytes at fixed offsets, and a header puts three
+words where the kernel writes its first field, so a kernel-filled struct can
+never carry one.
+
+The pattern is `struct utsname`, landed whole:
+
+    src/syscall/abi_extent.mx     abiWindow(b, off, n) - a VIEW of n bytes at
+                                  off (b[off:off+n] would copy under the copy
+                                  rule), abiCString(w) - up to the first NUL,
+                                  abiBufferOf(buf) - the base a kernel call gets
+    src/syscall/utsname_linux.mx  Utsname { raw []byte } + one accessor per
+                                  field + Uname(u) passing abiBufferOf(u.raw)
+
+The generated `Utsname` struct and its `Uname` wrapper are removed from
+`ztypes_linux_{amd64,arm64}.mx` and `zsyscall_linux_{amd64,arm64}.mx` with a
+comment saying why (they are generated files; the generator emits Go layouts and
+cannot emit this, which is part of W7e's cost). The two callers read windows now.
+Measured on this host:
+
+    sysname Linux   nodename vivo   release 7.3.0-4-garuda   machine x86_64
+
+against `uname -snrm` = `Linux vivo 7.3.0-4-garuda x86_64`.
+
+The campaign's inventory, counted from the tree rather than estimated: **82
+types carry 184 inline array fields** - ~25 kernel mirrors (148 fields, the
+`ztypes` layer), ~12 on-disk/format descriptions (coverage defs, xcoff/ar), and
+~45 ordinary-code buffers (gzip's [512]byte window, rc4's [256]byte sbox, bzip2,
+gif, ...). The order and the per-family plan are in `docs/PLAN_REMAINING.md`
+W7a; the next families are sockaddr (phase 8 exercises it end to end), then
+termios/ioctl, then file/stat, then the on-disk formats, then the representation
+switch together with the ordinary-code conversions, then A3 (the type becomes a
+compile error).
+
+Gates: bootstrap fixpoint `s4b == s4c == c8fd2ccf`.
