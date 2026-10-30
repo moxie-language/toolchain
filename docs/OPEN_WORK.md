@@ -20829,3 +20829,62 @@ package edge. `t.Add(0)`'s remaining 436 ns and the scanner's remaining
 1.27 us/token are that edge, not un-inlined local code. The next lever would be
 link-time optimization over the merged module, which is a pipeline change with
 its own cost; it is not in this round.
+
+## Round 289: -O2 meets a 19 KB aggregate, and the IR that built it
+
+Round 288 turned on `opt -passes=default<O2>` and O2 objects. The bench was
+3x faster and the compiler was 2.2x smaller, but building the TLS closure then
+needed **10.6 GB of RSS and minutes** on one package
+(`x/text/unicode/norm`), which is not a build a 16 GB machine (or this repo's
+own phase 8) can run. This round is the two emitter changes that bound it, and
+they are worth having on their own: they remove 80% of that package's IR.
+
+**First, what the module was.** `norm` is generated Unicode data. Each
+`tables1x.0.0.mx` has eight functions of the shape
+
+    func _decomps() [19105]byte { return [19105]byte{ 0x00, 0x41, ... } }
+
+and a 19 KB array literal written in a *return* position was lowered element by
+element: `_decomps` alone was **38,857 SSA instructions** in one basic block,
+`_nfkcValues` 10,091, and the package's bitcode was 3.83 MB before any
+optimization. The `SSAConstMemCpy` lowering (private constant global + one
+memcpy) already existed and was used for `nistec`'s 88 KB table, but only for
+`lhs = literal` *assignments* - `tryConstArrayMemcpy` is called from the
+assignment path and nowhere else. A returned literal took
+`buildArrayLit`'s alloc/store/load path.
+
+Change 1 (`ssa_builder.mx`, `buildArrayLit`): a qualifying all-constant literal
+is one memcpy in every position, not only assignment. The package's bitcode is
+now **0.73 MB** and `_decomps` is six instructions (alloca, memcpy, load, ret).
+
+**Second, the optimizer still blew up**, now on that six-instruction function:
+`-opt-bisect-limit` walked it down to `cgscc(function(sroa,early-cse))` on
+`norm._decomps`, where **SROA scalarizes the whole-aggregate load** into one
+element per instruction and EarlyCSE then works on a 38,000-instruction block.
+No single pass reproduced it in isolation (`sroa<modify-cfg>` alone: 289 MB;
+`gvn`/`cgscc(inline)` alone: 4 MB); it is the combination, and `mem2reg` first,
+`-O1`, and `-inline-threshold=40` all still hit 9-10 GB, so it is neither the
+inliner nor the alloca form.
+
+Change 2 (`ir_emit.mx`): a function whose signature or locals **carry an array
+of at least 512 elements by value** is emitted `noinline optnone`. Such a
+function is a generated table, cold, and already a memcpy of constant data, so
+there is nothing to optimize in it; `noinline` keeps the table from being
+duplicated into callers. This is a compile-time bound, and it is the only
+reason the -O2 policy is shippable.
+
+Measured, `x/text/unicode/norm` built with `-a`:
+
+    module before opt        3.83 MB  ->  0.73 MB
+    largest function         38,857 instr -> 10,091 (a 6208-element table)
+    opt on the module        >10 GB, minutes -> 304 MB, 25.8 s
+    whole build, peak RSS    10.6 GB -> 867 MB
+    return path             unchanged: local 59-69 ns, now 206-227 ns,
+                            alloc 9-10 ns, scanner 83 ms / 4 MiB
+
+What is left on the cost side: the inliner duplicates code across this package
+(0.73 MB in, 6.36 MB out), so its object compile is tens of seconds. That is a
+tuning question (inline threshold, per-object -O level, parallel objects), not
+a correctness one, and it is recorded in W22 rather than guessed at now.
+
+Gates: bootstrap fixpoint `s4b == s4c == cc1afd93`, quickcheck `--fast` green.

@@ -374,6 +374,31 @@ indistinguishable at runtime; the array fixtures (`abi_arrays_pipe_times`,
 `ptr_recv_array_elem`, `ptr_to_array_pun`) pass or become reject fixtures with the
 named error; quickcheck green; full sweep green.
 
+## W22. The -O2 pipeline's cost bound (rounds 288-289)
+
+stage4 optimizes each package's bitcode with `opt -passes=default<O2>` and
+compiles the object with `-O2` (round 288). That is what the legacy compiler
+always did, and it is a 3x runtime win. It also has one pathological shape and
+one tuning question, and both were measured on `x/text/unicode/norm` because
+that package is the worst case in the tree:
+
+- **Pathological shape.** A function that *carries* a table-sized array by
+  value (>= 512 elements) is emitted `noinline optnone` (round 289). SROA
+  scalarizes the whole-aggregate load and the following passes work on a
+  38,000-instruction block: without the attribute that one package needed
+  10 GB and minutes; with it, 304 MB and 26 s. Everything else in the tree is
+  optimized normally. Do not remove the attribute without re-measuring that
+  package.
+- **Tuning.** The inliner turns norm's 0.73 MB into 6.36 MB, so its object
+  compile is tens of seconds. Candidates, in order: a lower inline threshold,
+  `-O1` for the object stage once `opt` has done the middle-end, and parallel
+  object compiles (`-j` currently only parallelizes package compiles and the
+  machine here reports 1 because `cFreeMem` sees no headroom).
+
+**Accept:** a cold `bash tests/unitrun.sh --phases 8 -j 1 --force` completes
+inside its timeouts with peak RSS under 2 GB per worker, and the bench numbers
+of round 288 hold (W13, W14, W17).
+
 ## W8. Opportunistic cleanups (do while in the neighbourhood)
 
 - `src/math/big/decimal.mx` `rsh(x *decimal, s)`: writes `x.mant` through a
@@ -437,7 +462,8 @@ Re-measure first, then bisect with counters rather than timers.
 
 **Round 288 re-measured**: 83-84 ms for the 4 MiB fixture (1.27 us/token,
 was 5.4) after stage4 stopped emitting -O0 code. The 50 ms target is unmet and
-what is left is the per-call work that crosses a package boundary.
+what is left is the per-call work that crosses a package boundary (the runtime
+is a separate object, so its helpers are still real calls).
 
 **Round 275 rules out the mmap churn for the scanner**: 65536 tokens with 66
 mmaps in the whole run, so the 5.6 us per token is CPU on the per-call path

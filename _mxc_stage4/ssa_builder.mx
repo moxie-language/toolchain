@@ -7522,6 +7522,21 @@ func (fb *ssaFuncBuilder) buildArrayLit(e *syntax.CompositeLit, typ Type, ar *Ar
 	if litFullyCovers(e, typ) {
 		alloc.NoZero = true
 	}
+	// A large all-constant literal is one memcpy from a private constant
+	// global, not one insertvalue per element. Both paths were measured on
+	// the same source: `return [19105]byte{...}` (the Unicode decomposition
+	// tables, eight of them in x/text/unicode/norm) became 38,000 SSA
+	// instructions in a single function that way, and every per-function
+	// optimization pass then ran on a block that size - the -O2 pipeline
+	// needed 10 GB of RSS and minutes for that one package. The lower bound
+	// existed before -O2 (it is why SSAConstMemCpy was written for nistec's
+	// 88064-byte table) but only for `lhs = literal` assignments: a literal
+	// RETURNED from a function - which is how the generated tables are
+	// written - still expanded element by element.
+	if text, bytes, cok := fb.constArrayLitText(e, ar); cok {
+		fb.emit(&SSAConstMemCpy{Dst: alloc, ConstText: text, Bytes: bytes})
+		return fb.emitLoad(alloc, typ)
+	}
 	fb.buildCompositeLitInto(alloc, e, typ)
 	return fb.emitLoad(alloc, typ)
 }

@@ -1489,6 +1489,70 @@ func (e *irEmitter) emitLibMain() {
 	e.w("(ptr %_ctx) {\nbb.entry:\n  ret void\n}\n")
 }
 
+// bigAggregateElems is the array size above which a function that CARRIES the
+// array by value is emitted `noinline optnone`.
+//
+// An array is an inline aggregate in this IR, so a generated data table -
+// x/text/unicode/norm's `_decomps` returns [19105]byte, `_nfkcValues`
+// [6208]uint16, and there are five more - is loaded and returned as one SSA
+// aggregate value. SROA scalarizes that value into one element per instruction
+// and the next pass then works on a basic block of 38,000 instructions: the
+// -O2 pipeline peaked at 10 GB of RSS and ran for minutes on that ONE package,
+// which is not a build a 16 GB machine can run (measured with
+// `-opt-bisect-limit`: the blow-up is inside `cgscc(function(sroa,early-cse))`
+// on `norm._decomps`).
+//
+// Such a function is cold, generated, and already a memcpy of constant data, so
+// there is nothing for the optimizer to win: skipping it costs nothing and
+// bounds the compile. `noinline` is part of the same decision - inlining a
+// 19 KB aggregate into its callers is what made the optimized module 6 MB from
+// a 730 KB input.
+const bigAggregateElems = int64(512)
+
+// typeBigArray reports whether t is an array (or an array of arrays) with at
+// least bigAggregateElems elements. Slices and pointers do NOT count: their
+// storage is behind a pointer, which is not carried by value.
+func typeBigArray(t Type, depth int32) (ok bool) {
+	if t == nil || depth > 3 {
+		return false
+	}
+	switch u := SafeUnderlying(t).(type) {
+	case *Array:
+		if u.Len >= bigAggregateElems {
+			return true
+		}
+		return typeBigArray(u.Elem, depth+1)
+	}
+	return false
+}
+
+// fnCarriesBigAggregate reports whether f's signature or any of its locals
+// carries a table-sized array by value.
+func fnCarriesBigAggregate(f *SSAFunction) (ok bool) {
+	if f.Signature != nil {
+		if r := f.Signature.Results; r != nil {
+			for i := int32(0); i < r.Len(); i++ {
+				if typeBigArray(r.At(i).Typ, 0) {
+					return true
+				}
+			}
+		}
+		if p := f.Signature.Params; p != nil {
+			for i := int32(0); i < p.Len(); i++ {
+				if typeBigArray(p.At(i).Typ, 0) {
+					return true
+				}
+			}
+		}
+	}
+	for _, a := range f.Locals {
+		if typeBigArray(a.SSAType(), 0) {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *irEmitter) emitFunction(f *SSAFunction) {
 	e.w("; [emit] " | f.name | "\n")
 	sym := e.funcSymbol(f)
@@ -1616,7 +1680,13 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 		if nParam > 0 { e.w(", ") }
 		e.w("ptr %_ctx")
 	}
-	e.w(") {\n")
+	e.w(")")
+	// A function that carries a generated data table BY VALUE is kept out of
+	// the optimizer. See bigAggregateElems.
+	if fnCarriesBigAggregate(f) {
+		e.w(" noinline optnone")
+	}
+	e.w(" {\n")
 	fnBodyStart := int32(len(e.segs)) // segment index where this function's body starts
 
 	// Pre-scan: set allocTypes, detect cross-block alloca references
