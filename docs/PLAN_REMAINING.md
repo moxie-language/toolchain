@@ -62,9 +62,11 @@ cp /tmp/s4c ./moxie
   offset forms that already exist: `resize`, `mxutil.CopyAt/CopyRange`,
   `byteorder.*At`, `binary.*PutUint*At`, `Int.FillBytesAt`, `bytealg.IndexFrom`,
   `bytealg.IndexByteFrom`, `utf8.EncodeRuneAt`, `io.ReadFullIntoN`.
-- An array *base* is still a view; arrays are the one carve-out left, and W7
-  removes them. `[16]byte{...}` written as `[]byte{...}` keeps only the bytes
-  spelled out - round 248 fell into that.
+- An array base is a header with a **negative capacity**, and `arr[:]` is that
+  header with the cap sign flipped: same base, now length-changeable. That is not
+  an aliasing exception (round 281 corrected round 262's framing) - a sub-slice
+  still copies, and `arr[a:b]` is a sub-slice. `[16]byte{...}` written as
+  `[]byte{...}` keeps only the bytes spelled out - round 248 fell into that.
 - `resize(x, n)` keeps the buffer and the capacity and does **not** zero.
 - `bash tests/unitrun.sh --units a,b,c` selects exactly those fixture names;
   a unit it did not select keeps its old verdict and no longer affects the exit
@@ -279,68 +281,77 @@ integers, negatives, denormals) prints identically to
 
 ---
 
-## W7. The array campaign - revised in round 262 after measuring it
+## W7. The array campaign: one header, negative capacity
 
-The round-251 version of this item said "convert the 823 sites, then ban the
-array type". Measured, that cannot be done and should not be:
+Round 262 rewrote this item around three groups it called "load-bearing
+exceptions" - the ABI structs, the fiat/nistec field elements, and the array
+view. That was wrong, and this replaces it: none of the three is an exception,
+because the array's accounting is already the slice's. An array is a slice
+header - (base, len, cap) - carrying a **negative cap**. The negative capacity is
+the whole mechanism:
 
-    array-type sites, src/ without vendor           522
-      package-level vars                             83
-      in a function signature                       135
-      composite literals                            221
-      other                                          83
-    sites that slice an array base (`arr[:]`)       329
-    syscall ABI structs (ztypes_linux_amd64/arm64)   99
-    fiat/nistec field elements (inline math)         24
+- `cap(arr)` is negative, so nothing can grow it, and `push`, `pop`, `resize` and
+  `append` on it are **compile errors**, not runtime checks.
+- `len(arr)` is fixed exactly as the type says; indexing is base + i*elemsize
+  bounded by len, the same code a slice indexes with.
+- The header travels anywhere a value travels: a parameter, a struct field, a
+  return value, a channel element. There is no separate array ABI to build,
+  convert, or account for.
 
-Three of those groups are load-bearing:
+What that says about the three groups round 262 called exceptions:
 
-1. **The ABI.** `src/syscall/ztypes_linux_*.mx` mirrors the kernel's struct
-   layout. `[16]byte` in a `RawSockaddr` is the ABI; a slice field would change
-   the struct's size and every `//sys` call with it. 99 sites.
-2. **Inline arithmetic.** A `[4]uint64` field element in fiat/nistec is inline
-   storage with no allocation. As a slice field it needs an allocation per
-   element and a bounds check per limb, in the hottest code the tree has.
-3. **The view.** `arr[:]` is a *write-through view* - measured on a global, a
-   struct field and a local array, each `writeFirst(a[:])` leaving 0xAB in the
-   array. That is the carve-out in "an array base is still a view", and 329 call
-   sites depend on it, most of them the `Read(fd, b[:])` shape where the callee
-   writes into a fixed buffer. (`copy(arr[a:b], ...)` is already a **compile
-   error**: the compiler refuses a copy destination that is a sub-slice.)
+**The ABI.** A kernel struct mirror does not get a size change it cannot account
+for - it gets the accounting spelled out. The 24-byte header is the mirror's
+field where Go had `[16]byte`, and the `//sys` boundary reads `base` and `len`
+for the buffer it needs, with the negative cap meaning "this extent is fixed".
+Where the kernel fills bytes *in place* in a passed struct, the storage the
+header points at is what is passed, and the mirror records that offset - which is
+what a mirror is for. 99 sites of bookkeeping, no exception.
 
-So the array *type* is not the defect; **the view is**. Revised items:
+**The fiat/nistec field element.** A header is not an allocation. The element is
+`[4]uint64` of storage with a header whose cap is negative; the *owner* (the
+element's containing struct or the caller) allocates the 32 bytes once, as it
+does today inline, and the limbs are loads through that base. There is no
+per-limb allocation and no per-element allocation, and the bounds check is the
+same one a slice index already costs. 24 sites of accounting.
 
-**W7a - done (round 258).** Both compilers already reject an array where a slice
-is expected, naming both types, in argument position and in assignment. There is
-no compiler-driven checklist for this campaign.
+**The view.** `arr[:]` stops being an aliasing exception and becomes the cap-sign
+transition: the same base, len = len(arr), cap = +len(arr). It is a genuine slice
+of the same storage, which is why the 329 `Read(fd, b[:])` sites keep working -
+the callee writes into the same bytes because there was never anything to copy.
+`arr[a:b]`, in contrast, is a sub-slice and copies, exactly like on a slice. The
+copy rule then reads: *a sub-slice copies; a fixed-extent header's whole range
+yields the same storage with a length-changeable cap.*
 
-**W7b - convert data holders only.** Arrays that are pure data (coverage
-counters, error-code tables, metadata), where the value is never sliced as a
-view and never part of a wire/ABI layout. Allocate once in the owner (a
-constructor or `init`), not per call. Batch by package, ~50-100 sites per
-commit, `tests/quickcheck.sh` after each. Do **not** touch `syscall/ztypes_*`,
-`crypto/internal/fips140/nistec/fiat`, or anything whose layout is read by a
-syscall.
+Order of work, all bilateral (legacy first, then stage4):
 
-**W7c - remove the view, not the type.** Make `arr[:]` on an array base a
-**copy** (or a named compile error) in both compilers, then fix the 329 sites by
-giving each buffer an owner that allocates it once - `[]byte{:N}` in the struct,
-or a `resize`-preserved field. This is the change that removes the last carve-out
-from the copy rule: every slice expression then copies, and an array is only ever
-a value you index. It is also where the fixtures live: the six array fixtures
-(`abi_arrays_pipe_times`, `array_elem_addr`, `array_of_slices_layout`,
-`nested_array_field_addr`, `ptr_recv_array_elem`, `ptr_to_array_pun`) are the
-evidence for how the view is used today, and they become the reject fixtures for
-whatever the new rule forbids.
+- **W7a - representation.** `llvmType([N]T)` becomes the slice header (ptr to
+  N*sizeof(T) bytes, len = N, cap = -N); array literals allocate their storage in
+  the current arena and build the header; array-typed struct fields become header
+  fields. This is the change everything else follows from, and it is where the
+  two compilers must agree byte for byte.
+- **W7b - indexing, len, cap.** Indexing through base+offset with the len bound;
+  `len(arr)` reads the header; `cap(arr)` returns the negative value.
+- **W7c - the refusals.** `push`, `pop`, `resize`, `append`, and assignment to
+  `len(arr)` are compile errors naming the negative capacity ("fixed-extent
+  array: capacity cannot change"), in both compilers.
+- **W7d - the whole-range transition.** `arr[:]` produces the same base with a
+  positive cap; `arr[a:b]` copies. Remove "an array base is still a view" from
+  the copy rule's documentation, because it is no longer an exception - it is the
+  same header.
+- **W7e - the two accounting groups.** syscall mirrors (99) and fiat/nistec (24):
+  spell the header out, pass base+len at the boundaries, keep the storage
+  owner-allocated. No group is exempt.
+- **W7f - the rest.** The remaining array sites convert to slices during the same
+  pass, since an array literal and a slice literal now have the same
+  representation; only the cap sign differs.
 
-**Acceptance, revised.** No `arr[:]`/`arr[a:b]` on an array base remains in `src/`,
-`pkg/`, `_mxc_stage4/`; both compilers reject it with a named error; the two
-exceptions (ABI structs, inline field elements) are documented in one place with
-the reason; the full sweep is green; quickcheck green. The array *type* count is
-allowed to stay above zero, and the reason for each remaining group is written
-down.
-
----
+**Acceptance.** An array is a header in both compilers; `push`/`pop`/`resize` on
+one is a compile error from either; `arr[:]` and a slice of the same bytes are
+indistinguishable at runtime; the array fixtures (`abi_arrays_pipe_times`,
+`array_elem_addr`, `array_of_slices_layout`, `nested_array_field_addr`,
+`ptr_recv_array_elem`, `ptr_to_array_pun`) pass or become reject fixtures with the
+named error; quickcheck green; full sweep green.
 
 ## W8. Opportunistic cleanups (do while in the neighbourhood)
 
@@ -596,7 +607,7 @@ completion.
 | 9 | W3/W14 scanner | 5.6 us per token, re-measure with counters first | half session |
 | 10 | W5 read windows | allocation only | half session |
 | 11 | W6 float Stringer | cosmetic, self-contained | half session |
-| 12 | W7 array campaign | the last big one; W7a first | multi-session |
+| 12 | W7 array campaign | the last big one; representation first (W7a), one header with a negative cap, no exceptions | multi-session |
 | 13 | W8 cleanups | opportunistic | - |
 
 After each item: `bash tests/quickcheck.sh`, commit, push. After W7c: the full

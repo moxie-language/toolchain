@@ -20507,3 +20507,42 @@ which read a tar stream into a copy. It uses `io.ReadIntoN` now (the same
 allocation rules as the rest of the package, offset write, scratch in a free
 function's frame). A grep for `Read(|ReadFull(|ReadAt(|copy(` with a bounded
 sub-slice argument now finds only comments.
+
+## Round 281: the array campaign was framed as three exceptions. It has none.
+
+Round 262 rewrote W7 around three groups it called "load-bearing" and therefore
+exempt: the kernel ABI mirrors, the fiat/nistec field elements, and the array
+view. That framing was wrong and is retracted here. The correction is that an
+array's ABI **is** slice-header accounting, and the header says everything
+needed:
+
+    base, len, cap   with cap NEGATIVE for a fixed extent
+
+The negative capacity is the mechanism, not a flag on the side. `cap(arr)` is
+negative, so `push`, `pop`, `resize` and `append` on it are compile errors rather
+than runtime checks; `len(arr)` is the type's length and indexing is
+base+i*elemsize bounded by it, which is the same code a slice compiles to; and
+the 24-byte header travels wherever a value travels, so there is no second array
+ABI to build or to convert.
+
+What that does to the three "exceptions":
+
+- **The ABI.** A mirror does not get an unaccountable size change, it gets the
+  accounting written down: the header is the field where Go had `[16]byte`, the
+  `//sys` boundary takes base and len, and where the kernel fills bytes in place
+  the storage the header points at is what is passed, with its offset recorded -
+  which is what a mirror is. 99 sites of bookkeeping.
+- **The field element.** A header is not an allocation. `[4]uint64` of storage
+  with a negative-cap header is owner-allocated once, exactly as the inline form
+  is today; the limbs are loads through the base, and the bounds check is the one
+  a slice index already pays. 24 sites of accounting.
+- **The view.** `arr[:]` is the cap-sign transition - same base, len = len(arr),
+  cap = +len - so it is a genuine slice of the same storage and the 329
+  `Read(fd, b[:])` sites keep working because there was never anything to copy.
+  `arr[a:b]` remains a sub-slice and copies. The copy rule loses its last
+  "carve-out" because there is no carve-out left: a sub-slice copies, and a
+  fixed-extent header's whole range is not a sub-slice.
+
+W7 in the plan is rewritten in that order: representation first (both compilers
+byte for byte), then indexing, then the refusals, then the whole-range
+transition, then the two accounting groups, then the remainder.
