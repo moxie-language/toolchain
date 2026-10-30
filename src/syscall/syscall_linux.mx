@@ -162,28 +162,27 @@ type capHeader struct {
 	pid     int32
 }
 
-type capData struct {
-	effective   uint32
-	permitted   uint32
-	inheritable uint32
-}
-
-type caps struct {
-	hdr  capHeader
-	data [2]capData
-}
+// capget wants a header and, behind it, two __user_cap_data_struct: each is
+// {effective, permitted, inheritable} as three 32-bit words. That is 24 bytes
+// at fixed offsets, so it is a buffer read through windows - an `[2]capData`
+// field would be two slice headers where the kernel writes words.
+const (
+	capDataSize      = 12
+	capDataEffective = 0
+)
 
 // See CAP_TO_MASK in linux/capability.h:
 func capToMask(capv uintptr) (rn uint32) { return 1 << uint32(capv&31) }
 
 func isCapDacOverrideSet() (rok bool) {
 	const _CAP_DAC_OVERRIDE = 1
-	var c caps
-	c.hdr.version = _LINUX_CAPABILITY_VERSION_3
+	var hdr capHeader
+	hdr.version = _LINUX_CAPABILITY_VERSION_3
+	data := []byte{:2 * capDataSize}
 
-	_, _, err := RawSyscall(SYS_CAPGET, uintptr(unsafe.Pointer(&c.hdr)), uintptr(unsafe.Pointer(&c.data[0])), 0)
+	_, _, err := RawSyscall(SYS_CAPGET, uintptr(unsafe.Pointer(&hdr)), uintptr(abiBufferOf(data)), 0)
 
-	return err == 0 && c.data[0].effective&capToMask(_CAP_DAC_OVERRIDE) != 0
+	return err == 0 && abiGet32(data, capDataEffective)&capToMask(_CAP_DAC_OVERRIDE) != 0
 }
 
 //sys	faccessat(dirfd int32, path string, mode uint32) (err error)
@@ -321,17 +320,17 @@ func Pipe(p []int32) (rerr error) {
 	return Pipe2(p, 0)
 }
 
-//sysnb pipe2(p *[2]_C_int, flags int32) (err error)
+//sysnb pipe2(p *int32, flags int32) (err error)
 
 func Pipe2(p []int32, flags int32) (rerr error) {
 	if len(p) != 2 {
 		return EINVAL
 	}
-	var pp [2]_C_int
-	err := pipe2(&pp, flags)
+	pp := []int32{:2}
+	err := pipe2(&pp[0], flags)
 	if err == nil {
-		p[0] = int32(pp[0])
-		p[1] = int32(pp[1])
+		p[0] = pp[0]
+		p[1] = pp[1]
 	}
 	return err
 }
@@ -370,23 +369,23 @@ func Utimes(path string, tv []Timeval) (err error) {
 	if len(tv) != 2 {
 		return EINVAL
 	}
-	return utimes(path, (*[2]Timeval)(unsafe.Pointer(&tv[0])))
+	return utimes(path, &tv[0])
 }
 
-//sys	utimensat(dirfd int32, path string, times *[2]Timespec, flag int32) (err error)
+//sys	utimensat(dirfd int32, path string, times *Timespec, flag int32) (err error)
 
 func UtimesNano(path string, ts []Timespec) (err error) {
 	if len(ts) != 2 {
 		return EINVAL
 	}
-	return utimensat(_AT_FDCWD, path, (*[2]Timespec)(unsafe.Pointer(&ts[0])), 0)
+	return utimensat(_AT_FDCWD, path, &ts[0], 0)
 }
 
 func Futimesat(dirfd int32, path string, tv []Timeval) (err error) {
 	if len(tv) != 2 {
 		return EINVAL
 	}
-	return futimesat(dirfd, path, (*[2]Timeval)(unsafe.Pointer(&tv[0])))
+	return futimesat(dirfd, path, &tv[0])
 }
 
 func Futimes(fd int32, tv []Timeval) (err error) {
@@ -735,43 +734,9 @@ func Getsockname(fd int32) (sa Sockaddr, err error) {
 	return anyToSockaddr(rsa)
 }
 
-func GetsockoptInet4Addr(fd, level, opt int32) (value [4]byte, err error) {
-	vallen := _Socklen(4)
-	err = getsockopt(fd, level, opt, unsafe.Pointer(&value[0]), &vallen)
-	return value, err
-}
-
-func GetsockoptIPMreq(fd, level, opt int32) (riPMreq *IPMreq, rerr error) {
-	var value IPMreq
-	vallen := _Socklen(SizeofIPMreq)
-	err := getsockopt(fd, level, opt, unsafe.Pointer(&value), &vallen)
-	return &value, err
-}
-
-func GetsockoptIPMreqn(fd, level, opt int32) (riPMreqn *IPMreqn, rerr error) {
-	var value IPMreqn
-	vallen := _Socklen(SizeofIPMreqn)
-	err := getsockopt(fd, level, opt, unsafe.Pointer(&value), &vallen)
-	return &value, err
-}
-
-func GetsockoptIPv6Mreq(fd, level, opt int32) (riPv6Mreq *IPv6Mreq, rerr error) {
-	var value IPv6Mreq
-	vallen := _Socklen(SizeofIPv6Mreq)
-	err := getsockopt(fd, level, opt, unsafe.Pointer(&value), &vallen)
-	return &value, err
-}
-
 func GetsockoptIPv6MTUInfo(fd, level, opt int32) (riPv6MTUInfo *IPv6MTUInfo, rerr error) {
 	var value IPv6MTUInfo
 	vallen := _Socklen(SizeofIPv6MTUInfo)
-	err := getsockopt(fd, level, opt, unsafe.Pointer(&value), &vallen)
-	return &value, err
-}
-
-func GetsockoptICMPv6Filter(fd, level, opt int32) (riCMPv6Filter *ICMPv6Filter, rerr error) {
-	var value ICMPv6Filter
-	vallen := _Socklen(SizeofICMPv6Filter)
 	err := getsockopt(fd, level, opt, unsafe.Pointer(&value), &vallen)
 	return &value, err
 }
@@ -981,20 +946,6 @@ const (
 	_NT_PRSTATUS = 1
 )
 
-func PtraceGetRegs(pid int32, regsout *PtraceRegs) (err error) {
-	var iov Iovec
-	iov.Base = (*byte)(unsafe.Pointer(regsout))
-	iov.SetLen(int32(unsafe.Sizeof(*regsout)))
-	return ptracePtr(PTRACE_GETREGSET, pid, uintptr(_NT_PRSTATUS), unsafe.Pointer(&iov))
-}
-
-func PtraceSetRegs(pid int32, regs *PtraceRegs) (err error) {
-	var iov Iovec
-	iov.Base = (*byte)(unsafe.Pointer(regs))
-	iov.SetLen(int32(unsafe.Sizeof(*regs)))
-	return ptracePtr(PTRACE_SETREGSET, pid, uintptr(_NT_PRSTATUS), unsafe.Pointer(&iov))
-}
-
 func PtraceSetOptions(pid int32, options int32) (err error) {
 	return ptrace(PTRACE_SETOPTIONS, pid, 0, uintptr(options))
 }
@@ -1031,11 +982,11 @@ func ReadDirent(fd int32, buf []byte) (n int32, err error) {
 }
 
 func direntIno(buf []byte) (rn uint64, rok bool) {
-	return readInt(buf, unsafe.Offsetof(Dirent{}.Ino), unsafe.Sizeof(Dirent{}.Ino))
+	return readInt(buf, DirentInoOff, 8)
 }
 
 func direntReclen(buf []byte) (rn uint64, rok bool) {
-	return readInt(buf, unsafe.Offsetof(Dirent{}.Reclen), unsafe.Sizeof(Dirent{}.Reclen))
+	return readInt(buf, DirentReclenOff, 2)
 }
 
 func direntNamlen(buf []byte) (rn uint64, rok bool) {
@@ -1043,7 +994,7 @@ func direntNamlen(buf []byte) (rn uint64, rok bool) {
 	if !ok {
 		return 0, false
 	}
-	return reclen - uint64(unsafe.Offsetof(Dirent{}.Name)), true
+	return reclen - uint64(DirentNameOff), true
 }
 
 //sys	mount(source string, target string, fstype string, flags uintptr, data *byte) (err error)
@@ -1069,7 +1020,6 @@ func Mount(source string, target string, fstype string, flags uintptr, data stri
  * Direct access
  */
 //sys	Acct(path string) (err error)
-//sys	Adjtimex(buf *Timex) (state int32, err error)
 //sys	Chdir(path string) (err error)
 //sys	Chroot(path string) (err error)
 //sys	Close(fd int32) (err error)
@@ -1221,7 +1171,6 @@ func Setuid(uid int32) (err error) {
 //sys	Setpriority(which int32, who int32, prio int32) (err error)
 //sys	Setxattr(path string, attr string, data []byte, flags int32) (err error)
 //sys	Sync()
-//sysnb	Sysinfo(info *Sysinfo_t) (err error)
 //sys	Tee(rfd int32, wfd int32, len int32, flags int32) (n int64, err error)
 //sysnb	Tgkill(tgid int32, tid int32, sig Signal) (err error)
 //sysnb	Times(tms *Tms) (ticks uintptr, err error)
