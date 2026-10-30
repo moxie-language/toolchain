@@ -1,0 +1,71 @@
+// Return ownership: what a value carries out of a call.
+//
+// A parameter is caller-owned, so a result built from it must still POINT AT
+// the caller's data after the call (identity, not a copy), while anything the
+// callee allocated itself must survive as a copy in the caller's arena. This
+// is the acceptance shape W24 needs: the return slot becomes caller-owned
+// storage, and that must not change either of these two outcomes.
+package main
+
+type box struct {
+	b []byte
+	n int32
+}
+
+// fromParam returns a struct whose slice field is the parameter's OWN backing
+// array. The caller can observe identity by writing through it afterwards.
+func fromParam(b []byte) (out box) {
+	out.b = b
+	out.n = int32(len(b))
+	return
+}
+
+// fromLocal returns a struct whose slice field is built inside the callee. The
+// backing array lives in the callee's frame, so it has to arrive as a copy the
+// caller can still read (and keep writing) after the callee returned.
+func fromLocal(n int32) (out box) {
+	out.b = []byte{:n}
+	out.n = n
+	for i := int32(0); i < n; i++ {
+		out.b[i] = byte('a' + i)
+	}
+	return
+}
+
+func main() {
+	own := []byte{:4}
+	own[0] = 1
+	got := fromParam(own)
+	if int32(len(got.b)) != 4 {
+		println("param return length wrong:", int32(len(got.b)).String())
+		return
+	}
+	// Identity: a write through the returned slice is visible in the caller's
+	// own array only if the callee aliased it instead of copying it.
+	got.b[1] = 9
+	if own[1] != 9 {
+		println("return from parameter was copied instead of aliased: own[1] =", own[1].String())
+		return
+	}
+
+	loc := fromLocal(3)
+	if loc.n != 3 {
+		println("local return count wrong:", loc.n.String())
+		return
+	}
+	if int32(len(loc.b)) != 3 {
+		println("local return length wrong:", int32(len(loc.b)).String())
+		return
+	}
+	if loc.b[0] != 'a' || loc.b[2] != 'c' {
+		println("local return contents wrong:", string(loc.b))
+		return
+	}
+	// Still writable: the storage must be caller-owned, not the dead frame.
+	loc.b[1] = 'Z'
+	if loc.b[1] != 'Z' {
+		println("local return storage not writable")
+		return
+	}
+	println("return ownership ok")
+}
