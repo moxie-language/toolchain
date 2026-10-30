@@ -20587,3 +20587,50 @@ phase 8 green in both modes, so nothing in the tree depended on the positive
 number. The remaining W7a work is the representation itself - an inline `[N]T`
 becoming a header whose cap is this `-N` - which is where the storage and the
 struct-field cases get settled.
+
+## Round 283: the return protocol skips itself when there is nothing to relocate
+
+Round 275 measured the return-value protocol at 640 ns for `time.Local` returning
+one stable pointer, and several microseconds for a struct that holds one - ten
+runtime calls per return, for a value that needs no copying at all. The protocol
+exists to copy data out of a frame before it is released; when every pointer in
+the value is nil or already stable by identity, encode+decode would write each
+one raw and hand the same address back, so the whole sequence can be skipped.
+
+`codecRetStable(value, typeDesc)` answers that question, mirroring
+`codecEncodeValue`'s own per-field decisions in return mode: a stable pointer
+encodes raw, a slice encodes raw unless its elements can themselves hold
+transient data, and anything the codec must walk (map, interface, function,
+array) answers false so the real protocol runs. Both compilers branch on it in
+the plain return epilogue (stage4 `emitRetWithCodec`, legacy
+`compiler.go`'s codec block, guarded by `!sovereignActive`), and the fast block
+restores the stable registration, calls `FnArenaPopFree` and returns the value.
+
+    shape                          before     after
+    time.Local()                    640ns     200ns
+    time.Now()                     4275ns    1315ns
+    time.Unix(...)                 7165ns    1950ns
+    t.Add(0)                       5200ns    2640ns
+    t.UTC()                        5325ns    2990ns
+    struct with a stable pointer     15ns      15ns
+
+Two bugs found while landing it, both worth keeping:
+
+1. **The block first landed in `emitSovereignEpilogue`.** The anchor it was
+   inserted at (`ipt := e.intptrType(); st := e.sliceType()`) exists in BOTH
+   epilogue emitters, and the first match is the sovereign one - where the codec
+   also performs the receiver's STORE-BACK. Taking the shortcut there skips every
+   write a mutating method made through its receiver, and the bootstrap proved it
+   immediately: `s4b`, the compiler built by a compiler that had the shortcut,
+   SIGSEGV'd while compiling mxregexp. The sovereign epilogue must never take
+   this path; the fast block is only in `emitRetWithCodec` now.
+2. **An empty slice with a base in the frame is not stable.** The first version
+   answered "stable" for `length == 0 || ptr == nil`, so a returned empty slice
+   with a live frame pointer handed the caller a pointer into a released arena.
+   It showed up three ways in one quickcheck: an ASN.1 integer whose first byte
+   read 00 instead of 02, TLS reporting `index out of range` and a malformed
+   certificate, and a DNS name printing binary. A length-zero base still has to
+   pass `codecIsStableAddr`.
+
+Gates after the fix: bootstrap fixpoint `93324787`, quickcheck 15/15, phase 8
+17/17 in both dispatch modes.

@@ -311,6 +311,88 @@ func codecEscapeNote() {
 	}
 }
 
+// codecRetStable reports whether a returned value needs no relocation at all:
+// every pointer it holds is nil, or already stable by identity, so the encode
+// would take its codecTagStable branch for each of them and the decode would
+// hand the same addresses back. When that is true the epilogue can skip the
+// whole return protocol - buffer init, seen-set init, the descriptor walk, the
+// encode, the decode and the seen-set teardown - and return the value.
+//
+// It mirrors codecEncodeValue's own decisions field by field, in return mode: a
+// stable pointer encodes raw, a slice encodes raw unless its elements can hold
+// transient data (the codec walks those), and anything the codec necessarily
+// walks - a map, an interface, a function value, an array - answers false so the
+// real protocol runs. A pointer that looks invalid answers false for the same
+// reason: the encode turns those into nil, and this must not hand the caller a
+// pointer the codec would have dropped.
+func codecRetStable(ptr unsafe.Pointer, typ *RawType) (ok bool) {
+	if typ == nil || ptr == nil {
+		return false
+	}
+	save := codecRetTransient
+	codecRetTransient = true
+	ok = codecRetStableInner(ptr, typ)
+	codecRetTransient = save
+	return ok
+}
+
+func codecRetStableInner(ptr unsafe.Pointer, typ *RawType) (ok bool) {
+	if typ == nil || ptr == nil {
+		return false
+	}
+	k := typ.Kind()
+	if isBasicKind(k) {
+		return true
+	}
+	switch k {
+	case KindPointer:
+		p := *(*unsafe.Pointer)(ptr)
+		if p == nil {
+			return true
+		}
+		if uintptr(p) < 1048576 {
+			return false
+		}
+		return codecIsStableAddr(uintptr(p))
+	case KindBytes:
+		sv := *(*_string)(ptr)
+		if sv.ptr == nil {
+			return true
+		}
+		if uintptr(unsafe.Pointer(sv.ptr)) < 65536 {
+			return false
+		}
+		return codecIsStableAddr(uintptr(unsafe.Pointer(sv.ptr)))
+	case KindSlice:
+		sl := *(*_string)(ptr)
+		elem := typ.Elem()
+		if elem == nil {
+			return false
+		}
+		// A nil base is stable whatever the length; a base in the frame is not,
+		// even at length zero. Answering stable for an EMPTY slice with a frame
+		// base hands the caller a pointer into a released arena, and the first
+		// write through it lands in whatever the next allocation put there -
+		// measured as an ASN.1 integer whose first byte read 00 instead of 02.
+		if sl.ptr == nil {
+			return true
+		}
+		if sl.length > 0 && sovTypeHasPtrs(elem) {
+			return false
+		}
+		return codecIsStableAddr(uintptr(unsafe.Pointer(sl.ptr)))
+	case KindStruct:
+		nf := typ.NumField()
+		for i := int32(0); i < nf; i++ {
+			if !codecRetStableInner(unsafe.Add(ptr, typ.StructFieldOffset(i)), typ.StructFieldType(i)) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 // codecBufScratch is the reusable encode buffer. The structural codec never
 // re-enters compiled code, so only one encode is in flight at a time, and the
 // epilogue reads the encoded bytes during its decode before the next encode

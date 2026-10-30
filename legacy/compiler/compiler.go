@@ -4440,6 +4440,36 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 		return
 	}
 
+	// Fast path. The protocol below exists to copy data out of this frame before
+	// it is released; when the result holds only nil or stable pointers there is
+	// nothing to copy, and the protocol costs ten runtime calls per site -
+	// measured at 640ns for a bare stable pointer and several microseconds for a
+	// struct that holds one (round 275). codecRetStable mirrors the encode's own
+	// per-field decisions in return mode, so answering true means encode+decode
+	// would write each pointer raw and hand the same address back.
+	//
+	// Single result only: a multi-value return would need one check per result
+	// and an AND, and nothing on the measured hot paths returns a
+	// pointer-containing tuple. Mirrors stage4 ir_deepcopy.emitRetWithCodec.
+	if !b.sovereignActive && sig.Results().Len() == 1 && typeNeedsCopy(sig.Results().At(0).Type()) {
+		ffrt := sig.Results().At(0).Type()
+		fffType := b.getLLVMType(ffrt)
+		ffHold := b.CreateAlloca(fffType, "ffh")
+		b.CreateStore(retVal, ffHold)
+		ffTD := b.getTypeCode(ffrt)
+		ffRes := b.createRuntimeCall("codecRetStable", []llvm.Value{ffHold, ffTD}, "ffr")
+		ffFast := b.ctx.AddBasicBlock(b.llvmFn, "ff.fast")
+		ffSlow := b.ctx.AddBasicBlock(b.llvmFn, "ff.slow")
+		b.CreateCondBr(ffRes, ffFast, ffSlow)
+		b.SetInsertPointAtEnd(ffFast)
+		if b.stableRegistered {
+			b.createRuntimeCall("SovereignRegRestore", nil, "")
+		}
+		b.createRuntimeCall("FnArenaPopFree", nil, "")
+		b.CreateRet(retVal)
+		b.SetInsertPointAtEnd(ffSlow)
+	}
+
 	// Codec encode: store to alloca, call codecEncodeValue with type descriptor.
 	cbType := b.getLLVMRuntimeType("CodecBuf")
 	ssType := b.getLLVMRuntimeType("codecSeenSet")

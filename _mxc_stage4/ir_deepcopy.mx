@@ -590,6 +590,37 @@ func (e *irEmitter) emitRetWithCodec(llvmType string, val string) {
 		return
 	}
 
+	// Fast path: a single result whose every pointer is already stable needs no
+	// relocation. See codecRetStable.
+	if e.curFunc.Signature != nil && e.curFunc.Signature.Results != nil && e.curFunc.Signature.Results.Len() == 1 {
+		rt := e.curFunc.Signature.Results.At(0).Typ
+		if typeNeedsCodec(rt) {
+			elt := e.llvmType(rt)
+			e.nextReg++
+			hold := "%ffh" ; hold = hold | irItoa(e.nextReg)
+			e.w("  ") ; e.w(hold) ; e.w(" = alloca ") ; e.w(elt) ; e.w("\n")
+			e.w("  store ") ; e.w(elt) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(hold) ; e.w("\n")
+			e.collectTypeDesc(rt)
+			tn := e.reflectTypeName(rt)
+			e.nextReg++
+			ff := "%ffr" ; ff = ff | irItoa(e.nextReg)
+			e.w("  ") ; e.w(ff) ; e.w(" = call i1 @runtime.codecRetStable(ptr ") ; e.w(hold) ; e.w(", ptr ") ; e.w(irQuoteName(tn)) ; e.w(", ptr null)\n")
+			e.declareRuntime("runtime.codecRetStable", "i1", "ptr, ptr")
+			ffid := irItoa(e.nextReg)
+			fastLbl := "ff.fast" | ffid
+			slowLbl := "ff.slow" | ffid
+			e.w("  br i1 ") ; e.w(ff) ; e.w(", label %") ; e.w(fastLbl) ; e.w(", label %") ; e.w(slowLbl) ; e.w("\n")
+			e.w(fastLbl) ; e.w(":\n")
+			if e.stableReg {
+				e.w("  call void @runtime.SovereignRegRestore(ptr null)\n")
+				e.declareRuntime("runtime.SovereignRegRestore", "void", "")
+			}
+			e.w("  call void @runtime.FnArenaPopFree(ptr null)\n")
+			e.declareRuntime("runtime.FnArenaPopFree", "void", "")
+			e.w("  ret ") ; e.w(llvmType) ; e.w(" ") ; e.w(val) ; e.w("\n")
+			e.w(slowLbl) ; e.w(":\n")
+		}
+	}
 	ipt := e.intptrType()
 	st := e.sliceType()
 	// The codec buffer's layout, spelled exactly as llvmStructType spells every
