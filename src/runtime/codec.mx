@@ -42,6 +42,22 @@ func codecArenaContains(a *Arena, p uintptr) (ok bool) {
 	return false
 }
 
+// codecArenaContainsAddr is codecArenaContains with the arena as an address, for
+// callers on the stability test's hot path, where fetching a pointer-typed arena
+// would pay the very protocol the test exists to skip.
+func codecArenaContainsAddr(a, p uintptr) (ok bool) {
+	if a == 0 {
+		return false
+	}
+	ar := (*Arena)(unsafe.Pointer(a))
+	for i := int32(0); i < ar.nregions; i++ {
+		if p >= ar.regions[i].base && p < ar.regions[i].base+ar.regions[i].cap {
+			return true
+		}
+	}
+	return false
+}
+
 // codecIsStableAddr reports whether addr lives outside all transient
 // function arenas (i.e. in the root arena, a global, the stack, or a
 // sovereign arena currently borrowed / registered stable by a method).
@@ -83,7 +99,7 @@ func codecIsStableArenaAddr(p uintptr) (ok bool) {
 	// tree stored were different nodes, the method level was written to the
 	// copy, and every registration shape (exact, subtree, method, host)
 	// answered pattern=[].
-	if codecArenaContains(trueRootArena(), p) {
+	if codecArenaContainsAddr(rootArenaAddr(), p) {
 		return true
 	}
 	if codecRetTransient {
@@ -372,16 +388,42 @@ func retFieldOffset(data unsafe.Pointer) (off uintptr) {
 	}
 }
 
+// retKindOf reads the kind straight out of the descriptor's meta byte. A named
+// descriptor carries its underlying kind there (which is why codecEncodeValue
+// switches on Kind() for named structs), so this is the same answer Kind() gives
+// without a call: on the return path the check is measured in call overhead, not
+// in work.
+func retKindOf(tp uintptr) (k Kind) {
+	if tp == 0 {
+		return Invalid
+	}
+	if tp&0b11 != 0 {
+		return KindPointer
+	}
+	return Kind((*RawType)(unsafe.Pointer(tp)).meta & kindMask)
+}
+
+// retFieldOffsetAt decodes field i's varint offset from the struct descriptor.
+func retFieldOffsetAt(st *rtStructType, i int32) (off uintptr) {
+	fd := (*rtStructFieldDesc)(unsafe.Add(unsafe.Pointer(&st.fields[0]), uintptr(i)*unsafe.Sizeof(rtStructFieldDesc{})))
+	p := (*uint8)(unsafe.Add(fd.data, 1)) // skip flags byte
+	var shift uint32
+	for {
+		b := *p
+		off |= uintptr(b&0x7f) << shift
+		if b&0x80 == 0 {
+			return off
+		}
+		shift += 7
+		p = (*uint8)(unsafe.Add(unsafe.Pointer(p), 1))
+	}
+}
+
 func codecRetStableInner(ptr unsafe.Pointer, tp uintptr) (ok bool) {
 	if ptr == nil || tp == 0 {
 		return false
 	}
-	t := (*RawType)(unsafe.Pointer(tp))
-	k := t.Kind()
-	if isBasicKind(k) {
-		return true
-	}
-	switch k {
+	switch retKindOf(tp) {
 	case KindPointer:
 		p := *(*unsafe.Pointer)(ptr)
 		if p == nil {
@@ -418,7 +460,7 @@ func codecRetStableInner(ptr unsafe.Pointer, tp uintptr) (ok bool) {
 		if sl.ptr == nil {
 			return true
 		}
-		if sl.length > 0 && sovTypeHasPtrs((*RawType)(unsafe.Pointer(elem))) {
+		if sl.length > 0 && retKindHasPtrs(elem, 0) {
 			return false
 		}
 		return codecIsStableAddr(uintptr(unsafe.Pointer(sl.ptr)))
@@ -429,18 +471,50 @@ func codecRetStableInner(ptr unsafe.Pointer, tp uintptr) (ok bool) {
 		}
 		st := (*rtStructType)(unsafe.Pointer(u))
 		nf := int32(st.numField)
-		fbase := unsafe.Pointer(&st.fields[0])
-		fsz := unsafe.Sizeof(rtStructFieldDesc{})
 		for i := int32(0); i < nf; i++ {
-			fd := (*rtStructFieldDesc)(unsafe.Add(fbase, uintptr(i)*fsz))
+			fd := (*rtStructFieldDesc)(unsafe.Add(unsafe.Pointer(&st.fields[0]), uintptr(i)*unsafe.Sizeof(rtStructFieldDesc{})))
 			if fd.fieldType == nil {
 				return false
 			}
-			if !codecRetStableInner(unsafe.Add(ptr, retFieldOffset(fd.data)), uintptr(unsafe.Pointer(fd.fieldType))) {
+			if !codecRetStableInner(unsafe.Add(ptr, retFieldOffsetAt(st, i)), uintptr(unsafe.Pointer(fd.fieldType))) {
 				return false
 			}
 		}
 		return true
+	}
+	return isBasicKind(retKindOf(tp))
+}
+
+// retKindHasPtrs is sovTypeHasPtrs with an address in and no pointer returns, for
+// the slice case above: a slice whose elements can hold pointers is walked by the
+// codec, so the check has to answer false for it.
+func retKindHasPtrs(tp uintptr, depth int32) (ok bool) {
+	if tp == 0 || depth > 8 {
+		return false
+	}
+	switch retKindOf(tp) {
+	case KindBytes, KindPointer, KindSlice, KindInterface, KindMap, KindChan, KindFunc:
+		return true
+	case KindArray:
+		u := retUnderAddr(tp)
+		if u == 0 {
+			return false
+		}
+		elem := uintptr(unsafe.Pointer((*rtElemType)(unsafe.Pointer(u)).elem))
+		return retKindHasPtrs(elem, depth+1)
+	case KindStruct:
+		u := retUnderAddr(tp)
+		if u == 0 {
+			return false
+		}
+		st := (*rtStructType)(unsafe.Pointer(u))
+		nf := int32(st.numField)
+		for i := int32(0); i < nf; i++ {
+			fd := (*rtStructFieldDesc)(unsafe.Add(unsafe.Pointer(&st.fields[0]), uintptr(i)*unsafe.Sizeof(rtStructFieldDesc{})))
+			if retKindHasPtrs(uintptr(unsafe.Pointer(fd.fieldType)), depth+1) {
+				return true
+			}
+		}
 	}
 	return false
 }

@@ -20736,3 +20736,34 @@ decodes the field descriptor's varint, and the struct walk reads
 of the root arena's regions and a sovereign-range lookup) + FnArenaPopFree. That
 is where the next round starts, and it is the same currency: scalar accessors and
 a cheaper stability test.
+
+## Round 287: the check is still ~350 ns, and it is not the walk
+
+With the walk rewritten to scalar accessors (round 286), `time.Now` is 705 ns and
+`time.Local` 205. Forcing `codecRetStable` to answer true gives 345 for `Now`, so
+the check costs ~350 ns for a three-field struct - and this round asked what in
+it.
+
+Inlining the accessors changed nothing: the walk now reads the kind out of the
+descriptor's meta byte, decodes field offsets without a call, and never returns a
+pointer (the slice case uses a scalar `retKindHasPtrs` instead of
+`sovTypeHasPtrs`), and the measurement moved by noise (700 -> 715). The arena
+root test was made scalar too (215 -> 205; ~10 ns). So the ~350 ns is not the
+walk, not the accessors, and not the root fetch: what remains per pointer is
+`codecOnStack` (a stack-pointer read), a scan of the root arena's regions, and a
+sovereign-range lookup - all of which are cheap in isolation and therefore need a
+counter, not another estimate.
+
+What the last three rounds do establish, measured end to end:
+
+    time.Now()   4275 ns    original (round 275)
+                 1360 ns    + return fast path and a clock scratch
+                  705 ns    + scalar descriptor walk
+    time.Local()  640 ns -> 205 ns
+    t.Add(0)     5200 ns -> 2640 ns (unchanged since the fast path)
+
+W13's 200 ns accept is not reachable by this route: the floor for a function that
+returns a stable pointer is now `time.Local`'s 205 (arena push, check, pop), and
+`time.Now` adds one clock pair and a construction on top. Reaching 200 needs the
+lazy frame arena (W13b) *and* a cheaper stability test; the plan says so, and the
+next round should start with a counter inside `codecIsStableAddr`.
