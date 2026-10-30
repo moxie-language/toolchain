@@ -457,6 +457,35 @@ indistinguishable at runtime; the array fixtures (`abi_arrays_pipe_times`,
 `ptr_recv_array_elem`, `ptr_to_array_pun`) pass or become reject fixtures with the
 named error; quickcheck green; full sweep green.
 
+## W26. A package-level constant table is still an array VALUE (round 300)
+
+`x/net/idna` and `x/text/unicode/norm` carry their tables as functions returning
+arrays (`func _idnaValues() [8640]uint16`), so every read is
+`_idnaValues()[i]`: the whole table is copied into memory to read one element -
+at run time (17 KB per trie lookup) and at IR level (`opt` expands the aggregate
+copy into 8,648 extractvalue + 8,645 getelementptr, one basic block of ~25,900
+instructions, which is 109 s of `llc` for idna and 205 s for norm).
+
+Round 300 removed the *initializer* half: keyed constant literals now lower to
+one constant global (see `constArrayLitText`). What remains is the value copy,
+which W7a step 6 removes by turning these tables into slice vars:
+
+    func _idnaValues() [8640]uint16 { return [8640]uint16{...} }
+    ->
+    var _idnaValues = []uint16{...}      // callers: _idnaValues()[i] -> _idnaValues[i]
+
+The backing array is built once in `init()` in the root arena and every index is
+a load through the slice header. Two files carry the active tables
+(`tables15.0.0.mx` in each package, the `go1.21` variant; the older version
+files are not compiled), ~13 accessor functions and ~30 call sites. Struct-element
+tables (`[2180]valueRange`) have no constant-global path yet - their init stays
+per-element, which is acceptable once it runs once instead of per call.
+
+**Accept**: idna's and norm's largest basic block is under 1,000 instructions,
+`llc` for each is under 20 s, `net.LookupHost`/IDNA/`unicode/norm` behaviour is
+unchanged, both compilers build the tree, and the netsmoke cold build drops below
+8 minutes.
+
 ## W22. The -O2 pipeline's cost bound (rounds 288-289)
 
 stage4 optimizes each package's bitcode with `opt -passes=default<O2>` and

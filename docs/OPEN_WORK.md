@@ -21273,3 +21273,100 @@ Recorded as W25 with the three shapes a fix can take. It is a decision, not a
 patch: (b) - a build flag the compiler passes for its own build, so user main
 packages get the full protocol - is the coherent one, because the exclusion
 exists for the compiler, not for the language.
+
+## Round 299: the sockaddr family is buffers, and the caller owns them (W7a step 2)
+
+Under the header-everywhere design the sockaddr mirrors had to move first: a
+Moxie `[N]T` field will be a slice header, and the kernel writes `sa_family_t` at
+offset 0, so an inline array field is exactly where a header cannot go. The
+conversion is not a representation change to the mirrors - it deletes them:
+
+- `RawSockaddrInet4/6/Unix/Linklayer/Netlink/Any` and `RawSockaddr` are gone
+  from both `ztypes_linux_*` files. Their offsets are in
+  `src/syscall/abi_sockaddr.mx` and their sizes stay as `SizeofSockaddr*`.
+- The interesting part is not the offsets, it is ownership. The old interface
+  was `sockaddr() (unsafe.Pointer, _Socklen, error)` and the storage was an
+  inline array inside the `Sockaddr` value, so it lived wherever that value
+  lived. A byte-buffer version cannot do that: a buffer allocated inside
+  `sockaddr()` lives in that call's frame arena and dies when it returns, and
+  the kernel is handed the pointer *after* that. So the method is now
+  `sockaddr(buf []byte) (slen, err)` and the caller passes storage it owns -
+  `Bind`, `Connect`, `Sendto`, `SendmsgN` and the inet-specific wrappers
+  allocate `sockaddrBuf()` in their own frame. That is the user's rule written
+  into the interface: both sides of the call belong to the caller.
+- Output directions (`Accept4`, `Getsockname`, `Getpeername`, `Recvfrom`,
+  `Recvmsg`) allocate the buffer, let the kernel fill it, then read fields back
+  through windows (`sockFamily`, `sockPort`, `sockIPv4Addr`, `sockIPv6Addr`,
+  `abiGet16/32/8`). The generated wrappers per arch (`accept4`, `getpeername`,
+  `getsockname`, `recvfrom`) take `[]byte` and pass `abiBufferOf(...)`; the
+  `//sys` lines they are generated from carry the same signature.
+- `IPv6MTUInfo` was the only struct embedding a raw mirror (`RawSockaddrInet6`
+  plus a 32-bit MTU), so it became a buffer with `addr()`/`mtu()` windows.
+- `abi_extent.mx` gained `abiGet/Put8/16/32` and `abiPutBytes`, and its tag
+  moved from `linux` to `unix` so the sockaddr code (which is `unix`) and
+  `utsname` (which is `linux`) can share it.
+
+Verified end to end, both compilers: a probe binds an IPv4 socket and reads the
+bound port and address back through `Getsockname`, does the same for IPv6,
+round-trips a path through a Unix-domain socket, sends a UDP datagram with
+`Sendto` and reads it with `Recvfrom` including the source address; a net-only
+probe does `Listen`/`Dial`/`Accept` and moves a payload. `bind`/`connect`/
+`accept`/`getsockname`/`getpeername`/`sendto`/`recvfrom` all cross the new
+buffer boundary.
+
+Still array-bearing in this family, and next: `Msghdr` (`Pad_cgo_0/1 [4]byte`),
+`IPMreq`, `IPMreqn`, `Inet4Pktinfo`, `Inet6Pktinfo`, `ICMPv6Filter`
+(`Data [8]uint32`), `IPv6Mreq`. Those are step 3/4 shapes - `Msghdr` is the one
+that matters, because `recvmsgRaw`/`sendmsgRaw` hand it to the kernel.
+
+## Round 300: the object stage was serial, and a keyed table was 26,000 instructions
+
+Two measurements from watching a cold netsmoke build spend forty minutes in one
+`llc` after another.
+
+**The object pool inherited the wrong job count.** `objFiles` called
+`runPool(todo, bst.buildJobs)`, and the default job count is
+`adaptiveJobs()` = `min(nproc-1, (MemAvailable/2) / workerMemBudget)` with
+`workerMemBudget = 4 GB`. That budget is sized for a package *compile* worker
+holding a whole compile arena; an `llc` process peaks at 594 MB on the largest
+module in the tree (x/text/unicode/norm, measured) and 542 MB on net/http's 18 MB
+module. So on a 15 GB box with a browser open the object stage ran at **one
+parallel**, 153 objects one after another with seven cores idle.
+
+`objectJobs()` is the object stage's own bound: `nproc-1`, capped by
+`MemAvailable / llcMemBudget` (768 MB, the measured peak plus headroom), with an
+explicit `-j` still an upper bound - it is an instruction, not a default. The
+log now says what each stage does: `bitcode: N files, J parallel` for the
+clang IR stage and `objects: N files, J parallel` for the llc stage.
+
+Measured on the netsmoke server, cold both times, same sources: **28 min -> 12m28s**
+(34m49s of CPU over 7 cores). The remaining critical path is the `net` package
+itself: an 11.6 MB module with no oversized function (largest block 1,792
+instructions) that llc simply spends ~7 minutes on.
+
+**A keyed constant array literal expanded element by element.** `x/net/idna` and
+`x/text/unicode/norm` write their tables as
+
+    func _idnaValues() [8640]uint16 { return [8640]uint16{ 0x00: 0x0080, ... } }
+
+`constArrayLitText` refused keyed elements, so the table became memset + 8,640
+stores, and every *read* materialized the returned array: `llc -O2` on idna spent
+109 s, of which 76 s was X86 instruction selection and 27 s the machine
+scheduler, on five functions each holding ONE basic block of ~25,900
+instructions (`-O0` and `-O1` are worse, 141 s and 117 s: same DAG). The block is
+`opt`'s aggregate expansion of the 17 KB array copy - 8,648 extractvalue + 8,645
+getelementptr, one per element.
+
+`constArrayLitText` now accepts keyed elements (and Go's continuation rule),
+fills a zeroed value array, and emits one constant global, so `_idnaValues` is a
+memset + one memcpy + a load. The per-element path is still there for
+non-constant or non-integer elements, and legacy keeps it for everything: go/ssa
+does not present a composite literal as one foldable value, so the reference
+compiler emits per-element stores. The IR differs in size, not in meaning, and
+that asymmetry is recorded in `docs/PLAN_REMAINING.md` W7a.
+
+What is left on this path is the *array value* itself: `_idnaValues()[i]` copies
+the whole table into memory to read one element, at IR level and at run time.
+That is W7a step 6's job (the tables become slices, so the index reads rodata
+directly), and it is now the only reason these two packages are still slow to
+lower.

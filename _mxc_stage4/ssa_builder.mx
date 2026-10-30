@@ -7572,12 +7572,22 @@ func (fb *ssaFuncBuilder) buildArrayLit(e *syntax.CompositeLit, typ Type, ar *Ar
 // better code ( immediates, no rodata indirection).
 const constArrayLitMinElems = int32(64)
 
-// constArrayLitText formats an all-constant positional array literal as
-// an LLVM constant global body "[N x iK] [iK v, ...]". ok is false when
-// the literal has keyed elements, non-constant elements, non-integer
-// element type, or is below the size threshold.
+// constArrayLitText formats an all-constant array literal as an LLVM constant
+// global body "[N x iK] [iK v, ...]". ok is false when an element is not a
+// constant integer, an index is out of range, the element type is not an
+// integer, or the array is below the size threshold.
+//
+// KEYED elements are supported. The generated Unicode tables are written as
+// `0x00: 0x0080, 0x01: 0x0080, ...`, and refusing them expanded an 8640-entry
+// table into 8640 stores: one basic block of ~17,000 instructions that the
+// backend then spent two minutes selecting and scheduling - in each of five
+// functions of the same package (x/net/idna, x/text/unicode/norm). A keyed
+// table is the same constant global, just addressed by key.
 func (fb *ssaFuncBuilder) constArrayLitText(e *syntax.CompositeLit, ar *Array) (text string, bytes int64, ok bool) {
-	n := int32(len(e.ElemList))
+	n := int32(ar.Len)
+	if n <= 0 {
+		n = int32(len(e.ElemList))
+	}
 	if n < constArrayLitMinElems {
 		return "", 0, false
 	}
@@ -7608,48 +7618,80 @@ func (fb *ssaFuncBuilder) constArrayLitText(e *syntax.CompositeLit, ar *Array) (
 	default:
 		return "", 0, false
 	}
-	buf := []byte{:0:n * 8}
-	buf = appendStrBytes(buf, "[" | irItoa(n) | " x " | llvmName | "] [")
-	for i, el := range e.ElemList {
-		var v int64
-		switch ex := el.(type) {
-		case *syntax.BasicLit:
-			if ex.Kind != token.IntLit && ex.Kind != token.RuneLit {
+	// Zero-filled first: an unset index is a zero element, which is what the
+	// per-element path leaves there too. The element count is a LENGTH here, not
+	// a capacity - indexing a len-0 slice is a bounds panic, and arena memory is
+	// reused, so every slot is written explicitly.
+	vals := []int64{:n}
+	for i := int32(0); i < n; i++ {
+		vals[i] = 0
+	}
+	next := int32(0)
+	for _, el := range e.ElemList {
+		idx := next
+		val := el
+		if kv, isKV := el.(*syntax.KeyValueExpr); isKV {
+			kvIdx, kok := arrayLitElemInt(kv.Key)
+			if !kok || kvIdx < 0 || kvIdx >= int64(n) {
 				return "", 0, false
 			}
-			cv := EvalBasicLitLocal(ex)
-			ci, cok := cv.(*ConstInt)
-			if !cok {
-				return "", 0, false
-			}
-			v = ci.V
-		case *syntax.Operation:
-			if ex.Op != token.Sub || ex.Y != nil {
-				return "", 0, false
-			}
-			inner, iok := ex.X.(*syntax.BasicLit)
-			if !iok || inner.Kind != token.IntLit {
-				return "", 0, false
-			}
-			cv := EvalBasicLitLocal(inner)
-			ci, cok := cv.(*ConstInt)
-			if !cok {
-				return "", 0, false
-			}
-			v = -ci.V
-		default:
+			idx = int32(kvIdx)
+			val = kv.Value
+		}
+		if idx < 0 || idx >= n {
 			return "", 0, false
 		}
-		v = truncIntWidth(v, width, signed)
+		v, vok := arrayLitElemInt(val)
+		if !vok {
+			return "", 0, false
+		}
+		vals[idx] = truncIntWidth(v, width, signed)
+		next = idx + 1
+	}
+	buf := []byte{:0:n * 8}
+	buf = appendStrBytes(buf, "[" | irItoa(n) | " x " | llvmName | "] [")
+	for i := int32(0); i < n; i++ {
 		if i > 0 {
 			buf = mxutil.Ensure(buf, 1)
 			buf = push(buf, ',')
 		}
 		buf = appendStrBytes(buf, " " | llvmName | " ")
-		buf = appendStrBytes(buf, irItoa64(v))
+		buf = appendStrBytes(buf, irItoa64(vals[i]))
 	}
 	buf = appendStrBytes(buf, "]")
 	return string(buf), int64(n) * int64(width), true
+}
+
+// arrayLitElemInt is the integer value of one constant element of an array
+// literal: a decimal literal, a rune, or the negation of either.
+func arrayLitElemInt(el syntax.Expr) (v int64, ok bool) {
+	switch ex := el.(type) {
+	case *syntax.BasicLit:
+		if ex.Kind != token.IntLit && ex.Kind != token.RuneLit {
+			return 0, false
+		}
+		cv := EvalBasicLitLocal(ex)
+		ci, cok := cv.(*ConstInt)
+		if !cok {
+			return 0, false
+		}
+		return ci.V, true
+	case *syntax.Operation:
+		if ex.Op != token.Sub || ex.Y != nil {
+			return 0, false
+		}
+		inner, iok := ex.X.(*syntax.BasicLit)
+		if !iok || inner.Kind != token.IntLit {
+			return 0, false
+		}
+		cv := EvalBasicLitLocal(inner)
+		ci, cok := cv.(*ConstInt)
+		if !cok {
+			return 0, false
+		}
+		return -ci.V, true
+	}
+	return 0, false
 }
 
 func truncIntWidth(v int64, width int32, signed bool) (r int64) {

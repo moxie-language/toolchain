@@ -37,6 +37,7 @@ type buildState struct {
 	targetPkgPath string
 
 	buildJobs       int32
+	jobsExplicit    bool // -j was given: an instruction, not a default to improve on
 	tlsFailed       bool // TLS probe failed: globals shared, workers forced serial
 	quietDiscover   bool
 	wasmRtPkgs      map[string]bool
@@ -198,6 +199,41 @@ func adaptiveJobs() (n int32) {
 		}
 	}
 	return jobs
+}
+
+// llcMemBudget is the memory one object compile is allowed: measured peak RSS
+// of the largest modules in the tree is 594 MB (x/text/unicode/norm, a 9 MB
+// module) and 542 MB for net/http's 18 MB, so 768 MB carries those with room.
+// It is an ORDER below workerMemBudget (4 GB) because a compile worker holds a
+// whole package's compile arena while llc only holds one module's DAG.
+const llcMemBudget = int64(768 << 20)
+
+// objectJobs is how many llc processes run at once. The object stage used to
+// inherit bst.buildJobs, which adaptiveJobs caps at (free/2)/4GB - one on any
+// machine that has a browser open, so 153 objects were lowered one at a time
+// with seven cores idle. Bound it by what llc actually costs instead. An
+// explicit -j stays an upper bound: it is an instruction.
+func objectJobs(n int32) (k int32) {
+	k = cNproc() - 1
+	if k < 1 {
+		k = 1
+	}
+	if mem := cFreeMem(); mem > 0 {
+		memJobs := int32(mem / llcMemBudget)
+		if memJobs < 1 {
+			memJobs = 1
+		}
+		if memJobs < k {
+			k = memJobs
+		}
+	}
+	if bst.jobsExplicit && bst.buildJobs < k {
+		k = bst.buildJobs
+	}
+	if n > 0 && n < k {
+		k = n
+	}
+	return
 }
 
 // TLS probe: the C side spawns a thread that calls mxc_tls_probe_write,
@@ -454,8 +490,10 @@ func objFiles(clang, triple string, bcFiles []string) (objs []string) {
 	if len(todo) == 0 {
 		return objs
 	}
-	if !runPool(todo, bst.buildJobs) {
-		fatal("clang -c failed")
+	objParallel := objectJobs(int32(len(todo)))
+	mxutil.WriteStr(2, "  objects: " | simpleItoa(len(todo)) | " files, " | simpleItoa(objParallel) | " parallel\n")
+	if !runPool(todo, objParallel) {
+		fatal("object compile failed")
 	}
 	for _, o := range todoObj {
 		objPublish(o, stamp)
@@ -7016,6 +7054,7 @@ func main() {
 			if bst.buildJobs < 1 {
 				bst.buildJobs = 1
 			}
+			bst.jobsExplicit = true
 			i += 2
 		} else if args[i] == "-tags" {
 			if i+1 >= int32(len(args)) {
@@ -7877,7 +7916,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			nproc = int32(len(deferredClang))
 		}
 		memLine("  loop-end")
-		mxutil.WriteStr(2, "  objects: " | simpleItoa(len(deferredClang)) | " files, " | simpleItoa(nproc) | " parallel\n")
+		mxutil.WriteStr(2, "  bitcode: " | simpleItoa(len(deferredClang)) | " files, " | simpleItoa(nproc) | " parallel\n")
 		if !runPool(deferredClang, nproc) {
 			fatal("object compile failed")
 		}
