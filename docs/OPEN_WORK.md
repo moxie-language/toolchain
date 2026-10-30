@@ -20935,3 +20935,54 @@ claimed.
 
 Gates: bootstrap fixpoint `s4b == s4c == 3476d547`, and the warm rebuild of a
 binary is byte-identical to its cold build.
+
+## Round 291: the sovereign group that outlived its arena (W2)
+
+W2 said: `x509.CreateCertificate` leaks ~1 MB per call into the root arena, and
+the codec prints "codec arena escape" for it. Round 288's return fast path
+removed the warning (the codec no longer runs on that path), so the stated
+cause was dead; the leak was not - 100 calls took the root arena from 9.5 MB to
+112.9 MB.
+
+**The instrument that answered it** is in `arena_scope.mx` now, and it is the
+shape to reach for next time: `fnarena pushed/released/leaked` (a push counter
+in `FnArenaPush`, a release counter in `ArenaRelease`, both gated on
+`arenaTraceWanted`) and `sovhome root/sov/frame` (where a new group's receiver
+was found). One run, 10 certificates:
+
+    fnarena pushed=841789 released=841789 leaked=0
+    sovhome root=3 sov=7109 frame=803
+    sov created=7915 released=803 live=7112
+
+No arena leaked, so the groups whose arenas were "still alive" had to be bound
+to something else - and 7,109 of 7,915 receivers lived *inside another group's
+sovereign data arena* (a receiver created while a receiver's method runs). The
+frame-homed 803 were released; the nested 7,109 were not, and each kept a
+192-byte root struct, its record slice and its data arena.
+
+**The bug**: `sovReleaseArena` pushed the arena back to the pool after clearing
+`sovGroupList` and `sovGroups` instead of running `arenaReleaseGroups` - the
+fourth copy of the arena-exit teardown, and the only one that did not release
+the groups. `ArenaReset`'s own comment records that this exact leak was found
+and fixed there; the data-arena exit was missed, and it is the exit that owns
+the *nested* receivers, so it is the exit where it matters most.
+
+    after arenaReleaseGroups in sovReleaseArena:  live groups 7112 -> 3
+
+**A second, smaller one** was left visible by the first: growth only fell to
+890 KB per call, because `sovGroupFreeMax` was 32 while one certificate builds
+~800 concurrent groups - the root-arena free list was smaller than the peak, so
+every call carved structs and record slices it had already carved the call
+before. Raised to 4096 (a free list has to hold the peak, not a token amount):
+
+    100 certificates, root arena growth   103 MB -> 35.7 MB
+
+What is left (357 KB per call) is the largest receiver's record-slice doubling:
+`rootsize=131072 count=7` and `rootsize=65536 count=7` per six calls are
+`sovGrowRecs` re-growing a 16,384-record array in the root arena, because the
+group that gets recycled keeps whatever array it had and the big one lands on a
+group that is not the one needing it next time. Parking that array, or owning
+records per arena, is the next step - W2's "no growth over 100 calls" is
+therefore measured, not met.
+
+Gates: bootstrap fixpoint `s4b == s4c == 4a1080da`.

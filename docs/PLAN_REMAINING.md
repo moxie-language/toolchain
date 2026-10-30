@@ -193,6 +193,23 @@ Do not silence the warning; it is the only instrument that shows this class.
 round trips, and calling it 100 times does not grow the root arena (compare
 `runtime.ReadMemStats` or `mstats` before and after if a number is wanted).
 
+**Round 291 state**: the warning is gone (round 288's fast path), and the leak
+was two bugs, both found with the trace-gated ledger now in `arena_scope.mx`
+(`fnarena`/`sovhome` lines):
+
+1. `sovReleaseArena` cleared the group list instead of running
+   `arenaReleaseGroups`, so every group whose receiver lived inside another
+   group's data arena (7,109 of 7,915 per certificate) stayed in the receiver
+   map forever. Fixed: live groups 7,112 -> 3.
+2. `sovGroupFreeMax` was 32 while a call builds ~800 groups, so the root-arena
+   free list was smaller than the peak. Raised to 4096.
+
+Measured after both: 100 certificates grow the root arena 35.7 MB (was 103 MB).
+The remainder is `sovGrowRecs` re-growing the biggest receiver's record array
+(64 KB and 128 KB `sovRootAlloc`s) once per call. **Still open**: park that
+array, or give records an owner whose lifetime is the arena's, so the number
+reaches zero.
+
 ---
 
 ## W3. bufio.Scanner passes the buffer by window

@@ -256,6 +256,17 @@ func domainHeaderSize() (sz uintptr) {
 	return sz
 }
 
+// fnPushCount and fnReleaseCount are the leak ledger: an arena is pushed once
+// per function entry and released once per normal exit, so at any quiescent
+// point the difference is the number of arenas that were abandoned instead of
+// released. That is the shape the x509 certificate test could not explain from
+// the outside: 4,272 sovereign groups alive after six calls, each bound to an
+// arena that was still "live" - a leaked frame arena keeps every receiver
+// allocated in it alive, and with them their groups and their root-lifetime
+// bookkeeping (W2).
+var fnPushCount uint64
+var fnReleaseCount uint64
+
 // --- Function arena stack ---
 
 // FnArenaPush creates a new function arena and pushes it onto the stack.
@@ -265,6 +276,9 @@ func FnArenaPush(capacity uintptr) (a *Arena) {
 		return manualArena
 	}
 	domainRoot.fnTop++
+	if arenaTraceWanted() {
+		fnPushCount++
+	}
 	if domainRoot.fnTop >= fnStackMax {
 		runtimePanic("function arena stack overflow")
 	}
@@ -454,7 +468,23 @@ func sovRootAlloc(sz uintptr) unsafe.Pointer {
 // them. A group only reaches the list after it has been unlinked from the
 // compaction queue, released from the receiver map and had its arenas freed, so
 // nothing on the list is still referenced.
-const sovGroupFreeMax = int32(32)
+// sovGroupFreeMax is how many released groups keep their struct and slices for
+// reuse. 32 was sized for a handful of receivers alive at once and is far too
+// small for a call that builds hundreds (x509.CreateCertificate reaches ~800
+// concurrent groups), so the list emptied on every call and each one carved
+// fresh structs and record slices in the ROOT arena - 192-byte structs, 128 KB
+// record arrays - where nothing is ever reclaimed: 890 KB per call with the
+// orphaned-group bug already fixed. The list is the root arena's own free list,
+// so it has to hold the peak, not a token amount.
+const sovGroupFreeMax = int32(4096)
+
+// sovHomeRoot / sovHomeSov / sovHomeFrame classify where a new group's receiver
+// lived. A group is released when that arena is released, so a growing live
+// count means receivers landing in arenas that never die: the root, a sovereign
+// data arena (released with its own group), or a frame.
+var sovHomeRoot uint64
+var sovHomeSov uint64
+var sovHomeFrame uint64
 
 var sovGroupFreeHead *sovGroup
 var sovGroupFreeN int32
@@ -865,6 +895,18 @@ func sovReleaseArena(a *Arena) {
 	if a == nil {
 		return
 	}
+	// A data arena's release is an exit like any other, so it runs the SAME
+	// teardown as the other three: receivers allocated inside this arena are
+	// dead once it is released, and their groups go with it. This was the one
+	// exit that cleared the group list instead of releasing it - the exact
+	// shape ArenaReset's comment says was already fixed there - and it is why a
+	// receiver created while another receiver's method runs (a nested receiver,
+	// 7,109 of 7,915 groups in one x509.CreateCertificate) was orphaned: the
+	// group stayed in the receiver map with released=false, its data arena
+	// stayed mapped, and its root-lifetime bookkeeping was never reclaimed.
+	// Measured: ~1 MB of root arena per CreateCertificate, 9.5 MB -> 112.9 MB
+	// over 100 calls, and 4,272 live groups after six.
+	arenaReleaseGroups(a)
 	for i := int32(0); i < a.nregions; i++ {
 		if a.sovereign != 0 {
 			sovRangeUnregister(a.regions[i].base)
@@ -894,8 +936,6 @@ func sovReleaseArena(a *Arena) {
 	}
 	a.regions[0].off = arenaDataOffset()
 	a.owner = nil
-	a.sovGroupList = resize(a.sovGroupList, 0)
-	a.sovGroups = 0
 	sovPoolBytes += a.regions[0].cap
 	s[sovPoolN] = a
 	sovPoolN++
@@ -944,6 +984,15 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 	g.recv = recv
 	g.recvTypeDesc = recvTypeDesc
 	g.ctxArena = home
+	if arenaTraceWanted() {
+		if home == trueRootArena() {
+			sovHomeRoot++
+		} else if home != nil && home.sovereign != 0 {
+			sovHomeSov++
+		} else {
+			sovHomeFrame++
+		}
+	}
 	if g.ctxArena != nil {
 		g.ctxArena.sovGroups++
 	}
@@ -2464,6 +2513,9 @@ func ArenaAcquire(capacity uintptr) (a *Arena) {
 func ArenaRelease(a *Arena) {
 	if a == nil {
 		return
+	}
+	if arenaTraceWanted() {
+		fnReleaseCount++
 	}
 	// The frame pop is an exit like any other: receivers inside this arena are
 	// dead once the function returns, so their groups go with it.
