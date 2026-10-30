@@ -560,22 +560,23 @@ lines. `io.readWindow` returns a VIEW (`unsafe.Slice(unsafe.SliceData(p), n)`)
 and all three use it. Phase 8 is 18 of 18: sync, Transport, and both modes'
 no-accumulation units.
 
-## W21. Read destinations passed as bounded sub-slices (found by round 280)
+## W21. Read destinations passed as bounded sub-slices - DONE (round 280)
 
 The compiler refuses `copy(x[a:b], src)` by name, but it cannot refuse
 `f(x[a:b])` for a callee that writes through its parameter, and that is the shape
-that cost two rounds of phase 8. The rule: `x[:]` on an ARRAY is a view and
-correct; `x[n:]`, `x[:n]` and `x[a:b]` on a slice are copies and lose the write.
-The sanctioned destination helpers already exist (`io.ReadInto` takes an offset
-and copies through unsafe; `mxutil.CopyAt`/`CopyRange` likewise).
+that cost two rounds of phase 8. Measured semantics: `array[a:b]` is a VIEW,
+`slice[a:b]` is a COPY, bounded or not.
 
-**Accept**: every read destination in the tree is either a whole slice, an
-array's full range, or an offset-taking helper. Known sites:
-`archive/tar/reader.mx` (`r.Read(b[n:])`), `image/png/reader.mx`
-(`io.ReadFull(d.r, ignored[:min(...)])`). A grep for
-`Read(|ReadFull(|ReadAt(|WriteTo(|copy(` with a bounded sub-slice argument is the
-whole job; the compiler's existing `copy` diagnostic is the precedent for making
-it a compile error where it can.
+The sweep found exactly one live site: `archive/tar/reader.mx`'s `tryReadFull`
+read a tar stream into `b[n:]` (a `[]byte` parameter's sub-slice). It uses
+`io.ReadIntoN` now. Everything else is a full range or an array slice -
+`crypto/internal/fips140/drbg`'s `additionalInput[:16]` is a pointer to an array.
+A grep for `Read(|ReadFull(|ReadAt(|copy(` with a bounded sub-slice argument finds
+only comments.
+
+Not covered by a fixture: tar's partial-read path is not in phase 0a/8, so the
+accept here is the grep plus the compile. A tar fixture would be the honest
+completion.
 
 ## Suggested order
 
@@ -588,7 +589,7 @@ it a compile error where it can.
 | 5 | ~~W18 net IP layer~~ | done (round 278): DNS/Dial crash fixed, hosts and services parse; the leak and the `IP.String` trap remain | — |
 | 5b | ~~W19 spawned dispatch~~ | done (round 279): a sub-slice of the shared ring was a copy | — |
 | 5c | ~~W20 response body zeros~~ | done (round 280): a destination sub-slice was a copy; phase 8 is 18/18 | — |
-| 5d | W21 destination sub-slices | same class, two known sites outside the tested paths | 1 hour |
+| 5d | ~~W21 destination sub-slices~~ | done (round 280): one live site (tar), swept and fixed | — |
 | 6 | W17 per-call costs | 10-30 us per mutating call that builds its receiver; W13, W14 and W3b are all this | 1-2 sessions |
 | 7 | W13 time.Now | needs W17 (1) and (2); the remaining 3.5 us is unexplained | after W17 |
 | 8 | W2 codec escape warning | leaks per certificate, instrument for a class of bugs | 1 session |

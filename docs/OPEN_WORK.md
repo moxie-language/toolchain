@@ -20487,8 +20487,23 @@ Phase 8 after this and round 279 - **18 of 18 fixtures, both modes**:
 
 The compiler already refuses `copy(x[a:b], src)` ("a subslice is a copy, so
 copying into it is not allowed"). It cannot refuse `f(x[a:b])` for a callee that
-writes through its parameter, which is the shape that hid here. What remains is a
-sweep for read destinations passed as bounded sub-slices - `X[n:]`, `X[:n]`,
-`X[a:b]` - as opposed to full-range `X[:]` on an array, which is a view and
-correct. Two are known: `archive/tar/reader.mx` (`r.Read(b[n:])`) and
-`image/png/reader.mx` (`io.ReadFull(d.r, ignored[:min(...)])`).
+writes through its parameter, which is the shape that hid here. So: what is a
+copy, exactly? Measured rather than assumed:
+
+    var a [8]byte; s := a[:4]; s[0] = 9        a[0] == 9   array slice is a VIEW
+    b := []byte{...}; c := b[:2]; c[0] = 8     b[0] == 1   slice slice is a COPY
+    fill(a[:2], 5) (callee writes through)     a[0] == 5   array slice views
+    fill(b[:2], 4) (callee writes through)     b[0] == 1   slice slice copies
+
+So the rule is `array[a:b]` is a view and `slice[a:b]` is a copy, bounded or not.
+With that, the sweep is small: every `X[:]`/`X[a:b]` passed to a read in this
+tree is either a full range or an ARRAY slice - including
+`crypto/internal/fips140/drbg`'s `sysrand.Read(additionalInput[:16])`, where
+`additionalInput` is a `*[SeedSize]byte` - except one:
+
+    archive/tar/reader.mx  tryReadFull:  r.Read(b[n:])   b is a []byte parameter
+
+which read a tar stream into a copy. It uses `io.ReadIntoN` now (the same
+allocation rules as the rest of the package, offset write, scratch in a free
+function's frame). A grep for `Read(|ReadFull(|ReadAt(|copy(` with a bounded
+sub-slice argument now finds only comments.
