@@ -36,6 +36,13 @@ type irEmitter struct {
 	extGlobals map[string]string
 	strConst     []string
 	strMap       map[string]int32
+	// strLitIndex maps a string CONSTANT VALUE to its .str global, so one literal
+	// occurrence is one mutable object and two occurrences of the same text stay
+	// two objects. Keyed by the SSA constant, never by its text: content dedup
+	// made two unrelated literals share their bytes, so writing through
+	// `b := []byte("abc")` changed a `c := []byte("abc")` elsewhere in the
+	// program. Legacy's createConst cache uses the same key.
+	strLitIndex map[*SSAConst]int32
 	arrConsts    []string // constant array global bodies (compile arena)
 	pendArrConsts []string // fn-arena pending, merged by mergeAccumulators
 	curFunc    *SSAFunction
@@ -141,6 +148,7 @@ func newIREmitter(pkg *SSAPackage, triple string, srcLen int32) (p *irEmitter) {
 		extDecls:     map[string]string{},
 		extGlobals:   map[string]string{},
 		strMap:       map[string]int32{},
+		strLitIndex: map[*SSAConst]int32{},
 		typeIDs:      map[string]int32{},
 		localTypeIDs: map[string]bool{},
 		globalDeclTypes:   map[string]string{},
@@ -641,6 +649,28 @@ func (e *irEmitter) addStringConst(s string) (n int32) {
 	e.pendStrConsts = mxutil.Ensure(e.pendStrConsts, 1)
 	push(e.pendStrConsts, s)
 	return idx
+}
+
+// stringConstOperand is the LLVM operand for a string CONSTANT VALUE and its
+// global. One constant value is one object; a second occurrence of the same
+// text is a second object. addStringConst is not used here because it folds
+// equal text together, which made two unrelated literals the same mutable bytes.
+//
+// Only the INDEX is memoised. The operand text is rebuilt per call because it is
+// assembled with `|` in whatever arena is current, which during function emit is
+// the fn arena: caching the text handed later functions a header whose bytes the
+// flush had already reclaimed.
+func (e *irEmitter) stringConstOperand(c *SSAConst, s string) (txt string) {
+	idx, ok := e.strLitIndex[c]
+	if !ok {
+		idx = int32(len(e.strConst) + len(e.pendStrConsts))
+		e.pendStrConsts = mxutil.Ensure(e.pendStrConsts, 1)
+		push(e.pendStrConsts, s)
+		e.strLitIndex[c] = idx
+	}
+	ipt := e.intptrType()
+	slen := irItoa64(int64(len(s)))
+	return "{ ptr " | e.strConstGlobal(idx) | ", " | ipt | " " | slen | ", " | ipt | " " | slen | " }"
 }
 
 func (e *irEmitter) strConstGlobal(idx int32) (s string) {
@@ -1184,11 +1214,15 @@ func (e *irEmitter) mergeAccumulators() {
 	e.pendExtGlobals = nil
 	for _, s := range e.pendStrConsts {
 		cs := copyStr(s)
+		// Always append: a pending entry's index was handed out as
+		// len(strConst)+its position when the operand was emitted, so skipping a
+		// duplicate here would shift every later .str index onto the wrong bytes.
+		// strMap only records the FIRST index for a text, for addStringConst.
 		if _, ok := e.strMap[cs]; !ok {
 			e.strMap[cs] = len(e.strConst)
-			e.strConst = mxutil.Ensure(e.strConst, 1)
-			push(e.strConst, cs)
 		}
+		e.strConst = mxutil.Ensure(e.strConst, 1)
+		push(e.strConst, cs)
 	}
 	e.pendStrConsts = nil
 	for _, a := range e.pendArrConsts {
@@ -3844,11 +3878,8 @@ func (e *irEmitter) constOperand(c *SSAConst) (s string) {
 				if len(cs.S) == 0 {
 					return "zeroinitializer"
 				}
-				idx := e.addStringConst(cs.S)
-				ipt := e.intptrType()
-				slen := irItoa64(int64(len(cs.S)))
 				e.allocTypes[c] = e.sliceType()
-				return "{ ptr " | e.strConstGlobal(idx) | ", " | ipt | " " | slen | ", " | ipt | " " | slen | " }"
+				return e.stringConstOperand(c, cs.S)
 			}
 			return c.val.String()
 		case Float32:
@@ -3874,10 +3905,7 @@ func (e *irEmitter) constOperand(c *SSAConst) (s string) {
 				if len(cs.S) == 0 {
 					return "zeroinitializer"
 				}
-				idx := e.addStringConst(cs.S)
-				ipt := e.intptrType()
-				slen := irItoa64(int64(len(cs.S)))
-				return "{ ptr " | e.strConstGlobal(idx) | ", " | ipt | " " | slen | ", " | ipt | " " | slen | " }"
+				return e.stringConstOperand(c, cs.S)
 			}
 			return "zeroinitializer"
 		}

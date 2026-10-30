@@ -315,6 +315,12 @@ Moxie has no such bookkeeping to dodge.
 - **Strings are mutable.** There is no immutable-string contract to preserve,
   so a function may take a `string` parameter and write through it exactly like
   any other byte slice.
+- **A string constant is one object per occurrence.** Every use of one
+  expression names the same mutable bytes, so `p := b` aliases and a write
+  through `p` is visible through `b`. Two occurrences of the same text are two
+  independent objects: literals are not interned by content, because one site
+  mutating a literal must never change another site's. Equality is by content
+  (`runtime.stringEqual`), so the distinction never shows up as `!=`.
 - **There is no aliasing: a subslice is a copy.** `s[a:b]` allocates and copies.
   A write through a subslice does NOT reach the parent, so Go code that relied
   on overlapping views - in-place XOR, "read src fully before writing dst",

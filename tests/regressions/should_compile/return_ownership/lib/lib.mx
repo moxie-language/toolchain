@@ -1,0 +1,91 @@
+// Return ownership, exercised across a package boundary so the return codec
+// actually runs. Functions in package main are exempt from the per-frame arena
+// and the codec, so a main-only fixture measures nothing: allocations there
+// already land in the caller's arena and no relocation happens. A package
+// below main pushes a frame arena, builds the result in it, relocates the
+// result into the caller's arena and releases its own, which is the property
+// these functions exist to exercise.
+package lib
+
+type Box struct {
+	B []byte
+	N int32
+}
+
+// FromParam returns a box whose slice field is the parameter's OWN backing
+// array. The caller can observe identity by writing through it afterwards.
+func FromParam(b []byte) (out Box) {
+	out.B = b
+	out.N = int32(len(b))
+	return
+}
+
+// FromLocal returns a box whose slice field is built inside the callee. The
+// backing array lives in the callee's frame, so it has to arrive as a copy the
+// caller can still read (and keep writing) after the callee returned.
+func FromLocal(n int32) (out Box) {
+	out.B = []byte{:n}
+	out.N = n
+	for i := int32(0); i < n; i++ {
+		out.B[i] = byte('a' + i)
+	}
+	return
+}
+
+type Node struct {
+	Name string
+	Next *Node
+}
+
+// Ring builds a three-node cycle: a -> b -> c -> a. A relocation that
+// duplicated a node would come back with the cycle unrolled, so pointer
+// identity inside one returned graph is the check.
+func Ring() (h *Node) {
+	a := &Node{Name: "a"}
+	b := &Node{Name: "b"}
+	c := &Node{Name: "c"}
+	a.Next = b
+	b.Next = c
+	c.Next = a
+	h = a
+	return
+}
+
+type Item struct {
+	Name string
+	Tags []string
+}
+
+type Graph struct {
+	Head  *Node
+	Items []Item
+	ByKey map[string]int32
+	Own   []byte
+	Ext   []byte
+}
+
+// Build returns a struct whose fields are a cyclic graph, a slice of structs
+// carrying slices, a map, a callee-built buffer and the caller's parameter.
+func Build(ext []byte) (out Graph) {
+	out.Head = Ring()
+	out.Items = []Item{:2}
+	for i := int32(0); i < 2; i++ {
+		out.Items[i].Name = "item"
+		out.Items[i].Tags = []string{"x", "y", "z"}
+	}
+	out.ByKey = map[string]int32{}
+	out.ByKey["k"] = 7
+	out.Own = []byte("callee")
+	out.Ext = ext
+	return
+}
+
+// Big sizes the result once and fills it through a cursor, the shape every
+// caller-side buffer is supposed to have.
+func Big(n int32) (b []byte) {
+	b = []byte{:n}
+	for i := int32(0); i < n; i++ {
+		b[i] = byte(i & 0x7f)
+	}
+	return
+}

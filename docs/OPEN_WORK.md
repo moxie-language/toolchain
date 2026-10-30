@@ -21202,3 +21202,54 @@ plan, the one trap that matters (the caller's slot must be one alloca per CALL
 SITE, not a fresh caller-arena allocation per call, which would grow the
 caller's arena linearly in a loop), and the acceptance test. The tree stays
 green at `19a2606f` until that campaign starts.
+
+## Round 298: the return slot is already the caller's, and a literal was not one object
+
+W24 asked for sret so a result would be created in the caller's arena. This
+round measured the ABI instead of changing it, and the measurement says the
+step is already taken - at a lower level, and by every compiler:
+
+- A Moxie slice is `{ ptr, i64, i64 }`. `return_ownership`'s
+  `lib.FromParam` (return type `{ {ptr,i64,i64}, i32 }`) compiles to code that
+  writes its result through `%rdi` - the caller-provided hidden pointer - with
+  the arguments in `%rsi/%rdx/%rcx`. LLVM's backend lowers any aggregate that
+  does not fit in registers to exactly the ABI an IR `sret` would spell.
+  `llc-22` on an 80-byte `{[80 x i8]}` return does the same (writes through
+  `%rdi`), while a 16-byte `{ptr,i32,i32}` comes back in `%rax:%rdx:%rcx`.
+- So IR sret would change only the returns that are ALREADY cheaper than
+  memory - a bare pointer, a two-word header - and would leave the large ones
+  exactly as they are. Every Moxie function that returns pointers would pay a
+  memory store instead of a register move. That is a pessimisation with no
+  semantic payload, which is why `needsSret` stays `false`: it is the honest
+  answer, not a stub.
+- The property the rule actually asks for - a parameter's data keeps its
+  identity across the return, and only what the callee created itself is
+  function-scoped - is the codec's, and it is implemented. The one thing the
+  old fixture got wrong is that it lived in `package main`, which
+  `funcNeedsCodec` exempts (runtime, unsafe, syscall, os, main, pkg/*): no frame
+  arena, no codec, no relocation, so it could not observe the property at all.
+  `return_ownership` is now a directory fixture whose callee is a real `lib/`
+  package.
+
+Writing that fixture found a defect, in legacy: a string constant was not one
+object. `legacy/compiler/compiler.go` `createConst` called `llvm.AddGlobal` on
+every call, and it runs once per USE, so one literal occurrence produced
+`$string`, `$string.1`, ... - five globals for one `[]byte("caller")`.
+Consequence: `b := []byte("caller"); p := b; b[0] = 'X'` printed "copied" under
+legacy and "aliased" under stage4, and a parameter assigned into a returned
+struct came back detached from the caller's own buffer. Fixed by caching the
+object per constant VALUE (legacy) and by `stringConstOperand` (stage4).
+
+The two halves then disagreed about two *occurrences* of the same text: stage4
+shared one global by content, legacy kept them distinct. Decided: one object per
+occurrence. Content sharing between unrelated sites is action at a distance on a
+mutable object - the same hazard that makes package globals immutable outside
+`init()` - and it is not observable as inequality, because string equality is by
+content (`runtime.stringEqual`). `addStringConst` still folds text for the other
+users (panic-message strings); string constants go through
+`stringConstOperand`, and `mergeAccumulators` now appends every pending entry so
+a provisional `.str.N` index cannot shift onto another literal's bytes.
+
+Measured after the change: `[]byte("abc")` twice, write through the first, both
+compilers print `first: Xbc` / `second: abc`; `p := b` aliases in both. The
+fixture passes under both compilers.

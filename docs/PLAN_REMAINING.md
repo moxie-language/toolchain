@@ -528,52 +528,48 @@ No code change was needed - the tree has been writing through parameters all
 along. What changed is that the model no longer claims otherwise, so arena
 arguments must rest on lifetime, not on permission.
 
-## W24. Return values should be caller-owned storage (sret), not callee frame
+## W24. Return values are caller-owned storage - CLOSED BY MEASUREMENT (round 298)
 
 The model says both sides of a call belong to the caller: parameters are
-caller-owned, and a result should be created in the caller's arena too, so
-assigning a parameter into a result is a SHALLOW copy (the value, or a
-container's references) and only what the callee creates itself is
-function-scoped and needs relocating.
+caller-owned, and a result is created in the caller's arena too, so assigning a
+parameter into a result is a SHALLOW copy (the value, or a container's
+references) and only what the callee creates itself is function-scoped and needs
+relocating.
 
-State of the code today, measured:
+The plan was to force that with sret. Measurement says the machine already does
+it, so the sret step is cancelled rather than deferred:
 
-- **The ABI has no sret at all.** `needsSret` (`_mxc_stage4/ir_util.mx:189`)
-  returns `false` unconditionally, and `legacy/compiler/` mentions sret nowhere.
-  So every result travels in registers/an aggregate value, the callee builds it
-  in its own frame, and the caller stores it into caller memory AFTER the call.
-- The *storage* is therefore caller-owned only from the caller's store onwards;
-  during the call the value lives in the callee's frame. That is precisely the
-  window the model wants closed.
-- The *interior* is already handled the way the model wants: a pointer into a
-  caller arena (a parameter's data) is aliased, not copied (`codecIsStableAddr`
-  keeps ancestor arenas stable), and callee-created pointees are relocated into
-  the caller's arena at return. `codecRetStable` is the fast path for "nothing
-  needs relocating".
+- **The ABI is already caller-provided memory where it matters.** A slice is
+  `{ptr,i64,i64}`; `lib.FromParam` in the `return_ownership` fixture (return
+  type `{ {ptr,i64,i64}, i32 }`) writes its result through `%rdi` with its
+  arguments in `%rsi/%rdx/%rcx`, and `llc-22` lowers an 80-byte aggregate return
+  the same way. LLVM does this for every aggregate too big for registers,
+  whatever the IR spells, so an IR `sret` on the types `typeNeedsCodec` selects
+  changes nothing there.
+- **Where it would change something, it is a pessimisation.** The returns that
+  fit in registers today - a bare pointer, a 16-byte `{ptr,i32,i32}` - would
+  move from `%rax:%rdx:%rcx` into memory. Those are the most common returns in
+  the tree.
+- **The semantics are already the codec's, and they hold.** A parameter's data
+  keeps identity across the return (`codecIsStableAddr` keeps ancestor arenas
+  stable) and callee-created pointees are relocated into the caller's arena;
+  `codecRetStable` is the fast path for "nothing needs relocating".
+  `tests/regressions/should_compile/return_ownership/` pins all of it, with the
+  callee in a real `lib/` package - `funcNeedsCodec` exempts `main`, so a
+  main-only fixture has no frame arena and no codec and measures nothing.
+- `needsSret` stays `false` and the stage4 sret plumbing
+  (`ir_call.mx`, `ir_emit.mx`, `ir_iface.mx`) stays unused. If a C-ABI boundary
+  ever returns a struct by value from Moxie to C, `externalSymbol` would need
+  its own sret path; no such call exists today.
 
-The smallest correct implementation, bilateral:
+**Fixed while measuring (round 298):** legacy minted a fresh global per USE of a
+string constant, so one literal occurrence was five objects - `p := b` did not
+alias and a parameter assigned into a result came back detached. Both compilers
+now key one object per constant VALUE, and two occurrences of the same text stay
+two objects. Rule recorded in `CLAUDE.md`.
 
-1. sret for the return types that go through the return protocol (the ones
-   `typeNeedsCodec` already selects), never for `externalSymbol` (C ABI) or
-   declarations.
-2. The caller's slot is its own alloca at the call site (one per call site,
-   reused per call - NOT a fresh caller-arena allocation per call, which would
-   grow the caller's arena linearly in a loop).
-3. The callee's named results alias the slot, so `result = param` is a shallow
-   store into caller memory and the relocation at return only has to move what
-   the callee itself allocated.
-4. Legacy first, then stage4: function types (`getLLVMFunctionType`), calls,
-   returns, interface dispatch, closures and the interp all have to agree.
-
-**Why it is its own campaign**: it changes the ABI of every Moxie function that
-returns pointers, in both compilers, and a half-landed ABI change breaks the
-bootstrap rather than one package. The tree is green now (phase 8, sweep,
-quickcheck), so this starts from a known-good point.
-
-**Accept**: a fixture that returns a struct built from a parameter and a
-callee-local, checked to hold the parameter's data by identity and the local's
-by copy; bootstrap fixpoint; phase 8; and the bench unchanged or better (it
-saves the callee's result alloca and the caller's post-call store).
+**Accept (met):** fixture passes under both compilers, bootstrap fixpoint, phase
+8 and the sweep unchanged.
 
 ## W8. Opportunistic cleanups (do while in the neighbourhood)
 

@@ -94,6 +94,10 @@ type compilerContext struct {
 	diagnostics      []error
 	functionInfos    map[*ssa.Function]functionInfo
 	astComments      map[string]*ast.CommentGroup
+	// stringConsts maps a string constant VALUE to the one global object that
+	// holds it. See createConst: without it every use of one constant named a
+	// different object, so a mutable literal was copied at every mention.
+	stringConsts map[*ssa.Const]llvm.Value
 	embedGlobals     map[string][]*loader.EmbedFile
 	pkg              *types.Package
 	loaderPkg        *loader.Package // the loader's package, for its go/types info
@@ -131,6 +135,7 @@ func newCompilerContext(moduleName string, machine llvm.TargetMachine, config *C
 		targetData:    machine.CreateTargetData(),
 		functionInfos: map[*ssa.Function]functionInfo{},
 		astComments:   map[string]*ast.CommentGroup{},
+		stringConsts:  map[*ssa.Const]llvm.Value{},
 	}
 
 	c.ctx = llvm.NewContext()
@@ -3746,6 +3751,19 @@ func (c *compilerContext) createConst(expr *ssa.Const, pos token.Pos) llvm.Value
 			}
 			return llvm.ConstInt(llvmType, n, false)
 		} else if typ.Info()&types.IsString != 0 {
+			// A string constant is ONE object. AddGlobal mints a fresh global on
+			// every call (LLVM renames the duplicates $string.1, $string.2, ...)
+			// and createConst runs once per USE, so every mention of the same
+			// constant named a different object: `b := []byte("caller"); p := b;
+			// b[0] = 'X'` wrote one copy and read another, and a slice handed to
+			// a callee was not the slice the caller inspected afterwards - a
+			// parameter assigned to a return value came back detached from the
+			// caller's own buffer. Cache by constant VALUE, so every use of one
+			// expression shares its object while two distinct occurrences of the
+			// same text stay two objects.
+			if cached, ok := c.stringConsts[expr]; ok {
+				return cached
+			}
 			str := constant.StringVal(expr.Value)
 strLen := llvm.ConstInt(c.uintptrType, uint64(len(str)), false)
 				var strPtr llvm.Value
@@ -3778,6 +3796,7 @@ strLen := llvm.ConstInt(c.uintptrType, uint64(len(str)), false)
 				strPtr = llvm.ConstNull(c.dataPtrType)
 			}
 			strObj := llvm.ConstNamedStruct(c.getLLVMRuntimeType("_string"), []llvm.Value{strPtr, strLen, strLen})
+			c.stringConsts[expr] = strObj
 			return strObj
 		} else if typ.Kind() == types.UnsafePointer {
 			if !expr.IsNil() {

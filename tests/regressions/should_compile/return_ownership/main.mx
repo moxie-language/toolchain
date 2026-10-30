@@ -1,0 +1,107 @@
+// Return ownership: what a value carries out of a call.
+//
+// A parameter is caller-owned, so a result built from it must still POINT AT
+// the caller's data after the call (identity, not a copy), while anything the
+// callee allocated itself must survive as a copy in the caller's arena. Every
+// callee here is in lib/, because package main has no frame arena and no
+// return codec - the property is only observable across a package boundary.
+package main
+
+import (
+	"os"
+	"tests/regressions/should_compile/return_ownership/lib"
+)
+
+func bad(msg string) {
+	println("FAIL:", msg)
+	os.Exit(1)
+}
+
+func main() {
+	own := []byte{:4}
+	own[0] = 1
+	got := lib.FromParam(own)
+	if int32(len(got.B)) != 4 {
+		bad("parameter return length wrong")
+	}
+	// Identity: a write through the returned slice is visible in the caller's
+	// own array only if the callee aliased it instead of copying it.
+	got.B[1] = 9
+	if own[1] != 9 {
+		bad("return from parameter was copied instead of aliased")
+	}
+
+	loc := lib.FromLocal(3)
+	if loc.N != 3 {
+		bad("local return count wrong")
+	}
+	if int32(len(loc.B)) != 3 {
+		bad("local return length wrong")
+	}
+	if loc.B[0] != 'a' || loc.B[2] != 'c' {
+		bad("local return contents wrong")
+	}
+	// Still writable: the storage must be caller-owned, not the dead frame.
+	loc.B[1] = 'Z'
+	if loc.B[1] != 'Z' {
+		bad("local return storage not writable")
+	}
+
+	r := lib.Ring()
+	if r == nil || r.Next == nil || r.Next.Next == nil {
+		bad("ring lost its links")
+	}
+	if string(r.Next.Name) != "b" {
+		bad("ring node name lost")
+	}
+	// a -> b -> c -> a: the fourth hop must be the first node again. A
+	// relocation that duplicated the head would unroll the cycle here.
+	if r.Next.Next.Next != r {
+		bad("ring cycle broke at the return")
+	}
+
+	ext := []byte("caller")
+	g := lib.Build(ext)
+	if string(g.Head.Next.Name) != "b" {
+		bad("graph node name lost")
+	}
+	if g.Head.Next.Next.Next != g.Head {
+		bad("graph cycle broke through the struct field")
+	}
+	if int32(len(g.Items)) != 2 || string(g.Items[1].Name) != "item" {
+		bad("returned slice of structs lost its contents")
+	}
+	if string(g.Items[1].Tags[2]) != "z" {
+		bad("returned struct field lost its nested slice")
+	}
+	if g.ByKey["k"] != 7 {
+		bad("returned map lost its contents")
+	}
+	// A parameter's bytes are the caller's; a write through the returned field
+	// must reach them.
+	g.Ext[0] = 'C'
+	if ext[0] != 'C' {
+		bad("graph's parameter field was copied instead of aliased")
+	}
+	if string(g.Own) != "callee" {
+		bad("callee-built bytes lost")
+	}
+	g.Own[0] = 'K'
+	if string(g.Own) != "Kallee" {
+		bad("callee-built bytes are not writable")
+	}
+
+	big := lib.Big(1000)
+	if int32(len(big)) != 1000 {
+		bad("big return length wrong")
+	}
+	if big[0] != 0 || big[127] != 127 || big[128] != 0 || big[999] != byte(999&0x7f) {
+		bad("big return contents wrong")
+	}
+	big[500] = 0x5a
+	if big[500] != 0x5a {
+		bad("big return storage not writable")
+	}
+
+	println("return ownership ok")
+}
