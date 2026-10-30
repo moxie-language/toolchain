@@ -233,17 +233,30 @@ func fatal(msg string) {
 	exitNow(1)
 }
 
-func mem2regBc(bcFile string) {
-	tmp := bcFile | ".m2r"
-	// The driver speaks ONE LLVM major: whichever the host's clang/opt/link
-	// report, which build.sh asserts they all agree on. Names are unversioned
-	// on purpose - a "-22" suffix on a binary that is really 23 is exactly the
-	// lie that let this stack drift, and mixing majors inside one pipeline
-	// produces bitcode the next tool cannot read (a newer opt rewrites
-	// llvm.returnaddress into a name the older clang cannot lower).
-	rc := run([]string{"opt", "-passes=mem2reg", bcFile, "-o", tmp})
+// optBc optimizes one package's generated bitcode before it is cached.
+//
+// It used to run `mem2reg` alone and every object was then compiled at -O0,
+// so nothing was ever inlined: two runtime helpers in the same package still
+// paid a call across a function boundary, and the small ones (descriptor
+// accessors, arena lookups, the stability test) are where the per-call time
+// of W13/W14 lives. Measured with 200k iterations: `time.Local` cost 205 ns
+// for `return &localLoc`, ~125 of that one `codecIsStableAddr` call - about a
+// dozen non-inlined calls at ~10 cycles each. The legacy compiler has always
+// emitted optimized code (its TargetMachine runs at CodeGenLevelDefault), so
+// O2 here makes stage4 match the bootstrap compiler instead of adding a new
+// codegen decision.
+//
+// The driver speaks ONE LLVM major: whichever the host's clang/opt/link
+// report, which build.sh asserts they all agree on. Names are unversioned
+// on purpose - a "-22" suffix on a binary that is really 23 is exactly the
+// lie that let this stack drift, and mixing majors inside one pipeline
+// produces bitcode the next tool cannot read (a newer opt rewrites
+// llvm.returnaddress into a name the older clang cannot lower).
+func optBc(bcFile string) {
+	tmp := bcFile | ".opt"
+	rc := run([]string{"opt", "-passes=default<O2>", bcFile, "-o", tmp})
 	if rc != 0 {
-		fatal("opt mem2reg failed for " | bcFile)
+		fatal("opt failed for " | bcFile)
 	}
 	data, ok := mxutil.ReadFile(tmp)
 	if ok {
@@ -252,12 +265,17 @@ func mem2regBc(bcFile string) {
 }
 
 // objFlags is the one command line for bitcode -> object. Before this was
-// unified, the serial path omitted -O0 and the wasm path omitted the section
-// flags, and all of them wrote the same <hash>.bc.o next to the bitcode, so
-// the object file's contents depended on which caller happened to make it.
-// One flag set means an object is a function of (.bc, clang) alone, which is
-// what makes it reusable across builds.
-var objFlags = []string{"-O0", "-ffunction-sections", "-fdata-sections"}
+// unified, the serial path omitted the flags and the wasm path omitted the
+// section flags, and all of them wrote the same <hash>.bc.o next to the
+// bitcode, so the object file's contents depended on which caller happened to
+// make it. One flag set means an object is a function of (.bc, clang) alone,
+// which is what makes it reusable across builds.
+//
+// -O2, not -O0: optBc has already run the middle-end, and -O0 here would
+// still throw away the backend's own inlining of the small helpers a
+// descriptor walk is made of. This is the flag the legacy compiler's
+// TargetMachine has always had.
+var objFlags = []string{"-O2", "-ffunction-sections", "-fdata-sections"}
 
 // toolVersion returns a tool's version line, or "" when it cannot be read.
 func toolVersion(tool string) (s string) {
@@ -4898,7 +4916,7 @@ func cmdCacheWarm() {
 			failed++
 			continue
 		}
-		mem2regBc(bcFile)
+		optBc(bcFile)
 		cdir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
 		mkdirAll(cdir, 0755)
 		data, rok := mxutil.ReadFile(bcFile)
@@ -5695,7 +5713,7 @@ func cmdUpdate(rebuildAll bool) {
 			mxutil.WriteStr(2, "    FAIL: clang for " | pkg.path | "\n")
 			continue
 		}
-		mem2regBc(bcFile)
+		optBc(bcFile)
 		hash := pkgHash(pkg)
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
 		cdir := mxutil.JoinPath(cacheBase, safeName(pkg.path))
@@ -6057,7 +6075,7 @@ func cmdTest(args []string) {
 		if drc != 0 {
 			fatal("clang failed for " | dp.path)
 		}
-		mem2regBc(bcFile)
+		optBc(bcFile)
 		if dp != pkg {
 			cacheDir := mxutil.JoinPath(cacheBase, safeName(dp.path))
 			mkdirAll(cacheDir, 0755)
@@ -7825,7 +7843,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 	return bcs, hasRT
 }
 
-// cacheCompiledBc runs mem2reg on one package's compiled .bc and copies it
+// cacheCompiledBc optimizes one package's compiled .bc and copies it
 // into the package cache under the same key the reader looks up. A free
 // function so the file data dies with its frame: inline in the loop, every
 // package's bitcode (megabytes each) stayed live in the caller's arena until
@@ -7835,7 +7853,7 @@ func cacheCompiledBc(cacheBase, tmpdir, pkgPath, hash, version string) {
 	if !mxutil.FileExists(bcFile) {
 		return
 	}
-	mem2regBc(bcFile)
+	optBc(bcFile)
 	mkdirAll(mxutil.JoinPath(cacheBase, safeName(pkgPath)), 0755)
 	data, rok := mxutil.ReadFile(bcFile)
 	if rok {
@@ -7844,7 +7862,7 @@ func cacheCompiledBc(cacheBase, tmpdir, pkgPath, hash, version string) {
 		// The package was just compiled, so its bitcode is in the scratch
 		// directory and its object would be built there and thrown away with
 		// it - leaving the next build to compile all objects again. The cached
-		// copy is byte-identical (mem2reg ran above, before the copy), so the
+		// copy is byte-identical (optBc ran above, before the copy), so the
 		// object can be built from the copy and published beside it.
 		if bst.bcTwin == nil {
 			bst.bcTwin = map[string]string{}
@@ -8326,7 +8344,7 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 	if rc != 0 {
 		return "clang failed for " | pkg.path
 	}
-	mem2regBc(bcFile)
+	optBc(bcFile)
 
 	// Cache .bc
 	cacheDir := mxutil.JoinPath(meta.cacheBase, safeName(pkg.path))
@@ -8753,7 +8771,7 @@ func cmdBuildRuntime() {
 		if rc != 0 {
 			fatal("clang failed for " | dp.path)
 		}
-		mem2regBc(bcFile)
+		optBc(bcFile)
 		bcFiles = mxutil.Ensure(bcFiles, 1)
 		push(bcFiles, bcFile)
 		for _, cf := range dp.cfiles {

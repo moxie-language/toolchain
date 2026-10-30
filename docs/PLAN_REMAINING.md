@@ -420,7 +420,8 @@ made W3b's earlier probes measure the clock instead of the code.
 
 **Accept**: `time.Now()` under 200 ns and the W3b scanner benchmark (4 MiB of
 64-byte lines, 65536 tokens) under 50 ms, both measured with the recipe in round
-269. Profiling needs an in-tree counter: ptrace is blocked in this environment.
+269. Round 288 met the first (191-197 ns) and missed the second (83 ms): the
+scanner's floor is now the package boundary, not un-inlined local code. Profiling needs an in-tree counter: ptrace is blocked in this environment.
 
 **Round 275 split it into three costs** (see W17): the return-value protocol on
 every pointer-containing return (640 ns for `time.Local()` returning one stable
@@ -433,6 +434,10 @@ protocol for a `Time` specifically. `time.Now()` under 200 ns needs all three.
 See W3b above and round 269: the measurement instrument is now known to be
 4.3 us per call, so the earlier attribution to the sovereign arena is void.
 Re-measure first, then bisect with counters rather than timers.
+
+**Round 288 re-measured**: 83-84 ms for the 4 MiB fixture (1.27 us/token,
+was 5.4) after stage4 stopped emitting -O0 code. The 50 ms target is unmet and
+what is left is the per-call work that crosses a package boundary.
 
 **Round 275 rules out the mmap churn for the scanner**: 65536 tokens with 66
 mmaps in the whole run, so the 5.6 us per token is CPU on the per-call path
@@ -508,6 +513,11 @@ the 42 s.
 Round 275's table is the evidence; the three costs are independent and each has
 its own fix.
 
+0. **Round 288 measured the whole item again at O2** (stage4 had been emitting
+   -O0 objects; the legacy compiler never did): `t.Add(0)` 436-453 ns (was
+   2640), `t.UTC()` 525-583 (was 2990), and `strace -f -c` shows six mmaps for
+   the whole program - the per-call mmap churn is gone. The 300 ns accept is
+   still missed, and the remainder is the package boundary (see round 288).
 1. **Sovereign group per call when the receiver lives in the callee's frame.**
    `codecSovereignArena` keys groups by receiver address; a receiver created
    inside the callee has a new address every call, so every call runs the create

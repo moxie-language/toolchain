@@ -20767,3 +20767,65 @@ returns a stable pointer is now `time.Local`'s 205 (arena push, check, pop), and
 `time.Now` adds one clock pair and a construction on top. Reaching 200 needs the
 lazy frame arena (W13b) *and* a cheaper stability test; the plan says so, and the
 next round should start with a counter inside `codecIsStableAddr`.
+
+## Round 288: stage4 built every object at -O0, so nothing was ever inlined
+
+Round 287 left one `codecIsStableAddr` at ~125 ns for a pointer to a package
+global and asked for a counter. The counter was never needed: the caller's
+disassembly answered it first. `time.Local` is `return &localLoc`, and its body
+was three calls - `FnArenaPush`, `codecRetStable`, `FnArenaPopFree` - and each
+callee began with a stack frame for every local, because that is what -O0
+codegen looks like. `codecIsStableAddr` made about a dozen such calls
+(`codecOnStack` twice, `rootArenaAddr`, `codecArenaContainsAddr`,
+`lookupCheck`, `codecArenaContains`, `sovGroupInDyingArena`,
+`sovInSovereignDataArena`), and at ~10 cycles of call overhead each that is
+~400 cycles - the whole 125 ns. Nothing was slow except the fact that nothing
+was inlined.
+
+The cause was asymmetric by construction. `objFlags` compiled every
+`.bc -> .o` with `-O0`, and `mem2regBc` ran `opt -passes=mem2reg` and nothing
+else. The legacy compiler, which builds the first binary of every bootstrap,
+creates its TargetMachine at `CodeGenLevelDefault` (O2). So the bootstrap
+compiler emitted optimized code and the compiler it produced emitted -O0 code
+for everything after it: the same source is fast when built by legacy and slow
+when built by stage4. That is the wood-law failure this round actually fixes -
+not a missing optimization, a missing *agreement about one*.
+
+Change, one function and one variable in `_mxc_stage4/main.mx`:
+`mem2regBc` is `optBc` and runs `opt -passes=default<O2>` (the file was already
+compiled with `-Xclang -disable-O0-optnone`, so the functions were never
+optnone and the pass had something to do); `objFlags` is `-O2` instead of
+`-O0`. Both compilers now have the same optimization level. `objFlags` is part
+of the object stamp, so the flag change invalidated every cached object once
+and the next build rebuilt all of them; the generations after that reused them.
+
+Measured, AMD64 musl static, 200k iterations, same benched sources, O0 -> O2:
+
+    time.Now()                     705 -> 191-197 ns   (W13 accept: under 200)
+    time.Local()                   205 ->  55-58 ns    (W17-2 accept: under 100)
+    function returning int32         1 ->   0 ns
+    call that allocates 16 B        50 ->   9-10 ns
+    function returning one stable ptr 15 -> 17-19 ns   (W17-2: under 50)
+    t.Add(0)                      2640 -> 436-453 ns
+    t.UTC()                       2990 -> 525-583 ns
+    scanner, 4 MiB of 64-B lines   349-355 -> 83-84 ms (W14: 1.27 us/token)
+    scanner, 65536 8-byte lines     270-288 -> 68-76 ms
+    compiler binary              8,769,984 -> 3,900,608 B
+    warm compiler build             42 s -> 1.6 s
+    full `build -a` of stage4      1532 s -> 120 s
+    bootstrap (all generations)     ~36 min -> 5m07s
+
+Gates: bootstrap fixpoint `s4b == s4c == a8634a72…`, and a plain
+`build -a ./_mxc_stage4` reproduces the same bytes. quickcheck `--fast`: 14 of
+14 fixtures PASS (tree-cleanliness fails only because this commit was not yet
+made). Phase 8 follows.
+
+What this does NOT fix, and why the remaining numbers look the way they do: the
+unit of optimization is still ONE PACKAGE. `opt` sees a package; clang sees one
+package's object; `llvm-link` merges them only at the end. So a runtime helper
+called from `bufio` or `time` is still a real call, and the return protocol,
+the arena push and the stability check keep their call boundaries across the
+package edge. `t.Add(0)`'s remaining 436 ns and the scanner's remaining
+1.27 us/token are that edge, not un-inlined local code. The next lever would be
+link-time optimization over the merged module, which is a pipeline change with
+its own cost; it is not in this round.

@@ -4,7 +4,8 @@
 
 Moxie pins **LLVM 22** across the whole stack. This is not a preference: the
 legacy Go compiler links `libLLVM-22`, stage4 emits LLVM IR and invokes
-`clang-22`, `llvm-link-22`, `ld.lld-22` and `opt` (for mem2reg), and LLVM
+`clang-22`, `llvm-link-22`, `ld.lld-22` and `opt` (for the per-package
+middle-end), and LLVM
 bitcode is not compatible across major versions. Mixing majors produces
 bitcode that one of the tools cannot read, and the failure surfaces late, at
 link time.
@@ -14,7 +15,7 @@ link time.
 | clang | 22 | `.ll` -> `.bc` -> `.o` compilation | yes |
 | ld.lld | 22 | final link of every binary | yes |
 | llvm-link | 22 | merging the runtime bake | yes |
-| opt | 22 | `-passes=mem2reg` on compiled packages | yes |
+| opt | 22 | `-passes=default<O2>` on compiled packages | yes |
 | llvm-extract | 22 | extracting functions during IR validation | yes |
 | libLLVM | 22 | linked into the legacy Go compiler | bootstrap only |
 | Go | 1.25+ | building the legacy bootstrap compiler | bootstrap only |
