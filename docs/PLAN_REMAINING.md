@@ -419,16 +419,35 @@ that package is the worst case in the tree:
   win (1.5x on every bench). `llc -O2` is the same backend without the
   optimizer: clang -O2 quality, 2.2 s for the runtime module. build.sh checks
   llc's major beside clang's.
-- **Tuning that is left.** A cold netsmoke server build is 25.7 min (peak
-  3.67 GB) and a warm one is 0.6 s, so the cost is per package content, not
-  per build. The two levers, in order: parallel object compiles (the `-j`
-  machinery exists and `adaptiveJobs` reports 1 here because `cFreeMem` is
-  divided by a 4 GB per-worker budget that the optimizer no longer needs), and
-  the inliner's duplication on the packages it does optimize.
+- **Parallelism is blocked by a correctness bug, not the memory budget.** `-j 4`
+  on the netsmoke server fails in 39 s with `cannot use value of type
+  crypto/internal/fips140/ecdh.PublicKey as crypto/internal/fips140.PublicKey`
+  and `parallel build failed` (peak RSS 4.0 GB, so not resource exhaustion).
+  Serial builds of the same tree are green, so the parallel package path gives
+  the same named type two identities when packages are checked concurrently.
+  Until that is fixed the build is serial, and a cold netsmoke server build is
+  25.7 min (peak 3.67 GB); a warm one is 0.6 s, so the cost is per package
+  content, not per build.
 
 **Accept:** a cold `bash tests/unitrun.sh --phases 8 -j 1 --force` completes
 inside its timeouts with peak RSS under 2 GB per worker, and the bench numbers
 of round 288 hold (W13, W14, W17).
+
+## W23. Parameter immutability is documented but not enforced (round 292)
+
+The memory model says parameters are immutable borrows and that writing through
+a parameter pointer is a compile-time error. Measured: it is not. Both
+compilers accept `p.x = 7` through a `*T` parameter and `n = 5` on an `int64`
+parameter, and neither `legacy/compiler/restrict.go` nor stage4's checks have a
+parameter rule at all. The tree depends on the current behaviour - W10 records
+570 pointer-parameter field writes - so this is a migration, not a bug fix.
+
+**Decision needed**: either implement the rule and migrate those 570 sites (a
+campaign of its own, and one that would make every callee-that-fills-a-struct
+return the value instead), or correct CLAUDE.md to describe the model as it is
+and stop deriving arena arguments from immutability. Until one of the two
+happens, no arena reasoning may assume a callee cannot write through a
+parameter.
 
 ## W8. Opportunistic cleanups (do while in the neighbourhood)
 

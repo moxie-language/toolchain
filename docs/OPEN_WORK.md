@@ -20995,3 +20995,52 @@ it - the next instrument is the call-site attribution the ledger needs, and
 W2's "no growth over 100 calls" is therefore measured, not met.
 
 Gates: bootstrap fixpoint `s4b == s4c == 4a1080da`.
+
+## Round 292: what the compiler does not enforce about parameters, and the
+parallel build's failure
+
+Three measurements taken while closing out W5/W22, each of which changes what a
+plan item should say.
+
+**A pointer parameter can be written through, in both compilers.** The memory
+model in CLAUDE.md says parameters are immutable borrows and that writing
+through a parameter pointer is a compile-time error, enforced by the compiler
+rather than by page protection, and that this is why parameters never need deep
+copying across arena boundaries. It is not enforced:
+
+    type T struct { x int64; y []byte }
+    func writeThroughParam(p *T) { p.x = 7; p.y = []byte{:4} }
+    func plainParam(n int64) { n = 5 }        // reassigning the parameter itself
+
+Both compile and run (prints 7) with stage4 (`4a1080da`) and with the legacy
+compiler, and `legacy/compiler/restrict.go` has no parameter-immutability check
+at all. So the two compilers agree - wood law is satisfied - but the property
+the model rests on is not a property of the language. It cannot be switched on
+now either: W10's note records 570 pointer-parameter field writes in the tree,
+so enforcement is a migration, not a bug fix. Recorded as W23; the honest
+consequence today is that "a callee cannot write through a parameter" must not
+be assumed by any arena argument.
+
+**The parallel package build is broken, not just memory-capped.**
+`adaptiveJobs` reports 1 on this machine, so `-j` was never exercised. Forcing
+`-j 4` on the netsmoke server fails in 39 s with type-identity errors, not
+resource exhaustion:
+
+    nist.mx:56: cannot use value of type crypto/internal/fips140/ecdh.PublicKey
+                 as crypto/internal/fips140.PublicKey
+    mxc: parallel build failed      (peak RSS 4.0 GB)
+
+Serial builds of the same tree are green (phase 8), so the defect is the
+parallel package path's shared type state: two packages that name the same type
+get different identities when they are type-checked concurrently. W22 keeps the
+parallelism as its target but the blocker is this, not the memory budget.
+
+**W5 closes by measurement, not by conversion.** The TLS record path does copy
+the payload once per record (`payload = payload[explicitNonceLen:]`), and the
+plan said to convert it only if the record path grows: phase 8's
+no-accumulation unit reports rss 21112 kB -> 21344 kB over 400 exchanges
+(+232 kB inline, +0 kB spawned), so the copies are frame-transient and the
+"convert to an offset" risk (a view returned across a frame) is not worth
+taking. `debug/gosym`'s per-symbol slices have exactly one consumer, the
+`gosym_pclntab` fixture - the only other mention is a comment in
+`encoding/binary` - so the O(n^2) parse has no production path to be slow on.
