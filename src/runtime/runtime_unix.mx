@@ -329,10 +329,18 @@ func sleepTicks(d timeUnit) {
 	}
 }
 
+// clockScratch is the timespec the clock readers write into.
+//
+// A local `timespec{}` whose address is passed to clock_gettime has an escaping
+// address, so the compiler allocates it through runtime.alloc on every clock
+// read - two arena allocations per time.Now (wall and monotonic). One domain is
+// one thread, so a package-level scratch cannot be raced; it is per-process, and
+// spawn forks.
+var clockScratch timespec
+
 func getTime(clock int32) (r0 uint64) {
-	ts := timespec{}
-	clock_gettime(clock, &ts)
-	return uint64(ts.tv_sec)*1000*1000*1000 + uint64(ts.tv_nsec)
+	clock_gettime(clock, &clockScratch)
+	return uint64(clockScratch.tv_sec)*1000*1000*1000 + uint64(clockScratch.tv_nsec)
 }
 
 // Return monotonic time in nanoseconds.
@@ -346,10 +354,9 @@ func ticks() (r0 timeUnit) {
 
 //:linkname now time.now
 func now() (sec int64, nsec int32, mono int64) {
-	ts := timespec{}
-	clock_gettime(clock_REALTIME, &ts)
-	sec = int64(ts.tv_sec)
-	nsec = int32(ts.tv_nsec)
+	clock_gettime(clock_REALTIME, &clockScratch)
+	sec = int64(clockScratch.tv_sec)
+	nsec = int32(clockScratch.tv_nsec)
 	mono = nanotime()
 	return
 }

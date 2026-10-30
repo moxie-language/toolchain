@@ -20667,3 +20667,34 @@ The scanner re-measured with the fast path in place: 4 MiB of 64-byte lines is
 `Scan`'s cost is still its own work (5.4 us per token), not the codec. W14 keeps
 its numbers and its target; the next instrument is a counter inside `Scan`, as
 round 269 concluded.
+
+## Round 285: a clock read no longer allocates
+
+`now()` and `getTime()` each built a `local timespec{}` and passed its address to
+`clock_gettime`. An address that escapes gets allocated through `runtime.alloc`,
+so every `time.Now` made two arena allocations - one for the wall clock, one for
+the monotonic - and every `nanotime()` one more. A domain is one thread and spawn
+forks, so the scratch can be a package global:
+
+    var clockScratch timespec
+
+    time.Now()   1360 -> 1250 ns
+
+The rest of the round is the attribution W17-3 needed, and it is worth recording
+because the obvious answers are wrong:
+
+- The codec is gone from this path (round 283): the fast path is taken, the slow
+  one is dead code in the function.
+- The two clock reads are CHEAP. Dropping the monotonic read and re-measuring
+  moved `time.Now` by 80 ns, so a musl `clock_gettime` - which goes through its
+  own vDSO pointer, confirmed in the disassembly - is ~80 ns, not the ~580 the
+  first estimate assumed.
+- `time.Local()` is 205 ns of it, and `struct with a stable pointer` returned
+  from a function is 15 ns, so the return path is not the remainder either.
+- The arena push is not it either: `Local()` pays the same one.
+
+So ~850 ns of `time.Now` is still unattributed, inside its own construction path,
+and the next instrument has to be an in-runtime counter (call counts and bytes,
+not timers) - the same conclusion round 269 reached. What this round does settle
+is W13's plan: the vDSO shim was never the problem, so a direct-vDSO rewrite
+would buy at most ~160 ns and is off the list.
