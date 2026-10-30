@@ -528,6 +528,53 @@ No code change was needed - the tree has been writing through parameters all
 along. What changed is that the model no longer claims otherwise, so arena
 arguments must rest on lifetime, not on permission.
 
+## W24. Return values should be caller-owned storage (sret), not callee frame
+
+The model says both sides of a call belong to the caller: parameters are
+caller-owned, and a result should be created in the caller's arena too, so
+assigning a parameter into a result is a SHALLOW copy (the value, or a
+container's references) and only what the callee creates itself is
+function-scoped and needs relocating.
+
+State of the code today, measured:
+
+- **The ABI has no sret at all.** `needsSret` (`_mxc_stage4/ir_util.mx:189`)
+  returns `false` unconditionally, and `legacy/compiler/` mentions sret nowhere.
+  So every result travels in registers/an aggregate value, the callee builds it
+  in its own frame, and the caller stores it into caller memory AFTER the call.
+- The *storage* is therefore caller-owned only from the caller's store onwards;
+  during the call the value lives in the callee's frame. That is precisely the
+  window the model wants closed.
+- The *interior* is already handled the way the model wants: a pointer into a
+  caller arena (a parameter's data) is aliased, not copied (`codecIsStableAddr`
+  keeps ancestor arenas stable), and callee-created pointees are relocated into
+  the caller's arena at return. `codecRetStable` is the fast path for "nothing
+  needs relocating".
+
+The smallest correct implementation, bilateral:
+
+1. sret for the return types that go through the return protocol (the ones
+   `typeNeedsCodec` already selects), never for `externalSymbol` (C ABI) or
+   declarations.
+2. The caller's slot is its own alloca at the call site (one per call site,
+   reused per call - NOT a fresh caller-arena allocation per call, which would
+   grow the caller's arena linearly in a loop).
+3. The callee's named results alias the slot, so `result = param` is a shallow
+   store into caller memory and the relocation at return only has to move what
+   the callee itself allocated.
+4. Legacy first, then stage4: function types (`getLLVMFunctionType`), calls,
+   returns, interface dispatch, closures and the interp all have to agree.
+
+**Why it is its own campaign**: it changes the ABI of every Moxie function that
+returns pointers, in both compilers, and a half-landed ABI change breaks the
+bootstrap rather than one package. The tree is green now (phase 8, sweep,
+quickcheck), so this starts from a known-good point.
+
+**Accept**: a fixture that returns a struct built from a parameter and a
+callee-local, checked to hold the parameter's data by identity and the local's
+by copy; bootstrap fixpoint; phase 8; and the bench unchanged or better (it
+saves the callee's result alloca and the caller's post-call store).
+
 ## W8. Opportunistic cleanups (do while in the neighbourhood)
 
 - `src/math/big/decimal.mx` `rsh(x *decimal, s)`: writes `x.mant` through a

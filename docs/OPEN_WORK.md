@@ -21175,3 +21175,30 @@ that justified a shape by the old rule (big.Float.Int returning instead of
 writing an out-parameter, codecEnsure being a free function, the gosym test's
 receiver) now say what is actually true - a callee's allocation cannot be
 relocated into a caller object through a parameter, only through a return.
+
+## Round 297: the return slot is the callee's, and that is the gap W24 names
+
+The model now says parameters AND results are caller-owned, with a result
+assignment being a shallow copy. The parameters half is true. The results half
+is true only from the caller's store onwards, and this round measured why:
+
+- `needsSret` in `_mxc_stage4/ir_util.mx` returns `false` unconditionally, and
+  `legacy/compiler/` has no sret anywhere. Every result therefore travels in
+  registers/an aggregate, the callee builds it in its own frame, and the caller
+  stores it into caller memory after the call returns.
+- The interior already behaves the way the model wants: a pointer into a caller
+  arena (parameter data) is aliased rather than copied, and callee-created
+  pointees are relocated into the caller's arena - that is what `codecRetStable`
+  (round 283) and the ancestor-arena rule decide.
+- The stage4 plumbing for sret exists and is dead: the emitter declares
+  `ptr sret(<T>)` and the call sites allocate a slot when `needsSret` says so,
+  so the change is to select the right return types and then make it true in
+  legacy as well.
+
+Doing it as a footnote would be the wrong shape: it changes the ABI of every
+Moxie function that returns pointers, in both compilers, and a half-landed ABI
+change breaks the bootstrap rather than a package. W24 carries the four-step
+plan, the one trap that matters (the caller's slot must be one alloca per CALL
+SITE, not a fresh caller-arena allocation per call, which would grow the
+caller's arena linearly in a loop), and the acceptance test. The tree stays
+green at `19a2606f` until that campaign starts.
