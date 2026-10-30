@@ -111,13 +111,6 @@ func Experiments() (exps [][]byte) {
 	return e[:]
 }
 
-func _experiments() (exps [2][]byte) {
-	return [2][]byte{
-		NoExperiment: "None",
-		AllocFree:    "AllocFree",
-	}
-}
-
 // Experimental events.
 const (
 	MaxEvent EventType = 127 + iota
@@ -152,8 +145,112 @@ func Specs() (specs []EventSpec) {
 	return s[:]
 }
 
-func _specs() (specs [137]EventSpec) {
-	return [137]EventSpec{
+// GoStatus is the status of a goroutine.
+//
+// They correspond directly to the various goroutine states.
+type GoStatus uint8
+
+const (
+	GoBad GoStatus = iota
+	GoRunnable
+	GoRunning
+	GoSyscall
+	GoWaiting
+)
+
+func (s *GoStatus) String() (str string) {
+	switch *s {
+	case GoRunnable:
+		return "Runnable"
+	case GoRunning:
+		return "Running"
+	case GoSyscall:
+		return "Syscall"
+	case GoWaiting:
+		return "Waiting"
+	}
+	return "Bad"
+}
+
+// ProcStatus is the status of a P.
+//
+// They mostly correspond to the various P states.
+type ProcStatus uint8
+
+const (
+	ProcBad ProcStatus = iota
+	ProcRunning
+	ProcIdle
+	ProcSyscall
+
+	// ProcSyscallAbandoned is a special case of
+	// ProcSyscall. It's used in the very specific case
+	// where the first a P is mentioned in a generation is
+	// part of a ProcSteal event. If that's the first time
+	// it's mentioned, then there's no GoSyscallBegin to
+	// connect the P stealing back to at that point. This
+	// special state indicates this to the parser, so it
+	// doesn't try to find a GoSyscallEndBlocked that
+	// corresponds with the ProcSteal.
+	ProcSyscallAbandoned
+)
+
+func (s *ProcStatus) String() (str string) {
+	switch *s {
+	case ProcRunning:
+		return "Running"
+	case ProcIdle:
+		return "Idle"
+	case ProcSyscall:
+		return "Syscall"
+	}
+	return "Bad"
+}
+
+const (
+	// MaxBatchSize sets the maximum size that a batch can be.
+	//
+	// Directly controls the trace batch size in the runtime.
+	//
+	// NOTE: If this number decreases, the trace format version must change.
+	MaxBatchSize = 64 << 10
+
+	// Maximum number of PCs in a single stack trace.
+	//
+	// Since events contain only stack ID rather than whole stack trace,
+	// we can allow quite large values here.
+	//
+	// Directly controls the maximum number of frames per stack
+	// in the runtime.
+	//
+	// NOTE: If this number decreases, the trace format version must change.
+	MaxFramesPerStack = 128
+
+	// MaxEventTrailerDataSize controls the amount of trailer data that
+	// an event can have in bytes. Must be smaller than MaxBatchSize.
+	// Controls the maximum string size in the trace.
+	//
+	// Directly controls the maximum such value in the runtime.
+	//
+	// NOTE: If this number decreases, the trace format version must change.
+	MaxEventTrailerDataSize = 1 << 10
+)
+
+// The fixed-extent tables below are storage, built once in init() and read
+// through the package variable. A Moxie package variable carries no
+// initializer, so the literals live in init(); callers keep the accessor
+// and pay a header load instead of a copy of the whole table.
+var (
+	experimentsTbl [][]byte
+	specsTbl []EventSpec
+)
+
+func init() {
+	experimentsTbl = [][]byte{
+		NoExperiment: "None",
+		AllocFree:    "AllocFree",
+	}
+	specsTbl = []EventSpec{
 	// "Structural" Events.
 	EvEventBatch: {
 		Name: "EventBatch",
@@ -503,93 +600,6 @@ func _specs() (specs [137]EventSpec) {
 	}
 }
 
-// GoStatus is the status of a goroutine.
-//
-// They correspond directly to the various goroutine states.
-type GoStatus uint8
+func _experiments() (r [][]byte) { return experimentsTbl }
 
-const (
-	GoBad GoStatus = iota
-	GoRunnable
-	GoRunning
-	GoSyscall
-	GoWaiting
-)
-
-func (s *GoStatus) String() (str string) {
-	switch *s {
-	case GoRunnable:
-		return "Runnable"
-	case GoRunning:
-		return "Running"
-	case GoSyscall:
-		return "Syscall"
-	case GoWaiting:
-		return "Waiting"
-	}
-	return "Bad"
-}
-
-// ProcStatus is the status of a P.
-//
-// They mostly correspond to the various P states.
-type ProcStatus uint8
-
-const (
-	ProcBad ProcStatus = iota
-	ProcRunning
-	ProcIdle
-	ProcSyscall
-
-	// ProcSyscallAbandoned is a special case of
-	// ProcSyscall. It's used in the very specific case
-	// where the first a P is mentioned in a generation is
-	// part of a ProcSteal event. If that's the first time
-	// it's mentioned, then there's no GoSyscallBegin to
-	// connect the P stealing back to at that point. This
-	// special state indicates this to the parser, so it
-	// doesn't try to find a GoSyscallEndBlocked that
-	// corresponds with the ProcSteal.
-	ProcSyscallAbandoned
-)
-
-func (s *ProcStatus) String() (str string) {
-	switch *s {
-	case ProcRunning:
-		return "Running"
-	case ProcIdle:
-		return "Idle"
-	case ProcSyscall:
-		return "Syscall"
-	}
-	return "Bad"
-}
-
-const (
-	// MaxBatchSize sets the maximum size that a batch can be.
-	//
-	// Directly controls the trace batch size in the runtime.
-	//
-	// NOTE: If this number decreases, the trace format version must change.
-	MaxBatchSize = 64 << 10
-
-	// Maximum number of PCs in a single stack trace.
-	//
-	// Since events contain only stack ID rather than whole stack trace,
-	// we can allow quite large values here.
-	//
-	// Directly controls the maximum number of frames per stack
-	// in the runtime.
-	//
-	// NOTE: If this number decreases, the trace format version must change.
-	MaxFramesPerStack = 128
-
-	// MaxEventTrailerDataSize controls the amount of trailer data that
-	// an event can have in bytes. Must be smaller than MaxBatchSize.
-	// Controls the maximum string size in the trace.
-	//
-	// Directly controls the maximum such value in the runtime.
-	//
-	// NOTE: If this number decreases, the trace format version must change.
-	MaxEventTrailerDataSize = 1 << 10
-)
+func _specs() (r []EventSpec) { return specsTbl }

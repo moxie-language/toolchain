@@ -180,22 +180,18 @@ func bytesConcatMove(x, y []byte) []byte {
 func stringFromRunes(runeSlice []rune) (s _string) {
 	// Count the number of characters that will be in the string.
 	for _, r := range runeSlice {
-		_, numBytes := encodeUTF8(r)
-		s.length += numBytes
+		s.length += uintptr(utf8Len(r))
 	}
 	s.cap = s.length
 
 	// Allocate memory for the string.
 	s.ptr = (*byte)(alloc(s.length, nil))
 
-	// Encode runes to UTF-8 and store the resulting bytes in the string.
-	index := uintptr(0)
+	// Encode runes to UTF-8 straight into it.
+	dst := unsafe.Slice(s.ptr, int32(s.length))
+	off := int32(0)
 	for _, r := range runeSlice {
-		utf8buf, numBytes := encodeUTF8(r)
-		for _, c := range utf8buf[:numBytes] {
-			*(*byte)(unsafe.Add(unsafe.Pointer(s.ptr), index)) = c
-			index++
-		}
+		off += encodeUTF8At(dst, off, r)
 	}
 
 	return
@@ -227,15 +223,11 @@ func stringToRunes(s string) []int32 {
 
 // Create a string from a Unicode code point.
 func stringFromUnicode(x rune) _string {
-	utf8buf, length := encodeUTF8(x)
-	// Copy the stack-local array to the heap. Returning &utf8buf would be a
-	// stack escape - the _string.ptr would point into a dead stack frame after
-	// return. Named utf8buf rather than array: `array` is an imported package
-	// name elsewhere in this package, and stage4's lookupObject consults a
-	// scope shared across the package's files, so it reads as a shadow.
-	buf := alloc(length, nil)
-	memcpy(buf, unsafe.Pointer(&utf8buf), length)
-	return _string{ptr: (*byte)(buf), length: length, cap: length}
+	length := utf8Len(x)
+	buf := alloc(uintptr(length), nil)
+	dst := unsafe.Slice((*byte)(buf), length)
+	encodeUTF8At(dst, 0, x)
+	return _string{ptr: (*byte)(buf), length: uintptr(length), cap: uintptr(length)}
 }
 
 // Iterate over a string.
@@ -250,35 +242,64 @@ func stringNext(s string, it *stringIterator) (bool, int32, rune) {
 	return true, i, r
 }
 
-// Convert a Unicode code point into an array of bytes and its length.
-func encodeUTF8(x rune) ([4]byte, uintptr) {
-	// https://stackoverflow.com/questions/6240055/manually-converting-unicode-codepoints-into-utf-8-and-utf-16
-	// Note: this code can probably be optimized (in size and speed).
+// utf8Len is the number of bytes encodeUTF8At writes for x.
+func utf8Len(x rune) (n int32) {
 	switch {
 	case x <= 0x7f:
-		return [4]byte{byte(x), 0, 0, 0}, 1
+		return 1
 	case x <= 0x7ff:
-		b1 := 0xc0 | byte(x>>6)
-		b2 := 0x80 | byte(x&0x3f)
-		return [4]byte{b1, b2, 0, 0}, 2
+		return 2
 	case 0xd800 <= x && x <= 0xdfff:
 		// utf-16 surrogates are replaced with "invalid code point"
-		return [4]byte{0xef, 0xbf, 0xbd, 0}, 3
+		return 3
 	case x <= 0xffff:
-		b1 := 0xe0 | byte(x>>12)
-		b2 := 0x80 | byte((x>>6)&0x3f)
-		b3 := 0x80 | byte((x>>0)&0x3f)
-		return [4]byte{b1, b2, b3, 0}, 3
+		return 3
 	case x <= 0x10ffff:
-		b1 := 0xf0 | byte(x>>18)
-		b2 := 0x80 | byte((x>>12)&0x3f)
-		b3 := 0x80 | byte((x>>6)&0x3f)
-		b4 := 0x80 | byte((x>>0)&0x3f)
-		return [4]byte{b1, b2, b3, b4}, 4
-	default:
-		// Invalid Unicode code point.
-		return [4]byte{0xef, 0xbf, 0xbd, 0}, 3
+		return 4
 	}
+	// Invalid Unicode code point.
+	return 3
+}
+
+// encodeUTF8At writes the UTF-8 encoding of x at off in dst and returns the
+// number of bytes written. dst must have room for four bytes at off.
+//
+// This used to RETURN a [4]byte. A fixed extent is a slice header in Moxie, so
+// that spelling was an array type in the runtime's hottest path AND a copy per
+// code point; writing into the destination the caller already owns is the same
+// work minus the copy. Written at an offset rather than through dst[off:] for
+// the plain reason that a sub-slice is a copy in Moxie.
+func encodeUTF8At(dst []byte, off int32, x rune) (n int32) {
+	switch {
+	case x <= 0x7f:
+		dst[off] = byte(x)
+		return 1
+	case x <= 0x7ff:
+		dst[off] = 0xc0 | byte(x>>6)
+		dst[off+1] = 0x80 | byte(x&0x3f)
+		return 2
+	case 0xd800 <= x && x <= 0xdfff:
+		dst[off] = 0xef
+		dst[off+1] = 0xbf
+		dst[off+2] = 0xbd
+		return 3
+	case x <= 0xffff:
+		dst[off] = 0xe0 | byte(x>>12)
+		dst[off+1] = 0x80 | byte((x>>6)&0x3f)
+		dst[off+2] = 0x80 | byte(x&0x3f)
+		return 3
+	case x <= 0x10ffff:
+		dst[off] = 0xf0 | byte(x>>18)
+		dst[off+1] = 0x80 | byte((x>>12)&0x3f)
+		dst[off+2] = 0x80 | byte((x>>6)&0x3f)
+		dst[off+3] = 0x80 | byte(x&0x3f)
+		return 4
+	}
+	// Invalid Unicode code point.
+	dst[off] = 0xef
+	dst[off+1] = 0xbf
+	dst[off+2] = 0xbd
+	return 3
 }
 
 // Decode a single UTF-8 character from a string.

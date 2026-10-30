@@ -44,8 +44,38 @@ package coverage
 // this were to be the case, we would need a table of some sort below
 // as opposed to a fixed list.
 
-func _rtPkgs() (pkgs [24][]byte) {
-	return [24][]byte{
+// Scoping note: the constants and apis in this file are internal
+// only, not expected to ever be exposed outside of the runtime (unlike
+// other coverage file formats and APIs, which will likely be shared
+// at some point).
+
+// NotHardCoded is a package pseudo-ID indicating that a given package
+// is not part of the runtime and doesn't require a hard-coded ID.
+const NotHardCoded = -1
+
+// HardCodedPkgID returns the hard-coded ID for the specified package
+// path, or -1 if we don't use a hard-coded ID. Hard-coded IDs start
+// at -2 and decrease as we go down the list.
+func HardCodedPkgID(pkgpath []byte) (pkgid int32) {
+	rtPkgs := _rtPkgs()
+	for k, p := range rtPkgs {
+		if p == pkgpath {
+			return (0 - k) - 2
+		}
+	}
+	return NotHardCoded
+}
+
+// The fixed-extent tables below are storage, built once in init() and read
+// through the package variable. A Moxie package variable carries no
+// initializer, so the literals live in init(); callers keep the accessor
+// and pay a header load instead of a copy of the whole table.
+var (
+	rtPkgsTbl [][]byte
+)
+
+func init() {
+	rtPkgsTbl = [][]byte{
 		"internal/asan",
 		"internal/byteorder",
 		"internal/coverage/rtcov",
@@ -73,24 +103,4 @@ func _rtPkgs() (pkgs [24][]byte) {
 	}
 }
 
-// Scoping note: the constants and apis in this file are internal
-// only, not expected to ever be exposed outside of the runtime (unlike
-// other coverage file formats and APIs, which will likely be shared
-// at some point).
-
-// NotHardCoded is a package pseudo-ID indicating that a given package
-// is not part of the runtime and doesn't require a hard-coded ID.
-const NotHardCoded = -1
-
-// HardCodedPkgID returns the hard-coded ID for the specified package
-// path, or -1 if we don't use a hard-coded ID. Hard-coded IDs start
-// at -2 and decrease as we go down the list.
-func HardCodedPkgID(pkgpath []byte) (pkgid int32) {
-	rtPkgs := _rtPkgs()
-	for k, p := range rtPkgs {
-		if p == pkgpath {
-			return (0 - k) - 2
-		}
-	}
-	return NotHardCoded
-}
+func _rtPkgs() (r [][]byte) { return rtPkgsTbl }

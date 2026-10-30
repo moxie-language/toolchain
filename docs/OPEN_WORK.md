@@ -21505,3 +21505,69 @@ constructs through a package boundary.
 Lesson recorded because it cost four rounds: "it builds and the encoder
 round-trips" is not evidence about the encoder's inputs. Compare the OUTPUT of
 the same program under both compilers, for the path you actually changed.
+
+## Round 305: more tables are storage (order tables, trace, image, zstd, coverage)
+
+Converted to `var` + the package's one `init()`: the four ECDSA/ECDH curve-order
+tables each (`_p224Order` ... `_p521Order`), `_scalarMinusOneBytes`,
+`CovMetaMagic`/`CovCounterMagic`, `_rtPkgs`, the trace tables (`_specs`,
+`_experiments`, `_eventKindStrings`, `_tracev2*`, `_orderingDispatch`,
+`_frameFields`, `EventArgTypes`), zstd's FSE baselines and predefined tables,
+`_seqCodeInfo`, `_rfc6979ExtraDataV0`, net's `_defaultNS`/`_flagNames`,
+http2's `_http2padZeros`/`_http2frameNames`/`_http2frameParsers`/`_http2stateName`,
+`_replacementTable` (already), the gif/png interlacing tables and gif's log2
+lookup, and x509's `_publicKeyAlgoName`. Net effect this round: 480 array type
+occurrences left in the tree, down from 574 at the start of the session.
+
+`runtime/string.mx` lost its last array too: `encodeUTF8` used to RETURN a
+`[4]byte` per code point, which is both an array type in the hottest path in the
+runtime and a copy. It writes into the caller's buffer now (`encodeUTF8At`), with
+`utf8Len` for the counting pass. Note the writes are at explicit offsets
+(`dst[off+1] = ...`), not through `dst[off:]` - a sub-slice is a copy in Moxie, so
+the tail would be a throwaway.
+
+Verified: ECDSA sign/verify on P-224/P-256/P-384/P-521, ECDH shared-secret
+agreement, and x509 create+parse (which uses the algorithm-name table) all pass
+on the bootstrapped compiler; the html/idna/norm/syscall probe, the rune probe,
+the mirror (stat/readdir/pipe2/socketpair) probe and the keyed-literal probe all
+pass; fixpoint `s4b == s4c == d66002eb`.
+
+## Round 306: OPEN BUG - the second `idna.Lookup().ToUnicode` call corrupts the arena under stage4
+
+Found while probing round 305's tables, and NOT caused by it: it reproduces at
+commit 14205680 (round 304) and with `src/runtime/string.mx` reverted to that
+commit's version. It is the top open item.
+
+    u := idna.Lookup().ToUnicode("xn--bcher-kva.example")   // OK
+    u2 := idna.Lookup().ToUnicode("xn--bcher-kva.example")  // SIGSEGV
+
+What is known, measured:
+
+- One call is fine; the second faults. `Punycode().ToUnicode` twice is fine.
+  `Lookup().ToUnicode` on a label WITHOUT the `xn--` prefix, twice, is fine.
+  `Lookup().ToASCII` twice is fine. So the trigger is the ace-prefix decode path
+  (`decode` -> `labels.set` -> `fromPuny` = `validateFromPunycode` -> NFC +
+  `_trie().lookupString`) inside a full profile.
+- Under gdb the fault is inside `ArenaReset`: `mov 0x50(%rbx),%eax` (reading
+  `a.scope`) and, with tracing, in the region walk - the faulting address is a
+  page-aligned mmap base, i.e. the arena that is being reset has already been
+  unmapped.
+- The function-arena depth is balanced: `0` before the first call and `0` after
+  it, so this is not a leaked frame; it is a released arena being reset again.
+- Under the LEGACY compiler the same probe prints two `SOVFREE` lines (the
+  sovereign-group releases) and succeeds; under stage4 no `SOVFREE` runs at all
+  before the crash. The divergence is therefore in stage4's code, and the
+  sovereign-group lifetime machinery (`arenaReleaseGroups`,
+  `sovInvalidateArena`, `codecSovereignFree`, `sovReleaseArena`) is the shape
+  to look at: `labelIter` in idna is a self-mutating type, so `&labels` gets a
+  sovereign group keyed by a STACK address, and a group keyed by a stack address
+  that is reused by the next call is exactly the aliasing `ArenaReset`'s own
+  comment describes.
+- It became reachable only after round 304 fixed promoted func-typed fields:
+  before that, `p.mapping(p, s)` did not compile correctly, so this path returned
+  a wrong answer instead of running. The wrong answer was never the lesser evil;
+  the arena bug behind it is now visible.
+
+Nothing in the current gates reaches it (quickcheck and phase 8 pass), which is
+why it ships recorded rather than silently. The repro is six lines and is the
+first thing to run when picking this up.
