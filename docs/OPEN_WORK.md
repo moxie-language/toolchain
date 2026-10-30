@@ -18399,8 +18399,9 @@ round trips at 200 bits, ed25519 round trip and RFC 8032 vectors - is
 identical to Go 1.25.3 from a copy-rule compiler, and was zeroes before.
 
 Array bases need nothing: `tr.blk[:]` on a `[512]byte` field is a view of the
-array, which is the rule's carve-out (there is no allocation to make, so there
-is nothing to copy). That is why 26 of the 40 read sites are untouched and the
+array (round 281: not a carve-out - the array is a header with a negative
+capacity and the slice is that header with the cap sign flipped; there is no
+allocation to make, so there is nothing to copy). That is why 26 of the 40 read sites are untouched and the
 nine that were slices - zip's descriptor, h2's frame header, socks' reply,
 rsa's non-zero byte, net/parse's line buffer, saferio, suffixarray, dnsclient -
 became `io.ReadFullIntoN(r, dst, off, n)`, the span form of ReadFull.
@@ -19554,6 +19555,11 @@ copy cold, diff both logs and the resolved cache dirs).
 
 ## Round 262: the array campaign is about the view, not the type
 
+> **Corrected in round 281**: the three "load-bearing" groups below are not
+> exceptions. An array is a slice header with a NEGATIVE capacity, which is the
+> accounting that makes all three ordinary bookkeeping - see round 281 and W7.
+> The measurements below stand; the conclusions drawn from them do not.
+
 Round 251 sized W7 as "823 array-type sites, convert them, then ban the array
 type". Counting it properly before spending a session on it:
 
@@ -19582,8 +19588,8 @@ limb.
 
     writeFirst(a[:])   ->  a[0] == 0xAB
 
-An array base is a *write-through view*, which is exactly the carve-out in "an
-array base is still a view". 329 call sites depend on it, most in the shape
+An array base is a *write-through view* (round 281: the answer is not a
+carve-out but the header's negative capacity - see W7). 329 call sites depend on it, most in the shape
 `Read(fd, b[:])` where the callee writes into a fixed buffer. (`copy(arr[a:b],
 ...)` is already a **compile error** - the compiler refuses a copy destination
 that is a sub-slice - so the carve-out that remains is the array base itself.)

@@ -286,9 +286,9 @@ integers, negatives, denormals) prints identically to
 Round 262 rewrote this item around three groups it called "load-bearing
 exceptions" - the ABI structs, the fiat/nistec field elements, and the array
 view. That was wrong, and this replaces it: none of the three is an exception,
-because the array's accounting is already the slice's. An array is a slice
-header - (base, len, cap) - carrying a **negative cap**. The negative capacity is
-the whole mechanism:
+because an array's accounting does not have to be invented: it is the slice
+header's. An array is a slice header - (base, len, cap) - carrying a **negative
+cap**, and the negative capacity is the whole mechanism:
 
 - `cap(arr)` is negative, so nothing can grow it, and `push`, `pop`, `resize` and
   `append` on it are **compile errors**, not runtime checks.
