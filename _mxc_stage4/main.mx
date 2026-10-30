@@ -233,18 +233,17 @@ func fatal(msg string) {
 	exitNow(1)
 }
 
-// optBc optimizes one package's generated bitcode before it is cached.
+// optBc optimizes one package's generated bitcode before it is cached, if the
+// module is small enough to afford it.
 //
-// It used to run `mem2reg` alone and every object was then compiled at -O0,
-// so nothing was ever inlined: two runtime helpers in the same package still
-// paid a call across a function boundary, and the small ones (descriptor
-// accessors, arena lookups, the stability test) are where the per-call time
-// of W13/W14 lives. Measured with 200k iterations: `time.Local` cost 205 ns
-// for `return &localLoc`, ~125 of that one `codecIsStableAddr` call - about a
-// dozen non-inlined calls at ~10 cycles each. The legacy compiler has always
-// emitted optimized code (its TargetMachine runs at CodeGenLevelDefault), so
-// O2 here makes stage4 match the bootstrap compiler instead of adding a new
-// codegen decision.
+// The middle-end is what round 288 was about. Until then this ran `mem2reg`
+// alone and every object was compiled at -O0, so nothing was ever inlined: two
+// runtime helpers in the same package still paid a call across a function
+// boundary, and the small ones (descriptor accessors, arena lookups, the
+// stability test) are where the per-call time of W13/W14 lives. Measured with
+// 200k iterations: `time.Local` cost 205 ns for `return &localLoc`, ~125 of
+// that one `codecIsStableAddr` call - about a dozen non-inlined calls at ~10
+// cycles each. With the middle-end, 56 ns.
 //
 // The driver speaks ONE LLVM major: whichever the host's clang/opt/link
 // report, which build.sh asserts they all agree on. Names are unversioned
@@ -252,15 +251,38 @@ func fatal(msg string) {
 // lie that let this stack drift, and mixing majors inside one pipeline
 // produces bitcode the next tool cannot read (a newer opt rewrites
 // llvm.returnaddress into a name the older clang cannot lower).
+//
+// optBcBudget caps that middle-end by module size. Its cost is superlinear in
+// the size of the module and the generated IR is large: net/http's module is
+// 18 MB with a single 90,000-line function (serveContent), and
+// `opt -passes=default<O2>` on it reaches 10.7 GB of RSS and runs for many
+// minutes - it does not finish on a 16 GB machine, which is why phase 8 could
+// not build the netsmoke server. The numbers behind the cap: 0.73 MB -> 304 MB
+// and 26 s, 18 MB -> over 10 GB.
+//
+// Modules under the budget are the ones the round-288 win is made of (the
+// runtime and bufio, the two packages the per-call measurements come from), so
+// they keep it. A module over the budget gets exactly what the whole tree got
+// before round 288: mem2reg. Bounded cost, no cliff.
+const optBcBudget = int64(6 << 20)
+
 func optBc(bcFile string) {
+	passes := "default<O2>"
+	sz := int64(0)
+	if data, ok := mxutil.ReadFile(bcFile); ok {
+		sz = int64(len(data))
+	}
+	if sz > optBcBudget {
+		passes = "mem2reg"
+	}
 	tmp := bcFile | ".opt"
-	rc := run([]string{"opt", "-passes=default<O2>", bcFile, "-o", tmp})
+	rc := run([]string{"opt", "-passes=" | passes, bcFile, "-o", tmp})
 	if rc != 0 {
 		fatal("opt failed for " | bcFile)
 	}
-	data, ok := mxutil.ReadFile(tmp)
-	if ok {
-		mxutil.WriteFile(bcFile, data, 0644)
+	out, wok := mxutil.ReadFile(tmp)
+	if wok {
+		mxutil.WriteFile(bcFile, out, 0644)
 	}
 }
 
@@ -271,11 +293,10 @@ func optBc(bcFile string) {
 // make it. One flag set means an object is a function of (.bc, clang) alone,
 // which is what makes it reusable across builds.
 //
-// -O2, not -O0: optBc has already run the middle-end, and -O0 here would
-// still throw away the backend's own inlining of the small helpers a
-// descriptor walk is made of. This is the flag the legacy compiler's
-// TargetMachine has always had.
-var objFlags = []string{"-O2", "-ffunction-sections", "-fdata-sections"}
+// These are the flags llc is given in addition to -O2 (see objTool). The
+// section flags are what makes --gc-sections able to drop an unreferenced
+// function, and they are not implied by the optimization level.
+var objFlags = []string{"-function-sections", "-data-sections"}
 
 // toolVersion returns a tool's version line, or "" when it cannot be read.
 func toolVersion(tool string) (s string) {
@@ -324,7 +345,7 @@ func objStampFor(clang, triple string) (s string) {
 		}
 		flags = flags | f
 	}
-	return bst.clangVer | "|" | triple | "|" | flags
+	return bst.clangVer | "|llc|" | triple | "|" | flags
 }
 
 func objReusable(oFile, stamp string) (ok bool) {
@@ -342,11 +363,37 @@ func objReusable(oFile, stamp string) (ok bool) {
 	return got && string(data) == stamp
 }
 
+// objTool returns the code generator that turns bitcode into an object: llc,
+// beside the clang the driver was told to use (same LLVM distribution, one
+// major, which build.sh asserts).
+//
+// llc, not clang -c: clang -c at -O2 runs the MIDDLE-END again over bitcode
+// optBc has already optimized, which is 38 s per module on this tree (the
+// netsmoke server's 153 objects took 97 minutes and had to be killed). llc is
+// the same backend with the same -O2 codegen and no optimizer: 2.2 s for the
+// 1.8 MB runtime module against clang's 0.7 s at -O0 and 5.4 s at -O2, and it
+// keeps the -O2 code quality clang -O0 loses (measured: -O0 objects cost 1.5x
+// on every per-call bench, time.Now 293 vs 206 ns).
+func objTool(clang string) (s string) {
+	slash := int32(-1)
+	for i := int32(0); i < int32(len(clang)); i++ {
+		if clang[i] == '/' {
+			slash = i
+		}
+	}
+	if slash < 0 {
+		return "llc"
+	}
+	return clang[:slash+1] | "llc"
+}
+
 func objCmd(clang, triple, bcFile, oFile string) (a []string) {
 	a = []string{:0:12}
-	push(a, clang)
-	push(a, "--target=" | triple)
-	push(a, "-c")
+	push(a, objTool(clang))
+	push(a, "-O2")
+	push(a, "-filetype=obj")
+	push(a, "-mtriple=" | triple)
+	push(a, "-relocation-model=static")
 	for _, f := range objFlags {
 		push(a, f)
 	}
@@ -7830,9 +7877,9 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			nproc = int32(len(deferredClang))
 		}
 		memLine("  loop-end")
-		mxutil.WriteStr(2, "  clang: " | simpleItoa(len(deferredClang)) | " files, " | simpleItoa(nproc) | " parallel\n")
+		mxutil.WriteStr(2, "  objects: " | simpleItoa(len(deferredClang)) | " files, " | simpleItoa(nproc) | " parallel\n")
 		if !runPool(deferredClang, nproc) {
-			fatal("clang failed")
+			fatal("object compile failed")
 		}
 		// Cache the .bc files
 		for _, pkg := range pkgs {

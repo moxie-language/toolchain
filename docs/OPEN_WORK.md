@@ -20888,3 +20888,50 @@ tuning question (inline threshold, per-object -O level, parallel objects), not
 a correctness one, and it is recorded in W22 rather than guessed at now.
 
 Gates: bootstrap fixpoint `s4b == s4c == cc1afd93`, quickcheck `--fast` green.
+
+## Round 290: -O2 has a size, and the backend is llc's job, not clang -c's
+
+Round 289 bounded the *optimizer* on one bad shape (a table-sized aggregate).
+Phase 8 then found the bound was in the wrong place: `net/http` is not a bad
+shape, it is simply 18 MB of bitcode with a 90,000-instruction function
+(`serveContent`), and `opt -passes=default<O2>` on it reaches 10.7 GB of RSS
+and runs for many minutes. The netsmoke server build could not finish - the
+gate never got past it. Three measurements decided the policy:
+
+- **clang -c -O2 objects: 38 s per module.** 153 objects would have been 97
+  minutes (measured: 19 objects in 12 minutes, then killed). clang re-runs the
+  MIDDLE-END over bitcode `opt` has just optimized.
+- **clang -c -O0 objects: 0.6 s, but 1.5x slower program.** FastISel costs the
+  whole win: `time.Local` 59 -> 90 ns, `time.Now` 206 -> 293,
+  scanner 83 -> 129 ms.
+- **llc -O2: clang -O2's code quality without its optimizer.** 2.2 s for the
+  1.8 MB runtime module (clang: 5.4 s), and the bench matches clang -O2:
+  `local` 56-59, `alloc` 9-10, `time.Now` 196-217, scanner 78-80 ms.
+
+So the pipeline is now: `opt` owns the middle-end, bounded by module size;
+`llc` owns codegen at -O2; clang is only the `.ll` -> `.bc` front end.
+
+- **`optBcBudget` = 6 MB.** Modules under it get `default<O2>`; the runtime
+  (~3.5 MB post-opt) and bufio (~3.9 MB) - the two packages every per-call
+  number in rounds 288-289 comes from - are inside it. Modules over it
+  (`net/http` 18 MB, `crypto/tls` ~9 MB) get `mem2reg`, which is exactly what
+  the whole tree got before round 288: bounded cost, no cliff.
+- **`objCmd` runs `llc -O2 -filetype=obj -mtriple=<triple>
+  -relocation-model=static -function-sections -data-sections`**, beside the
+  configured clang (`objTool` swaps the basename). build.sh now checks llc's
+  major with the rest of the tools.
+
+Measured on the netsmoke server (153 modules):
+
+    cold build   1545 s (25.7 min), peak RSS 3.67 GB
+    warm build   0.6 s, byte-identical binary
+    before       killed at 855 s, 19 of 153 objects
+
+`time.Now` is 196-217 ns on this host, so W13's 200 ns target is reached but
+not comfortably under it; the scanner is 78-80 ms against W14's 50 ms, and what
+is left there is the package boundary (the runtime is a separate object, so its
+helpers are still real calls). Both are recorded in the plan as measured, not
+claimed.
+
+Gates: bootstrap fixpoint `s4b == s4c == 3476d547`, and the warm rebuild of a
+binary is byte-identical to its cold build.

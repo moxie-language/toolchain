@@ -34,7 +34,7 @@ if [ -z "$LLVM_MAJOR" ]; then
     echo "error: no llvm-config found; set LLVM_MAJOR to the LLVM major to use" >&2
     exit 1
 fi
-for tool in clang ld.lld opt llvm-link llvm-extract; do need_major "$tool" "$LLVM_MAJOR"; done
+for tool in clang llc ld.lld opt llvm-link llvm-extract; do need_major "$tool" "$LLVM_MAJOR"; done
 if [ -n "$FAIL" ]; then
     echo "error: LLVM $LLVM_MAJOR required (the host's one major). bad/missing:$FAIL" >&2
     echo "  arch:   pacman -S llvm clang lld" >&2

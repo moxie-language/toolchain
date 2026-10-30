@@ -389,11 +389,22 @@ that package is the worst case in the tree:
   10 GB and minutes; with it, 304 MB and 26 s. Everything else in the tree is
   optimized normally. Do not remove the attribute without re-measuring that
   package.
-- **Tuning.** The inliner turns norm's 0.73 MB into 6.36 MB, so its object
-  compile is tens of seconds. Candidates, in order: a lower inline threshold,
-  `-O1` for the object stage once `opt` has done the middle-end, and parallel
-  object compiles (`-j` currently only parallelizes package compiles and the
-  machine here reports 1 because `cFreeMem` sees no headroom).
+- **Module budget.** `optBc` runs the O2 middle-end only on modules under
+  6 MB (`optBcBudget`); above that it runs `mem2reg`, which is what the pre-288
+  tree did. Round 290's numbers: `opt` on net/http (18 MB) reached 10.7 GB and
+  never finished, while the runtime and bufio - every per-call win comes from
+  them - are under the budget.
+- **Object stage is llc, and only llc.** clang -c -O2 re-runs the middle-end
+  (38 s per module, 97 min for the netsmoke server), clang -c -O0 costs the
+  win (1.5x on every bench). `llc -O2` is the same backend without the
+  optimizer: clang -O2 quality, 2.2 s for the runtime module. build.sh checks
+  llc's major beside clang's.
+- **Tuning that is left.** A cold netsmoke server build is 25.7 min (peak
+  3.67 GB) and a warm one is 0.6 s, so the cost is per package content, not
+  per build. The two levers, in order: parallel object compiles (the `-j`
+  machinery exists and `adaptiveJobs` reports 1 here because `cFreeMem` is
+  divided by a 4 GB per-worker budget that the optimizer no longer needs), and
+  the inliner's duplication on the packages it does optimize.
 
 **Accept:** a cold `bash tests/unitrun.sh --phases 8 -j 1 --force` completes
 inside its timeouts with peak RSS under 2 GB per worker, and the bench numbers
