@@ -21571,3 +21571,29 @@ What is known, measured:
 Nothing in the current gates reaches it (quickcheck and phase 8 pass), which is
 why it ships recorded rather than silently. The repro is six lines and is the
 first thing to run when picking this up.
+
+### Round 306, further measurement: it is layout-dependent
+
+Running `runtime.ArenaScopeReport()` between the two calls makes the crash go
+away, which is the useful part: the corruption is an out-of-bounds WRITE whose
+victim is whatever happens to sit past the end of a region, not a deterministic
+logic error. The report shows the arena accounting is correct around the call
+(`sov created=2 released=1 live=1`, root usage growing by ~9 KB), so the write is
+not in the sovereign counters either.
+
+Next steps for whoever picks this up, in order:
+
+1. Find the write. The candidates are the places that bypass bounds checks: the
+   runtime's `memcpy`/`memzero`/`unsafe.Slice` users and the `//:nobounds`
+   functions (`decodeUTF8`), plus any `unsafe.Add` cursor. `decodeUTF8` is a
+   READ; the write is elsewhere. `memzero(addr, unsafe.Sizeof(DomainRoot{}))` in
+   `initDomain` is sized by the struct - if stage4's `DomainRoot` layout differs
+   from the one the carved offsets assume, the carve writes tables past the
+   mapped header and every later reset walks a truncated region. That is worth
+   checking FIRST: it is a one-place mismatch, it would corrupt exactly the
+   header fields `ArenaReset` reads (`regions`, `nregions`), and a layout
+   divergence between the two compilers is the one thing this tree has already
+   been bitten by.
+2. Compare `unsafe.Sizeof(runtime.DomainRoot{})` and every `rawSlice*` carve
+   offset under both compilers. If they differ, the fix is the layout, not the
+   arena code.
