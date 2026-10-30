@@ -20977,12 +20977,21 @@ before. Raised to 4096 (a free list has to hold the peak, not a token amount):
 
     100 certificates, root arena growth   103 MB -> 35.7 MB
 
-What is left (357 KB per call) is the largest receiver's record-slice doubling:
-`rootsize=131072 count=7` and `rootsize=65536 count=7` per six calls are
-`sovGrowRecs` re-growing a 16,384-record array in the root arena, because the
-group that gets recycled keeps whatever array it had and the big one lands on a
-group that is not the one needing it next time. Parking that array, or owning
-records per arena, is the next step - W2's "no growth over 100 calls" is
-therefore measured, not met.
+What was left after that (357 KB per call) was the largest receiver's
+record-slice doubling: `rootsize=131072` and `rootsize=65536` per six calls
+were `sovGrowRecs` re-growing a 16,384-record array in the root arena, because
+the group that gets recycled keeps whatever array it had and the big one lands
+on a group that is not the one needing it next time. A third fix parks that
+array: `sovParkedRecs` keeps the largest released record array (one slot, since
+only one receiver per call is that large) and `sovGrowRecs` takes it instead of
+asking the root arena for another.
+
+    100 certificates, root arena growth   103 MB -> 35.7 MB -> 13.3 MB
+
+133 KB per call still accumulates, spread over the remaining root-lifetime
+bookkeeping (16/32-byte slices, a few 192-byte group structs, and record arrays
+below the park threshold), and the size histogram no longer accounts for all of
+it - the next instrument is the call-site attribution the ledger needs, and
+W2's "no growth over 100 calls" is therefore measured, not met.
 
 Gates: bootstrap fixpoint `s4b == s4c == 4a1080da`.

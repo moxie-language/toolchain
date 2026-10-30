@@ -511,6 +511,7 @@ func sovRecycleGroup(g *sovGroup) {
 	if g == nil || sovGroupFreeN >= sovGroupFreeMax {
 		return
 	}
+	sovParkRecs(g)
 	recs := resize(g.recs, 0)
 	batches := resize(g.batchStart, 0)
 	slots := resize(g.slots, 0)
@@ -711,6 +712,30 @@ func sovGroupInDyingArena(a *Arena, p uintptr) (ok bool) {
 // instead of failing.
 const sovMapMax = int32(1) << 27
 
+// sovParkedRecs is one large record array kept between groups.
+//
+// The biggest receiver in a call needs 16,384 records - 128 KB of root arena -
+// and after a group is recycled the array it keeps is whatever it happened to
+// have, so the group that needs the big one next usually does not get it and
+// grows its own from 4 records up: 64 KB and 128 KB allocations on every
+// x509.CreateCertificate, 357 KB of root arena per call after the group-release
+// bugs were fixed (round 291). Park the largest array instead of leaving it
+// behind; it is root-lifetime state either way, and one slot is enough because
+// only one receiver per call is that large.
+const sovParkMinRecs = int32(1024)
+var sovParkedRecs []*sovRecord
+
+func sovParkRecs(g *sovGroup) {
+	if g == nil || cap(g.recs) < sovParkMinRecs {
+		return
+	}
+	if cap(sovParkedRecs) >= cap(g.recs) {
+		return
+	}
+	sovParkedRecs = resize(g.recs, 0)
+	g.recs = nil
+}
+
 func sovGrowRecs(g *sovGroup) {
 	nc := cap(g.recs) * 2
 	// Small floor: a build creates hundreds of thousands of groups and most of
@@ -723,6 +748,13 @@ func sovGrowRecs(g *sovGroup) {
 	}
 	if nc > sovMapMax || nc < 0 {
 		runtimePanic("sovereign allocation map overflow: compaction did not reclaim records")
+	}
+	if cap(sovParkedRecs) >= nc {
+		reuse := resize(sovParkedRecs, nc)
+		copy(reuse, g.recs)
+		g.recs = resize(reuse, len(g.recs))
+		sovParkedRecs = nil
+		return
 	}
 	nb := unsafe.Slice((**sovRecord)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(&sovRecord{}))), nc)
 	copy(nb, g.recs)

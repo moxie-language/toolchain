@@ -205,10 +205,13 @@ was two bugs, both found with the trace-gated ledger now in `arena_scope.mx`
    free list was smaller than the peak. Raised to 4096.
 
 Measured after both: 100 certificates grow the root arena 35.7 MB (was 103 MB).
-The remainder is `sovGrowRecs` re-growing the biggest receiver's record array
-(64 KB and 128 KB `sovRootAlloc`s) once per call. **Still open**: park that
-array, or give records an owner whose lifetime is the arena's, so the number
-reaches zero.
+The remainder was `sovGrowRecs` re-growing the biggest receiver's record array
+(64 KB and 128 KB `sovRootAlloc`s) once per call; a third fix parks that array
+between groups (`sovParkedRecs`), which takes it to **13.3 MB per 100 calls**
+(133 KB per call). **Still open**: the last 133 KB per call is spread over small
+root-lifetime bookkeeping and record arrays below the park threshold, and the
+size histogram no longer accounts for all of it - the next instrument is
+call-site attribution (a PC per root allocation), not another size table.
 
 ---
 
