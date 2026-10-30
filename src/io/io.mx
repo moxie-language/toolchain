@@ -13,6 +13,7 @@
 package io
 
 import (
+	"unsafe"
 	"git.smesh.lol/moxie/pkg/mxutil"
 	"errors"
 )
@@ -453,6 +454,24 @@ func LimitReader(r Reader, n int64) (out Reader) { return &LimitedReader{r, n} }
 // data returned to just N bytes. Each call to Read
 // updates N to reflect the new amount remaining.
 // Read returns EOF when N <= 0 or when the underlying R returns EOF.
+// readWindow returns the first n bytes of p as a VIEW.
+//
+// p[0:n] is a bounded sub-slice, which allocates and copies in this language:
+// harmless as a source, fatal as a destination, because the reader writes into
+// the copy while the caller's buffer keeps whatever it had. That is how every
+// Content-Length response body read back as the right number of ZERO bytes
+// (round 280, W20) and how a SectionReader's last partial read lost its data.
+// unsafe.Slice is the only way to name the same bytes again.
+func readWindow(p []byte, n int32) (w []byte) {
+	if n >= int32(len(p)) {
+		return p
+	}
+	if n <= 0 || len(p) == 0 {
+		return p[0:0]
+	}
+	return unsafe.Slice(unsafe.SliceData(p), n)
+}
+
 type LimitedReader struct {
 	R Reader // underlying reader
 	N int64  // max bytes remaining
@@ -463,7 +482,7 @@ func (l *LimitedReader) Read(p []byte) (n int32, err error) {
 		return 0, EOF
 	}
 	if int64(len(p)) > l.N {
-		p = p[0:l.N]
+		p = readWindow(p, int32(l.N))
 	}
 	n, err = l.R.Read(p)
 	l.N -= int64(n)
@@ -500,7 +519,7 @@ func (s *SectionReader) Read(p []byte) (n int32, err error) {
 		return 0, EOF
 	}
 	if lim := s.limit - s.off; int64(len(p)) > lim {
-		p = p[0:lim]
+		p = readWindow(p, int32(lim))
 	}
 	n, err = s.r.ReadAt(p, s.off)
 	s.off += int64(n)
@@ -534,7 +553,7 @@ func (s *SectionReader) ReadAt(p []byte, off int64) (n int32, err error) {
 	}
 	off += s.base
 	if lim := s.limit - off; int64(len(p)) > lim {
-		p = p[0:lim]
+		p = readWindow(p, int32(lim))
 		n, err = s.r.ReadAt(p, off)
 		if err == nil {
 			err = EOF

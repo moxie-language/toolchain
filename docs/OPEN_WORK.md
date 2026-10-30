@@ -20452,3 +20452,43 @@ is W20.
 Also fixed here: `repeatable-spawned` compared three responses to each other, so
 three identical EMPTY responses passed it - which is how a spawned mode that
 answered nothing was recorded green. It now asserts the body first.
+
+## Round 280: a bounded sub-slice is a copy, including when it is a destination
+
+Round 279 left four phase-8 fixtures failing on one symptom: `client-sync`
+printed `status=200` and then eighteen ZERO bytes where `hello path=/smoke` (18
+bytes) belongs. Reading straight from `resp.Body` instead of through
+`io.ReadAll` gave the same thing - `n=18 err=EOF` with the buffer untouched - so
+the reader was returning a length and no data.
+
+`io.LimitedReader.Read` is where a Content-Length body gets its length:
+
+    if int64(len(p)) > l.N {
+        p = p[0:l.N]
+    }
+    n, err = l.R.Read(p)
+
+`p[0:l.N]` is a bounded sub-slice, so in this language it **allocates and
+copies**. The underlying reader wrote the eighteen bytes into the copy and the
+caller's buffer kept its zeros; `n` came from the copy's length, so the count was
+right and the data was gone. The same three lines exist in `SectionReader.Read`
+and `SectionReader.ReadAt`, so a section reader's last partial read lost its
+bytes too.
+
+`io.readWindow` returns the first n bytes of a buffer as a VIEW
+(`unsafe.Slice(unsafe.SliceData(p), n)`) and all three sites use it.
+
+Phase 8 after this and round 279 - **18 of 18 fixtures, both modes**:
+
+    no-accumulation-inline   400 exchanges: rss 25672kB -> 25888kB (+216kB)
+    no-accumulation-spawned  400 exchanges: rss 14836kB -> 14836kB (+0kB)
+    client-sync              single-domain LookupHost/Dial/Write/ReadResponse
+    client-spawned           the client stack against a worker in another domain
+
+The compiler already refuses `copy(x[a:b], src)` ("a subslice is a copy, so
+copying into it is not allowed"). It cannot refuse `f(x[a:b])` for a callee that
+writes through its parameter, which is the shape that hid here. What remains is a
+sweep for read destinations passed as bounded sub-slices - `X[n:]`, `X[:n]`,
+`X[a:b]` - as opposed to full-range `X[:]` on an array, which is a view and
+correct. Two are known: `archive/tar/reader.mx` (`r.Read(b[n:])`) and
+`image/png/reader.mx` (`io.ReadFull(d.r, ignored[:min(...)])`).

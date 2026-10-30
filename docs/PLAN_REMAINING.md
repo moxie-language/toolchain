@@ -536,72 +536,46 @@ Round 277 fixed `parseFile.readLine`, which is why /etc/hosts, /etc/resolv.conf,
 name, unbounded over a long-running process resolving many names - W2's leak
 class), and phase 8 re-run to confirm the whole netsmoke passes.
 
-## W19. Phase 8's spawned-mode handlers answer nothing (found by the round-278 run)
+## W19. Phase 8's spawned-mode handlers answer nothing - DONE (round 279)
 
-With the resolver fixed, phase 8 reaches every fixture. The current state, from
-one run of `unitrun --phases 8` (log kept at `tmp/unitrun/8/whole-phase_/out`):
+Fixed, and the cause was worth the hunt. The queue boundary is a MAP_SHARED ring
+of preallocated slots, and both sides named one slot with a bounded sub-slice
+(`chanSlotBuf[base : base+slotBytes]`), which **allocates and copies** in this
+language. The shell wrote the request into its private copy, the worker decoded
+an untouched ring, rejected the frame and wrote an abort the shell discarded, so
+the client saw a connection closed with no response. `chanSlotWindow` now builds
+a real window with `unsafe.Add`.
 
-    PASS  build, mux-match, spawn-bytes, spawn-cost
-    PASS  listen-inline, curl-inline, keepalive-inline, repeatable-inline, client-inline
-    FAIL  no-accumulation-inline   addr=127.0.0.1 addr=::1 loop=200 bad=200
-    FAIL  client-sync              status=200 body=body mismatch: wanted hello path=/smoke
-    PASS  listen-spawned
-    FAIL  curl-spawned             curl got: (empty)
-    FAIL  keepalive-spawned        got: []
-    PASS  repeatable-spawned
-    FAIL  client-spawned           Get "http://127.0.0.1:39129/smoke": unexpected EOF
+Phase 8 after the fix: 14 of 18 pass in both modes, including `client-spawned`
+(the whole Moxie client stack against a worker in another domain). The four
+that remain are W20.
 
-The shape: the inline server answers curl correctly (`curl-inline` PASS with
-`hello path=/smoke`) but the shell's second exchange and the Moxie client see a
-body of `body`, and in spawned mode the server accepts the connection and then
-answers nothing at all. So there are two questions, not one: what the shell
-client and the Moxie sync client each parse (inline), and why the spawned
-handler pool produces no response (spawned).
+## W20. The sync path's response body reads back as zeros - DONE (round 280)
 
-Reproduced by hand, `server 127.0.0.1:49991 spawned` + one `curl`, with
-`strace -f` on the whole tree (5 processes: the parent plus 4 workers):
+`io.LimitedReader.Read` truncated the caller's buffer with `p = p[0:l.N]`, and a
+bounded sub-slice ALLOCATES AND COPIES here: the reader wrote the body into the
+copy, the caller's buffer kept its zeros, and the count was still right because
+it came from the copy's length. `SectionReader.Read`/`ReadAt` had the same three
+lines. `io.readWindow` returns a VIEW (`unsafe.Slice(unsafe.SliceData(p), n)`)
+and all three use it. Phase 8 is 18 of 18: sync, Transport, and both modes'
+no-accumulation units.
 
-    parent  fork() x4 -> 4 children
-    parent  accept4() = 9
-    parent  read(9, "GET /smoke HTTP/1.1\r\nHost: 127.0...", 4096) = 84
-    parent  (nothing further on fd 9; back to accept4 -> EAGAIN)
-    child   futex(0x7f114b400000, FUTEX_WAIT, 0, {tv_nsec=20000000})   x4, looping
+## W21. Read destinations passed as bounded sub-slices (found by round 280)
 
-so the request is accepted and read by the manager, and the four workers sit in
-their 20 ms futex waits seeing no ring data. No child crashed (no core), no
-workers were left unspawned (`spawn-cost` passes: 16 spawns, 158 us each). The
-defect is between "manager has the request bytes" and "a worker sees a ring
-entry" - or the reply never comes back. `inline` mode serves the same request
-correctly on the same binary, so the socket and the handler are both fine.
+The compiler refuses `copy(x[a:b], src)` by name, but it cannot refuse
+`f(x[a:b])` for a callee that writes through its parameter, and that is the shape
+that cost two rounds of phase 8. The rule: `x[:]` on an ARRAY is a view and
+correct; `x[n:]`, `x[:n]` and `x[a:b]` on a slice are copies and lose the write.
+The sanctioned destination helpers already exist (`io.ReadInto` takes an offset
+and copies through unsafe; `mxutil.CopyAt`/`CopyRange` likewise).
 
-Also worth fixing in the fixture: `repeatable-spawned` PASSES while every
-response is empty, because it compares three responses to each other and
-`"" == "" == ""`. It should assert the body first, as `curl-*` does, or it can
-never fail.
-
-Bisected so far:
-
-- **The sovereign arena pool is not it.** The same fixture built with
-  `src/runtime/alloc.mx` from `7e15d493` - the version before the pool - fails
-  identically (`curl` rc=52, empty reply). That was the only commit of this
-  session that changes runtime behavior a worker uses.
-- **The net fixes are not it.** `curl` needs no Moxie resolver, and inline mode,
-  which uses the same resolver, answers.
-- **A pre-session compiler cannot even build the fixture**: `/tmp/s4old` (stage4
-  built from `9914050d`) aborts with the region-table panic on this closure,
-  which is W15 before round 274 fixed it. So the remaining bisect needs a
-  compiler that has the fingerprint fix but not the pool - `7e15d493` or
-  `bc4e9b4e` - bootstrapped in about ten minutes, then one fixture build and one
-  `curl`.
-
-Still candidates: `4f403191` (W9 spread push - the chan framing path uses
-`push(dst, src...)`), `9914050d` (W11 childMap, but `muxmatch` passes 12/12),
-and something older than this session: the plan's "phase 8 green" at round 267
-was recorded for `muxmatch`, and it is not clear the spawned modes were ever
-green since.
-
-**Accept**: every netsmoke fixture green in both modes, and the inline body
-mismatch explained.
+**Accept**: every read destination in the tree is either a whole slice, an
+array's full range, or an offset-taking helper. Known sites:
+`archive/tar/reader.mx` (`r.Read(b[n:])`), `image/png/reader.mx`
+(`io.ReadFull(d.r, ignored[:min(...)])`). A grep for
+`Read(|ReadFull(|ReadAt(|WriteTo(|copy(` with a bounded sub-slice argument is the
+whole job; the compiler's existing `copy` diagnostic is the precedent for making
+it a compile error where it can.
 
 ## Suggested order
 
@@ -612,6 +586,9 @@ mismatch explained.
 | 3 | ~~W16 object cache~~ | done (round 273): warm builds 36x faster, which makes every later item cheaper | — |
 | 4 | ~~W15 compiler memory~~ | done (round 274): a concatenation built the fingerprint, not a data structure | — |
 | 5 | ~~W18 net IP layer~~ | done (round 278): DNS/Dial crash fixed, hosts and services parse; the leak and the `IP.String` trap remain | — |
+| 5b | ~~W19 spawned dispatch~~ | done (round 279): a sub-slice of the shared ring was a copy | — |
+| 5c | ~~W20 response body zeros~~ | done (round 280): a destination sub-slice was a copy; phase 8 is 18/18 | — |
+| 5d | W21 destination sub-slices | same class, two known sites outside the tested paths | 1 hour |
 | 6 | W17 per-call costs | 10-30 us per mutating call that builds its receiver; W13, W14 and W3b are all this | 1-2 sessions |
 | 7 | W13 time.Now | needs W17 (1) and (2); the remaining 3.5 us is unexplained | after W17 |
 | 8 | W2 codec escape warning | leaks per certificate, instrument for a class of bugs | 1 session |
