@@ -21594,6 +21594,11 @@ Next steps for whoever picks this up, in order:
    header fields `ArenaReset` reads (`regions`, `nregions`), and a layout
    divergence between the two compilers is the one thing this tree has already
    been bitten by.
-2. Compare `unsafe.Sizeof(runtime.DomainRoot{})` and every `rawSlice*` carve
-   offset under both compilers. If they differ, the fix is the layout, not the
-   arena code.
+2. ~~Compare `unsafe.Sizeof(runtime.DomainRoot{})` and every `rawSlice*` carve
+   offset under both compilers.~~ MEASURED and ruled out: a temporary
+   `LayoutReport` returns `Arena size 96, DomainRoot size 344,
+   domainHeaderSize 352, regions@56, nregions@0, scope@80, alloc@88,
+   arenaDataOffset 3072` under BOTH compilers, byte for byte. The carve is
+   correct, so the write is somewhere else. Also ruled out: the arena accounting
+   (`sov created/released`, root usage) is consistent across the call, and the
+   function-arena depth is balanced.
