@@ -21044,3 +21044,30 @@ no-accumulation unit reports rss 21112 kB -> 21344 kB over 400 exchanges
 taking. `debug/gosym`'s per-symbol slices have exactly one consumer, the
 `gosym_pclntab` fixture - the only other mention is a comment in
 `encoding/binary` - so the O(n^2) parse has no production path to be slow on.
+
+## Round 293: the runtime may import strconv, so float text is Go's text (W6)
+
+`Float64Text` was a hand-rolled 15-digit formatter: every float printed as
+`+1.500000000000000e+000`, no shortest representation, and the value came from
+repeated multiplication. The plan called for a Ryu port into the runtime on the
+assumption that the runtime cannot depend on the stdlib. It can - nothing in
+`strconv`'s own imports (math, mxutil) imports the runtime, there is no cycle,
+and the bootstrap self-hosts with the dependency in place:
+
+    func Float64Text(v float64) string { return string(strconv.FormatFloat(v, 'g', -1, 64)) }
+    func Float32Text(v float32) string { return string(strconv.FormatFloat(float64(v), 'g', -1, 32)) }
+
+Output, checked against Go for the shapes that used to be wrong:
+
+    1            1              1e-07        1e-07
+    1.5          1.5            1e+21        1e+21
+    0.1          0.1            1.23456789e+08
+    1e6          1e+06          5e-324       5e-324
+    1e308        1e+308         -0           -0
+    1/3          0.3333333333333333
+    float32(0.1) 0.1            +Inf / NaN   +Inf / NaN
+
+`fmt.Sprint(1.5, 0.1, 1e308)` prints `1.5 0.1 1e+308`. The formatted text is now
+`strconv`'s, which means one float formatter in the tree instead of two, and the
+Ryu port the plan proposed would have duplicated it. Gate: bootstrap fixpoint
+`s4b == s4c == 93bb8578`, and the probe output above is the test.

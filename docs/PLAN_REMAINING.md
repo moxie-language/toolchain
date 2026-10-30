@@ -288,11 +288,12 @@ up in debug output and in any `String()` that uses the runtime's formatter.
 **Where.** `src/runtime/numfmt.mx`: `Float32Text` (line ~85, 7 digits) and
 `Float64Text` (~145, 15 digits).
 
-**Shape.** The runtime cannot import `strconv` (cycle). Port the shortest
-algorithm: `src/strconv/ftoaryu.mx` already has `ryuFtoaShortest` and its
-support tables; a self-contained copy in `numfmt.mx` needs only integer ops on
-the mantissa/exponent and a small powers-of-five table. Keep the special cases
-(NaN, ±Inf, zero, negative zero) as they are.
+**DONE (round 293).** The premise was wrong: the runtime CAN import `strconv`.
+Nothing in strconv's imports (math, mxutil) imports the runtime, so there is no
+cycle, and the bootstrap self-hosts with the dependency in place. `Float64Text`
+and `Float32Text` are now one `strconv.FormatFloat(v, 'g', -1, bits)` call each,
+which is the same formatter `fmt` uses - one float formatter in the tree
+instead of two, and the Ryu port this item proposed would have duplicated it.
 
 **Acceptance.** A table of ~40 values (`0.1`, `1.5`, `1/3`, `1e21`, `1e-7`,
 `123456789.123456789`, `math.MaxFloat64`, `math.SmallestNonzeroFloat64`,
