@@ -20698,3 +20698,41 @@ and the next instrument has to be an in-runtime counter (call counts and bytes,
 not timers) - the same conclusion round 269 reached. What this round does settle
 is W13's plan: the vDSO shim was never the problem, so a direct-vDSO rewrite
 would buy at most ~160 ns and is off the list.
+
+## Round 286: the walk was paying the protocol it exists to avoid
+
+Round 285 left ~850 ns of `time.Now` unattributed. The ablation that found it was
+one line: force `codecRetStable` to answer true and re-measure.
+
+    time.Now()       1245 -> 345 ns      forced true
+    time.Local()      200 ->  95 ns      forced true
+
+Three hundred and forty-five is about the floor of the function (arena push, one
+clock read, `Local`, the return), so ~900 ns was the *check itself* - and the
+reason is that `codecRetStableInner` walked a type descriptor through the
+descriptor accessors:
+
+    typ.Kind(), typ.NumField(), typ.StructFieldOffset(i), typ.StructFieldType(i),
+    typ.Elem(), typ.Underlying()
+
+Every one of those returns `*RawType` (or `Kind`), and a pointer-returning call
+pays the return protocol - ~100 ns each on round 283's fast path, 640 before it.
+A three-field struct walk makes about a dozen such calls, so the check cost more
+than the protocol it was there to skip. The same defect the round is about, one
+level down.
+
+The walk now does its own descriptor arithmetic and never returns a pointer:
+`retUnderAddr(tp uintptr) uintptr` follows the named chain, `retFieldOffset`
+decodes the field descriptor's varint, and the struct walk reads
+`rtStructFieldDesc` directly. Scalars in, scalars out.
+
+    time.Now()       1245 ->  705 ns
+    time.Now()+sink  1165 ->  610 ns
+    time.Unix(...)   1950 ->  925 ns
+    time.Local()      200 ->  215 ns    (unchanged; the check floor)
+
+`time.Local()` is now the floor: its whole body is `return &localLoc`, and the
+315 ns it costs is FnArenaPush + `codecIsStableAddr` (an `onStack` call, a scan
+of the root arena's regions and a sovereign-range lookup) + FnArenaPopFree. That
+is where the next round starts, and it is the same currency: scalar accessors and
+a cheaper stability test.

@@ -331,16 +331,53 @@ func codecRetStable(ptr unsafe.Pointer, typ *RawType) (ok bool) {
 	}
 	save := codecRetTransient
 	codecRetTransient = true
-	ok = codecRetStableInner(ptr, typ)
+	ok = codecRetStableInner(ptr, uintptr(unsafe.Pointer(typ)))
 	codecRetTransient = save
 	return ok
 }
 
-func codecRetStableInner(ptr unsafe.Pointer, typ *RawType) (ok bool) {
-	if typ == nil || ptr == nil {
+// retUnderAddr follows the named chain to the underlying descriptor and returns
+// it as an ADDRESS, not a pointer.
+//
+// The type kind accessors (Underlying, StructFieldType, Elem) all return
+// *RawType, and every pointer-returning call pays the return protocol: about
+// 100 ns each even on round 283's fast path. The walk makes a dozen of them for
+// a three-field struct, which was 900 ns of time.Now's 1250 (measured by forcing
+// this helper to answer true: 345 ns). Scalars in, scalars out.
+func retUnderAddr(tp uintptr) (u uintptr) {
+	for {
+		if tp == 0 {
+			return 0
+		}
+		t := (*RawType)(unsafe.Pointer(tp))
+		if !t.IsNamed() {
+			return tp
+		}
+		tp = uintptr(unsafe.Pointer((*rtElemType)(unsafe.Pointer(t)).elem))
+	}
+}
+
+// retFieldOffset decodes a field descriptor's varint offset.
+func retFieldOffset(data unsafe.Pointer) (off uintptr) {
+	p := (*uint8)(unsafe.Add(data, 1)) // skip flags byte
+	var shift uint32
+	for {
+		b := *p
+		off |= uintptr(b&0x7f) << shift
+		if b&0x80 == 0 {
+			return off
+		}
+		shift += 7
+		p = (*uint8)(unsafe.Add(unsafe.Pointer(p), 1))
+	}
+}
+
+func codecRetStableInner(ptr unsafe.Pointer, tp uintptr) (ok bool) {
+	if ptr == nil || tp == 0 {
 		return false
 	}
-	k := typ.Kind()
+	t := (*RawType)(unsafe.Pointer(tp))
+	k := t.Kind()
 	if isBasicKind(k) {
 		return true
 	}
@@ -365,8 +402,12 @@ func codecRetStableInner(ptr unsafe.Pointer, typ *RawType) (ok bool) {
 		return codecIsStableAddr(uintptr(unsafe.Pointer(sv.ptr)))
 	case KindSlice:
 		sl := *(*_string)(ptr)
-		elem := typ.Elem()
-		if elem == nil {
+		u := retUnderAddr(tp)
+		if u == 0 {
+			return false
+		}
+		elem := uintptr(unsafe.Pointer((*rtElemType)(unsafe.Pointer(u)).elem))
+		if elem == 0 {
 			return false
 		}
 		// A nil base is stable whatever the length; a base in the frame is not,
@@ -377,14 +418,25 @@ func codecRetStableInner(ptr unsafe.Pointer, typ *RawType) (ok bool) {
 		if sl.ptr == nil {
 			return true
 		}
-		if sl.length > 0 && sovTypeHasPtrs(elem) {
+		if sl.length > 0 && sovTypeHasPtrs((*RawType)(unsafe.Pointer(elem))) {
 			return false
 		}
 		return codecIsStableAddr(uintptr(unsafe.Pointer(sl.ptr)))
 	case KindStruct:
-		nf := typ.NumField()
+		u := retUnderAddr(tp)
+		if u == 0 {
+			return false
+		}
+		st := (*rtStructType)(unsafe.Pointer(u))
+		nf := int32(st.numField)
+		fbase := unsafe.Pointer(&st.fields[0])
+		fsz := unsafe.Sizeof(rtStructFieldDesc{})
 		for i := int32(0); i < nf; i++ {
-			if !codecRetStableInner(unsafe.Add(ptr, typ.StructFieldOffset(i)), typ.StructFieldType(i)) {
+			fd := (*rtStructFieldDesc)(unsafe.Add(fbase, uintptr(i)*fsz))
+			if fd.fieldType == nil {
+				return false
+			}
+			if !codecRetStableInner(unsafe.Add(ptr, retFieldOffset(fd.data)), uintptr(unsafe.Pointer(fd.fieldType))) {
 				return false
 			}
 		}
