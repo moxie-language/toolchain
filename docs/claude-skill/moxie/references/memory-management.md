@@ -91,7 +91,16 @@ A function's allocations are invisible outside that function. The only way data 
 
 ### Parameters
 
-Function parameters are owned by the caller. The callee receives them as **immutable borrows** - read-only references into the caller's arena. Writing through a parameter pointer is a compile error. Methods that need to produce modified state return it; the caller assigns the result.
+Function parameters point into the caller's arena and are **mutable**: a callee
+may write through a parameter pointer and assign to a parameter (one thread per
+domain, so there is no concurrent mutation to guard against). A write is visible
+to the caller after the call.
+
+What a callee may NOT do is store a pointer to its OWN frame through a
+parameter: the frame is released at return and the return protocol does not
+relocate a parameter's target, so the caller would hold a dangling pointer. A
+callee that needs to produce pointer-containing state for its caller writes it
+into memory the caller owns or returns it as a value.
 
 ### Globals
 

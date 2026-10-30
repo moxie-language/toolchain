@@ -109,11 +109,41 @@ transform whose output size is a function of its input needs no growth at all.
 
 ## Parameter and Receiver Rules
 
-Function parameters are IMMUTABLE BORROWS - writing through a parameter pointer is a compile-time error enforced by the compiler, not by MMU page protection. This is a type-system-level guarantee that is "expensive now" (compile-time enforcement) but "free at runtime" (no runtime checks). Because parameters cannot be mutated, they never need deep copying across arena boundaries.
+Function parameters are MUTABLE. A callee may write through a parameter pointer
+and may assign to a parameter: there is ONE thread per domain and no concurrent
+mutation to guard against, so immutability bought nothing. Both compilers accept
+it (`p.x = 7` through a `*T`, and `n = 5` on an `int64` parameter), and the
+tree already relies on it in 570 places.
 
-Only METHOD RECEIVERS can be written to. Changes to receiver fields are tracked and serialized at return along with return values. The serialization format includes pointer-to-previously-serialized references to enable full closure of cyclic graph data structures.
+What mutability does NOT change is LIFETIME. A parameter points into the
+caller's arena, so:
 
-Return values are serialized at return along with values written into the receiver, then decoded into the caller's arena with pointers rewritten, and the function arena can then be fully released.
+- a write through a parameter is visible to the caller after the call, which is
+  the point of allowing it;
+- a callee that stores a pointer to its OWN frame through a parameter hands the
+  caller a dangling pointer the moment it returns - the return protocol
+  relocates return values and receiver store-backs, and it does not know about a
+  parameter's target (W10's class). A callee that needs to build
+  pointer-containing state for its caller must write it into memory the caller
+  owns or return it as a value.
+
+Named return values remain REQUIRED (`func f() (n int32)` is legal,
+`func f() int32` is not): a named result is assignable like any local, and the
+return protocol needs a slot to relocate.
+
+Package-scoped variables remain IMMUTABLE outside `init()`. That rule is not
+about threads inside a domain (there is one) but about DOMAINS: a fork shares
+the pages, so two domains reading the same global must see the same value, and a
+value that changes after `init()` has no defined meaning across them.
+
+Only METHOD RECEIVERS are tracked for store-back. Changes to receiver fields are
+tracked and serialized at return along with return values. The serialization
+format includes pointer-to-previously-serialized references to enable full
+closure of cyclic graph data structures.
+
+Return values are serialized at return along with values written into the
+receiver, then decoded into the caller's arena with pointers rewritten, and the
+function arena can then be fully released.
 
 ## Closures Do Not Capture Outer Scope
 

@@ -21143,3 +21143,35 @@ switch together with the ordinary-code conversions, then A3 (the type becomes a
 compile error).
 
 Gates: bootstrap fixpoint `s4b == s4c == c8fd2ccf`.
+
+## Round 296: parameters are mutable - the rule was the lie, not the code
+
+Round 292 measured that neither compiler enforces the documented "parameters are
+immutable borrows" rule, and that 570 sites in the tree already write through
+parameters. W23 asked for the decision and it is now made: **parameters are
+mutable.** The reasoning is the same one that removed the rule's only
+justification - there is one thread of execution per domain, so there is no
+concurrent mutation for an immutable borrow to prevent. The rule bought nothing
+and cost a false premise that arena arguments were being built on.
+
+What the model now says, in CLAUDE.md, docs/REFERENCE.md and the skill's
+memory-management page:
+
+- a callee may write through a parameter pointer and may assign to a parameter,
+  and the write is visible to the caller after the call;
+- what it may NOT do is store a pointer to its OWN frame through a parameter -
+  the frame is released at return and only RETURN values and receiver
+  store-backs are relocated, so the caller would hold a dangling pointer (the
+  W10 class, still open as a class);
+- named return values are still REQUIRED, and a named result is assignable like
+  any local;
+- package-scoped variables are still IMMUTABLE outside `init()`, and the reason
+  is domains rather than threads: a forked domain shares the pages, so two
+  domains reading a global must see one value, and a value that changes after
+  `init()` has no defined meaning across them.
+
+No code changed: the tree already relied on mutable parameters. The comments
+that justified a shape by the old rule (big.Float.Int returning instead of
+writing an out-parameter, codecEnsure being a free function, the gosym test's
+receiver) now say what is actually true - a callee's allocation cannot be
+relocated into a caller object through a parameter, only through a return.

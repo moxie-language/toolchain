@@ -1383,10 +1383,23 @@ Three boundaries exist where memory changes hands:
 
 ### Parameters
 
-Function parameters are owned by the caller. The callee receives them as
-**immutable borrows** - read-only references into the caller's arena.
-Writing through a parameter pointer is a compile error. Methods that need
-to produce modified state return it; the caller assigns the result.
+Function parameters point into the caller's arena and are **mutable**: a callee
+may write through a parameter pointer and may assign to a parameter. There is
+one thread of execution per domain, so there is no concurrent mutation for
+immutability to prevent, and a write through a parameter is visible to the
+caller after the call.
+
+The limit is lifetime, not permission: a callee that stores a pointer to its own
+frame through a parameter hands the caller a dangling pointer, because the
+callee's frame is released at return and the return protocol only relocates
+return values and receiver store-backs.
+
+Named return values are required (`func f() (n int32)`, never `func f() int32`),
+and a named result is assignable like any local.
+
+Package-scoped variables are immutable outside `init()`: domains are forked
+processes sharing pages, so two domains reading the same global must see the
+same value.
 
 ### Between Domains
 

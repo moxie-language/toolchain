@@ -505,12 +505,28 @@ parameter, and neither `legacy/compiler/restrict.go` nor stage4's checks have a
 parameter rule at all. The tree depends on the current behaviour - W10 records
 570 pointer-parameter field writes - so this is a migration, not a bug fix.
 
-**Decision needed**: either implement the rule and migrate those 570 sites (a
-campaign of its own, and one that would make every callee-that-fills-a-struct
-return the value instead), or correct CLAUDE.md to describe the model as it is
-and stop deriving arena arguments from immutability. Until one of the two
-happens, no arena reasoning may assume a callee cannot write through a
-parameter.
+**DECIDED (round 296): parameters are mutable, the docs were wrong.** With one
+thread per domain there is no concurrent mutation for immutability to prevent,
+so the rule bought nothing and cost a lie: the compiler never enforced it and
+570 sites already wrote through parameters. CLAUDE.md, docs/REFERENCE.md and the
+skill's memory-management page now say: a callee may write through a parameter
+and may assign to a parameter; a write is visible to the caller afterwards.
+
+Three things the decision does NOT change:
+
+- **Lifetime.** A callee that stores a pointer to its own frame through a
+  parameter still hands the caller a dangling pointer, because only RETURN
+  values and receiver store-backs are relocated. W10's class stays open.
+- **Named returns.** Still required (`func f() (n int32)`), and a named result
+  is assignable like any local.
+- **Package globals.** Still immutable outside `init()`, for a domain reason
+  rather than a thread reason: a forked domain shares the pages, so two domains
+  reading a global must see the same value, and a value that changes after
+  `init()` has no defined meaning across them.
+
+No code change was needed - the tree has been writing through parameters all
+along. What changed is that the model no longer claims otherwise, so arena
+arguments must rest on lifetime, not on permission.
 
 ## W8. Opportunistic cleanups (do while in the neighbourhood)
 
