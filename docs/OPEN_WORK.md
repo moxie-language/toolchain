@@ -21418,3 +21418,90 @@ Verified: idna's ToASCII round-trip (`bücher.example` -> `xn--bcher-kva.example
 and a norm probe covering NFC composition, NFD decomposition, NFKC compatibility
 (Kelvin sign -> K) and `IsNormal` on normalised and unnormalised input, under the
 converted tables and under both compilers' builds of the probe.
+
+## Round 302: the kernel mirrors carry no fixed extents (W7a step 3)
+
+Twenty structs in `ztypes_linux_*` spelled a kernel extent as a Go array field.
+An `[N]T` is a slice header in Moxie, so it cannot sit where the kernel writes
+its first byte - and fifteen of the twenty had no reader in the tree at all.
+Gone with their only users: `Timex`/`Adjtimex`, `Statfs_t`+`Fsid`/`Fstatfs`+
+`Statfs`, `Ustat_t`/`Ustat`, `Sysinfo_t`/`Sysinfo`, `FdSet`/`Select`+`pselect`,
+`Flock_t`/`FcntlFlock`, `ICMPv6Filter` and its setters, `IPMreq`/`SetsockoptIPMreq`,
+`Inet4Pktinfo`, `Inet6Pktinfo`, `TCPInfo`, `InotifyEvent`, `Termios`,
+`PtraceRegs` (+`PC`/`SetPC` and the two reg wrappers), and `lsf_linux.mx`
+(`SockFilter`, `SockFprog`, and a `[IFNAMSIZ]byte` ioctl extent nothing used).
+
+Kept and converted: `Stat_t`'s trailing 24 bytes are three scalars (the kernel
+writes sizeof(struct stat) and they are unused), `Msghdr`/`SockFprog` dropped
+their `Pad_cgo_*` (compiler alignment padding, not extent), `IPMreqn`/`IPv6Mreq`
+carry `abiAddr4`/`abiAddr16` (one byte per field, layout exact), `Dirent` is
+`Dirent*Off` constants over the record `getdents` wrote, `caps` is a 24-byte
+buffer read at fixed offsets, and `pipe2`/`socketpair`/`utimes`/`utimensat`/
+`futimesat` take a pointer to the first element instead of a pointer to a
+two-element array.
+
+Measured against C on this host, field by field: sizeof(struct stat)=144 with
+dev@0 ino@8 mtim@88 ctim@104, sizeof(struct msghdr)=56, sizeof(struct sock_fprog)=16,
+sizeof(struct ip_mreqn)=12, sizeof(struct ipv6_mreq)=20 - identical before and
+after, and identical to the Moxie mirrors. A functional probe covers stat,
+lstat, SameFile, readdir, rename, utimensat, utimes, pipe2, socketpair and the
+faccessat capability path; phase 8 passed (2/2) and quickcheck 15/15.
+
+## Round 303: the tables that could never be selected, and the ones that were
+
+Every `go1.N` build tag from go1.9 to go1.24 is satisfied, so a `!go1.N` guard
+is always false: the five superseded copies each of the idna, norm and bidi
+Unicode tables (plus `idna9.0.0.mx`, `pre_go118.mx`, `trie12.0.0.mx` and
+`bidirule9.0.0.mx`) were dead weight holding ~65 array types. Deleted.
+
+The tables that DO build became storage: `_bidiValues`/`_bidiIndex`
+(x/text/unicode/bidi), `_huffmanCodes`/`_huffmanCodeLen` (hpack),
+`_isTokenTable`/`_validHostByte` (httpguts), `_replacementTable` (html), the five
+`__Code_index_N` tables (internal/types/errors), and the syscall errno/signal
+tables. `runtime/secalloc_chacha`'s and intrinsics' de Bruijn tables are string
+constants instead - one byte per index, no array type at all.
+
+The syscall errno and signal tables are the interesting ones: `Errno.Error()`
+called `_errors()` and copied 133 strings on EVERY conversion. They are built
+once in the package's `init()` now and `Errno.Error`/`Signal.String` read the
+variable, so an error string costs a header load.
+
+## Round 304: three stage4 codegen holes, found by RUNNING idna instead of building it
+
+Round 301 verified the converted Unicode tables by building idna and comparing
+`bücher.example -> xn--bcher-kva.example` - which is the punycode ENCODER, a path
+that never touches the mapping tables. Running the full profile under both
+compilers showed stage4 returning `ExAmPle.COM` unchanged and `bToUnicode`
+producing interleaved NULs. Three separate bugs, all silent wrong answers:
+
+1. **`string([]rune)` was a header reinterpretation.** `[]rune` and `string`
+   share the three-word shape, so `srcType == dstType` returned the value
+   untouched: `string([]rune{'a','b','c'})` was a 3-byte string holding
+   `"a\x00\x00"`, and `[]rune("aüc")` was four "runes" whose second value was
+   0xC3. `emitConvert` now calls `runtime.stringFromRunes` /
+   `runtime.stringToRunes`, exactly as legacy does. The runtime's own
+   `stringToRunes` was also wrong in BOTH compilers: it walked `for range s`,
+   which in Moxie is bytes, not code points; it decodes UTF-8 now.
+2. **A keyed composite literal with a NAMED-CONSTANT key dropped the key.**
+   `buildCompositeLitInto`'s array path understood only integer-literal keys
+   and advanced `posIdx++` instead of `posIdx = key+1`, so
+   `[6][2]ruleTransition{ruleInitial: ..., ruleRTL: ...}` in
+   x/text/secure/bidirule was written positionally - ruleRTL's row landed at
+   index 1 and every ASCII label failed the bidi rule. The key is now resolved
+   through the constant folder (named constants and constant expressions), and
+   an unkeyed element follows the last KEY, which is Go's rule.
+3. **A func-typed field promoted from an embedded struct was invisible.**
+   `buildFuncFieldCall` asked `fieldIndex` for the field in the outer type,
+   got -1, and reported the field as undefined - so `p.mapping(p, s)` on
+   `idna.Profile` (whose `mapping` lives on the embedded `options`) could not be
+   built at all. The embedded path is walked now (`fieldTypeAtPath`).
+
+Verified: a probe printing html unescape, errno and signal text, NFC, NFD,
+idna ToASCII/ToUnicode and punycode encode gives byte-identical output under
+both compilers, and the new fixture
+`tests/regressions/should_compile/rune_keyed_promoted/` exercises all three
+constructs through a package boundary.
+
+Lesson recorded because it cost four rounds: "it builds and the encoder
+round-trips" is not evidence about the encoder's inputs. Compare the OUTPUT of
+the same program under both compilers, for the path you actually changed.

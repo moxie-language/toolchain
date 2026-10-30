@@ -1,0 +1,57 @@
+// Regression fixture: rune-slice conversions, keyed literals with named
+// constant keys, and a func field promoted from an embedded struct. Each of the
+// three used to produce a wrong answer or a spurious compile error in stage4
+// while legacy was already correct.
+package main
+
+import (
+	"os"
+	"tests/regressions/should_compile/rune_keyed_promoted/lib"
+)
+
+func bad(msg string) {
+	println("FAIL:", msg)
+	os.Exit(1)
+}
+
+func main() {
+	// 1. runes to bytes and back
+	rs := []rune{'a', 0xfc, 'c'}
+	s := lib.RunesToBytes(rs)
+	if int32(len(s)) != 4 {
+		bad("runes to bytes length " | int32(len(s)).String())
+	}
+	if string(s) != "aüc" {
+		bad("runes to bytes content " | string(s))
+	}
+	back := lib.BytesToRunes("aüc")
+	if int32(len(back)) != 3 {
+		bad("bytes to runes length " | int32(len(back)).String())
+	}
+	if back[0] != 'a' || back[1] != 0xfc || back[2] != 'c' {
+		bad("bytes to runes content")
+	}
+
+	// 2. keyed literals with named constant keys
+	st := lib.Walk([]uint16{1, 1, 1})
+	if st != 2 {
+		bad("keyed array walk ended in state " | int32(st).String())
+	}
+	if v, cnt := lib.KeyedSliceAt(2); v != 40 || cnt != 5 {
+		bad("keyed slice: v=" | int32(v).String() | " n=" | int32(cnt).String())
+	}
+	if v, _ := lib.KeyedSliceAt(4); v != 50 {
+		bad("keyed slice last element " | int32(v).String())
+	}
+	if v, _ := lib.KeyedSliceAt(1); v != 0 {
+		bad("keyed slice gap should be zero, got " | int32(v).String())
+	}
+
+	// 3. func field promoted from an embedded struct
+	b, got := lib.ThroughField([]byte("ExAmPle"))
+	if string(b) != "example" || got != 7 {
+		bad("promoted func field: '" | string(b) | "' n=" | int32(got).String())
+	}
+
+	println("return rune_keyed_promoted ok")
+}

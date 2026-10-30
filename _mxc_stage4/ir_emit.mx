@@ -2777,6 +2777,21 @@ func (e *irEmitter) emitIf(i *SSAIf) {
 	}
 }
 
+// isRuneSlice reports whether t is a slice of 32-bit signed integers, i.e. the
+// []rune that a string conversion has to encode. `[]int32` is the same type in
+// Go's rules and converts the same way.
+func isRuneSlice(t Type) (ok bool) {
+	if t == nil {
+		return false
+	}
+	sl, isSl := SafeUnderlying(t).(*Slice)
+	if !isSl {
+		return false
+	}
+	b, isB := SafeUnderlying(sl.Elem).(*Basic)
+	return isB && b.Kind == Int32 && b.Info&IsInteger != 0
+}
+
 func (e *irEmitter) emitConvert(c *SSAConvert) {
 	reg := e.regName(c)
 	srcType := e.llvmType(c.X.SSAType())
@@ -2796,6 +2811,28 @@ func (e *irEmitter) emitConvert(c *SSAConvert) {
 		} else {
 			e.valName[c] = "zeroinitializer"
 		}
+		return
+	}
+
+	// A rune slice and a string share the three-word header, so they have the
+	// SAME LLVM type and the equality return below hands the header straight
+	// through - but the conversion is not a reinterpretation: a rune slice
+	// holds one 32-bit code point per element and a string holds UTF-8 bytes.
+	// string([]rune{'a','b','c'}) was therefore a 3-byte string containing the
+	// first three bytes of the rune array ("a\x00\x00"), which is how
+	// x/net/idna's punycode decoder produced interleaved NULs, and
+	// []rune("abc") returned the string's bytes reinterpreted as code points.
+	// Both directions go through the runtime encoders, exactly as legacy does.
+	if isRuneSlice(c.X.SSAType()) && e.isStringLike(c.SSAType()) {
+		e.declareRuntime("runtime.stringFromRunes", e.sliceType(), e.sliceType())
+		e.w("  ") ; e.w(reg) ; e.w(" = call ") ; e.w(e.sliceType()) ; e.w(" @runtime.stringFromRunes(") ; e.w(srcType) ; e.w(" ") ; e.w(val) ; e.w(", ptr null)\n")
+		e.setRegType(c, reg, e.sliceType())
+		return
+	}
+	if e.isStringLike(c.X.SSAType()) && isRuneSlice(c.SSAType()) {
+		e.declareRuntime("runtime.stringToRunes", e.sliceType(), e.sliceType())
+		e.w("  ") ; e.w(reg) ; e.w(" = call ") ; e.w(e.sliceType()) ; e.w(" @runtime.stringToRunes(") ; e.w(srcType) ; e.w(" ") ; e.w(val) ; e.w(", ptr null)\n")
+		e.setRegType(c, reg, e.sliceType())
 		return
 	}
 

@@ -1,0 +1,146 @@
+// Three stage4 code generation holes that every one of them produced a WRONG
+// ANSWER rather than an error, found while converting the Unicode tables.
+//
+//  1. string([]rune) and []rune(string) were a reinterpretation of the three
+//     word header, so string([]rune{'a','b','c'}) was a 3-byte string holding
+//     "a\0\0" - the first three bytes of the rune array.
+//  2. A keyed composite literal whose key was a NAMED CONSTANT dropped the key
+//     and stored the element at the running position, so a table keyed
+//     ruleInitial, ruleRTL, ruleRTLFinal, ruleLTR, ... came out shifted by one
+//     and every LTR label failed the bidi rule.
+//  3. A func-typed field promoted from an embedded struct was not found at all:
+//     the call reported "undefined field", which is why idna.Profile.process's
+//     `p.mapping(p, s)` could not be built.
+//
+// Everything is in lib/ because package main has no frame arena, so the return
+// path these functions exercise would not run at all in main.
+package lib
+
+// State values double as the keys of the table below.
+const (
+	stateStart stateId = iota
+	stateLTR
+	stateLTRFinal
+	stateRTL
+	stateInvalid
+)
+
+type stateId uint8
+
+type transition struct {
+	next stateId
+	mask uint16
+}
+
+// table is keyed by NAMED CONSTANTS, in an order that is not the numeric order:
+// a positional reading puts stateRTL's row at index 1 and breaks the walk.
+func table() (t [6][2]transition) {
+	return [6][2]transition{
+		stateStart: {
+			{stateLTRFinal, 1},
+			{stateRTL, 2},
+		},
+		stateRTL: {
+			{stateInvalid, 0},
+			{stateInvalid, 0},
+		},
+		stateLTR: {
+			{stateLTRFinal, 1},
+			{stateLTR, 4},
+		},
+		stateLTRFinal: {
+			{stateLTRFinal, 1},
+			{stateLTR, 4},
+		},
+	}
+}
+
+// Walk reports the state the machine ends in after following masks left to
+// right. For codes {1, 1, 1} that is stateLTRFinal (2); a table read
+// positionally ends in stateInvalid (4).
+func Walk(codes []uint16) (st stateId) {
+	st = stateStart
+	for _, c := range codes {
+		tr := table()[st]
+		switch {
+		case tr[0].mask&c != 0:
+			st = tr[0].next
+		case tr[1].mask&c != 0:
+			st = tr[1].next
+		default:
+			st = stateInvalid
+		}
+	}
+	return st
+}
+
+// keyedSlice uses a named constant key in a SLICE literal, which has the same
+// rule and the same failure.
+func keyedSlice() (s []int32) {
+	return []int32{
+		stateStart:      10,
+		stateLTRFinal:   40,
+		stateInvalid:    50,
+	}
+}
+
+func KeyedSliceAt(i int32) (v int32, n int32) {
+	s := keyedSlice()
+	return s[i], int32(len(s))
+}
+
+// RunesToBytes converts a rune slice to a string: UTF-8 encoding, not a
+// reinterpretation of the header.
+func RunesToBytes(r []rune) (s string) {
+	return string(r)
+}
+
+// BytesToRunes converts a string to a rune slice: UTF-8 decoding, not one
+// "rune" per byte.
+func BytesToRunes(s string) (r []rune) {
+	return []rune(s)
+}
+
+// options mirrors the embedding shape idna.Profile uses: the func field lives
+// on the embedded struct and is called through the outer one.
+type options struct {
+	mapFn func(p *Profile, s []byte) (b []byte, n int32)
+}
+
+type Profile struct {
+	options
+}
+
+func lower(s []byte) (b []byte) {
+	b = []byte{:len(s)}
+	for i := int32(0); i < int32(len(s)); i++ {
+		c := s[i]
+		if 'A' <= c && c <= 'Z' {
+			c = c + 32
+		}
+		b[i] = c
+	}
+	return b
+}
+
+func mapLower(p *Profile, s []byte) (b []byte, n int32) {
+	return lower(s), int32(len(s))
+}
+
+func NewProfile() (p *Profile) {
+	return &Profile{options{mapFn: mapLower}}
+}
+
+// ThroughField calls the PROMOTED func field, which is the construct that used
+// to be reported as an undefined field.
+func ThroughField(s []byte) (b []byte, n int32) {
+	p := NewProfile()
+	var err bool
+	if p.mapFn != nil {
+		b, n = p.mapFn(p, s)
+	}
+	if err {
+		return s, 0
+	}
+	return b, n
+}

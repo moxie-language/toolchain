@@ -6629,6 +6629,17 @@ func (fb *ssaFuncBuilder) buildFuncFieldCall(sel *syntax.SelectorExpr, argList [
 		return nil, false
 	}
 	ft := fb.fieldType(recv.SSAType(), fb.fieldIndex(recv.SSAType(), sel.Sel.Value))
+	if ft == nil {
+		// A field promoted from an embedded struct is not in the outer type's
+		// own field list, so fieldIndex says -1 and the func field did not look
+		// like a func field at all: the call was reported as an undefined
+		// field. idna.Profile.process's `p.mapping(p, s)` is exactly this shape
+		// (mapping lives on the embedded options struct), and without the walk
+		// the idna package could not be built at all.
+		if path := fb.findEmbeddedFieldPath(recv.SSAType(), sel.Sel.Value); len(path) > 0 {
+			ft = fb.fieldTypeAtPath(recv.SSAType(), path)
+		}
+	}
 	sig, ok := SafeUnderlying(ft).(*Signature)
 	if !ok {
 		return nil, false
@@ -7631,11 +7642,11 @@ func (fb *ssaFuncBuilder) constArrayLitText(e *syntax.CompositeLit, ar *Array) (
 		idx := next
 		val := el
 		if kv, isKV := el.(*syntax.KeyValueExpr); isKV {
-			kvIdx, kok := arrayLitElemInt(kv.Key)
-			if !kok || kvIdx < 0 || kvIdx >= int64(n) {
+			kvIdx, kok := fb.arrayLitKey(kv.Key)
+			if !kok || kvIdx < 0 || kvIdx >= n {
 				return "", 0, false
 			}
-			idx = int32(kvIdx)
+			idx = kvIdx
 			val = kv.Value
 		}
 		if idx < 0 || idx >= n {
@@ -7660,6 +7671,30 @@ func (fb *ssaFuncBuilder) constArrayLitText(e *syntax.CompositeLit, ar *Array) (
 	}
 	buf = appendStrBytes(buf, "]")
 	return string(buf), int64(n) * int64(width), true
+}
+
+// arrayLitKey is the index a keyed composite-literal element names. Generated
+// tables key their elements by named constants (`ruleInitial:`, `_Idna:`) and
+// by constant expressions (`1 << 13:`), not only by integer literals, and only
+// the literal form was understood: every other key was dropped and the element
+// written at the running position instead. That is how
+// x/text/secure/bidirule's transitions table - keyed ruleInitial, ruleRTL,
+// ruleRTLFinal, ruleLTR, ruleLTRFinal, ruleInvalid - ended up with ruleRTL's row
+// at index 1, so an LTR label walked into the RTL rows and every ASCII domain
+// was rejected by the bidi rule.
+func (fb *ssaFuncBuilder) arrayLitKey(el syntax.Expr) (v int32, ok bool) {
+	if k, kok := arrayLitElemInt(el); kok {
+		return int32(k), true
+	}
+	c, isConst := fb.buildExpr(el).(*SSAConst)
+	if !isConst {
+		return 0, false
+	}
+	ci, isInt := c.val.(*ConstInt)
+	if !isInt {
+		return 0, false
+	}
+	return int32(ci.V), true
 }
 
 // arrayLitElemInt is the integer value of one constant element of an array
@@ -7813,13 +7848,13 @@ func (fb *ssaFuncBuilder) buildCompositeLitInto(dst SSAValue, e *syntax.Composit
 			idx := posIdx
 			if kv, ok := el.(*syntax.KeyValueExpr); ok {
 				expr = kv.Value
-				if bl, ok2 := kv.Key.(*syntax.BasicLit); ok2 {
-					if ci, ok3 := EvalBasicLitLocal(bl).(*ConstInt); ok3 {
-						idx = int32(ci.V)
-					}
+				if k, kok := fb.arrayLitKey(kv.Key); kok {
+					idx = k
 				}
 			}
-			posIdx++
+			// An unkeyed element follows the last KEY, not the previous
+			// element's slot: `[6]int{0: 'a', 'b'}` puts 'b' at index 1.
+			posIdx = idx + 1
 			ia := &SSAIndexAddr{X: dst, Index: &SSAConst{typ: Typ[Int32], val: &ConstInt{V: int64(idx)}}}
 			ia.typ = NewPointer(ar.Elem)
 			ia.name = fb.nextName()
@@ -7941,7 +7976,7 @@ func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ Type, sl *Sl
 	// and ignored the keys, so a keyed slice literal stored at the wrong
 	// offsets - []uint16{0x00: 0x80, 0x01: 0x80} was indistinguishable from a
 	// positional one.
-	n := sliceLitLen(e)
+	n := fb.sliceLitLen(e)
 	nVal := &SSAConst{typ: Typ[Int32], val: &ConstInt{V:int64(n)}}
 	ms := &SSAMakeSlice{}
 	ms.typ = typ
@@ -7970,8 +8005,8 @@ func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ Type, sl *Sl
 		idx := next
 		var expr syntax.Expr
 		if kv, ok := el.(*syntax.KeyValueExpr); ok {
-			if k, kok := arrayLitElemInt(kv.Key); kok && k >= 0 {
-				idx = int32(k)
+			if k, kok := fb.arrayLitKey(kv.Key); kok && k >= 0 {
+				idx = k
 			}
 			expr = kv.Value
 		} else {
@@ -8005,13 +8040,13 @@ func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ Type, sl *Sl
 // sliceLitLen is the length a slice literal denotes: the highest keyed index
 // plus one, or the element count when nothing is keyed (Go's composite-literal
 // rule, which the array path already followed).
-func sliceLitLen(e *syntax.CompositeLit) (n int32) {
+func (fb *ssaFuncBuilder) sliceLitLen(e *syntax.CompositeLit) (n int32) {
 	next := int32(0)
 	for _, el := range e.ElemList {
 		idx := next
 		if kv, ok := el.(*syntax.KeyValueExpr); ok {
-			if k, kok := arrayLitElemInt(kv.Key); kok && k >= 0 {
-				idx = int32(k)
+			if k, kok := fb.arrayLitKey(kv.Key); kok && k >= 0 {
+				idx = k
 			}
 		}
 		if idx+1 > n {
@@ -9629,6 +9664,18 @@ func (fb *ssaFuncBuilder) findEmbeddedFieldPath(t Type, name string) (ss []int32
 		}
 	}
 	return nil
+}
+
+// fieldTypeAtPath walks an embedded-field path (outer -> ... -> field) and
+// returns the type of the final field.
+func (fb *ssaFuncBuilder) fieldTypeAtPath(t Type, path []int32) (tv Type) {
+	for i := int32(0); i < int32(len(path)); i++ {
+		t = fb.fieldType(t, path[i])
+		if t == nil {
+			return nil
+		}
+	}
+	return t
 }
 
 func (fb *ssaFuncBuilder) fieldType(t Type, idx int32) (tv Type) {
