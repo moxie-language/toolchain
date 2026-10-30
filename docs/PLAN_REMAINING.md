@@ -323,6 +323,27 @@ the callee writes into the same bytes because there was never anything to copy.
 copy rule then reads: *a sub-slice copies; a fixed-extent header's whole range
 yields the same storage with a length-changeable cap.*
 
+Inventory for W7a, counted rather than guessed (the campaign has a map now):
+
+    stage4 (both the representation and every probing site)
+      ssa_builder.mx    24   buildArrayLit, emitAlloc of an array, index
+      ir_emit.mx        13   indexing, len/cap, array-to-slice
+      ir_descriptors.mx  8   KindArray in the runtime type descriptor
+      ir_iter.mx         4   range over an array
+      ir_call.mx         4   array parameters/returns
+      ssa_types.mx       3   Array type itself
+      ir_binop.mx        3   comparison/copy of array values
+      ir_typecheck.mx    2   the `[...]T` length rule
+      ir_types.mx        1   llvmType's `[N x T]` branch (already returns the
+                             slice for Len < 0, which is the shape to keep)
+      ir_deepcopy.mx, ir_chan.mx, main.mx   1 each
+    legacy
+      compiler.go 24, interface.go 11, restrict.go 10, llvm.go 8, map.go 5,
+      channel.go 4, wasmspawn.go 3, sizes.go 2, interp/memory.go 9
+    runtime
+      KindArray in 6 files (alloc, codec, hashmap, interface, typekind,
+      type_render), 15 sites
+
 Order of work, all bilateral (legacy first, then stage4):
 
 - **W7a - representation.** `llvmType([N]T)` becomes the slice header (ptr to
@@ -522,6 +543,20 @@ Order: (1) first, because it is contained in the runtime and it is 10-30 us per
 call on every mutating method that builds its receiver; then (2) with the
 bilateral codegen change; then re-measure W14's scanner bench, which round 275
 showed is CPU on this same path.
+
+**First attempt at (2), parked with what it learned**: the branch belongs in
+`emitRetWithCodec` in `_mxc_stage4/ir_deepcopy.mx`, after the `needsCodec` test,
+guarded by a runtime `codecRetStable(value, typeDesc)` that answers "every pointer
+this value holds is nil or stable by identity" - mirroring
+`codecEncodeValue`'s own per-field decisions in return mode, including the rule
+that a slice whose elements can hold pointers is walked even when its backing is
+stable. Written that way it emitted the check for interface results (12 sites in
+`time`) but NOT for `time.Local`'s named single pointer result, and the bench was
+unchanged (640 -> 665 ns), so the work is unverified and was reverted rather than
+committed half-done. The next attempt should start by dumping the emitted IR for
+a function with one NAMED pointer result and finding which of `emitReturn`'s
+branches produced its epilogue - the block is reachable, so it is a routing
+question, not a design question.
 
 ## W18. The net package's IP layer (found by round 277, mostly fixed by round 278)
 
