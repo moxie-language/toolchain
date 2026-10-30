@@ -20634,3 +20634,36 @@ Two bugs found while landing it, both worth keeping:
 
 Gates after the fix: bootstrap fixpoint `93324787`, quickcheck 15/15, phase 8
 17/17 in both dispatch modes.
+
+## Round 284: what is left in time.Now, and the scanner re-measured
+
+With the return protocol skipped (round 283), `time.Now()` is 1315-1360 ns.
+Taking the marginal cost over `time.Local()` (200 ns) isolates the body: about
+1160 ns, and the body is two clock reads.
+
+`now()` (src/runtime/runtime_unix.mx, linknamed as `time.now`) is:
+
+    ts := timespec{}
+    clock_gettime(clock_REALTIME, &ts)
+    sec, nsec = ...
+    mono = nanotime()
+
+and the disassembly of `time.now` shows `runtime.alloc`, `runtime.clock_gettime`
+and `runtime.nanotime`. Both reads go through the libc shim
+(`libc_clock_gettime`), at about 580 ns each - 30x what a direct vDSO call
+costs. So W13's remaining 1.3 us is not codec, not `Local`, and not the arena:
+it is two libc calls where Go makes two vDSO calls.
+
+That gives W13 a real plan instead of a mystery:
+
+1. Call the vDSO directly (locate `__vdso_clock_gettime` through
+   `AT_SYSINFO_EHDR`, as Go does) - 2 x ~25 ns instead of 2 x ~580 ns.
+2. Then `Local()` is the next floor at 200 ns, which is FnArenaPush(64 KiB) +
+   the fast-path check for a function that allocates nothing. The fix there is a
+   lazy frame arena (acquire on first allocation), not another codec change.
+
+The scanner re-measured with the fast path in place: 4 MiB of 64-byte lines is
+349-355 ms against 366-397 before, so the return protocol was about 12% of it and
+`Scan`'s cost is still its own work (5.4 us per token), not the codec. W14 keeps
+its numbers and its target; the next instrument is a counter inside `Scan`, as
+round 269 concluded.
