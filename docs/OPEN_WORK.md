@@ -20552,3 +20552,38 @@ What that does to the three "exceptions":
 W7 in the plan is rewritten in that order: representation first (both compilers
 byte for byte), then indexing, then the refusals, then the whole-range
 transition, then the two accounting groups, then the remainder.
+
+## Round 282: an array's capacity is negative, in both compilers
+
+The first piece of the corrected W7, and the one that has to exist before the
+representation can change: **`cap(arr)` is `-N`**. The negative value is the
+sentinel `mxutil.capFixed` already understands for `//:linkdata` storage, so a
+growth guard (`cap(x)-len(x) < n`) answers "no room" without a special case, and
+it is the accounting the array header will carry.
+
+Measured, same source, both compilers:
+
+    len(a)  = 8      cap(a)  = -8     a is [8]byte
+    len(a[:]) = 8    cap(a[:]) = 8    the cap-sign flip: same storage, growable cap
+    len(p)  = 8      cap(p)  = -8     p is *[8]byte
+
+Where the change lives is the interesting part. In stage4 it is the `cap` case in
+`ir_call.mx` (the array and pointer-to-array branches now emit `-N`). In legacy
+it is **not in the compiler at all**: Go makes `cap(anArrayVar)` a *constant*
+expression, so `go/types` folds it and no lowering pass ever sees a `cap` to
+rewrite - patching the vendored `go/ssa` builtin folder (the obvious place) had
+no effect at all, which is what pointed at the truth. The fold is in
+`go/types/builtins.go`, so the legacy side is the `patch-gotypes.go` patcher that
+the tree already uses for string=[]byte and the Moxie builtins:
+
+    if t.len >= 0 {
+        if id == _Cap { val = constant.MakeInt64(-t.len) } else { val = ... t.len }
+    }
+
+`len` keeps the type's length; only `cap` carries the sentinel.
+
+Verified: `s4b == s4c` (bootstrap fixpoint `74799d6e`), quickcheck green, and
+phase 8 green in both modes, so nothing in the tree depended on the positive
+number. The remaining W7a work is the representation itself - an inline `[N]T`
+becoming a header whose cap is this `-N` - which is where the storage and the
+struct-field cases get settled.

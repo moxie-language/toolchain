@@ -79,6 +79,7 @@ func main() {
 	patchScopeHashPrefix(dstDir)
 	patchBuiltinMethods(dstDir)
 	patchPtrRecvMethodSet(dstDir)
+	patchArrayCapNegative(dstDir)
 
 	fmt.Fprintf(os.Stderr, "patched go/types in %s\n", dstDir)
 }
@@ -662,6 +663,26 @@ func patchPanicRecoverString(dir string) {
 		"\tcase _Recover:\n\t\t// recover() interface{}\n\t\tx.mode = value\n\t\tx.typ = &emptyInterface",
 		"\tcase _Recover:\n\t\t// recover() string\n\t\tx.mode = value\n\t\tx.typ = Typ[String]")
 
+	mustWrite(f, src)
+}
+
+func patchArrayCapNegative(dir string) {
+	// Moxie: an array's capacity is NEGATIVE. The negative value is the sentinel
+	// that says the extent cannot change (mxutil's capFixed), so a growth guard
+	// answers "no room" instead of allocating, and cap(arr[:]) is the same
+	// storage with the sign flipped - a slice of an array stays
+	// length-changeable. len() keeps the type's length: only cap carries the
+	// sentinel. See W7 in docs/PLAN_REMAINING.md.
+	//
+	// This has to happen here rather than in the compiler: Go makes
+	// cap(anArrayVar) a CONSTANT, so go/types folds it and no lowering pass ever
+	// sees a cap expression to rewrite (measured: patching the vendored go/ssa
+	// had no effect for exactly this reason).
+	f := filepath.Join(dir, "builtins.go")
+	src := mustRead(f)
+	src = mustReplace(f, src,
+		"\t\t\tif !check.hasCallOrRecv {\n\t\t\t\tmode = constant_\n\t\t\t\tif t.len >= 0 {\n\t\t\t\t\tval = constant.MakeInt64(t.len)\n\t\t\t\t} else {",
+		"\t\t\tif !check.hasCallOrRecv {\n\t\t\t\tmode = constant_\n\t\t\t\tif t.len >= 0 {\n\t\t\t\t\tif id == _Cap {\n\t\t\t\t\t\tval = constant.MakeInt64(-t.len)\n\t\t\t\t\t} else {\n\t\t\t\t\t\tval = constant.MakeInt64(t.len)\n\t\t\t\t\t}\n\t\t\t\t} else {")
 	mustWrite(f, src)
 }
 

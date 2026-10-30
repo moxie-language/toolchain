@@ -531,16 +531,23 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			arg := e.operand(c.Call.Args[0])
 			uc := SafeUnderlying(c.Call.Args[0].SSAType())
 			if uc == nil { uc = c.Call.Args[0].SSAType() }
+			// Fixed extent: an array's capacity is NEGATIVE, and that sign is the
+			// sentinel that says the extent cannot change - it is what
+			// mxutil.capFixed tests, so every growth guard answers "no room"
+			// without a special case. cap(arr[:]) is the same storage with the
+			// sign flipped, so a slice of an array stays length-changeable. This
+			// is the array-ABI convention W7 builds on, and legacy's go/types
+			// patch has to produce the same number (build/patch-gotypes.go).
 			if arr, ok := uc.(*Array); ok {
 				rt5 := e.llvmType(c.SSAType())
-				e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(rt5) ; e.w(" ") ; e.w(irItoa(int32(arr.Len))) ; e.w(", 0\n")
+				e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(rt5) ; e.w(" ") ; e.w(irItoa(-int32(arr.Len))) ; e.w(", 0\n")
 				_ = arg
 				return
 			}
 			if p, ok := uc.(*Pointer); ok && p.Base != nil {
 				if arr, ok2 := SafeUnderlying(p.Base).(*Array); ok2 {
 					rt6 := e.llvmType(c.SSAType())
-					e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(rt6) ; e.w(" ") ; e.w(irItoa(int32(arr.Len))) ; e.w(", 0\n")
+					e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(rt6) ; e.w(" ") ; e.w(irItoa(-int32(arr.Len))) ; e.w(", 0\n")
 					_ = arg
 					return
 				}
