@@ -571,6 +571,41 @@ two objects. Rule recorded in `CLAUDE.md`.
 **Accept (met):** fixture passes under both compilers, bootstrap fixpoint, phase
 8 and the sweep unchanged.
 
+## W25. `package main` gets no frame arena and no codec (round 298)
+
+`funcNeedsArenaCopy` excludes `main` from the per-function arena and the return
+codec in both compilers (`legacy/compiler/compiler.go:4364`,
+`_mxc_stage4/ir_deepcopy.mx:52`). The reason is that the compiler is itself
+`package main` and manages its own arenas by hand, but the exclusion applies to
+every user binary's main package, so a main-package function never emits
+`FnArenaPush`/`FnArenaPop` at all (measured in IR for a probe module: none of its
+main-package functions do) and nothing it allocates is reclaimed when it returns.
+
+Measured: a loop of 256 iterations allocating a 4 MiB buffer in a main-package
+helper dies with `arena: region mmap failed` under `ulimit -v 400000` - 1 GiB of
+garbage, none of it reclaimed. Any long-running loop written in `main` grows
+without bound; every other package is unaffected because the arena and the codec
+are on.
+
+The same exclusion is why the return-ownership property cannot be observed from
+`package main` (round 298 moved that fixture's callee into a `lib/` package).
+
+Deciding what main gets needs one call:
+
+- (a) push a frame arena for main-package functions but keep the codec off: only
+  safe for functions whose results contain no pointers, and the compiler would
+  pay a push/pop per call;
+- (b) make the exclusion a build flag that the compiler passes for its OWN build,
+  so user main packages get the full protocol. This is the coherent one - the
+  exclusion exists for the compiler, not for the language - and it costs a
+  bootstrap cycle;
+- (c) leave it and document that a loop that runs longer than a frame belongs in
+  a library function or an explicit root-arena scope.
+
+**Accept** for (b): a probe with a 1 GiB loop in `package main` survives the same
+`ulimit -v` cap under both compilers, the compiler still builds itself with the
+flag set, and bootstrap reproduces.
+
 ## W8. Opportunistic cleanups (do while in the neighbourhood)
 
 - `src/math/big/decimal.mx` `rsh(x *decimal, s)`: writes `x.mant` through a

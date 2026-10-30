@@ -21253,3 +21253,23 @@ a provisional `.str.N` index cannot shift onto another literal's bytes.
 Measured after the change: `[]byte("abc")` twice, write through the first, both
 compilers print `first: Xbc` / `second: abc`; `p := b` aliases in both. The
 fixture passes under both compilers.
+
+## Round 298b: what `package main` does not get
+
+While moving the ownership fixture across a package boundary, the exclusion
+itself came into view. `funcNeedsArenaCopy` excludes `main` from the per-function
+arena and the return codec, in both compilers, with no comment saying why - the
+answer is that the compiler is `package main` and manages its arenas by hand.
+
+For a user binary that means a main-package function emits no `FnArenaPush` and
+nothing it allocates is reclaimed at return. Measured: 256 iterations of a 4 MiB
+allocation inside a main-package helper die with `arena: region mmap failed`
+under `ulimit -v 400000` - 1 GiB of unreachable garbage, because the buffers land
+in the root arena and stay. Library callees are untouched by this (their own
+frame arena is pushed and popped); the loop has to be *written in main* for it to
+happen, which is exactly where a small server's request loop lives.
+
+Recorded as W25 with the three shapes a fix can take. It is a decision, not a
+patch: (b) - a build flag the compiler passes for its own build, so user main
+packages get the full protocol - is the coherent one, because the exclusion
+exists for the compiler, not for the language.
