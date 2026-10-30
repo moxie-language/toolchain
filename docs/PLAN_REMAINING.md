@@ -374,9 +374,13 @@ Order of work, all bilateral (legacy first, then stage4):
   two compilers must agree byte for byte.
 - **W7b - indexing, len, cap.** Indexing through base+offset with the len bound;
   `len(arr)` reads the header; `cap(arr)` returns the negative value.
-- **W7c - the refusals.** `push`, `pop`, `resize`, `append`, and assignment to
-  `len(arr)` are compile errors naming the negative capacity ("fixed-extent
-  array: capacity cannot change"), in both compilers.
+- **W7c - the refusals.** DONE in stage4 (round 294): `push`, `pop` and
+  `resize` on an array are compile errors naming the negative capacity. Legacy
+  already refused all three through go/types ("invalid push: argument must be a
+  slice"), so only stage4 had the hole - and it was a silent one: `push(arr, v)`
+  compiled and dropped `v`. Still open here: `append` does not exist in the
+  language at all, and assignment to `len(arr)` (not expressible today) would
+  need the same message if it ever becomes one.
 - **W7d - the whole-range transition.** `arr[:]` produces the same base with a
   positive cap; `arr[a:b]` copies. Remove "an array base is still a view" from
   the copy rule's documentation, because it is no longer an exception - it is the

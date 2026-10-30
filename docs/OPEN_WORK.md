@@ -21071,3 +21071,34 @@ Output, checked against Go for the shapes that used to be wrong:
 `strconv`'s, which means one float formatter in the tree instead of two, and the
 Ryu port the plan proposed would have duplicated it. Gate: bootstrap fixpoint
 `s4b == s4c == 93bb8578`, and the probe output above is the test.
+
+## Round 294: a fixed extent refuses push, pop and resize (W7c, stage4 side)
+
+Measured on the compiler before this round, with an `[8]byte`:
+
+    push(arr, v)      compiled, kept the array type, and SILENTLY DROPPED v
+                      (len stayed 8, cap stayed -8)
+    pop(arr)          clang: '%t2' defined with type '[8 x i8]' but expected
+                      '{ ptr, i64, i64 }'
+    resize(arr, 4)    the same clang error
+
+So the refusal W7c asks for was missing exactly where the user's array
+correction put the mechanism: the negative capacity already says the extent is
+fixed, but stage4 still built the call. `buildBuiltinCall` now refuses all three
+at type-check time, naming the fix:
+
+    fixed-extent array: capacity cannot change; slice it with arr[:] to get a
+    growable extent
+
+The legacy compiler was already honest here and needed nothing: go/types rejects
+the same three programs with "invalid push: argument must be a slice; have arr
+(variable of type [8]byte)", "invalid operation: first argument to pop must be a
+slice, ...", and the same for resize. A mirror in `legacy/compiler/compiler.go`
+was written, measured to be unreachable, and removed - wood law is about the
+behaviour, and both compilers now refuse; only the wording differs because the
+pipelines differ. `arr[:]` still yields a growable slice (cap +N) and
+`push(arr[:], v)` still works: the refusal is about the fixed extent, not about
+the bytes.
+
+Gates: bootstrap fixpoint `s4b == s4c == b838bcb8`; the probe above is the
+test for all three verbs in both compilers.

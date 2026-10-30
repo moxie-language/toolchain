@@ -6130,6 +6130,21 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		fb.emit(call8)
 		return call8
 	case BuiltinPush, BuiltinResize:
+		// A fixed extent cannot grow or shrink. An array's capacity is NEGATIVE
+		// to say exactly that (cap(arr) = -N, cap(arr[:]) = +N), so push and
+		// resize have no legal meaning on one. Both used to be emitted anyway:
+		// push(arr, v) compiled and silently DROPPED the element (the result
+		// kept the array type and len 8), and resize(arr, n) emitted a slice
+		// extractvalue on an array value and died in clang with "'%t2' defined
+		// with type '[8 x i8]' but expected '{ ptr, i64, i64 }'". The refusal
+		// names the fix.
+		if len(args) > 0 && args[0] != nil {
+			if _, isArr := SafeUnderlying(args[0].SSAType()).(*Array); isArr {
+				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+				push(cctx.compileErrors, fb.errPos() | "fixed-extent array: capacity cannot change; slice it with arr[:] to get a growable extent")
+				return nil
+			}
+		}
 		// An untyped nil has no element type, so the call cannot be typed: the
 		// result used to become untyped nil and default to int32, which either
 		// produced IR clang refuses (an i32 where a slice header belongs) or
@@ -6181,6 +6196,16 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		}
 		return callP
 	case BuiltinPop:
+		// pop needs a length it can shorten: an array's length is fixed and its
+		// negative capacity says so. Like push/resize it used to reach the
+		// emitter and fail in clang instead of here.
+		if len(args) > 0 && args[0] != nil {
+			if _, isArr := SafeUnderlying(args[0].SSAType()).(*Array); isArr {
+				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+				push(cctx.compileErrors, fb.errPos() | "fixed-extent array: capacity cannot change; slice it with arr[:] to get a growable extent")
+				return nil
+			}
+		}
 		callPop := &SSACall{Call: SSACallCommon{Value: b, Args: args}}
 		if len(args) == 1 {
 			if sl, ok := SafeUnderlying(args[0].SSAType()).(*Slice); ok {
