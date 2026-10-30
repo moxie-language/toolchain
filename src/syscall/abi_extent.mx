@@ -1,4 +1,4 @@
-//:build linux
+//:build unix
 
 package syscall
 
@@ -45,4 +45,66 @@ func abiBufferOf(b []byte) (p unsafe.Pointer) {
 		return nil
 	}
 	return unsafe.Pointer(unsafe.SliceData(b))
+}
+
+// abiGet16 and abiGet32 read a NATIVE-endian integer at a fixed offset, which
+// is what every ABI struct field is except the sockaddr port (network order,
+// see sockSetPort). The window is at least pointer-aligned in practice; the
+// unaligned load is legal on every target this tree builds for.
+func abiGet16(b []byte, off int32) (v uint16) {
+	w := abiWindow(b, off, 2)
+	if w == nil {
+		return 0
+	}
+	return *(*uint16)(unsafe.Pointer(&w[0]))
+}
+
+func abiPut16(b []byte, off int32, v uint16) {
+	w := abiWindow(b, off, 2)
+	if w == nil {
+		return
+	}
+	*(*uint16)(unsafe.Pointer(&w[0])) = v
+}
+
+func abiGet8(b []byte, off int32) (v uint8) {
+	w := abiWindow(b, off, 1)
+	if w == nil {
+		return 0
+	}
+	return w[0]
+}
+
+func abiPut8(b []byte, off int32, v uint8) {
+	w := abiWindow(b, off, 1)
+	if w == nil {
+		return
+	}
+	w[0] = v
+}
+
+func abiGet32(b []byte, off int32) (v uint32) {
+	w := abiWindow(b, off, 4)
+	if w == nil {
+		return 0
+	}
+	return *(*uint32)(unsafe.Pointer(&w[0]))
+}
+
+func abiPut32(b []byte, off int32, v uint32) {
+	w := abiWindow(b, off, 4)
+	if w == nil {
+		return
+	}
+	*(*uint32)(unsafe.Pointer(&w[0])) = v
+}
+
+// abiPutBytes copies src into b at off, for a field whose extent the caller
+// hands over as a slice.
+func abiPutBytes(b []byte, off int32, src []byte) {
+	w := abiWindow(b, off, int32(len(src)))
+	if w == nil {
+		return
+	}
+	copy(w, src)
 }

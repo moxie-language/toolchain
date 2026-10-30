@@ -536,36 +536,39 @@ func Mkfifo(path string, mode uint32) (err error) {
 	return Mknod(path, mode|S_IFIFO, 0)
 }
 
-func (sa *SockaddrInet4) sockaddr() (rpointer unsafe.Pointer, r_Socklen _Socklen, rerr error) {
-	if sa.Port < 0 || sa.Port > 0xFFFF {
-		return nil, 0, EINVAL
+func (sa *SockaddrInet4) sockaddr(buf []byte) (r_Socklen _Socklen, rerr error) {
+	if len(buf) < SizeofSockaddrInet4 {
+		return 0, EINVAL
 	}
-	sa.raw.Family = AF_INET
-	p := (*[2]byte)(unsafe.Pointer(&sa.raw.Port))
-	p[0] = byte(sa.Port >> 8)
-	p[1] = byte(sa.Port)
-	sa.raw.Addr = sa.Addr
-	return unsafe.Pointer(&sa.raw), SizeofSockaddrInet4, nil
+	if !sockSetPort(buf, sa.Port) {
+		return 0, EINVAL
+	}
+	sockSetFamily(buf, AF_INET)
+	copy(sockIPv4Addr(buf), sa.Addr[:])
+	return SizeofSockaddrInet4, nil
 }
 
-func (sa *SockaddrInet6) sockaddr() (rpointer unsafe.Pointer, r_Socklen _Socklen, rerr error) {
-	if sa.Port < 0 || sa.Port > 0xFFFF {
-		return nil, 0, EINVAL
+func (sa *SockaddrInet6) sockaddr(buf []byte) (r_Socklen _Socklen, rerr error) {
+	if len(buf) < SizeofSockaddrInet6 {
+		return 0, EINVAL
 	}
-	sa.raw.Family = AF_INET6
-	p := (*[2]byte)(unsafe.Pointer(&sa.raw.Port))
-	p[0] = byte(sa.Port >> 8)
-	p[1] = byte(sa.Port)
-	sa.raw.Scope_id = sa.ZoneId
-	sa.raw.Addr = sa.Addr
-	return unsafe.Pointer(&sa.raw), SizeofSockaddrInet6, nil
+	if !sockSetPort(buf, sa.Port) {
+		return 0, EINVAL
+	}
+	sockSetFamily(buf, AF_INET6)
+	abiPut32(buf, sockIn6OffScope, sa.ZoneId)
+	copy(sockIPv6Addr(buf), sa.Addr[:])
+	return SizeofSockaddrInet6, nil
 }
 
-func (sa *SockaddrUnix) sockaddr() (rpointer unsafe.Pointer, r_Socklen _Socklen, rerr error) {
+func (sa *SockaddrUnix) sockaddr(buf []byte) (r_Socklen _Socklen, rerr error) {
+	if len(buf) < sockUnOffPath+sockUnPathLen {
+		return 0, EINVAL
+	}
 	name := sa.Name
 	n := len(name)
-	if n > len(sa.raw.Path) {
-		return nil, 0, EINVAL
+	if n > sockUnPathLen {
+		return 0, EINVAL
 	}
 	// Abstract addresses start with NUL.
 	// '@' is also a valid way to specify abstract addresses.
@@ -573,12 +576,13 @@ func (sa *SockaddrUnix) sockaddr() (rpointer unsafe.Pointer, r_Socklen _Socklen,
 
 	// Non-abstract named addresses are NUL terminated.
 	// The length can't use the full capacity as we need to add NUL.
-	if n == len(sa.raw.Path) && !isAbstract {
-		return nil, 0, EINVAL
+	if n == sockUnPathLen && !isAbstract {
+		return 0, EINVAL
 	}
-	sa.raw.Family = AF_UNIX
-	for i := 0; i < n; i++ {
-		sa.raw.Path[i] = int8(name[i])
+	sockSetFamily(buf, AF_UNIX)
+	path := sockUnixPath(buf)
+	for i := int32(0); i < n; i++ {
+		path[i] = name[i]
 	}
 	// Length is family + name (+ NUL if non-abstract).
 	// Family is of type uint16 (2 bytes).
@@ -586,13 +590,13 @@ func (sa *SockaddrUnix) sockaddr() (rpointer unsafe.Pointer, r_Socklen _Socklen,
 	if isAbstract {
 		// Abstract addresses are not NUL terminated.
 		// We rewrite '@' prefix to NUL here.
-		sa.raw.Path[0] = 0
+		path[0] = 0
 	} else if n > 0 {
 		// Add NUL for non-abstract named addresses.
 		sl++
 	}
 
-	return unsafe.Pointer(&sa.raw), sl, nil
+	return sl, nil
 }
 
 type SockaddrLinklayer struct {
@@ -602,21 +606,23 @@ type SockaddrLinklayer struct {
 	Pkttype  uint8
 	Halen    uint8
 	Addr     [8]byte
-	raw      RawSockaddrLinklayer
 }
 
-func (sa *SockaddrLinklayer) sockaddr() (rpointer unsafe.Pointer, r_Socklen _Socklen, rerr error) {
-	if sa.Ifindex < 0 || sa.Ifindex > 0x7fffffff {
-		return nil, 0, EINVAL
+func (sa *SockaddrLinklayer) sockaddr(buf []byte) (r_Socklen _Socklen, rerr error) {
+	if len(buf) < SizeofSockaddrLinklayer {
+		return 0, EINVAL
 	}
-	sa.raw.Family = AF_PACKET
-	sa.raw.Protocol = sa.Protocol
-	sa.raw.Ifindex = int32(sa.Ifindex)
-	sa.raw.Hatype = sa.Hatype
-	sa.raw.Pkttype = sa.Pkttype
-	sa.raw.Halen = sa.Halen
-	sa.raw.Addr = sa.Addr
-	return unsafe.Pointer(&sa.raw), SizeofSockaddrLinklayer, nil
+	if sa.Ifindex < 0 || sa.Ifindex > 0x7fffffff {
+		return 0, EINVAL
+	}
+	sockSetFamily(buf, AF_PACKET)
+	abiPut16(buf, sockLlOffProtocol, sa.Protocol)
+	abiPut32(buf, sockLlOffIfindex, uint32(sa.Ifindex))
+	abiPut16(buf, sockLlOffHatype, sa.Hatype)
+	abiPut8(buf, sockLlOffPkttype, sa.Pkttype)
+	abiPut8(buf, sockLlOffHalen, sa.Halen)
+	copy(abiWindow(buf, sockLlOffAddr, sockLlAddrLen), sa.Addr[:])
+	return SizeofSockaddrLinklayer, nil
 }
 
 type SockaddrNetlink struct {
@@ -624,49 +630,50 @@ type SockaddrNetlink struct {
 	Pad    uint16
 	Pid    uint32
 	Groups uint32
-	raw    RawSockaddrNetlink
 }
 
-func (sa *SockaddrNetlink) sockaddr() (rpointer unsafe.Pointer, r_Socklen _Socklen, rerr error) {
-	sa.raw.Family = AF_NETLINK
-	sa.raw.Pad = sa.Pad
-	sa.raw.Pid = sa.Pid
-	sa.raw.Groups = sa.Groups
-	return unsafe.Pointer(&sa.raw), SizeofSockaddrNetlink, nil
+func (sa *SockaddrNetlink) sockaddr(buf []byte) (r_Socklen _Socklen, rerr error) {
+	if len(buf) < SizeofSockaddrNetlink {
+		return 0, EINVAL
+	}
+	sockSetFamily(buf, AF_NETLINK)
+	abiPut16(buf, sockNlOffPad, sa.Pad)
+	abiPut32(buf, sockNlOffPid, sa.Pid)
+	abiPut32(buf, sockNlOffGroups, sa.Groups)
+	return SizeofSockaddrNetlink, nil
 }
 
-func anyToSockaddr(rsa *RawSockaddrAny) (rsockaddr Sockaddr, rerr error) {
-	switch rsa.Addr.Family {
+func anyToSockaddr(rsa []byte) (rsockaddr Sockaddr, rerr error) {
+	switch sockFamily(rsa) {
 	case AF_NETLINK:
-		pp := (*RawSockaddrNetlink)(unsafe.Pointer(rsa))
 		sa := &SockaddrNetlink{}
-		sa.Family = pp.Family
-		sa.Pad = pp.Pad
-		sa.Pid = pp.Pid
-		sa.Groups = pp.Groups
+		sa.Family = sockFamily(rsa)
+		sa.Pad = abiGet16(rsa, sockNlOffPad)
+		sa.Pid = abiGet32(rsa, sockNlOffPid)
+		sa.Groups = abiGet32(rsa, sockNlOffGroups)
 		return sa, nil
 
 	case AF_PACKET:
-		pp := (*RawSockaddrLinklayer)(unsafe.Pointer(rsa))
 		sa := &SockaddrLinklayer{}
-		sa.Protocol = pp.Protocol
-		sa.Ifindex = int32(pp.Ifindex)
-		sa.Hatype = pp.Hatype
-		sa.Pkttype = pp.Pkttype
-		sa.Halen = pp.Halen
-		sa.Addr = pp.Addr
+		sa.Protocol = abiGet16(rsa, sockLlOffProtocol)
+		sa.Ifindex = int32(abiGet32(rsa, sockLlOffIfindex))
+		sa.Hatype = abiGet16(rsa, sockLlOffHatype)
+		sa.Pkttype = abiGet8(rsa, sockLlOffPkttype)
+		sa.Halen = abiGet8(rsa, sockLlOffHalen)
+		copy(sa.Addr[:], abiWindow(rsa, sockLlOffAddr, sockLlAddrLen))
 		return sa, nil
 
 	case AF_UNIX:
-		pp := (*RawSockaddrUnix)(unsafe.Pointer(rsa))
 		sa := &SockaddrUnix{}
-		if pp.Path[0] == 0 {
+		path := sockUnixPath(rsa)
+		if path == nil {
+			return nil, EINVAL
+		}
+		if path[0] == 0 {
 			// "Abstract" Unix domain socket.
 			// Rewrite leading NUL as @ for textual display.
 			// (This is the standard convention.)
-			// Not friendly to overwrite in place,
-			// but the callers below don't care.
-			pp.Path[0] = '@'
+			path[0] = '@'
 		}
 
 		// Assume path ends at NUL.
@@ -675,27 +682,23 @@ func anyToSockaddr(rsa *RawSockaddrAny) (rsockaddr Sockaddr, rerr error) {
 		// to be uninterpreted fixed-size binary blobs--but
 		// everyone uses this convention.
 		n := 0
-		for n < len(pp.Path) && pp.Path[n] != 0 {
+		for n < int32(len(path)) && path[n] != 0 {
 			n++
 		}
-		sa.Name = string(unsafe.Slice((*byte)(unsafe.Pointer(&pp.Path[0])), n))
+		sa.Name = string(path[:n])
 		return sa, nil
 
 	case AF_INET:
-		pp := (*RawSockaddrInet4)(unsafe.Pointer(rsa))
 		sa := &SockaddrInet4{}
-		p := (*[2]byte)(unsafe.Pointer(&pp.Port))
-		sa.Port = int32(p[0])<<8 + int32(p[1])
-		sa.Addr = pp.Addr
+		sa.Port = sockPort(rsa)
+		copy(sa.Addr[:], sockIPv4Addr(rsa))
 		return sa, nil
 
 	case AF_INET6:
-		pp := (*RawSockaddrInet6)(unsafe.Pointer(rsa))
 		sa := &SockaddrInet6{}
-		p := (*[2]byte)(unsafe.Pointer(&pp.Port))
-		sa.Port = int32(p[0])<<8 + int32(p[1])
-		sa.ZoneId = pp.Scope_id
-		sa.Addr = pp.Addr
+		sa.Port = sockPort(rsa)
+		sa.ZoneId = abiGet32(rsa, sockIn6OffScope)
+		copy(sa.Addr[:], sockIPv6Addr(rsa))
 		return sa, nil
 	}
 	return nil, EAFNOSUPPORT
@@ -706,16 +709,16 @@ func Accept(fd int32) (nfd int32, sa Sockaddr, err error) {
 }
 
 func Accept4(fd int32, flags int32) (nfd int32, sa Sockaddr, err error) {
-	var rsa RawSockaddrAny
-	var slen _Socklen = SizeofSockaddrAny
-	nfd, err = accept4(fd, &rsa, &slen, flags)
+	rsa := sockaddrBuf()
+	slen := _Socklen(SizeofSockaddrAny)
+	nfd, err = accept4(fd, rsa, &slen, flags)
 	if err != nil {
 		return
 	}
 	if slen > SizeofSockaddrAny {
-		panic("RawSockaddrAny too small")
+		panic("sockaddr buffer too small")
 	}
-	sa, err = anyToSockaddr(&rsa)
+	sa, err = anyToSockaddr(rsa)
 	if err != nil {
 		Close(nfd)
 		nfd = 0
@@ -724,12 +727,12 @@ func Accept4(fd int32, flags int32) (nfd int32, sa Sockaddr, err error) {
 }
 
 func Getsockname(fd int32) (sa Sockaddr, err error) {
-	var rsa RawSockaddrAny
-	var slen _Socklen = SizeofSockaddrAny
-	if err = getsockname(fd, &rsa, &slen); err != nil {
+	rsa := sockaddrBuf()
+	slen := _Socklen(SizeofSockaddrAny)
+	if err = getsockname(fd, rsa, &slen); err != nil {
 		return
 	}
-	return anyToSockaddr(&rsa)
+	return anyToSockaddr(rsa)
 }
 
 func GetsockoptInet4Addr(fd, level, opt int32) (value [4]byte, err error) {
@@ -784,9 +787,9 @@ func SetsockoptIPMreqn(fd, level, opt int32, mreq *IPMreqn) (err error) {
 	return setsockopt(fd, level, opt, unsafe.Pointer(mreq), unsafe.Sizeof(*mreq))
 }
 
-func recvmsgRaw(fd int32, p, oob []byte, flags int32, rsa *RawSockaddrAny) (n, oobn int32, recvflags int32, err error) {
+func recvmsgRaw(fd int32, p, oob []byte, flags int32, rsa []byte) (n, oobn int32, recvflags int32, err error) {
 	var msg Msghdr
-	msg.Name = (*byte)(unsafe.Pointer(rsa))
+	msg.Name = (*byte)(abiBufferOf(rsa))
 	msg.Namelen = uint32(SizeofSockaddrAny)
 	var iov Iovec
 	if len(p) > 0 {

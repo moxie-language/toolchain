@@ -1,0 +1,85 @@
+//:build unix
+
+package syscall
+
+// The sockaddr layouts, as offsets into the buffer the kernel reads and writes.
+//
+// A sockaddr is not a Go struct at the boundary: the kernel reads AF_* at
+// offset 0, a big-endian port at 2, an address at a family-specific offset, and
+// so on, for a length the caller states separately. In Moxie an `[N]T` field is
+// a slice header, which cannot sit where the kernel writes its first field, so
+// the extent is a byte buffer and the fields are these offsets (W7a). The
+// address families ported here are the ones the tree uses; both supported word
+// sizes agree on all of them.
+const (
+	sockOffFamily = 0
+	sockOffPort   = 2
+
+	sockIn4OffAddr = 4 // [4]byte in_addr
+	sockIn4OffZero = 8 // [8]byte
+	sockIn4Len     = 16
+
+	sockIn6OffFlow  = 4 // uint32 flowinfo
+	sockIn6OffAddr  = 8 // [16]byte in6_addr
+	sockIn6OffScope = 24
+	sockIn6Len      = 28
+
+	sockUnOffPath = 2   // [108]int8
+	sockUnPathLen = 108
+
+	sockLlOffProtocol = 2  // uint16
+	sockLlOffIfindex  = 4  // int32
+	sockLlOffHatype   = 8  // uint16
+	sockLlOffPkttype  = 10 // uint8
+	sockLlOffHalen    = 11 // uint8
+	sockLlOffAddr     = 12 // [8]uint8
+	sockLlAddrLen     = 8
+
+	sockNlOffPad    = 2 // uint16
+	sockNlOffPid    = 4 // uint32
+	sockNlOffGroups = 8 // uint32
+)
+
+// sockFamily reads the AF_* every sockaddr starts with.
+func sockFamily(b []byte) (v uint16) {
+	return abiGet16(b, sockOffFamily)
+}
+
+func sockSetFamily(b []byte, v uint16) {
+	abiPut16(b, sockOffFamily, v)
+}
+
+// sockPort reads the 16-bit port in NETWORK byte order that inet sockaddrs
+// carry at offset 2. It is the one field the ABI does not store host-endian.
+func sockPort(b []byte) (v int32) {
+	w := abiWindow(b, sockOffPort, 2)
+	if w == nil {
+		return 0
+	}
+	return int32(w[0])<<8 | int32(w[1])
+}
+
+func sockSetPort(b []byte, v int32) (ok bool) {
+	w := abiWindow(b, sockOffPort, 2)
+	if w == nil || v < 0 || v > 0xFFFF {
+		return false
+	}
+	w[0] = byte(v >> 8)
+	w[1] = byte(v)
+	return true
+}
+
+// sockIPv4Addr is the 4-byte address window of an AF_INET sockaddr.
+func sockIPv4Addr(b []byte) (w []byte) {
+	return abiWindow(b, sockIn4OffAddr, 4)
+}
+
+// sockIPv6Addr is the 16-byte address window of an AF_INET6 sockaddr.
+func sockIPv6Addr(b []byte) (w []byte) {
+	return abiWindow(b, sockIn6OffAddr, 16)
+}
+
+// sockUnixPath is the path window of an AF_UNIX sockaddr.
+func sockUnixPath(b []byte) (w []byte) {
+	return abiWindow(b, sockUnOffPath, sockUnPathLen)
+}

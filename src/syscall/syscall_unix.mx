@@ -251,50 +251,60 @@ func Pwrite(fd int32, p []byte, offset int64) (n int32, err error) {
 var SocketDisableIPv6 bool
 
 type Sockaddr interface {
-	sockaddr() (ptr unsafe.Pointer, slen _Socklen, err error) // lowercase; only we can define Sockaddrs
+	// sockaddr writes the kernel form into buf and returns the address length.
+	// The buffer belongs to the CALLER because the kernel reads or writes those
+	// bytes after this returns: a buffer allocated here would live in this
+	// call's frame arena and die with it (the RawSockaddr* mirrors are buffers
+	// for the same reason, see abi_sockaddr.mx).
+	sockaddr(buf []byte) (slen _Socklen, err error) // lowercase; only we can define Sockaddrs
 }
 
 type SockaddrInet4 struct {
 	Port int32
 	Addr [4]byte
-	raw  RawSockaddrInet4
 }
 
 type SockaddrInet6 struct {
 	Port   int32
 	ZoneId uint32
 	Addr   [16]byte
-	raw    RawSockaddrInet6
 }
 
 type SockaddrUnix struct {
 	Name string
-	raw  RawSockaddrUnix
+}
+
+// sockaddrBuf is the storage a Sockaddr conversion fills. SizeofSockaddrAny
+// covers every family the tree speaks, and the caller owns it.
+func sockaddrBuf() (b []byte) {
+	return []byte{:SizeofSockaddrAny}
 }
 
 func Bind(fd int32, sa Sockaddr) (err error) {
-	ptr, n, err := sa.sockaddr()
+	buf := sockaddrBuf()
+	n, err := sa.sockaddr(buf)
 	if err != nil {
 		return err
 	}
-	return bind(fd, ptr, n)
+	return bind(fd, abiBufferOf(buf), n)
 }
 
 func Connect(fd int32, sa Sockaddr) (err error) {
-	ptr, n, err := sa.sockaddr()
+	buf := sockaddrBuf()
+	n, err := sa.sockaddr(buf)
 	if err != nil {
 		return err
 	}
-	return connect(fd, ptr, n)
+	return connect(fd, abiBufferOf(buf), n)
 }
 
 func Getpeername(fd int32) (sa Sockaddr, err error) {
-	var rsa RawSockaddrAny
-	var slen _Socklen = SizeofSockaddrAny
-	if err = getpeername(fd, &rsa, &slen); err != nil {
+	rsa := sockaddrBuf()
+	slen := _Socklen(SizeofSockaddrAny)
+	if err = getpeername(fd, rsa, &slen); err != nil {
 		return
 	}
-	return anyToSockaddr(&rsa)
+	return anyToSockaddr(rsa)
 }
 
 func GetsockoptInt(fd, level, opt int32) (value int32, err error) {
@@ -305,77 +315,69 @@ func GetsockoptInt(fd, level, opt int32) (value int32, err error) {
 }
 
 func Recvfrom(fd int32, p []byte, flags int32) (n int32, from Sockaddr, err error) {
-	var rsa RawSockaddrAny
-	var slen _Socklen = SizeofSockaddrAny
-	if n, err = recvfrom(fd, p, flags, &rsa, &slen); err != nil {
+	rsa := sockaddrBuf()
+	slen := _Socklen(SizeofSockaddrAny)
+	if n, err = recvfrom(fd, p, flags, rsa, &slen); err != nil {
 		return
 	}
-	if rsa.Addr.Family != AF_UNSPEC {
-		from, err = anyToSockaddr(&rsa)
+	if sockFamily(rsa) != AF_UNSPEC {
+		from, err = anyToSockaddr(rsa)
 	}
 	return
 }
 
 func recvfromInet4(fd int32, p []byte, flags int32, from *SockaddrInet4) (n int32, err error) {
-	var rsa RawSockaddrAny
-	var socklen _Socklen = SizeofSockaddrAny
-	if n, err = recvfrom(fd, p, flags, &rsa, &socklen); err != nil {
+	rsa := sockaddrBuf()
+	socklen := _Socklen(SizeofSockaddrAny)
+	if n, err = recvfrom(fd, p, flags, rsa, &socklen); err != nil {
 		return
 	}
-	pp := (*RawSockaddrInet4)(unsafe.Pointer(&rsa))
-	port := (*[2]byte)(unsafe.Pointer(&pp.Port))
-	from.Port = int32(port[0])<<8 + int32(port[1])
-	from.Addr = pp.Addr
+	from.Port = sockPort(rsa)
+	copy(from.Addr[:], sockIPv4Addr(rsa))
 	return
 }
 
 func recvfromInet6(fd int32, p []byte, flags int32, from *SockaddrInet6) (n int32, err error) {
-	var rsa RawSockaddrAny
-	var socklen _Socklen = SizeofSockaddrAny
-	if n, err = recvfrom(fd, p, flags, &rsa, &socklen); err != nil {
+	rsa := sockaddrBuf()
+	socklen := _Socklen(SizeofSockaddrAny)
+	if n, err = recvfrom(fd, p, flags, rsa, &socklen); err != nil {
 		return
 	}
-	pp := (*RawSockaddrInet6)(unsafe.Pointer(&rsa))
-	port := (*[2]byte)(unsafe.Pointer(&pp.Port))
-	from.Port = int32(port[0])<<8 + int32(port[1])
-	from.ZoneId = pp.Scope_id
-	from.Addr = pp.Addr
+	from.Port = sockPort(rsa)
+	from.ZoneId = abiGet32(rsa, sockIn6OffScope)
+	copy(from.Addr[:], sockIPv6Addr(rsa))
 	return
 }
 
 func recvmsgInet4(fd int32, p, oob []byte, flags int32, from *SockaddrInet4) (n, oobn int32, recvflags int32, err error) {
-	var rsa RawSockaddrAny
-	n, oobn, recvflags, err = recvmsgRaw(fd, p, oob, flags, &rsa)
+	rsa := sockaddrBuf()
+	n, oobn, recvflags, err = recvmsgRaw(fd, p, oob, flags, rsa)
 	if err != nil {
 		return
 	}
-	pp := (*RawSockaddrInet4)(unsafe.Pointer(&rsa))
-	port := (*[2]byte)(unsafe.Pointer(&pp.Port))
-	from.Port = int32(port[0])<<8 + int32(port[1])
-	from.Addr = pp.Addr
+	from.Port = sockPort(rsa)
+	copy(from.Addr[:], sockIPv4Addr(rsa))
 	return
 }
 
 func recvmsgInet6(fd int32, p, oob []byte, flags int32, from *SockaddrInet6) (n, oobn int32, recvflags int32, err error) {
-	var rsa RawSockaddrAny
-	n, oobn, recvflags, err = recvmsgRaw(fd, p, oob, flags, &rsa)
+	rsa := sockaddrBuf()
+	n, oobn, recvflags, err = recvmsgRaw(fd, p, oob, flags, rsa)
 	if err != nil {
 		return
 	}
-	pp := (*RawSockaddrInet6)(unsafe.Pointer(&rsa))
-	port := (*[2]byte)(unsafe.Pointer(&pp.Port))
-	from.Port = int32(port[0])<<8 + int32(port[1])
-	from.ZoneId = pp.Scope_id
-	from.Addr = pp.Addr
+	from.Port = sockPort(rsa)
+	from.ZoneId = abiGet32(rsa, sockIn6OffScope)
+	copy(from.Addr[:], sockIPv6Addr(rsa))
 	return
 }
 
 func Recvmsg(fd int32, p, oob []byte, flags int32) (n, oobn int32, recvflags int32, from Sockaddr, err error) {
-	var rsa RawSockaddrAny
-	n, oobn, recvflags, err = recvmsgRaw(fd, p, oob, flags, &rsa)
+	rsa := sockaddrBuf()
+	n, oobn, recvflags, err = recvmsgRaw(fd, p, oob, flags, rsa)
 	// source address is only specified if the socket is unconnected
-	if rsa.Addr.Family != AF_UNSPEC {
-		from, err = anyToSockaddr(&rsa)
+	if sockFamily(rsa) != AF_UNSPEC {
+		from, err = anyToSockaddr(rsa)
 	}
 	return
 }
@@ -386,61 +388,65 @@ func Sendmsg(fd int32, p, oob []byte, to Sockaddr, flags int32) (err error) {
 }
 
 func SendmsgN(fd int32, p, oob []byte, to Sockaddr, flags int32) (n int32, err error) {
-	var ptr unsafe.Pointer
+	var buf []byte
 	var salen _Socklen
 	if to != nil {
-		ptr, salen, err = to.sockaddr()
+		buf = sockaddrBuf()
+		salen, err = to.sockaddr(buf)
 		if err != nil {
 			return 0, err
 		}
 	}
-	return sendmsgN(fd, p, oob, ptr, salen, flags)
+	return sendmsgN(fd, p, oob, abiBufferOf(buf), salen, flags)
 }
 
 func sendmsgNInet4(fd int32, p, oob []byte, to *SockaddrInet4, flags int32) (n int32, err error) {
-	ptr, salen, err := to.sockaddr()
+	buf := sockaddrBuf()
+	salen, err := to.sockaddr(buf)
 	if err != nil {
 		return 0, err
 	}
-	return sendmsgN(fd, p, oob, ptr, salen, flags)
+	return sendmsgN(fd, p, oob, abiBufferOf(buf), salen, flags)
 }
 
 func sendmsgNInet6(fd int32, p, oob []byte, to *SockaddrInet6, flags int32) (n int32, err error) {
-	ptr, salen, err := to.sockaddr()
+	buf := sockaddrBuf()
+	salen, err := to.sockaddr(buf)
 	if err != nil {
 		return 0, err
 	}
-	return sendmsgN(fd, p, oob, ptr, salen, flags)
+	return sendmsgN(fd, p, oob, abiBufferOf(buf), salen, flags)
 }
 
 func sendtoInet4(fd int32, p []byte, flags int32, to *SockaddrInet4) (err error) {
-	ptr, n, err := to.sockaddr()
+	buf := sockaddrBuf()
+	n, err := to.sockaddr(buf)
 	if err != nil {
 		return err
 	}
-	return sendto(fd, p, flags, ptr, n)
+	return sendto(fd, p, flags, abiBufferOf(buf), n)
 }
 
 func sendtoInet6(fd int32, p []byte, flags int32, to *SockaddrInet6) (err error) {
-	ptr, n, err := to.sockaddr()
+	buf := sockaddrBuf()
+	n, err := to.sockaddr(buf)
 	if err != nil {
 		return err
 	}
-	return sendto(fd, p, flags, ptr, n)
+	return sendto(fd, p, flags, abiBufferOf(buf), n)
 }
 
 func Sendto(fd int32, p []byte, flags int32, to Sockaddr) (err error) {
-	var (
-		ptr   unsafe.Pointer
-		salen _Socklen
-	)
+	var buf []byte
+	var salen _Socklen
 	if to != nil {
-		ptr, salen, err = to.sockaddr()
+		buf = sockaddrBuf()
+		salen, err = to.sockaddr(buf)
 		if err != nil {
 			return err
 		}
 	}
-	return sendto(fd, p, flags, ptr, salen)
+	return sendto(fd, p, flags, abiBufferOf(buf), salen)
 }
 
 func SetsockoptByte(fd, level, opt int32, value byte) (err error) {
