@@ -457,34 +457,29 @@ indistinguishable at runtime; the array fixtures (`abi_arrays_pipe_times`,
 `ptr_recv_array_elem`, `ptr_to_array_pun`) pass or become reject fixtures with the
 named error; quickcheck green; full sweep green.
 
-## W26. A package-level constant table is still an array VALUE (round 300)
+## W26. Package-level constant tables are storage now - DONE (round 301)
 
-`x/net/idna` and `x/text/unicode/norm` carry their tables as functions returning
-arrays (`func _idnaValues() [8640]uint16`), so every read is
-`_idnaValues()[i]`: the whole table is copied into memory to read one element -
-at run time (17 KB per trie lookup) and at IR level (`opt` expands the aggregate
-copy into 8,648 extractvalue + 8,645 getelementptr, one basic block of ~25,900
-instructions, which is 109 s of `llc` for idna and 205 s for norm).
-
-Round 300 removed the *initializer* half: keyed constant literals now lower to
-one constant global (see `constArrayLitText`). What remains is the value copy,
-which W7a step 6 removes by turning these tables into slice vars:
+Round 300 fixed the initializer half (keyed constant literals lower to one
+constant global). Round 301 fixed the value half: the accessor functions
+returning arrays became slice-header accessors over storage built once in
+`init()`, so an index reads the table instead of copying it.
 
     func _idnaValues() [8640]uint16 { return [8640]uint16{...} }
     ->
-    var _idnaValues = []uint16{...}      // callers: _idnaValues()[i] -> _idnaValues[i]
+    var _idnaValuesTbl []uint16
+    func init() { _idnaValuesTbl = []uint16{...} }
+    func _idnaValues() []uint16 { return _idnaValuesTbl }
 
-The backing array is built once in `init()` in the root arena and every index is
-a load through the slice header. Two files carry the active tables
-(`tables15.0.0.mx` in each package, the `go1.21` variant; the older version
-files are not compiled), ~13 accessor functions and ~30 call sites. Struct-element
-tables (`[2180]valueRange`) have no constant-global path yet - their init stays
-per-element, which is acceptable once it runs once instead of per call.
+Measured: idna's module 5.3 MB -> 442 KB and its llc 109 s -> 0.87 s; norm's
+9.0 MB -> 569 KB and 205 s -> 1.04 s; netsmoke server `-a` 25.7 min -> 11m26s.
+Two compiler prerequisites landed with it: keyed slice literals are indexed by
+their keys (stage4 previously ignored them and used the element position), and a
+large all-constant slice literal takes the const-memcpy path.
 
-**Accept**: idna's and norm's largest basic block is under 1,000 instructions,
-`llc` for each is under 20 s, `net.LookupHost`/IDNA/`unicode/norm` behaviour is
-unchanged, both compilers build the tree, and the netsmoke cold build drops below
-8 minutes.
+What is left of the class: a **struct-element** constant table still expands
+element by element inside `init` (idna's `[]valueRange`, 15,289 instructions
+once per process). A constant-global path for struct elements would remove it,
+as would the general array removal; neither is blocking now.
 
 ## W22. The -O2 pipeline's cost bound (rounds 288-289)
 

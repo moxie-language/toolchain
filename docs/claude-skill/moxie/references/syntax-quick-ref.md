@@ -76,8 +76,6 @@ map[K]V{}           // empty map
 &T{}                // pointer to zero T
 ```
 
-For named slice types: `(make)(S, 0, c)` - parenthesized form bypasses restriction check.
-
 ## Declarations
 
 Package scope allows only:

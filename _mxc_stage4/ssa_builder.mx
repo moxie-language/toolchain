@@ -7936,7 +7936,12 @@ func litFullyCovers(e *syntax.CompositeLit, typ Type) (ok bool) {
 }
 
 func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ Type, sl *Slice) (s SSAValue) {
-	n := len(e.ElemList)
+	// Length is the highest index + 1 (the rule for keyed elements), not the
+	// element count: `[]T{5: v}` has six elements. The old code used the count
+	// and ignored the keys, so a keyed slice literal stored at the wrong
+	// offsets - []uint16{0x00: 0x80, 0x01: 0x80} was indistinguishable from a
+	// positional one.
+	n := sliceLitLen(e)
 	nVal := &SSAConst{typ: Typ[Int32], val: &ConstInt{V:int64(n)}}
 	ms := &SSAMakeSlice{}
 	ms.typ = typ
@@ -7946,13 +7951,33 @@ func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ Type, sl *Sl
 	fb.emit(ms)
 
 	elemTyp := sl.Elem
-	for i, el := range e.ElemList {
+	// A large all-constant slice literal is one memcpy from a private constant
+	// global, the same lowering buildArrayLit uses: the generated Unicode tables
+	// are 2,000-19,000 constant elements, and one store per element is one basic
+	// block that the backend then spends minutes selecting.
+	if text, bytes, cok := fb.constArrayLitText(e, NewArray(elemTyp, int64(n))); cok {
+		zero := &SSAConst{typ: Typ[Int32], val: &ConstInt{V: 0}}
+		dst := &SSAIndexAddr{X: ms, Index: zero}
+		dst.typ = NewPointer(elemTyp)
+		dst.name = fb.nextName()
+		fb.emit(dst)
+		fb.emit(&SSAConstMemCpy{Dst: dst, ConstText: text, Bytes: bytes})
+		return ms
+	}
+
+	next := int32(0)
+	for _, el := range e.ElemList {
+		idx := next
 		var expr syntax.Expr
 		if kv, ok := el.(*syntax.KeyValueExpr); ok {
+			if k, kok := arrayLitElemInt(kv.Key); kok && k >= 0 {
+				idx = int32(k)
+			}
 			expr = kv.Value
 		} else {
 			expr = el
 		}
+		next = idx + 1
 		var v SSAValue
 		if cl, ok := expr.(*syntax.CompositeLit); ok && cl.Type == nil {
 			v = fb.buildCompositeLitWithType(cl, elemTyp)
@@ -7966,8 +7991,8 @@ func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ Type, sl *Sl
 			retypeUntypedShift(bin, elemTyp)
 		}
 		fb.checkAssignable(v, elemTyp, "array or slice literal")
-		idx := &SSAConst{typ: Typ[Int32], val: &ConstInt{V:int64(i)}}
-		ia := &SSAIndexAddr{X: ms, Index: idx}
+		idxConst := &SSAConst{typ: Typ[Int32], val: &ConstInt{V:int64(idx)}}
+		ia := &SSAIndexAddr{X: ms, Index: idxConst}
 		ia.typ = NewPointer(elemTyp)
 		ia.name = fb.nextName()
 		fb.emit(ia)
@@ -7975,6 +8000,26 @@ func (fb *ssaFuncBuilder) buildSliceLit(e *syntax.CompositeLit, typ Type, sl *Sl
 		fb.emitStore(ia, v)
 	}
 	return ms
+}
+
+// sliceLitLen is the length a slice literal denotes: the highest keyed index
+// plus one, or the element count when nothing is keyed (Go's composite-literal
+// rule, which the array path already followed).
+func sliceLitLen(e *syntax.CompositeLit) (n int32) {
+	next := int32(0)
+	for _, el := range e.ElemList {
+		idx := next
+		if kv, ok := el.(*syntax.KeyValueExpr); ok {
+			if k, kok := arrayLitElemInt(kv.Key); kok && k >= 0 {
+				idx = int32(k)
+			}
+		}
+		if idx+1 > n {
+			n = idx + 1
+		}
+		next = idx + 1
+	}
+	return
 }
 
 // sigHasNilSlot reports whether a signature has a parameter or result whose type

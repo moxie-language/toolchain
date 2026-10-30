@@ -21370,3 +21370,51 @@ the whole table into memory to read one element, at IR level and at run time.
 That is W7a step 6's job (the tables become slices, so the index reads rodata
 directly), and it is now the only reason these two packages are still slow to
 lower.
+
+## Round 301: the Unicode tables are storage, not values (W26 / W7a step 6)
+
+Round 300 removed the *initializer* half of the table problem. This removes the
+value half, and the numbers say it was the larger one.
+
+`x/net/idna` and `x/text/unicode/norm` carried their tables as accessor
+functions returning arrays, so every read was `_idnaValues()[i]`: the callee
+rebuilt the table and the caller copied the whole thing to read one element.
+The generated files now declare the storage and build it once:
+
+    var _idnaValuesTbl []uint16
+    func init() { _idnaValuesTbl = []uint16{ 0x00: 0x0080, ... } }
+    func _idnaValues() []uint16 { return _idnaValuesTbl }
+
+Call sites are untouched (`_idnaValues()[i]` still reads a slice header), and a
+Moxie package variable cannot carry an initializer, so the literal lives in the
+one `init()` the package is allowed. Two source-level prerequisites landed in
+the compiler first, both in `ssa_builder.mx`:
+
+- **A keyed slice literal is indexed by its keys**, and its length is the
+  highest key plus one. `buildSliceLit` ignored `KeyValueExpr` entirely and used
+  the element position: `[]byte{2: 'a', 5: 'b'}` produced a length-2 slice with
+  the bytes at 0 and 1. (An array literal already followed the rule; go/ssa
+  already followed it in legacy, so this made stage4 match both.)
+- **A large all-constant slice literal takes the memcpy path**, the same
+  `SSAConstMemCpy` lowering `buildArrayLit` uses: one private constant global,
+  one memcpy into the slice's storage. Without it the conversion would have
+  moved the giant block from the readers into `init`.
+
+Measured, before -> after:
+
+    module size   idna 5.3 MB -> 442 KB      norm 9.0 MB -> 569 KB
+    llc -O2       idna 109 s  -> 0.87 s      norm 205 s  -> 1.04 s
+    llc peak RSS  idna 594 MB -> 99 MB       norm 594 MB -> 94 MB
+    largest block idna 25,928 -> 15,289*     norm (decomps) -> 11,761*
+    netsmoke server, `-a`, cold: 25.7 min ->  11m26s
+
+\* what remains is `init` itself: the `[]valueRange` tables have struct elements,
+so their literals still expand element by element. That is 15,289 instructions
+of constant stores once per process instead of 26,000 per lookup, and llc now
+spends under a second on it. A constant-global path for struct-element literals
+would remove even that, and is the next step if those tables grow again.
+
+Verified: idna's ToASCII round-trip (`bücher.example` -> `xn--bcher-kva.example`)
+and a norm probe covering NFC composition, NFD decomposition, NFKC compatibility
+(Kelvin sign -> K) and `IsNormal` on normalised and unnormalised input, under the
+converted tables and under both compilers' builds of the probe.
