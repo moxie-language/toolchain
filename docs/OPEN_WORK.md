@@ -22355,3 +22355,28 @@ Next step: reproduce in-tree with a `golang.org/x/...`-path probe package (value
 receivers are only legal outside user packages, which is why the synthetic
 reproducer had to use pointer receivers and could not mirror idna), then diff
 the IR for `idna.New`/`apply`/`optionBool.applyTo` between the compilers.
+
+### Round 325, further: the interface box's arena is not the cause either
+
+The prime suspect after the bisect was where stage4 allocates the out-of-line box
+for an interface value wider than a pointer: `emitMakeInterface` does
+`runtime.alloc(sizeof(T), nil, nil)`, i.e. into the CURRENT arena, which inside a
+constructor like `idna.CheckHyphens` is that function's own frame - and the
+interface it returns is used in the caller. Made a probe of exactly that: the
+out-of-line box allocated from `runtime.RootArena()` instead of the current
+arena, compiler rebuilt, same probe re-run.
+
+    idna.Display() with root-allocated interface boxes -> SIGSEGV, as before
+
+So the box's arena is not the cause. Five hypotheses are now eliminated by
+measurement (pooling, sovereign-group release, the lazy form table, the
+literal-return shape, the box arena), which leaves the write path:
+
+`apply` iterates the variadic `[]Option` and calls `f.applyTo(o)` - an interface
+method with a VALUE receiver whose struct holds a func field - and that method
+calls `x.set(o, x.v)`, a func value invoked with a parameter and a field of the
+receiver copy. A wild store through a wrong `o` would corrupt an arena header
+(which is what makes the crash land in `ArenaReset`) and later hand `quickSpan` a
+form-table pointer into reclaimed memory. That is the shape to reproduce next,
+in a package whose import path exempts it from the value-receiver rule (any path
+without a dot, or under `golang.org/x/`), then diff its IR between compilers.
