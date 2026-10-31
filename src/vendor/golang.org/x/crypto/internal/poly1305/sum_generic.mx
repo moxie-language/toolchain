@@ -44,13 +44,17 @@ func newMACGeneric(key []byte) macGeneric {
 // macState holds numbers in saturated 64-bit little-endian limbs. That is,
 // the value of [x0, x1, x2] is x[0] + x[1] * 2⁶⁴ + x[2] * 2¹²⁸.
 type macState struct {
-	// h is the main accumulator. It is to be interpreted modulo 2¹³⁰ - 5, but
-	// can grow larger during and after rounds. It must, however, remain below
-	// 2 * (2¹³⁰ - 5).
-	h [3]uint64
+	// h is the main accumulator: three 64-bit limbs, H0 least significant. It
+	// is to be interpreted modulo 2¹³⁰ - 5, but can grow larger during and
+	// after rounds. It must, however, remain below 2 * (2¹³⁰ - 5).
+	//
+	// The limbs are named fields, not `[3]uint64`/`[2]uint64`: a fixed extent
+	// is a slice header in Moxie, so the array spelling put three words where
+	// the limb was, in a struct that is copied by value on every block.
+	H0, H1, H2 uint64
 	// r and s are the private key components.
-	r [2]uint64
-	s [2]uint64
+	R0, R1 uint64
+	S0, S1 uint64
 }
 
 type macGeneric struct {
@@ -92,7 +96,7 @@ func (h *macGeneric) Sum(out []byte) {
 	if h.offset > 0 {
 		updateGeneric(&state, h.buffer[:h.offset])
 	}
-	finalize(out, &state.h, &state.s)
+	finalize(out, &state)
 }
 
 // [rMask0, rMask1] is the specified Poly1305 clamping mask in little-endian. It
@@ -105,10 +109,10 @@ const (
 
 // initialize loads the 256-bit key into the two 128-bit secret values r and s.
 func initialize(key []byte, m *macState) {
-	m.r[0] = binary.LittleEndian().Uint64(key[0:8]) & rMask0
-	m.r[1] = binary.LittleEndian().Uint64(key[8:16]) & rMask1
-	m.s[0] = binary.LittleEndian().Uint64(key[16:24])
-	m.s[1] = binary.LittleEndian().Uint64(key[24:32])
+	m.R0 = binary.LittleEndian().Uint64(key[0:8]) & rMask0
+	m.R1 = binary.LittleEndian().Uint64(key[8:16]) & rMask1
+	m.S0 = binary.LittleEndian().Uint64(key[16:24])
+	m.S1 = binary.LittleEndian().Uint64(key[24:32])
 }
 
 // uint128 holds a 128-bit number as two 64-bit limbs, for use with the
@@ -145,8 +149,8 @@ func shiftRightBy2(a uint128) uint128 {
 // If the msg length is not a multiple of TagSize, it assumes the last
 // incomplete chunk is the final one.
 func updateGeneric(state *macState, msg []byte) {
-	h0, h1, h2 := state.h[0], state.h[1], state.h[2]
-	r0, r1 := state.r[0], state.r[1]
+	h0, h1, h2 := state.H0, state.H1, state.H2
+	r0, r1 := state.R0, state.R1
 
 	// pos walks msg: msg = msg[TagSize:] in the loop copies the whole
 	// remaining message every 16 bytes.
@@ -268,7 +272,7 @@ func updateGeneric(state *macState, msg []byte) {
 		//     5 * 2¹²⁸ + (2¹²⁸ - 1) = 6 * 2¹²⁸ - 1
 	}
 
-	state.h[0], state.h[1], state.h[2] = h0, h1, h2
+	state.H0, state.H1, state.H2 = h0, h1, h2
 }
 
 const (
@@ -289,8 +293,8 @@ const (
 // finalize completes the modular reduction of h and computes
 //
 //	out = h + s  mod  2¹²⁸
-func finalize(out []byte, h *[3]uint64, s *[2]uint64) {
-	h0, h1, h2 := h[0], h[1], h[2]
+func finalize(out []byte, st *macState) {
+	h0, h1, h2 := st.H0, st.H1, st.H2
 
 	// After the partial reduction in updateGeneric, h might be more than
 	// 2¹³⁰ - 5, but will be less than 2 * (2¹³⁰ - 5). To complete the reduction
@@ -311,8 +315,8 @@ func finalize(out []byte, h *[3]uint64, s *[2]uint64) {
 	//
 	// by just doing a wide addition with the 128 low bits of h and discarding
 	// the overflow.
-	h0, c := bits.Add64(h0, s[0], 0)
-	h1, _ = bits.Add64(h1, s[1], c)
+	h0, c := bits.Add64(h0, st.S0, 0)
+	h1, _ = bits.Add64(h1, st.S1, c)
 
 	binary.LittleEndian().PutUint64At(out, 0, h0)
 	binary.LittleEndian().PutUint64At(out, 8, h1)
