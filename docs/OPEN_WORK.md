@@ -21789,3 +21789,36 @@ Two rules restated with this round, because both were violated on the way here:
 Verified: the net probe (TCP bind/dial/accept/peer, UDP send/recv peer bytes,
 netip.As4/As16, dnsmessage round trip) passes under both compilers, the paletted
 draw and poly1305 fixtures pass, and `internal/coverage` builds.
+
+## Round 314: keccakf's 25 lanes are a slice view; chacha20's key/nonce conversion is BLOCKED and recorded
+
+`keccakf.mx`: the state was `*[25]uint64`, and on a little-endian host it is
+literally a view of the byte buffer (`(*[25]uint64)(unsafe.Pointer(&da[0]))`).
+It is `[]uint64` now, built with `unsafe.Slice((*uint64)(unsafe.Pointer(&da[0])),
+25)` - the same view, no array type - and the big-endian path decodes into
+`[]uint64{:25}` and writes back through `keccakfStoreBack(da []byte, a []uint64)`.
+Verified by `tls_handshake` (which exercises the transport crypto end to end)
+and by the poly1305 fixture.
+
+`chacha20.Cipher`'s `key [8]uint32` / `nonce [3]uint32` were converted too and
+then REVERTED, because the conversion is not safe yet and the failure is subtle:
+the standalone RFC 8439 vector PASSES with the slices, but `tls_handshake` fails
+with "tls: unexpected message" as soon as the converted Cipher is used. The same
+tree with keccakf converted and chacha20 reverted passes, so the cipher
+arithmetic is fine - what breaks is the Cipher as a VALUE that crosses a package
+boundary inside `cipher.AEAD`. That is the W27/W30 family: a struct with slice
+fields loses its contents on the way out. Two consequences worth writing down:
+
+- Converting a struct's fixed extents to slices is only verified by exercising
+  the struct ACROSS a package boundary; a same-package vector can pass while the
+  boundary path is broken.
+- Until that class is fixed, files whose state structs are handed to another
+  package in an interface should stay on fixed extents. chacha20 is one; the
+  crypto limb conversions planned next (p256, edwards25519, blake2b) must be
+  checked the same way, or they will trade one array type for a silent break.
+
+Also still open from the same probe: a `:=` inside a loop of a self-mutating
+method is refused once the receiver's struct gains a slice field (chacha20's
+`xorKeyStreamBlocksGeneric`), which is why that function's round temporaries were
+hoisted above the loop. The hoist is correct and stays; the refusal is Moxie's
+rule doing its job.

@@ -33,7 +33,7 @@ func initRcTable() {
 
 // keccakfStoreBack writes the little-endian state words back into the
 // byte array, called deferred by keccakF1600Generic on big-endian hosts.
-func keccakfStoreBack(da []byte, a *[25]uint64) {
+func keccakfStoreBack(da []byte, a []uint64) {
 	for i := range a {
 		byteorder.LEPutUint64At(da, i*8, a[i])
 	}
@@ -42,9 +42,14 @@ func keccakfStoreBack(da []byte, a *[25]uint64) {
 // keccakF1600Generic applies the Keccak permutation.
 func keccakF1600Generic(da []byte) {
 	rc := rcTable
-	var a *[25]uint64
+	// The 25 lanes are a SLICE, not a `[25]uint64`: on a little-endian host the
+	// state is a view of the byte array itself, which is what unsafe.Slice
+	// gives - 25 uint64 words starting at da's first byte, with no copy and no
+	// array type. On a big-endian host the lanes are decoded into their own
+	// slice and written back on return.
+	var a []uint64
 	if cpu.BigEndian {
-		lane := &[25]uint64{}
+		lane := []uint64{:25}
 		for i := range lane {
 			lane[i] = byteorder.LEUint64At(da, i*8)
 		}
@@ -53,7 +58,7 @@ func keccakF1600Generic(da []byte) {
 		// plain function call; da and a are evaluated at defer time.
 		defer keccakfStoreBack(da, a)
 	} else {
-		a = (*[25]uint64)(unsafe.Pointer(&da[0]))
+		a = unsafe.Slice((*uint64)(unsafe.Pointer(&da[0])), 25)
 	}
 
 	// Implementation translated from Keccak-inplace.c
