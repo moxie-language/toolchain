@@ -105,11 +105,12 @@ func (z *Reader) Reset(r io.Reader) (rerr error) {
 		multistream:  true,
 		cc:           cc,
 	}
-	if rr, ok := r.(flate.Reader); ok {
-		z.r = rr
-	} else {
-		z.r = bufio.NewReader(r)
-	}
+	// Always buffer. Moxie's inflate pulls bytes in bulk rather than one at a
+	// time, so a shared raw reader is drained past the end of the deflate
+	// stream and the trailer read below starts from the wrong bytes: measured
+	// as "gzip: invalid checksum" on a *bytes.Buffer source with the data
+	// decompressing correctly. bufio keeps the trailer owed to us.
+	z.r = bufio.NewReader(r)
 	z.Header, z.err = z.readHeader()
 	return z.err
 }

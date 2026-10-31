@@ -1,0 +1,108 @@
+// gzip and zlib round trips, including the trailer check.
+//
+// Both had to be repaired for this to pass:
+//
+//   - gzip created its flate.Writer lazily inside Write, i.e. allocated it in
+//     that frame and stored the pointer through the receiver. Close then
+//     flushed a released object: the file was a 10-byte header and an 8-byte
+//     trailer with NO deflate payload (18 bytes), and the runtime printed its
+//     "pointer into a transient frame arena" note. The compressor is created in
+//     the constructor now.
+//   - both readers handed the raw source to inflate unless it was already a
+//     flate.Reader, and Moxie's inflate reads in bulk: it drained the trailer
+//     (CRC32+size for gzip, Adler-32 for zlib) and the trailer read that
+//     followed started from the wrong bytes. A *bytes.Buffer source therefore
+//     decoded the data correctly and then failed with "invalid checksum".
+//     Both readers always wrap the source in a bufio.Reader now, which keeps
+//     the trailer owed to the reader.
+//
+// usage: compress_roundtrip    exit 0 when every shape round trips
+package main
+
+import (
+	"bytes"
+	"compress/gzip"
+	"compress/zlib"
+	"io"
+	"os"
+)
+
+func gzipCheck(tag []byte, src []byte, want []byte) (ok bool) {
+	r, err := gzip.NewReader(bytes.NewReader(src))
+	if err != nil {
+		println("gzip", tag, "NewReader:", err.Error())
+		return false
+	}
+	got, rerr := io.ReadAll(r)
+	if rerr != nil {
+		println("gzip", tag, "read:", rerr.Error())
+		return false
+	}
+	if !bytes.Equal(got, want) {
+		println("gzip", tag, "payload mismatch")
+		return false
+	}
+	return true
+}
+
+func main() {
+	base := []byte("hello compression, this is a round trip across a buffer boundary\n")
+	fail := int32(0)
+
+	// gzip: write, then read back from a fresh bytes.Reader, a second buffer,
+	// and the same buffer the writer used (the shape that exposed the trailer).
+	var b1 bytes.Buffer
+	w1 := gzip.NewWriter(&b1)
+	if _, err := w1.Write(base); err != nil {
+		println("gzip write:", err.Error())
+		os.Exit(1)
+	}
+	if err := w1.Close(); err != nil {
+		println("gzip close:", err.Error())
+		os.Exit(1)
+	}
+	println("gzip bytes", int32(b1.Len()).String())
+	if b1.Len() <= 18 {
+		println("gzip: no deflate payload")
+		fail++
+	}
+	if !gzipCheck([]byte("fresh"), b1.Bytes(), base) {
+		fail++
+	}
+	var b2 bytes.Buffer
+	b2.Write(b1.Bytes())
+	if !gzipCheck([]byte("buffer"), b2.Bytes(), base) {
+		fail++
+	}
+
+	// zlib: same trailer discipline, Adler-32 instead of CRC32+size.
+	var z1 bytes.Buffer
+	zw := zlib.NewWriter(&z1)
+	zw.Write(base)
+	if err := zw.Close(); err != nil {
+		println("zlib close:", err.Error())
+		os.Exit(1)
+	}
+	zr, zerr := zlib.NewReader(bytes.NewReader(z1.Bytes()))
+	if zerr != nil {
+		println("zlib NewReader:", zerr.Error())
+		fail++
+	} else {
+		zgot, zrerr := io.ReadAll(zr)
+		if zrerr != nil {
+			println("zlib read:", zrerr.Error())
+			fail++
+		} else if !bytes.Equal(zgot, base) {
+			println("zlib payload mismatch")
+			fail++
+		} else {
+			println("zlib bytes", int32(z1.Len()).String())
+		}
+	}
+
+	if fail != 0 {
+		println("compress_roundtrip:", fail.String(), "case(s) failed")
+		os.Exit(1)
+	}
+	println("compress_roundtrip ok")
+}

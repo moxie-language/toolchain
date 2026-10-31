@@ -94,6 +94,15 @@ func (z *Writer) init(w io.Writer, level int32) {
 		// Reset goes through it.
 		buf: []byte{:gzipHeaderLen},
 	}
+	// The compressor is created HERE, in the constructor, never lazily in
+	// Write. A pointer the callee allocates in its own frame and stores through
+	// a receiver is the W10 shape: Write created the flate.Writer in its frame,
+	// Close then flushed a released object, and the file came out as a header
+	// and a trailer with no DEFLATE payload at all (measured: 18 bytes, with
+	// the codec printing its unknown-extent escape note).
+	if compressor == nil {
+		z.compressor, _ = flate.NewWriter(w, level)
+	}
 }
 
 // Reset discards the [Writer] z's state and makes it equivalent to the

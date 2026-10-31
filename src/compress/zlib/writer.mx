@@ -65,12 +65,33 @@ func NewWriterLevelDict(w io.Writer, level int32, dict []byte) (out *Writer, wer
 	if level < HuffmanOnly || level > BestCompression {
 		return nil, fmt.Errorf("zlib: invalid compression level: %d", level)
 	}
-	return &Writer{
+	z := &Writer{
 		w:       w,
 		level:   level,
 		dict:    dict,
 		scratch: []byte{:4},
-	}, nil
+	}
+	// The deflater is created HERE and in Reset, never on first use in
+	// writeHeader: a pointer allocated in the callee's frame and stored through
+	// a receiver is the W10 shape, and the first use is a method call, so the
+	// deflate stream was written from a released frame - the file came out as a
+	// zlib header and an Adler-32 with no payload between them (6 bytes).
+	if err := z.startCompressor(); err != nil {
+		return nil, err
+	}
+	return z, nil
+}
+
+// startCompressor creates the deflater and the Adler-32 state. Both
+// constructors go through it; writeHeader's nil check remains only for a
+// zero-value Writer, which the constructors never produce.
+func (z *Writer) startCompressor() (err error) {
+	z.compressor, err = flate.NewWriterDict(z.w, z.level, z.dict)
+	if err != nil {
+		return err
+	}
+	z.digest = adler32.New()
+	return nil
 }
 
 // Reset clears the state of the [Writer] z such that it is equivalent to its
@@ -81,6 +102,8 @@ func (z *Writer) Reset(w io.Writer) {
 	// z.level and z.dict left unchanged.
 	if z.compressor != nil {
 		z.compressor.Reset(w)
+	} else {
+		z.startCompressor()
 	}
 	if z.digest != nil {
 		z.digest.Reset()
