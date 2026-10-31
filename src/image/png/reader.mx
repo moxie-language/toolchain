@@ -108,7 +108,7 @@ type decoder struct {
 	cb            int32
 	stage         int32
 	idatLength    uint32
-	tmp           [3 * 256]byte
+	tmp           []byte
 	interlace     int32
 
 	// useTransparent and transparent are used for grayscale and truecolor
@@ -151,7 +151,7 @@ func (d *decoder) parseIHDR(length uint32) (out error) {
 	if length != 13 {
 		return newFormatError("bad IHDR length")
 	}
-	if _, err := io.ReadFull(d.r, d.tmp[:13]); err != nil {
+	if _, err := d.readScratch(13); err != nil {
 		return err
 	}
 	d.crc.Write(d.tmp[:13])
@@ -242,7 +242,7 @@ func (d *decoder) parsePLTE(length uint32) (out error) {
 	if length%3 != 0 || np <= 0 || np > 256 || np > 1<<uint32(d.depth) {
 		return newFormatError("bad PLTE length")
 	}
-	n, err := io.ReadFull(d.r, d.tmp[:3*np])
+	n, err := d.readScratch(3 * np)
 	if err != nil {
 		return err
 	}
@@ -271,13 +271,29 @@ func (d *decoder) parsePLTE(length uint32) (out error) {
 	return d.verifyChecksum()
 }
 
+const pngScratchLen = 3 * 256
+
+// ignoredMax is the chunk-skipping read size.
+const ignoredMax = 4096
+
+// readScratch reads exactly n bytes into the decoder's scratch buffer and
+// leaves its full length in place. A window of a slice is a COPY, so a read
+// into d.tmp[:n] would fill a throwaway: the header is resized for the read and
+// put back afterwards.
+func (d *decoder) readScratch(n int32) (got int32, err error) {
+	d.tmp = resize(d.tmp, n)
+	got, err = io.ReadFull(d.r, d.tmp)
+	d.tmp = resize(d.tmp, pngScratchLen)
+	return
+}
+
 func (d *decoder) parsetRNS(length uint32) (out error) {
 	switch d.cb {
 	case cbG1, cbG2, cbG4, cbG8, cbG16:
 		if length != 2 {
 			return newFormatError("bad tRNS length")
 		}
-		n, err := io.ReadFull(d.r, d.tmp[:length])
+		n, err := d.readScratch(int32(length))
 		if err != nil {
 			return err
 		}
@@ -298,7 +314,7 @@ func (d *decoder) parsetRNS(length uint32) (out error) {
 		if length != 6 {
 			return newFormatError("bad tRNS length")
 		}
-		n, err := io.ReadFull(d.r, d.tmp[:length])
+		n, err := d.readScratch(int32(length))
 		if err != nil {
 			return err
 		}
@@ -311,7 +327,7 @@ func (d *decoder) parsetRNS(length uint32) (out error) {
 		if length > 256 {
 			return newFormatError("bad tRNS length")
 		}
-		n, err := io.ReadFull(d.r, d.tmp[:length])
+		n, err := d.readScratch(int32(length))
 		if err != nil {
 			return err
 		}
@@ -355,7 +371,7 @@ func (d *decoder) Read(p []byte) (out int32, derr error) {
 		}
 		// Read the length and chunk type of the next chunk, and check that
 		// it is an IDAT chunk.
-		if _, rerr := io.ReadFull(d.r, d.tmp[:8]); rerr != nil {
+		if _, rerr := d.readScratch(8); rerr != nil {
 			return 0, rerr
 		}
 		d.idatLength = binary.BigEndian().Uint32(d.tmp[:4])
@@ -410,7 +426,9 @@ func (d *decoder) decode() (out image.Image, derr error) {
 		if i == 100 {
 			return nil, io.ErrNoProgress
 		}
-		n, err = r.Read(d.tmp[:1])
+		d.tmp = resize(d.tmp, 1)
+		n, err = r.Read(d.tmp)
+		d.tmp = resize(d.tmp, pngScratchLen)
 	}
 	if err != nil && err != io.EOF {
 		return nil, newFormatError(err.String())
@@ -888,7 +906,7 @@ func (d *decoder) parseIEND(length uint32) (out error) {
 
 func (d *decoder) parseChunk(configOnly bool) (out error) {
 	// Read the length and chunk type.
-	if _, err := io.ReadFull(d.r, d.tmp[:8]); err != nil {
+	if _, err := d.readScratch(8); err != nil {
 		return err
 	}
 	length := binary.BigEndian().Uint32(d.tmp[:4])
@@ -950,14 +968,19 @@ func (d *decoder) parseChunk(configOnly bool) (out error) {
 		return newFormatError(fmt.Sprintf("Bad chunk length: %d", length))
 	}
 	// Ignore this chunk (of a known length).
-	ignored := []byte{:4096}
+	ignored := []byte{:ignoredMax}
 	// Declared once, outside the loop: a declaration in a loop in a
 	// self-mutating method is rejected, and the scratch would otherwise be
 	// allocated into the sovereign arena on every iteration.
 	var n int32
 	var rerr error
+	var want int32
 	for length > 0 {
-		n, rerr = io.ReadFull(d.r, ignored[:min(len(ignored), int32(length))])
+		want = int32(length)
+		if want > ignoredMax {
+			want = ignoredMax
+		}
+		n, rerr = io.ReadFull(d.r, resize(ignored, want))
 		if rerr != nil {
 			return rerr
 		}
@@ -968,7 +991,7 @@ func (d *decoder) parseChunk(configOnly bool) (out error) {
 }
 
 func (d *decoder) verifyChecksum() (out error) {
-	if _, err := io.ReadFull(d.r, d.tmp[:4]); err != nil {
+	if _, err := d.readScratch(4); err != nil {
 		return err
 	}
 	if binary.BigEndian().Uint32(d.tmp[:4]) != d.crc.Sum32() {
@@ -978,7 +1001,7 @@ func (d *decoder) verifyChecksum() (out error) {
 }
 
 func (d *decoder) checkHeader() (out error) {
-	_, err := io.ReadFull(d.r, d.tmp[:len(Magic)])
+	_, err := d.readScratch(int32(len(Magic)))
 	if err != nil {
 		return err
 	}
@@ -997,6 +1020,7 @@ func Decode(r io.Reader) (img image.Image, derr error) {
 		crc:         cc.NewIEEE(),
 		cc:          cc,
 		transparent: []byte{:6},
+		tmp:         []byte{:pngScratchLen},
 	}
 	if err := d.checkHeader(); err != nil {
 		if err == io.EOF {
@@ -1024,6 +1048,7 @@ func DecodeConfig(r io.Reader) (cfg image.Config, derr error) {
 		crc:         cc.NewIEEE(),
 		cc:          cc,
 		transparent: []byte{:6},
+		tmp:         []byte{:pngScratchLen},
 	}
 	if err := d.checkHeader(); err != nil {
 		if err == io.EOF {
