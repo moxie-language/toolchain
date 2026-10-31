@@ -62,10 +62,10 @@ func moxie_futex_wake_all_shared(addr *uint32)
 func libc_write(fd int32, buf unsafe.Pointer, count uint32) (r0 int32)
 
 //export getrlimit
-func libc_getrlimit(resource int32, rlim *[2]uint64) (r0 int32)
+func libc_getrlimit(resource int32, rlim *uint64) (r0 int32)
 
 //export setrlimit
-func libc_setrlimit(resource int32, rlim *[2]uint64) (r0 int32)
+func libc_setrlimit(resource int32, rlim *uint64) (r0 int32)
 
 // void *mmap(void *addr, size_t length, int32 prot, int32 flags, int32 fd, off_t offset);
 // Note: off_t is defined as int64 because:
@@ -157,14 +157,14 @@ func main(argc int32, argv *unsafe.Pointer) (r0 int32) {
 	allocateHeap()
 	initDomain(256 * 1024 * 1024)
 
-	var rl [2]uint64
-	libc_getrlimit(3, &rl)
+	rl := []uint64{:2}
+	libc_getrlimit(3, &rl[0])
 	if rl[0] < 268435456 {
 		rl[0] = 268435456
 		if rl[1] != 0xFFFFFFFFFFFFFFFF && rl[0] > rl[1] {
 			rl[0] = rl[1]
 		}
-		libc_setrlimit(3, &rl)
+		libc_setrlimit(3, &rl[0])
 	}
 
 	// Store argc and argv for later use.
@@ -287,11 +287,13 @@ func syscall_runtime_envs() (r0 []string) {
 	return envs
 }
 
-var putcharBuf [1]byte
+// putcharBuf is ONE byte: the putchar staging cell. It was a [1]byte, which is
+// a slice header where the kernel expects a byte.
+var putcharBuf byte
 
 func putchar(c byte) {
-	putcharBuf[0] = c
-	libc_write(1, unsafe.Pointer(&putcharBuf[0]), 1)
+	putcharBuf = c
+	libc_write(1, unsafe.Pointer(&putcharBuf), 1)
 }
 
 func ticksToNanoseconds(t timeUnit) (r0 int64) {

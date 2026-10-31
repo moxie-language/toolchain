@@ -61,63 +61,57 @@ type ruleTransition struct {
 	mask uint16
 }
 
-func _transitions() [6][2]ruleTransition { return [6][2]ruleTransition{
-	// [2.1] The first character must be a character with Bidi property L, R, or
-	// AL. If it has the R or AL property, it is an RTL label; if it has the L
-	// property, it is an LTR label.
-	ruleInitial: {
-		{ruleLTRFinal, 1 << bidi.L},
-		{ruleRTLFinal, 1<<bidi.R | 1<<bidi.AL},
-	},
-	ruleRTL: {
-		// [2.3] In an RTL label, the end of the label must be a character with
-		// Bidi property R, AL, EN, or AN, followed by zero or more characters
-		// with Bidi property NSM.
-		{ruleRTLFinal, 1<<bidi.R | 1<<bidi.AL | 1<<bidi.EN | 1<<bidi.AN},
+// The rule transitions, two slots per state: the primary slot `state*2` and the
+// secondary `state*2+1`. Built once in init().
+//
+// This was `[6][2]ruleTransition` returned BY VALUE from an accessor, so every
+// rune of every label copied twelve ruleTransition structs (and a fixed extent
+// is a slice header here anyway). The rules themselves are unchanged - only the
+// container is: a flat slice indexed by state*2.
+var transitions []ruleTransition
 
-		// [2.2] In an RTL label, only characters with the Bidi properties R,
-		// AL, AN, EN, ES, CS, ET, ON, BN, or NSM are allowed.
-		// We exclude the entries from [2.3]
-		{ruleRTL, 1<<bidi.ES | 1<<bidi.CS | 1<<bidi.ET | 1<<bidi.ON | 1<<bidi.BN | 1<<bidi.NSM},
-	},
-	ruleRTLFinal: {
-		// [2.3] In an RTL label, the end of the label must be a character with
-		// Bidi property R, AL, EN, or AN, followed by zero or more characters
-		// with Bidi property NSM.
-		{ruleRTLFinal, 1<<bidi.R | 1<<bidi.AL | 1<<bidi.EN | 1<<bidi.AN | 1<<bidi.NSM},
+// asciiTable is the per-byte bidi properties of ASCII, built once.
+//
+// It was rebuilt by calling bidi.LookupRune 128 times on EVERY advance() and
+// advanceString() call - per label, per rune.
+var asciiTable []bidi.Properties
 
-		// [2.2] In an RTL label, only characters with the Bidi properties R,
-		// AL, AN, EN, ES, CS, ET, ON, BN, or NSM are allowed.
-		// We exclude the entries from [2.3] and NSM.
-		{ruleRTL, 1<<bidi.ES | 1<<bidi.CS | 1<<bidi.ET | 1<<bidi.ON | 1<<bidi.BN},
-	},
-	ruleLTR: {
-		// [2.6] In an LTR label, the end of the label must be a character with
-		// Bidi property L or EN, followed by zero or more characters with Bidi
-		// property NSM.
-		{ruleLTRFinal, 1<<bidi.L | 1<<bidi.EN},
+func init() {
+	ErrInvalid = errors.New("bidirule: failed Bidi Rule")
+	transitions = []ruleTransition{:12}
+	putRule(ruleInitial, ruleLTRFinal, 1<<bidi.L, ruleRTLFinal, 1<<bidi.R|1<<bidi.AL)
+	// [2.3] In an RTL label, the end of the label must be a character with Bidi
+	// property R, AL, EN, or AN, followed by zero or more characters with Bidi
+	// property NSM.
+	ruleRTLFinalMask := uint16(1<<bidi.R | 1<<bidi.AL | 1<<bidi.EN | 1<<bidi.AN)
+	// [2.2] In an RTL label, only characters with the Bidi properties R, AL, AN,
+	// EN, ES, CS, ET, ON, BN, or NSM are allowed. We exclude [2.3].
+	ruleRTLMask := uint16(1<<bidi.ES | 1<<bidi.CS | 1<<bidi.ET | 1<<bidi.ON | 1<<bidi.BN)
+	putRule(ruleRTL, ruleRTLFinal, ruleRTLFinalMask, ruleRTL, ruleRTLMask|1<<bidi.NSM)
+	// [2.3] as above; [2.2] excluding [2.3] and NSM.
+	putRule(ruleRTLFinal, ruleRTLFinal, ruleRTLFinalMask|1<<bidi.NSM, ruleRTL, ruleRTLMask)
+	// [2.6] In an LTR label, the end of the label must be a character with Bidi
+	// property L or EN, followed by zero or more characters with Bidi property
+	// NSM.
+	// [2.5] In an LTR label, only characters with the Bidi properties L, EN, ES,
+	// CS, ET, ON, BN, or NSM are allowed. We exclude [2.6].
+	ruleLTRMask := uint16(1<<bidi.ES | 1<<bidi.CS | 1<<bidi.ET | 1<<bidi.ON | 1<<bidi.BN)
+	putRule(ruleLTR, ruleLTRFinal, 1<<bidi.L|1<<bidi.EN, ruleLTR, ruleLTRMask|1<<bidi.NSM)
+	putRule(ruleLTRFinal, ruleLTRFinal, 1<<bidi.L|1<<bidi.EN|1<<bidi.NSM, ruleLTR, ruleLTRMask)
+	putRule(ruleInvalid, ruleInvalid, 0, ruleInvalid, 0)
 
-		// [2.5] In an LTR label, only characters with the Bidi properties L,
-		// EN, ES, CS, ET, ON, BN, or NSM are allowed.
-		// We exclude the entries from [2.6].
-		{ruleLTR, 1<<bidi.ES | 1<<bidi.CS | 1<<bidi.ET | 1<<bidi.ON | 1<<bidi.BN | 1<<bidi.NSM},
-	},
-	ruleLTRFinal: {
-		// [2.6] In an LTR label, the end of the label must be a character with
-		// Bidi property L or EN, followed by zero or more characters with Bidi
-		// property NSM.
-		{ruleLTRFinal, 1<<bidi.L | 1<<bidi.EN | 1<<bidi.NSM},
+	asciiTable = []bidi.Properties{:128}
+	for i := int32(0); i < 128; i++ {
+		p, _ := bidi.LookupRune(rune(i))
+		asciiTable[i] = p
+	}
+}
 
-		// [2.5] In an LTR label, only characters with the Bidi properties L,
-		// EN, ES, CS, ET, ON, BN, or NSM are allowed.
-		// We exclude the entries from [2.6].
-		{ruleLTR, 1<<bidi.ES | 1<<bidi.CS | 1<<bidi.ET | 1<<bidi.ON | 1<<bidi.BN},
-	},
-	ruleInvalid: {
-		{ruleInvalid, 0},
-		{ruleInvalid, 0},
-	},
-}}
+// putRule fills the two slots of one state.
+func putRule(st, next0 ruleState, mask0 uint16, next1 ruleState, mask1 uint16) {
+	transitions[int32(st)*2] = ruleTransition{next: next0, mask: mask0}
+	transitions[int32(st)*2+1] = ruleTransition{next: next1, mask: mask1}
+}
 
 // [2.4] In an RTL label, if an EN is present, no AN may be present, and
 // vice versa.
@@ -245,21 +239,12 @@ func (t *Transformer) Span(src []byte, atEOF bool) (n int32, err error) {
 
 // Precomputing the ASCII values decreases running time for the ASCII fast path
 // by about 30%.
-func _asciiTable() [128]bidi.Properties {
-	var t [128]bidi.Properties
-	for i := range t {
-		p, _ := bidi.LookupRune(rune(i))
-		t[i] = p
-	}
-	return t
-}
-
 func (t *Transformer) advance(s []byte) (n int32, ok bool) {
 	var e bidi.Properties
 	var sz int32
 	for n < len(s) {
 		if s[n] < utf8.RuneSelf {
-			e, sz = _asciiTable()[s[n]], 1
+			e, sz = asciiTable[s[n]], 1
 		} else {
 			e, sz = bidi.Lookup(s[n:])
 			if sz <= 1 {
@@ -280,11 +265,12 @@ func (t *Transformer) advance(s []byte) (n int32, ok bool) {
 			t.state = ruleInvalid
 			return n, false
 		}
-		switch tr := _transitions()[t.state]; {
-		case tr[0].mask&c != 0:
-			t.state = tr[0].next
-		case tr[1].mask&c != 0:
-			t.state = tr[1].next
+		base := int32(t.state) * 2
+		switch {
+		case transitions[base].mask&c != 0:
+			t.state = transitions[base].next
+		case transitions[base+1].mask&c != 0:
+			t.state = transitions[base+1].next
 		default:
 			t.state = ruleInvalid
 			if t.isRTL() {
@@ -301,7 +287,7 @@ func (t *Transformer) advanceString(s []byte) (n int32, ok bool) {
 	var sz int32
 	for n < len(s) {
 		if s[n] < utf8.RuneSelf {
-			e, sz = _asciiTable()[s[n]], 1
+			e, sz = asciiTable[s[n]], 1
 		} else {
 			e, sz = bidi.LookupString(s[n:])
 			if sz <= 1 {
@@ -319,11 +305,12 @@ func (t *Transformer) advanceString(s []byte) (n int32, ok bool) {
 			t.state = ruleInvalid
 			return n, false
 		}
-		switch tr := _transitions()[t.state]; {
-		case tr[0].mask&c != 0:
-			t.state = tr[0].next
-		case tr[1].mask&c != 0:
-			t.state = tr[1].next
+		base := int32(t.state) * 2
+		switch {
+		case transitions[base].mask&c != 0:
+			t.state = transitions[base].next
+		case transitions[base+1].mask&c != 0:
+			t.state = transitions[base+1].next
 		default:
 			t.state = ruleInvalid
 			if t.isRTL() {
@@ -335,6 +322,4 @@ func (t *Transformer) advanceString(s []byte) (n int32, ok bool) {
 	return n, true
 }
 
-func init() {
-	ErrInvalid = errors.New("bidirule: failed Bidi Rule")
-}
+
