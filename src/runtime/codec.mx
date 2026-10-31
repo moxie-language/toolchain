@@ -432,7 +432,10 @@ func codecRetStableInner(ptr unsafe.Pointer, tp uintptr) (ok bool) {
 		if uintptr(p) < 1048576 {
 			return false
 		}
-		return codecIsStableAddr(uintptr(p))
+		if !codecIsStableAddr(uintptr(p)) {
+			return false
+		}
+		return !retPointeeDies(p, retElemAddr(tp))
 	case KindBytes:
 		sv := *(*_string)(ptr)
 		if sv.ptr == nil {
@@ -483,6 +486,110 @@ func codecRetStableInner(ptr unsafe.Pointer, tp uintptr) (ok bool) {
 		return true
 	}
 	return isBasicKind(retKindOf(tp))
+}
+
+// retPointeeDies reports whether a value of type tp at p holds a reference into
+// memory that dies with this return.
+//
+// This is the check the return protocol was missing: a pointer that itself
+// lives in an ancestor arena was aliased, and its referents were never looked
+// at. NewUnauthenticatedCipher allocates its Cipher in its own frame, the inner
+// constructor fills in c.key from ITS frame and hands c back - c is an ancestor
+// address, stable by identity, so the encode wrote the pointer raw - and the
+// inner frame was then released and reused by the Poly1305 work. The struct
+// survived, the key it pointed at read all zeros. A slice field whose backing
+// store is in the dying frame is exactly as transient as the struct itself
+// would have been.
+//
+// One level deep is enough. The answer only chooses between aliasing the whole
+// graph and re-encoding it, and the re-encode walks every level; a reference
+// that is already stable cannot become transient later, because a return is the
+// only sanctioned way to move data out of a frame and every return is checked
+// by this same rule.
+func retPointeeDies(p unsafe.Pointer, tp uintptr) (ok bool) {
+	if p == nil || tp == 0 {
+		return false
+	}
+	switch retKindOf(tp) {
+	case KindPointer, KindUnsafePointer:
+		q := *(*unsafe.Pointer)(p)
+		return q != nil && uintptr(q) >= 1048576 && !codecIsStableAddr(uintptr(q))
+	case KindBytes, KindSlice:
+		sv := *(*_string)(p)
+		return sv.ptr != nil && !codecIsStableAddr(uintptr(unsafe.Pointer(sv.ptr)))
+	case KindStruct:
+		u := retUnderAddr(tp)
+		if u == 0 {
+			return false
+		}
+		st := (*rtStructType)(unsafe.Pointer(u))
+		nf := int32(st.numField)
+		for i := int32(0); i < nf; i++ {
+			fd := (*rtStructFieldDesc)(unsafe.Add(unsafe.Pointer(&st.fields[0]), uintptr(i)*unsafe.Sizeof(rtStructFieldDesc{})))
+			ft := uintptr(unsafe.Pointer(fd.fieldType))
+			if ft == 0 || !retKindHasPtrs(ft, 0) {
+				continue
+			}
+			if retPointeeDies(unsafe.Add(p, retFieldOffsetAt(st, i)), ft) {
+				return true
+			}
+		}
+		return false
+	case KindArray:
+		u := retUnderAddr(tp)
+		if u == 0 {
+			return false
+		}
+		elem := uintptr(unsafe.Pointer((*rtElemType)(unsafe.Pointer(u)).elem))
+		if elem == 0 || !retKindHasPtrs(elem, 0) {
+			return false
+		}
+		eu := retUnderAddr(elem)
+		if eu == 0 {
+			return false
+		}
+		esz := (*RawType)(unsafe.Pointer(eu)).Size()
+		if esz == 0 {
+			return false
+		}
+		n := (*RawType)(unsafe.Pointer(u)).ArrayLen()
+		for i := int32(0); i < n; i++ {
+			if retPointeeDies(unsafe.Add(p, uintptr(i)*esz), elem) {
+				return true
+			}
+		}
+		return false
+	case KindMap, KindChan, KindFunc:
+		q := *(*unsafe.Pointer)(p)
+		return q != nil && uintptr(q) >= 1048576 && !codecIsStableAddr(uintptr(q))
+	}
+	return false
+}
+
+// retElemAddr returns the element type of tp as an address, without a pointer
+// return (the return protocol costs ~100 ns each and this is asked per pointer
+// result). Mirrors RawType.Elem.
+func retElemAddr(tp uintptr) (r0 uintptr) {
+	if tp == 0 {
+		return 0
+	}
+	if tag := tp & 0b11; tag != 0 {
+		return tp - 1
+	}
+	for {
+		t := (*RawType)(unsafe.Pointer(tp))
+		if !t.IsNamed() {
+			break
+		}
+		tp = uintptr(unsafe.Pointer((*rtElemType)(unsafe.Pointer(t)).elem))
+		if tp == 0 {
+			return 0
+		}
+	}
+	if retKindOf(tp) == KindPointer {
+		return uintptr(unsafe.Pointer((*rtPtrType)(unsafe.Pointer(tp)).elem))
+	}
+	return uintptr(unsafe.Pointer((*rtElemType)(unsafe.Pointer(tp)).elem))
 }
 
 // retKindHasPtrs is sovTypeHasPtrs with an address in and no pointer returns, for
@@ -844,7 +951,17 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		// pointee's own branch, which registers its address BEFORE its children
 		// on both sides - adding it here as well was a second entry the decoder
 		// did not make, and that asymmetry is what shifted back-references.
-		if codecIsStableAddr(uintptr(p)) {
+		//
+		// A stable ADDRESS is not a stable OBJECT: the pointee can be an
+		// ancestor's struct that this frame filled with slices of its own
+		// memory (retPointeeDies), and aliasing that hands back a struct whose
+		// fields point into a released frame. Below the same 1 MiB threshold the
+		// bad-pointer check at the top of this branch uses, there is nothing to
+		// read: those values were aliased as garbage before this check existed
+		// and reading them is the SIGSEGV (a zeroed pointer field of a partially
+		// built TLS state).
+		if codecIsStableAddr(uintptr(p)) &&
+			(uintptr(p) < 1048576 || !retPointeeDies(p, retElemAddr(uintptr(unsafe.Pointer(typ))))) {
 			codecSeenAdd(ss, p, codecPointeeSize(typ))
 			codecNoteStable(uintptr(p))
 			codecWriteVarint(cb, codecTagStable)

@@ -21876,3 +21876,62 @@ returned pointer's pointee owns slices whose backing store lives in a transient
 arena. The evidence above is the test: with the fix, `key0` must stay
 0x03020100 after the Poly1305 work, and `tls_handshake` must pass with the
 converted `Cipher`.
+
+## Round 316: W33 fixed - a stable ADDRESS is not a stable OBJECT; chacha20's key/nonce are slices
+
+The diagnosis in round 315 was right about the mechanism and wrong about the
+place. The return relocation is not skipped: `codecEncodeValue`'s `KindPointer`
+branch asks `codecIsStableAddr(p)` about the pointer's TARGET, gets "stable"
+because the Cipher lives in an ancestor frame, writes the pointer raw - and
+never looks at what the pointee points AT. `NewUnauthenticatedCipher` allocates
+the Cipher in its own frame and then calls `newUnauthenticatedCipher(c, ...)`,
+which fills `c.key` from ITS OWN frame. Inside that inner return `c` is an
+ancestor address (stable, aliased) while `c.key`'s backing store is in the dying
+frame. The struct came back intact and its key bytes were recycled.
+
+The fix is `retPointeeDies` in `src/runtime/codec.mx`: before a pointer may be
+aliased, walk the pointee's reference fields (struct fields, array elements,
+inline structs) and answer "copy" if any of them points into memory that dies
+with this return. One level is enough - the answer only chooses between aliasing
+the graph and re-encoding it, and the re-encode walks every level. It is asked
+in both places that decide: `codecRetStableInner` (the fast path) and the encode
+branch itself. A pointer below the existing 1 MiB bad-pointer threshold is never
+dereferenced, only aliased as before.
+
+Both compilers get this from the single shared runtime file - wood law holds
+without a compiler change.
+
+With that in place the chacha20 conversion went in: `Cipher.key []uint32` and
+`Cipher.nonce []uint32`, lengths established by `newUnauthenticatedCipher`, and
+the block temporaries hoisted above the `for pos < n` walk (a `:=` inside a loop
+is refused in a self-mutating method). Verified: RFC 8439 AEAD vector matches
+byte for byte (`ct d31a8d34...`, tag `1ae10b59...`), RFC 7539 2.4.2 keystream
+matches, and `tls_handshake` passes end to end.
+
+### The other half: the exporter was stored across a lifetime
+
+Turning the walk on surfaced a real lifetime bug it had been masking. `crypto/tls`
+built its keying-material exporter in the handshake state -
+`c.ekm = hs.suite.exportKeyingMaterial(...)` - so the Conn held a pointer into
+`hs`'s arena. The handshake returns, `hs` dies, and
+`(*Conn).connectionStateLocked` later encodes a dangling `EKM` interface value:
+SIGSEGV inside the codec walk (measured under gdb at `retPointeeDies`, reached
+from `ConnectionState` -> `connectionStateLocked`).
+
+State a Conn owns has to be built by a method on the Conn, where the receiver's
+sovereign arena is the current arena, and its byte slices have to be copied
+there: `(*Conn).setEKMFromMasterSecret` and `(*Conn).setEKM13` now do exactly
+that, and the handshake states call them. `ekmFromMasterSecret` and
+`(*cipherSuiteTLS13).exportKeyingMaterial` are gone rather than left as unused
+constructors.
+
+Full fixture: handshake, 1 KiB echo in both directions, and the wrong-CA
+rejection, all green.
+
+### Still open from this family
+
+- W27 (reset of a freed arena) and W30 (`JoinHostPort(IPString(ip), port)`)
+- the walk does not descend into map values: a map allocated inline in a dying
+  frame and stored into a stable object is still aliased as a whole
+- `codecSetTopOnlyTransient` still has no callers; the receiver store-back path
+  it was written for is not emitted by either compiler

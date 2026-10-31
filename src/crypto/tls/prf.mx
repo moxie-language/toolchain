@@ -298,14 +298,32 @@ type ekmFromMasterSecretState struct {
 	serverRandom []byte
 }
 
-// ekmFromMasterSecret generates exported keying material as defined in RFC 5705.
-func ekmFromMasterSecret(version uint16, suite *cipherSuite, masterSecret, clientRandom, serverRandom []byte) (rekm ekmFunc) {
-	return &ekmFromMasterSecretState{
+// setEKMFromMasterSecret installs the RFC 5705 exporter on the connection.
+//
+// It has to be built HERE, in a method whose receiver is the Conn: allocations
+// made by a mutating method land in the receiver's own arena, while an object
+// built in the handshake state lives exactly as long as that handshake. Handing
+// the Conn a pointer to the handshake's copy is the W10 shape - the handshake
+// function returns, its arena goes back to the pool, and ConnectionState() then
+// reads the exporter through a dangling pointer (measured: SIGSEGV in the codec
+// walk over the interface value, on the server's post-handshake ConnectionState
+// call).
+//
+// The secret and the randoms are copied for the same reason: they belong to the
+// handshake state's arena.
+func (c *Conn) setEKMFromMasterSecret(version uint16, suite *cipherSuite, masterSecret, clientRandom, serverRandom []byte) {
+	ms := []byte{:len(masterSecret)}
+	copy(ms, masterSecret)
+	cr := []byte{:len(clientRandom)}
+	copy(cr, clientRandom)
+	sr := []byte{:len(serverRandom)}
+	copy(sr, serverRandom)
+	c.ekm = &ekmFromMasterSecretState{
 		version:      version,
 		suite:        suite,
-		masterSecret: masterSecret,
-		clientRandom: clientRandom,
-		serverRandom: serverRandom,
+		masterSecret: ms,
+		clientRandom: cr,
+		serverRandom: sr,
 	}
 }
 
