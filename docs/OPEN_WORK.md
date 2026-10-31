@@ -21822,3 +21822,57 @@ method is refused once the receiver's struct gains a slice field (chacha20's
 `xorKeyStreamBlocksGeneric`), which is why that function's round temporaries were
 hoisted above the loop. The hoist is correct and stays; the refusal is Moxie's
 rule doing its job.
+
+## Round 315: WHY a slice field does not survive a package boundary (W33, root cause found)
+
+The chacha20 conversion from round 314 is the reproducer, and instrumenting it
+named the exact failure. `chacha20poly1305`'s open path derives the Poly1305 key
+from the cipher's block 0, verifies the tag, and only then XORs the plaintext:
+
+    s, _ := chacha20.NewUnauthenticatedCipher(c.key[:], nonce)
+    s.XORKeyStream(polyKey, polyKey)   // block 0 - CORRECT: polyKey = 7bac2b25...
+    s.SetCounter(1)
+    ... poly1305 tag work ...
+    s.XORKeyStream(plaintext, ciphertext)
+
+Printing the cipher's own state right before the last call:
+
+    OPEN after poly work: counter 1 key0 0 left 0
+
+`key0` is ZERO. `counter` is right, the leftover length is right, and the block-0
+keystream derived a moment earlier was right - but by the time the Poly1305 work
+has run, the cipher's `key` slice reads zeros. That is not a cipher bug: the
+key's BACKING STORE was reclaimed and zeroed under it.
+
+Why the array version was safe and the slice version is not: with
+`key [8]uint32` the key bytes are INLINE in the struct, so the struct's value
+carries them wherever it goes. With `key []uint32` the struct carries a header,
+and the bytes live wherever `NewUnauthenticatedCipher`'s frame arena put them.
+`NewUnauthenticatedCipher` returns `*Cipher`; the return protocol decides whether
+that pointer needs relocating with `codecRetStable`, and it answers "stable" for
+a receiver that the sovereign machinery has registered as stable
+(`codecRegStable`/borrowed arena). The callee's frame is then released, its
+memory is reused by the Poly1305 work, and the caller holds a pointer whose
+slice fields point into recycled memory. The struct's own bytes survived (the
+arena block was not overwritten) but its slice's target did not - which is
+exactly "counter intact, key zero".
+
+The general rule this gives the array campaign, and the reason three rounds of
+crypto conversion were reverted:
+
+  **A self-mutating struct that is handed to another package must keep its
+  state INLINE (named scalars) or as a VIEW of memory the caller owns. It must
+  not own slices.**
+
+That is why poly1305's limbs became `H0..H2`/`R0/R1`/`S0/S1` (safest form) and
+why keccakf's lanes became a view of the caller's byte buffer (also safe), while
+chacha20's `key`/`nonce` had to go back to fixed extents. The crypto conversions
+still on the list (p256, edwards25519, blake2b) must follow the scalar-field
+form, not the slice form.
+
+The real fix, when it is taken up: `codecRetStable` must answer false when the
+returned pointer's pointee owns slices whose backing store lives in a transient
+(or borrowed) arena, so the full relocation path copies them into the caller's
+arena. The evidence above is the test: with the fix, `key0` must stay
+0x03020100 after the Poly1305 work, and `tls_handshake` must pass with the
+converted `Cipher`.
