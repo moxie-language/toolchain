@@ -7925,6 +7925,15 @@ func (fb *ssaFuncBuilder) buildCompositeLitInto(dst SSAValue, e *syntax.Composit
 			if litFullyCovers(e, p.Base) {
 				alloc.NoZero = true
 			}
+			// The address escapes: it is being stored into dst, and dst is an
+			// element of a slice, array or map that outlives this frame. Without
+			// the mark the pointee was a stack alloca whose address was stored
+			// into the arena's backing array, so the element dangled the moment
+			// the function returned - `s = []*T{{n: k}, {n: k+1}, {n: k+2}};
+			// return` read the last element out of a recycled frame slot. The
+			// explicit `&T{...}` path marks this too (buildAddrOf), and legacy's
+			// builder.addr(escaping=true) makes the same decision.
+			fb.markAddrEscaping(alloc)
 			fb.buildCompositeLitInto(alloc, e, p.Base)
 			fb.emitStore(dst, alloc)
 			return

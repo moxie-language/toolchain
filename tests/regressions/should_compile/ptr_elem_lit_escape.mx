@@ -1,0 +1,126 @@
+// Element literals in a pointer-element aggregate literal must be allocated in
+// the arena, not on the stack.
+//
+// `[]*T{{n: 1}, {n: 2}, {n: 3}}` means three `&T{...}` values. The address of
+// each pointee is stored into the slice's backing array, which outlives the
+// frame whenever the slice is returned or stored in a receiver - so the pointee
+// escapes. stage4 built it with a stack alloca and never called
+// markAddrEscaping, while the explicit `&T{...}` path always did, so the
+// returned slice carried pointers into a dead frame:
+//
+//     func makeThree(k int64) (s []*T) {
+//         s = []*T{{n: k}, {n: k + 1}, {n: k + 2}}
+//         return
+//     }
+//     makeThree(9)  ->  9 10 7      (legacy: 9 10 11)
+//
+// The last element's stores were also dropped from the emitted IR, so it read
+// back whatever the recycled slot held. The same shape is what crashed
+// `idna.Lookup().ToUnicode` on its second call (a func-value field of a
+// dangling pointee was executed); with the escape mark those calls are clean.
+//
+// usage: ptr_elem_lit_escape    exit 0 when every element survives the return
+package main
+
+type node struct {
+	n    int64
+	name []byte
+}
+
+type hook struct {
+	info func(x int32) (r int32)
+	n    int64
+}
+
+func double(x int32) (r int32) { return x * 2 }
+func triple(x int32) (r int32) { return x * 3 }
+
+func makeNodes(k int64) (s []*node) {
+	s = []*node{
+		{n: k, name: "a"},
+		{n: k + 1, name: "b"},
+		{n: k + 2, name: "c"},
+	}
+	return
+}
+
+func makeHooks() (s []*hook) {
+	s = []*hook{
+		{info: double, n: 1},
+		{info: triple, n: 2},
+		{info: double, n: 3},
+	}
+	return
+}
+
+func makeHookArray() (a [3]*hook) {
+	a = [3]*hook{
+		{info: double, n: 11},
+		{info: triple, n: 22},
+		{info: double, n: 33},
+	}
+	return
+}
+
+func makeHookMap() (m map[int32]*hook) {
+	m = map[int32]*hook{
+		0: {info: double, n: 5},
+		1: {info: triple, n: 6},
+	}
+	return
+}
+
+// churn moves the stack and the arenas before the values are read again.
+func churn() (n int64) {
+	big := []byte{:4096}
+	for i := int32(0); i < 4096; i++ {
+		big[i] = byte(i)
+	}
+	return int64(big[4095])
+}
+
+func main() {
+	nodes := makeNodes(9)
+	_ = churn()
+	if nodes[0].n != 9 || nodes[1].n != 10 || nodes[2].n != 11 {
+		panic("returned []*T lost an element after the frame died")
+	}
+	if nodes[2].name != nil && !bytesEqual(nodes[2].name, "c") {
+		panic("returned []*T lost the last element's slice field")
+	}
+
+	hooks := makeHooks()
+	_ = churn()
+	if hooks[2].n != 3 || hooks[2].info(2) != 4 {
+		panic("returned []*T lost the last element's func field")
+	}
+	if hooks[0].info(3) != 6 || hooks[1].info(3) != 9 {
+		panic("returned []*T has the wrong func field in an earlier element")
+	}
+
+	arr := makeHookArray()
+	_ = churn()
+	if arr[2].n != 33 || arr[2].info(2) != 4 || arr[0].info(2) != 4 {
+		panic("[3]*T literal lost an element")
+	}
+
+	m := makeHookMap()
+	_ = churn()
+	if m[0].n != 5 || m[1].n != 6 || m[1].info(2) != 6 {
+		panic("map[K]*T literal lost an element")
+	}
+
+	println("ptr elem lit escape ok")
+}
+
+func bytesEqual(a []byte, b []byte) (ok bool) {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := int32(0); i < len(a); i++ {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
