@@ -22220,3 +22220,38 @@ comparable" errors; it passes on both compilers now.
 Gates: quickcheck 15/15, text_compare_forms and compress_roundtrip 2/2 through
 the harness, phase 8 netsmoke 17/17 + tree-cleanliness, bootstrap fixpoint
 `s2 == s3` (d41bd227) with the same hash as the previous round.
+
+## Round 323: W29 fixed - stage4 accepted '+' and '+=' on text in user code
+
+Legacy refuses both in a user's main module: concatenation is `|`, so
+`loader`'s `CheckPlusOnText` walks the AST for a text operand on either side of
+`+` and for a text left-hand side of `+=`. Stage4 had a `+` check that tested
+only the LEFT operand and only through `ssaIsStringType`, which is the string
+Basic alone, and it had no `+=` check at all. So these compiled here and were
+rejected there:
+
+    a := []byte("x"); b := []byte("y"); s := a + b   // stage4: ok, "xy"
+    s := a; s += b                                   // stage4: ok, "xy"
+
+The divergence also ran the wrong way round: the compiler that accepted the
+operator had to invent semantics for it, so `+=` on text silently concatenated -
+an operator the language reserves, with an error message that named the rule
+legacy was enforcing all along.
+
+The predicate is `TextType` (string Basic OR slice of byte), on either operand
+for `+` and on the left-hand side for `+=`, and the gate is legacy's
+(main-module user code), factored into `(*ssaFuncBuilder).plusIsBanned` so the
+two rules share one definition of "user code". The first attempt used
+`textSlice` and rejected `n += 3`: that predicate answers "Basic type" for ANY
+Basic by design of its other call sites, which is why the numeric forms are now
+part of `concat_text_forms` - a check that rejects too much is the same class of
+bug as one that rejects too little, and this one proved it on the first try.
+
+Fixtures `reject_plus_text` and `reject_plusassign_text` (phase 0b, each naming
+its expected error): the first BUILT and printed "xy" on the old compiler, the
+second likewise; both are refused by both compilers now.
+
+Gates: quickcheck 15/15, phase 8 netsmoke 17/17 + tree-cleanliness (2 663 s, rebuild of the whole netsmoke closure plus a loaded host), bootstrap
+fixpoint `s2 == s3` (`0c395b6a`, a new hash because stage4 itself changed - the
+whole tree, toolchain and stdlib included, still compiles with `+` on text
+where it is allowed).
