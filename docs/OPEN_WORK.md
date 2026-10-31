@@ -22094,3 +22094,37 @@ a gzip body.
     src/syscall/{exec_linux,syscall_unix}.mx          4   kernel ABI structs
     src/internal/zstd/{huff,fse}.mx, gzip, gif reader  -   done this round
     src/internal/trace/.../parser.mx                  1   on-disk event record
+
+## Round 320: the [:] sweep, and the operator's ruling on it
+
+Asked to stop writing `copy(dst[:], src[:])` (copy already takes the smaller of
+the two lengths) and to remove `[:]` where the operand is a slice, the sweep
+found 295 full-slice expressions across `src`, `_mxc_stage4`, `pkg` and `tests`.
+A first pass tried to enforce it in the compiler; the operator ruled that out:
+
+  **x[:] and x[0:len(x)] are the same expression, and both are copies by the
+  slice rule. Banning only the short spelling is asymmetric and bans the very
+  thing `slice_copy_rule.mx` exists to document. What is wrong is a subslice in
+  a DESTINATION position - and that rule already exists.**
+
+So no new compiler rule: `copy(dst[:], ...)`, `copy(dst[0:len(dst)], ...)` and a
+store through either are rejected by the subslice-copy checks that were already
+in `checkASTRestrictions` / `checkSubsliceStores`, and `x[:]` stays legal as
+explicit copy syntax. Verified after the revert on both compilers: `t := s[:]`
+copies (a write through `t` leaves `s` alone) and `copy(dst, s)` returns the
+smaller length with no `[:]` on either side.
+
+The cleanup stays, because each of those sites was dead work or a silent
+throwaway: `strconv/ftoa`'s `bigFtoa` built a `decimalSlice` over a copy of the
+digit buffer, `sha256`/`sha512` passed a copy of the block state to `block`
+(so the digest was written nowhere), `ecdh`/`ecdsa` copied an order slice they
+only read, `archive/zip` and `internal/zstd` fed their writers copies, and
+`x/text/norm`'s trie constructor stored a copy where Go stores a view.
+
+Mechanism, for the next sweep of this kind: the compiler is the classifier. A
+temporary `x[:] of a slice` diagnostic in stage4, run by building every package
+directory that still contained `[:]`, produced file:line for each real site in
+about six rounds; the diagnostic is gone and the sites are clean.
+
+Gates: quickcheck 15/15 (slice_copy_rule restored to `base[:]` and passing),
+phase 8 netsmoke 2/2 (1 948 s), fixpoint `s4b == s4c` (d41bd227).
