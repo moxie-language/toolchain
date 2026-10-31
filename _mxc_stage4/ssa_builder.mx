@@ -5515,6 +5515,39 @@ func (fb *ssaFuncBuilder) checkSliceToArrayConv(x SSAValue, dst Type) {
 	push(cctx.compileErrors, "slice-to-array-pointer conversion is not allowed: work in slices")
 }
 
+// checkTextArrayConv rejects a text conversion whose other side is a fixed
+// extent.
+//
+// Moxie text is []byte, so `string(x)` and `[]byte(x)` are the identity for a
+// SLICE - but not for an ARRAY. go/types rejects `string([8]byte)` and
+// `[]byte([8]byte)` (legacy reports "cannot convert ... to type string"), while
+// stage4 emitted a bitcast from `[8 x i8]` to the slice header and clang
+// refused the module:
+//
+//	error: invalid cast opcode for cast from '[8 x i8]' to '{ ptr, i64, i64 }'
+//
+// `internal/xcoff`'s `println(name, hdr.Name)` shape is what reached it. A
+// fixed extent is not text: work in slices.
+func (fb *ssaFuncBuilder) checkTextArrayConv(x SSAValue, dst Type) {
+	if x == nil || dst == nil || x.SSAType() == nil {
+		return
+	}
+	src := x.SSAType()
+	srcText := TextType(src)
+	if !srcText && !TextType(dst) {
+		return
+	}
+	other := src
+	if srcText {
+		other = dst
+	}
+	if _, isArr := SafeUnderlying(other).(*Array); !isArr {
+		return
+	}
+	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+	push(cctx.compileErrors, fb.errPos() | "cannot convert " | src.String() | " to " | dst.String() | " (a fixed extent is not text: work in slices)")
+}
+
 // isUnsafePtrType reports whether t is the unsafe.Pointer type. Compared by
 // KIND, not identity: a type reaches a body through several construction paths
 // (the universe's Typ sentinels, a signature description, a parsed declaration),
@@ -5658,6 +5691,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 					// which folded to a nil Pointer and compiled (measured:
 					// rc=0, printed nil, where go/types rejects the source).
 					fb.checkSliceToArrayConv(args2[0], tn.Typ)
+					fb.checkTextArrayConv(args2[0], tn.Typ)
 					fb.checkPtrToIntConv(args2[0], tn.Typ)
 					fb.checkUnsafePtrConv(args2[0], tn.Typ)
 					if folded, okF := fb.foldConstConvert(args2[0], tn.Typ); okF {
@@ -5684,6 +5718,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 			}
 			fb.checkConstConvert(args3[0], convType)
 			fb.checkSliceToArrayConv(args3[0], convType)
+			fb.checkTextArrayConv(args3[0], convType)
 			fb.checkPtrToIntConv(args3[0], convType)
 			fb.checkUnsafePtrConv(args3[0], convType)
 			if folded, okF := fb.foldConstConvert(args3[0], convType); okF {
