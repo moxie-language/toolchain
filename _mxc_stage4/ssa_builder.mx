@@ -7320,6 +7320,22 @@ func (fb *ssaFuncBuilder) buildSlice(e *syntax.SliceExpr) (s SSAValue) {
 	if x == nil {
 		return nil
 	}
+	// x[:] on a SLICE is a copy of the whole thing, and the header already
+	// names the whole thing: it buys nothing and silently hands a throwaway to
+	// whatever receives it. On an ARRAY it is the view that makes the storage
+	// reachable (the buildArrayAddr branch above), so that stays.
+	fullSlice := true
+	for _, ix := range e.Index {
+		if ix != nil {
+			fullSlice = false
+		}
+	}
+	if fullSlice {
+		if _, isSlice := SafeUnderlying(x.SSAType()).(*Slice); isSlice {
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, fb.errPos() | "x[:] of a slice is a copy that buys nothing: write x")
+		}
+	}
 	sl := &SSASlice{X: x}
 	if len(e.Index) > 0 && e.Index[0] != nil {
 		sl.Low = fb.buildExpr(e.Index[0])

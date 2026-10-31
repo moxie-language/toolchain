@@ -757,6 +757,20 @@ func (b *builder) checkASTRestrictions() {
 					b.addError(dst.Pos(), "moxie: a subslice is a copy, so copying into it is not allowed: write the elements or resize the slice")
 				}
 			}
+		case *ast.SliceExpr:
+			// x[:] on a SLICE is a copy of the whole thing, and the header
+			// already names the whole thing: it buys nothing and silently
+			// hands a throwaway to whatever receives it. On an ARRAY it is the
+			// view that makes the storage reachable, so that stays.
+			if node.Low == nil && node.High == nil && node.Max == nil {
+				if info := b.typeInfo(); info != nil {
+					if tv, ok := info.Types[node.X]; ok && tv.Type != nil {
+						if _, isSlice := tv.Type.Underlying().(*types.Slice); isSlice {
+							b.addError(node.Pos(), "moxie: x[:] of a slice is a copy that buys nothing: write x")
+						}
+					}
+				}
+			}
 		case *ast.AssignStmt:
 			// A subslice is a copy: a store through one writes into a
 			// throwaway that has no address, and the original never changes.
