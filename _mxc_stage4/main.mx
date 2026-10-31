@@ -313,6 +313,17 @@ func optBc(bcFile string) {
 	}
 	tmp := bcFile | ".opt"
 	rc := run([]string{"opt", "-passes=" | passes, bcFile, "-o", tmp})
+	if rc != 0 && passes != "mem2reg" {
+		// An optimizer crash on VALID IR is an LLVM bug, and it is not a
+		// reason to refuse to build the program. Fall back to the bounded
+		// middle-end - the same one every module over optBcBudget gets - so a
+		// package that trips a pass still compiles (slower, not unbuildable).
+		// Measured: compress/bzip2's module passes `opt -passes=verify` and
+		// then dies in slp-vectorizer with llvm::VectorType::get on the IR
+		// inlined from slices.insertionSortCmpFunc; nothing in the tree
+		// imports bzip2, so no gate had ever compiled it.
+		rc = run([]string{"opt", "-passes=mem2reg", bcFile, "-o", tmp})
+	}
 	if rc != 0 {
 		fatal("opt failed for " | bcFile)
 	}

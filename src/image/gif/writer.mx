@@ -50,7 +50,7 @@ type encoder struct {
 	// globalCT is the size in bytes of the global color table.
 	globalCT int32
 	// buf is a scratch buffer. It must be at least 256 for the blockWriter.
-	buf              [256]byte
+	buf              []byte
 	globalColorTable [3 * 256]byte
 	localColorTable  [3 * 256]byte
 }
@@ -84,7 +84,7 @@ func (b *blockWriter) WriteByte(c byte) (out error) {
 	}
 
 	// Flush block
-	b.e.write(b.e.buf[:256])
+	b.e.write(b.e.buf)
 	b.e.buf[0] = 0
 	return b.e.err
 }
@@ -144,8 +144,8 @@ func (e *encoder) writeHeader() {
 	}
 
 	// Logical screen width and height.
-	byteorder.LEPutUint16At(e.buf[:], 0, uint16(e.g.Config.Width))
-	byteorder.LEPutUint16At(e.buf[:], 2, uint16(e.g.Config.Height))
+	byteorder.LEPutUint16At(e.buf, 0, uint16(e.g.Config.Width))
+	byteorder.LEPutUint16At(e.buf, 2, uint16(e.g.Config.Height))
 	e.write(e.buf[:4])
 
 	if gp, ok := e.g.Config.ColorModel.(*image.Palette); ok && len(gp.Element) > 0 {
@@ -184,7 +184,7 @@ func (e *encoder) writeHeader() {
 		}
 		e.buf[0] = 0x03 // Block Size.
 		e.buf[1] = 0x01 // Sub-block Index.
-		byteorder.LEPutUint16At(e.buf[:], 2, uint16(e.g.LoopCount))
+		byteorder.LEPutUint16At(e.buf, 2, uint16(e.g.LoopCount))
 		e.buf[4] = 0x00 // Block Terminator.
 		e.write(e.buf[:5])
 	}
@@ -272,7 +272,7 @@ func (e *encoder) writeImageBlock(pm *image.Paletted, delay int32, disposal byte
 		} else {
 			e.buf[3] = 0x00 | disposal<<2
 		}
-		byteorder.LEPutUint16At(e.buf[:], 4, uint16(delay)) // Delay Time (1/100ths of a second)
+		byteorder.LEPutUint16At(e.buf, 4, uint16(delay)) // Delay Time (1/100ths of a second)
 
 		// Transparent color index.
 		if transparentIndex != -1 {
@@ -284,10 +284,10 @@ func (e *encoder) writeImageBlock(pm *image.Paletted, delay int32, disposal byte
 		e.write(e.buf[:8])
 	}
 	e.buf[0] = sImageDescriptor
-	byteorder.LEPutUint16At(e.buf[:], 1, uint16(b.Min.X))
-	byteorder.LEPutUint16At(e.buf[:], 3, uint16(b.Min.Y))
-	byteorder.LEPutUint16At(e.buf[:], 5, uint16(b.Dx()))
-	byteorder.LEPutUint16At(e.buf[:], 7, uint16(b.Dy()))
+	byteorder.LEPutUint16At(e.buf, 1, uint16(b.Min.X))
+	byteorder.LEPutUint16At(e.buf, 3, uint16(b.Min.Y))
+	byteorder.LEPutUint16At(e.buf, 5, uint16(b.Dx()))
+	byteorder.LEPutUint16At(e.buf, 7, uint16(b.Dy()))
 	e.write(e.buf[:9])
 
 	// To determine whether or not this frame's palette is the same as the
@@ -372,6 +372,7 @@ func EncodeAll(w io.Writer, g *GIF) (out error) {
 	}
 
 	e := encoder{g: *g}
+	e.buf = []byte{:256}
 	// The GIF.Disposal, GIF.Config and GIF.BackgroundIndex fields were added
 	// in Go 1.5. Valid Go 1.4 code, such as when the Disposal field is omitted
 	// in a GIF struct literal, should still produce valid GIFs.
@@ -430,16 +431,10 @@ func Encode(w io.Writer, m image.Image, o *Options) (out error) {
 	if okv, okok := m.(*image.Paletted); okok {
 		pm = okv
 	}
-	if pm == nil {
-		if cp, ok := m.ColorModel().([]color.Color); ok {
-			pm = image.NewPaletted(b, cp)
-			for y := b.Min.Y; y < b.Max.Y; y++ {
-				for x := b.Min.X; x < b.Max.X; x++ {
-					pm.Set(x, y, color.PaletteConvert(cp, m.At(x, y)))
-				}
-			}
-		}
-	}
+	// There is no palette-model path here: in Go a color.Palette is a named
+	// slice type with a Convert method, and Moxie has neither, so a color.Model
+	// can never be a palette. A *image.Paletted is the only image whose pixels
+	// are already indices, and it is handled above.
 	if pm == nil || len(pm.Palette.Element) > opts.NumColors {
 		// Set pm to be a palettedized copy of m, including its bounds, which
 		// might not start at (0, 0).

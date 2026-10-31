@@ -32,7 +32,7 @@ type Writer struct {
 	compressor  *flate.Writer
 	digest      hash.Hash32
 	err         error
-	scratch     [4]byte
+	scratch     []byte
 	wroteHeader bool
 }
 
@@ -66,9 +66,10 @@ func NewWriterLevelDict(w io.Writer, level int32, dict []byte) (out *Writer, wer
 		return nil, fmt.Errorf("zlib: invalid compression level: %d", level)
 	}
 	return &Writer{
-		w:     w,
-		level: level,
-		dict:  dict,
+		w:       w,
+		level:   level,
+		dict:    dict,
+		scratch: []byte{:4},
 	}, nil
 }
 
@@ -85,7 +86,9 @@ func (z *Writer) Reset(w io.Writer) {
 		z.digest.Reset()
 	}
 	z.err = nil
-	z.scratch = [4]byte{}
+	for i := range z.scratch {
+		z.scratch[i] = 0
+	}
 	z.wroteHeader = false
 }
 
@@ -121,7 +124,7 @@ func (z *Writer) writeHeader() (err error) {
 	}
 	if z.dict != nil {
 		// The next four bytes are the Adler-32 checksum of the dictionary.
-		binary.BigEndian().PutUint32At(z.scratch[:], 0, adler32.Checksum(z.dict))
+		binary.BigEndian().PutUint32At(z.scratch, 0, adler32.Checksum(z.dict))
 		if _, err = z.w.Write(z.scratch[0:4]); err != nil {
 			return err
 		}
@@ -187,7 +190,7 @@ func (z *Writer) Close() (err error) {
 	}
 	checksum := z.digest.Sum32()
 	// ZLIB (RFC 1950) is big-endian, unlike GZIP (RFC 1952).
-	binary.BigEndian().PutUint32At(z.scratch[:], 0, checksum)
+	binary.BigEndian().PutUint32At(z.scratch, 0, checksum)
 	_, z.err = z.w.Write(z.scratch[0:4])
 	return z.err
 }

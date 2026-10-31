@@ -1,0 +1,82 @@
+// bzip2 decompression and a GIF encode/decode round trip.
+//
+// Neither package had a fixture. compress/bzip2 is not imported by anything in
+// the tree, and image/gif's encoder had never been exercised: it also carried an
+// impossible type assertion (a color.Model can never BE a color.Palette in
+// Moxie, where a slice type cannot have methods) that the legacy compiler
+// rejected and stage4 accepted, so the package only compiled on one of the two.
+//
+// The bzip2 stream is the system bzip2's output for the sentence checked below.
+// The GIF half compares decoded pixels by RGBA() value rather than interface
+// identity, because two color.Color values are pointers.
+//
+// usage: bzip2_gif_roundtrip       exit 0 when both halves hold
+package main
+import (
+	"bytes"
+	"compress/bzip2"
+	"image"
+	"image/color"
+	"image/gif"
+	"io"
+)
+func main() {
+	bz2Stream := []byte{0x42, 0x5a, 0x68, 0x39, 0x31, 0x41, 0x59, 0x26, 0x53, 0x59, 0xed, 0xd3, 0x36, 0x51, 0x00, 0x00, 0x09, 0xd9, 0x80, 0x00, 0x10, 0x40, 0x04, 0x10, 0x00, 0x36, 0x64, 0xdc, 0xb0, 0x20, 0x00, 0x31, 0x4c, 0x98, 0x99, 0x06, 0x46, 0x11, 0x31, 0x47, 0xb4, 0x91, 0xe6, 0xa8, 0x7a, 0x90, 0x61, 0x64, 0x0a, 0x8b, 0xdb, 0xb2, 0xb4, 0xdf, 0x75, 0x5e, 0x60, 0xe3, 0xd3, 0x38, 0xa8, 0xf9, 0x81, 0x2c, 0xba, 0x3a, 0x13, 0xf8, 0xbb, 0x92, 0x29, 0xc2, 0x84, 0x87, 0x6e, 0x99, 0xb2, 0x88}
+	// bzip2: a stream produced by the system bzip2 for a known sentence.
+	r := bzip2.NewReader(bytes.NewReader(bz2Stream))
+	got, rerr := io.ReadAll(r)
+	if rerr != nil {
+		println("bzip2 read failed:", rerr.Error())
+		return
+	}
+	want := "hello world, this is a bzip2 probe payload\n"
+	if string(got) != want {
+		println("bzip2 mismatch, got len", int32(len(got)).String())
+		println(string(got))
+		return
+	}
+	println("bzip2 ok")
+	// gif: encode a palette image and decode it back.
+	pal := []color.Color{
+		color.RGBA{R: 0, G: 0, B: 0, A: 255},
+		color.RGBA{R: 255, G: 0, B: 0, A: 255},
+		color.RGBA{R: 0, G: 255, B: 0, A: 255},
+		color.RGBA{R: 0, G: 0, B: 255, A: 255},
+	}
+	rect := image.Rectangle{Min: image.Point{0, 0}, Max: image.Point{16, 9}}
+	img := image.NewPaletted(rect, pal)
+	for y := int32(0); y < 9; y++ {
+		for x := int32(0); x < 16; x++ {
+			img.SetColorIndex(x, y, uint8((x+y)%4))
+		}
+	}
+	var buf bytes.Buffer
+	if err := gif.Encode(&buf, img, nil); err != nil {
+		println("gif encode failed:", err.Error())
+		return
+	}
+	println("gif bytes", int32(buf.Len()).String())
+	back, derr := gif.Decode(&buf)
+	if derr != nil {
+		println("gif decode failed:", derr.Error())
+		return
+	}
+	b := back.Bounds()
+	if b.Dx() != 16 || b.Dy() != 9 {
+		println("gif bounds mismatch")
+		return
+	}
+	for y := int32(0); y < 9; y++ {
+		for x := int32(0); x < 16; x++ {
+			br, bg, bb, ba := back.At(x, y).RGBA()
+			wr, wg, wb, wa := img.At(x, y).RGBA()
+			if br != wr || bg != wg || bb != wb || ba != wa {
+				println("gif pixel mismatch at", x, y)
+				println(" have", int32(br>>8).String(), int32(bg>>8).String(), int32(bb>>8).String(), int32(ba>>8).String())
+				println(" want", int32(wr>>8).String(), int32(wg>>8).String(), int32(wb>>8).String(), int32(wa>>8).String())
+				return
+			}
+		}
+	}
+	println("gif round trip ok")
+}
