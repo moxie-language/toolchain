@@ -21999,3 +21999,54 @@ each verified before the next:
 Gate state after the classes above: quickcheck 15/15 (the fixture set, not
 counting the new crypto_vectors unit), `tls_handshake` green end to end,
 fixpoint `s4b == s4c`.
+
+## Round 318: the read form of the copy rule, and two defects the sweep found
+
+The remaining buffer conversions (bzip2, gif, zlib, chunked, tabwriter, ecdh,
+kernel_version, png/gif decoder scratch) turned up a rule that had only been
+stated for writes:
+
+  **A read into a window of a slice fills a throwaway.** `io.ReadFull(r, b[:n])`
+  consumes the bytes and puts them in a copy, exactly as `b[:n] = x` writes into
+  one. Reads therefore take the header *resized* to the bytes being read
+  (`resize(b, n)`, then restore), which is what `(*png.decoder).readScratch` and
+  `(*gif.decoder).readScratch` do. Both image decoders read their chunk headers,
+  color tables and image descriptors that way; png's chunk-skipping loop and
+  `net/http/internal`'s two-byte CRLF check were the same shape.
+
+Two real defects came out of compiling packages that no gate had ever compiled:
+
+- **W34, a compiler that refused valid code.** `compress/bzip2` could not be
+  built by stage4 at all: `opt -passes=default<O2>` crashes in LLVM's
+  slp-vectorizer (`llvm::VectorType::get`) on the IR inlined from
+  `slices.insertionSortCmpFunc`, while `opt -passes=verify` accepts the module.
+  Nothing in the tree imports bzip2, so no gate saw it. `optBc` now falls back to
+  `mem2reg` when the O2 run fails - the same bounded middle-end every module over
+  `optBcBudget` already gets - so an optimizer bug costs optimization, not the
+  build. Legacy never ran this pipeline; the outcome (the program builds) is
+  what both compilers now agree on.
+- **W35, an assertion that could never hold.** `image/gif`'s encoder asserted
+  `m.ColorModel().([]color.Color)`. Moxie has no named slice types, so a
+  `color.Model` can never BE a palette (Go's `color.Palette` is a named slice
+  with a `Convert` method). The legacy compiler rejected the impossible
+  assertion and stage4 accepted it: one package, two compilers, two answers. The
+  branch is deleted rather than fixed - the `*image.Paletted` case above it is
+  the only image whose pixels are indices.
+
+Fixtures added (all three are in phase 0a and pass through the harness):
+
+    crypto_vectors          AES FIPS-197 C.1-C.3 (+decrypt), SP 800-38A CBC,
+                            both standard GCM tag cases + open, RC4, BLAKE2b
+                            512/256 one-shot and streaming, Argon2id repeat
+    png_roundtrip           37x23 RGBA encode/decode, pixel exact
+    bzip2_gif_roundtrip     a system-bzip2 stream decompressed, a palette GIF
+                            encoded and decoded pixel for pixel
+
+Gates after the whole sweep: quickcheck 15/15, the three new units 4/4,
+phase 8 netsmoke 2/2 (HTTP/TCP/UDP/spawn plus tree-cleanliness), fixpoint
+`s4b == s4c` (b8313a0b).
+
+Array declarations left, each with its reason, are the holdout list in round
+317 plus: the png/gif `tmp` scratch (done here), and
+`src/internal/trace/internal/tracev1/parser.mx`'s `Args [4]uint64`, which is an
+on-disk event record.
