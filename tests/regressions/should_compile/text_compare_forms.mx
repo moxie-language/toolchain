@@ -1,0 +1,126 @@
+/*
+Text comparisons through every spelling of text.
+
+`string` and `[]byte` are one type, but the legacy type checker keeps the two
+spellings distinct while it types a package, so `string(a) != string(b)` reached
+the SSA builder as a comparison of two []byte operands. The conversion is
+identical-type and folds away, so the builder saw a bare `a != b` on two slice
+parameters: legacy rejected it as "[]byte is not comparable" while stage4
+accepted it. A switch on `string(x)` failed the same way, one level down, in the
+case comparisons.
+
+The rewrite layer classifies an operand by the text predicate now, not by
+[]byte, so both spellings lower to the same content comparison. These cases pin
+the equality AND the ordering, and every "different" pair has the SAME LENGTH on
+purpose: a header comparison would call them equal, a content comparison does
+not.
+
+usage: text_compare_forms    exit 0 when every form compares by content
+*/
+package main
+
+type label string
+
+func eqConv(a []byte, b []byte) (ok bool) {
+	return string(a) == string(b)
+}
+
+func neConv(a []byte, b []byte) (ok bool) {
+	return string(a) != string(b)
+}
+
+func ltConv(a []byte, b []byte) (ok bool) {
+	return string(a) < string(b)
+}
+
+func bareEq(a []byte, b []byte) (ok bool) {
+	return a == b
+}
+
+func litEq(a []byte) (ok bool) {
+	return a == "x"
+}
+
+func pick(tag []byte) (n int32) {
+	switch string(tag) {
+	case "one":
+		return 1
+	case "two":
+		return 2
+	case "":
+		return 3
+	}
+	return 0
+}
+
+func main() {
+	// Distinct buffers, equal content: header identity must not decide this.
+	x := []byte("padded")
+	y := []byte("padded")
+	z := []byte("qadded")
+
+	if !eqConv(x, y) {
+		panic("string()== string() says unequal for equal content")
+	}
+	if neConv(x, y) {
+		panic("string()!= string() says unequal for equal content")
+	}
+	// Same length, different content. A header compare calls these equal.
+	if !neConv(x, z) {
+		panic("string()!= string() missed a same-length difference")
+	}
+	if eqConv(x, z) {
+		panic("string()== string() matched a same-length difference")
+	}
+	if !ltConv(x, z) {
+		panic("string()< string() is wrong for 'padded' < 'qadded'")
+	}
+	if ltConv(z, x) {
+		panic("string()< string() is wrong for 'qadded' < 'padded'")
+	}
+	if !bareEq(x, y) {
+		panic("a == b says unequal for equal content")
+	}
+	if litEq(x) {
+		panic("a == \"x\" matched a literal the text does not hold")
+	}
+	if !litEq([]byte("x")) {
+		panic("a == \"x\" missed a literal the text does hold")
+	}
+
+	// Prefix ordering: shorter sorts first with equal leading bytes.
+	short := []byte("pad")
+	if !ltConv(short, x) {
+		panic("prefix must sort before the longer text")
+	}
+	// Empty is a defined value, not a missing one.
+	var empty []byte
+	if !eqConv(empty, []byte("")) {
+		panic("empty text is not equal to empty text")
+	}
+	if !neConv(empty, short) {
+		panic("empty text compared equal to non-empty text")
+	}
+
+	// A named text type compares the same way.
+	var l label = "padded"
+	if string(l) != string(x) {
+		panic("named string type compared unequal for equal content")
+	}
+
+	// Switch tags go through the same path.
+	if pick([]byte("one")) != 1 {
+		panic("switch on string(tag) missed case one")
+	}
+	if pick([]byte("two")) != 2 {
+		panic("switch on string(tag) missed case two")
+	}
+	if pick([]byte("")) != 3 {
+		panic("switch on string(tag) missed the empty case")
+	}
+	if pick([]byte("three")) != 0 {
+		panic("switch on string(tag) matched a case it should not")
+	}
+
+	println("text compare forms ok")
+}

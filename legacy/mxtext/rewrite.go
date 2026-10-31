@@ -3200,10 +3200,17 @@ func FilterPipeErrors(errs []error) []error {
 // to __moxie_eq / __moxie_lt calls, and converts switch statements on []byte
 // to tag-less switches with __moxie_eq calls.
 
-// findByteComparisons finds binary expressions comparing two []byte values.
-// If one side is []byte and the other is string (e.g. map-key string compared
-// against a []byte var), wraps the string side in []byte(...) so the emitted
-// __moxie_eq/__moxie_lt receives matching types.
+// FindByteComparisons finds binary expressions comparing two text values.
+//
+// Text has two spellings and the type checker keeps them distinct, so an
+// operand written as string(x) arrives typed with the built-in string while an
+// operand written as x arrives typed []byte. The predicate here must be the
+// text predicate, not isByteSlice: classifying on []byte alone left
+// `string(a) != string(b)` unrewritten, and because that conversion is
+// identical-type it folds away in SSA, so the builder received a bare
+// `a != b` on two []byte parameters and no backend can emit it. Text compares
+// by content; that is the only semantic there is, so every text comparison is
+// lowered to __moxie_eq/__moxie_lt here.
 func FindByteComparisons(files []*ast.File, info *types.Info) []*ast.BinaryExpr {
 	var result []*ast.BinaryExpr
 	for _, file := range files {
@@ -3219,31 +3226,16 @@ func FindByteComparisons(files []*ast.File, info *types.Info) []*ast.BinaryExpr 
 			}
 			xType := info.TypeOf(bin.X)
 			yType := info.TypeOf(bin.Y)
-			xBytes := (xType != nil && isByteSlice(xType)) || isMoxieConcatCall(bin.X) || isSliceByteConversion(bin.X)
-			yBytes := (yType != nil && isByteSlice(yType)) || isMoxieConcatCall(bin.Y) || isSliceByteConversion(bin.Y)
+			xBytes := isTextLike(xType) || isMoxieConcatCall(bin.X) || isSliceByteConversion(bin.X)
+			yBytes := isTextLike(yType) || isMoxieConcatCall(bin.Y) || isSliceByteConversion(bin.Y)
 			if !xBytes && !yBytes {
 				return true
-			}
-			// Bridge string↔[]byte mismatches by wrapping string side.
-			if xBytes && !yBytes && yType != nil && isStringKind(yType) {
-				bin.Y = wrapInByteSlice(bin.Y)
-			}
-			if yBytes && !xBytes && xType != nil && isStringKind(xType) {
-				bin.X = wrapInByteSlice(bin.X)
 			}
 			result = append(result, bin)
 			return true
 		})
 	}
 	return result
-}
-
-// wrapInByteSlice wraps expr in []byte(expr).
-func wrapInByteSlice(expr ast.Expr) ast.Expr {
-	return &ast.CallExpr{
-		Fun:  &ast.ArrayType{Elt: ast.NewIdent("byte")},
-		Args: []ast.Expr{expr},
-	}
 }
 
 // applyByteComparisonRewrites replaces []byte comparison expressions with
@@ -3364,7 +3356,10 @@ func maybeReplaceCmp(expr ast.Expr, set map[*ast.BinaryExpr]bool) ast.Expr {
 	return expr
 }
 
-// findByteSwitches finds switch statements that switch on a []byte expression.
+// findByteSwitches finds switch statements that switch on a text expression.
+// A tag written as string(x) is text just as x is; tagging on []byte alone
+// left those switches comparing slice headers through an `==` the tag-less
+// rewrite never saw.
 func FindByteSwitches(files []*ast.File, info *types.Info) []*ast.SwitchStmt {
 	var result []*ast.SwitchStmt
 	for _, file := range files {
@@ -3373,8 +3368,7 @@ func FindByteSwitches(files []*ast.File, info *types.Info) []*ast.SwitchStmt {
 			if !ok || sw.Tag == nil {
 				return true
 			}
-			tagType := info.TypeOf(sw.Tag)
-			if tagType != nil && isByteSlice(tagType) {
+			if isTextLike(info.TypeOf(sw.Tag)) {
 				result = append(result, sw)
 			}
 			return true
