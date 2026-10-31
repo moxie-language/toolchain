@@ -1,0 +1,173 @@
+// State built in a frame and read after that frame has died.
+//
+// Every W31-class defect - a returned pointer whose pointee owned slices or
+// func values, a struct whose field was a stack alloca, a constructor whose
+// result aliased its own frame - looks like this: correct on the first read,
+// garbage or a SIGSEGV once something else has reused the memory. So each case
+// here builds its value in a function, returns it, churns 8 KiB of stack and
+// arena, and only then reads it back.
+//
+// The shapes are the ones the arena model has to get right: a slice of
+// pointers, a pushed slice of pointers, a map with slice values, a struct
+// with an embedded slice, a nested pointer slice built one frame deeper, and a
+// func value in a returned struct.
+//
+// usage: escape_shapes    exit 0 when every shape survives the frame
+package main
+
+type node struct {
+	n    int64
+	name []byte
+}
+
+type withMap struct {
+	m map[int32]int64
+	s []byte
+}
+
+type withFunc struct {
+	f func(x int32) (r int32)
+	n int64
+}
+
+type big struct {
+	a, b, c, d int64
+	name       []byte
+}
+
+type holder struct {
+	items []*node
+	bigs  []big
+	f     func(x int32) (r int32)
+}
+
+type reg struct {
+	m map[int32][]byte
+}
+
+type refs struct {
+	items []*node
+}
+
+func double(x int32) (r int32) { return x * 2 }
+
+func mkPushed(k int64) (s []*node) {
+	s = []*node{}
+	s = push(s, &node{n: k, name: "a"})
+	s = push(s, &node{n: k + 1, name: "b"})
+	return
+}
+
+func mkMap(k int64) (w withMap) {
+	w = withMap{m: map[int32]int64{}, s: "str"}
+	w.m[1] = k
+	w.m[2] = k + 1
+	return
+}
+
+func mkBig(k int64) (b big) {
+	b = big{a: k, b: k + 1, c: k + 2, d: k + 3, name: "big"}
+	return
+}
+
+func mkHolder(k int64) (h *holder) {
+	h = &holder{
+		items: []*node{{n: k, name: "x"}, {n: k + 1, name: "y"}},
+		bigs:  []big{{a: k, b: k + 1, c: k + 2, d: k + 3, name: "one"}},
+		f:     double,
+	}
+	return
+}
+
+func mkRegDirect() (r *reg) {
+	r = &reg{m: map[int32][]byte{1: "one", 2: "two"}}
+	return
+}
+
+func mkRegInline() (r *reg) {
+	m := map[int32][]byte{}
+	b := []byte("inline")
+	m[1] = b
+	c := []byte("second")
+	m[2] = c
+	r = &reg{m: m}
+	return
+}
+
+func mkNodes() (s []*node) {
+	s = []*node{{n: 41, name: "h"}, {n: 42, name: "i"}}
+	return
+}
+
+func mkRefsNested() (r *refs) {
+	r = &refs{items: mkNodes()}
+	return
+}
+
+// churn moves the stack and the arenas before the values are read.
+func churn() (n int64) {
+	g := []byte{:8192}
+	for i := int32(0); i < 8192; i++ {
+		g[i] = byte(i)
+	}
+	return int64(g[8191])
+}
+
+func main() {
+	p := mkPushed(5)
+	_ = churn()
+	if p[0].n != 5 || p[1].n != 6 || !sameText(p[0].name, "a") {
+		panic("pushed slice of pointers lost its state")
+	}
+
+	w := mkMap(10)
+	_ = churn()
+	if w.m[1] != 10 || w.m[2] != 11 || !sameText(w.s, "str") {
+		panic("map-valued struct lost its state")
+	}
+
+	b := mkBig(20)
+	_ = churn()
+	if b.a != 20 || b.b != 21 || b.c != 22 || b.d != 23 || !sameText(b.name, "big") {
+		panic("wide struct lost its state")
+	}
+
+	h := mkHolder(30)
+	_ = churn()
+	if h.items[0].n != 30 || h.items[1].n != 31 || h.bigs[0].a != 30 ||
+		h.bigs[0].d != 33 || h.f(3) != 6 {
+		panic("holder lost its state")
+	}
+
+	d := mkRegDirect()
+	_ = churn()
+	if !sameText(d.m[1], "one") || !sameText(d.m[2], "two") {
+		panic("map literal with text values lost its state")
+	}
+
+	i := mkRegInline()
+	_ = churn()
+	if !sameText(i.m[1], "inline") || !sameText(i.m[2], "second") {
+		panic("map whose values were frame slices lost its state")
+	}
+
+	n := mkRefsNested()
+	_ = churn()
+	if n.items[0].n != 41 || n.items[1].n != 42 {
+		panic("pointer slice built one frame deeper lost its state")
+	}
+
+	println("escape shapes ok")
+}
+
+func sameText(a []byte, b []byte) (ok bool) {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := int32(0); i < len(a); i++ {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
