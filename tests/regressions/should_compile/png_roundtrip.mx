@@ -1,0 +1,67 @@
+// PNG encode/decode round trip, pixel exact.
+//
+// image/png had no fixture: its encoder keeps a per-filter row cache
+// (`cr [nFilter][]uint8`), an 8-byte chunk header, a 4-byte CRC footer and a
+// 1024-byte PLTE staging buffer, all of which became slices. A filter that
+// writes through a window of its row would show up as unfiltered bytes under a
+// filter name that says otherwise, which only a decoded pixel comparison
+// catches. Alpha is opaque here on purpose: RGBA is premultiplied in memory and
+// PNG is not, so a translucent round trip is lossy by one and that is the
+// format's arithmetic, not the encoder's.
+//
+// usage: png_roundtrip       exit 0 when every pixel matches
+package main
+
+import (
+	"bytes"
+	"image"
+	"image/color"
+	"image/png"
+)
+
+func main() {
+	// a small RGBA image with an alpha ramp, encoded and decoded back
+	w := int32(37)
+	h := int32(23)
+	img := image.NewRGBA(image.Rectangle{Min: image.Point{0, 0}, Max: image.Point{w, h}})
+	for y := int32(0); y < h; y++ {
+		for x := int32(0); x < w; x++ {
+			img.SetRGBA(x, y, color.RGBA{
+				R: uint8(x * 7),
+				G: uint8(y * 11),
+				B: uint8((x ^ y) * 3),
+				A: 255,
+			})
+		}
+	}
+	var out bytes.Buffer
+	if err := png.Encode(&out, img); err != nil {
+		println("encode failed:", err.Error())
+		return
+	}
+	println("encoded bytes", int32(out.Len()).String())
+	got, derr := png.Decode(&out)
+	if derr != nil {
+		println("decode failed:", derr.Error())
+		return
+	}
+	b := got.Bounds()
+	if b.Dx() != w || b.Dy() != h {
+		println("bounds mismatch", b.Dx().String(), b.Dy().String())
+		return
+	}
+	// compare every pixel
+	for y := int32(0); y < h; y++ {
+		for x := int32(0); x < w; x++ {
+			want := img.RGBAAt(x, y)
+			hr, hg, hb, ha := got.At(x, y).RGBA()
+			if uint32(want.R)*0x101 != hr || uint32(want.G)*0x101 != hg || uint32(want.B)*0x101 != hb || uint32(want.A)*0x101 != ha {
+				println("pixel mismatch at", x, y)
+				println(" want", int32(want.R).String(), int32(want.G).String(), int32(want.B).String(), int32(want.A).String())
+				println(" have", int32(hr>>8).String(), int32(hg>>8).String(), int32(hb>>8).String(), int32(ha>>8).String())
+				return
+			}
+		}
+	}
+	println("png round trip ok")
+}

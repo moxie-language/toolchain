@@ -42,10 +42,10 @@ type encoder struct {
 	m       image.Image
 	cb      int32
 	err     error
-	header  [8]byte
-	footer  [4]byte
-	tmp     [4 * 256]byte
-	cr      [nFilter][]uint8
+	header  []byte
+	footer  []byte
+	tmp     []byte
+	cr      [][]byte
 	pr      []uint8
 	zw      *zlib.Writer
 	zwLevel int32
@@ -104,7 +104,7 @@ func (e *encoder) writeChunk(b []byte, name []byte) {
 		e.err = newUnsupportedError(string(push(push(push([]byte(nil), name...), " chunk is too large: "...), strconv.Itoa(len(b))...)))
 		return
 	}
-	binary.BigEndian().PutUint32At(e.header[:], 0, n)
+	binary.BigEndian().PutUint32At(e.header, 0, n)
 	e.header[4] = name[0]
 	e.header[5] = name[1]
 	e.header[6] = name[2]
@@ -112,7 +112,7 @@ func (e *encoder) writeChunk(b []byte, name []byte) {
 	crc := e.cc.NewIEEE()
 	crc.Write(e.header[4:8])
 	crc.Write(b)
-	binary.BigEndian().PutUint32At(e.footer[:], 0, crc.Sum32())
+	binary.BigEndian().PutUint32At(e.footer, 0, crc.Sum32())
 
 	_, e.err = e.w.Write(e.header[:8])
 	if e.err != nil {
@@ -127,8 +127,8 @@ func (e *encoder) writeChunk(b []byte, name []byte) {
 
 func (e *encoder) writeIHDR() {
 	b := e.m.Bounds()
-	binary.BigEndian().PutUint32At(e.tmp[:], 0, uint32(b.Dx()))
-	binary.BigEndian().PutUint32At(e.tmp[:], 4, uint32(b.Dy()))
+	binary.BigEndian().PutUint32At(e.tmp, 0, uint32(b.Dx()))
+	binary.BigEndian().PutUint32At(e.tmp, 4, uint32(b.Dy()))
 	// Set bit depth and color type.
 	switch e.cb {
 	case cbG8:
@@ -210,7 +210,7 @@ func (e *encoder) Write(b []byte) (out int32, derr error) {
 
 // Chooses the filter to use for encoding the current row, and applies it.
 // The return value is the index of the filter and also of the row in cr that has had it applied.
-func filter(cr *[nFilter][]byte, pr []byte, bpp int32) (out int32) {
+func filter(cr [][]byte, pr []byte, bpp int32) (out int32) {
 	// We try all five filter types, and pick the one that minimizes the sum of absolute differences.
 	// This is the same heuristic that libpng uses, although the filters are attempted in order of
 	// estimated most likely to be minimal (ftUp, ftPaeth, ftNone, ftSub, ftAverage), rather than
@@ -570,7 +570,7 @@ func (e *encoder) writeImage(w io.Writer, m image.Image, cb int32, level int32) 
 			// Since we skip paletted images we don't have to worry about
 			// bitsPerPixel not being a multiple of 8
 			bpp = bitsPerPixel / 8
-			f = filter(&cr, pr, bpp)
+			f = filter(cr, pr, bpp)
 		}
 
 		// Write the compressed bytes.
@@ -645,6 +645,15 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) (out error) {
 	}
 	if e == nil {
 		e = &encoder{}
+	}
+	// A pooled encoder keeps the scratch it allocated last time; a fresh one
+	// gets it here. The lengths are the chunk header, the CRC footer, the two
+	// 256-entry PLTE runs and one row buffer per filter type.
+	if e.tmp == nil {
+		e.header = []byte{:8}
+		e.footer = []byte{:4}
+		e.tmp = []byte{:4 * 256}
+		e.cr = [][]byte{:nFilter}
 	}
 	if enc.BufferPool != nil {
 		defer enc.BufferPool.Put((*EncoderBuffer)(e))
