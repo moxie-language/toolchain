@@ -21688,3 +21688,34 @@ a UDP send/recv and checks the returned peer's four bytes and port, plus
   likely the same arena-lifetime class as W27 and is the second symptom to use
   when chasing it: it reproduces with `ufrom.String()` on a received UDP address
   and needs no idna at all.
+
+## Round 310: h2's ping payloads, image/draw's palette entries, and a write that went nowhere
+
+`http2PingFrame.Data`, `sentPingData`, `http2writePing.data`, `WritePing`'s
+parameter and the three local ping payload buffers are slices; the in-flight
+ping map is keyed by `string(payload)`, which is the same eight bytes compared by
+content. `http2incomparable` (`[0]func()`, the Go idiom for "make this struct
+non-comparable at zero cost") is deleted: a fixed extent is a slice header here,
+so it cost 24 bytes in each of the ten structs that embedded it - and none of
+them is ever compared.
+
+`image/draw`'s palette and Floyd-Steinberg error buffers are
+`[]paletteEntry{C0..C3 int32}` instead of `[][4]int32`: 16 bytes per entry
+instead of a 96-byte slice header, in buffers walked per pixel.
+
+Two bugs fell out of that work, both older than the array campaign:
+
+- **W31: a paletted draw wrote into a copy.** `drawPaletted` did
+  `pix = p.Pix[p.PixOffset(...):]` and then `pix[y*stride+x] = index`. A
+  sub-slice is a COPY in Moxie, so the index went into a throwaway: every
+  `draw.Draw` into an `*image.Paletted` was a silent no-op and the destination
+  pixels kept their old values. It is a base slice plus an offset now. Measured
+  with a four-colour palette and exact palette colours: before the fix every
+  pixel came out 0; after it, red/green/blue/black land on 1/2/3/0 and a
+  near-red pixel quantizes to 1, under BOTH compilers.
+- **A shadowed package constant made `image/draw` unbuildable by legacy.**
+  `const m = 1<<16 - 1` and the `Quantizer.Quantize(p []color.Color, m
+  image.Image)` parameter - legacy refuses the file ("'m' shadows declaration in
+  enclosing scope"), stage4 accepted it. Renamed to `maxChannel`. This is the
+  W29 direction (stage4 enforces fewer restrictions than legacy) with a concrete
+  cost: the reference compiler could not build a package the tree ships.

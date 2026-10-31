@@ -825,7 +825,6 @@ func (p *http2clientConnPool) getClientConn(req *Request, addr string, dialOnMis
 
 // dialCall is an in-flight Transport dial call to a host.
 type http2dialCall struct {
-	_ http2incomparable
 	p *http2clientConnPool
 	// the context associated with the request
 	// that created this dialCall
@@ -898,7 +897,6 @@ func (p *http2clientConnPool) addConnIfNeeded(key string, t *http2Transport, c n
 }
 
 type http2addConnCall struct {
-	_    http2incomparable
 	p    *http2clientConnPool
 	done chan struct{} // closed when done
 	err  error
@@ -1534,7 +1532,6 @@ func http2takeInflows(f1, f2 *http2inflow, n uint32) (rok bool) {
 
 // outflow is the outbound flow control window's size.
 type http2outflow struct {
-	_ http2incomparable
 
 	// n is the number of DATA bytes we're allowed to send.
 	// An outflow is kept both on a conn and a per-stream.
@@ -2398,7 +2395,7 @@ func (f *http2Framer) WriteSettingsAck() (rerr error) {
 // See https://httpwg.org/specs/rfc7540.html#rfc.section.6.7
 type http2PingFrame struct {
 	http2FrameHeader
-	Data [8]byte
+	Data []byte // 8 bytes
 }
 
 func (f *http2PingFrame) IsAck() (rok bool) { return f.Flags.Has(http2FlagPingAck) }
@@ -2412,18 +2409,18 @@ func http2parsePingFrame(_ *http2frameCache, fh http2FrameHeader, countError fun
 		countError("frame_ping_has_stream")
 		return nil, http2ConnectionError(http2ErrCodeProtocol)
 	}
-	f := &http2PingFrame{http2FrameHeader: fh}
-	copy(f.Data[:], payload)
+	f := &http2PingFrame{http2FrameHeader: fh, Data: []byte{:8}}
+	copy(f.Data, payload)
 	return f, nil
 }
 
-func (f *http2Framer) WritePing(ack bool, data [8]byte) (rerr error) {
+func (f *http2Framer) WritePing(ack bool, data []byte) (rerr error) {
 	var flags http2Flags
 	if ack {
 		flags = http2FlagPingAck
 	}
 	f.startWrite(http2FramePing, flags, 0)
-	f.writeBytes(data[:])
+	f.writeBytes(data)
 	return f.endWrite()
 }
 
@@ -3247,7 +3244,7 @@ func http2summarizeFrame(f http2Frame) (rs string) {
 		}
 		fmt.Fprintf(&buf, " incr=%v", fr.Increment)
 	case *http2PingFrame:
-		fmt.Fprintf(&buf, " ping=%q", fr.Data[:])
+		fmt.Fprintf(&buf, " ping=%q", fr.Data)
 	case *http2GoAwayFrame:
 		fmt.Fprintf(&buf, " LastStreamID=%v ErrCode=%v Debug=%q",
 			fr.LastStreamID, fr.ErrCode, fr.debugData)
@@ -3607,7 +3604,6 @@ func (cw *http2closeWaiter) Wait() {
 // Its buffered writer is lazily allocated as needed, to minimize
 // idle memory usage with many connections.
 type http2bufferedWriter struct {
-	_           http2incomparable
 	group       http2synctestGroupInterface // immutable
 	conn        net.Conn                    // immutable
 	bw          *bufio.Writer               // non-nil when data is buffered
@@ -3709,7 +3705,6 @@ func http2bodyAllowedForStatus(status int32) (rok bool) {
 }
 
 type http2httpError struct {
-	_       http2incomparable
 	msg     string
 	timeout bool
 }
@@ -3767,7 +3762,10 @@ func (s *http2sorter) SortStrings(ss [][]byte) {
 // incomparable is a zero-width, non-comparable type. Adding it to a struct
 // makes that struct also non-comparable, and generally doesn't add
 // any size (as long as it's first).
-type http2incomparable [0]func()
+// http2incomparable used to be `[0]func()`, the Go idiom that makes a struct
+// non-comparable without costing space. A fixed extent is a slice header in
+// Moxie, so it cost 24 bytes in each of the ten structs below and forbade a
+// comparison none of them performs. Deleted.
 
 // synctestGroupInterface is the methods of synctestGroup used by Server and Transport.
 // It's defined as an interface here to let us keep synctestGroup entirely test-only
@@ -4632,7 +4630,7 @@ type http2serverConn struct {
 	inFrameScheduleLoop         bool              // whether we're in the scheduleFrameWrite loop
 	needToSendGoAway            bool              // we need to schedule a GOAWAY frame write
 	pingSent                    bool
-	sentPingData                [8]byte
+	sentPingData                []byte
 	goAwayCode                  http2ErrCode
 	shutdownTimer               http2timer // nil until used
 	idleTimer                   http2timer // nil if unused
@@ -4866,7 +4864,6 @@ func (sc *http2serverConn) readFrames() {
 
 // frameWriteResult is the message passed from writeFrameAsync to the serve goroutine.
 type http2frameWriteResult struct {
-	_   http2incomparable
 	wr  http2FrameWriteRequest // what was written (or attempted)
 	err error                  // result of the writeFrame call
 }
@@ -6582,7 +6579,6 @@ func (sc *http2serverConn) sendWindowUpdate(st *http2stream, n int32) {
 // requestBody is the Handler's Request.Body type.
 // Read and Close may be called concurrently.
 type http2requestBody struct {
-	_             http2incomparable
 	stream        *http2stream
 	conn          *http2serverConn
 	closeDone     bool       // for use by Close only
@@ -7754,7 +7750,7 @@ type http2ClientConn struct {
 	streamsReserved  int32                           // incr by ReserveNewRequest; decr on RoundTrip
 	nextStreamID     uint32
 	pendingRequests  int32                       // requests blocked and waiting to be sent because len(streams) == maxConcurrentStreams
-	pings            map[[8]byte]chan struct{} // in flight ping data to notification channel
+	pings            map[string]chan struct{} // in flight ping data to notification channel
 	br               *bufio.Reader
 	lastActive       time.Time
 	lastIdle         time.Time // time last idle
@@ -8182,7 +8178,7 @@ func (t *http2Transport) newClientConn(c net.Conn, singleUse bool) (rhttp2Client
 		wantSettingsAck:             true,
 		readIdleTimeout:             conf.SendPingTimeout,
 		pingTimeout:                 conf.PingTimeout,
-		pings:                       map[[8]byte]chan struct{}{},
+		pings:                       map[string]chan struct{}{},
 		reqHeaderMu:                 chan struct{}{1},
 		lastActive:                  t.now(),
 	}
@@ -9138,9 +9134,9 @@ func (cs *http2clientStream) writeRequestBody(req *Request) (err error) {
 				// to send the END_STREAM bit early, double-check that we're actually
 				// at EOF. Subsequent reads should return (0, EOF) at this point.
 				// If either value is different, we return an error in one of two ways below.
-				var scratch [1]byte
+				scratch := []byte{:1}
 				var n1 int32
-				n1, erD = bod4.Read(scratch[:])
+				n1, erD = bod4.Read(scratch)
 				remainLen -= int64(n1)
 			}
 			if remainLen < 0 {
@@ -9303,7 +9299,6 @@ func (cc *http2ClientConn) WriteHeader(name, value string) {
 }
 
 type http2resAndError struct {
-	_   http2incomparable
 	res *Response
 	err error
 }
@@ -9345,7 +9340,6 @@ func (cc *http2ClientConn) forgetStreamID(id uint32) {
 
 // clientConnReadLoop is the state owned by the clientConn's frame-reading readLoop.
 type http2clientConnReadLoop struct {
-	_  http2incomparable
 	cc *http2ClientConn
 }
 
@@ -10126,14 +10120,20 @@ func (rl *http2clientConnReadLoop) processResetStream(f *http2RSTStreamFrame) (r
 func (cc *http2ClientConn) Ping(ctx context.Context) (rerr error) {
 	c := chan struct{}{}
 	// Generate a random payload
-	var p [8]byte
+	p := []byte{:8}
+	// key is declared once: a `:=` inside the loop of a self-mutating method
+	// would put a fresh allocation in the receiver's arena every iteration.
+	var key []byte
 	for {
-		if _, err := rand.Read(p[:]); err != nil {
+		if _, err := rand.Read(p); err != nil {
 			return err
 		}
+		// The key is the eight payload bytes as a string: string is []byte and
+		// map keys compare by content, so it is the same key the array was.
+		key = string(p)
 		// check for dup before insert
-		if _, found := cc.pings[p]; !found {
-			cc.pings[p] = c
+		if _, found := cc.pings[key]; !found {
+			cc.pings[key] = c
 			break
 		}
 	}
@@ -10164,9 +10164,9 @@ func (rl *http2clientConnReadLoop) processPing(f *http2PingFrame) (rerr error) {
 	if f.IsAck() {
 		c2 := rl.cc
 		// If ack, notify listener if any
-		if c, ok := c2.pings[f.Data]; ok {
+		if c, ok := c2.pings[string(f.Data)]; ok {
 			close(c)
-			delete(c2.pings, f.Data)
+			delete(c2.pings, string(f.Data))
 		}
 		if c2.pendingResets > 0 {
 			// See clientStream.cleanupWriteRequest.
@@ -10202,8 +10202,8 @@ func (cc *http2ClientConn) writeStreamReset(streamID uint32, code http2ErrCode, 
 	// data, and the error codes are all pretty vague ("cancel").
 	cc.fr.WriteRSTStream(streamID, code)
 	if ping {
-		var payload [8]byte
-		rand.Read(payload[:])
+		payload := []byte{:8}
+		rand.Read(payload)
 		cc.fr.WritePing(false, payload)
 	}
 	cc.bw.Flush()
@@ -10261,7 +10261,6 @@ func (rt *http2erringRoundTripper) RoundTrip(*Request) (rresponse *Response, rer
 // gzipReader wraps a response body so it can lazily
 // call gzip.NewReader on the first call to Read
 type http2gzipReader struct {
-	_    http2incomparable
 	body io.ReadCloser // underlying Response.Body
 	zr   *gzip.Reader  // lazily-initialized gzip reader
 	zerr error         // sticky error
@@ -10535,7 +10534,7 @@ func (se *http2StreamError) writeFrame(ctx http2writeContext) (rerr error) {
 func (se *http2StreamError) staysWithinBuffer(limit int32) (rok bool) { return http2frameHeaderLen+4 <= limit }
 
 type http2writePing struct {
-	data [8]byte
+	data []byte // 8 bytes
 }
 
 func (w *http2writePing) writeFrame(ctx http2writeContext) (rerr error) {
