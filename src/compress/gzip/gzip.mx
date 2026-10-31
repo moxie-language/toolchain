@@ -25,6 +25,9 @@ const (
 	HuffmanOnly        = flate.HuffmanOnly
 )
 
+// gzipHeaderLen is the fixed header size: ID1, ID2, CM, FLG, MTIME(4), XFL, OS.
+const gzipHeaderLen = 10
+
 // A Writer is an [io.WriteCloser].
 // Writes to a Writer are compressed and written to w.
 type Writer struct {
@@ -33,7 +36,7 @@ type Writer struct {
 	level       int32
 	wroteHeader bool
 	closed      bool
-	buf         [10]byte
+	buf         []byte
 	compressor  *flate.Writer
 	digest      uint32 // CRC-32, IEEE polynomial (section 8)
 	size        uint32 // Uncompressed size (section 2.3.1)
@@ -86,6 +89,10 @@ func (z *Writer) init(w io.Writer, level int32) {
 		level:      level,
 		compressor: compressor,
 		cc:         cc,
+		// The struct assignment above rebuilds z from nothing, so the header
+		// staging buffer is established here: init is the constructor, and
+		// Reset goes through it.
+		buf: []byte{:gzipHeaderLen},
 	}
 }
 
@@ -102,7 +109,7 @@ func (z *Writer) writeBytes(b []byte) (werr error) {
 	if len(b) > 0xffff {
 		return errors.New("gzip.Write: Extra data is too large")
 	}
-	binary.LittleEndian().PutUint16At(z.buf[:], 0, uint16(len(b)))
+	binary.LittleEndian().PutUint16At(z.buf, 0, uint16(len(b)))
 	_, err := z.w.Write(z.buf[:2])
 	if err != nil {
 		return err
@@ -152,7 +159,12 @@ func (z *Writer) Write(p []byte) (n int32, rerr error) {
 	// Write the GZIP header lazily.
 	if !z.wroteHeader {
 		z.wroteHeader = true
-		z.buf = [10]byte{0: gzipID1, 1: gzipID2, 2: gzipDeflate}
+		for i := range z.buf {
+			z.buf[i] = 0
+		}
+		z.buf[0] = gzipID1
+		z.buf[1] = gzipID2
+		z.buf[2] = gzipDeflate
 		if z.Extra != nil {
 			z.buf[3] |= 0x04
 		}
@@ -165,7 +177,7 @@ func (z *Writer) Write(p []byte) (n int32, rerr error) {
 		if z.ModTime.After(time.Unix(0, 0)) {
 			// Section 2.3.1, the zero value for MTIME means that the
 			// modified time is not set.
-			binary.LittleEndian().PutUint32At(z.buf[:], 4, uint32(z.ModTime.Unix()))
+			binary.LittleEndian().PutUint32At(z.buf, 4, uint32(z.ModTime.Unix()))
 		}
 		if z.level == BestCompression {
 			z.buf[8] = 2
@@ -251,8 +263,8 @@ func (z *Writer) Close() (err error) {
 	if z.err != nil {
 		return z.err
 	}
-	binary.LittleEndian().PutUint32At(z.buf[:], 0, z.digest)
-	binary.LittleEndian().PutUint32At(z.buf[:], 4, z.size)
+	binary.LittleEndian().PutUint32At(z.buf, 0, z.digest)
+	binary.LittleEndian().PutUint32At(z.buf, 4, z.size)
 	_, z.err = z.w.Write(z.buf[:8])
 	return z.err
 }
