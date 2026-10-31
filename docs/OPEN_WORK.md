@@ -21719,3 +21719,42 @@ Two bugs fell out of that work, both older than the array campaign:
   enclosing scope"), stage4 accepted it. Renamed to `maxChannel`. This is the
   W29 direction (stage4 enforces fewer restrictions than legacy) with a concrete
   cost: the reference compiler could not build a package the tree ships.
+
+## Round 311: the two unimported packages are removed, and why converting them was the wrong move
+
+`internal/xcoff` (20 array types) and `internal/coverage` (19) are imported by
+nothing in the tree, and each is UNBUILDABLE as it stands:
+
+- `internal/coverage` fails the one-init-per-package rule outright: two files
+  declare `func init()`, so the package cannot be compiled by either compiler.
+- `internal/xcoff` gets past type checking and then emits invalid IR - clang
+  rejects `getelementptr inbounds {ptr, i64, i64}, ptr %t17, i32 0, i32 %t53`,
+  a dynamic index into a slice HEADER rather than its data pointer (W32 below).
+  Nothing ever noticed because no build reaches the package.
+
+W7a step 5 said to convert these on-disk format mirrors to `[]byte` + windows.
+That was written before the packages were measured: with no importer, no test
+exercises the result, so the conversion is unverifiable churn in code that does
+not build. The campaign's own rule - remove dead references rather than carry
+them - applies instead. Removed: 39 array types, 188 KB of unbuilt source.
+`git log -- src/internal/xcoff` has it all if AIX archives or the Go coverage
+format are ever wired up.
+
+## Round 312: W32 - a stage4 GEP that indexes a slice header with a variable
+
+    %t54 = getelementptr inbounds {ptr, i64, i64}, ptr %t17, i32 0, i32 %t53
+
+`{ptr, i64, i64}` is a slice, and `%t53` is a runtime value: this is an `x[i]`
+lowered as a field index into the HEADER instead of an index into the data
+pointer's element type. clang refuses it, so the package that produced it
+(`internal/xcoff`, now deleted) never linked. Two things make it worth
+recording rather than forgetting:
+
+1. It is a stage4-only defect of the "permissive or wrong IR, silently" class -
+   the same family as W29 - and it was invisible because the package has no
+   importer. Any future code that reaches the same construct will hit it.
+2. The construct is still unidentified: the IR was emitted into a temp dir that
+   is removed on failure. To reproduce, restore `src/internal/xcoff` from git,
+   build a package importing it with `-print-ir`, and search for a dynamic last
+   index into `{ptr, i64, i64}`. `cstring`/`binary.BigEndian().Uint32(x[:4])`
+   and the two archive header readers are the candidates.
