@@ -19,13 +19,15 @@ type Pipe struct {
 // The caller must have already registered the fd with the Loop via AddFD or
 // the Loop's accept path.
 func NewPipe(c *Conn) (out *Pipe) {
-	return &Pipe{Conn: c}
+	out = &Pipe{Conn: c}
+	out.reader.hdr = []byte{:6}
+	return out
 }
 
 // WriteFrame buffers a frame for sending. Never blocks.
 func (p *Pipe) WriteFrame(chanID uint16, data []byte) {
 	l := uint32(len(data))
-	var hdr [6]byte
+	hdr := []byte{:6}
 	hdr[0] = byte(chanID >> 8)
 	hdr[1] = byte(chanID)
 	hdr[2] = byte(l >> 24)
@@ -33,8 +35,8 @@ func (p *Pipe) WriteFrame(chanID uint16, data []byte) {
 	hdr[4] = byte(l >> 8)
 	hdr[5] = byte(l)
 	frame := []byte{:0:6 + int32(l)}
-	frame = mxutil.Ensure(frame, len(hdr[:]))
-	frame = push(frame, hdr[:]...)
+	frame = mxutil.Ensure(frame, len(hdr))
+	frame = push(frame, hdr...)
 	frame = mxutil.Ensure(frame, len(data))
 	frame = push(frame, data...)
 	p.Conn.Write(frame)
@@ -50,7 +52,7 @@ func (p *Pipe) ReadFrame() (chanID uint16, payload []byte, ok bool) {
 
 // pipeFrameReader maintains partial-frame state across EPOLLIN events.
 type pipeFrameReader struct {
-	hdr     [6]byte
+	hdr     []byte
 	hdrN    int32
 	chanID  uint16
 	dataLen int32
