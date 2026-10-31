@@ -21935,3 +21935,67 @@ rejection, all green.
   frame and stored into a stable object is still aliased as a whole
 - `codecSetTopOnlyTransient` still has no callers; the receiver store-back path
   it was written for is not emitted by either compiler
+
+## Round 317: the array campaign, class by class - state, limbs, buffers
+
+Rounds 316's W33 fix unblocked the conversions that were blocked on structs
+crossing a package boundary with slice fields. Since then, one class at a time,
+each verified before the next:
+
+- **chacha20** (round 316): `key`/`nonce` are slices with the lengths set by the
+  constructor, block temporaries hoisted. RFC 8439 AEAD vector, RFC 7539 2.4.2.
+- **nistec field elements** (p224/p256/p384/p521): the four fiat `_fiat64`
+  files' limb types are structs of named scalars (`x0..xN`) rather than fixed
+  extents, so the Montgomery/non-Montgomery distinction stays in the type and no
+  cast is needed; the byte-domain ends of the fiat API take slices whose length
+  the caller established. `P256Element` and friends keep value semantics inside
+  a point whose coordinates are copied.
+- **edwards25519**: the scalar's fiat limbs are one named-scalar struct (the
+  domain is documented per function), and the byte buffers are slices. The trap
+  worth remembering: after such a change `copy(wideBytes[:], x[:])` still
+  COMPILES and copies into a throwaway, because a subslice is a copy - the
+  clamped scalar came out zero and every ed25519 public key was the identity's
+  encoding. RFC 8032 test 1 catches it.
+- **symmetric and hash state**: AES round-key tables, RC4 state, BLAKE2b chain
+  state + block + key, Argon2 blocks and scratch, CBC IV + staging block, CTR
+  staging buffers, siphash's key words, and the small buffers in entropy, bip39,
+  pkcs1v22, jpeg's idct row, cgroup, evloop's frame header, spawn's fd pairs.
+  BLAKE2b's IV and message schedule were being rebuilt per block; they are
+  package state in the package's single init() now.
+- New fixture `tests/regressions/should_compile/crypto_vectors.mx`: AES
+  FIPS-197 C.1-C.3 encrypt+decrypt, SP 800-38A CBC, the two standard GCM tag
+  cases with an open, RC4's classic vector, BLAKE2b-512/256 one-shot and
+  streaming, and an Argon2id repeat/difference check. Those packages had no
+  fixture at all before this.
+
+### Holdouts, with the reason each needs more than a mechanical edit
+
+- `runtime/hashmap.mx`: `bucket.tophash [8]uint8` and `_pad [8]uint8` are the
+  bucket LAYOUT the compiler's map codegen addresses. Converting them means
+  changing the layout contract in both compilers.
+- `runtime/ringbuf.mx`: `spawnRingSet [16][2]uintptr` is read by the forked
+  child after `fork`, before any allocation is safe to assume.
+- `runtime/secalloc_chacha.mx`: the state and block are written through byte
+  WINDOWS (`state[48:]`); with slices a window is a copy, so this needs the
+  offset-put idiom (`secPutUint32LEAt(b, off, v)`) across ~20 call sites.
+- `syscall/exec_linux.mx`: `caps.data [2]capData` is a kernel ABI struct; a
+  slice there changes the 8-byte-header layout the kernel reads.
+- `internal/xcoff` (20 declarations): not in any build closure (nothing imports
+  it), needs `debug/dwarf` to build under the legacy compiler first, and its
+  readers are `binary.Read(unsafe.TypeOf(hdr), unsafe.Pointer(hdr))` - the
+  structs have to become byte blocks with window accessors before the fields
+  can be slices.
+- `internal/coverage`: the magic tables are `[4]byte`/`[4]byte` by wire format.
+- `image/png` writer/reader: `cr [nFilter][]uint8` (a filter cache) and a
+  4096-byte read buffer; mechanical but the encoder allocates its row cache on
+  first use.
+- `crypto/secp256k1` (`Fe [4]uint64`) and `crypto/ec/secp256k1` (`n [10]uint32`):
+  the limb arithmetic indexes the extent in loops (`for i := 0; i < 4; i++`),
+  so the scalar-field form means unrolling the field arithmetic, not renaming a
+  type.
+- `crypto/internal/fips140/nistec/p256_asm.mx` (22): `//:build ignore`, the
+  assembly wrapper for a path this tree does not build.
+
+Gate state after the classes above: quickcheck 15/15 (the fixture set, not
+counting the new crypto_vectors unit), `tls_handshake` green end to end,
+fixpoint `s4b == s4c`.
