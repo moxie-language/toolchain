@@ -21720,41 +21720,72 @@ Two bugs fell out of that work, both older than the array campaign:
   W29 direction (stage4 enforces fewer restrictions than legacy) with a concrete
   cost: the reference compiler could not build a package the tree ships.
 
-## Round 311: the two unimported packages are removed, and why converting them was the wrong move
+## Round 311 CORRECTED: internal/coverage compiles again; nothing is deleted
 
-`internal/xcoff` (20 array types) and `internal/coverage` (19) are imported by
-nothing in the tree, and each is UNBUILDABLE as it stands:
+An earlier pass in this round deleted `internal/xcoff` and `internal/coverage`
+because they were unimported and unbuildable. That was wrong on both counts, and
+the reason `internal/coverage` was unbuildable was a bug INTRODUCED BY THIS
+CAMPAIGN: round 303 converted `defs.mx`'s two magic tables to `var` + `init()`
+and round 305 converted `pkid.mx`'s runtime package list the same way, so the
+package ended up with TWO `func init()` - which Moxie rejects outright. The
+package was never broken before the conversion; the conversion broke it.
 
-- `internal/coverage` fails the one-init-per-package rule outright: two files
-  declare `func init()`, so the package cannot be compiled by either compiler.
-- `internal/xcoff` gets past type checking and then emits invalid IR - clang
-  rejects `getelementptr inbounds {ptr, i64, i64}, ptr %t17, i32 0, i32 %t53`,
-  a dynamic index into a slice HEADER rather than its data pointer (W32 below).
-  Nothing ever noticed because no build reaches the package.
+Fixed by consolidating: `pkid.mx`'s single `init()` now builds all three tables
+(the two magics and the runtime package list) and `defs.mx` has none. The
+package compiles and its accessors return the right bytes again:
 
-W7a step 5 said to convert these on-disk format mirrors to `[]byte` + windows.
-That was written before the packages were measured: with no importer, no test
-exercises the result, so the conversion is unverifiable churn in code that does
-not build. The campaign's own rule - remove dead references rather than carry
-them - applies instead. Removed: 39 array types, 188 KB of unbuilt source.
-`git log -- src/internal/xcoff` has it all if AIX archives or the Go coverage
-format are ever wired up.
+    coverage.CovMetaMagic()    -> 4 bytes, {0x00, 'c', 'v', 'm'}
+    coverage.CovCounterMagic() -> 4 bytes
+    coverage.MetaSymbolHeader  -> usable
+
+`internal/xcoff` is restored as it was (20 array types, still to convert). Its
+type-checking succeeds but its IR is rejected by clang for a reason that is a
+compiler defect, not a package defect - see W32 below.
+
+The lesson: "unbuildable" has to be traced to a cause before it is used as an
+argument. Here the cause was two files each declaring the package's one init
+because two separate table conversions were landed in different rounds.
 
 ## Round 312: W32 - a stage4 GEP that indexes a slice header with a variable
 
     %t54 = getelementptr inbounds {ptr, i64, i64}, ptr %t17, i32 0, i32 %t53
 
-`{ptr, i64, i64}` is a slice, and `%t53` is a runtime value: this is an `x[i]`
-lowered as a field index into the HEADER instead of an index into the data
-pointer's element type. clang refuses it, so the package that produced it
-(`internal/xcoff`, now deleted) never linked. Two things make it worth
-recording rather than forgetting:
+`{ptr, i64, i64}` is a slice and `%t53` is a runtime value: an `x[i]` lowered as
+a field index into the slice HEADER instead of an index into the data pointer's
+element type. clang refuses it, so `internal/xcoff` cannot link. This is a
+stage4-only defect of the "wrong IR, silently" class (cf. W29) and it is open.
+`internal/xcoff` reaches it through `binary.Read(..., unsafe.TypeOf(hdr),
+unsafe.Pointer(hdr))` on its `[8]byte`-bearing header structs; rewriting those
+readers as byte blocks + windows (W7a step 5) removes the construct, and the
+descriptor path itself still needs the fix.
 
-1. It is a stage4-only defect of the "permissive or wrong IR, silently" class -
-   the same family as W29 - and it was invisible because the package has no
-   importer. Any future code that reaches the same construct will hit it.
-2. The construct is still unidentified: the IR was emitted into a temp dir that
-   is removed on failure. To reproduce, restore `src/internal/xcoff` from git,
-   build a package importing it with `-print-ir`, and search for a dynamic last
-   index into `{ptr, i64, i64}`. `cstring`/`binary.BigEndian().Uint32(x[:4])`
-   and the two archive header readers are the candidates.
+## Round 313: constructors for structs whose slice fields imply a length
+
+Converting a fixed extent to a slice moves the length OUT of the type, so a bare
+composite literal now compiles with a nil or short field - which is how every
+IPv4 dial silently became a dial to 0.0.0.0 in round 308. The length has to be
+established in one place, so each such struct gets a constructor:
+
+    syscall.NewSockaddrInet4(port int32, addr []byte) SockaddrInet4
+    syscall.NewSockaddrInet6(port, zoneId int32/uint32, addr []byte) SockaddrInet6
+    syscall.NewSockaddrLinklayer(ifindex int32, halen uint8, addr []byte) SockaddrLinklayer
+    dnsmessage.NewAResource(addr []byte) (AResource, error)      // 4 bytes
+    dnsmessage.NewAAAAResource(addr []byte) (AAAAResource, error) // 16 bytes
+
+plus unexported `newSockaddrInet4/6`, `newSockaddrLinklayer`, `newAResource`,
+`newAAAAResource` and h2's `newPingFrame` for the READ paths, where the point is
+"allocate the extent the kernel/file will fill". Call sites use the constructors
+and never spell `[]byte{:4}` inline.
+
+Two rules restated with this round, because both were violated on the way here:
+
+- **A slice IS the reference.** No `*[]T` parameter, and no `*[N]T`, is needed
+  where a slice will do: passing the slice header gives the callee the same
+  backing store, so writers and readers both take `[]byte`, `[]uint16`, ....
+  Pointers stay for genuine C ABI arguments (`getrlimit`'s `*uint64`) and for
+  receiver-like structs that the callee mutates (`*macState`).
+- **The length belongs to the constructor**, not to every call site.
+
+Verified: the net probe (TCP bind/dial/accept/peer, UDP send/recv peer bytes,
+netip.As4/As16, dnsmessage round trip) passes under both compilers, the paletted
+draw and poly1305 fixtures pass, and `internal/coverage` builds.

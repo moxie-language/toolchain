@@ -604,7 +604,23 @@ type SockaddrLinklayer struct {
 	Hatype   uint16
 	Pkttype  uint8
 	Halen    uint8
-	Addr     []byte // 8 bytes, supplied by the caller
+	Addr     []byte // 8 bytes, allocated by newSockaddrLinklayer
+}
+
+// newSockaddrLinklayer returns a link-layer sockaddr with Addr allocated at its
+// ABI length.
+func newSockaddrLinklayer() (sa SockaddrLinklayer) {
+	sa.Addr = []byte{:linkAddrLen}
+	return sa
+}
+
+// NewSockaddrLinklayer returns a link-layer sockaddr with the given address.
+func NewSockaddrLinklayer(ifindex int32, halen uint8, addr []byte) (sa SockaddrLinklayer) {
+	sa = newSockaddrLinklayer()
+	sa.Ifindex = ifindex
+	sa.Halen = halen
+	copy(sa.Addr, addr)
+	return sa
 }
 
 func (sa *SockaddrLinklayer) sockaddr(buf []byte) (r_Socklen _Socklen, rerr error) {
@@ -653,7 +669,8 @@ func anyToSockaddr(rsa []byte) (rsockaddr Sockaddr, rerr error) {
 		return sa, nil
 
 	case AF_PACKET:
-		sa := &SockaddrLinklayer{Addr: []byte{:sockLlAddrLen}}
+		sa := &SockaddrLinklayer{}
+		*sa = newSockaddrLinklayer()
 		sa.Protocol = abiGet16(rsa, sockLlOffProtocol)
 		sa.Ifindex = int32(abiGet32(rsa, sockLlOffIfindex))
 		sa.Hatype = abiGet16(rsa, sockLlOffHatype)
@@ -688,13 +705,15 @@ func anyToSockaddr(rsa []byte) (rsockaddr Sockaddr, rerr error) {
 		return sa, nil
 
 	case AF_INET:
-		sa := &SockaddrInet4{Addr: []byte{:4}}
+		sa := &SockaddrInet4{}
+		*sa = newSockaddrInet4()
 		sa.Port = sockPort(rsa)
 		copy(sa.Addr, sockIPv4Addr(rsa))
 		return sa, nil
 
 	case AF_INET6:
-		sa := &SockaddrInet6{Addr: []byte{:16}}
+		sa := &SockaddrInet6{}
+		*sa = newSockaddrInet6()
 		sa.Port = sockPort(rsa)
 		sa.ZoneId = abiGet32(rsa, sockIn6OffScope)
 		copy(sa.Addr, sockIPv6Addr(rsa))

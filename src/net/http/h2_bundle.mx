@@ -2393,9 +2393,18 @@ func (f *http2Framer) WriteSettingsAck() (rerr error) {
 // from the sender, as well as determining whether an idle connection
 // is still functional.
 // See https://httpwg.org/specs/rfc7540.html#rfc.section.6.7
+// pingDataLen is the wire size of a PING payload; the frame's Data is a slice,
+// so this is the length its constructor establishes.
+const pingDataLen = 8
+
 type http2PingFrame struct {
 	http2FrameHeader
-	Data []byte // 8 bytes
+	Data []byte // pingDataLen bytes
+}
+
+// newPingFrame returns a PING frame with its payload allocated.
+func newPingFrame(fh http2FrameHeader) (f *http2PingFrame) {
+	return &http2PingFrame{http2FrameHeader: fh, Data: []byte{:pingDataLen}}
 }
 
 func (f *http2PingFrame) IsAck() (rok bool) { return f.Flags.Has(http2FlagPingAck) }
@@ -2409,7 +2418,7 @@ func http2parsePingFrame(_ *http2frameCache, fh http2FrameHeader, countError fun
 		countError("frame_ping_has_stream")
 		return nil, http2ConnectionError(http2ErrCodeProtocol)
 	}
-	f := &http2PingFrame{http2FrameHeader: fh, Data: []byte{:8}}
+	f := newPingFrame(fh)
 	copy(f.Data, payload)
 	return f, nil
 }

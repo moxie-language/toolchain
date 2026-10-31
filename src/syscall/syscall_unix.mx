@@ -260,7 +260,18 @@ type Sockaddr interface {
 // The Addr fields are SLICES, not fixed extents: a `[4]byte`/`[16]byte` is a
 // slice header in Moxie, and these structs are converted into the ABI buffer by
 // sockaddr() rather than handed to the kernel, so their layout is not the
-// kernel's. The caller supplies the address bytes.
+// kernel's.
+//
+// A slice field does not carry its length in the type, so the constructors
+// below are what establish it. A SockaddrInet4 written as a bare literal
+// compiles with a nil Addr, and its sockaddr() conversion then writes nothing -
+// a dial to 0.0.0.0 that reports success.
+const (
+	inet4AddrLen    = 4
+	inet6AddrLen    = 16
+	linkAddrLen     = 8
+)
+
 type SockaddrInet4 struct {
 	Port int32
 	Addr []byte
@@ -270,6 +281,36 @@ type SockaddrInet6 struct {
 	Port   int32
 	ZoneId uint32
 	Addr   []byte
+}
+
+// newSockaddrInet4 is the allocation the readers use: Addr exists, zeroed.
+func newSockaddrInet4() (sa SockaddrInet4) {
+	sa.Addr = []byte{:inet4AddrLen}
+	return sa
+}
+
+// newSockaddrInet6 is newSockaddrInet4's IPv6 twin.
+func newSockaddrInet6() (sa SockaddrInet6) {
+	sa.Addr = []byte{:inet6AddrLen}
+	return sa
+}
+
+// NewSockaddrInet4 returns an IPv4 sockaddr with Addr allocated at its ABI
+// length and filled from addr (use nil for an address to be received).
+func NewSockaddrInet4(port int32, addr []byte) (sa SockaddrInet4) {
+	sa = newSockaddrInet4()
+	sa.Port = port
+	copy(sa.Addr, addr)
+	return sa
+}
+
+// NewSockaddrInet6 returns an IPv6 sockaddr; see NewSockaddrInet4.
+func NewSockaddrInet6(port int32, zoneId uint32, addr []byte) (sa SockaddrInet6) {
+	sa = newSockaddrInet6()
+	sa.Port = port
+	sa.ZoneId = zoneId
+	copy(sa.Addr, addr)
+	return sa
 }
 
 type SockaddrUnix struct {
