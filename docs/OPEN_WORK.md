@@ -22436,3 +22436,56 @@ why `makeThree(9)` had to return the slice for the bug to show.
 Gates: quickcheck 15/15, ptr_elem_lit_escape + text_compare_forms +
 compress_roundtrip + crypto_vectors through the harness, phase 8 netsmoke 17/17 (2 544 s),
 bootstrap fixpoint `s2 == s3` (cd9258fd).
+
+## Round 327: the two wrong-IR rejections, and phase 1b was red for three reasons
+
+Phase 1b (the stdlib compile sweep) is the gate that catches "some package in
+the tree does not compile" - the one thing a green bootstrap does not prove. It
+had not been run in a while, and it was red.
+
+### stage4 lowered `string([N]byte)` as an invalid bitcast
+
+    %t20 = bitcast [8 x i8] %t19 to {ptr, i64, i64}
+
+go/types rejects both directions of a text/fixed-extent conversion, and legacy
+reports `cannot convert h.Name (variable of type [8]byte) to type string`. stage4
+built the SSAConvert anyway and clang refused the module with "invalid cast
+opcode" and no source line - the W29 shape: one compiler rejects the source, the
+other invents a lowering. `internal/xcoff`'s `println(name, hdr.Name)` is where
+it was reached.
+
+`checkTextArrayConv` runs beside the other conversion shape checks and reports
+the site in source terms: `cannot convert [8]byte to string (a fixed extent is
+not text: work in slices)`. The conversion that exists is `string(buf[:])` - the
+array becomes a slice view first. Fixture `reject_string_array` (phase 0b) names
+that error. The whole-tree bootstrap compiles with the check in place, so the
+tree had no legitimate `string(array)`.
+
+### Three tree breakages behind phase 1b's red
+
+1. `internal/coverage/{encodecounter,encodemeta}`: the on-disk header structs
+   carry `Magic [4]byte` (those four bytes are a field of the file format) while
+   the exported constants are text. Assigning text to a fixed extent in a struct
+   literal is rejected - correctly - so the magic is copied in:
+   `copy(hdr.Magic[:], coverage.CovCounterMagic())`. The campaign's real shape
+   for these structs (byte blocks with window accessors, because their layout IS
+   the wire format) is still the recorded holdout.
+2. `internal/trace/tracev2` declared two `init()` functions (events.mx and
+   spec.mx) - two table conversions from different rounds, each taking the
+   package's one init.
+3. `internal/trace` declared three (event.mx, order.mx and tracev1.mx) - the
+   same mistake twice in one tree.
+
+Bodies merged into the single init, rule unchanged. Because this class has now
+bitten three times (xcoff first), the diagnostic names the declaration:
+
+    b.mx:3: at most one init() per package: merge this body into the package's init()
+
+It was a bare sentence with no line, which meant reading every file in the
+directory to find the stray one.
+
+### Gates
+
+quickcheck 15/15, phase 1b 45 packages ok (1 083 s), phase 3 IR validation PASS,
+phase 8 netsmoke 17/17 (2 566 s), reject_string_array PASS through the 0b harness,
+bootstrap fixpoint `s2 == s3` (27b81561).
