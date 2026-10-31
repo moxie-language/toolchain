@@ -22309,3 +22309,49 @@ live in `tests/regressions` until it stops crashing.
 
 Gates unchanged from round 323 (nothing in the tree was modified for this
 investigation; every temporary print and probe edit was reverted).
+
+## Round 325: correcting round 324 - the trigger is MapForLookup plus an optionBool, not the constructor
+
+Round 324 concluded that the addressed-literal constructor (`Lookup`, `Display`)
+was the trigger because every `New(...)` shape tested was fine. That was an
+artefact of which options those tests passed. Told apart one at a time, with
+`ToASCII` called twice on each profile:
+
+    idna.New()                                     ok
+    idna.New(CheckHyphens(true))                   ok
+    idna.New(CheckHyphens(true), StrictDomainName(true))   ok   (two optionBools)
+    idna.New(MapForLookup())                       ok
+    idna.New(MapForLookup(), BidiRule())           ok   (second option is an EMPTY struct)
+    idna.New(MapForLookup(), StrictDomainName(true))       SIGSEGV
+    idna.New(MapForLookup(), CheckHyphens(true))           SIGSEGV
+    idna.New(MapForLookup(), ValidateLabels(true))         SIGSEGV
+    idna.Lookup(), idna.Display()                  SIGSEGV (both are literal constructors)
+
+So the constructor shape is irrelevant: `New(MapForLookup(), <optionBool>)`
+crashes exactly like `Lookup`, and `New(...)` with the same options in the same
+shape crashes where `Lookup` is not involved at all. What the failing pair has
+that the working pairs do not:
+
+- `MapForLookup().applyTo(o)` runs first and writes `o.trie = _trie()` and
+  `o.mapping = validateAndMap` - a root-arena pointer and a func value - and
+  internally applies two `optionBool` values to the same `o`.
+- the second top-level option is an `optionBool`:
+  `struct{ set func(*options, bool); v bool }`, boxed into the variadic
+  `[]Option`, dispatched as a value-receiver method.
+- `BidiRule()` in that position is an empty struct and does not crash, and two
+  `optionBool`s with no `MapForLookup` do not crash.
+
+That is the shape to diff next: a variadic `[]Option` of interface values whose
+boxted dynamic type is a struct with a func field, applied to a target struct
+that already holds a func value and a root-arena pointer. The measured fault is
+always an indirect call landing in arena memory or in `runtime.ArenaReset`
+(0x26f6xx), i.e. a func value read out of reclaimed memory - the optionBool
+`set` function, read through a box or a copy that no longer holds it.
+
+The four experiments in round 324 (pooling, sovereign group release, form-table
+init, synthetic literal shape) remain valid: none of them is the cause.
+
+Next step: reproduce in-tree with a `golang.org/x/...`-path probe package (value
+receivers are only legal outside user packages, which is why the synthetic
+reproducer had to use pointer receivers and could not mirror idna), then diff
+the IR for `idna.New`/`apply`/`optionBool.applyTo` between the compilers.
