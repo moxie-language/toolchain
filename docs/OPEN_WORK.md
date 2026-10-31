@@ -22177,3 +22177,46 @@ a plain slice while the bare operand path is patched. The new fixture uses
 
 Gates: quickcheck 15/15, compress_roundtrip 2/2 through the harness, phase 8
 netsmoke 2/2, fixpoint `s4b == s4c` (d41bd227).
+
+## Round 322: W37 fixed - the rewrite layer asked "is it []byte", not "is it text"
+
+The W37 note guessed that `moxieComparable` was being consulted with a slice
+where it should see text. The diagnostic said otherwise: in
+`string(a) != string(b)` the SSA operands are the two `[]byte` PARAMETERS. The
+`string(...)` conversions are identical-type under string=[]byte, so go/ssa
+folds them away and the builder receives a bare `a != b` on two slices - the
+exact expression that works when written without the conversions.
+
+So the two spellings of one type were being routed differently. A bare `a != b`
+is caught by `FindByteComparisons` and lowered to `__moxie_eq`, because the
+operand type is `[]byte`. An operand written `string(a)` types as the built-in
+`string` while the package is being typed, `isByteSlice` said no to both
+operands, the pair looked like a comparison involving no text at all, and it
+survived to the SSA builder as an unlowered slice comparison. Legacy then
+rejected it (`moxieComparable` on a `*types.Slice`); stage4 accepted it, so the
+compilers disagreed about a program that neither could justify.
+
+The predicate is `isTextLike` in both finders now - `FindByteComparisons` and
+`FindByteSwitches`, which had the identical blind spot one level down: a
+`switch string(x)` lost its tag to the tag-less `__moxie_eq` rewrite only when
+the tag happened to be typed `[]byte`, so the `string(x)` form fell through to
+case comparisons the SSA builder rejected. The string->[]byte wrapping bridge in
+the comparison finder existed to serve the same blind spot (one side `[]byte`,
+the other `string`); once both sides are recognised as text there is nothing to
+bridge and it is gone.
+
+This is a legacy-only change and no mirror is owed: stage4 parses Moxie source
+directly and already treated both spellings as text. The proof that nothing
+else moved is the binary - the bootstrap still converges on `d41bd227`, byte for
+byte the compiler that has been shipping, because the compiler's own source
+contains none of the newly-detected pattern.
+
+Fixture `text_compare_forms.mx` pins equality, ordering, prefix ordering, the
+empty value, a named text type, the literal form and switch tags. Every
+"different" pair has the SAME LENGTH, so a header comparison cannot pass it.
+On the pre-fix compiler it fails to compile with three "[]byte is not
+comparable" errors; it passes on both compilers now.
+
+Gates: quickcheck 15/15, text_compare_forms and compress_roundtrip 2/2 through
+the harness, phase 8 netsmoke 17/17 + tree-cleanliness, bootstrap fixpoint
+`s2 == s3` (d41bd227) with the same hash as the previous round.
