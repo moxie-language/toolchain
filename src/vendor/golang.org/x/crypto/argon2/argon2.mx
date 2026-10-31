@@ -44,7 +44,7 @@ func deriveKey(mode int32, password, salt, secret, data []byte, time, memory uin
 	if memory < 2*syncPoints*uint32(threads) {
 		memory = 2 * syncPoints * uint32(threads)
 	}
-	B := initBlocks(&h0, memory, uint32(threads))
+	B := initBlocks(h0, memory, uint32(threads))
 	processBlocks(B, time, memory, uint32(threads), mode)
 	out = extractKey(B, memory, uint32(threads), keyLen)
 	return
@@ -55,53 +55,53 @@ const (
 	syncPoints  = 4
 )
 
-type block [blockLength]uint64
-
-func initHash(password, salt, key, data []byte, time, memory, threads, keyLen uint32, mode int32) (h0 [blake2b.Size + 8]byte) {
-	var (
-		params [24]byte
-		tmp    [4]byte
-	)
+func initHash(password, salt, key, data []byte, time, memory, threads, keyLen uint32, mode int32) (h0 []byte) {
+	h0 = []byte{:blake2b.Size + 8}
+	params := []byte{:24}
+	tmp := []byte{:4}
 
 	b2, _ := blake2b.New512(nil)
-	binary.LittleEndian().PutUint32At(params[:], 0, threads)
-	binary.LittleEndian().PutUint32At(params[:], 4, keyLen)
-	binary.LittleEndian().PutUint32At(params[:], 8, memory)
-	binary.LittleEndian().PutUint32At(params[:], 12, time)
-	binary.LittleEndian().PutUint32At(params[:], 16, uint32(Version))
-	binary.LittleEndian().PutUint32At(params[:], 20, uint32(mode))
-	b2.Write(params[:])
-	binary.LittleEndian().PutUint32At(tmp[:], 0, uint32(len(password)))
-	b2.Write(tmp[:])
+	binary.LittleEndian().PutUint32At(params, 0, threads)
+	binary.LittleEndian().PutUint32At(params, 4, keyLen)
+	binary.LittleEndian().PutUint32At(params, 8, memory)
+	binary.LittleEndian().PutUint32At(params, 12, time)
+	binary.LittleEndian().PutUint32At(params, 16, uint32(Version))
+	binary.LittleEndian().PutUint32At(params, 20, uint32(mode))
+	b2.Write(params)
+	binary.LittleEndian().PutUint32At(tmp, 0, uint32(len(password)))
+	b2.Write(tmp)
 	b2.Write(password)
-	binary.LittleEndian().PutUint32At(tmp[:], 0, uint32(len(salt)))
-	b2.Write(tmp[:])
+	binary.LittleEndian().PutUint32At(tmp, 0, uint32(len(salt)))
+	b2.Write(tmp)
 	b2.Write(salt)
-	binary.LittleEndian().PutUint32At(tmp[:], 0, uint32(len(key)))
-	b2.Write(tmp[:])
+	binary.LittleEndian().PutUint32At(tmp, 0, uint32(len(key)))
+	b2.Write(tmp)
 	b2.Write(key)
-	binary.LittleEndian().PutUint32At(tmp[:], 0, uint32(len(data)))
-	b2.Write(tmp[:])
+	binary.LittleEndian().PutUint32At(tmp, 0, uint32(len(data)))
+	b2.Write(tmp)
 	b2.Write(data)
 	b2.Sum(resize(h0, 0))
 	return
 }
 
-func initBlocks(h0 *[blake2b.Size + 8]byte, memory, threads uint32) (B []block) {
-	var block0 [1024]byte
-	B = []block{:int32(memory)}
+func initBlocks(h0 []byte, memory, threads uint32) (B [][]uint64) {
+	block0 := []byte{:1024}
+	B = [][]uint64{:int32(memory)}
+	for i := range B {
+		B[i] = []uint64{:blockLength}
+	}
 	for lane := uint32(0); lane < threads; lane++ {
 		j := lane * (memory / threads)
 		binary.LittleEndian().PutUint32At(h0, blake2b.Size+4, lane)
 
 		binary.LittleEndian().PutUint32At(h0, blake2b.Size, 0)
-		blake2bHash(block0[:], h0[:])
+		blake2bHash(block0, h0)
 		for i := range B[j+0] {
 			B[j+0][i] = binary.LittleEndian().Uint64(block0[i*8:])
 		}
 
 		binary.LittleEndian().PutUint32At(h0, blake2b.Size, 1)
-		blake2bHash(block0[:], h0[:])
+		blake2bHash(block0, h0)
 		for i := range B[j+1] {
 			B[j+1][i] = binary.LittleEndian().Uint64(block0[i*8:])
 		}
@@ -109,7 +109,7 @@ func initBlocks(h0 *[blake2b.Size + 8]byte, memory, threads uint32) (B []block) 
 	return
 }
 
-func processBlocks(B []block, time, memory, threads uint32, mode int32) {
+func processBlocks(B [][]uint64, time, memory, threads uint32, mode int32) {
 	lanes := memory / threads
 	segments := lanes / syncPoints
 
@@ -122,8 +122,10 @@ func processBlocks(B []block, time, memory, threads uint32, mode int32) {
 	}
 }
 
-func processSegment(B []block, n, slice, lane, memory, time, threads, segments, lanes uint32, mode int32) {
-	var addresses, in, zero block
+func processSegment(B [][]uint64, n, slice, lane, memory, time, threads, segments, lanes uint32, mode int32) {
+	addresses := []uint64{:blockLength}
+	in := []uint64{:blockLength}
+	zero := []uint64{:blockLength}
 	if mode == argon2i || (mode == argon2id && n == 0 && slice < syncPoints/2) {
 		in[0] = uint64(n)
 		in[1] = uint64(lane)
@@ -138,8 +140,8 @@ func processSegment(B []block, n, slice, lane, memory, time, threads, segments, 
 		index = 2
 		if mode == argon2i || mode == argon2id {
 			in[6]++
-			processBlock(&addresses, &in, &zero)
-			processBlock(&addresses, &addresses, &zero)
+			processBlock(addresses, in, zero)
+			processBlock(addresses, addresses, zero)
 		}
 	}
 
@@ -153,20 +155,20 @@ func processSegment(B []block, n, slice, lane, memory, time, threads, segments, 
 		if mode == argon2i || (mode == argon2id && n == 0 && slice < syncPoints/2) {
 			if index%blockLength == 0 {
 				in[6]++
-				processBlock(&addresses, &in, &zero)
-				processBlock(&addresses, &addresses, &zero)
+				processBlock(addresses, in, zero)
+				processBlock(addresses, addresses, zero)
 			}
 			random = addresses[index%blockLength]
 		} else {
 			random = B[prev][0]
 		}
 		newOffset := indexAlpha(random, lanes, segments, threads, n, slice, lane, index)
-		processBlockXOR(&B[offset], &B[prev], &B[newOffset])
+		processBlockXOR(B[offset], B[prev], B[newOffset])
 		index, offset = index+1, offset+1
 	}
 }
 
-func extractKey(B []block, memory, threads, keyLen uint32) (key []byte) {
+func extractKey(B [][]uint64, memory, threads, keyLen uint32) (key []byte) {
 	lanes := memory / threads
 	for lane := uint32(0); lane < threads-1; lane++ {
 		for i, v := range B[(lane*lanes)+lanes-1] {
@@ -174,12 +176,12 @@ func extractKey(B []block, memory, threads, keyLen uint32) (key []byte) {
 		}
 	}
 
-	var buf [1024]byte
+	buf := []byte{:1024}
 	for i, v := range B[memory-1] {
-		binary.LittleEndian().PutUint64At(buf[:], i*8, v)
+		binary.LittleEndian().PutUint64At(buf, i*8, v)
 	}
 	key = []byte{:int32(keyLen)}
-	blake2bHash(key, buf[:])
+	blake2bHash(key, buf)
 	return
 }
 

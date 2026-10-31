@@ -1,0 +1,196 @@
+// Known-answer vectors for the symmetric and hash primitives whose state is
+// carried as limbs and buffers: AES (FIPS-197 C.1-C.3, SP 800-38A CBC, the
+// standard GCM tag cases), RC4, BLAKE2b-512/256 (RFC 7693 appendix A), and an
+// Argon2id self-consistency check.
+//
+// These packages had no fixture at all, so a refactor of their state layout -
+// a fixed extent becoming a slice, a table moving into a package variable
+// built in init() - could only be caught by "the handshake still works", which
+// exercises exactly one code path per primitive. The AES vectors are the
+// round-key expansion in all three key sizes; the GCM cases are the tag
+// derivation, which is where a zeroed state word shows up.
+//
+// usage: crypto_vectors       exit 0 when every vector matches
+package main
+
+import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rc4"
+	"golang.org/x/crypto/argon2"
+	"golang.org/x/crypto/blake2b"
+	"os"
+)
+
+func hexOf(b []byte) (s string) {
+	const d = "0123456789abcdef"
+	out := []byte{:int32(len(b)) * 2}
+	for i := int32(0); i < int32(len(b)); i++ {
+		out[i*2] = d[b[i]>>4]
+		out[i*2+1] = d[b[i]&0xf]
+	}
+	return string(out)
+}
+
+func unhex(s []byte) (b []byte) {
+	b = []byte{:int32(len(s)) / 2}
+	for i := int32(0); i < int32(len(b)); i++ {
+		hi := hexVal(s[i*2])
+		lo := hexVal(s[i*2+1])
+		b[i] = hi<<4 | lo
+	}
+	return b
+}
+
+func hexVal(c byte) (v byte) {
+	if c >= '0' && c <= '9' {
+		return c - '0'
+	}
+	return c - 'a' + 10
+}
+
+// checker carries the failure count. A package global cannot be mutated
+// outside init(), and a closure cannot capture, so the count lives in a
+// self-mutating type passed as a receiver.
+type checker struct {
+	fails int32
+}
+
+func (c *checker) want(name []byte, got []byte, expect []byte) {
+	if string(got) == string(expect) {
+		println("ok  ", name)
+		return
+	}
+	c.fails++
+	println("FAIL", name)
+	println("  got   ", hexOf(got))
+	println("  want  ", hexOf(expect))
+}
+
+func (c *checker) aesBlock(keyHex []byte, name []byte, ptHex []byte, wantHex []byte) {
+	key := unhex(keyHex)
+	pt := unhex(ptHex)
+	blk, err := aes.NewCipher(key)
+	if err != nil {
+		c.fails++
+		println("FAIL", name, "newcipher:", err.Error())
+		return
+	}
+	dst := []byte{:16}
+	blk.Encrypt(dst, pt)
+	c.want(name, dst, unhex(wantHex))
+	back := []byte{:16}
+	blk.Decrypt(back, dst)
+	c.want([]byte("dec ") | name, back, pt)
+}
+
+func main() {
+	var c checker
+	// FIPS-197 appendix C: the same plaintext under all three key sizes.
+	pt := []byte("00112233445566778899aabbccddeeff")
+	c.aesBlock([]byte("000102030405060708090a0b0c0d0e0f"), []byte("aes128"), pt,
+		[]byte("69c4e0d86a7b0430d8cdb78070b4c55a"))
+	c.aesBlock([]byte("000102030405060708090a0b0c0d0e0f1011121314151617"), []byte("aes192"), pt,
+		[]byte("dda97ca4864cdfe06eaf70a0ec0d7191"))
+	c.aesBlock([]byte("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), []byte("aes256"), pt,
+		[]byte("8ea2b7ca516745bfeafc49904b496089"))
+
+	// SP 800-38A F.2.1: one CBC block.
+	{
+		key := unhex([]byte("2b7e151628aed2a6abf7158809cf4f3c"))
+		iv := unhex([]byte("000102030405060708090a0b0c0d0e0f"))
+		src := unhex([]byte("6bc1bee22e409f96e93d7e117393172a"))
+		blk, _ := aes.NewCipher(key)
+		mode := cipher.NewCBCEncrypter(blk, iv)
+		dst := []byte{:16}
+		mode.CryptBlocks(dst, src)
+		c.want([]byte("aes-cbc"), dst, unhex([]byte("7649abac8119b246cee98e9b12e9197d")))
+	}
+
+	// GCM: the two standard zero-key cases (empty and one zero block).
+	{
+		blk, _ := aes.NewCipher([]byte{:16})
+		gcm, gerr := cipher.NewGCM(blk)
+		if gerr != nil {
+			c.fails++
+			println("FAIL gcm new: ", gerr.Error())
+		} else {
+			nonce := []byte{:12}
+			sealed := gcm.Seal(nil, nonce, nil, nil)
+			c.want([]byte("gcm-empty"), sealed,
+				unhex([]byte("58e2fccefa7e3061367f1d57a4e7455a")))
+			zero := []byte{:16}
+			sealed2 := gcm.Seal(nil, nonce, zero, nil)
+			c.want([]byte("gcm-zeros"), sealed2,
+				unhex([]byte("0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf")))
+			opened, oerr := gcm.Open(nil, nonce, sealed2, nil)
+			if oerr != nil {
+				c.fails++
+				println("FAIL gcm open: ", oerr.Error())
+			} else {
+				c.want([]byte("gcm-open"), opened, zero)
+			}
+		}
+	}
+
+	// RC4: the classic "Key" / "Plaintext" vector.
+	{
+		rc, cerr := rc4.NewCipher([]byte("Key"))
+		if cerr != nil {
+			c.fails++
+			println("FAIL rc4 new: ", cerr.Error())
+		} else {
+			dst := []byte{:9}
+			rc.XORKeyStream(dst, []byte("Plaintext"))
+			c.want([]byte("rc4"), dst, unhex([]byte("bbf316e8d940af0ad3")))
+		}
+	}
+
+	// RFC 7693 appendix A: BLAKE2b-512("abc"). The 256-bit case is the Go
+	// stdlib's own vector, which also covers the digest's size parameter.
+	{
+		sum := blake2b.Sum512([]byte("abc"))
+		c.want([]byte("blake2b-512"),
+			sum,
+			unhex([]byte("ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923")))
+		sum256 := blake2b.Sum256([]byte("abc"))
+		c.want([]byte("blake2b-256"),
+			sum256,
+			unhex([]byte("bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319")))
+		// The streaming interface must agree with the one-shot form.
+		h, herr := blake2b.New512(nil)
+		if herr != nil {
+			c.fails++
+			println("FAIL blake2b new: ", herr.Error())
+		} else {
+			h.Write([]byte("a"))
+			h.Write([]byte("bc"))
+			c.want([]byte("blake2b-stream"), h.Sum(nil), sum)
+		}
+	}
+
+	// Argon2id has no fixture either: check that two identical calls agree and
+	// a different password does not.
+	{
+		a := argon2.IDKey([]byte("password"), []byte("somesalt"), 1, 64, 1, 32)
+		b := argon2.IDKey([]byte("password"), []byte("somesalt"), 1, 64, 1, 32)
+		c.want([]byte("argon2id-repeat"), a, b)
+		diff := argon2.IDKey([]byte("passwore"), []byte("somesalt"), 1, 64, 1, 32)
+		if string(a) == string(diff) {
+			c.fails++
+			println("FAIL argon2id: different passwords gave the same key")
+		} else {
+			println("ok   argon2id")
+		}
+		if len(a) != 32 {
+			c.fails++
+			println("FAIL argon2id length")
+		}
+	}
+
+	if c.fails != 0 {
+		println("crypto_vectors:", c.fails, "case(s) failed")
+		os.Exit(1)
+	}
+	println("crypto_vectors ok")
+}

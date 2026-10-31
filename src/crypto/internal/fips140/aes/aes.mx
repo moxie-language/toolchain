@@ -25,8 +25,11 @@ type Block struct {
 type blockExpanded struct {
 	rounds int32
 	// Round keys, where only the first (rounds + 1) × (128 ÷ 32) words are used.
-	enc [60]uint32
-	dec [60]uint32
+	// The tables are slices built by the constructor: they are the cipher's
+	// read-only key schedule, and the whole struct is what crosses the package
+	// boundary out of New.
+	enc []uint32
+	dec []uint32
 }
 
 const (
@@ -38,6 +41,9 @@ const (
 
 	// AES-256 has 256-bit keys, 14 rounds, and uses 15 128-bit round keys
 	// (15×128÷32 = 60 32-bit words).
+
+	// roundKeysWords is the largest key schedule: AES-256's 15 round keys.
+	roundKeysWords = 60
 
 	aes128KeySize = 16
 	aes192KeySize = 24
@@ -70,8 +76,11 @@ func (k *KeySizeError) String() (ret0 string) { return k.Error() }
 // The key argument should be the AES key, either 16, 24, or 32 bytes to select
 // AES-128, AES-192, or AES-256.
 func New(key []byte) (ret0 *Block, ret1 error) {
-	// This call is outline to let the allocation happen on the parent stack.
-	return newOutlined(&Block{}, key)
+	// This call is outlined to let the allocation happen on the parent stack.
+	b := &Block{}
+	b.enc = []uint32{:roundKeysWords}
+	b.dec = []uint32{:roundKeysWords}
+	return newOutlined(b, key)
 }
 
 // newOutlined is marked go:noinline to avoid it inlining into New, and making New

@@ -11,13 +11,16 @@ import (
 
 type CBCEncrypter struct {
 	b  Block
-	iv [BlockSize]byte
+	iv []byte
 }
 
 // NewCBCEncrypter returns a [cipher.BlockMode] which encrypts in cipher block
 // chaining mode, using the given Block.
-func NewCBCEncrypter(b *Block, iv [BlockSize]byte) (ret0 *CBCEncrypter) {
-	return &CBCEncrypter{b: *b, iv: iv}
+func NewCBCEncrypter(b *Block, iv []byte) (ret0 *CBCEncrypter) {
+	c := &CBCEncrypter{b: *b}
+	c.iv = []byte{:BlockSize}
+	copy(c.iv, iv)
+	return c
 }
 
 func (c *CBCEncrypter) BlockSize() (ret0 int32) { return BlockSize }
@@ -36,27 +39,27 @@ func (c *CBCEncrypter) CryptBlocks(dst, src []byte) {
 	if len(src) == 0 {
 		return
 	}
-	cryptBlocksEnc(&c.b, &c.iv, dst, src)
+	cryptBlocksEnc(&c.b, c.iv, dst, src)
 }
 
 func (x *CBCEncrypter) SetIV(iv []byte) {
 	if len(iv) != len(x.iv) {
 		panic("cipher: incorrect length IV")
 	}
-	copy(x.iv[:], iv)
+	copy(x.iv, iv)
 }
 
-func cryptBlocksEncGeneric(b *Block, civ *[BlockSize]byte, dst, src []byte) {
+func cryptBlocksEncGeneric(b *Block, civ []byte, dst, src []byte) {
 	// The block walks by offset and stages the ciphertext in an array: a
 	// sub-slice of dst or src is a copy, so dst[pos:pos+16] passed to the
 	// block function would be a throwaway.
-	var blk [BlockSize]byte
+	blk := []byte{:BlockSize}
 	pos := int32(0)
 	for int32(len(src))-pos > 0 {
 		for j := int32(0); j < BlockSize; j++ {
 			blk[j] = src[pos+j] ^ civ[j]
 		}
-		encryptBlock(b, blk[:], blk[:])
+		encryptBlock(b, blk, blk)
 		// The ciphertext is both the output and the next iv.
 		for j := int32(0); j < BlockSize; j++ {
 			dst[pos+j] = blk[j]
@@ -68,13 +71,16 @@ func cryptBlocksEncGeneric(b *Block, civ *[BlockSize]byte, dst, src []byte) {
 
 type CBCDecrypter struct {
 	b  Block
-	iv [BlockSize]byte
+	iv []byte
 }
 
 // NewCBCDecrypter returns a [cipher.BlockMode] which decrypts in cipher block
 // chaining mode, using the given Block.
-func NewCBCDecrypter(b *Block, iv [BlockSize]byte) (ret0 *CBCDecrypter) {
-	return &CBCDecrypter{b: *b, iv: iv}
+func NewCBCDecrypter(b *Block, iv []byte) (ret0 *CBCDecrypter) {
+	c := &CBCDecrypter{b: *b}
+	c.iv = []byte{:BlockSize}
+	copy(c.iv, iv)
+	return c
 }
 
 func (c *CBCDecrypter) BlockSize() (ret0 int32) { return BlockSize }
@@ -93,17 +99,17 @@ func (c *CBCDecrypter) CryptBlocks(dst, src []byte) {
 	if len(src) == 0 {
 		return
 	}
-	cryptBlocksDec(&c.b, &c.iv, dst, src)
+	cryptBlocksDec(&c.b, c.iv, dst, src)
 }
 
 func (x *CBCDecrypter) SetIV(iv []byte) {
 	if len(iv) != len(x.iv) {
 		panic("cipher: incorrect length IV")
 	}
-	copy(x.iv[:], iv)
+	copy(x.iv, iv)
 }
 
-func cryptBlocksDecGeneric(b *Block, civ *[BlockSize]byte, dst, src []byte) {
+func cryptBlocksDecGeneric(b *Block, civ []byte, dst, src []byte) {
 	// For each block, we need to xor the decrypted data with the previous
 	// block's ciphertext (the iv). To avoid making a copy each time, we loop
 	// over the blocks backwards.
@@ -112,18 +118,18 @@ func cryptBlocksDecGeneric(b *Block, civ *[BlockSize]byte, dst, src []byte) {
 	prev := start - BlockSize
 
 	// Copy the last block of ciphertext as the IV of the next call.
-	var iv [BlockSize]byte
+	iv := []byte{:BlockSize}
 	for j := int32(0); j < BlockSize; j++ {
 		iv[j] = civ[j]
 		civ[j] = src[start+j]
 	}
 
-	var blk [BlockSize]byte
+	blk := []byte{:BlockSize}
 	for start >= 0 {
 		for j := int32(0); j < BlockSize; j++ {
 			blk[j] = src[start+j]
 		}
-		decryptBlock(b, blk[:], blk[:])
+		decryptBlock(b, blk, blk)
 
 		if start > 0 {
 			for j := int32(0); j < BlockSize; j++ {

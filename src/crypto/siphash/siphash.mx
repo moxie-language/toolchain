@@ -11,8 +11,12 @@ package siphash
 
 import "math/bits"
 
-// Key is a 128-bit SipHash key.
-type Key [2]uint64
+// Key is a 128-bit SipHash key. Two named words rather than an extent: the
+// key is a value that gets copied into every call, and a fixed extent in a
+// value type is exactly what the language is shedding.
+type Key struct {
+	k0, k1 uint64
+}
 
 // DefaultKey returns a non-secret fixed key for deterministic hash-table use.
 // It uses the SipHash initialization constants so it is well-tested.
@@ -20,10 +24,10 @@ func DefaultKey() (k Key) { k = Key{0x736f6d6570736575, 0x646f72616e646f6d}; ret
 
 // Sum64 computes SipHash-2-4 with 64-bit output.
 func Sum64(key Key, p []byte) (sum uint64) {
-	v0 := key[0] ^ 0x736f6d6570736575
-	v1 := key[1] ^ 0x646f72616e646f6d
-	v2 := key[0] ^ 0x6c7967656e657261
-	v3 := key[1] ^ 0x7465646279746573
+	v0 := key.k0 ^ 0x736f6d6570736575
+	v1 := key.k1 ^ 0x646f72616e646f6d
+	v2 := key.k0 ^ 0x6c7967656e657261
+	v3 := key.k1 ^ 0x7465646279746573
 
 	length := len(p)
 	blocks := length / 8
@@ -58,11 +62,11 @@ func Sum64(key Key, p []byte) (sum uint64) {
 //   - v1 is XORed with 0xee at initialization
 //   - Finalization runs twice: once for the low 64 bits, then with
 //     v1 XORed by 0xdd for the high 64 bits
-func Sum128(key Key, p []byte) (out [2]uint64) {
-	v0 := key[0] ^ 0x736f6d6570736575
-	v1 := key[1] ^ 0x646f72616e646f6d
-	v2 := key[0] ^ 0x6c7967656e657261
-	v3 := key[1] ^ 0x7465646279746573
+func Sum128(key Key, p []byte) (lo, hi uint64) {
+	v0 := key.k0 ^ 0x736f6d6570736575
+	v1 := key.k1 ^ 0x646f72616e646f6d
+	v2 := key.k0 ^ 0x6c7967656e657261
+	v3 := key.k1 ^ 0x7465646279746573
 
 	// 128-bit output mode marker.
 	v1 ^= 0xee
@@ -93,16 +97,16 @@ func Sum128(key Key, p []byte) (out [2]uint64) {
 	for i := 0; i < 4; i++ {
 		v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
 	}
-	lo := v0 ^ v1 ^ v2 ^ v3
+	lo = v0 ^ v1 ^ v2 ^ v3
 
 	// Second finalization: high 64 bits.
 	v1 ^= 0xdd
 	for i := 0; i < 4; i++ {
 		v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
 	}
-	hi := v0 ^ v1 ^ v2 ^ v3
+	hi = v0 ^ v1 ^ v2 ^ v3
 
-	out = [2]uint64{lo, hi}; return
+	return
 }
 
 func sipRound(v0, v1, v2, v3 uint64) (r0, r1, r2, r3 uint64) {
