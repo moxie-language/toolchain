@@ -21602,3 +21602,43 @@ Next steps for whoever picks this up, in order:
    correct, so the write is somewhere else. Also ruled out: the arena accounting
    (`sov created/released`, root usage) is consistent across the call, and the
    function-arena depth is balanced.
+
+## Round 307: where the compiler's memory goes (the "500 MB very fast" observation)
+
+Measured on a hello-world build with every cache invalidated (`-a`), sampling
+/proc and tracing mmap:
+
+    virtual at start    260 MB    (initDomain maps one 256 MB domain region)
+    virtual peak        1058 MB
+    RSS peak            714 MB    reached inside one package's compile
+    RSS after link      208 MB
+    large mmaps (>=32MB) 39 calls, 4.6 GB of address space in total
+
+Breakdown:
+
+- **256 MB domain region**, mapped once at startup and never released. Virtual
+  only; pages commit on touch. This is the floor for every program.
+- **One compile arena per package**: `len(src) * 1000`, floor 64 MB, cap
+  512 MB (`ir_typecheck.mx`). The `runtime` package hits the 512 MB cap and
+  touches ~400-500 MB during SSA construction and IR emission - that is the
+  714 MB peak, and it is what "allocates 500 MB very fast" is. The arena IS
+  freed at the end of the package (`ArenaFree`), which is why RSS falls back to
+  ~208 MB.
+- **`root=1/131 MB`**: the root arena keeps 131 MB of type-universe state for
+  the whole run (one region, no growth).
+- The eight 256 MB maps during `link` are the `ld.lld` CHILD processes, each
+  with its own domain region; they are not the parent's RSS.
+- IR text is streamed to the .ll file (`emitter.outFile`), not accumulated, so
+  the text is not the spike. The spike is per-package SSA/type state.
+
+Candidate reductions, in order of expected value (not measured yet):
+
+1. Release per-package state earlier: the AST (`src`), SSA graphs and descriptor
+   tables are alive together for the whole package. Freeing the AST after type
+   check and each function's SSA after its emission would cut the peak without
+   changing any output.
+2. The 1000x arena sizing factor is a guess. Measure `arena.alloc` at ci-tc per
+   package and set the factor from the observed worst case; the cap exists
+   precisely so growth can append instead.
+3. 256 MB for the domain region is generous when the root only uses 131 MB and
+   never grows.
