@@ -219,6 +219,18 @@ rm -rf "$td"
 # verdicts (the client transport blocker, which is its own defect) while the
 # process exited 0, so the driver recorded a green phase over a red log. Exit
 # non-zero when anything failed, the same way phase 3 does.
-if [ -f "$STATUSFILE" ] && [ "$(grep -c '^FAIL' "$STATUSFILE" 2>/dev/null || echo 0)" -gt 0 ]; then
+#
+# The count is taken before the test, not inside it: `grep -c` prints 0 AND
+# exits 1 when nothing matches, so `$(grep -c ... || echo 0)` produced two lines
+# and every run ended with "[: 0\n0: integer expected" on stderr - noise from a
+# gate, which is how a real failure message gets ignored. The `|| true` inside
+# the substitution is what keeps `set -e` from treating grep's no-match exit as
+# the phase failing: the first version of this fix aborted the script (all 17
+# checks had PASSed and the phase went red), which the gate caught.
+fails=0
+if [ -f "$STATUSFILE" ]; then
+	fails="$(grep -c '^FAIL' "$STATUSFILE" 2>/dev/null || true)"
+fi
+if [ "$fails" -gt 0 ]; then
 	exit 1
 fi
