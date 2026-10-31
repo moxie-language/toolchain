@@ -1873,6 +1873,15 @@ func (fb *ssaFuncBuilder) buildAssign(s *syntax.AssignStmt) {
 		// default, so the mask was 0xFFFFFFFF and math.Modf cleared 32 bits
 		// of the mantissa instead of 51 (Modf(2.1) returned 2.0999984).
 		retypeUntypedShift(rv, lv.SSAType())
+		// '+=' on text is refused in user code for the same reason '+' is:
+		// concatenation is '|=' there, and legacy rejects it in loader's
+		// CheckPlusOnText (the AssignStmt case). This compiler accepted it and
+		// silently concatenated, so `s += b` on two []byte operands was a
+		// compilers-disagree bug (W29).
+		if s.Op == token.Add && fb.plusIsBanned() && TextType(lv.SSAType()) {
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, "'+=' is not allowed for text concatenation, use |= operator")
+		}
 		op := compoundOp(s.Op)
 		bin := &SSABinOp{Op: op, X: lv, Y: rv}
 		bin.typ = lv.SSAType()
@@ -5216,6 +5225,23 @@ func (fb *ssaFuncBuilder) buildOperandAddr(e syntax.Expr) (s SSAValue) {
 	return a
 }
 
+// plusIsBanned reports whether the '+' and '+=' text rules apply to the
+// function being built: user code in the target's main module. Legacy's gate is
+// `p.Module.Main && p.Module.Path != "git.smesh.lol/moxie"` in loader's Check,
+// i.e. the program's own module and not the toolchain; isTargetPkg is that test
+// expressed against this compiler's module root, and isUserPackagePath adds the
+// same vendor and toolchain-package exemptions the other restrictions use.
+func (fb *ssaFuncBuilder) plusIsBanned() (banned bool) {
+	if bst == nil || !targetIsMainModule() {
+		return false
+	}
+	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
+		return false
+	}
+	p := fb.fn.Pkg.Pkg.Path
+	return isTargetPkg(p) && isUserPackagePath(restrictPath(p))
+}
+
 func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 	if e.Y == nil {
 		if e.Op == token.Add {
@@ -5317,17 +5343,17 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 	if x == nil || y == nil {
 		return nil
 	}
-	// Legacy rejects '+' for text in user code (restrict.go
-	// checkInstrRestrictions): concatenation is the '|' operator. It tests the
-	// left operand's resolved type, so this does too - the rune/string mix
-	// below is a separate error with its own message. The rule is a
-	// main-module rule in legacy (CheckPlusOnText), so a manifest-less target
-	// and a dependency package both keep '+' - see targetIsMainModule.
-	if e.Op == token.Add && ssaIsStringType(x.SSAType()) && targetIsMainModule() && fb.fn != nil && fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil && isTargetPkg(fb.fn.Pkg.Pkg.Path) {
-		if isUserPackagePath(restrictPath(fb.fn.Pkg.Pkg.Path)) {
-			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-			push(cctx.compileErrors, "'+' is not allowed for text concatenation, use | operator")
-		}
+	// Concatenation is the '|' operator, so '+' on text is refused in user
+	// code - the rule legacy enforces in loader's CheckPlusOnText. That check
+	// tests BOTH operands for text and this one used to test only the left
+	// operand, and only for the string Basic: `a + b` on two []byte operands
+	// was accepted by stage4 while legacy rejected it (W29, a compilers-
+	// disagree bug). The rune/string mix below is a separate error with its own
+	// message. The rule is a main-module rule in legacy, so a dependency
+	// package keeps '+' - see targetIsMainModule.
+	if e.Op == token.Add && fb.plusIsBanned() && (TextType(x.SSAType()) || TextType(y.SSAType())) {
+		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+		push(cctx.compileErrors, "'+' is not allowed for text concatenation, use | operator")
 	}
 	if (op == OpOr || op == OpAdd) && x.SSAType() != nil && y.SSAType() != nil {
 		if IsRuneKind(x.SSAType()) && IsStringKind(y.SSAType()) || IsStringKind(x.SSAType()) && IsRuneKind(y.SSAType()) {
