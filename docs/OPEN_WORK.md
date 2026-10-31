@@ -22255,3 +22255,57 @@ Gates: quickcheck 15/15, phase 8 netsmoke 17/17 + tree-cleanliness (2 663 s, reb
 fixpoint `s2 == s3` (`0c395b6a`, a new hash because stage4 itself changed - the
 whole tree, toolchain and stdlib included, still compiles with `+` on text
 where it is allowed).
+
+## Round 324: W31 (round 306's idna crash) narrowed to one constructor shape
+
+The reproducer from round 306 still crashes under stage4 and still passes under
+legacy, so it was taken apart with measurements instead of reading. What is now
+known:
+
+    p := idna.Lookup();  p.ToUnicode("xn--bcher-kva.example")   // stage4: ok
+    p.ToUnicode("xn--bcher-kva.example")                        // stage4: SIGSEGV
+
+Under gdb the fault is an indirect call through a garbage pointer inside
+`norm.(*formInfo).quickSpan` (`call *0x10(%rax)`, i.e. `f.info(src, i)`), where
+`f` came from the form table but points into arena memory that no longer holds a
+`formInfo`. The jumped-to address is an arena base or a code address, depending
+on the run - a dangling object, not a logic error.
+
+**The constructor shape is the trigger.** With `ToASCII` called twice on each:
+
+    idna.New()                                ok
+    idna.New(idna.MapForLookup())             ok
+    idna.New(idna.MapForLookup(), BidiRule()) ok
+    idna.Display()                            SIGSEGV (inside ArenaReset)
+    idna.Lookup()                             SIGSEGV
+
+`New` builds `p := &Profile{}`, mutates it through `apply(&p.options, o)` and
+returns `p`. `Lookup`/`Display` return `&Profile{options{...}}` - an addressed
+composite literal carrying three func values, an embedded struct and `_trie()`.
+
+Ruled out by experiment, each of which one would otherwise have to re-test:
+
+1. **Arena pooling / reset of a reused arena.** Forcing `ArenaRelease` to always
+   `ArenaFree` (never pool, never reset) does not stop the crash; the reported
+   address becomes the page-aligned arena base exactly as round 306 described.
+2. **Sovereign group release.** Returning early from `codecSovereignFree` so a
+   group's arenas are never released does not stop it either, and every arena
+   reset at the crash point reports `sov=0 gl=0` - no group is involved.
+3. **The lazily built form table** (`initFormTable`, built on first use and
+   stored into a package global). Calling it from norm's package `init()`
+   instead does not fix the crash - it moves it earlier - and norm's own
+   `NFC.Bytes`, `NFC.QuickSpan` and `NFC.String` each work twice on both
+   compilers, so the table survives when idna is not in the path.
+4. **The literal-return shape in general.** A synthetic package with the same
+   shape (embedded options struct, three func fields, a trie with two slices
+   passed in, both a literal-return constructor and a mutating one) passes on
+   stage4. The trigger needs idna's own init-built tables as well.
+
+Next step, in order: copy `idna` into a probe package, rewrite `Lookup` to the
+mutating shape and confirm it passes (that isolates the constructor, not the
+package); then diff the IR emitted for `idna.Lookup` between the compilers,
+which is where the two disagree and where the fix belongs. The fixture cannot
+live in `tests/regressions` until it stops crashing.
+
+Gates unchanged from round 323 (nothing in the tree was modified for this
+investigation; every temporary print and probe edit was reverted).
