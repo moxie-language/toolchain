@@ -22380,3 +22380,59 @@ receiver copy. A wild store through a wrong `o` would corrupt an arena header
 form-table pointer into reclaimed memory. That is the shape to reproduce next,
 in a package whose import path exempts it from the value-receiver rule (any path
 without a dot, or under `golang.org/x/`), then diff its IR between compilers.
+
+## Round 326: W31 fixed - the pointee of an element literal was a stack alloca
+
+Rounds 324 and 325 chased the crash through five hypotheses and a constructor
+bisect without finding it, because the defect is one level below all of them:
+not in what flavour of `Profile` was built, but in where the `Profile`'s memory
+came from.
+
+The reproducer is ten lines:
+
+    type T struct { n int64 }
+    func makeThree(k int64) (s []*T) {
+        s = []*T{{n: k}, {n: k + 1}, {n: k + 2}}
+        return
+    }
+    makeThree(9)   // stage4: 9 10 7    legacy: 9 10 11
+
+`[]*T{{...}}` means a slice of `&T{...}` values, so each pointee's address is
+stored into the slice's backing array and escapes the frame. stage4's
+pointer-to-aggregate branch allocated the pointee with `emitAlloc` (Heap:false,
+a stack alloca) and never called `markAddrEscaping`, while the explicit
+`&T{...}` path has always called it. A returned slice therefore carried
+pointers into a dead frame. The emitted IR also lost the last element's stores
+(`store i64 %k+2, ptr %t18` was simply absent), which is why exactly the LAST
+element read back garbage and the earlier ones only looked right because their
+stack slots had not been reused yet.
+
+The fix is one call in that one place: `fb.markAddrEscaping(alloc)`. Legacy's
+`builder.addr(escaping=true)` makes the same decision for `&`, so the two
+compilers now agree on the rule rather than one of them being right by accident.
+
+**This was also the idna crash.** With it:
+
+    idna.Display()                                        two ToASCII calls, ok
+    idna.Lookup()                                         two ToUnicode calls, ok
+    idna.New(MapForLookup(), StrictDomainName(true))      two ToASCII calls, ok
+
+All three segfaulted before. The garbage function value the second call jumped
+through was a pointee read out of a recycled frame - the round-306 report was
+right about the symptom and about the arena, and the pointee was never in the
+arena to begin with.
+
+Fixture `ptr_elem_lit_escape` covers a returned `[]*T`, a returned `[3]*T`, a
+`map[K]*T` with elided values, func-typed fields and a slice field, and reads
+every element after a 4 KiB churn call. On the pre-fix compiler it panics with
+"returned []*T lost an element after the frame died"; it passes on both
+compilers now.
+
+The five eliminated hypotheses stand as true negatives, and the method note is
+worth keeping: a same-package read of the literal is NOT evidence - the reads
+that expose this defect are the ones that happen after the frame dies, which is
+why `makeThree(9)` had to return the slice for the bug to show.
+
+Gates: quickcheck 15/15, ptr_elem_lit_escape + text_compare_forms +
+compress_roundtrip + crypto_vectors through the harness, phase 8 netsmoke 17/17 (2 544 s),
+bootstrap fixpoint `s2 == s3` (cd9258fd).
