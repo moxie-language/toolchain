@@ -16,21 +16,33 @@ func main() {
 	if a[0] != 0 || a[1] != 0 || a[2] != 0 || a[3] != 0 || a[4] != 0 {
 		panic("clear on a slice")
 	}
-	// Through a view the length is the view's length, not the parent's.
+	// A subslice of a SLICE is a copy, so clearing it clears the copy and the
+	// parent keeps its elements. This block used to assert Go's view semantics
+	// (b[1] and b[2] zeroed) and therefore failed on both compilers; the copy
+	// rule is the language, so what is asserted here is that clear() cannot
+	// reach the parent at all.
 	b := []uint32{1, 2, 3, 4, 5}
 	clear(b[1:3])
-	if b[0] != 1 || b[1] != 0 || b[2] != 0 || b[3] != 4 || b[4] != 5 {
-		panic("clear on a subslice")
+	if b[0] != 1 || b[1] != 2 || b[2] != 3 || b[3] != 4 || b[4] != 5 {
+		panic("clear on a subslice reached the parent")
 	}
 	c := []uint32{1, 2, 3, 4, 5}
 	clear(c[2:])
-	if c[0] != 1 || c[1] != 2 || c[2] != 0 || c[4] != 0 {
-		panic("clear on a suffix")
+	if c[2] != 3 || c[4] != 5 {
+		panic("clear on a suffix reached the parent")
 	}
 	d := []uint32{1, 2, 3, 4, 5}
 	clear(d[:2])
-	if d[0] != 0 || d[1] != 0 || d[2] != 3 {
-		panic("clear on a prefix")
+	if d[0] != 1 || d[1] != 2 {
+		panic("clear on a prefix reached the parent")
+	}
+	// A fixed extent is the one place a subslice IS a view, so clearing the
+	// suffix of an array reaches the array.
+	var arr [5]uint32
+	arr[0], arr[1], arr[2], arr[3], arr[4] = 1, 2, 3, 4, 5
+	clear(arr[2:])
+	if arr[0] != 1 || arr[1] != 2 || arr[2] != 0 || arr[4] != 0 {
+		panic("clear on an array view did not reach the array")
 	}
 	// Multi-byte elements: the byte count is len*sizeof(elem). Clearing len
 	// elements instead would leave half of each word behind.
