@@ -22050,3 +22050,47 @@ Array declarations left, each with its reason, are the holdout list in round
 317 plus: the png/gif `tmp` scratch (done here), and
 `src/internal/trace/internal/tracev1/parser.mx`'s `Args [4]uint64`, which is an
 on-disk event record.
+
+## Round 319: W36 - an interface-wrapped writer loses its buffer across a return
+
+`compress/gzip` cannot round trip, and did not before this round's conversion
+(the pre-change tree dies with SIGSEGV in the same probe). The evidence, small
+enough to state exactly:
+
+    flate alone:  NewWriter(&buf) -> 39 bytes -> NewReader -> identical   OK
+    gzip:         NewWriter(&buf) -> 18 bytes -> NewReader -> "flate:
+                  corrupt input before offset 5"
+
+18 bytes is the 10-byte gzip header plus the 8-byte footer (`b9 c5 0f 1d` is
+crc32 of the payload, `21 00 00 00` is its length): the DEFLATE stream is empty.
+Between the two halves the runtime prints
+
+    moxie: codec arena escape: pointer into a transient frame arena preserved
+    instead of copied (unknown-extent pointee); that frame arena is leaked for
+    the pointer's lifetime
+
+so the compressor it built is writing through a basic-pointee pointer whose
+target was in a frame that has been released - the W33 family, on the
+`codecEscapeNote` branch instead of the stable-alias branch. `flate.NewWriter(z.w,
+z.level)` boxes an `io.Writer` inside the flate writer; the boxed pointer is
+"unknown extent" and is preserved rather than copied.
+
+`*gzip.Writer.Write` creates its compressor lazily, so `init` cannot be the
+place that fixes this; the fix belongs in the codec's unknown-extent escape path
+(or in how a boxed writer is carried), and it needs this probe as its fixture.
+Until then `compress/gzip` is broken for both compilers - note that
+`net/http/h2_bundle.mx` and `internal/profile` import it, and no gate exercises
+a gzip body.
+
+## Round 319 (cont.): the campaign's remaining declarations
+
+    src/crypto/internal/fips140/nistec/p256_asm.mx   22   //:build ignore
+    src/internal/xcoff/ar.mx + xcoff.mx              20   no importer, needs debug/dwarf
+    src/internal/coverage/*                          20   on-disk meta format, padding fields
+    src/crypto/secp256k1/{scalar,field}.mx            8   loop-indexed limbs: unroll, not rename
+    src/crypto/internal/fips140/nistec/p256{,_table,_ordinv}.mx 7  table/ordinv limbs
+    src/runtime/secalloc_chacha.mx                    5   writes through byte windows
+    src/runtime/{hashmap,ringbuf}.mx                  5   compiler-coupled bucket layout / post-fork
+    src/syscall/{exec_linux,syscall_unix}.mx          4   kernel ABI structs
+    src/internal/zstd/{huff,fse}.mx, gzip, gif reader  -   done this round
+    src/internal/trace/.../parser.mx                  1   on-disk event record
