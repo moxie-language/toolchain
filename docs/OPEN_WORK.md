@@ -22128,3 +22128,52 @@ about six rounds; the diagnostic is gone and the sites are clean.
 
 Gates: quickcheck 15/15 (slice_copy_rule restored to `base[:]` and passing),
 phase 8 netsmoke 2/2 (1 948 s), fixpoint `s4b == s4c` (d41bd227).
+
+## Round 321: W36 fixed - three defects behind "gzip does not round trip"
+
+A 33-byte payload through `compress/gzip` produced 18 bytes: the 10-byte header
+and the 8-byte trailer, with no DEFLATE stream between them, and the reader then
+said "flate: corrupt input". It was three separate defects:
+
+1. **gzip's compressor was created lazily inside `Write`.** A pointer allocated
+   in the callee's frame and stored through the receiver is the W10 shape, so
+   `Close` flushed a released object. It is created in `init()` now - the one
+   constructor that `NewWriter` and `Reset` both go through. This is also why
+   the codec printed its unknown-extent escape note: the arena was leaked for
+   the pointer, and the pointer's state was already gone.
+2. **zlib had the same shape one step later**: `writeHeader` created the
+   deflater on first use, so its output was `78 9c` and an Adler-32 with nothing
+   between them (6 bytes). `NewWriterLevelDict` and `Reset` create it through
+   `startCompressor()` now.
+3. **Both readers let inflate steal the trailer.** They passed the raw source to
+   inflate unless it was already a `flate.Reader`, and Moxie's inflate reads in
+   bulk rather than byte-wise: it drained the CRC32+size (gzip) or Adler-32
+   (zlib), so the trailer read that follows started from the wrong bytes. A
+   `*bytes.Buffer` source therefore decoded the data CORRECTLY and then failed
+   with "invalid checksum". Both readers always wrap the source in a
+   `bufio.Reader` now.
+
+`net/http/h2_bundle` imports gzip and no gate had ever exercised a gzip body;
+the fix leaves crypto/tls, png (zlib) and the netsmoke server green.
+
+New fixture `compress_roundtrip.mx`: gzip read back from a fresh `bytes.Reader`,
+from a second buffer, and from the buffer the writer used, plus the same for
+zlib, and it asserts a real payload exists (18/6 bytes is the failure
+signature). Builds and runs on both compilers.
+
+### W37, found while doing it: legacy rejects string comparison in a condition
+
+    func same(a []byte, b []byte) (ok bool) {
+        if string(a) != string(b) { return false }   // legacy: invalid operation
+        return true
+    }
+
+`a != b` on two `[]byte` compiles on both compilers; `string(a) != string(b)`
+is rejected by legacy with "moxie: invalid operation: != ([]byte is not
+comparable)" and accepted by stage4. In Moxie `string` and `[]byte` are one
+type, so legacy's `moxieComparable` is being consulted with a type it treats as
+a plain slice while the bare operand path is patched. The new fixture uses
+`bytes.Equal` so it builds on both; the gap itself is open.
+
+Gates: quickcheck 15/15, compress_roundtrip 2/2 through the harness, phase 8
+netsmoke 2/2, fixpoint `s4b == s4c` (d41bd227).
