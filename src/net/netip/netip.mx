@@ -723,22 +723,26 @@ func (ip *Addr) Prefix(b int32) (rprefix Prefix, rerr error) {
 // IPv6 addresses with zones are returned without their zone (use the
 // [Addr.Zone] method to get it).
 // The ip zero value returns all zeroes.
-// As16 returns the address as a fixed 16-byte array, not a slice: its main
-// consumers are the syscall sockaddr structures, whose fields are fixed arrays
-// because their layout is the kernel's. AsSlice is the slice form.
-func (ip *Addr) As16() (a16 [16]byte) {
-	byteorder.BEPutUint64At(a16[:], 0, ip.addr.hi)
-	byteorder.BEPutUint64At(a16[:], 8, ip.addr.lo)
+// As16 returns the address as a fresh 16-byte slice.
+//
+// It used to return a [16]byte. A fixed extent is a slice header in Moxie, and
+// the sockaddr fields these feed are slices now too, so the caller gets the
+// bytes it can actually hand on.
+func (ip *Addr) As16() (a16 []byte) {
+	a16 = []byte{:16}
+	byteorder.BEPutUint64At(a16, 0, ip.addr.hi)
+	byteorder.BEPutUint64At(a16, 8, ip.addr.lo)
 	return a16
 }
 
 // As4 returns an IPv4 or IPv4-in-IPv6 address in its 4-byte representation.
 // If ip is the zero [Addr] or an IPv6 address, As4 panics.
 // Note that 0.0.0.0 is not the zero Addr.
-// As4 returns the address as a fixed 4-byte array; see As16.
-func (ip *Addr) As4() (a4 [4]byte) {
+// As4 returns the address as a fresh 4-byte slice; see As16.
+func (ip *Addr) As4() (a4 []byte) {
 	if ip.z == z4 || ip.Is4In6() {
-		byteorder.BEPutUint32At(a4[:], 0, uint32(ip.addr.lo))
+		a4 = []byte{:4}
+		byteorder.BEPutUint32At(a4, 0, uint32(ip.addr.lo))
 		return a4
 	}
 	if ip.z == z0 {
@@ -753,14 +757,9 @@ func (ip *Addr) AsSlice() (rb []byte) {
 	case z0:
 		return nil
 	case z4:
-		var ret [4]byte
-		byteorder.BEPutUint32At(ret[:], 0, uint32(ip.addr.lo))
-		return ret[:]
+		return ip.As4()
 	default:
-		var ret [16]byte
-		byteorder.BEPutUint64At(ret[:], 0, ip.addr.hi)
-		byteorder.BEPutUint64At(ret[:], 8, ip.addr.lo)
-		return ret[:]
+		return ip.As16()
 	}
 }
 

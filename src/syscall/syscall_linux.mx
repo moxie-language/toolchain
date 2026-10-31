@@ -543,7 +543,7 @@ func (sa *SockaddrInet4) sockaddr(buf []byte) (r_Socklen _Socklen, rerr error) {
 		return 0, EINVAL
 	}
 	sockSetFamily(buf, AF_INET)
-	copy(sockIPv4Addr(buf), sa.Addr[:])
+	copy(sockIPv4Addr(buf), sa.Addr)
 	return SizeofSockaddrInet4, nil
 }
 
@@ -556,7 +556,7 @@ func (sa *SockaddrInet6) sockaddr(buf []byte) (r_Socklen _Socklen, rerr error) {
 	}
 	sockSetFamily(buf, AF_INET6)
 	abiPut32(buf, sockIn6OffScope, sa.ZoneId)
-	copy(sockIPv6Addr(buf), sa.Addr[:])
+	copy(sockIPv6Addr(buf), sa.Addr)
 	return SizeofSockaddrInet6, nil
 }
 
@@ -604,7 +604,7 @@ type SockaddrLinklayer struct {
 	Hatype   uint16
 	Pkttype  uint8
 	Halen    uint8
-	Addr     [8]byte
+	Addr     []byte // 8 bytes, supplied by the caller
 }
 
 func (sa *SockaddrLinklayer) sockaddr(buf []byte) (r_Socklen _Socklen, rerr error) {
@@ -620,7 +620,7 @@ func (sa *SockaddrLinklayer) sockaddr(buf []byte) (r_Socklen _Socklen, rerr erro
 	abiPut16(buf, sockLlOffHatype, sa.Hatype)
 	abiPut8(buf, sockLlOffPkttype, sa.Pkttype)
 	abiPut8(buf, sockLlOffHalen, sa.Halen)
-	copy(abiWindow(buf, sockLlOffAddr, sockLlAddrLen), sa.Addr[:])
+	copy(abiWindow(buf, sockLlOffAddr, sockLlAddrLen), sa.Addr)
 	return SizeofSockaddrLinklayer, nil
 }
 
@@ -653,13 +653,13 @@ func anyToSockaddr(rsa []byte) (rsockaddr Sockaddr, rerr error) {
 		return sa, nil
 
 	case AF_PACKET:
-		sa := &SockaddrLinklayer{}
+		sa := &SockaddrLinklayer{Addr: []byte{:sockLlAddrLen}}
 		sa.Protocol = abiGet16(rsa, sockLlOffProtocol)
 		sa.Ifindex = int32(abiGet32(rsa, sockLlOffIfindex))
 		sa.Hatype = abiGet16(rsa, sockLlOffHatype)
 		sa.Pkttype = abiGet8(rsa, sockLlOffPkttype)
 		sa.Halen = abiGet8(rsa, sockLlOffHalen)
-		copy(sa.Addr[:], abiWindow(rsa, sockLlOffAddr, sockLlAddrLen))
+		copy(sa.Addr, abiWindow(rsa, sockLlOffAddr, sockLlAddrLen))
 		return sa, nil
 
 	case AF_UNIX:
@@ -688,16 +688,16 @@ func anyToSockaddr(rsa []byte) (rsockaddr Sockaddr, rerr error) {
 		return sa, nil
 
 	case AF_INET:
-		sa := &SockaddrInet4{}
+		sa := &SockaddrInet4{Addr: []byte{:4}}
 		sa.Port = sockPort(rsa)
-		copy(sa.Addr[:], sockIPv4Addr(rsa))
+		copy(sa.Addr, sockIPv4Addr(rsa))
 		return sa, nil
 
 	case AF_INET6:
-		sa := &SockaddrInet6{}
+		sa := &SockaddrInet6{Addr: []byte{:16}}
 		sa.Port = sockPort(rsa)
 		sa.ZoneId = abiGet32(rsa, sockIn6OffScope)
-		copy(sa.Addr[:], sockIPv6Addr(rsa))
+		copy(sa.Addr, sockIPv6Addr(rsa))
 		return sa, nil
 	}
 	return nil, EAFNOSUPPORT

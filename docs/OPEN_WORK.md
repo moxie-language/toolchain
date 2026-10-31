@@ -21642,3 +21642,49 @@ Candidate reductions, in order of expected value (not measured yet):
    precisely so growth can append instead.
 3. 256 MB for the domain region is generous when the root only uses 131 MB and
    never grows.
+
+## Round 308: address values are slices (sockaddr, netip, dnsmessage)
+
+A `[4]byte`/`[16]byte` address field is a slice header in Moxie, so every
+address VALUE in the tree is a slice now: `SockaddrInet4.Addr`,
+`SockaddrInet6.Addr`, `SockaddrLinklayer.Addr` (and the net_fake stubs),
+`netip.Addr.As4()`/`As16()`, dnsmessage's `AResource.A`/`AAAAResource.AAAA`,
+`net.rawdns`'s nameserver address, and the netip locals behind them.
+
+These structs are converted into the ABI buffer by `sockaddr()` - they are not
+handed to the kernel - so their layout was never the kernel's, and the comment
+that said otherwise ("As16 returns a fixed 16-byte array ... because their
+layout is the kernel's") is deleted with the code it justified.
+
+The trap this class sets, and the reason it was done in one pass: `s[a:]` on a
+slice is a COPY, so `copy(sa.Addr[:], ip4)` still compiles and writes into a
+throwaway. Every one of those 16 sites became `copy(sa.Addr, ...)`, and every
+construction site now allocates the extent (`SockaddrInet4{Port: p, Addr:
+[]byte{:4}}`) BEFORE the kernel call fills it. A nil `Addr` would compile too,
+and the address would silently stay 0.0.0.0 - so the receive-side buffers in
+`net/udpsock_posix.mx` are allocated where the struct is built.
+
+Verified: a probe that binds a TCP listener on 127.0.0.1:0, dials it, accepts,
+moves a payload, and reads the accepted peer back (bind/connect build the buffer
+from the struct; getsockname/accept fill the struct from the buffer), then does
+a UDP send/recv and checks the returned peer's four bytes and port, plus
+`netip.As4/As16` lengths and a dnsmessage Message.
+
+## Round 309: two bugs found while probing the address work, both recorded not fixed
+
+- **W29: stage4 accepts `+` for text concatenation in a user package; legacy
+  rejects it** ("moxie: '+' is not allowed for text concatenation, use |
+  operator"). The restriction exists in `legacy/compiler/restrict.go` and stage4
+  only enforces it somewhere the probe did not reach. `src/net/ipsock.mx` uses
+  `+` legitimately (stdlib is exempt), so this is about USER packages only.
+- **W30: rendering a just-returned IP through `JoinHostPort` gives garbage**,
+  under BOTH compilers:
+      net.JoinHostPort(net.IPString(ip), "53443")   -> "2.0.0.0:53443"
+      net.JoinHostPort("127.0.0.1", "53443")        -> "127.0.0.1:53443"
+  and the same call renders a random address on each run (32.76.9.213, 2.0.0.0),
+  which is a dangling pointer, not a formatting mistake. The peer's BYTES are
+  correct (`IPString(ua.IP)` alone prints "127.0.0.1"), so the sockaddr
+  conversion is right and the corruption is in the string path. This is very
+  likely the same arena-lifetime class as W27 and is the second symptom to use
+  when chasing it: it reproduces with `ufrom.String()` on a received UDP address
+  and needs no idna at all.
