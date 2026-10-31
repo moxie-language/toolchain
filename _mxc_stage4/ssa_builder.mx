@@ -756,14 +756,28 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 		return
 	}
 	if d.Name.Value == "init" {
+		// Name the declaration: the message used to be a bare sentence with no
+		// line, and a package with a stray second init() (two table conversions
+		// landed in different rounds, twice - internal/trace/tracev2 and
+		// internal/trace) meant reading every file in the directory to find it.
+		// errPos renders as "line:N: ", which the diagnostic printer turns into
+		// the file and line, the same as every other compile error here.
+		line := int32(0)
+		if dp := d.Pos(); dp.IsKnown() {
+			line = int32(dp.Line())
+		}
+		prefix := ""
+		if line > 0 {
+			prefix = "line:" | simpleItoa(line) | ": "
+		}
 		if pb.pkg.Pkg.Name == "main" && !testWrapsLibrary() {
 			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-			push(cctx.compileErrors, "init() is not allowed in main package: use main() for program entry")
+			push(cctx.compileErrors, prefix | "init() is not allowed in main package: use main() for program entry")
 			return
 		}
 		if pb.initFn != nil {
 			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-			push(cctx.compileErrors, "at most one init() per package")
+			push(cctx.compileErrors, prefix | "at most one init() per package: merge this body into the package's init()")
 			return
 		}
 	}

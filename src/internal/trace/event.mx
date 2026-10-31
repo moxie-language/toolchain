@@ -958,6 +958,93 @@ func init() {
 		tracev2.ProcSyscall:          ProcRunning,
 		tracev2.ProcSyscallAbandoned: ProcIdle,
 	}
+	// The tables from order.mx and tracev1.mx live here too: Moxie allows one
+	// init() per package, so a conversion that lands in two rounds must not
+	// split it.
+	errSkip = errors.New("skip event")
+	initOrderConsts()
+	v1BuiltinStrings = []string{
+		"forever", "preempted", "runtime.Gosched", "sleep",
+		"chan send", "chan receive", "network", "sync",
+		"sync.(*Cond).Wait", "select", "", "GC mark assist wait for work",
+		"", "GC mark termination", "GC sweep termination", "write heap dump",
+		"goroutine profile", "goroutine profile cleanup", "all goroutine stack trace",
+		"read mem stats", "AllThreadsSyscall", "GOMAXPROCS", "start trace", "stop trace",
+		"CountPagesInUse (test)", "ReadMetricsSlow (test)", "ReadMemStatsSlow (test)",
+		"PageCachePagesLeaked (test)", "ResetDebugLog (test)",
+	}
+	orderingDispatchTbl = []orderingHandleFunc{
+		// Procs.
+		tracev2.EvProcsChange: (*ordering).advanceAnnotation,
+		tracev2.EvProcStart:   (*ordering).advanceProcStart,
+		tracev2.EvProcStop:    (*ordering).advanceProcStop,
+		tracev2.EvProcSteal:   (*ordering).advanceProcSteal,
+		tracev2.EvProcStatus:  (*ordering).advanceProcStatus,
+
+		// Goroutines.
+		tracev2.EvGoCreate:            (*ordering).advanceGoCreate,
+		tracev2.EvGoCreateSyscall:     (*ordering).advanceGoCreateSyscall,
+		tracev2.EvGoStart:             (*ordering).advanceGoStart,
+		tracev2.EvGoDestroy:           (*ordering).advanceGoStopExec,
+		tracev2.EvGoDestroySyscall:    (*ordering).advanceGoDestroySyscall,
+		tracev2.EvGoStop:              (*ordering).advanceGoStopExec,
+		tracev2.EvGoBlock:             (*ordering).advanceGoStopExec,
+		tracev2.EvGoUnblock:           (*ordering).advanceGoUnblock,
+		tracev2.EvGoSyscallBegin:      (*ordering).advanceGoSyscallBegin,
+		tracev2.EvGoSyscallEnd:        (*ordering).advanceGoSyscallEnd,
+		tracev2.EvGoSyscallEndBlocked: (*ordering).advanceGoSyscallEndBlocked,
+		tracev2.EvGoStatus:            (*ordering).advanceGoStatus,
+
+		// STW.
+		tracev2.EvSTWBegin: (*ordering).advanceGoRangeBegin,
+		tracev2.EvSTWEnd:   (*ordering).advanceGoRangeEnd,
+
+		// GC events.
+		tracev2.EvGCActive:           (*ordering).advanceGCActive,
+		tracev2.EvGCBegin:            (*ordering).advanceGCBegin,
+		tracev2.EvGCEnd:              (*ordering).advanceGCEnd,
+		tracev2.EvGCSweepActive:      (*ordering).advanceGCSweepActive,
+		tracev2.EvGCSweepBegin:       (*ordering).advanceGCSweepBegin,
+		tracev2.EvGCSweepEnd:         (*ordering).advanceGCSweepEnd,
+		tracev2.EvGCMarkAssistActive: (*ordering).advanceGoRangeActive,
+		tracev2.EvGCMarkAssistBegin:  (*ordering).advanceGoRangeBegin,
+		tracev2.EvGCMarkAssistEnd:    (*ordering).advanceGoRangeEnd,
+		tracev2.EvHeapAlloc:          (*ordering).advanceHeapMetric,
+		tracev2.EvHeapGoal:           (*ordering).advanceHeapMetric,
+
+		// Annotations.
+		tracev2.EvGoLabel:         (*ordering).advanceAnnotation,
+		tracev2.EvUserTaskBegin:   (*ordering).advanceUserTaskBegin,
+		tracev2.EvUserTaskEnd:     (*ordering).advanceUserTaskEnd,
+		tracev2.EvUserRegionBegin: (*ordering).advanceUserRegionBegin,
+		tracev2.EvUserRegionEnd:   (*ordering).advanceUserRegionEnd,
+		tracev2.EvUserLog:         (*ordering).advanceAnnotation,
+
+		// Coroutines. Added in Go 1.23.
+		tracev2.EvGoSwitch:        (*ordering).advanceGoSwitch,
+		tracev2.EvGoSwitchDestroy: (*ordering).advanceGoSwitch,
+		tracev2.EvGoCreateBlocked: (*ordering).advanceGoCreate,
+
+		// GoStatus event with a stack. Added in Go 1.23.
+		tracev2.EvGoStatusStack: (*ordering).advanceGoStatus,
+
+		// Experimental events.
+
+		// Experimental heap span events. Added in Go 1.23.
+		tracev2.EvSpan:      (*ordering).advanceAllocFree,
+		tracev2.EvSpanAlloc: (*ordering).advanceAllocFree,
+		tracev2.EvSpanFree:  (*ordering).advanceAllocFree,
+
+		// Experimental heap object events. Added in Go 1.23.
+		tracev2.EvHeapObject:      (*ordering).advanceAllocFree,
+		tracev2.EvHeapObjectAlloc: (*ordering).advanceAllocFree,
+		tracev2.EvHeapObjectFree:  (*ordering).advanceAllocFree,
+
+		// Experimental goroutine stack events. Added in Go 1.23.
+		tracev2.EvGoroutineStack:      (*ordering).advanceAllocFree,
+		tracev2.EvGoroutineStackAlloc: (*ordering).advanceAllocFree,
+		tracev2.EvGoroutineStackFree:  (*ordering).advanceAllocFree,
+	}
 }
 
 func _eventKindStrings() (r [][]byte) { return eventKindStringsTbl }
