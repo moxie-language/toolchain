@@ -22489,3 +22489,104 @@ directory to find the stray one.
 quickcheck 15/15, phase 1b 45 packages ok (1 083 s), phase 3 IR validation PASS,
 phase 8 netsmoke 17/17 (2 566 s), reject_string_array PASS through the 0b harness,
 bootstrap fixpoint `s2 == s3` (27b81561).
+
+## Round 328: the whole suite, run for the first time in a while - five red phases
+
+Rounds 322-327 fixed one defect at a time and ran the gates that were relevant
+to the change. This round ran every phase and fixed what was red. Five were.
+
+### 1b: coverage magic and two stray inits
+
+Recorded in round 327 - `internal/coverage/{encodecounter,encodemeta}` assigned
+text to `Magic [4]byte` on-disk fields, and `internal/trace` / `internal/trace
+/tracev2` had two and three `init()` functions. Both fixed there; the
+one-init diagnostic now names the declaration, because that class has bitten
+three times (xcoff first).
+
+### 6: clearzero asserted Go's view semantics
+
+    b := []uint32{1, 2, 3, 4, 5}
+    clear(b[1:3])
+    if b[1] != 0 { panic("clear on a subslice") }   // both compilers panicked
+
+A subslice of a slice is a COPY, so `clear` reaches the copy and the parent
+keeps its elements. The fixture had been written with Go's view semantics and
+therefore failed on both compilers, which phase 6 reports as two failures. It
+now asserts the copy rule, and keeps the one case where a subslice IS a view -
+`arr[2:]` of a fixed extent - because that is exactly the distinction the
+builtin has to pin.
+
+### 5: two dead `unsafe` imports took the whole wasm target down
+
+    moxie build -target wasm ./src/syscall
+    ; "unsafe" imported and not used
+
+`syscall_js.mx` and `net_fake.mx` both carry `//:build js && wasm` and both
+declared `"unsafe"` with no `unsafe.` reference. Everything on the wasm target
+reaches syscall through net, so 59 of the 118 fixtures failed with "wasm build
+failed" for that one reason. The imports are gone.
+
+That diagnostic was also the only compile error in the tree that named no file:
+
+    main.mx:5: "unsafe" imported and not used
+
+It renders through the same `line:N: ` prefix now. Finding the two sites by hand
+- one per sweep round - is what that cost.
+
+Also `slice_copy_rule` could not pass on wasm by construction: its only success
+signal was `os.Exit(0)`, and exit on wasm is a wasi proc_exit, which the browser
+harness sees as the module trapping. Phase 5 compares output; the fixture prints
+"slice copy rule ok" now.
+
+### 7 (and the reason it stays red): an out-of-tree package
+
+    ui:relay-build FAIL  mxc: compile error for git.smesh.lol/nostr/pkg/signer/p8k
+    p8k.mx:128: cannot use value of type [32]byte as string in argument to function
+
+The relay lives at /home/mleku/moxie/git.smesh.lol/morly and depends on the
+nostr repo, which still passes fixed extents where this tree's crypto API takes
+slices - `secp256k1.VerifySchnorr(s.pub, m, sg)` with `var m [32]byte`. That
+API changed in round "crypto: the secp256k1 byte APIs take slices" (e8109bc8),
+and the caller was never migrated. The compiler is right; the fix is `m[:]` at
+those call sites, in a repository outside this one.
+
+### 6 also needs the machine's GOROOT fixed
+
+phase 6 shells out to `go build` for its reference program and this host exports
+`GOROOT=/home/mleku/go`, which contains only `pkg/`. Every Go invocation
+therefore fails with "package fmt is not in std", including `legacy/build.sh`.
+Running the gates with `env -u GOROOT` (go then resolves /opt/go1.25.3 from its
+own location) makes phase 6 green. Nothing in the tree is at fault and no script
+was changed for it.
+
+### Where phase 5 stands after the imports fix
+
+The sweep went from 59 failures to 22 with the dead imports removed and
+`slice_copy_rule` made comparable. `addr_of_composite_lit` passes on a re-run,
+so at least that one was the load (the machine was at load average 13 through
+this round). The remaining failures, with what is known so far:
+
+- `ip_api`, `net_buffers_api`: the wasm build of `net` fails with cascading
+  nonsense, not a real error - `udpsock_posix.mx:107: not enough arguments in
+  call (want 1, have 0)` and `:108: Port undefined (type int32 has no field or
+  method Port)`. Both are the "argument silently dropped because its type did
+  not resolve" symptom round 311 recorded for net's js arm: `SockaddrInet4` /
+  `NewSockaddrInet4` are unix-only, so on js/wasm the value is an unresolved
+  type and the arity check then reports a shifted call. The fix is a js/wasm
+  definition of those sockaddr helpers (or a clear "undefined" instead of the
+  cascade), not a change in the caller.
+- `ed25519_roundtrip`, `ed25519_vectors`, `x25519_ecdh`, `poly1305_aead`,
+  `rand_fill`, `tls_handshake`: build fine, trap in the browser run. A crypto
+  runtime path on wasm, not yet diagnosed.
+- `asn1_oid_der`, `asn1_tag_crosspkg`, `defer_in_loop`, `forward_type_
+  constructors`, `generic_field_read`, `generic_forward_field`,
+  `generic_type_method`, `shift_compare_context`, `web_dom_roundtrip`,
+  `iface_ptr_recv_crosspkg`, `slice_alias_crosspkg`, `array_elem_addr`,
+  `bzip2_gif_roundtrip`: not yet looked at.
+
+Gates on this tree: quickcheck 15/15, phase 1 4/4 packages, phase 2 selfhost
+PASS (fixpoint stage2 == stage3), phase 3 IR validation PASS, phase 4 PASS,
+phase 6 PASS (with `env -u GOROOT`), phase 8 netsmoke 17/17 (2 566 s), phase 1b
+45 packages ok (1 083 s), bootstrap fixpoint `s2 == s3` (01af5895), phase 5
+96/118 with the remaining 22 listed above, phase 7 red only on the out-of-tree
+nostr call site.
