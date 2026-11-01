@@ -22866,3 +22866,44 @@ arithmetic, x25519, poly1305's limbs, and tls's transport), so fixing it should
 clear most of the 22 remaining wasm fixtures. The next step is the emitted IR
 for `math/bits.Mul64` on the wasm target, which the backend now makes easy to
 reproduce in isolation.
+
+### Round 330, the IR: Mul64 is folded to a 128-bit multiply
+
+The wasm module's `math/bits.Mul64` is one multiply, not the 32-bit-half algorithm
+the source writes:
+
+    %0 = zext i64 %x to i128
+    %1 = zext i64 %y to i128
+    %2 = mul nuw i128 %1, %0
+    %3 = lshr i128 %2, 64
+    %t46 = trunc nuw i128 %3 to i64      ; hi
+    %t49 = mul i64 %y, %x                ; lo
+
+A pattern fold turns "mask both operands to 32 bits, multiply the halves, shift
+and add" into a wide multiply. On x86-64 LLVM legalises `mul i128` to a handful
+of 64-bit multiplies and the result is exact; on wasm32 the same instruction is
+legalised through a runtime call, and `__multi3` is in the module (two
+occurrences in the name section, and no provider anywhere in this tree - it comes
+from the compiler-rt archive clang links). The low word is always right and the
+high word is wrong, which is what a broken or mis-called `__multi3` looks like.
+
+So the candidates, in order:
+
+1. The pattern fold should not fire when the target has no native 128-bit
+   multiply, or it should be checked on one: the fold replaces verified portable
+   arithmetic with a runtime call whose wasm implementation nobody in this tree
+   tests.
+2. If the fold stays, `__multi3` on wasm32 has to be verified - it is the only
+   place a 64x64->128 product happens on that target, and everything that needs
+   one goes through it.
+
+This is the block to pull for the remaining 22 wasm fixtures: the field
+arithmetic behind ed25519, x25519, poly1305's limbs and tls's transport all run
+through `Mul64`.
+
+Also worth keeping from this round: a probe under `crypto/internal` cannot be an
+importing program, so the diagnostic that localised this was a temporary
+`func init()` self-test inside `edwards25519/field` printing four checkpoints -
+`SetBytes`/`Bytes` round trip, `sqrtM1^2 == -1`, `Square`'s first limb, and
+`SqrtRatio`'s verdict. `Square`'s limb differed between targets and named the
+operation in one run.
