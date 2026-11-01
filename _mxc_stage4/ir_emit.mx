@@ -581,6 +581,53 @@ func (e *irEmitter) declareExternalGlobal(g *SSAGlobal) {
 	e.appendEmitKVPend(emitKV{name, typ})
 }
 
+// externDropsCtx reports whether a call to fn omits the hidden context
+// argument, which is the C ABI rule for an exported symbol. The CALL site
+// decides this from fn.externalSymbol; the declaration must decide it the same
+// way, and it did not, so one symbol could carry two signatures:
+//
+//	declare i64 @strlen(ptr, ptr)      ; in the runtime package's IR
+//	call    i64 @strlen(ptr nonnull)   ; at every call site
+//
+// Native links are quiet about it because libc defines strlen and the
+// declaration is only a name. wasm-ld compares the definition it synthesises
+// from that declaration against the calls and replaces every mismatched callee
+// with a three-byte trap named `signature_mismatch:strlen` - which is how
+// encoding/asn1 died on wasm (round 332). The name is looked up in the export
+// map as well as on the function because the declaration is sometimes emitted
+// from a function object built before the map was consulted.
+func (e *irEmitter) externDropsCtx(fn *SSAFunction) (ok bool) {
+	if fn == nil {
+		return false
+	}
+	if fn.externalSymbol != "" {
+		return true
+	}
+	if cctx.compileExportMap == nil {
+		return false
+	}
+	if _, hit := cctx.compileExportMap[fn.name]; hit {
+		return true
+	}
+	// The declaration is also emitted for a synthetic function built from the
+	// symbol alone, whose "name" is the mangled symbol rather than the source
+	// name, so the exported NAME is matched too.
+	sym := e.funcSymbol(fn)
+	if len(sym) > 0 && sym[0] == '@' {
+		sym = sym[1:]
+	}
+	if len(sym) >= 2 && sym[0] == '"' && sym[len(sym)-1] == '"' {
+		sym = sym[1 : len(sym)-1]
+	}
+	for k, v := range cctx.compileExportMap {
+		_ = k
+		if v == sym {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 	if fn == nil || len(fn.Blocks) > 0 {
 		return
@@ -595,7 +642,7 @@ func (e *irEmitter) declareExternalFunc(fn *SSAFunction) {
 	retType := e.funcRetType(fn)
 	useSret := needsSret(retType)
 	isIntrinsic := mxutil.HasPrefix(sym, "@llvm.") || mxutil.HasPrefix(sym, "@\"llvm.")
-	isExport := fn.externalSymbol != ""
+	isExport := e.externDropsCtx(fn)
 	skipCtx := isIntrinsic || isExport
 	params := ""
 	if useSret {
@@ -1939,7 +1986,18 @@ func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
 			n++
 		}
 	}
-	if !isIntrinsic {
+	// An exported symbol is C ABI: no hidden context argument. This is the
+	// declaration every bodyless function gets, and it is where the extra
+	// parameter came from:
+	//
+	//	declare i64 @strlen(ptr, ptr)      ; here
+	//	call    i64 @strlen(ptr nonnull)   ; at every call site
+	//
+	// Native is quiet about it (libc defines strlen and the declaration is
+	// only a name); wasm-ld compares the definition it synthesises from this
+	// declaration with the calls and replaces each mismatched callee with a
+	// trap named `signature_mismatch:strlen`.
+	if !isIntrinsic && !e.externDropsCtx(f) {
 		if n > 0 { decl = decl | ", " }
 		decl = decl | "ptr"
 	}
