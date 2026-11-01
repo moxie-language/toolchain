@@ -108,7 +108,13 @@ for t in "${TARGETS[@]}"; do
         printf '%-32s SKIP  (native build failed)\n' "$name"
         continue
     fi
-    "$d/native" >"$d/native.out" 2>&1
+    # stdout only, on both sides. The reference is the program's output; its
+    # stderr is diagnostics, and a diagnostic the wasm target cannot write (no
+    # fd 2 before round 333) or writes at a different moment is not a
+    # difference in the program's answer. A real failure still shows: the exit
+    # code of the native run is checked, and a wasm trap reaches the run as an
+    # error rather than as clean output.
+    "$d/native" >"$d/native.out" 2>/dev/null
     nrc=$?
 
     # wasm module
@@ -123,7 +129,12 @@ for t in "${TARGETS[@]}"; do
     # deliver run.py's own wait_for_function timeout and the call blocks
     # forever: bound each run here, or one bad module stalls the whole suite
     # and hides every later result. RUN_TIMEOUT is seconds.
-    timeout "${RUN_TIMEOUT:-60}" python3 "$ROOT/tests/wasm/run.py" -q "$d/app.wasm" >"$d/wasm.out" 2>&1
+    # stdout and stderr separately: stdout is the module's own output and is
+    # what gets diffed, stderr is the driver's diagnostics (the module's stderr,
+    # a JS error, the console). Merging them, as this did, put a runtime warning
+    # into the compared output and made a fixture look wrong for saying
+    # something on fd 2 that the native reference also says.
+    timeout "${RUN_TIMEOUT:-60}" python3 "$ROOT/tests/wasm/run.py" -q "$d/app.wasm" >"$d/wasm.out" 2>"$d/wasm.err"
     rrc=$?
     if [ "$rrc" -ne 0 ]; then
         if [ "$rrc" -eq 124 ]; then
@@ -131,7 +142,7 @@ for t in "${TARGETS[@]}"; do
         else
             printf '%-32s FAIL  (browser run failed)\n' "$name"
         fi
-        tail -5 "$d/wasm.out" | sed 's/^/      /'
+        { tail -5 "$d/wasm.err"; tail -3 "$d/wasm.out"; } 2>/dev/null | sed 's/^/      /'
         FAIL=$((FAIL+1))
         continue
     fi

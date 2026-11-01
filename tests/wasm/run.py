@@ -8,6 +8,7 @@ Exits non-zero if the module failed to load or produced an error.
 import functools
 import http.server
 import json
+import os
 import pathlib
 import socketserver
 import sys
@@ -33,8 +34,14 @@ BUNDLE = raw[raw.index("--bundle") + 1] if "--bundle" in raw else None
 BRIDGE = raw[raw.index("--bridge") + 1] if "--bridge" in raw else None
 WASM = next((a for a in args if a not in ("-q", "--sw", "--app", "--bundle", "--bridge")
              and a not in (SW, APP, BUNDLE, BRIDGE)), str(ROOT / "app.wasm"))
-TIMEOUT = 20000
-SW_TIMEOUT = 45000
+# How long the page waits for the module to boot. The caller owns this bound:
+# a module that never yields can only be stopped from outside, so validate.sh
+# wraps the whole run in RUN_TIMEOUT and this is the friendlier, more specific
+# bound inside it. RUN_WAIT_MS raises it for a module whose load is genuinely
+# slow (a 7MB crypto closure instantiating in a worker), which is information
+# the gate should show as a slow pass rather than as a boot failure.
+TIMEOUT = int(os.environ.get("RUN_WAIT_MS", "20000"))
+SW_TIMEOUT = int(os.environ.get("RUN_WAIT_MS", "45000"))
 
 
 REQUESTS = []
@@ -133,7 +140,17 @@ def main():
     if not QUIET:
         print("stdout: " + json.dumps(out["logs"]))
     if out["errs"]:
-        print("console errors: " + json.dumps(out["errs"]))
+        # A module's stderr is diagnostics, and -q promises that stdout carries
+        # the program's output and nothing else: the caller diffs it against the
+        # native run. So in quiet mode the diagnostics go to this process's
+        # stderr, where they stay readable in the log and stay out of the diff.
+        # A runtime warning the wasm target emits (a codec arena escape, say) is
+        # then visible without making the fixture look wrong.
+        if QUIET:
+            for e in out["errs"]:
+                sys.stderr.write(e if e.endswith("\n") else e + "\n")
+        else:
+            print("console errors: " + json.dumps(out["errs"]))
     if out["error"]:
         # A module that traps never reaches the end of main, so the logs it did
         # produce are the only evidence of how far it got - and in -q mode they

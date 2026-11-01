@@ -15,6 +15,19 @@ import { makeDomProxy } from './relay.mjs';
 
 let memory;
 
+// A domain that ends by calling os.Exit(0) finished; it did not fail. The
+// host has no process to end, so syscall.Exit reports itself by throwing, and
+// the exit code is carried on the thrown object. Without this a clean exit is
+// posted as an error and the module's whole output is discarded - the fixture
+// that calls os.Exit(0) at the end of main looked like a crash.
+function settled(e, onFailure) {
+  if (e && e.moxieExit === 0) {
+    globalThis.postMessage({ kind: 'done' });
+    return;
+  }
+  onFailure();
+}
+
 globalThis.addEventListener('error', (e) => {
   globalThis.postMessage({ kind: 'error', error: String((e && e.error && e.error.stack) || e.message) });
 });
@@ -74,7 +87,7 @@ function runRoot(wasmPath, relayPort, appBridgeUrl, appPort) {
     inst.exports._start();
     globalThis.postMessage({ kind: 'done' });
   }).catch((e) => {
-    globalThis.postMessage({ kind: 'error', error: String((e && e.stack) || e) });
+    settled(e, () => globalThis.postMessage({ kind: 'error', error: String((e && e.stack) || e) }));
   });
 }
 
@@ -97,7 +110,7 @@ function runEntry(wasmPath, fnIdx, args, chanList) {
     inst.exports.__spawn_entry(fnIdx, ptr, args.length, hptr, handles.length);
     globalThis.postMessage({ kind: 'done' });
   }).catch((e) => {
-    globalThis.postMessage({ kind: 'error', error: String((e && e.stack) || e) });
+    settled(e, () => globalThis.postMessage({ kind: 'error', error: String((e && e.stack) || e) }));
   });
 }
 

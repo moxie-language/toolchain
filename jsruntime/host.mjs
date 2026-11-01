@@ -960,8 +960,13 @@ export function buildHostImports(mem) {
       // libc write, pulled in by the compiler-side C shims.
       write: () => -1,
       // syscall.Exit has no process to terminate in a browser. Report the
-      // code through the host's error path so it is visible, not silent.
-      'syscall.Exit': (code) => { throw new Error(`exit ${code | 0}`); },
+      // code through the host's error path so it is visible, not silent, and
+      // carry it on the thrown object: code 0 unwinds the stack exactly the
+      // same way but means the program was *finished*, and worker-host
+      // reports that as done instead of as a crash.
+      'syscall.Exit': (code) => {
+        throw Object.assign(new Error(`exit ${code | 0}`), { moxieExit: code | 0 });
+      },
     }, {
       get(target, prop) {
         if (prop in target) {
