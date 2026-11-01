@@ -23214,3 +23214,30 @@ ca scan returns against the two records the index holds.
 Two more test-side fixes from the same run: a `[]string` printed with `%v` into
 a `...Stringer` variadic (the compiler is right to refuse it), and the sockaddr
 literals from round 334.
+
+### Round 335, the one still red: TestIngestDeletionOtherAuthor
+
+Evidence gathered, in the order it was found (all instrumentation since removed):
+
+- `tCount` is `eng.QueryEvents(&filter.F{})`, an empty filter, which takes the
+  default branch: `scanCA(0, MaxInt64)`, i.e. the created-at index over the whole
+  time range.
+- The ca index reports `Count()==2` at scan time, and the scan returns **1**
+  serial (`DBG collect total=2` / `DBG found=1`).
+- The two events differ in `CreatedAt` (`now`, `now+1`) and in serial, so their
+  ca keys cannot be equal unless the WAL hands out the same serial twice.
+- The fetch loop is not the loss: the last `DBG fetch serials=` for that query
+  is 1, so the serial is already missing before `GetBySerial`.
+
+So the range [MakeCA(0,0), MakeCA(MaxInt64, serial.Max)] over a two-record ca
+index yields one record. Next probes, in order: whether the two ca keys really
+differ (print them from `serialSink.Add`, which is where a record can also be
+dropped by `isDeleted` - `handleDeletion` in the same test deletes nothing, but
+`isDeleted` is the other silent skip in that loop), and whether `Append` can
+return the same serial twice, which would make the keys equal and let the
+merge's dedup collapse them.
+
+What is NOT in doubt: the two rounds of key/sort fixes are real and measured.
+The morly suite went from 38 tests passing before its first failure to 153, and
+the three failures it exposed on the way (duplicate detection, WoT depth, word
+search) are closed.
