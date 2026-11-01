@@ -214,6 +214,26 @@ func codecIsStableArenaAddr(p uintptr) (ok bool) {
 // aliased, because a copied object is a wrong program while a copied byte
 // range is only a copied value.
 func codecSovDataAlias(p uintptr) (ok bool) {
+	return codecSovDataLive(p)
+}
+
+// codecSovDataLive reports whether p points into a sovereign data arena that
+// outlives the frame now returning, and marks that group escaped so nothing
+// compacts the block away while an alias of it is in the caller's hands.
+//
+// A sovereign arena lives exactly as long as its receiver, so a pointer into
+// one is not transient just because this frame is returning: it is transient
+// only when the RECEIVER itself lives in the frame being released, which is
+// what sovGroupInDyingArena answers. Without this, a struct aliased by identity
+// (a read-only method returning its receiver's objects) was still declared
+// "dying" by retPointeeDies purely because one of its fields pointed into the
+// pointee's OWN sovereign arena, and the whole object was deep-copied: every
+// mutation after the return landed on the copy. The store's
+// Engine.allFiles -> flushSidecars path lost every flush bookkeeping update
+// that way, while the copies still wrote to the same file descriptors, so the
+// .buf sidecar accumulated duplicate records and a range scan that sized
+// itself from Count() silently dropped the newest event.
+func codecSovDataLive(p uintptr) (ok bool) {
 	if !codecRetTransient || domainRoot == nil {
 		return false
 	}
@@ -513,10 +533,12 @@ func retPointeeDies(p unsafe.Pointer, tp uintptr) (ok bool) {
 	switch retKindOf(tp) {
 	case KindPointer, KindUnsafePointer:
 		q := *(*unsafe.Pointer)(p)
-		return q != nil && uintptr(q) >= 1048576 && !codecIsStableAddr(uintptr(q))
+		return q != nil && uintptr(q) >= 1048576 && !codecIsStableAddr(uintptr(q)) &&
+			!codecSovDataLive(uintptr(q))
 	case KindBytes, KindSlice:
 		sv := *(*_string)(p)
-		return sv.ptr != nil && !codecIsStableAddr(uintptr(unsafe.Pointer(sv.ptr)))
+		return sv.ptr != nil && !codecIsStableAddr(uintptr(unsafe.Pointer(sv.ptr))) &&
+			!codecSovDataLive(uintptr(unsafe.Pointer(sv.ptr)))
 	case KindStruct:
 		u := retUnderAddr(tp)
 		if u == 0 {
@@ -561,7 +583,8 @@ func retPointeeDies(p unsafe.Pointer, tp uintptr) (ok bool) {
 		return false
 	case KindMap, KindChan, KindFunc:
 		q := *(*unsafe.Pointer)(p)
-		return q != nil && uintptr(q) >= 1048576 && !codecIsStableAddr(uintptr(q))
+		return q != nil && uintptr(q) >= 1048576 && !codecIsStableAddr(uintptr(q)) &&
+			!codecSovDataLive(uintptr(q))
 	}
 	return false
 }

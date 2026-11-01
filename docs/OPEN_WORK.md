@@ -23241,3 +23241,56 @@ What is NOT in doubt: the two rounds of key/sort fixes are real and measured.
 The morly suite went from 38 tests passing before its first failure to 153, and
 the three failures it exposed on the way (duplicate detection, WoT depth, word
 search) are closed.
+
+### Round 336: the object that was copied on the way out
+
+Round 335 left one morly test red and a probe list. The probe found something
+bigger than the store.
+
+The trail, in the order it was walked (instrumentation since removed):
+
+- `tCount` is `eng.QueryEvents(&filter.F{})` -> `scanCA(0, MaxInt64)`. The scan
+  emitted **three** records with distinct keys and correct serials while
+  `Count()` was 2, and `collectSerials` sizes its sink from `Count()`, so
+  `serialSink.Add` returned false on the third and the loop broke before the
+  newest event was ever reached. The missing serial was a dropped record, not a
+  missing key: every ca key was well formed (`63 2d 2d | ts | serial`).
+- Three records for two events means the `.buf` sidecar held the target twice.
+  `QuickFlush` prints `bufN=2` going in and `bufN=0, blen=0` after the clear, but
+  the next call on the same File still sees `bufN=2` - so the clear never
+  reached the File.
+- `flushSidecars` iterates `e.allFiles()`. Printing addresses settled it: inside
+  `allFiles` the element *is* `e.ca`, and in `flushSidecars`'s loop it is a
+  different address, 21 times over. `e.ca.bufN` is unchanged after a loop that
+  printed `bufN=0` from inside `QuickFlush`. The copies kept the same `*os.File`
+  descriptors, which is why the sidecar grew and the index state did not: every
+  flush wrote its buffer to the file and then threw away the record of having
+  done it.
+- The copy is made by the runtime codec, not by the store. `retPointeeDies`
+  walks the pointee's fields and asks `codecIsStableAddr`; in return-value mode
+  a pointer into a sovereign data arena answers "not stable", deliberately,
+  because the owning receiver may compact that arena later. `sorted.File.buf`
+  lives in the File's own sovereign arena, so *every* File was declared dying
+  and deep-copied. A single field in an object's own arena condemned the object.
+
+The fix is in `src/runtime/codec.mx`, in the shared runtime, so both compilers
+pick it up by construction:
+
+- `codecSovDataLive(p)` answers whether `p` points into a sovereign data arena
+  that outlives the frame now returning, and marks the group escaped so nothing
+  compacts the block away while the caller holds an alias of it. It is the body
+  `codecSovDataAlias` already had, extracted, and `codecSovDataAlias` now
+  delegates to it.
+- `retPointeeDies` uses it for pointer, bytes/slice, map/chan/func fields: a
+  field in a live sovereign arena does not make its holder die. Transience now
+  depends on whether the *receiver* lives in the releasing frame
+  (`sovGroupInDyingArena`), which is the actual question, instead of on whether
+  the field happens to live in an arena other than the current stable one.
+
+Measured: `TestIngestDeletionOtherAuthor` passes, all 30 pipeline tests pass, and
+the morly unit suite is green across every package that carries tests.
+
+The lesson is the one this campaign keeps teaching: an object whose identity is
+split in two still compiles and still runs, and when the two halves write to the
+same file descriptors the damage is silent. The bug was reported as "the newest
+event is invisible"; it was the flush bookkeeping being thrown away.
