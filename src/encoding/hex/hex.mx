@@ -54,11 +54,25 @@ func Encode(dst, src []byte) (n int32) {
 
 // AppendEncode appends the hexadecimally encoded src to dst
 // and returns the extended buffer.
+//
+// The digits are written through a cursor at the append point, not through
+// `dst[len(dst):]`: a subslice is a COPY in Moxie, so Encode wrote its output
+// into a throwaway and the appended bytes were whatever the grown buffer
+// already held. That is what made an envelope marshal an event id as 32 spaces
+// (nostr's TestOKRoundTrip) - the length was right and the bytes were stale.
 func AppendEncode(dst, src []byte) (out []byte) {
+	base := len(dst)
 	n := EncodedLen(len(src))
 	dst = slices.Grow(dst, n)
-	Encode(dst[len(dst):][:n], src)
-	return dst[:len(dst)+n]
+	dst = resize(dst, base+n)
+	j := base
+	for i := 0; i < len(src); i++ {
+		v := src[i]
+		dst[j] = hextable[v>>4]
+		dst[j+1] = hextable[v&0x0f]
+		j += 2
+	}
+	return dst
 }
 
 func EncAppend(dst, src []byte) (out []byte) {
@@ -98,6 +112,13 @@ func DecodedLen(x int32) (out int32) { return x / 2 }
 // If the input is malformed, Decode returns the number
 // of bytes decoded before the error.
 func Decode(dst, src []byte) (n int32, derr error) {
+	return decodeInto(dst, 0, src)
+}
+
+// decodeInto is Decode that starts writing at dst[off]. AppendDecode needs it
+// because the alternative - decoding into dst[len(dst):] - is a write into a
+// copy, and the appended bytes would be the buffer's stale contents.
+func decodeInto(dst []byte, off int32, src []byte) (n int32, derr error) {
 	i, j := 0, 1
 	for ; j < len(src); j += 2 {
 		p := src[j-1]
@@ -111,7 +132,7 @@ func Decode(dst, src []byte) (n int32, derr error) {
 		if b > 0x0f {
 			return i, invalidByteError(q)
 		}
-		dst[i] = (a << 4) | b
+		dst[off+int32(i)] = (a << 4) | b
 		i++
 	}
 	if len(src)%2 == 1 {
@@ -129,10 +150,11 @@ func Decode(dst, src []byte) (n int32, derr error) {
 // and returns the extended buffer.
 // If the input is malformed, it returns the partially decoded src and an error.
 func AppendDecode(dst, src []byte) (out []byte, derr error) {
-	n := DecodedLen(len(src))
-	dst = slices.Grow(dst, n)
-	n, err := Decode(dst[len(dst):][:n], src)
-	return dst[:len(dst)+n], err
+	base := len(dst)
+	dst = slices.Grow(dst, DecodedLen(len(src)))
+	dst = resize(dst, base+DecodedLen(len(src)))
+	n, err := decodeInto(dst, base, src)
+	return resize(dst, base+n), err
 }
 
 // EncodeToString returns the hexadecimal encoding of src.
