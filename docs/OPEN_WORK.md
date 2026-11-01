@@ -23163,3 +23163,54 @@ Open from this round:
   both kind-3 events. Next step: instrument `Engine.QueryEvents` for the author
   index, and check whether `ev.MarshalBinaryToBytes` (also a candidate for the
   same copy bug) is producing a record the WAL replay can read back.
+
+### Round 335: the copy rule inside a store - every index key was zeros
+
+The sibling sweep from round 334 kept going into morly, and the second layer of
+the same defect was there: the store's index keys.
+
+`pkg/store/index/keys.mx` built every key like this:
+
+    k := []byte{:KPCKeyLen}
+    copy(k, KPC[:])
+    serial.PutKind(k[3:], kind)
+    copy(k[5:], pubHash[:serial.HashLen])
+    serial.PutTimestamp(k[5+serial.HashLen:], ts)
+
+A subslice of a slice is a COPY, so every field after the 3-byte prefix was
+written into a throwaway. Every key in the store was `prefix + zeros`.
+
+The reason it survived: writer and reader used the same broken keys, so the
+store was self-consistent. What it could not do is *look anything up*. The
+visible symptoms were all "found nothing" or "found the wrong thing":
+
+- duplicate detection accepted redeliveries (`TestIngestDuplicate`),
+- the WoT walk found the admin's follow list and stopped
+  (`Depth(bob) = -1, want 2`),
+- a word search over a store that had just accepted an event returned nothing,
+- author/kind/created-at/tag scans returned whichever record happened to match.
+
+The builders now write at explicit offsets: `putBytes` in the package, and
+`serial.PutAt`/`PutKindAt`/`PutTimestampAt` in the serial package.
+
+That fix exposed a second one one layer down. `sorted/recSorter.Swap` swapped
+two records with three `copy()` calls on subslices, so `sort.Sort` ran and the
+buffer kept its insertion order; `scanBinder` merges that buffer and stops at
+the first record greater than the range end, so a scan for one word broke on the
+first unsorted record. Swapped byte by byte now.
+
+Note the *path exemption* that let both of these compile: a package whose import
+path contains `/pkg/` is exempt from the restriction pass, so `copy(k[5:], ...)`
+and the three-copy swap are accepted silently in `git.smesh.lol/morly/pkg/...`.
+That is why the whole tree has to be swept for this shape by hand until the
+compiler diagnostic exists (round 334's open item).
+
+Measured: the morly suite went from 38 tests before the first failure to 153,
+and the remaining red is `TestIngestDeletionOtherAuthor` - a store holding two
+events answers an empty-filter query with one serial, while the ca index reports
+`Count()==2` in other queries of the same run. Next probe: print the serial the
+ca scan returns against the two records the index holds.
+
+Two more test-side fixes from the same run: a `[]string` printed with `%v` into
+a `...Stringer` variadic (the compiler is right to refuse it), and the sockaddr
+literals from round 334.
