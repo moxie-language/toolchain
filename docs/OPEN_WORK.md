@@ -22703,3 +22703,41 @@ renders; what remains is `test_console_log_version` and `test_dark_mode_toggle`
 (selenium.communication errors from the browser driver) and `TestFeed`'s
 WebSocket `ConnectionResetError`, plus the signed-in flow group that depends on
 the extension. Those are the next things to look at in ../smesh and ../morly.
+
+### Round 329, second pass: the relay's websocket path, and where it stands
+
+With HTTP answering, the smoke suite's remaining real failure was
+`TestFeed::test_feed_notes_appear`: the browser opens a websocket, sends a REQ,
+and the relay resets the connection. Hand-reproduced with a python client, and
+the relay's own prints named the sequence: upgrade completes (phase 1), then the
+first readConn returns "phase 1 wpos 0" and immediately calls closeConn.
+
+Two defects behind it, both from the same copy rule:
+
+1. `parseWSFrame` filled the per-frame mask with `copy(mask[:], data[pos:..])`,
+   which writes into a throwaway: the mask stayed zero, and a zero mask makes
+   unmasking the identity, so every client frame was consumed still masked.
+   Measured directly: `copy(out[:], src)` on an array leaves the array zero
+   (`fill: 0 0 0 0`). Same in the relay's wire codec - `copy(hdr[15:47],
+   r.Pubkey[:])` and `copy(r.Pubkey[:], hdr[15:47])` wrote into throwaways, so
+   the encoded wire header carried zero pubkeys/event IDs and the decoded ones
+   stayed zero. All six sites write elements now.
+2. Consuming a request or frame replaced the header with `c.buf[consumed:]`,
+   which is a copy - a fresh allocation of the remainder's length. With an
+   empty remainder the buffer's capacity became 0, `avail = cap - len` was 0,
+   the next read was a zero-length read, syscall.Read answered `(0, nil)`, and
+   readConn took that as EOF and reset the connection. The remainder is copied
+   to the front of the same buffer and the header resized now.
+
+Those packages compile at all because a `/pkg/` path segment exempts them from
+the restriction pass that refuses `copy(x[:], ...)` in user code - so the
+compiler could not warn, and every one of these was silent. That exemption is
+the next class to look at: it is right for the toolchain's own packages and
+wrong for an app's.
+
+State: phase 7 `ui:build` PASSES (nine bundles + relay), the relay serves HTTP
+(200, 2036 bytes, and a second request on a new connection), the websocket
+upgrade completes and frames reach the handler (the codec's unknown-extent
+escape note appears in the log), and the smoke suite is at 3 passed / 3 failed /
+5 errors - the feed test still does not see its replies, and the rest are
+selenium.communication errors plus the extension-dependent signed-in flows.
