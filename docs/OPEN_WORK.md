@@ -23045,3 +23045,57 @@ phase's concurrent browsers went into swap. The granule is a platform function
 now: 64MB on native, 4MB on wasm - 16x less per overflow, still 512MB per arena
 before the region table fills, and recycling makes the more frequent chains
 cheap.
+
+### Round 333: three ABI/signature defects that only a 32-bit target shows
+
+Round 332 left the wasm suite green, and the first thing the next sweep found
+was in a phase that had not been run in that campaign: phase 1c, where
+`net/http` did not compile for wasm at all.
+
+    net_http_internal.ll:233:16: error: invalid cast opcode for cast from
+    'i64' to 'i32'
+    %rs51 = sext i64 %t82 to i32
+
+`resize(s, n)` converts `n` to the slice length field's width, and the
+conversion was widen-only: legacy zero-extended a narrower argument, stage4
+sign-extended anything that was not already the pointer type. A 64-bit length
+on a 32-bit target has to be NARROWED. Both compilers truncate now. Native
+cannot reach it - uintptr is i64 there, so no conversion is emitted - which is
+why a wasm-only sweep found it.
+
+That was the entry point to a larger defect, because the compiler was emitting
+two signatures for one symbol:
+
+    declare i64 @strlen(ptr, ptr)      ; the runtime package's IR
+    call    i64 @strlen(ptr nonnull)   ; every call site
+    declare i32 @malloc(i32, ptr)
+    call    ptr @malloc(i32)
+
+`emitFuncDecl` (the declaration for every bodyless function) appended the
+hidden context argument unconditionally, while the call site correctly treats
+an exported symbol as C ABI and omits it. Native links say nothing: libc
+defines strlen and the declaration is only a name. wasm-ld compares the
+definition it synthesises from the declaration against the calls and replaces
+each mismatched callee with a three-byte trap named
+`signature_mismatch:strlen` - the name in round 332's stack trace.
+
+With declarations following the call convention, one place was left wrong:
+`internal/task/task_none` declared `_panicstr` with `//export`, but
+`_panicstr` is DEFINED in `runtime/panic.mx` as a Moxie function, context
+argument and all. A declaration resolved by a Moxie definition keeps the Moxie
+ABI; `//export` says "a C function takes this name". It is a `//:linkname` now,
+the form asn1 already uses for `runtime.memcpy`. The wasm link has no
+signature-mismatch warnings left, `net/http` compiles for wasm (769s, 44MB
+module), and phase 1c passes.
+
+Measured on the fresh bootstrap (fixpoint `3319d757`, s2 == s3):
+
+    phase 1: PASS   phase 1b: PASS   phase 1c: PASS   phase 2: PASS
+    phase 3: PASS   phase 4: PASS    phase 5: 118/118  phase 6: PASS  phase 8: PASS
+
+How the declaration was found is worth keeping: the first two guesses (the
+export map consulted at the declaration site, then matched by exported name)
+changed nothing, and a temporary `mxutil.WriteStr(2, "DBGDECL ...")` in
+`declareExternalFunc` printed NOTHING - the function is never called for
+strlen, because the declaration comes from `emitFuncDecl`. One instrumented
+build answered what two reasoned fixes had not.
