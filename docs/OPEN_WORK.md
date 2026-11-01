@@ -23099,3 +23099,67 @@ changed nothing, and a temporary `mxutil.WriteStr(2, "DBGDECL ...")` in
 `declareExternalFunc` printed NOTHING - the function is never called for
 strlen, because the declaration comes from `emitFuncDecl`. One instrumented
 build answered what two reasoned fixes had not.
+
+### Round 334: the copy rule as wrong bytes - seven writes through a subslice
+
+The wasm campaign closed with the whole suite green, so the next sweep was the
+sibling repos: build them against the current compiler and run their tests.
+That is where the round's real find was.
+
+nostr, morly and smesh all *compiled*; the tests did not run. The failures
+looked unrelated - an event id marshalled as 32 spaces, an ASN.1 field decode
+error, "invalid public key", a loopback websocket reset - and every one of them
+was the same defect: **a write through a subslice of a slice**.
+
+    s[a:b] is a COPY. Writing through it lands in a throwaway.
+
+`copy` onto a subslice is already a compile error in a user package (the
+diagnostic "a subslice is a copy, so copying into it is not allowed"), but
+passing one to a function that writes through its parameter is accepted and
+silently does nothing. That gap cost seven sites:
+
+| where | what it broke |
+| --- | --- |
+| `encoding/hex` AppendEncode/AppendDecode | appended the grown buffer's stale bytes |
+| `crypto/secp256k1` feToBytes/feToLEBytes | EVERY public key and signature serialisation was 32 zero bytes |
+| nostr `pkg/hex` | same as the stdlib one (its own clone) |
+| nostr `pkg/event` Marshal | id/pubkey/sig hex written through `b[hexStart:]` → NUL bytes in the frame |
+| nostr `pkg/crypto/nip44` pad | padded plaintext was zeros past the length prefix |
+| nostr `pkg/tag` tagFieldBinary | binary-encoded tag values were 32 zero bytes |
+| nostr `pkg/ws` writeClient/ServerFrame | extended length stayed 00 00 and the mask key was 00 00 00 00: every frame ≥126 bytes declared length ZERO |
+
+The secp256k1 one is the serious one. It was invisible because both ends of a
+self-consistent system used the same broken serialiser: a signature over a
+32-zero pubkey verifies against a 32-zero pubkey. The BIP-340 vector tests in
+the tree were red - `TestRadix16Carry` ("digits[64]==1 for scalar n-1") and
+`TestBIP340Vectors` (8 of 19) - and nobody had run them, because phase 1b
+COMPILES the stdlib and does not run its tests. After the fix all four pass,
+and nostr's signer derives the vector public key.
+
+Measured after the fixes:
+
+    nostr:  194 tests pass, rc=0        (was: 5 units red, first at pkg/envelope)
+    morly:   38 pass, 1 fail            (TestSocialWithStore, below)
+    smesh:   relay-bin and both wasm bundles build
+
+Also fixed, all found by the same run: two test bugs (a dns cache entry with a
+zero expiry demands a UDP lookup of a `.invalid` name; `byte(70000)` is now a
+compile error, as it should be - the ws frame fixture masks its length bytes),
+and the sockaddr literals that still wrote `Addr: [4]byte{...}` for a slice.
+
+**The durable fix is a compiler diagnostic**: reject a subslice expression
+passed as an argument to a parameter the callee writes through (a one-level
+per-callee effect summary is enough; the callee either assigns to an index of
+the parameter or passes it on). That is a bilateral change and the next thing
+this work needs. Until then this class costs a silent wrong answer every time,
+and the tree has no test that can see it.
+
+Open from this round:
+
+- **morly `TestSocialWithStore`**: the WoT walk finds the admin's follow list
+  (1 event) and then gets 0 events for the first hop's author, so
+  `Depth(bob) = -1, want 2`. The query is
+  `Kinds=[3], Authors=[alice], Limit=1` against a store that has just accepted
+  both kind-3 events. Next step: instrument `Engine.QueryEvents` for the author
+  index, and check whether `ev.MarshalBinaryToBytes` (also a candidate for the
+  same copy bug) is producing a record the WAL replay can read back.
