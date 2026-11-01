@@ -932,6 +932,25 @@ export function buildHostImports(mem) {
     // Resolving unknown names to a no-op keeps the module loadable; naming
     // each one would mean editing this file every time the closure shifts.
     env: new Proxy({
+      // compiler-rt's 64x64 -> 128 multiply, and on wasm32 it is the ONLY place
+      // a 128-bit product happens: LLVM folds the 32-bit-half algorithm in
+      // math/bits.Mul64 into `mul i128`, which legalises to this call -
+      // (retptr, aLo, aHi, bLo, bHi), the product written as two i64s.
+      //
+      // The catch-all below answered 0 for it, which is why every wasm crypto
+      // path (ed25519's field arithmetic, x25519, poly1305's limbs, tls) had a
+      // correct LOW word and a garbage HIGH one - the caller's stack slot held
+      // whatever was there before.
+      __multi3(ret, aLo, aHi, bLo, bHi) {
+        const M64 = 0xffffffffffffffffn;
+        const a = (BigInt.asUintN(64, aHi) << 64n) | BigInt.asUintN(64, aLo);
+        const b = (BigInt.asUintN(64, bHi) << 64n) | BigInt.asUintN(64, bLo);
+        const p = a * b;
+        const dv = new DataView(mem().buffer);
+        dv.setBigInt64(ret, BigInt.asIntN(64, p & M64), true);
+        dv.setBigInt64(ret + 8, BigInt.asIntN(64, (p >> 64n) & M64), true);
+        return 0;
+      },
       mxc_readfile: () => 0,
       mxc_filesize: () => -1,
       mxc_getenv: () => 0,
@@ -945,7 +964,27 @@ export function buildHostImports(mem) {
       'syscall.Exit': (code) => { throw new Error(`exit ${code | 0}`); },
     }, {
       get(target, prop) {
-        return prop in target ? target[prop] : (() => 0);
+        if (prop in target) {
+          return target[prop];
+        }
+        if (typeof prop !== 'string') {
+          return undefined;
+        }
+        // Still a 0-returning no-op, so a module whose closure pulls in an
+        // unreached shim stays loadable - but the FIRST call is reported, so the
+        // next gap of this kind (a symbol the host owes the module, like
+        // __multi3 above) is visible instead of silently corrupting data.
+        let noted = false;
+        return () => {
+          if (!noted) {
+            noted = true;
+            globalThis.postMessage({
+              kind: 'stderr',
+              text: `host: env.${prop} is not provided by the host; returning 0\n`,
+            });
+          }
+          return 0;
+        };
       },
     }),
     // gojs is the Go wasm_exec convention that syscall/js compiles against
