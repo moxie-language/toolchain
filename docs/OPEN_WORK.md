@@ -23014,3 +23014,34 @@ The remaining five, one at a time:
 `RUN_WAIT_MS` makes the page's boot wait configurable: the external
 `RUN_TIMEOUT` is the only bound that can stop a module that never yields, and a
 slow-but-correct boot should be measurable instead of looking like a hang.
+
+### Round 332, result: phase 5 is 117/117, and wasm memory is bounded
+
+    phase 5 (wasm):  117 passed, 0 failed   (118 units; tls_handshake is now
+                                             skipped as not-a-wasm-fixture)
+    quickcheck: 15/15   phase 1b: PASS   phase 2 (fixpoint): PASS
+    phase 3: PASS       phase 4: PASS    phase 6: PASS    phase 8: PASS
+
+Two more defects were in the gate itself, and both were invisible until the
+fixtures actually passed:
+
+- Every run.py staged its module into the same `tests/wasm/app.wasm`, and the
+  page loads `/app.wasm`. Phase 5 runs four units at a time, so four runs
+  overwrote each other's module: a unit could execute another fixture, or load
+  something mid-copy. It presented as a flaky set - the same fixture passing
+  alone and failing in the sweep, a different member each time. The module is
+  served from where it is now; nothing is staged.
+- `util.sh` runs under `set -e` and `validate.sh` exits nonzero exactly when a
+  fixture fails, so `run_one` died on the first failure before printing the
+  verdict it had already written to its log. Every failure read as
+  "(no output)". That is why the flakiness looked like a crash.
+
+The last thing to fix was memory, and the complaint about it was right. A
+chained arena region asked for 64MB on every target. That granule is free on
+native, where a mapping stays virtual until touched; on wasm `memory.grow`
+COMMITS the pages, so one overflowing frame cost 64MB of resident linear
+memory. A crypto fixture measured 270MB for work that used kilobytes, and the
+phase's concurrent browsers went into swap. The granule is a platform function
+now: 64MB on native, 4MB on wasm - 16x less per overflow, still 512MB per arena
+before the region table fills, and recycling makes the more frequent chains
+cheap.
