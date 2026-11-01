@@ -22801,3 +22801,26 @@ So the work item is the `edwards25519/field` arithmetic on wasm32: `SetBytes`
 must be exercised directly (its error is currently thrown away by the only
 caller, which is itself a defect worth fixing - a decode that cannot fail
 silently returning a zero point is how this arrived as a panic three calls away).
+
+### Round 330, resolved as far as it goes: the basepoint decode now says why
+
+`_generator()` used `p, _ := (&Point{}).SetBytes(...)`, so a failed decode became
+a ZERO point and the panic arrived three calls away as "use of uninitialized
+Point". It panics at the decode now, and the wasm target immediately names the
+real failure:
+
+    panic: edwards25519: basepoint decode failed: edwards25519: invalid point encoding
+
+So `SetBytes` rejects the RFC 8032 basepoint on wasm32 while accepting it
+natively: the square root that recovers x from u is wrong on that target, i.e.
+the defect is in `crypto/internal/fips140/edwards25519/field` arithmetic, not in
+the caller and not in the return path (both cleared above).
+
+That is the next work item, and it needs the field package exercised directly on
+wasm - the package is `internal`, so the probe has to be a temporary self-test
+inside it rather than an importing program. The fixture that will judge it is
+already there: `ed25519_vectors` covers RFC 8032's test vectors and
+`tls_handshake` exercises the same arithmetic end to end.
+
+Native gates after the change: crypto_vectors, ed25519_roundtrip,
+ed25519_vectors and tls_handshake all pass, quickcheck 15/15.
