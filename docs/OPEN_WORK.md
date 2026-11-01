@@ -22590,3 +22590,87 @@ phase 6 PASS (with `env -u GOROOT`), phase 8 netsmoke 17/17 (2 566 s), phase 1b
 45 packages ok (1 083 s), bootstrap fixpoint `s2 == s3` (01af5895), phase 5
 96/118 with the remaining 22 listed above, phase 7 red only on the out-of-tree
 nostr call site.
+
+## Round 329: the three sibling repos, and what phase 7 turned up
+
+Phase 7 builds the relay (../morly) and the app's nine wasm bundles
+(../smesh) from source with the compiler under test, then runs the app's
+browser smoke suite. None of the three built against this tree, so the round
+was spent on them. Everything below is committed in its own repository.
+
+### moxie: embed had not been compiled since its import moved into a comment
+
+    // In source files that don't refer to [embed.FS], use a blank import (
+        "git.smesh.lol/moxie/pkg/mxutil"import _ "embed").
+
+A doc-comment line had been split by an edit and the import path written into
+the comment, so the package never imported mxutil and `mxutil.CopyFrom` was
+undefined. The comment is whole again, the import is in the import block, and
+two calls convert int64 offsets to CopyFrom's int32 (io.Seeker works in int64).
+Nothing in the tree imports embed; the relay is the only importer, which is why
+phase 1b never saw it.
+
+Also fixed in this round: `net`'s js/wasm build was missing
+NewSockaddrInet4/NewSockaddrInet6 (the types live in net_fake.mx, the
+constructors only in the unix file), which took out ip_api and net_buffers_api
+with "not enough arguments in call (want 1, have 0)" - the round-311 symptom,
+naming the caller instead of the missing symbol. Both fixtures pass on wasm now.
+
+### nostr: the crypto byte APIs take slices
+
+p8k's Signer kept its key in `[32]byte` and copied arguments into extents for
+secp256k1, which takes []byte. The key material is a slice now, allocated by
+New/MustNew (and lazily by InitPub), and the signature/aux/message buffers are
+slices; ws/dns's dnsAddr likewise.
+
+### smesh: the fixed-extent wrappers around every crypto call
+
+This tree refuses `copy(x[:], src)` and writes through `x[:]` in every package,
+so a fixed extent cannot be filled. The app was full of the Go habit:
+
+- jsbridge/schnorr/schnorr_wasm.mx was a pure pass-through that copied its
+  arguments into [32]byte/[64]byte locals for entry points that already take
+  slices; it is seven one-line functions now.
+- crypto/chacha20's XOR/XORAt and crypto/chacha20poly1305's Seal/Open took fixed
+  extents and sliced them immediately; they take slices, and their callers
+  (mls/ciphersuite, marmot) pass what they have.
+- crypto/nip44 derives its three message keys as subslices of the expanded block
+  (a read-only use, where a copy is exactly right), pushes the MAC input instead
+  of copying into `macInput[32:]`, and pad() pushes the length prefix and zero
+  padding instead of copying into `out[2:]`.
+- crypto/hkdf's Extract fills its [32]byte return one byte at a time (a fixed
+  extent cannot be a copy destination); mls/ciphersuite copies its extraction
+  into a fresh slice; wasm/signer/vault accumulates sha256.Sum's []byte.
+- Three never-compiled defects only a first compile finds: proposal/framing/
+  key_schedule/tree converted a POINTER receiver to an integer
+  (`uint16(t)` with `t *proposalType`), and group.mx's UnmarshalGroup read a
+  uint32 into `v, ok :=` where `v` is the function's named *Group result, so
+  `leafIndex(v)` tried to convert a *Group. The reads use `li` now.
+- Marmot's NostrGroupData.NostrGroupID is []byte (a copy of the wire bytes).
+
+### morly: three defects behind "the relay will not build"
+
+ParseAddr returned [4]byte into a sockaddr whose Addr is a slice (it returns
+[]byte); acceptAll declared `prev := runtime.CurrentArena()` inside its loop,
+which is refused in a self-mutating method, and is declared above it; clog
+passed its `...fmt.Stringer` to Fprintf without the spread.
+
+### Where phase 7 stands
+
+`ui:build` PASSES: nine wasm bundles plus the runtime staging, with the relay
+built from source. `ui:smoke` fails, and the relay is the reason in a way that
+is not a build problem: started by hand with ORLY_STATIC_DIR set it binds and
+logs "listening", the process stays alive, and `curl` on `/` connects and then
+never receives a byte (rc=124), with no request line in the relay's log. That is
+a relay runtime defect - the accept/handler path never answers - and it needs
+its own investigation in ../morly. Phase 7 was red before this round too, so
+this is progress (build green, smoke red for one named reason) rather than a
+regression.
+
+Also open from this round: `ed25519_roundtrip` (and presumably the other crypto
+wasm fixtures) build for wasm and trap in the browser inside
+`crypto/internal/fips140/ed25519.NewPrivateKeyFromSeed` -> `precomputePrivateKey`
+(sha512 + edwards25519), while the same source runs natively. Not diagnosed;
+the storage constructor there (`&PrivateKey{seed: []byte{:seedSize}, ...}`
+allocated in the constructor's frame) is the W31/W33 shape worth looking at
+first on that target.
