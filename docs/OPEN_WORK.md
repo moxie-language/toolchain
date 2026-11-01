@@ -22946,3 +22946,71 @@ The ed25519 chain that led here is recorded above: the trap, the zero generator,
 the discarded decode error, the field self-test, `Mul64`, and now the host. Each
 step was one probe, and the harness change that made the module speak was what
 turned the first one from guesswork into a measurement.
+
+### Round 332: wasm never reused released memory, and phase 5's last six fixtures
+
+Round 331 left six wasm failures and one clue: `x25519_ecdh` died in a
+print/alloc recursion, and the recursion was the *reporting* of an arena
+failure, not the failure.
+
+The recursion was real and was worth fixing first, because it was hiding the
+message. `putchar` took the address of a local to hand to `fd_write`, which
+marks it escaping, so every character printed allocated four bytes:
+
+    putchar -> runtime.alloc(i32 4, ptr null, ptr null)
+
+An allocator that is failing cannot print a diagnostic through the allocator.
+Its buffers are package state now, and the same run said:
+
+    panic: runtime error: arena: region mmap failed
+
+Which was the real defect, and a second-order one: `sysMap` returns nil on
+failure, and every arena call site tested `addr == unsafe.Pointer(^uintptr(0))`
+- a value no implementation returns. The check was dead, so a failed map was
+used as a success. Fixed to `addr == nil` in all four sites, and the diagnostic
+was instrumented for one run rather than guessed at:
+
+    sysMap: size=67108864 prev=62481 bump=4094754816
+    sysMap: size=67108864 prev=63505 bump=4161863680
+    sysMap: grow failed size=67108864 pages=1024 bump=4228972544 mempages=64529
+
+The arena model reclaims by unmapping, and on wasm `sysUnmap` was a no-op, so
+every chained overflow region (64MB, one per overflowing frame) was mapped once
+and abandoned. `crypto/internal/fips140`'s curve inits chained enough of them to
+take the bump cursor to the top of the 4 GiB address space inside
+`nistec.buildP521GeneratorTable`.
+
+`sysUnmap` now pushes the region onto an intrusive free list and `sysMap` takes
+the first fit, splitting the tail so a live small arena does not pin 64MB. Peak
+linear memory on that fixture: 270MB, two chained regions, and it passes.
+
+`MoxieWrite` was a stub returning -1, so every runtime diagnostic on fd 2 was
+dropped on wasm. It is a real `fd_write` now, which is how the next failure was
+read instead of merely observed.
+
+The remaining five, one at a time:
+
+- `rand_fill`: the module exited 0 and the host called that a crash.
+  `syscall.Exit` reports itself by throwing (there is no process to end), and
+  the worker posted `kind:'error'` regardless of the code. Code 0 posts `done`.
+- `asn1_oid_der`, `asn1_tag_crosspkg`: `RuntimeError: unreachable` in
+  `encoding/asn1.(*_rawType).fieldData`, in a three-byte function named
+  `signature_mismatch:strlen`. The wasm link's hand-written `@malloc` and
+  `@strlen` stubs took two arguments (`(i32, ptr)`, `(ptr, ptr)`) while every
+  call passes one, because a `//export`ed bodyless function is a C function and
+  drops the hidden context parameter. wasm-ld replaces the mismatched callee
+  with a trap, so every `strlen` call died - that is `cgo_GoString`, which
+  builds an ASN.1 field name. Stubs take the arguments the calls pass, which is
+  what legacy gets from musl on native.
+- `iface_ptr_recv_crosspkg`: no compiler difference at all. The module printed
+  the same codec arena-escape warning as the native run, but the gate merged
+  the driver's stderr into the stdout it diffs. The wasm gate now captures
+  stdout and stderr separately and `-q` keeps stdout to the program's output.
+- `tls_handshake`: not a wasm fixture. It is a handshake between two domains
+  over a loopback socket; a wasm domain has no sockets and no second thread, so
+  the module sat in its accept loop until the run timed out. `//:wasmtest skip`
+  with the reason stated in the fixture.
+
+`RUN_WAIT_MS` makes the page's boot wait configurable: the external
+`RUN_TIMEOUT` is the only bound that can stop a module that never yields, and a
+slow-but-correct boot should be measurable instead of looking like a hang.
