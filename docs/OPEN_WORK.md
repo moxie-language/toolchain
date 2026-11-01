@@ -22824,3 +22824,45 @@ already there: `ed25519_vectors` covers RFC 8032's test vectors and
 
 Native gates after the change: crypto_vectors, ed25519_roundtrip,
 ed25519_vectors and tls_handshake all pass, quickcheck 15/15.
+
+### Round 330: the wasm crypto failures are `bits.Mul64` returning garbage
+
+The chain from the trap to the cause, each step measured:
+
+1. `ed25519.NewKeyFromSeed` -> `precomputePrivateKey` -> `ScalarBaseMult` ->
+   `initBasepointTable` -> `Point.Add` panics "use of uninitialized Point".
+2. With the basepoint decode failing loud at its own site it says "invalid point
+   encoding", so `SetBytes` is rejecting the RFC 8032 basepoint.
+3. A temporary self-test inside `edwards25519/field` (the package is `internal`,
+   so it cannot be imported by a probe) localised it further: `SetBytes`/`Bytes`
+   round trip correctly on wasm, but `Square` gives a DIFFERENT result than
+   native (`u2.l0` 540431955284448 native vs 1215972019264279 wasm) and
+   `sqrtM1^2 == -1` is false, so `SqrtRatio` reports "not a square".
+4. `Square`'s arithmetic runs through `math/bits.Mul64`, and a direct probe shows
+   the defect:
+
+       native: Mul64(2^62, 4)   -> hi 1                 lo 0
+       wasm:   Mul64(2^62, 4)   -> hi 720576034868559873 lo 0
+
+   The LOW word is always right; the HIGH word is garbage - and it changes
+   between builds of the same source (720575940379279361, then
+   720576034868559873), which is the signature of reading an uninitialised or
+   mis-sized slot rather than a wrong formula.
+
+Two things are therefore open, and the second is the cause:
+
+- The `edwards25519/field` self-test should stay in some form: it named the
+  operation in one run, where the fixture alone only named a panic.
+- `math/bits.Mul64` on wasm32 computes a wrong high word while plain 64-bit
+  arithmetic (`>>`, `&`, `*`, `+`, `-`, shifts by 0/32/63) is correct on the
+  same target, verified by its own probe. `Mul64` differs from that arithmetic
+  in one respect: it declares `const mask32 = 1<<32 - 1`, an untyped constant
+  that does not fit int32. Typing it `uint64` did NOT fix the high word (it
+  changed the wrong value), so the constant is a second defect at most, not the
+  cause.
+
+Every wasm crypto failure in phase 5 goes through this function (ed25519's field
+arithmetic, x25519, poly1305's limbs, and tls's transport), so fixing it should
+clear most of the 22 remaining wasm fixtures. The next step is the emitted IR
+for `math/bits.Mul64` on the wasm target, which the backend now makes easy to
+reproduce in isolation.
