@@ -22907,3 +22907,42 @@ importing program, so the diagnostic that localised this was a temporary
 `SetBytes`/`Bytes` round trip, `sqrtM1^2 == -1`, `Square`'s first limb, and
 `SqrtRatio`'s verdict. `Square`'s limb differed between targets and named the
 operation in one run.
+
+### Round 331: the wasm host stubbed __multi3, and phase 5 went 96/118 -> 113/119
+
+The IR said the basepoint decode ran through `mul i128`; the wasm module said
+where that goes:
+
+    Import[6]:
+     - func[0] sig=2 <__multi3> <- env.__multi3
+
+`__multi3(retptr, aLo, aHi, bLo, bHi)` is compiler-rt's 64x64->128 multiply, and
+on wasm32 it is the only place a 128-bit product happens. `jsruntime/host.mjs`
+answered every unlisted `env` name with `(() => 0)`, so the product was written
+nowhere: the caller kept the LOW word (it computes that separately) and read
+whatever the stack slot held for the HIGH one.
+
+Fixed with a real BigInt implementation, and the catch-all now reports the FIRST
+call of any name it does not provide, so the next symbol the host owes a module
+surfaces instead of silently corrupting data (which is exactly how this one
+presented: a correct low word and a garbage high word).
+
+Phase 5, measured before and after:
+
+    before:  96 passed, 22 failed
+    after:  113 passed,  6 failed     (119 units)
+
+Remaining, and what is known so far:
+
+- `x25519_ecdh`: the browser run dies in a print/alloc recursion -
+  `printstring -> ArenaAllocTD -> alloc -> printstring` - which is an arena
+  failure being reported by printing something that itself allocates. The arena
+  failure is the defect; the recursion is how it shows.
+- `rand_fill`, `tls_handshake`: not looked at yet.
+- `asn1_oid_der`, `asn1_tag_crosspkg`, `iface_ptr_recv_crosspkg`: not looked at
+  yet; these are not on the crypto path, so they are probably unrelated.
+
+The ed25519 chain that led here is recorded above: the trap, the zero generator,
+the discarded decode error, the field self-test, `Mul64`, and now the host. Each
+step was one probe, and the harness change that made the module speak was what
+turned the first one from guesswork into a measurement.
