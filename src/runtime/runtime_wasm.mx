@@ -9,15 +9,54 @@ import "unsafe"
 //:wasmimport wasi_snapshot_preview1 fd_write
 func fd_write(fd int32, iovs unsafe.Pointer, iovs_len int32, nwritten unsafe.Pointer) int32
 
+// putchar's buffers are package state, not locals. Taking the address of a
+// local to hand to an import marks it escaping, so every character printed
+// allocated four bytes for `nw` (measured in the wasm IR: putchar called
+// runtime.alloc). That is fatal in one place: the allocator's own diagnostics
+// print, so an allocator failure recursed putchar -> alloc -> print -> putchar
+// until the stack ran out, and the message that would have named the failure
+// was never printed.
+var (
+	putcharBuf byte
+	putcharIOV [2]uintptr
+	putcharNW  int32
+)
+
 func putchar(c byte) {
-	buf := [1]byte{c}
-	iov := [2]uintptr{uintptr(unsafe.Pointer(&buf[0])), 1}
-	var nw int32
-	fd_write(1, unsafe.Pointer(&iov[0]), 1, unsafe.Pointer(&nw))
+	putcharBuf = c
+	putcharIOV[0] = uintptr(unsafe.Pointer(&putcharBuf))
+	putcharIOV[1] = 1
+	fd_write(1, unsafe.Pointer(&putcharIOV[0]), 1, unsafe.Pointer(&putcharNW))
 }
 
 //:wasmimport wasi_snapshot_preview1 fd_read
 func fd_read(fd int32, iovs unsafe.Pointer, iovs_len int32, nread unsafe.Pointer) int32
+
+// MoxieWrite is the runtime's raw fd write; the codec uses it for diagnostics
+// on fd 2. On wasm the descriptors are WASI's, so this is a real fd_write and
+// a codec-escape or leaked-arena warning reaches the host console instead of
+// being dropped. The stub it replaces returned -1, which made that whole class
+// of runtime warnings invisible on this target - a fixture that hit one looked
+// like it simply had nothing to say.
+//
+// The iovec and the count are package state for the reason putchar's are:
+// taking the address of a local to hand to an import allocates, and this is
+// called from the allocator's own failure paths.
+var (
+	moxieWriteIOV [2]uintptr
+	moxieWriteNW  int32
+)
+
+func MoxieWrite(fd int32, buf unsafe.Pointer, count int32) int32 {
+	if count <= 0 {
+		return 0
+	}
+	moxieWriteIOV[0] = uintptr(buf)
+	moxieWriteIOV[1] = uintptr(count)
+	moxieWriteNW = 0
+	fd_write(fd, unsafe.Pointer(&moxieWriteIOV[0]), 1, unsafe.Pointer(&moxieWriteNW))
+	return moxieWriteNW
+}
 
 // stdinPeek holds the byte buffered() read ahead for getchar().
 var stdinPeek byte

@@ -14,14 +14,77 @@ import "unsafe"
 // stack, and previously handed-out regions) and WebAssembly guarantees fresh
 // pages are zero-filled.
 //
-// Growth is a bump allocation: memory is never given back within a domain.
-// That matches the arena model, where regions are only released when the
-// domain exits, and a wasm process has exactly one domain.
+// Growth is never given back to the host, but it IS recycled here. The arena
+// model releases a function arena with sysUnmap and expects the address space
+// back; on native munmap provides that, on wasm the returned region was simply
+// lost, so every chained overflow region was mapped once and abandoned. The
+// NIST curve inits chained a 64MB region per overflowing frame, and
+// memory.grow failed at 64529 of 65536 pages (4 GiB) inside
+// nistec.buildP521GeneratorTable before the program had produced a byte.
 
 // sysMemBump is the next free offset in linear memory. Zero means "not yet
 // initialised"; the first call seeds it from the current memory size, since
 // all memory below that is already spoken for.
 var sysMemBump uintptr
+
+// sysFreeHead is the list of released regions, linked through the regions
+// themselves: a free region holds its successor at +0 and its own size at +4.
+// It is intrusive because the arena that would hold a normal list is the
+// caller - this is the layer below the allocator.
+//
+// sysFreeHdr is the size of that header. wasm32 words are four bytes, and the
+// smallest region ever mapped is one 64KiB page, so a header always fits; the
+// check is there because a smaller region could not be tracked and is leaked
+// rather than corrupted.
+const sysFreeHdr = uintptr(8)
+
+var sysFreeHead uintptr
+
+func sysFreeNext(base uintptr) (p *uintptr) {
+	p = (*uintptr)(unsafe.Pointer(base))
+	return p
+}
+
+func sysFreeSize(base uintptr) (p *uintptr) {
+	p = (*uintptr)(unsafe.Pointer(base + sysFreeHdr/2))
+	return p
+}
+
+// sysFreePut pushes a released region onto the free list.
+func sysFreePut(base uintptr, size uintptr) {
+	if base == 0 || size < sysFreeHdr {
+		return
+	}
+	*sysFreeNext(base) = sysFreeHead
+	*sysFreeSize(base) = size
+	sysFreeHead = base
+}
+
+// sysFreeTake unlinks and returns the first free region of at least size
+// bytes, splitting the tail back out so a live small arena does not pin a
+// whole 64MB chain region. Returns 0 if no region fits.
+func sysFreeTake(size uintptr) uintptr {
+	prev := uintptr(0)
+	cur := sysFreeHead
+	for cur != 0 {
+		next := *sysFreeNext(cur)
+		avail := *sysFreeSize(cur)
+		if avail >= size {
+			if prev == 0 {
+				sysFreeHead = next
+			} else {
+				*sysFreeNext(prev) = next
+			}
+			if avail-size >= sysFreeHdr {
+				sysFreePut(cur+size, avail-size)
+			}
+			return cur
+		}
+		prev = cur
+		cur = next
+	}
+	return 0
+}
 
 // sysMap returns a zeroed, 64 KiB-aligned region of size bytes, or nil if
 // linear memory could not be grown.
@@ -30,6 +93,14 @@ func sysMap(size uintptr) unsafe.Pointer {
 		return nil
 	}
 	size = (size + wasmPageSize - 1) &^ (wasmPageSize - 1)
+	reused := sysFreeTake(size)
+	if reused != 0 {
+		// The region held a free-list header and whatever the released arena
+		// last contained. A region from memory.grow is zero, so a recycled one
+		// must be made to look the same.
+		memzero(unsafe.Pointer(reused), size)
+		return unsafe.Pointer(reused)
+	}
 	pages := int32(size / wasmPageSize)
 
 	if sysMemBump == 0 {
@@ -58,12 +129,17 @@ func sysMapShared(size uintptr) unsafe.Pointer {
 	return sysMap(size)
 }
 
-// sysUnmap is a no-op. Linear memory cannot be returned to the host, and
-// there is no allocator below us that could reuse it. The arena model only
-// releases at domain exit, at which point the whole process memory goes away.
+// sysUnmap releases a region for reuse. Linear memory cannot be returned to
+// the host, so release means the pages go back on the free list for the next
+// sysMap instead of disappearing from it.
+//
+// The size is rounded up to a page because that is what sysMap actually took
+// from linear memory: an ArenaNew region is 4KiB-aligned but sysMap grows
+// whole 64KiB pages for it, and the round-up recovers the tail that the
+// arena's own capacity does not count.
 func sysUnmap(p unsafe.Pointer, size uintptr) {
-	_ = p
-	_ = size
+	size = (size + wasmPageSize - 1) &^ (wasmPageSize - 1)
+	sysFreePut(uintptr(p), size)
 }
 
 // InitCShared initializes the runtime for c-shared mode, where main() never
@@ -83,19 +159,14 @@ func InitCShared() {
 	initAll()
 }
 
-// MoxieWrite has no wasm meaning: it exists so the native compiler and its
-// forked workers can exchange bytes over a pipe fd, and wasm has neither
-// fork nor pipe fds. The compiler forces its serial path on wasm, so this is
-// only here to satisfy the declaration while keeping the build honest about
-// what happened if anything ever does reach it.
-func MoxieWrite(fd int32, buf unsafe.Pointer, count int32) int32 {
-	_ = fd
-	_ = buf
-	_ = count
-	return -1
-}
+// MoxieWrite lives in runtime_wasm.mx, next to fd_write: on wasm the
+// descriptors are WASI's, so a diagnostic written to fd 2 does reach the host.
 
-// MoxieRead is the counterpart to MoxieWrite; see the note there.
+// MoxieRead has no wasm caller: it exists so the native compiler and its forked
+// workers can exchange bytes over a pipe fd, and wasm has neither fork nor pipe
+// fds. The compiler forces its serial path on wasm, so this is only here to
+// satisfy the declaration while keeping the build honest about what happened if
+// anything ever does reach it.
 func MoxieRead(fd int32, buf unsafe.Pointer, count int32) int32 {
 	_ = fd
 	_ = buf
