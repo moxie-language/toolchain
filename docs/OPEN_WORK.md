@@ -22741,3 +22741,35 @@ upgrade completes and frames reach the handler (the codec's unknown-extent
 escape note appears in the log), and the smoke suite is at 3 passed / 3 failed /
 5 errors - the feed test still does not see its replies, and the rest are
 selenium.communication errors plus the extension-dependent signed-in flows.
+
+## Round 330: a wasm trap now says what the module got to, and ed25519 says why it died
+
+Phase 5's crypto fixtures build for wasm and trap in the browser. Localising one
+of them was blind, because the harness dropped the module's own output on the
+failure path: `run.py` collected the logs, printed them only on a clean run, and
+the caller showed the last three lines of a JS stack.
+
+`run.py` prints them now, as one line after the error so the caller's tail still
+ends with something readable, and validate.sh's failure tail is five lines:
+
+    main  FAIL  (browser run failed)
+      stdout so far: A start
+       | B seed ready
+       | C sha512 64
+       | panic: edwards25519: use of uninitialized Point
+
+The probe behind it is ten lines (`sha512.Sum512` then
+`ed25519.NewKeyFromSeed`), so the trap is in `NewPrivateKeyFromSeed` ->
+`precomputePrivateKey` -> `ScalarBaseMult` -> `initBasepointTable` ->
+`Point.Add`, where `checkInitialized` finds a ZERO generator point and panics.
+Native prints "DBG generator ok, zero: false" at the same place.
+
+`_generator()` is `(&Point{}).SetBytes(...)`: a Point built in that function's
+frame, handed to a method that fills it, and returned by pointer. Native
+relocates the pointee into the caller's arena (W33's fix); on wasm32 the value
+arrives zeroed. That is the next thing to look at: the return-encode's
+stability decision on the wasm target, or the pointee copy there.
+
+Two instrumentation rounds were spent before this because the trap arrives as
+`RuntimeError: unreachable` with a JS stack that names the trapping function but
+not what it printed - the harness change is the durable part of this round.

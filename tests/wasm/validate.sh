@@ -131,7 +131,7 @@ for t in "${TARGETS[@]}"; do
         else
             printf '%-32s FAIL  (browser run failed)\n' "$name"
         fi
-        tail -3 "$d/wasm.out" | sed 's/^/      /'
+        tail -5 "$d/wasm.out" | sed 's/^/      /'
         FAIL=$((FAIL+1))
         continue
     fi

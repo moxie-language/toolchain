@@ -135,7 +135,14 @@ def main():
     if out["errs"]:
         print("console errors: " + json.dumps(out["errs"]))
     if out["error"]:
+        # A module that traps never reaches the end of main, so the logs it did
+        # produce are the only evidence of how far it got - and in -q mode they
+        # used to be dropped on this path, which cost a whole round of
+        # instrumenting a wasm-only crash blind. One line, so the caller's
+        # `tail -3` still shows the error itself.
         print("JS error: " + out["error"])
+        if QUIET and out["logs"]:
+            print("stdout so far: " + " | ".join(out["logs"]))
         return 1
     # The service worker's boot is reported on stderr so -q keeps printing only
     # the module's stdout, and it is a failure: a worker that never activated,
