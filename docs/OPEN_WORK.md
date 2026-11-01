@@ -22674,3 +22674,32 @@ wasm fixtures) build for wasm and trap in the browser inside
 the storage constructor there (`&PrivateKey{seed: []byte{:seedSize}, ...}`
 allocated in the constructor's frame) is the W31/W33 shape worth looking at
 first on that target.
+
+### Round 329, resolved: the relay read every request into a throwaway
+
+The smoke failure above had one cause, and it was in the relay:
+
+    n, err := syscall.Read(c.fd, c.buf[c.wpos:])
+
+`c.buf[c.wpos:]` is a COPY, so each request's bytes were read into a buffer
+nobody owned, `c.buf` stayed zeroed, processHTTP searched zeros for
+"\r\n\r\n", never found it and returned. The relay accepted the connection and
+then sat in epoll answering nothing - which is exactly what the hand test saw
+(curl connects, both sides ESTABLISHED, queues empty, no byte back).
+
+Instrumenting readConn and processHTTP is what named it: "readConn" ran, "read
+n 79" ran, "processHTTP" ran, and "found end" never printed. The read now goes
+into a per-connection window (`rdbuf`, allocated once at accept) and the bytes
+are pushed into the connection buffer, whose discipline needed making coherent
+in the same change: `buf` is length-tracked (len is the used length, capacity is
+the storage), so `avail` is cap-len, growBuf doubles the capacity and pushes,
+the consumed remainder replaces the header instead of being copied over in
+place, and `wpos` follows `len(c.buf)`.
+
+Verified by hand (http=200, 2036 bytes for `/`, and a second request on a new
+connection answers too), then by phase 7: `ui:build` PASSES and the smoke suite
+went from 11 errors to **3 passed, 3 failed, 5 errors**. The page loads and
+renders; what remains is `test_console_log_version` and `test_dark_mode_toggle`
+(selenium.communication errors from the browser driver) and `TestFeed`'s
+WebSocket `ConnectionResetError`, plus the signed-in flow group that depends on
+the extension. Those are the next things to look at in ../smesh and ../morly.
