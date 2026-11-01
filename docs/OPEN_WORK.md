@@ -22773,3 +22773,31 @@ stability decision on the wasm target, or the pointee copy there.
 Two instrumentation rounds were spent before this because the trap arrives as
 `RuntimeError: unreachable` with a JS stack that names the trapping function but
 not what it printed - the harness change is the durable part of this round.
+
+### Round 330, further: the trap is inside SetBytes, not in the return path
+
+Two probes narrowed it, and both are worth keeping because they each ruled out a
+plausible class in one run:
+
+- A returned pointer to a frame-built struct (`p = &P{...}; return` with 4 and
+  with 10 int64 fields, read after a 4 KiB churn) survives the wasm target, so
+  the W31/W33 relocation is not the problem here.
+- Multi-word struct equality (`E{a,b,c,d,e uint64}` compared against zero, against
+  itself, and differing in the first and in the last limb) is correct on wasm, so
+  `checkInitialized`'s comparison is not lying.
+
+Instrumenting the limbs settled it:
+
+    DBG gen x0 0 x1 0 y0 0 z0 0 zero true          (wasm)
+    DBG generator ok, zero: false                   (native)
+
+`_generator()` decodes the RFC 8032 basepoint with `SetBytes`, and on wasm32 that
+returns a ZERO point - a failure inside the field arithmetic (the square root
+that recovers x from u), which `_generator` discards with `p, _ :=`. Everything
+downstream then panics in `Point.Add`'s `checkInitialized`, which is the trap the
+harness reported.
+
+So the work item is the `edwards25519/field` arithmetic on wasm32: `SetBytes`
+must be exercised directly (its error is currently thrown away by the only
+caller, which is itself a defect worth fixing - a decode that cannot fail
+silently returning a zero point is how this arrived as a panic three calls away).
