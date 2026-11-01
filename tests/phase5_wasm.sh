@@ -86,7 +86,11 @@ run_one() {
 		return
 	fi
 	log="$UNIT_WORK/validate.log"
-	MOXIE="$MOXIE" bash "$ROOT/tests/wasm/validate.sh" "$target" >"$log" 2>&1
+	# `|| true` is not tolerance: util.sh runs under `set -e`, and validate.sh
+	# exits nonzero exactly when a fixture FAILS, so without this the phase
+	# script died on the first failure before printing the verdict it had
+	# already written to the log - the whole phase reported "no output".
+	MOXIE="$MOXIE" bash "$ROOT/tests/wasm/validate.sh" "$target" >"$log" 2>&1 || true
 	# One verdict per target, taken from the harness's own line for it.
 	local line
 	line="$(grep -E "^$(basename "$name") +(PASS|FAIL|SKIP)" "$log" | head -1)"

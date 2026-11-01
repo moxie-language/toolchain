@@ -34,6 +34,7 @@ BUNDLE = raw[raw.index("--bundle") + 1] if "--bundle" in raw else None
 BRIDGE = raw[raw.index("--bridge") + 1] if "--bridge" in raw else None
 WASM = next((a for a in args if a not in ("-q", "--sw", "--app", "--bundle", "--bridge")
              and a not in (SW, APP, BUNDLE, BRIDGE)), str(ROOT / "app.wasm"))
+MODULE = WASM
 # How long the page waits for the module to boot. The caller owns this bound:
 # a module that never yields can only be stopped from outside, so validate.sh
 # wraps the whole run in RUN_TIMEOUT and this is the friendlier, more specific
@@ -58,6 +59,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return str(REPO) + path
         if path == "/":
             return str(ROOT / "host.html")
+        if path == "/app.wasm":
+            # The module under test is served from where it actually is, not
+            # from tests/wasm/app.wasm. Staging it there made every concurrent
+            # validation run overwrite the others' module - phase 5 runs one
+            # unit per fixture, four at a time - so a unit could execute a
+            # different fixture, or fail to load at all, depending on timing.
+            # That is exactly how it presented: the same fixture passed alone
+            # and failed in the sweep, with a different member of the set each
+            # run.
+            return str(pathlib.Path(MODULE).resolve())
         return str(ROOT) + path
 
     def end_headers(self):
@@ -81,10 +92,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 def main():
     # The default host page loads /app.wasm; an emitted bundle host carries its
-    # own module URL, so with --host there is nothing to copy unless a module
-    # was named as well.
-    if not HOST or pathlib.Path(WASM).exists():
-        (ROOT / "app.wasm").write_bytes(pathlib.Path(WASM).read_bytes())
+    # own module URL, so with --host nothing needs staging. Nothing is copied in
+    # either case: translate_path serves /app.wasm from the module this process
+    # was given, which is what keeps concurrent runs independent.
 
     srv = socketserver.TCPServer(("127.0.0.1", 0), functools.partial(Handler, directory=str(ROOT)))
     srv.allow_reuse_address = True
