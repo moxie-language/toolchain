@@ -1005,8 +1005,24 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			lt := e.llvmType(c.Call.Args[1].SSAType())
 			var nlVal string
 			if lt != ipt {
+				// The slice length field is uintptr-width, so this argument is
+				// widened - and on a 32-bit target a 64-bit one must be
+				// NARROWED, which is a trunc. A blanket sext made the whole
+				// module invalid there:
+				//   net_http_internal.ll:233:16: error: invalid cast opcode
+				//   for cast from 'i64' to 'i32'
+				//   %rs51 = sext i64 %t82 to i32
+				// It cannot happen natively, where uintptr is i64 and no
+				// conversion is emitted at all, which is why only the wasm
+				// sweep saw it.
 				nlVal = e.nextReg2("rs")
-				e.w("  ") ; e.w(nlVal) ; e.w(" = sext ") ; e.w(lt) ; e.w(" ") ; e.w(newLen) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+				srcBits := e.intBits(lt)
+				dstBits := e.intBits(ipt)
+				op := "zext"
+				if srcBits > dstBits {
+					op = "trunc"
+				}
+				e.w("  ") ; e.w(nlVal) ; e.w(" = ") ; e.w(op) ; e.w(" ") ; e.w(lt) ; e.w(" ") ; e.w(newLen) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
 			} else {
 				nlVal = newLen
 			}

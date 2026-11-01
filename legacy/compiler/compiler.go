@@ -2357,6 +2357,11 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		// resize argument before comparing and inserting.
 		if newLen.Type().IntTypeWidth() < srcCap.Type().IntTypeWidth() {
 			newLen = b.CreateZExt(newLen, srcCap.Type(), "resize.widen")
+		} else if newLen.Type().IntTypeWidth() > srcCap.Type().IntTypeWidth() {
+			// A 64-bit length on a 32-bit target has to be narrowed, and a
+			// narrowing is a trunc: the widen-only version emitted an i64 into
+			// an i32 field, which LLVM rejects outright.
+			newLen = b.CreateTrunc(newLen, srcCap.Type(), "resize.narrow")
 		}
 		// Bounds check: newLen <= cap (unsigned comparison catches n < 0).
 		overflow := b.CreateICmp(llvm.IntUGT, newLen, srcCap, "resize.overflow")
