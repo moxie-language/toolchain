@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"unsafe"
 )
 
 // An ExitError reports an unsuccessful exit by a command.
@@ -71,11 +72,21 @@ func Command(name string, arg ...string) (c *Cmd) {
 // fdOf is the fd to hand the child for one stream: the caller's file when one
 // was named, and otherwise the parent's own fd for that slot, which is what
 // "inherited" means to dup2.
-func fdOf(f *os.File, inherit uintptr) (fd uintptr) {
-	if f == nil {
-		return inherit
+// fdFile hands the child a file descriptor.
+//
+// ProcAttr.Files carries raw fds THROUGH the *os.File word (see
+// src/os/exec_linux.mx: the child reads int32(uintptr(unsafe.Pointer(Files[i])))).
+// A named stream becomes its own descriptor; an unnamed one becomes the
+// inherited number, which the child sees as "already in place" and leaves
+// alone. The old shape built a []uintptr of fds and assigned it to a []*os.File
+// field, which stage4 compiled as a memory reinterpretation and both compilers
+// now reject - so the type had to become honest about what it stores.
+func fdFile(f *os.File, inherit uintptr) (out *os.File) {
+	fd := inherit
+	if f != nil {
+		fd = f.Fd()
 	}
-	return f.Fd()
+	return (*os.File)(unsafe.Pointer(fd))
 }
 
 // Start forks and execs the command, without waiting for it.
@@ -91,10 +102,10 @@ func (c *Cmd) Start() (err error) {
 	// inherits all three, which is what Run wants; a list of 0/1/2 would be
 	// three dup2 calls onto themselves.
 	if c.Stdin != nil || c.Stdout != nil || c.Stderr != nil {
-		files := []uintptr{:3}
-		files[0] = fdOf(c.Stdin, 0)
-		files[1] = fdOf(c.Stdout, 1)
-		files[2] = fdOf(c.Stderr, 2)
+		files := []*os.File{:3}
+		files[0] = fdFile(c.Stdin, 0)
+		files[1] = fdFile(c.Stdout, 1)
+		files[2] = fdFile(c.Stderr, 2)
 		attr.Files = files
 	}
 	p, perr := os.StartProcess(c.Path, c.Args, attr)

@@ -23294,3 +23294,53 @@ The lesson is the one this campaign keeps teaching: an object whose identity is
 split in two still compiles and still runs, and when the two halves write to the
 same file descriptors the damage is silent. The bug was reported as "the newest
 event is invisible"; it was the flush bookkeeping being thrown away.
+
+### Round 337: a store into an element was not an assignment
+
+Chasing the smesh SIGBUS (round 336's sibling) turned up a hole in stage4's type
+checking that legacy never had. `nostr.NewTags(list ...*Tag)` assigned `[]*Tag`
+to `List []Tag`; stage4 compiled it, storing a pointer array where an array of
+24-byte structs was declared, and the first field read was a SIGBUS. Legacy
+rejected it all along: "cannot use xs (variable of type []*T) as []T value in
+assignment".
+
+The hole: `buildStore` checked assignability for a store into a plain NAME and
+nowhere else. A store into a struct FIELD, a slice/array element, a map value or
+a through-a-pointer target skipped `checkAssignable` entirely, so any two types
+of the same machine width were silently reinterpreted.
+
+`checkElemStore` now does what the name path does before it stores:
+
+- an untyped shift takes the target's type (`r2.limbs[n-1] = 1 << x` with
+  `[]uint32` is a 32-bit shift; it was being typed int32 and rejected),
+- the value must then be assignable to the element type.
+
+Two details the first attempt got wrong, both caught by phase 1b:
+
+- the element type of an index store must come from `ssaIndexElemType`, not from
+  `p.Base`: when the base is already a `*[N]T` (an array field reached through a
+  pointer), `p.Base` is the ARRAY and `f.codebits[i] = v` was rejected with
+  "cannot use value of type int32 as [19]int32". That was flate and the fips140
+  gcm cmac at once.
+- the shift retyping has to happen before the check, or every
+  `dst[i] = 1 << n` in the tree fails.
+
+The check immediately found two stdlib packages that have never compiled, in
+either compiler, because nothing imports them:
+
+- `src/crypto/rc4/rc4.mx`: `c.s[i], c.s[j] = y, x` with `s []uint32` and y, x
+  uint8 - the port widened Go's `[256]byte` state and never converted the swap.
+  Now `uint32(y), uint32(x)`.
+- `src/os/exec/exec.mx`: `Cmd.Start` built `files := []uintptr{...}` and assigned
+  it to `ProcAttr.Files []*os.File`. `ProcAttr.Files` carries raw fds THROUGH
+  the `*os.File` word (the child reads
+  `int32(uintptr(unsafe.Pointer(Files[i])))`), so the honest shape is a
+  `[]*os.File` whose entries are `(*os.File)(unsafe.Pointer(fd))` - which is what
+  `fdFile` now builds, with the convention named in a comment.
+
+Measured: phase 1b "45 packages ok" (it was red on flate, then on bigmod, then
+on rc4, then on os/exec, one real breakage at a time); phase 6 green including
+the aeaddep dependency build; `reject_field_assign_mismatch` rejects on stage4 and
+on legacy; bootstrap fixpoint holds. Legacy already rejected every one of these,
+so this round is stage4-only: wood law is satisfied by matching, not by
+mirroring.

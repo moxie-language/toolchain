@@ -2737,6 +2737,21 @@ func retypeUntypedShift(v SSAValue, T Type) {
 	}
 }
 
+// checkElemStore is the field, index, map and deref store's type check. A store
+// into an element is an assignment: an untyped shift takes the target's type
+// exactly as it does in a name store (`r2.limbs[n-1] = 1 << x` with limbs
+// []uint32 is a uint32 shift, not an int32 one), and the value must be
+// assignable afterwards.
+func (fb *ssaFuncBuilder) checkElemStore(val SSAValue, T Type) {
+	if T == nil || val == nil {
+		return
+	}
+	if bin, okB := val.(*SSABinOp); okB && bin.untypedShift {
+		retypeUntypedShift(bin, T)
+	}
+	fb.checkAssignable(val, T, "assignment")
+}
+
 func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 	if lhs == nil {
 		panic("buildStore: nil lhs")
@@ -2795,6 +2810,7 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 			ptr := fb.buildExpr(lv.X)
 			if ptr != nil {
 				if p, ok2 := ptr.SSAType().(*Pointer); ok2 && p.Base != nil {
+					fb.checkElemStore(val, p.Base)
 					val = fb.coerceToInterface(val, p.Base)
 				}
 				fb.emitStore(ptr, val)
@@ -2807,6 +2823,13 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 			return
 		}
 		if p, ok2 := addr.SSAType().(*Pointer); ok2 && p.Base != nil {
+			// A field store is an assignment and gets the same check a name
+			// store gets. Without it the value was reinterpreted: `ts.List = xs`
+			// with List []Tag and xs []*Tag compiled and stored a pointer array
+			// in a Tag array, and reading the result was a SIGBUS (smesh's
+			// nostr.Tags). Legacy rejects it (go/types): "cannot use xs ...
+			// as []T value in assignment".
+			fb.checkElemStore(val, p.Base)
 			val = fb.coerceToInterface(val, p.Base)
 		}
 		fb.emitStore(addr, val)
@@ -2818,6 +2841,7 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 		}
 		if m, isMap := SafeUnderlying(base.SSAType()).(*TCMap); isMap {
 			idx = fb.coerceToInterface(idx, m.Key)
+			fb.checkElemStore(val, m.Elem)
 			val = fb.coerceToInterface(val, m.Elem)
 			fb.emit(&SSAMapUpdate{Map: base, Key: idx, Value: val})
 			return
@@ -2843,6 +2867,13 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 				ia2.typ = NewPointer(ssaElemType(base.SSAType()))
 				ia2.name = fb.nextName()
 				fb.emit(ia2)
+				// The element type comes from ssaIndexElemType: ia2's type is
+				// built from the base's type, and for a base that is already a
+				// *[N]T (an array field reached through a pointer) p.Base is the
+				// ARRAY, so checking against it rejected
+				// `f.codebits[codeOrder[i]] = int32(...)` with "cannot use
+				// value of type int32 as [19]int32".
+				fb.checkElemStore(val, ssaIndexElemType(base.SSAType()))
 				if p, ok9 := ia2.SSAType().(*Pointer); ok9 && p.Base != nil {
 					val = fb.coerceToInterface(val, p.Base)
 				}
@@ -2858,6 +2889,7 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 		ia.typ = NewPointer(ssaElemType(base.SSAType()))
 		ia.name = fb.nextName()
 		fb.emit(ia)
+		fb.checkElemStore(val, ssaIndexElemType(base.SSAType()))
 		if p, ok2 := ia.SSAType().(*Pointer); ok2 && p.Base != nil {
 			val = fb.coerceToInterface(val, p.Base)
 		}
