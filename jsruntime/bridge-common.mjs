@@ -196,6 +196,29 @@ export function makeEnv(getMem) {
       }
       return n;
     },
+    // compiler-rt's 64x64 -> 128 multiply, and on wasm32 it is the ONLY place
+    // a 128-bit product happens: LLVM folds the 32-bit-half algorithm in
+    // math/bits.Mul64 into `mul i128`, which legalises to this call -
+    // (retptr, aLo, aHi, bLo, bHi), the product written as two i64s.
+    //
+    // host.mjs (the page supervisor) has had this since the app's crypto was
+    // found returning a correct LOW word and a garbage HIGH one; the WORKER
+    // env object did not, so every worker module whose closure uses i128 - the
+    // app bundle (ed25519 field arithmetic) and the signer - failed to LINK
+    // with "LinkError: import object field '__multi3' is not a Function". The
+    // app domain then sat in 'boot' forever: the failure is reported as an
+    // error message, and the page's ready flag is never set. Phase 7's smoke
+    // suite saw exactly that as five Selenium timeouts and three failures.
+    __multi3(ret, aLo, aHi, bLo, bHi) {
+      const M64 = 0xffffffffffffffffn;
+      const a = (BigInt.asUintN(64, aHi) << 64n) | BigInt.asUintN(64, aLo);
+      const b = (BigInt.asUintN(64, bHi) << 64n) | BigInt.asUintN(64, bLo);
+      const p = a * b;
+      const dv = new DataView(getMem().buffer);
+      dv.setBigInt64(ret, BigInt.asIntN(64, p & M64), true);
+      dv.setBigInt64(ret + 8, BigInt.asIntN(64, (p >> 64n) & M64), true);
+      return 0;
+    },
     'syscall.Exit'(code) {
       self.close();
       throw new Error('wasm exit ' + code);

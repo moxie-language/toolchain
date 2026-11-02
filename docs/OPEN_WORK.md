@@ -23467,3 +23467,72 @@ Measured, bootstrap fixpoint `528605f1`:
   runtime staging, relay built from source) and `ui:smoke` ends at round 329's
   documented `3 passed, 3 failed, 5 errors`, Selenium timeouts in the browser
   flows. That is the app/relay side and it was red before this work.
+
+### Round 342: the sibling sweep, and why phase 7 was red
+
+**The siblings under the no-exemption compiler.** With the exemption gone from
+both compilers, each repository was built with legacy (the stricter of the two)
+to see what 341 admitted to hiding:
+
+- **nostr**: clean. Only the expected "linker could not find symbol main.main"
+  for a library target.
+- **morly**: five shadowed declarations, all redeclarations of a named result -
+  `var buf [8]byte` in serial.AppendTimestamp (an array, too), `var n int64` in
+  config.parseInt64, four `var err error` in tree/messages.mx, `var buf []byte`
+  in transport/http.mx, and a bool `authed` beside a []byte `authed` in
+  server_subs.mx. Fixed; the suite is still 370/370.
+- **smesh**: six sites in the mls package - the same `var err error` shape in
+  framing/group/tree, `readVarint` declaring a local `n` over its own uint32
+  result (and typing the shift int32), and readVector/writeVector naming their
+  callback parameter after the receiver (`r`, `w`, then `sub`, each a shadow of
+  something in scope). Fixed; `make test-unit` rc=0.
+
+Two more things fell out of that build, both legacy compiler defects on valid
+input, both a degenerate LLVM handle passed to the C API:
+
+- the DebugRef path handed `DIBuilder.InsertValueAtEnd` a zero value handle
+  (`b.locals` keeps an entry for a variable that was only declared - morly's
+  `done` is one), and the compiler died with SIGSEGV inside createFunction;
+- the Store path asked the LLVM VALUE for its type to decide whether the store
+  is a no-op; the size is a property of the SSA type, so it now comes from
+  `getLLVMType(instr.Val.Type())` instead.
+
+Legacy also disagreed with stage4 about `src/vendor/golang.org/x/...`: stage4
+strips a leading `vendor/` before the third-party exemption, legacy did not, so
+legacy rejected the stdlib's vendored x/crypto for unnamed returns the moment the
+other exemptions went. Both now read the same path. Bootstrap fixpoint unchanged
+(528605f1): these remove crashes, they do not change emitted code.
+
+**The wasm crypto trap from round 329 is closed.** `ed25519_roundtrip`,
+`ed25519_vectors`, `x25519_ecdh`, `poly1305_aead` and `crypto_vectors` all build
+for wasm and print the same answer as native on the current compiler
+(`tests/wasm/validate.sh`: 5 passed, 0 failed). Whatever the constructor-arena
+bug was, the intervening codec and constructor work closed it; nothing was
+"fixed" for it in this round, and the fixtures are the evidence.
+
+**Phase 7 was red because the app worker could not link.** The smoke suite's
+five errors and three failures were all one cause, and the browser console
+named it:
+
+    [app-worker] fatal: LinkError: import object field '__multi3' is not a Function
+    [signer-worker] boot: LinkError: import object field '__multi3' is not a Function
+
+LLVM legalises `mul i128` (math/bits.Mul64) to compiler-rt's `__multi3`. The
+PAGE host (`jsruntime/host.mjs`) has provided it since the low-word/garbage-high
+-word bug; the WORKER env object in `jsruntime/bridge-common.mjs` had not, so
+every worker bundle whose closure uses 128-bit arithmetic failed to instantiate.
+The app then sat in `boot` forever - the page's `data-wasm-ready` flag is only
+set by the worker's `ready` message, and a fatal error message never sets it -
+which is why the failures looked like Selenium timeouts rather than a build
+problem.
+
+`__multi3` is now in the worker env too. The app becomes ready in about a second,
+and phase 7 is green: `ui:build` PASS (nine bundles + runtime staging + relay
+from source) and `ui:smoke` **11 passed** in 47s, where it was 3 passed / 3
+failed / 5 errors before.
+
+One build-product trap worth recording: `web/static/bridge-common.mjs` in the
+app repo is gitignored, and `moxie build -target wasm` keeps an app-supplied copy
+("the app does not ship it" otherwise). A stale copy there kept the old env in
+the staged tree even after the runtime was fixed, so the fix only took effect
+once the file was deleted and the build staged the runtime's own.
