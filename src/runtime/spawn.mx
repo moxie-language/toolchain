@@ -59,6 +59,11 @@ func spawnRingDataSize(slots, budget uintptr) uint32 {
 }
 
 func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
+	// The breaker is created BEFORE the fork: the parent's handle (returned by
+	// SpawnLifecycleChannel) and the child's DomainClosed must be one object, so
+	// a close by either side is visible to both.
+	spawnBreaker = spawnBreakerMake()
+
 	// Create ring buffer pairs for each channel before fork.
 	// mmap(MAP_SHARED) so both processes share the same physical memory.
 	spawnRingCount = nChans
@@ -104,6 +109,7 @@ func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
 		// Child process - run the spawned function directly.
 		childSpawnTarget = true
 		childParentPid = moxie_getppid()
+		DomainClosed = spawnBreaker
 
 		// Reaper: if this domain's parent dies without closing anything - a
 		// SIGKILL, a crash - the kernel delivers SIGTERM here. That is the one

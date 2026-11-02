@@ -23772,3 +23772,27 @@ budget for a value parameter's type, but the pack that carries value arguments
 is a pointer array over COW pages, not a bounded encode, so nothing enforces the
 budget at the spawn call yet. That is the next step: encode value parameters
 into a bounded buffer with the same panic as a channel frame.
+
+**The breaker is one object, created before the fork.** `spawnDomain` now makes
+the breaker channel before `fork`, so the parent's handle (what
+`SpawnLifecycleChannel` returns, and later what `spawn` returns) and the child's
+`DomainClosed` are the same channel: a close by either side is visible to both,
+and the child's exit still closes it through `domainReapChildren`. The runtime
+side compiles (s1) with no behaviour change yet, because no compiler binds the
+target's `closed` result to it - that is the next step, recorded here so it is
+not re-derived:
+
+- legacy: in `createFunction`, after the `*ssa.Alloc` whose comment is "closed"
+  is created, store `runtime.ClosedBreakerChan()` into it; the target's select
+  then reads the result variable.
+- stage4: the same store into `NamedResults[0]` in the function prologue.
+- both: the spawn rule becomes "the target's signature is exactly
+  `(closed chan struct{})`", replacing the no-results check, plus the select
+  requirements - `main` selects on `sigint`, a target selects on `closed`.
+- SIGINT delivery: the handler in `signal.c` currently `_exit`s. It must set a
+  flag and wake a futex word the domain parks on (the single-threaded wake
+  word), and `sigint` must be a special word lowering to that wait; then the
+  main select can observe it.
+- migration: every spawn target gains `(closed chan struct{})` and its select
+  case, and every `main` gains the `sigint` select (about 120 fixtures in this
+  tree, morly's six targets and its main).

@@ -54,17 +54,26 @@ func LastSpawnedLockdownFd() int32 {
 // sends the exit status string on the channel then closes it.
 // Empty string = clean exit, non-empty = error description.
 func SpawnLifecycleChannel() *channel {
+	if spawnBreaker == nil {
+		spawnBreaker = spawnBreakerMake()
+	}
+	if domainList != nil {
+		domainList.doneCh = spawnBreaker
+	}
+	return spawnBreaker
+}
+
+// spawnBreakerMake creates the one breaker channel shared by a spawn: the
+// parent holds the handle spawn returns, the child binds the same object as
+// DomainClosed, and closing either end closes both views. It lives in the root
+// arena because it outlives the frame that spawns.
+func spawnBreakerMake() *channel {
 	// string = {ptr, len, cap} = 3 pointers
 	ptrSize := unsafe.Sizeof(uintptr(0))
-	// The channel is held by the domain entry and outlives the spawning
-	// frame that receives it, so it comes from the root arena too.
 	save := CurrentArena()
 	SetCurrentArena(trueRootArena())
 	ch := chanMake(ptrSize*3, 1, ptrSize*3, nil, 0)
 	SetCurrentArena(save)
-	if domainList != nil {
-		domainList.doneCh = ch
-	}
 	return ch
 }
 
@@ -90,6 +99,15 @@ func domainLookupByPid(pid int32) *domainEntry {
 // domainReapChildren checks for exited children and marks them dead.
 // Non-blocking (WNOHANG). Call periodically from the scheduler.
 // Sends exit status string on the lifecycle channel before closing it.
+// DomainClosed is the breaker channel of the domain being run: in a spawn child
+// it is the same object the parent received from spawn, so a close by either
+// side is visible to both. Nil in the root domain.
+var DomainClosed *channel
+
+// spawnBreaker is the parent's handle to the most recent spawn's breaker,
+// created before the fork so the child inherits the same object.
+var spawnBreaker *channel
+
 func domainReapChildren() {
 	for e := domainList; e != nil; e = e.next {
 		if !e.alive {
