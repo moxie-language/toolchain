@@ -479,8 +479,12 @@ own tags (or are fixed-shape), so `[]Request` takes one number and Request's
 budget is computed from its fields.
 
 **No capacity means UNBUFFERED, not "no buffer".** `chan T{}` in a spawn call is
-a rendezvous: one frame slot, the sender waits for the receiver to take it, and
-the payload crosses the ring like a pipe. That is the point of synchronisation
+a rendezvous: the ring allocates exactly ONE message slot, the sender writes the
+frame and then WAITS FOR THE RECEIVER'S ACK before the send returns, and the
+payload crosses the ring like a pipe. The ack is the receiver advancing the
+ring's read index past that frame - no extra message, no extra memory. `:N` with
+N > 0 returns as soon as the frame is in the ring and parks only when the ring
+is full, which is what a buffer is for. That is the point of synchronisation
 between the two domains - a sender that has to wait is telling you the receiving
 domain is not returning to its select promptly enough, which is a design fault
 you want visible, not a queue you want deep enough to hide it. A frame must
@@ -494,11 +498,11 @@ path, because its wire size is not a function of a count and an element width.
 A value whose encoding exceeds its budget panics naming the type, the field path,
 the budget and the actual. The tag is a promise the encoder keeps, not a hint.
 
-Open decision: a spawn-facing type with no `cap:` tag and a variable shape. Either
-it is refused at compile time (every spawn channel must state a budget, so the
-migration of existing spawn callers is mandatory in the same change) or it gets a
-default budget - 64 KiB, say - and panics above it (lenient, and the default is a
-guess, but a loud one). Not yet chosen; nothing is implemented for either.
+There is no default budget. Even unbuffered allocates one message slot, and a
+slot cannot be allocated for a frame whose size is unknown, so a spawn-facing
+type with no computable budget and no `cap:` tags is a compile error naming the
+field that leaves it unbounded. The migration of existing spawn callers is part
+of the same change.
 
 ## Spawn Architecture: Managers and Workers
 
