@@ -130,7 +130,7 @@ func PipeChanSend(ch *channel, encoded []byte) bool {
 			return false
 		}
 		if ringSend(ch.ringSend, encoded) {
-			return true
+			break
 		}
 		if !peerAlive(ch) {
 			ringClose(ch.ringSend)
@@ -138,6 +138,23 @@ func PipeChanSend(ch *channel, encoded []byte) bool {
 		}
 		ringParkRead(ch.ringSend, need)
 	}
+	// Unbuffered send: the frame is in the ring, and the send is not complete
+	// until the receiver has taken it. The ack is the receiver advancing the
+	// read index past the frame - no extra message and no extra memory. A
+	// buffered channel (bufCap > 0) returns here: the ring holding N+1 frames
+	// is what the buffer is for, and parking happens only when it is full.
+	if ch.bufCap == 0 {
+		for !ringAcked(ch.ringSend) {
+			if ringIsClosed(ch.ringSend) {
+				return false
+			}
+			if !peerAlive(ch) {
+				return false
+			}
+			ringParkAck(ch.ringSend)
+		}
+	}
+	return true
 }
 
 // PipeChanRecv is the runtime entry the compiler emits in place of the

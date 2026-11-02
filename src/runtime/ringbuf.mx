@@ -150,6 +150,34 @@ func ringParkRead(ring uintptr, need uint32) {
 	atomicStoreU32(&hdr.sendSleeper, 0)
 }
 
+// ringAcked reports whether the receiver has consumed everything written so
+// far. The SPSC pair has one writer, so "everything written" is exactly the
+// frame the caller just sent: the read index reaching the write index IS the
+// acknowledgement of an unbuffered send.
+func ringAcked(ring uintptr) bool {
+	hdr := (*ringBuf)(unsafe.Pointer(ring))
+	w := atomicLoadU32(&hdr.writeIdx)
+	r := atomicLoadU32(&hdr.readIdx)
+	// Index counters wrap; a signed difference of the low 32 bits is the
+	// distance between them and is non-negative once the reader has caught up.
+	return int32(r-w) >= 0
+}
+
+// ringParkAck waits for the read index to move, bounded by the same park
+// timeout every other ring wait uses. It is the waiting half of ringAcked:
+// the caller re-probes and rechecks peer liveness after each return, so a dead
+// reader surfaces as a failed send instead of a hang.
+func ringParkAck(ring uintptr) {
+	hdr := (*ringBuf)(unsafe.Pointer(ring))
+	atomicStoreU32(&hdr.sendSleeper, 1)
+	w := atomicLoadU32(&hdr.writeIdx)
+	cmp := atomicLoadU32(&hdr.readIdx)
+	if int32(cmp-w) < 0 && !ringIsClosed(ring) {
+		moxie_futex_wait_timeout_shared(&hdr.readIdx, cmp, pipeParkTimeoutNs)
+	}
+	atomicStoreU32(&hdr.sendSleeper, 0)
+}
+
 func ringAlign8(n uint32) uint32 {
 	return (n + 7) &^ 7
 }
