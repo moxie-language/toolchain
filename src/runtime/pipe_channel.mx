@@ -107,6 +107,13 @@ func peerAlive(ch *channel) bool {
 	return childAlive(ch.spawnPid)
 }
 
+// breakerFallback is the native answer to a nil breaker: the target was called
+// instead of spawned, so no domain and no breaker exist. Fail loud.
+func breakerFallback() *channel {
+	runtimePanic("spawn target called directly: closed breaker is nil; spawn it instead of calling it")
+	return nil
+}
+
 // PipeChanSend is the runtime entry the compiler emits in place of the
 // in-runtime queue send for spawn-bound channels. Writes the encoded
 // bytes to the send ring. The channel's declared capacity is how many
@@ -381,15 +388,21 @@ func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
 	if ch.ringRecv != 0 {
 		data, rok := ringRecv(ch.ringRecv)
 		if rok {
-			if uintptr(len(data)) == ch.elementSize {
-				recvStore(value, unsafe.Pointer(&data[0]), ch.elementSize)
-			} else {
-				memzero(value, ch.elementSize)
+			// value is nil for a select case that binds nothing
+			// (`case <-closed:`), so there is nowhere to put the payload.
+			if value != nil {
+				if uintptr(len(data)) == ch.elementSize {
+					recvStore(value, unsafe.Pointer(&data[0]), ch.elementSize)
+				} else {
+					memzero(value, ch.elementSize)
+				}
 			}
 			return true, true
 		}
 		if ringIsClosed(ch.ringRecv) {
-			recvZero(value, ch.elementSize)
+			if value != nil {
+				recvZero(value, ch.elementSize)
+			}
 			return true, false
 		}
 		return false, false

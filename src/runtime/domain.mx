@@ -74,8 +74,20 @@ func spawnBreakerMake() *channel {
 	SetCurrentArena(trueRootArena())
 	ch := chanMake(ptrSize*3, 1, ptrSize*3, nil, 0)
 	SetCurrentArena(save)
+	// The breaker crosses the fork, so the CLOSE has to be visible on both
+	// sides: it rides the control ring (chanID 0), whose closed flag lives in
+	// MAP_SHARED memory. A plain channel's closed flag would be copy-on-write
+	// and the child would never see the parent's close.
+	ch.spawnBound = true
+	ch.spawnChanID = 0
+	ch.ringSend = spawnCtlRing
+	ch.ringRecv = spawnCtlRing
 	return ch
 }
+
+// spawnCtlRing is the control ring shared by a spawn's breaker: closing it is
+// how either side says "terminate", and both ends observe the same flag.
+var spawnCtlRing uintptr
 
 func domainCount() int32 {
 	n := 0
@@ -99,13 +111,9 @@ func domainLookupByPid(pid int32) *domainEntry {
 // domainReapChildren checks for exited children and marks them dead.
 // Non-blocking (WNOHANG). Call periodically from the scheduler.
 // Sends exit status string on the lifecycle channel before closing it.
-// DomainClosed is the breaker channel of the domain being run: in a spawn child
-// it is the same object the parent received from spawn, so a close by either
-// side is visible to both. Nil in the root domain.
-var DomainClosed *channel
-
 // spawnBreaker is the parent's handle to the most recent spawn's breaker,
-// created before the fork so the child inherits the same object.
+// created before the fork so the child inherits the same object. DomainClosed
+// (chan.mx) is the child's view of the same channel.
 var spawnBreaker *channel
 
 func domainReapChildren() {

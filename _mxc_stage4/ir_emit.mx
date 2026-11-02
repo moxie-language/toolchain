@@ -25,6 +25,9 @@ type irEmitter struct {
 	// table for the package this emitter is compiling.
 	wasmSpawnTargets []*wasmSpawnTarget
 	wasmSpawnIndex   map[string]int32
+	// spawnBreakers are the breakers the current function created; every return
+	// closes them, so a child never outlives the frame that spawned it.
+	spawnBreakers []string
 	pendKeepIface []Type // fn-arena: interfaces boxed during the current function
 	keepIfaceTypes []Type // compile-arena: merged; module-tail llvm.used
 	triple     string
@@ -1635,6 +1638,7 @@ func fnCarriesBigAggregate(f *SSAFunction) (ok bool) {
 }
 
 func (e *irEmitter) emitFunction(f *SSAFunction) {
+	e.spawnBreakers = nil
 	e.w("; [emit] " | f.name | "\n")
 	sym := e.funcSymbol(f)
 	if len(sym) > 5 && (mxutil.HasPrefix(sym, "@llvm.") || mxutil.HasPrefix(sym, "@\"llvm.")) {
@@ -2189,6 +2193,7 @@ func (e *irEmitter) emitInstr(instr SSAInstruction) {
 			break
 		}
 		e.emitAlloc(i)
+		e.bindSpawnClosed(i)
 	case *SSACoverHit:
 		e.emitCoverHitLine(i.Line)
 	case *SSAStore:
@@ -2525,8 +2530,35 @@ func (e *irEmitter) returnOperand(res SSAValue, expectType string) (val string) 
 	return val
 }
 
+// bindSpawnClosed binds the domain's breaker to a spawn target's `closed`
+// result and asserts it: a target called directly has no breaker, and a nil one
+// would disable the select's closed arm and run its loop forever.
+func (e *irEmitter) bindSpawnClosed(a *SSAAlloc) {
+	f := e.curFunc
+	if f == nil || !isSpawnTargetSig(f.Signature) || len(f.NamedResults) == 0 {
+		return
+	}
+	if f.NamedResults[0] != a {
+		return
+	}
+	reg := e.nextReg2("brk")
+	e.w("  ") ; e.w(reg) ; e.w(" = call ptr @runtime.ClosedBreakerChan(ptr null)\n")
+	e.declareRuntime("runtime.ClosedBreakerChan", "ptr", "")
+	as := e.nextReg2("brk")
+	e.w("  ") ; e.w(as) ; e.w(" = call ptr @runtime.AssertBreaker(ptr ") ; e.w(reg) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.AssertBreaker", "ptr", "ptr")
+	e.w("  store ptr ") ; e.w(as) ; e.w(", ptr ") ; e.w(e.regName(a)) ; e.w("\n")
+}
+
 func (e *irEmitter) emitReturn(r *SSAReturn) {
 	isRecoverBlock := e.curFunc.Recover != nil && e.currentEmitBlock == e.curFunc.Recover
+	// Close every breaker this function created: a child never outlives the
+	// frame that spawned it, which for main is the ordinary exit path.
+	for _, br := range e.spawnBreakers {
+		e.w("  call void @runtime.SpawnClose(ptr ") ; e.w(br) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.SpawnClose", "void", "ptr")
+	}
+	e.spawnBreakers = nil
 	e.deferCheckpointOn = false
 	// `return expr` with named results assigns the result slots, runs the
 	// defers, and returns the slots - the order Go uses. Returning the

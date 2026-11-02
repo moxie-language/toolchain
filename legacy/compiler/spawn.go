@@ -108,9 +108,9 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	// breaker that closes when the domain terminates is the channel spawn
 	// returns.
 	sig := targetFn.Signature
-	if sig.Results().Len() != 0 {
+	if !isSpawnTargetSig(sig) {
 		b.addError(instr.Pos(), fmt.Sprintf(
-			"spawn: %s must not return values; a spawned function reports termination through the breaker channel spawn returns",
+			"spawn: %s must be declared with exactly one result, (closed chan struct{}), which is the domain's breaker; a function without it cannot be spawned",
 			targetFn.Name()))
 		return llvm.Value{}, nil
 	}
@@ -205,10 +205,35 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	waitFnType, waitFn := b.getFunction(b.program.ImportedPackage("runtime").Members["PipeWaitChildReady"].(*ssa.Function))
 	b.createCall(waitFnType, waitFn, []llvm.Value{llvm.Undef(b.dataPtrType)}, "child.ready")
 
-	// Return a lifecycle channel (chan struct{}) that closes when the child exits.
+	// Return the breaker channel (chan struct{}) that closes when the child
+	// exits. Register it with the domain so a panic closes it, and note it on
+	// the frame so every return of this function closes it too.
 	lcFnType, lcFn := b.getFunction(b.program.ImportedPackage("runtime").Members["SpawnLifecycleChannel"].(*ssa.Function))
 	doneCh := b.createCall(lcFnType, lcFn, []llvm.Value{llvm.Undef(b.dataPtrType)}, "done.ch")
+	trackFnType, trackFn := b.getFunction(b.program.ImportedPackage("runtime").Members["SpawnTrack"].(*ssa.Function))
+	b.createCall(trackFnType, trackFn, []llvm.Value{doneCh, llvm.Undef(b.dataPtrType)}, "")
+	b.spawnBreakers = append(b.spawnBreakers, doneCh)
 	return doneCh, nil
+}
+
+// isSpawnTargetSig reports whether sig is the declared shape of a spawned
+// function: exactly one result, named closed, of type chan struct{}. That result
+// is the domain's breaker - the same channel spawn returns - and its presence in
+// the signature is what marks the function as a spawn target.
+func isSpawnTargetSig(sig *types.Signature) bool {
+	if sig == nil || sig.Results().Len() != 1 {
+		return false
+	}
+	r := sig.Results().At(0)
+	if r.Name() != "closed" {
+		return false
+	}
+	ch, ok := r.Type().Underlying().(*types.Chan)
+	if !ok || ch.Dir() != types.SendRecv {
+		return false
+	}
+	st, ok := ch.Elem().Underlying().(*types.Struct)
+	return ok && st.NumFields() == 0
 }
 
 // validateSpawnArg checks one parameter of a spawned function. A channel

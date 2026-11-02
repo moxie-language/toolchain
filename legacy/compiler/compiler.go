@@ -214,6 +214,9 @@ type builder struct {
 	// in-runtime queue path. Populated by createSpawn (parent) and
 	// setupNativeSpawnTargetChannels (child).
 	pipeChannels map[ssa.Value]bool
+	// spawnBreakers are the breakers this function created: every return closes
+	// them, so a child never outlives the frame that spawned it.
+	spawnBreakers []llvm.Value
 
 	// Arena prologue/epilogue state.
 	fnArenaVal    llvm.Value // per-function arena (freed on return)
@@ -1858,6 +1861,15 @@ func (b *builder) createFunction() {
 				}
 			}
 			b.createInstruction(instr)
+			if alloc, isAlloc := instr.(*ssa.Alloc); isAlloc && alloc.Comment == "closed" && isSpawnTargetSig(b.fn.Signature) {
+				// The target's breaker: the same channel spawn returned to the
+				// parent. Asserting it here turns a direct call (not spawned,
+				// so no breaker exists) into an immediate panic instead of a
+				// select whose closed arm is nil and a loop that never ends.
+				ch := b.createRuntimeCall("ClosedBreakerChan", nil, "")
+				ch = b.createRuntimeCall("AssertBreaker", []llvm.Value{ch}, "")
+				b.CreateStore(ch, b.locals[alloc])
+			}
 		}
 		if b.fn.Name() == "init" && len(block.Instrs) == 0 {
 			b.CreateRetVoid()
@@ -2034,6 +2046,10 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		b.createRuntimeInvoke("_panic", []llvm.Value{value}, "")
 		b.CreateUnreachable()
 	case *ssa.Return:
+		for _, br := range b.spawnBreakers {
+			b.createRuntimeCall("SpawnClose", []llvm.Value{br}, "")
+		}
+		b.spawnBreakers = nil
 		if b.hasDeferFrame() {
 			b.createRuntimeCall("destroyDeferFrame", []llvm.Value{b.deferFrame}, "")
 		}

@@ -1110,6 +1110,26 @@ func (e *irEmitter) emitPrintArg(val string, t Type) {
 // emit a goroutine-start wrapper that unpacks them and calls the target,
 // call runtime.spawnDomain, mark each channel arg pipe-bound on the parent
 // side, wait for the child to be ready, and return the lifecycle channel.
+// isSpawnTargetSig reports whether sig is the declared shape of a spawned
+// function: exactly one result, named closed, of type chan struct{}. That result
+// is the domain's breaker - the same channel spawn returns - and its presence in
+// the signature is what marks the function as a spawn target.
+func isSpawnTargetSig(sig *Signature) (ok bool) {
+	if sig == nil || sig.Results == nil || sig.Results.Len() != 1 {
+		return false
+	}
+	r := sig.Results.At(0)
+	if r == nil || r.Name != "closed" || r.Typ == nil {
+		return false
+	}
+	ch, ok := SafeUnderlying(r.Typ).(*TCChan)
+	if !ok || ch.Dir != TCSendRecv {
+		return false
+	}
+	st, ok := SafeUnderlying(ch.Elem).(*TCStruct)
+	return ok && st.NumFields() == 0
+}
+
 // checkSpawnTarget enforces the spawn ABI: a parameter is either a channel (the
 // domain's only route to another domain) or a static startup value frozen at the
 // spawn call, and the function must not return a value - its termination breaker
@@ -1120,8 +1140,8 @@ func (e *irEmitter) checkSpawnTarget(fn *SSAFunction) (ok bool) {
 		return true
 	}
 	sig := fn.Signature
-	if sig.Results != nil && sig.Results.Len() > 0 {
-		reportCompileError("spawn: " | fn.name | " must not return values; a spawned function reports termination through the breaker channel spawn returns")
+	if !isSpawnTargetSig(sig) {
+		reportCompileError("spawn: " | fn.name | " must be declared with exactly one result, (closed chan struct{}), which is the domain's breaker; a function without it cannot be spawned")
 		return false
 	}
 	for _, blk := range fn.Blocks {
@@ -1227,6 +1247,12 @@ func (e *irEmitter) emitSpawnCall(c *SSACall) {
 	reg := e.regName(c)
 	e.w("  ") ; e.w(reg) ; e.w(" = call ptr @runtime.SpawnLifecycleChannel(ptr null)\n")
 	e.declareRuntime("runtime.SpawnLifecycleChannel", "ptr", "")
+	// Register the breaker for the panic path and close it at this function's
+	// every return.
+	e.w("  call void @runtime.SpawnTrack(ptr ") ; e.w(reg) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.SpawnTrack", "void", "ptr")
+	e.spawnBreakers = mxutil.Ensure(e.spawnBreakers, 1)
+	push(e.spawnBreakers, reg)
 }
 
 // emitSpawnWrapper emits (once) the goroutine-start wrapper for a spawn

@@ -426,6 +426,67 @@ func chanRecv(ch *channel, value unsafe.Pointer, op *channelOp) bool {
 
 // chanClose closes the given channel. If this channel has a receiver or is
 // empty, it closes the channel. Else, it panics.
+// DomainClosed is the breaker channel of the domain being run: in a spawn child
+// it is the same object the parent received from spawn, so a close by either
+// side is visible to both. Nil in the root domain.
+var DomainClosed *channel
+
+// ClosedBreakerChan is the domain's breaker, bound to a spawn target's `closed`
+// result in the function prologue.
+func ClosedBreakerChan() *channel { return DomainClosed }
+
+// AssertBreaker binds a spawn target's closed result and fails loud when the
+// function was called directly instead of spawned: a nil breaker disables the
+// closed arm of the select and the loop then runs forever with no symptom.
+func AssertBreaker(ch *channel) *channel {
+	if ch == nil {
+		return breakerFallback()
+	}
+	return ch
+}
+
+// spawnTracked is every breaker this domain created, for the panic path: a
+// panicking parent closes all of them, terminating its subtree, which cascades
+// because each child's panic closes the breakers it created in turn.
+var spawnTracked [64]*channel
+var spawnTrackedN int32
+
+// SpawnTrack records a breaker so a panic can close it.
+func SpawnTrack(ch *channel) {
+	if ch == nil || spawnTrackedN >= 64 {
+		return
+	}
+	spawnTracked[spawnTrackedN] = ch
+	spawnTrackedN++
+}
+
+// SpawnClose closes a breaker once; nil is a no-op because a spawn that failed
+// has no child to terminate.
+func SpawnClose(ch *channel) {
+	if ch == nil {
+		return
+	}
+	if ch.spawnBound {
+		// The breaker crosses the fork: closing it means closing the control
+		// ring both sides read, not setting a copy-on-write flag.
+		PipeChanCloseSignal(ch)
+		return
+	}
+	if ch.closed {
+		return
+	}
+	chanClose(ch)
+}
+
+// SpawnCloseAll closes every breaker this domain created and forgets them.
+func SpawnCloseAll() {
+	for i := int32(0); i < spawnTrackedN; i++ {
+		SpawnClose(spawnTracked[i])
+		spawnTracked[i] = nil
+	}
+	spawnTrackedN = 0
+}
+
 func chanClose(ch *channel) {
 	if ch == nil {
 		// Not allowed by the language spec.

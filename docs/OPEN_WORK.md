@@ -23796,3 +23796,36 @@ not re-derived:
 - migration: every spawn target gains `(closed chan struct{})` and its select
   case, and every `main` gains the `sigint` select (about 120 fixtures in this
   tree, morly's six targets and its main).
+
+**The breaker is bound, asserted and closed (round 346, second half).**
+`spawnBreaker` is now a control-ring-bound channel: created before the fork,
+wired to `spawnCtlRing`, and `spawnBreakerMake` gives it `spawnBound` with
+`ringSend`/`ringRecv` on that ring. The compiler binds it to the target's
+`closed` result in the prologue and asserts it there
+(`AssertBreaker`), so a direct call to a spawn target panics with
+"spawn target called directly: closed breaker is nil; spawn it instead of
+calling it" instead of running a select whose closed arm is nil. `spawn` records
+the breaker with `SpawnTrack`; every `return` of the creating function closes
+it, and `runtimePanic` closes them all (and the domain's own breaker) before it
+prints. The spawn signature rule is now exact: a target must be declared
+`(closed chan struct{})`, in legacy and stage4, native and wasm.
+
+**A nil select buffer was a real segfault, found by the breaker.** A select case
+that binds nothing (`case <-closed:`) passes a nil recvbuf, and the spawn-bound
+`tryPipeRecv` wrote `elementSize` bytes through it. It now skips the store when
+`value` is nil; that path is reachable from any spawn-bound `chan struct{}` case,
+so this was a latent crash independent of the breaker.
+
+**Verified.** Bootstrap fixpoint `496b0c21`. Probes: direct call panics with the
+message above; a parent function that spawns and returns makes the child's
+`case <-closed:` fire (`worker: closed`, then `ok`); a parent `panic` closes the
+breakers before printing (the child is usually reaped by PDEATHSIG in the same
+instant, so the cascade is enforced by the close order rather than observable
+as a print). Targets migrated: moxie's seven (chanpath, futexpark x2,
+tls_handshake, spawn_frame_budget, spawncost, spawnbytes) and morly's five
+(Broadcast/Proxy/Ingest/Blossom workers, dbengine.Run).
+
+**Still open, unchanged:** `sigint` (main's select) needs the signal handler to
+stop `_exit`ing and wake a domain park word; then every main gains the select
+and both compilers enforce it. The value-parameter budget encode is also still
+unwired (the tag walk exists, the pack is a pointer array).
