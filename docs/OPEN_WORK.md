@@ -23727,3 +23727,14 @@ have no `spawn` calls, so they needed no migration.
 The one-line lesson worth keeping: `ssa.MakeChan.Budget` had to be added to
 `Operands()`, because an operand the SSA does not list is an operand the
 compiler is free to delete.
+
+**Every field takes a variable.** `chan Body{:buffers:limit}` with both from
+variables is a three-slot ring of `limit` bytes per element; `[]byte{:ln:cp}`
+and `map[K]V{:mc}` take variables for len/cap and capacity. Three of the four
+already worked (the literals are ordinary expressions); the map capacity did
+not: `emitMakeMap` passed the reserve operand straight to `hashmapMake`, so a
+variable emitted `i32` where the runtime takes a word and the IR verifier
+rejected the module. It is widened with `sextToIpt` now, like a slice's len/cap.
+
+Evidence, installed compiler: `chan cap 3`, `worker got 3000`, `slice len 4 cap
+8`, `map len 1`, `ok`. Bootstrap fixpoint `34cd6dc9` (s2 == s3).
