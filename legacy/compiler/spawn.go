@@ -102,14 +102,29 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		return llvm.Value{}, nil
 	}
 
-	// Validate that the function signature's parameters are spawn-safe
-	// and implement moxie.Codec.
+	// Spawn ABI: a parameter is either a channel (the domain's only route to
+	// another domain) or a static startup value, serialized at the spawn call
+	// and frozen in the child from that moment. It must not return a value: the
+	// breaker that closes when the domain terminates is the channel spawn
+	// returns.
 	sig := targetFn.Signature
+	if sig.Results().Len() != 0 {
+		b.addError(instr.Pos(), fmt.Sprintf(
+			"spawn: %s must not return values; a spawned function reports termination through the breaker channel spawn returns",
+			targetFn.Name()))
+		return llvm.Value{}, nil
+	}
 	for i := 0; i < sig.Params().Len(); i++ {
 		if err := validateSpawnArg(sig.Params().At(i).Type(), i, codecIface); err != nil {
 			b.addError(instr.Pos(), err.Error())
 			return llvm.Value{}, nil
 		}
+	}
+	if globalName, found := b.spawnTargetReadsChannelGlobal(targetFn); found {
+		b.addError(instr.Pos(), fmt.Sprintf(
+			"spawn: %s reads channel global %s; a spawned domain's channels must be its parameters, so pass it through the spawn call",
+			targetFn.Name(), globalName))
+		return llvm.Value{}, nil
 	}
 
 	if len(concreteArgs) != sig.Params().Len() {
@@ -196,16 +211,41 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	return doneCh, nil
 }
 
-// validateSpawnArg checks that a type is safe to pass across a spawn boundary.
-// Channels are allowed as bare top-level parameters (they become IPC channels);
-// their element types must implement moxie.Codec. Non-channel arguments must
-// implement moxie.Codec directly. No interface types anywhere.
+// validateSpawnArg checks one parameter of a spawned function. A channel
+// parameter becomes IPC; the element type must be spawn-safe. A non-channel
+// parameter is a static startup value: it is serialized at the spawn call and
+// frozen in the child from that moment, so it must implement moxie.Codec.
 func validateSpawnArg(t types.Type, argIndex int, codec *types.Interface) error {
 	if ch, ok := t.Underlying().(*types.Chan); ok {
-		// Top-level channel: element type must be spawn-safe and implement Codec.
 		return validateSpawnElem(ch.Elem(), argIndex, codec)
 	}
 	return validateSpawnElem(t, argIndex, codec)
+}
+
+// spawnTargetReadsChannelGlobal reports the first channel-typed package global
+// the target's own body references. A spawned domain may only use channels it
+// received as parameters: a global channel is shared memory nobody negotiated,
+// and the child's copy of its state is a fork-time snapshot.
+func (b *builder) spawnTargetReadsChannelGlobal(fn *ssa.Function) (name string, found bool) {
+	for _, blk := range fn.Blocks {
+		for _, instr := range blk.Instrs {
+			switch in := instr.(type) {
+			case *ssa.UnOp:
+				if g, ok := in.X.(*ssa.Global); ok {
+					if _, isChan := g.Type().Underlying().(*types.Chan); isChan {
+						return g.Name(), true
+					}
+				}
+			case *ssa.Store:
+				if g, ok := in.Addr.(*ssa.Global); ok {
+					if _, isChan := g.Type().Underlying().(*types.Chan); isChan {
+						return g.Name(), true
+					}
+				}
+			}
+		}
+	}
+	return "", false
 }
 
 // validateSpawnElem rejects types that can't be serialized across a spawn

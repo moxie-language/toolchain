@@ -23738,3 +23738,37 @@ rejected the module. It is widened with `sextToIpt` now, like a slice's len/cap.
 
 Evidence, installed compiler: `chan cap 3`, `worker got 3000`, `slice len 4 cap
 8`, `map len 1`, `ok`. Bootstrap fixpoint `34cd6dc9` (s2 == s3).
+
+### Round 346: the spawn ABI is a signature, and the kernel is the reaper
+
+**A spawned function is a signature the compiler can read.** A target declares
+no return value (the termination breaker is the channel `spawn` returns), a
+target's parameters are values (copied, frozen at the call) or channels
+(shared), and a target may not reach a channel through a package global: its
+parameters are the only capabilities it holds. The check reports
+`must not return values` and `reads channel global`, in legacy and stage4,
+native and wasm. Note the version of this rule from the same session that the
+next round replaces: the target will declare `(closed chan struct{})` and return
+the breaker, so the no-results half is scheduled to become an exact-signature
+check, not a ban.
+
+**The supervision gap has a kernel answer.** Every spawn is supervised: the
+parent holds a breaker and reaps. But a parent killed outright - SIGKILL, a
+crash - never closes anything, and a child that is not in a channel wait (a
+sleep, a blocking read) never notices. `spawnDomain`'s child now calls
+`prctl(PR_SET_PDEATHSIG, SIGTERM)` and rechecks `getppid()` afterwards (the
+parent may already be gone when prctl runs); the child dies by SIGTERM with no
+cooperation from the parent. Measured: a parent SIGKILLed while its child loops
+on `time.Sleep` leaves no child after one second.
+
+Evidence: fixpoint `3b7c6f1c`, `reject_spawn_returns_value` passes; the reaper
+probe prints `reaper ok: child gone after the parent was killed`. The
+channel-global check is in place for same-package targets; a cross-package
+target's body may not be loaded into the caller's SSA, so that case is recorded
+rather than claimed.
+
+**Value parameters are sized, not yet bounded.** The tag walk already computes a
+budget for a value parameter's type, but the pack that carries value arguments
+is a pointer array over COW pages, not a bounded encode, so nothing enforces the
+budget at the spawn call yet. That is the next step: encode value parameters
+into a bounded buffer with the same panic as a channel frame.

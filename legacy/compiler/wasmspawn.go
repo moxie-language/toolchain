@@ -214,6 +214,18 @@ func (b *builder) createWasmSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		return llvm.Value{}, nil
 	}
 
+	if sig.Results().Len() != 0 {
+		b.addError(instr.Pos(), fmt.Sprintf(
+			"spawn: %s must not return values; a spawned function reports termination through the breaker channel spawn returns",
+			targetFn.Name()))
+		return llvm.Value{}, nil
+	}
+	if globalName, found := b.spawnTargetReadsChannelGlobal(targetFn); found {
+		b.addError(instr.Pos(), fmt.Sprintf(
+			"spawn: %s reads channel global %s; a spawned domain's channels must be its parameters, so pass it through the spawn call",
+			targetFn.Name(), globalName))
+		return llvm.Value{}, nil
+	}
 	for i, arg := range concreteArgs {
 		if err := validateWasmSpawnArg(sig.Params().At(i).Type(), i); err != nil {
 			b.addError(instr.Pos(), err.Error())

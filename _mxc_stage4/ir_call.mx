@@ -1110,6 +1110,39 @@ func (e *irEmitter) emitPrintArg(val string, t Type) {
 // emit a goroutine-start wrapper that unpacks them and calls the target,
 // call runtime.spawnDomain, mark each channel arg pipe-bound on the parent
 // side, wait for the child to be ready, and return the lifecycle channel.
+// checkSpawnTarget enforces the spawn ABI: a parameter is either a channel (the
+// domain's only route to another domain) or a static startup value frozen at the
+// spawn call, and the function must not return a value - its termination breaker
+// is the channel spawn returns. A channel reached through a package global is
+// refused too: the channels of a spawned domain must be its parameters.
+func (e *irEmitter) checkSpawnTarget(fn *SSAFunction) (ok bool) {
+	if fn == nil || fn.Signature == nil {
+		return true
+	}
+	sig := fn.Signature
+	if sig.Results != nil && sig.Results.Len() > 0 {
+		reportCompileError("spawn: " | fn.name | " must not return values; a spawned function reports termination through the breaker channel spawn returns")
+		return false
+	}
+	for _, blk := range fn.Blocks {
+		for _, instr := range blk.Instrs {
+			u, isUnop := instr.(*SSAUnOp)
+			if !isUnop {
+				continue
+			}
+			g, isGlobal := u.X.(*SSAGlobal)
+			if !isGlobal {
+				continue
+			}
+			if _, isChan := SafeUnderlying(g.typ).(*TCChan); isChan {
+				reportCompileError("spawn: " | fn.name | " reads channel global " | g.name | "; a spawned domain's channels must be its parameters, so pass it through the spawn call")
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (e *irEmitter) emitSpawnCall(c *SSACall) {
 	if e.ptrBits == 32 {
 		e.emitWasmSpawnCall(c)
@@ -1118,6 +1151,10 @@ func (e *irEmitter) emitSpawnCall(c *SSACall) {
 	ipt := e.intptrType()
 	targetFn, ok := c.Call.Args[0].(*SSAFunction)
 	if !ok {
+		e.emitZeroReg(e.regName(c), c.SSAType())
+		return
+	}
+	if !e.checkSpawnTarget(targetFn) {
 		e.emitZeroReg(e.regName(c), c.SSAType())
 		return
 	}

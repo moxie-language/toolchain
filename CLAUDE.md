@@ -467,6 +467,23 @@ channel is a mailbox or a FIFO queue, never a rendezvous.
 the messages weigh. `cap(ch)` reports the declared N on both ends; `len(ch)`
 reports the local in-runtime queue, which the boundary path never uses.
 
+**Values are copied; channels are shared.** A value parameter is a one-time
+copy frozen at the spawn call; a channel parameter is a durable right to a
+shared structure - the same line Erlang draws between terms and pids. A spawn
+boundary is therefore a sharing boundary, not an isolation boundary: the child
+holds the same ring the parent holds, so the isolation is at the capability
+level, not the memory level. A misbehaving child can corrupt a ring its parent
+also uses, and the blast radius is exactly the capabilities it was handed.
+A value parameter is part of the spawn's footprint, so it takes the same `cap`
+tags as a channel element type (one page per unstated dimension): the startup
+config is not exempt from sizing.
+
+**The spawn ABI.** `spawn(fn, arg...)` passes values (copied, frozen at the
+call) and channels (shared). The target declares no return values - its
+termination breaker is the channel `spawn` returns, which closes when the child
+ends - and it may not reach a channel through a package global: a spawned
+domain's channels are exactly its parameters, the only capabilities it gets.
+
 **The ring is sized before the fork, from the declaration.** A spawn channel is
 an atomic FIFO, not a pipe: its size must be known when the rings are created,
 which is before the domain exists. The data area is

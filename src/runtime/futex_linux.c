@@ -11,7 +11,9 @@
 
 #include <limits.h>
 #include <stdint.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
+#include <signal.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -49,4 +51,12 @@ void moxie_futex_wake(uint32_t *addr) {
 
 void moxie_futex_wake_all(uint32_t *addr) {
     syscall(SYS_futex, addr, FUTEX_WAKE|FUTEX_PRIVATE_FLAG, INT_MAX, NULL, NULL, 0);
+}
+
+// moxie_set_pdeathsig asks the kernel to deliver sig when this process's parent
+// dies. That is the reaper above main: every spawn is supervised by a holder
+// that can close the child's terminate channel, but a parent killed outright
+// gets no chance to do so, and the kernel is the only witness left.
+void moxie_set_pdeathsig(uint32_t sig) {
+    prctl(PR_SET_PDEATHSIG, (unsigned long)sig, 0, 0, 0);
 }

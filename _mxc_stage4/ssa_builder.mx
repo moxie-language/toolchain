@@ -6219,6 +6219,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		push(cctx.compileErrors, "recover() is not available in Moxie: a panic is fatal")
 		return nil
 	case BuiltinSpawn:
+		fb.checkSpawnSignature(args)
 		call7 := &SSACall{Call: SSACallCommon{Value: b, Args: args}}
 		// spawn returns the control channel: chan struct{}, bidirectional
 		// because either side may close it. It was typed <-chan string, a
@@ -6400,6 +6401,27 @@ func (fb *ssaFuncBuilder) emitMake(typ Type, sizeArgs []SSAValue) (s SSAValue) {
 		return mc
 	}
 	return nil
+}
+
+// checkSpawnSignature enforces the spawn ABI at the call site: the target must
+// not return a value (its termination breaker is the channel spawn returns).
+// The signature is taken from the function VALUE's type, so it is the same
+// signature the caller is calling, not a wrapper's.
+func (fb *ssaFuncBuilder) checkSpawnSignature(args []SSAValue) {
+	if len(args) == 0 || args[0] == nil {
+		return
+	}
+	sig, ok := SafeUnderlying(args[0].SSAType()).(*Signature)
+	if !ok || sig == nil {
+		return
+	}
+	if sig.Results != nil && sig.Results.Len() > 0 {
+		name := "spawn target"
+		if fn, isFn := args[0].(*SSAFunction); isFn {
+			name = fn.name
+		}
+		reportCompileError("spawn: " | name | " must not return values; a spawned function reports termination through the breaker channel spawn returns")
+	}
 }
 
 // reportUndefinedField mirrors legacy's diagnostic for a selector that is

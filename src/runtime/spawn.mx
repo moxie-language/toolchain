@@ -105,6 +105,16 @@ func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
 		childSpawnTarget = true
 		childParentPid = moxie_getppid()
 
+		// Reaper: if this domain's parent dies without closing anything - a
+		// SIGKILL, a crash - the kernel delivers SIGTERM here. That is the one
+		// supervision gap the capability model cannot close, because the holder
+		// of the terminate channel is gone. The ppid is rechecked after the
+		// call because the parent may have died before prctl ran.
+		moxie_set_pdeathsig(15) // SIGTERM
+		if moxie_getppid() != childParentPid {
+			exit(0)
+		}
+
 		// Wire the lockdown channel: close the read end (parent's side),
 		// route fault notifications to the write end. Done before
 		// spawnCall so any allocation made by user code is covered.
@@ -179,6 +189,9 @@ func spawnCall(fn uintptr, argp unsafe.Pointer) {
 
 //export moxie_spawn_call
 func moxie_spawn_call(fn uintptr, argp unsafe.Pointer)
+
+//export moxie_set_pdeathsig
+func moxie_set_pdeathsig(sig uint32)
 
 // MakePipe creates a unidirectional pipe via libc pipe(2). Returns the
 // (read, write) fds, or (-1, -1) on failure. The fds are inherited by
