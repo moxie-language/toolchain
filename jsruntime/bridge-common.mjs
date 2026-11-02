@@ -254,11 +254,13 @@ export function makeWasi(getMem) {
       return 0;
     },
     // The app imports fd_read (os.Stdin read paths). There is no stdin in a
-    // worker, so report EOF: nread = 0 and a success errno.
+    // worker, so report EBADF: the runtime panics with a message naming the
+    // missing descriptor, where a successful zero-byte read would just look
+    // like an empty stream.
     fd_read(fd, iovs, iovs_len, nread_ptr) {
       const dv = new DataView(getMem().buffer);
       dv.setUint32(nread_ptr >>> 0, 0, true);
-      return 0;
+      return 8; // WASI errno EBADF
     },
 
     clock_time_get(clock_id, precision, time_ptr) {

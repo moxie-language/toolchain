@@ -81,8 +81,22 @@ func MoxieRead(fd int32, buf unsafe.Pointer, count int32) int32 {
 	moxieReadIOV[0] = uintptr(buf)
 	moxieReadIOV[1] = uintptr(count)
 	moxieReadNR = 0
-	fd_read(fd, unsafe.Pointer(&moxieReadIOV[0]), 1, unsafe.Pointer(&moxieReadNR))
+	errno := fd_read(fd, unsafe.Pointer(&moxieReadIOV[0]), 1, unsafe.Pointer(&moxieReadNR))
+	if errno != 0 {
+		// A browser has no stdin and no filesystem: the descriptor does not
+		// exist, and a read of it must say so. Returning 0 reported that as
+		// end-of-input, which reads as "the stream is empty" and hides the fact
+		// that there is no stream at all - a caller then loops forever on a
+		// read that can never make progress.
+		panicNoDescriptor()
+	}
 	return moxieReadNR
+}
+
+// panicNoDescriptor is the single message for "this wasm target has no such
+// descriptor", so a stdin read in a browser says what happened.
+func panicNoDescriptor() {
+	runtimePanic("wasm: read failed: no such descriptor (a browser has no stdin and no filesystem)")
 }
 
 // stdinPeek holds the byte buffered() read ahead for getchar().
@@ -94,7 +108,12 @@ func buffered() int32 {
 	var n int32
 	var b [1]byte
 	iov := [2]uintptr{uintptr(unsafe.Pointer(&b[0])), 1}
-	if fd_read(0, unsafe.Pointer(&iov[0]), 1, unsafe.Pointer(&n)) != 0 || n == 0 {
+	if errno := fd_read(0, unsafe.Pointer(&iov[0]), 1, unsafe.Pointer(&n)); errno != 0 {
+		// No fd 0 at all: see MoxieRead. EOF (n == 0 with a successful read) is
+		// still just "nothing to read".
+		panicNoDescriptor()
+	}
+	if n == 0 {
 		return 0
 	}
 	stdinPeek = b[0]

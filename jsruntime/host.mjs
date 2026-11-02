@@ -904,12 +904,14 @@ export function buildHostImports(mem) {
         dv.setUint32(nwritten, totalWritten, true);
         return 0;
       },
-      // A domain has no stdin: report EOF so runtime.buffered returns 0 and
-      // os.Stdin.Read yields instead of blocking on a read that never comes.
+      // A page has no stdin. Report EBADF rather than EOF: the runtime turns a
+      // failed read into a panic that names the missing descriptor, while a
+      // successful read of zero bytes reads as "the stream is empty" and hides
+      // that there is no stream at all.
       fd_read(fd, iovs, iovs_len, nread) {
         const dv = new DataView(mem().buffer);
         dv.setUint32(nread, 0, true);
-        return 0;
+        return 8; // WASI errno EBADF
       },
       clock_time_get(clockID, precision, time) {
         const now = clockID === 1

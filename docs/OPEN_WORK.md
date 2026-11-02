@@ -23553,3 +23553,50 @@ red through it - phase 5's ed25519 trap and phase 7's smoke suite - are both
 closed: the first by the intervening constructor/codec work (verified, five
 crypto fixtures native == wasm), the second by the worker env's missing
 `__multi3` (round 342).
+
+### Round 343: the five open items, worked
+
+**1. Subslice passed to a writing parameter - documented, not diagnosed.** The
+compilers refuse the two shapes decidable from one expression (`copy(x[a:b], …)`
+and `x[a:b][i] = v`) and cannot refuse the third cheaply: `f(x[a:b])` is a lost
+write only if `f` writes through that parameter, which needs a parameter-write
+set per function and a call-graph walk at every call site - multi-level
+inference, not a local rule. Recorded in CLAUDE.md next to the subslice rule,
+with the corollary that a static analysis tool can do it offline, and with the
+authoring rule it implies: never pass a parameter as a return value.
+
+**2. legacy builds morly again (the wood-law violation).** The crash was not a
+compiler bug this time - it was `<spawn>` answering a `chan struct{}` result with
+no LLVM value because legacy REJECTS a buffered channel across a spawn boundary
+and morly passed two of them:
+
+    ready := chan struct{}{:64}   // server.mx:68, the store-ready channel
+    ready = chan struct{}{:64}    // server.mx:284, the ingest worker nudge
+
+Both are unbuffered now. The rule is right: `PipeChanSend` writes the SPSC ring
+and never consults the channel's declared capacity, so `:64` is a promise the
+wire cannot keep and the ring is the buffer either way. `legacy/moxie build`
+produces a 17.7MB relay, and morly's suite is unchanged at 370/370 under stage4.
+
+The crash path itself is fixed as a class (item 3): any `createExpr` that
+answers (nil, nil) for a value that has one is now a positioned diagnostic with
+an undef substitute, so the rest of the package still compiles and reports.
+
+**4. reading stdin on wasm panics.** A browser has no stdin and no filesystem:
+the descriptor does not exist, and returning 0 reported that as end-of-input,
+which reads as "the stream is empty" and hides that there is no stream at all.
+`MoxieRead` and `buffered()` now turn a failed `fd_read` into
+"wasm: read failed: no such descriptor (a browser has no stdin and no
+filesystem)", and both hosts answer EBADF for fd 0 instead of a successful
+zero-byte read. EOF on a descriptor that DOES exist is still just EOF.
+
+**5. CLAUDE.md drift.** It claimed the compiler skips any file importing
+`iter`/`weak`/`crypto/internal/fips140cache` (discoverPkg, "~line 1722"). There
+is no such skip-list, and there has not been one since the `any` refactor; the
+paragraph now says so.
+
+**6. the bridge-common footgun now says so.** An app-supplied
+`web/static/bridge-common.mjs` is kept by the build, and a stale copy there kept
+an old worker env in a staged tree for a round. The build now compares the app's
+copy against `jsruntime/bridge-common.mjs` and warns when they differ, because
+silence is what cost that round.

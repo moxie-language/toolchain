@@ -326,6 +326,21 @@ Moxie has no such bookkeeping to dodge.
   on overlapping views - in-place XOR, "read src fully before writing dst",
   `copy` overlap reasoning - is wrong here. Take the value you mean to change
   and write it back, or build the result in a fresh slice.
+- **The same lost write hides behind a callee.** `f(s[a:b])` where `f` writes
+  through that parameter is a copy write too: the subslice is materialised at
+  the call and the callee's stores land in it. The compilers cannot refuse it
+  cheaply - deciding that an argument must not be a subslice means knowing what
+  the callee does with the parameter, and through it what the callee's own
+  callees do: a parameter-write set per function, then a walk over the call
+  graph at every call site. That is multi-level inference, not a local rule,
+  which is why the language forbids `copy(x[a:b], …)` and `x[a:b][i] = v`
+  (both decidable from one expression) but not this. A static analysis tool can
+  do it offline and should: the shape to report is a subslice argument reaching
+  a parameter that is written, including a `ReadAt`-style call whose callee
+  fills the buffer.
+  **Authoring rule this implies: never pass a parameter as a return value.**
+  `func f(out []byte) { g(out) ... }` and `return out` hand the caller memory
+  the frame may not own; return a value or write through a receiver instead.
 
 For the compiler this means: element loads and stores are bounds-checked for
 slices and strings (forming an address from an index is not), and there is no
@@ -377,22 +392,17 @@ may be constrained by:
 Never `any` / `interface{}` as a constraint. Never `any` / `interface{}` as a
 field, parameter, or return type.
 
-**Open work (not yet done):** the stdlib still contains `any` in generic
-signatures and must be refactored to concrete constraints. Known offenders:
-`iter` (`Seq[V any]`, `Seq2[K,V any]`, `Pull`/`Pull2`, plus plain `any`
-panic-value storage), `weak` (`Pointer[T any]`, `Make[T any]`),
-`crypto/internal/fips140cache` (`Cache[K,V any]`), and generic functions across
-`maps`/`slices`/`bytes`/`strings`/`internal/trace` (`maps.Clone[V any]`,
-`maps.Keys[V any]`, etc.). Iteration element types take `ordered` (`cmp.Ordered`),
-same as slices/sort. Reuse or expand an existing stdlib interface where one
-fits; otherwise define the minimal concrete constraint the use case demands.
+Iteration element types take `ordered` (`cmp.Ordered`), same as slices/sort.
+Reuse or expand an existing stdlib interface where one fits; otherwise define
+the minimal concrete constraint the use case demands.
 
-The compiler currently papers over this with a **workaround, not a fix**: in
-`_mxc_stage4/main.mx` (discoverPkg, ~line 1722) any file importing `iter`,
-`weak`, or `crypto/internal/fips140cache` is skipped wholesale. This silently
-drops those files (and their symbols) from the build. The real fix is the
-refactor above; removing that skip-list is the completion condition, not the
-starting point.
+Status: the refactor has landed. The `any` in generic signatures is gone, and so
+is the compiler workaround that used to paper over it - there is no skip-list in
+`discoverPkg` any more, and a package importing `iter`, `weak` or
+`crypto/internal/fips140cache` compiles like any other. What a grep still finds
+under `src/` is prose (`fmt/doc.mx`'s examples, `asn1`'s notes about the empty
+interface being absent) plus the dead `printitf` helpers that were removed in
+round 340; no code position holds an `any`.
 
 ## Browser Target: WASM Only
 

@@ -1959,6 +1959,21 @@ func (b *builder) hasReceiver() bool {
 	return sig != nil && sig.Recv() != nil
 }
 
+// isVoidSSAValue reports whether an instruction legitimately produces no LLVM
+// value: a call to a function with no results (close, print, a void runtime
+// helper). Those leave b.locals holding a zero handle by design, and every
+// reader ignores the entry.
+func isVoidSSAValue(instr ssa.Value) bool {
+	t := instr.Type()
+	if t == nil {
+		return true
+	}
+	if tup, ok := t.(*types.Tuple); ok {
+		return tup.Len() == 0
+	}
+	return false
+}
+
 // createInstruction builds the LLVM IR equivalent instructions for the
 // particular Go SSA instruction.
 func (b *builder) createInstruction(instr ssa.Instruction) {
@@ -1976,6 +1991,15 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 			// more compilation errors which can then all be shown together to
 			// the user.
 			b.diagnostics = append(b.diagnostics, err)
+			b.locals[instr] = llvm.Undef(b.getLLVMType(instr.Type()))
+		} else if value.IsNil() && !isVoidSSAValue(instr) {
+			// createExpr answered (nil, nil) for a value that has one. Storing
+			// a zero handle and carrying on turns the first reader into a
+			// SIGSEGV inside the LLVM C API with no clue which value it was -
+			// morly's spawn result did exactly that. Name it and substitute an
+			// undef so the rest of the package is still compiled and every
+			// other diagnostic is reported too.
+			b.addError(instr.Pos(), fmt.Sprintf("internal: no LLVM value for %s (%T, type %s)", instr.Name(), instr, instr.Type()))
 			b.locals[instr] = llvm.Undef(b.getLLVMType(instr.Type()))
 		} else {
 			b.locals[instr] = value
