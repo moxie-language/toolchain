@@ -225,9 +225,8 @@ func isSpawnTargetSig(sig *types.Signature) bool {
 		return false
 	}
 	r := sig.Results().At(0)
-	if r.Name() != "closed" {
-		return false
-	}
+	// The name is documentation; the contract is the type - exactly one
+	// result, a `chan struct{}`, which is the domain's breaker.
 	ch, ok := r.Type().Underlying().(*types.Chan)
 	if !ok || ch.Dir() != types.SendRecv {
 		return false

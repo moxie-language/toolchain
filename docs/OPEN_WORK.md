@@ -23829,3 +23829,11 @@ tls_handshake, spawn_frame_budget, spawncost, spawnbytes) and morly's five
 stop `_exit`ing and wake a domain park word; then every main gains the select
 and both compilers enforce it. The value-parameter budget encode is also still
 unwired (the tag walk exists, the pack is a pointer array).
+
+**The spawn signature contract is the TYPE, not the name.** Imported signatures
+do not reliably carry the result name, so `isSpawnTargetSig` accepts exactly one
+result of type `chan struct{}` (send-recv, empty struct element) in both
+compilers; the migration still spells it `(closed chan struct{})`, and the
+language documents that spelling. Without this, every cross-package spawn in
+morly was rejected ("BroadcastWorker must be declared with exactly one
+result") while the same-package fixtures compiled.
