@@ -258,13 +258,19 @@ func RewriteChanLiterals(src []byte, fset *token.FileSet) RewriteResult {
 		// Write everything before this channel literal.
 		result.Write(src[lastEnd:toks[chanIdx].pos])
 
+		// Unspecified capacity is ONE slot. A Moxie domain has one thread, so an
+		// unbuffered channel would have no possible listener; one slot is the
+		// mailbox the event-loop model needs - the first send never blocks, and
+		// the second waits until the receiver has taken the first.
+		if bufExpr == "" {
+			bufExpr = "1"
+		}
+
 		makeOffset := result.Len()
 		result.WriteString("__slicealloc(chan ")
 		result.WriteString(typeText)
-		if bufExpr != "" {
-			result.WriteString(", ")
-			result.WriteString(bufExpr)
-		}
+		result.WriteString(", ")
+		result.WriteString(bufExpr)
 		result.WriteString(")")
 		offsets = append(offsets, makeOffset)
 

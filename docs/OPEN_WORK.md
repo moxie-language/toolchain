@@ -23600,3 +23600,66 @@ paragraph now says so.
 an old worker env in a staged tree for a round. The build now compares the app's
 copy against `jsruntime/bridge-common.mjs` and warns when they differ, because
 silence is what cost that round.
+
+### Round 344: a spawn channel is a sized mailbox, and its frames have a declared bound
+
+**The channel is a FIFO with a size stated in its declaration.** `chan T{}` is
+ONE slot, `chan T{:N}` is N; there is no unbuffered channel, because a domain
+has one thread and nothing could receive while a rendezvous sender waits. The
+literal rewrite emits the default explicitly (`__slicealloc(chan T, 1)`), both
+compilers reject a constant capacity below one, and `chanMake` rejects a
+capacity computed at run time. Inside a thread and across a spawn boundary the
+rule is the same: a mailbox, never a rendezvous.
+
+**The declared capacity is a message count, not a byte threshold.** The ring
+header gained `sentFrames` and `recvFrames`, each written by exactly one side,
+so `sentFrames - recvFrames` is the outstanding count and a send parks once N
+are waiting. Legacy's old rejection of buffered channels across spawn
+boundaries is gone (wood law: stage4 accepted them, so legacy does now too).
+
+**The ring is created at the spawn, sized from the element type.** A spawn
+channel is an atomic FIFO: its size is fixed before the fork, so the compiler
+computes an upper bound on one encoded message and the runtime sizes the pair
+`pow2((N+1) * align8(4 + budget))` (at least a page, at most `ringMaxMsg`).
+Every variable-length dimension takes its count from a `cap:"..."` struct tag -
+one number per dimension, outermost first, in ELEMENTS of that dimension, bytes
+at a `string`/`[]byte` leaf - and an unstated dimension is one page, 4096
+bytes. A channel, interface, function value or type parameter in the path is a
+compile error: no count bounds it. `NoteSpawnChan` carries each channel handle
+to `spawnDomain`, so the depth and the budget are read from the handle itself
+instead of being guessed from an argument list.
+
+**Overrunning the budget panics with the declaration to fix.** The check runs
+before the ring-size check, so the message is the one that names the problem:
+
+    panic: runtime error at 0x...: spawn channel: encoded frame of 6011 bytes
+    exceeds the 4118-byte frame budget. Variable-length fields and their cap
+    tags: main.Untagged.Body unstated (4096)
+
+    panic: ... encoded frame of 20020 bytes exceeds the 16765-byte frame budget.
+    Variable-length fields and their cap tags: main.Req.Tags cap:"8,32";
+    main.Req.Body cap:"8192"
+
+Both notes are compiler-generated text carried on the channel, so a panic names
+the field path and the tag a programmer has to change.
+
+Evidence: bootstrap fixpoint `b3dfd429` (s2 == s3); a 4096-byte frame crosses a
+default-budget ring and a 6000-byte one crosses an 8192-tagged body
+(`tests/regressions/should_compile/spawn_frame_budget.mx`); `:0` is rejected
+(`tests/restrictions/reject_chan_zero_capacity.mx`); the two panic messages
+above were captured from real binaries.
+
+**Open, found on the way (not fixed):** stage4 misprints a value that was just
+received into a local and then passed to `println`/`fmt.Println` - the receive
+is correct (a comparison against the expected value passes) and the printed
+word is stack residue, so it is a display bug in the boxing at that call site.
+Legacy builds the same probe correctly, so this is a stage4-only divergence.
+The reproducer is the `workerR` shape: a spawned worker that loops
+`v := <-in; fmt.Println(v)` on a `chan int64{:4}` whose frames were all sent
+before the worker wakes. It is intermittent across programs, which points at
+stack-slot reuse for the boxed interface rather than at the channel.
+
+**Open, unchanged:** there is no harness that asserts a panic message, so the
+two overflow messages are captured by hand; and no compiler diagnostic exists
+for "subslice passed to a parameter that writes", which stays a documented
+static-analysis target.

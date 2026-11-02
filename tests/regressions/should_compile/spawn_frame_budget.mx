@@ -1,0 +1,55 @@
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+// Spawn channel frames are sized from the element type: a `cap` tag on every
+// variable-length field states its element count, and an unstated dimension is
+// one 4096-byte page. The ring is created at that size before the fork, so a
+// payload at the declared size must cross, and the declared depth must hold.
+type Req struct {
+	ID   int64
+	Tags []string `cap:"8,32"`
+	Body []byte   `cap:"8192"`
+}
+
+// Untagged carries the default: no cap tag on Body means 4096 bytes.
+type Untagged struct {
+	N    int32
+	Body []byte
+}
+
+func worker(in chan Req, one chan Untagged) {
+	time.Sleep(100 * time.Millisecond)
+	for i := 0; i < 2; i++ {
+		r := <-in
+		fmt.Println("  req", r.ID, "tags", len(r.Tags), "body", len(r.Body))
+	}
+	u := <-one
+	fmt.Println("  untagged body", len(u.Body))
+}
+
+func main() {
+	in := chan Req{:4}
+	one := chan Untagged{}
+	done := spawn(worker, in, one)
+
+	a := Req{ID: 1, Tags: []string{"a", "b", "c"}, Body: []byte("hello")}
+	in <- a
+	big := []byte{:6000}
+	for i := 0; i < 6000; i++ {
+		big[i] = byte(i)
+	}
+	b := Req{ID: 2, Tags: []string{"x"}, Body: big}
+	in <- b
+
+	// Exactly the page default, through a one-slot mailbox.
+	fill := []byte{:4096}
+	u := Untagged{N: 7, Body: fill}
+	one <- u
+
+	<-done
+	fmt.Println("ok")
+}

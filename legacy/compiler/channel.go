@@ -5,8 +5,11 @@ package compiler
 
 import (
 	"fmt"
+	"go/token"
 	"go/types"
 	"math"
+	"strconv"
+	"strings"
 
 	"moxie/compiler/llvmutil"
 	"moxie/loader"
@@ -15,8 +18,24 @@ import (
 )
 
 func (b *builder) createMakeChan(expr *ssa.MakeChan) llvm.Value {
-	elementSize := b.targetData.TypeAllocSize(b.getLLVMType(expr.Type().Underlying().(*types.Chan).Elem()))
+	// A channel is a mailbox with at least one slot. A Moxie domain has one
+	// thread, so an unbuffered channel would have no possible listener: the
+	// first send could never complete. `chan T{}` is lowered to capacity 1, so
+	// the only way to arrive here with a constant below one is to write a
+	// capacity that cannot work.
+	if sz, ok := expr.Size.(*ssa.Const); ok && !sz.IsNil() && sz.Int64() < 1 {
+		b.addError(expr.Pos(), "channel capacity must be at least 1: a Moxie domain has one thread, so an unbuffered channel has no possible listener")
+	}
+	elemType := expr.Type().Underlying().(*types.Chan).Elem()
+	elementSize := b.targetData.TypeAllocSize(b.getLLVMType(elemType))
 	elementSizeValue := llvm.ConstInt(b.uintptrType, elementSize, false)
+	budget := b.frameBudget(elemType, nil, 0, expr.Pos())
+	if budget > frameBudgetMax {
+		b.addError(expr.Pos(), fmt.Sprintf(
+			"spawn: %s has a %d-byte frame budget, over the %d-byte maximum; reduce its cap dimensions", elemType, budget, frameBudgetMax))
+		budget = frameBudgetMax
+	}
+	notePtr, noteLen := b.budgetNoteOperand(b.frameNote(elemType, "", ""))
 	bufSize := b.getValue(expr.Size, getPos(expr))
 	b.createChanBoundsCheck(elementSize, bufSize, expr.Size.Type().Underlying().(*types.Basic), expr.Pos())
 	if bufSize.Type().IntTypeWidth() < b.uintptrType.IntTypeWidth() {
@@ -24,13 +43,205 @@ func (b *builder) createMakeChan(expr *ssa.MakeChan) llvm.Value {
 	} else if bufSize.Type().IntTypeWidth() > b.uintptrType.IntTypeWidth() {
 		bufSize = b.CreateTrunc(bufSize, b.uintptrType, "")
 	}
-	ch := b.createRuntimeCall("chanMake", []llvm.Value{elementSizeValue, bufSize}, "")
+	ch := b.createRuntimeCall("chanMake", []llvm.Value{
+		elementSizeValue,
+		bufSize,
+		llvm.ConstInt(b.uintptrType, uint64(budget), false),
+		notePtr, noteLen,
+	}, "")
 	if b.PrintAllocs != nil {
 		// The channel's storage belongs to the runtime allocator, so the byte
 		// size is not known here; the site is still counted.
 		b.emitLogAlloc(expr.Pos(), llvm.ConstInt(b.uintptrType, 0, false))
 	}
 	return ch
+}
+
+// frameBudgetDefault is the byte budget for a variable-length dimension whose
+// struct field states no cap tag: one memory page.
+const frameBudgetDefault = 4096
+
+// frameBudgetMax bounds one frame. A spawn ring holds the declared depth plus
+// one in-flight frame, so the budget has to leave the pair inside ringMaxMsg.
+const frameBudgetMax = 16 << 20
+
+// capTagCounts parses a cap:"..." struct tag into its per-dimension element
+// counts, outermost dimension first. A malformed or missing number is treated
+// as unstated (the caller then takes the page default).
+func capTagCounts(tag string) (dims []int64) {
+	const key = `cap:"`
+	i := strings.Index(tag, key)
+	if i < 0 {
+		return nil
+	}
+	rest := tag[i+len(key):]
+	if j := strings.IndexByte(rest, '"'); j >= 0 {
+		rest = rest[:j]
+	}
+	for _, part := range strings.Split(rest, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		n, err := strconv.ParseInt(part, 10, 64)
+		if err != nil || n <= 0 {
+			continue
+		}
+		dims = append(dims, n)
+	}
+	return dims
+}
+
+// frameBudget is an upper bound, in bytes, on the structural encoding of one
+// value of type t as written by codecEncodeValue: a tag byte per non-basic
+// value, a varint count (at most 5 bytes for a uint32), then the payload. A
+// slice, string or map dimension takes its count from the enclosing field's
+// cap tag, which states ELEMENTS of that dimension (bytes for a byte/string
+// leaf); an unstated dimension is one memory page. The value sizes the shared
+// ring a spawn channel carries, so a dimension that cannot be bounded at all
+// (channel, interface, function, type parameter) is an error, never a guess.
+func (b *builder) frameBudget(t types.Type, dims []int64, di int, pos token.Pos) (n int64) {
+	if t == nil {
+		return frameBudgetDefault
+	}
+	if named, ok := t.(*types.Named); ok {
+		t = named.Underlying()
+	}
+	switch ut := t.Underlying().(type) {
+	case *types.Basic:
+		if ut.Info()&types.IsString != 0 {
+			// tag + varint length + varint capacity + bytes
+			c := dimCount(dims, di)
+			if c == 0 {
+				c = frameBudgetDefault
+			}
+			return 1 + 10 + c
+		}
+		return int64(b.targetData.TypeAllocSize(b.getLLVMType(t)))
+	case *types.Slice:
+		if c := dimCount(dims, di); c > 0 {
+			return 1 + 10 + c*b.frameBudget(ut.Elem(), dims, di+1, pos)
+		}
+		return 1 + 10 + frameBudgetDefault
+	case *types.Array:
+		return 1 + 10 + int64(ut.Len())*b.frameBudget(ut.Elem(), dims, di+1, pos)
+	case *types.Pointer:
+		return 1 + b.frameBudget(ut.Elem(), dims, di, pos)
+	case *types.Map:
+		if c := dimCount(dims, di); c > 0 {
+			return 1 + 5 + c*(b.frameBudget(ut.Key(), nil, 0, pos)+b.frameBudget(ut.Elem(), nil, 0, pos))
+		}
+		return 1 + 5 + frameBudgetDefault
+	case *types.Struct:
+		n = 1 + 5
+		for i := 0; i < ut.NumFields(); i++ {
+			n += b.frameBudget(ut.Field(i).Type(), capTagCounts(ut.Tag(i)), 0, pos)
+		}
+		return n
+	case *types.Chan:
+		b.addError(pos, fmt.Sprintf("spawn: %s contains a channel, which has no computable frame size; pass channels as top-level spawn arguments", t))
+	case *types.Interface:
+		b.addError(pos, fmt.Sprintf("spawn: %s contains an interface, which has no computable frame size", t))
+	case *types.Signature:
+		b.addError(pos, fmt.Sprintf("spawn: %s contains a function value, which has no computable frame size", t))
+	case *types.TypeParam:
+		b.addError(pos, fmt.Sprintf("spawn: %s is a type parameter, which has no computable frame size", t))
+	}
+	return frameBudgetDefault
+}
+
+// dimCount is the stated count for the dimension at di, or 0 when unstated.
+func dimCount(dims []int64, di int) (n int64) {
+	if di >= 0 && di < len(dims) {
+		return dims[di]
+	}
+	return 0
+}
+
+// budgetNoteOperand materializes the frame-budget note as a (pointer, length)
+// pair for the runtime: a private, writable global holding the bytes. The note
+// is the compiler's contribution to the overflow panic, so it names the fields
+// whose cap tags set the budget.
+func (b *builder) budgetNoteOperand(note string) (ptr llvm.Value, n llvm.Value) {
+	if note == "" {
+		return llvm.ConstNull(b.dataPtrType), llvm.ConstInt(b.uintptrType, 0, false)
+	}
+	globalType := llvm.ArrayType(b.ctx.Int8Type(), len(note))
+	global := llvm.AddGlobal(b.mod, globalType, "$spawn.frameNote")
+	global.SetInitializer(b.ctx.ConstString(note, false))
+	global.SetLinkage(llvm.InternalLinkage)
+	// Moxie strings are mutable; keep the note out of .rodata like every other
+	// string object the compiler emits.
+	global.SetGlobalConstant(false)
+	global.SetUnnamedAddr(true)
+	global.SetAlignment(1)
+	zero := llvm.ConstInt(b.ctx.Int32Type(), 0, false)
+	ptr = llvm.ConstInBoundsGEP(globalType, global, []llvm.Value{zero, zero})
+	return ptr, llvm.ConstInt(b.uintptrType, uint64(len(note)), false)
+}
+
+// frameNote lists every variable-length field in t's frame path with the cap
+// tag that sizes it, or "unstated (4096)" when the tag is absent. This text is
+// carried on the channel and appears in the panic that fires when an encoding
+// overruns its budget, so it must name the declaration a programmer changes.
+func (b *builder) frameNote(t types.Type, path, tag string) (s string) {
+	if t == nil {
+		return ""
+	}
+	if named, ok := t.(*types.Named); ok {
+		t = named.Underlying()
+	}
+	switch ut := t.Underlying().(type) {
+	case *types.Basic:
+		if ut.Info()&types.IsString != 0 {
+			return capNoteEntry(path, tag)
+		}
+	case *types.Slice:
+		if strings.Contains(tag, `cap:"`) || elemIsByte(ut.Elem()) {
+			return capNoteEntry(path, tag)
+		}
+		if sub := b.frameNote(ut.Elem(), path+"[]", ""); sub != "" {
+			return capNoteEntry(path, tag) + "; " + sub
+		}
+		return capNoteEntry(path, tag)
+	case *types.Array:
+		return b.frameNote(ut.Elem(), path, tag)
+	case *types.Pointer:
+		return b.frameNote(ut.Elem(), path, tag)
+	case *types.Map:
+		return capNoteEntry(path, tag)
+	case *types.Struct:
+		if path == "" {
+			path = t.String()
+		}
+		var parts []string
+		for i := 0; i < ut.NumFields(); i++ {
+			if sub := b.frameNote(ut.Field(i).Type(), path+"."+ut.Field(i).Name(), ut.Tag(i)); sub != "" {
+				parts = append(parts, sub)
+			}
+		}
+		return strings.Join(parts, "; ")
+	}
+	return ""
+}
+
+func capNoteEntry(path, tag string) string {
+	const key = `cap:"`
+	if i := strings.Index(tag, key); i >= 0 {
+		rest := tag[i+len(key):]
+		if j := strings.IndexByte(rest, '"'); j >= 0 {
+			return path + ` cap:"` + rest[:j] + `"`
+		}
+	}
+	return path + " unstated (4096)"
+}
+
+func elemIsByte(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	b, ok := t.Underlying().(*types.Basic)
+	return ok && b.Kind() == types.Uint8
 }
 
 // createChanSend emits a pseudo chan send operation. It is lowered to the

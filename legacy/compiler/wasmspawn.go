@@ -219,14 +219,7 @@ func (b *builder) createWasmSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 			b.addError(instr.Pos(), err.Error())
 			return llvm.Value{}, nil
 		}
-		if mc := traceToMakeChan(arg); mc != nil {
-			if cv, ok := mc.Size.(*ssa.Const); ok {
-				if cv.Value != nil {
-					// positive size = buffered; warn but allow
-					_ = cv
-				}
-			}
-		}
+		_ = arg
 	}
 
 	i32 := b.ctx.Int32Type()

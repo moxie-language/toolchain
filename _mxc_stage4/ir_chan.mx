@@ -622,11 +622,13 @@ func (e *irEmitter) emitMakeChan(m *SSAMakeChan) {
 	reg := e.regName(m)
 	ipt := e.intptrType()
 	elemType := "i8"
+	var elem Type
 	if ch, ok := SafeUnderlying(m.SSAType()).(*TCChan); ok && ch.Elem != nil {
 		et := e.llvmType(ch.Elem)
 		if et != "void" && et != "" {
 			elemType = et
 		}
+		elem = ch.Elem
 	}
 	e.nextReg++
 	elemSz := "%mc" | irItoa(e.nextReg)
@@ -636,10 +638,231 @@ func (e *irEmitter) emitMakeChan(m *SSAMakeChan) {
 	if m.Size != nil {
 		bufSz = e.sextToIpt(m.Size, e.operand(m.Size))
 	}
+	budget := int32(4096)
+	if elem != nil {
+		budget = e.frameBudget(elem, nil, 0)
+		if budget > 16<<20 {
+			reportCompileError("spawn: " | elem.String() | " has a frame budget over the 16MB maximum; reduce its cap dimensions")
+			budget = 16 << 20
+		}
+	}
+	note := ""
+	if elem != nil {
+		note = e.frameNote(elem, "", "")
+	}
+	notePtr := "ptr null"
+	noteLen := "0"
+	if len(note) > 0 {
+		notePtr = "ptr " | e.strConstGlobal(e.addStringConst(note))
+		noteLen = irItoa64(int64(len(note)))
+	}
 	e.w("  ") ; e.w(reg) ; e.w(" = call ptr @runtime.chanMake(")
-	e.w(ipt) ; e.w(" ") ; e.w(elemSz) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(bufSz) ; e.w(", ptr null)\n")
-	e.declareRuntime("runtime.chanMake", "ptr", ipt | ", " | ipt)
+	e.w(ipt) ; e.w(" ") ; e.w(elemSz) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(bufSz)
+	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(irItoa(budget))
+	e.w(", ") ; e.w(notePtr) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(noteLen) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.chanMake", "ptr", ipt | ", " | ipt | ", " | ipt | ", ptr, " | ipt)
 	// The channel's storage is the runtime allocator's; the byte size is not
 	// known here, so the site is counted with a zero size.
 	e.emitLogAlloc("0")
+}
+
+// frameBudget is an upper bound, in bytes, on the structural encoding of one
+// value of type t as written by codecEncodeValue: a tag byte per non-basic
+// value, a varint count (at most 5 bytes for a uint32), then the payload. A
+// slice, string or map dimension takes its count from the enclosing field's
+// cap tag, which states ELEMENTS of that dimension (bytes for a byte/string
+// leaf); an unstated dimension is one memory page. The value sizes the shared
+// ring a spawn channel carries, so a dimension that cannot be bounded at all
+// (channel, interface, function, type parameter) is an error, never a guess.
+func (e *irEmitter) frameBudget(t Type, dims []int64, di int32) (n int32) {
+	if t == nil {
+		return 4096
+	}
+	u := SafeUnderlying(t)
+	if u == nil {
+		u = t
+	}
+	switch ut := u.(type) {
+	case *Basic:
+		if ut.Info&IsString != 0 {
+			c := budgetDim(dims, di)
+			if c == 0 {
+				c = 4096
+			}
+			// tag + varint length + varint capacity + bytes
+			return int32(1 + 10 + c)
+		}
+		return 1 + budgetBasicWidth(ut.Kind)
+	case *Slice:
+		if c := budgetDim(dims, di); c > 0 {
+			return int32(1 + 10 + c*int64(e.frameBudget(ut.Elem, dims, di+1)))
+		}
+		return 1 + 10 + 4096
+	case *Array:
+		return int32(1 + 10 + ut.Len*int64(e.frameBudget(ut.Elem, dims, di+1)))
+	case *Pointer:
+		return 1 + e.frameBudget(ut.Base, dims, di)
+	case *TCMap:
+		if c := budgetDim(dims, di); c > 0 {
+			return int32(1 + 5 + c*int64(e.frameBudget(ut.Key, nil, 0)+e.frameBudget(ut.Elem, nil, 0)))
+		}
+		return 1 + 5 + 4096
+	case *TCStruct:
+		n = 1 + 5
+		for i := int32(0); i < ut.NumFields(); i++ {
+			n += e.frameBudget(ut.Field(i).Typ, budgetTagCounts(ut.Tag(i)), 0)
+		}
+		return n
+	case *TCChan:
+		reportCompileError("spawn: " | t.String() | " contains a channel, which has no computable frame size; pass channels as top-level spawn arguments")
+	case *TCInterface:
+		reportCompileError("spawn: " | t.String() | " contains an interface, which has no computable frame size")
+	case *Signature:
+		reportCompileError("spawn: " | t.String() | " contains a function value, which has no computable frame size")
+	case *TypeParam:
+		reportCompileError("spawn: " | t.String() | " is a type parameter, which has no computable frame size")
+	}
+	return 4096
+}
+
+// budgetDim is the stated element count for dimension di, or 0 when unstated.
+func budgetDim(dims []int64, di int32) (n int64) {
+	if di >= 0 && di < int32(len(dims)) {
+		return dims[di]
+	}
+	return 0
+}
+
+func budgetBasicWidth(k BasicKind) (n int32) {
+	switch k {
+	case Bool, Int8, Uint8:
+		return 1
+	case Int16, Uint16:
+		return 2
+	case Int32, Uint32, Float32:
+		return 4
+	}
+	return 8
+}
+
+// budgetTagCounts parses a cap:"..." struct tag into its per-dimension element
+// counts, outermost first. A missing or malformed number leaves that dimension
+// unstated, which takes the page default.
+func budgetTagCounts(tag string) (dims []int64) {
+	i := lIndex(tag, []byte("cap:\""))
+	if i < 0 {
+		return nil
+	}
+	rest := tag[i+5:]
+	if j := lIndexByte(rest, '"'); j >= 0 {
+		rest = rest[:j]
+	}
+	start := int32(0)
+	n := int32(0)
+	for k := int32(0); k <= len(rest); k++ {
+		if k < len(rest) && rest[k] != ',' {
+			continue
+		}
+		c := budgetParseCount(rest[start:k])
+		start = k + 1
+		if c <= 0 {
+			continue
+		}
+		if n >= cap(dims) {
+			old := dims
+			dims = []int64{:n + 4}
+			for j := int32(0); j < n; j++ {
+				dims[j] = old[j]
+			}
+			dims = resize(dims, n)
+		}
+		dims = resize(dims, n+1)
+		dims[n] = c
+		n++
+	}
+	return dims
+}
+
+func budgetParseCount(s []byte) (n int64) {
+	s = lTrimSpace(s)
+	for i := int32(0); i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return 0
+		}
+		n = n*10 + int64(c-'0')
+	}
+	return n
+}
+
+// frameNote lists every variable-length field in t's frame path with the cap
+// tag that sizes it, or "unstated (4096)" when no tag is present. The text is
+// carried on the channel and appears in the panic that fires when an encoding
+// overruns its budget, so it must name the declaration a programmer changes.
+func (e *irEmitter) frameNote(t Type, path, tag string) (s string) {
+	if t == nil {
+		return ""
+	}
+	u := SafeUnderlying(t)
+	if u == nil {
+		u = t
+	}
+	switch ut := u.(type) {
+	case *Basic:
+		if ut.Info&IsString != 0 {
+			return capNoteEntry(path, tag)
+		}
+	case *Slice:
+		if lIndex(tag, []byte("cap:\"")) >= 0 || budgetElemIsByte(ut.Elem) {
+			return capNoteEntry(path, tag)
+		}
+		if sub := e.frameNote(ut.Elem, path|"[]", ""); sub != "" {
+			return capNoteEntry(path, tag) | "; " | sub
+		}
+		return capNoteEntry(path, tag)
+	case *Array:
+		return e.frameNote(ut.Elem, path, tag)
+	case *Pointer:
+		return e.frameNote(ut.Base, path, tag)
+	case *TCMap:
+		return capNoteEntry(path, tag)
+	case *TCStruct:
+		if path == "" {
+			path = t.String()
+		}
+		parts := ""
+		for i := int32(0); i < ut.NumFields(); i++ {
+			sub := e.frameNote(ut.Field(i).Typ, path|"."|ut.Field(i).Name, ut.Tag(i))
+			if sub == "" {
+				continue
+			}
+			if parts != "" {
+				parts = parts | "; " | sub
+			} else {
+				parts = sub
+			}
+		}
+		return parts
+	}
+	return ""
+}
+
+func capNoteEntry(path, tag string) (s string) {
+	i := lIndex(tag, []byte("cap:\""))
+	if i >= 0 {
+		rest := tag[i+5:]
+		if j := lIndexByte(rest, '"'); j >= 0 {
+			return path | " cap:\"" | rest[:j] | "\""
+		}
+	}
+	return path | " unstated (4096)"
+}
+
+func budgetElemIsByte(t Type) (ok bool) {
+	u := SafeUnderlying(t)
+	if u == nil {
+		return false
+	}
+	b, isB := u.(*Basic)
+	return isB && b.Kind == Uint8
 }

@@ -424,7 +424,7 @@ Generic Web APIs that belong upstream in `jsruntime/`: DOM, IndexedDB, WebSocket
 - If the needed code is in another language, prefer to reimplement it from specification/RFC/NIP/BIP/etc
 - Prefer one file over many files when the logic is related
 - When writing utility scripts, tooling, or standalone programs, always use Moxieunless there is a specific technical reason requiring another language. This means: no reflection, no cgo, no full runtime features. If a task seems like it needs Python, reconsider whether it can be done in Moxie. It can always be done in Moxie.
-- Remember that Moxie has no goroutines - it uses kernel threads for spawn(). Spawn channels are carried across lock-free SPSC ring buffers (shared memory, no pipe syscall). Senders never block on a full buffer - backpressure is expressed by buffer state, and the sender retries with yield. Receivers peek the ring buffer and retry with yield. Chans default to unbuffered (0-capacity = rendezvous through the ring, which always has data or waits for the partner to produce). blockRecv/blockSend use a futex on the ring's write/read index so the kernel puts the thread to sleep instead of spinning. There is no concurrency primitives because there is only one thread of execution per domain - spawn creates a new domain with its own thread.
+- Remember that Moxie has no goroutines - it uses kernel threads for spawn(). Spawn channels are carried across lock-free SPSC ring buffers (shared memory, no pipe syscall). A channel is a mailbox with the depth its declaration gives it - `chan T{}` is one slot, `chan T{:N}` is N - and there is no unbuffered channel, because a domain has exactly one thread and nothing could receive while a rendezvous sender waits. A send returns once its frame is in the ring; it parks on the ring's read index when the declared number of messages is already outstanding (or the ring lacks room for the frame), and the receiver advancing that index is the wake. blockRecv/blockSend use a futex on the ring's write/read index so the kernel puts the thread to sleep instead of spinning. There are no other concurrency primitives because there is only one thread of execution per domain - spawn creates a new domain with its own thread.
 - For browser/frontend moxie code, compile to WASM (`GOOS=js GOARCH=wasm`). JS shims and host-bridging live in `jsruntime/`. Native targets (linux/amd64, darwin/arm64, etc.) remain first-class - relays, servers, and CLI tools compile via `moxie build`.
 
 ## Architecture Reading
@@ -441,68 +441,76 @@ Do not assume project structure from convention. Read the actual code.
 
 **ChanID convention**: chanID 0 = control (close signals), chanID 1 = first spawn channel arg, chanID 2 = second, etc.
 
-**A spawn channel is a pipe, not a queue.** One handle carries two SPSC rings
-(`ringSend`/`ringRecv`, mirrored on each side), so both ends may send and
-receive; close is signalled on the control channel. Backpressure is the ring
-being full: the sender parks on the ring's read index (`ringParkRead`, 20ms
+**A spawn channel is a mailbox with N slots, and N is what its declaration
+says.** One handle carries two SPSC byte rings (`ringSend`/`ringRecv`, mirrored
+on each side), so both ends may send and receive; close is signalled on the
+control channel. `chan T{:N}` means N messages may be OUTSTANDING - sent and not
+yet received - before the sender parks. A send returns as soon as its frame is
+in the ring; it parks when that many are already waiting, or when the ring has
+no room for the frame. Parking is on the ring's read index (`ringParkRead`, 20ms
 bounds, then it rechecks ring state and peer liveness) and the reader advancing
-the index is the wake. There is no yield-and-retry loop and no 100ms give-up;
-a send returns false only on a closed channel or a dead peer. `cap`/`len` on a
-spawn-bound handle describe the local queue, which is never used on that path.
+the index is the wake. There is no yield-and-retry loop and no give-up: a send
+returns false only on a closed channel or a dead peer.
 
-**Buffer sizes are controllable and are sized from a declared frame budget.**
-`chan T{:N}` in a spawn call means N messages may be OUTSTANDING - sent and not
-yet received - before the sender parks. N = 0 is a rendezvous: the sender parks
-until the receiver takes the single in-flight frame. The ring is always N+1
-slots deep, because a sent frame must exist in shared memory until it is read:
+**`chan T{}` is ONE slot, and there is no unbuffered channel.** A Moxie domain
+has one thread, so an unbuffered send could never complete: nothing could
+receive while the sender waits. One slot is the mailbox the event-loop model
+needs - the first send never blocks, and the second waits until the receiver has
+taken the first. An explicit `:0` is a compile error naming that reason, and a
+capacity computed at run time is rejected by `chanMake` before any send can hang
+on it. The rule is the same inside a thread and across a spawn boundary: a
+channel is a mailbox or a FIFO queue, never a rendezvous.
 
-    ring = header + (N+1) * align8(4 + frameBudget(T))
+**The depth is a message count, not a byte threshold.** The ring header carries
+`sentFrames` and `recvFrames`, each written by one side only, so
+`sentFrames - recvFrames` is the outstanding count: the SAME `:N` slack whatever
+the messages weigh. `cap(ch)` reports the declared N on both ends; `len(ch)`
+reports the local in-runtime queue, which the boundary path never uses.
 
-`frameBudget(T)` is exact when T is fixed-shape - no slice, string, map,
-interface, chan or func anywhere in the graph - because the codec's wire cost is
-tags + `uint32` lengths + fields, and a back-reference only ever shortens it.
+**The ring is sized before the fork, from the declaration.** A spawn channel is
+an atomic FIFO, not a pipe: its size must be known when the rings are created,
+which is before the domain exists. The data area is
 
-A variable-length T states its budget with a struct-field tag, ONE NUMBER PER
-VARIABLE-LENGTH DIMENSION, outermost first, and the final number is BYTES when
-that dimension's leaf is string/[]byte:
+    pow2((N + 1) * align8(4 + frameBudget(T)))     // at least one page, at most ringMaxMsg
 
-    Field []byte      `cap:"65536"`      // 1 dimension: bytes
-    Rows  [][]byte    `cap:"8,16,1024"`  // 8 rows, 16 cells, 1024 bytes per cell
-    Tags  []string    `cap:"32,64"`      // 32 tags, 64 bytes each
-    Kinds []uint16    `cap:"16"`         // 16 elements, element width fixed
+`N` is the declared depth and the extra slot carries the in-flight frame; each
+direction gets its own ring. `frameBudget(T)` is the compiler's upper bound on
+one encoded message, and every variable-length dimension declares its size in a
+`cap` struct tag - one number per dimension, outermost first, counted in
+ELEMENTS of that dimension (bytes when the leaf is `string`/`[]byte`):
 
-The count must match the type: `cap:"2,3"` on `[][][]byte` is a compile error
-naming the type and the number of dimensions it needs, because the purpose of
-the number is to size the ring between two threads - a dimension left unbounded
-leaves the frame unbounded. A struct stops the chain: its own fields carry their
-own tags (or are fixed-shape), so `[]Request` takes one number and Request's
-budget is computed from its fields.
+    type Request struct {
+        ID   int64
+        Tags []string `cap:"32,64"`   // 32 tags, 64 bytes each
+        Body []byte   `cap:"65536"`   // 65536 bytes
+    }
 
-**No capacity means UNBUFFERED, not "no buffer".** `chan T{}` in a spawn call is
-a rendezvous: the ring allocates exactly ONE message slot, the sender writes the
-frame and then WAITS FOR THE RECEIVER'S ACK before the send returns, and the
-payload crosses the ring like a pipe. The ack is the receiver advancing the
-ring's read index past that frame - no extra message, no extra memory. `:N` with
-N > 0 returns as soon as the frame is in the ring and parks only when the ring
-is full, which is what a buffer is for. That is the point of synchronisation
-between the two domains - a sender that has to wait is telling you the receiving
-domain is not returning to its select promptly enough, which is a design fault
-you want visible, not a queue you want deep enough to hide it. A frame must
-still exist in shared memory between the write and the read, so a spawn channel
-needs a frame budget whether or not it declares a capacity: `:N` is how many
-frames may be outstanding, the budget is how big each one is.
+An unstated dimension is one memory page, **4096 bytes** - a rule, not a guess,
+so every type has a budget and every ring has a size. A channel, interface,
+function value or type parameter in the frame path is a compile error: no count
+can bound it.
 
-Refused by name, never guessed: a map, interface, chan or func inside the budget
-path, because its wire size is not a function of a count and an element width.
+**Overrunning the budget panics, and the panic names the fix.** Both ends of a
+spawn channel are trusted code fixed at compile time, so a frame that encodes
+past its budget is a declaration that does not describe the data - the
+programmer taking the piss. The send dies with the actual size, the budget, and
+the compiler-generated list of the variable-length fields and their cap tags
+(`Request.Body unstated (4096); Request.Tags cap:"32,64"`), carried on the
+channel itself. No silent wrap, no truncation, no reallocation: a bound that can
+be exceeded silently is not a bound.
 
-A value whose encoding exceeds its budget panics naming the type, the field path,
-the budget and the actual. The tag is a promise the encoder keeps, not a hint.
-
-There is no default budget. Even unbuffered allocates one message slot, and a
-slot cannot be allocated for a frame whose size is unknown, so a spawn-facing
-type with no computable budget and no `cap:` tags is a compile error naming the
-field that leaves it unbounded. The migration of existing spawn callers is part
-of the same change.
+**Sizing: one slot unless the other side's cost varies.** The default is right
+for latency-sensitive paths and for handoffs that are promptly consumed - a
+framebuffer load picked up at vblank and handed to DMA needs no slack, and a
+tight event loop should be kept tight. Add slots only where per-message
+processing time on the far side varies and the producer's tempo does not match
+it: blockchain mempool validation, a nostr relay's ingest and fan-out, network
+send and receive. A buffer is slack, not a queue: queue discipline belongs to
+the receiver (a sovereign self-mutating type that drains the mailbox into its
+own queue, with the thread that scales that queue when the burst is wide), never
+to the channel. A sender that has to park is telling you the receiving loop is
+not returning to its select promptly enough - that is a design fault you want
+visible, not a queue you want deep enough to hide it.
 
 ## Spawn Architecture: Managers and Workers
 

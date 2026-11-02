@@ -21,13 +21,65 @@ import "unsafe"
 // runtime.LastSpawnedLockdownFd(). If pipe creation fails the child
 // falls back to the stderr sink and the parent gets -1; spawn does not
 // fail on a lockdown-pipe failure, only observability degrades.
+// spawnChanSet holds the channel pointers of the spawn being established. The
+// compiler notes each channel argument before it calls spawnDomain, so each
+// ring is sized from that channel's declared depth (`chan T{:N}`) and its
+// compiler-computed frame budget - both of which live on the channel itself.
+var spawnChanSet [16]*channel
+
+// NoteSpawnChan records a channel argument for the spawn about to start. The
+// compiler emits one call per channel argument, in argument order, before
+// spawnDomain; spawnDomain clears the slot once the ring pair is created.
+func NoteSpawnChan(idx int32, ch *channel) {
+	if idx < 0 || idx >= 16 {
+		return
+	}
+	spawnChanSet[idx] = ch
+}
+
+// spawnRingDataSize is the power-of-two data area for one direction of a spawn
+// channel: room for the declared depth plus one in-flight frame, each frame
+// being the length prefix plus the channel's frame budget. The mask arithmetic
+// in ringWrite/ringRead requires a power of two, and the area may not exceed
+// ringMaxMsg, which is the largest frame the protocol can carry at all.
+func spawnRingDataSize(slots, budget uintptr) uint32 {
+	frame := uintptr(ringAlign8(4 + uint32(budget)))
+	if frame < 16 {
+		frame = 16
+	}
+	need := (slots + 1) * frame
+	size := uintptr(4096)
+	for size < need {
+		size = size << 1
+	}
+	if size > ringMaxMsg {
+		runtimePanic("spawn: channel frame budget exceeds ringMaxMsg: declare the slice/map dimension with a cap tag that fits")
+	}
+	return uint32(size)
+}
+
 func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
 	// Create ring buffer pairs for each channel before fork.
 	// mmap(MAP_SHARED) so both processes share the same physical memory.
 	spawnRingCount = nChans
 	for i := int32(0); i < nChans && i < 16; i++ {
-		spawnRingSet[i][0] = ringCreate(ringDefaultSize) // parent→child
-		spawnRingSet[i][1] = ringCreate(ringDefaultSize) // child→parent
+		// One page and one slot when the channel is nil or was never noted:
+		// that is the documented default for an unstated capacity.
+		budget := uintptr(4096)
+		slots := uintptr(1)
+		ch := spawnChanSet[i]
+		spawnChanSet[i] = nil
+		if ch != nil {
+			if ch.frameBudget > 0 {
+				budget = ch.frameBudget
+			}
+			if ch.bufCap > 0 {
+				slots = ch.bufCap
+			}
+		}
+		dataSize := spawnRingDataSize(slots, budget)
+		spawnRingSet[i][0] = ringCreate(dataSize) // parent→child
+		spawnRingSet[i][1] = ringCreate(dataSize) // child→parent
 	}
 
 	// Shared control block for the child-ready handshake (MAP_SHARED).

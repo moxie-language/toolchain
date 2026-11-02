@@ -129,27 +129,10 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		}
 	}
 
-	// Reject buffered channels across spawn boundaries.
-	for i, arg := range concreteArgs {
-		if _, isChan := arg.Type().Underlying().(*types.Chan); !isChan {
-			continue
-		}
-		if mc := traceToMakeChan(arg); mc != nil {
-			if c, ok := mc.Size.(*ssa.Const); ok {
-				if c.Value != nil && constant.Sign(c.Value) > 0 {
-					b.addError(instr.Pos(), fmt.Sprintf(
-						"spawn: argument %d is a buffered channel — only unbuffered channels allowed across spawn boundaries",
-						i+1))
-					return llvm.Value{}, nil
-				}
-			} else {
-				b.addError(instr.Pos(), fmt.Sprintf(
-					"spawn: argument %d has dynamic channel buffer size — only unbuffered channels (make(chan T)) allowed across spawn boundaries",
-					i+1))
-				return llvm.Value{}, nil
-			}
-		}
-	}
+	// Buffered channels are the mechanism, not a special case: a spawn channel's
+	// declaration states how many messages may be outstanding (`chan T{:N}`,
+	// one slot when unsized), and the runtime reads that depth from the handle
+	// at send time. Nothing about the buffer needs to be known here.
 
 	// Collect channel args (in declaration order) for post-spawn marking.
 	var chanArgs []spawnChanArg
@@ -175,6 +158,23 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	// Create a goroutine-style wrapper that unpacks args and calls the function.
 	wrapper := b.createGoroutineStartWrapper(funcType, funcPtr, "spawn", false, false, instr.Pos())
 
+	// Note every channel's ring slot before the domain exists: spawnDomain
+	// sizes each ring pair from that channel's declared depth and its
+	// compiler-computed frame budget, both of which travel on the handle.
+	target := b.nativeSpawnTargetFor(targetFn)
+	if target != nil && len(chanArgs) > 0 {
+		note := b.program.ImportedPackage("runtime").Members["NoteSpawnChan"].(*ssa.Function)
+		noteType, noteFn := b.getFunction(note)
+		i32 := b.ctx.Int32Type()
+		for i, ca := range chanArgs {
+			b.CreateCall(noteType, noteFn, []llvm.Value{
+				llvm.ConstInt(i32, uint64(target.chanIDs[i]-1), false),
+				ca.llvm,
+				llvm.Undef(b.dataPtrType),
+			}, "")
+		}
+	}
+
 	// Call runtime.spawnDomain(wrapper, paramBundle, nChans).
 	nChans := llvm.ConstInt(b.ctx.Int32Type(), uint64(len(chanArgs)), false)
 	spawnFnType, spawnFn := b.getFunction(b.program.ImportedPackage("runtime").Members["spawnDomain"].(*ssa.Function))
@@ -182,7 +182,7 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 
 	// Mark every channel arg pipe-bound on the parent side. The child's
 	// setupNativeSpawnTargetChannels does the symmetric mark with ChildPipeFd.
-	if target := b.nativeSpawnTargetFor(targetFn); target != nil {
+	if target != nil {
 		b.emitNativeSpawnChannelMark(target, chanArgs)
 	}
 

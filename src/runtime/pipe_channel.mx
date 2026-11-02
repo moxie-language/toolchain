@@ -109,11 +109,14 @@ func peerAlive(ch *channel) bool {
 
 // PipeChanSend is the runtime entry the compiler emits in place of the
 // in-runtime queue send for spawn-bound channels. Writes the encoded
-// bytes to the send ring. Parks on the ring's read index when the ring
-// is full; the park is bounded and the loop rechecks liveness after
-// each return, so a crashed peer surfaces as a failed send rather than
-// a hang. Returns false on close or peer death. Fail-loud on frames
-// that can never fit the ring.
+// bytes to the send ring. The channel's declared capacity is how many
+// messages may be OUTSTANDING - sent and not yet received - so a send
+// returns as soon as its frame is in the ring and parks only when that
+// many are already waiting. Parks on the ring's read index, which the
+// receiver advances on every consume; the park is bounded and the loop
+// rechecks liveness after each return, so a crashed peer surfaces as a
+// failed send rather than a hang. Returns false on close or peer death.
+// Fail-loud on frames that can never fit the ring.
 func PipeChanSend(ch *channel, encoded []byte) bool {
 	if ch == nil || !ch.spawnBound {
 		return false
@@ -121,16 +124,30 @@ func PipeChanSend(ch *channel, encoded []byte) bool {
 	if ch.ringSend == 0 {
 		return false
 	}
+	// The ring is sized from this budget, so a message over it means the
+	// declared cap dimensions do not describe this value. Both sides of a spawn
+	// channel are trusted code, and the budget is the bound the declaration
+	// promised: overrun it and the programmer is taking the piss, so the send
+	// dies naming the actual size, the budget and the fields to fix. The budget
+	// is checked before the ring size so the declaration-level message is the
+	// one a programmer sees.
+	if uintptr(len(encoded)) > ch.frameBudget {
+		pipeBudgetPanic(ch, uintptr(len(encoded)))
+	}
 	if !ringFits(ch.ringSend, int32(len(encoded))) {
 		runtimePanic("PipeChanSend: frame exceeds ring size")
 	}
+	// One slot is the default (`chan T{}`): the mailbox the event-loop model
+	// needs, where the first send never blocks and the second waits for the
+	// receiver to take the first. A deeper buffer trades latency for slack.
+	slots := uint32(ch.bufCap)
 	need := ringAlign8(4 + uint32(len(encoded)))
 	for {
 		if ringIsClosed(ch.ringSend) {
 			return false
 		}
-		if ringSend(ch.ringSend, encoded) {
-			break
+		if ringDepth(ch.ringSend) < slots && ringSend(ch.ringSend, encoded) {
+			return true
 		}
 		if !peerAlive(ch) {
 			ringClose(ch.ringSend)
@@ -138,23 +155,18 @@ func PipeChanSend(ch *channel, encoded []byte) bool {
 		}
 		ringParkRead(ch.ringSend, need)
 	}
-	// Unbuffered send: the frame is in the ring, and the send is not complete
-	// until the receiver has taken it. The ack is the receiver advancing the
-	// read index past the frame - no extra message and no extra memory. A
-	// buffered channel (bufCap > 0) returns here: the ring holding N+1 frames
-	// is what the buffer is for, and parking happens only when it is full.
-	if ch.bufCap == 0 {
-		for !ringAcked(ch.ringSend) {
-			if ringIsClosed(ch.ringSend) {
-				return false
-			}
-			if !peerAlive(ch) {
-				return false
-			}
-			ringParkAck(ch.ringSend)
-		}
-	}
-	return true
+}
+
+// pipeBudgetPanic is the loud failure for a frame that overruns the channel's
+// declared frame budget. Both sides of a spawn channel are trusted - the code
+// is fixed at compile time - so an overrun is a declaration that does not
+// describe the data, and the programmer is expected to fix the cap tag rather
+// than have the ring quietly wrap. The note carried on the channel is the
+// compiler's list of the variable-length fields and the caps they declare.
+func pipeBudgetPanic(ch *channel, actual uintptr) {
+	head := "spawn channel: encoded frame of " | itoa(int32(actual)) | " bytes exceeds the "
+	tail := "-byte frame budget. Variable-length fields and their cap tags: " | ch.frameNote
+	runtimePanic(head | itoa(int32(ch.frameBudget)) | tail)
 }
 
 // PipeChanRecv is the runtime entry the compiler emits in place of the
@@ -354,7 +366,7 @@ func (ch *channel) tryPipeSend(value unsafe.Pointer) bool {
 	if sz > 0 {
 		data = unsafe.Slice((*byte)(value), sz)
 	}
-	if ch.ringSend != 0 {
+	if ch.ringSend != 0 && ringDepth(ch.ringSend) < uint32(ch.bufCap) {
 		return ringSend(ch.ringSend, data)
 	}
 	return false

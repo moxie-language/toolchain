@@ -9,14 +9,21 @@ import "unsafe"
 // parent and child access the same physical memory. One ring per
 // channel direction - no multiplexing, no chanID headers.
 //
-// Layout: 24-byte header followed by data[size] bytes.
+// Layout: 32-byte header followed by data[size] bytes.
 //   [0:4]   writeIdx - monotonically increasing, producer-written
 //   [4:8]   readIdx  - monotonically increasing, consumer-written
 //   [8:12]  size     - data area size (power of 2)
 //   [12:16] closed   - 0=open, 1=closed
 //   [16:20] recvSleeper - reader is parked on writeIdx (waiting for data)
 //   [20:24] sendSleeper - writer is parked on readIdx (waiting for space)
-//   [24:]   data
+//   [24:28] sentFrames - frames published, producer-written
+//   [28:32] recvFrames - frames consumed, consumer-written
+//   [32:]   data
+//
+// The frame counters give the channel its declared depth: outstanding frames
+// are sentFrames-recvFrames, and the sender refuses (parks) while that reaches
+// the channel's capacity. Each counter has exactly one writer, so the
+// difference needs no read-modify-write between the two processes.
 //
 // Messages: [len:4][payload:len][pad to align 8].
 // Indices wrap via mask (size-1). Both sides use atomic load/store
@@ -30,7 +37,7 @@ import "unsafe"
 // uncontended publish free of the FUTEX_WAKE syscall.
 
 const (
-	ringHeaderSize  = 24
+	ringHeaderSize  = 32
 	ringDefaultSize = 1 << 25 // 32MB data area (lazily faulted; matches ringMaxMsg)
 	flag_MAP_SHARED = 0x1
 )
@@ -47,6 +54,8 @@ type ringBuf struct {
 	closed      uint32
 	recvSleeper uint32
 	sendSleeper uint32
+	sentFrames  uint32
+	recvFrames  uint32
 }
 
 func ringCreate(dataSize uint32) uintptr {
@@ -62,6 +71,8 @@ func ringCreate(dataSize uint32) uintptr {
 	hdr.closed = 0
 	hdr.recvSleeper = 0
 	hdr.sendSleeper = 0
+	hdr.sentFrames = 0
+	hdr.recvFrames = 0
 	return uintptr(p)
 }
 
@@ -150,32 +161,13 @@ func ringParkRead(ring uintptr, need uint32) {
 	atomicStoreU32(&hdr.sendSleeper, 0)
 }
 
-// ringAcked reports whether the receiver has consumed everything written so
-// far. The SPSC pair has one writer, so "everything written" is exactly the
-// frame the caller just sent: the read index reaching the write index IS the
-// acknowledgement of an unbuffered send.
-func ringAcked(ring uintptr) bool {
+// ringDepth is the number of frames published and not yet consumed: the
+// outstanding message count the channel's declared capacity limits. Only the
+// producer writes sentFrames and only the consumer writes recvFrames, so the
+// difference is an SPSC count that needs no read-modify-write to be shared.
+func ringDepth(ring uintptr) uint32 {
 	hdr := (*ringBuf)(unsafe.Pointer(ring))
-	w := atomicLoadU32(&hdr.writeIdx)
-	r := atomicLoadU32(&hdr.readIdx)
-	// Index counters wrap; a signed difference of the low 32 bits is the
-	// distance between them and is non-negative once the reader has caught up.
-	return int32(r-w) >= 0
-}
-
-// ringParkAck waits for the read index to move, bounded by the same park
-// timeout every other ring wait uses. It is the waiting half of ringAcked:
-// the caller re-probes and rechecks peer liveness after each return, so a dead
-// reader surfaces as a failed send instead of a hang.
-func ringParkAck(ring uintptr) {
-	hdr := (*ringBuf)(unsafe.Pointer(ring))
-	atomicStoreU32(&hdr.sendSleeper, 1)
-	w := atomicLoadU32(&hdr.writeIdx)
-	cmp := atomicLoadU32(&hdr.readIdx)
-	if int32(cmp-w) < 0 && !ringIsClosed(ring) {
-		moxie_futex_wait_timeout_shared(&hdr.readIdx, cmp, pipeParkTimeoutNs)
-	}
-	atomicStoreU32(&hdr.sendSleeper, 0)
+	return atomicLoadU32(&hdr.sentFrames) - atomicLoadU32(&hdr.recvFrames)
 }
 
 func ringAlign8(n uint32) uint32 {
@@ -248,8 +240,10 @@ func ringSend(ring uintptr, payload []byte) bool {
 	if msgLen > 0 {
 		ringWrite(ring, w+4, msgLen, unsafe.Pointer(&payload[0]))
 	}
-	// Publish: advance writeIdx with release semantics.
+	// Publish: advance writeIdx with release semantics, then count the frame so
+	// a sender blocked on the declared depth sees this send in flight.
 	atomicStoreU32(&hdr.writeIdx, w+total)
+	atomicStoreU32(&hdr.sentFrames, atomicLoadU32(&hdr.sentFrames)+1)
 	ringWakeReaders(ring)
 	return true
 }
@@ -281,8 +275,10 @@ func ringRecv(ring uintptr) ([]byte, bool) {
 		data = []byte{:msgLen}
 		ringRead(ring, r+4, msgLen, unsafe.Pointer(&data[0]))
 	}
-	// Consume: advance readIdx with release semantics.
+	// Consume: advance readIdx with release semantics, then count the frame so a
+	// sender parked on the depth limit wakes to a free slot.
 	atomicStoreU32(&hdr.readIdx, r+total)
+	atomicStoreU32(&hdr.recvFrames, atomicLoadU32(&hdr.recvFrames)+1)
 	ringWakeWriters(ring)
 	return data, true
 }

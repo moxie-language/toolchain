@@ -70,6 +70,14 @@ type channel struct {
 	spawnPid    int32    // peer pid for death detection (0 = local/none)
 	ringSend    uintptr  // SPSC ring for sending (0 = local channel)
 	ringRecv    uintptr  // SPSC ring for receiving (0 = local channel)
+	// frameBudget is the compiler-computed byte ceiling on one structurally
+	// encoded message. The ring a spawn channel carries is sized from it (the
+	// declared depth plus one in-flight frame), so a message that overruns it
+	// is a loud failure rather than a silently undersized ring. frameNote is
+	// the compiler's list of the variable-length fields and cap tags that set
+	// that budget, so the failure names the declaration to change.
+	frameBudget uintptr
+	frameNote   []byte
 	// On wasm a spawn-bound channel's ring lives in JavaScript behind an
 	// opaque int32 handle (see spawn_wasm.mx), so there is no ring address to
 	// hold: sabHandle carries that handle instead. Zero means local.
@@ -153,10 +161,24 @@ type chanSelectState struct {
 	value unsafe.Pointer
 }
 
-func chanMake(elementSize uintptr, bufSize uintptr) *channel {
+func chanMake(elementSize uintptr, bufSize uintptr, frameBudget uintptr, notePtr unsafe.Pointer, noteLen uintptr) *channel {
+	// A channel is a mailbox with at least one slot. A Moxie domain has one
+	// thread, so an unbuffered channel has no possible listener and its first
+	// send could never complete. The literal rewrite makes `chan T{}` one slot
+	// and the compilers reject a constant below one; this catches a capacity
+	// computed at run time, before any send can hang on it.
+	if bufSize == 0 {
+		runtimePanic("chanMake: channel capacity must be at least 1: a Moxie domain has one thread, so an unbuffered channel has no possible listener")
+	}
+	var note []byte
+	if notePtr != nil && noteLen > 0 {
+		note = unsafe.Slice((*byte)(notePtr), noteLen)
+	}
 	return &channel{
 		elementSize: elementSize,
 		bufCap:      bufSize,
+		frameBudget: frameBudget,
+		frameNote:   note,
 		buf:         alloc(elementSize*bufSize, nil),
 	}
 }

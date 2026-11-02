@@ -6375,6 +6375,18 @@ func (fb *ssaFuncBuilder) emitMake(typ Type, sizeArgs []SSAValue) (s SSAValue) {
 		fb.emit(mm)
 		return mm
 	case *TCChan:
+		// A channel is a mailbox with at least one slot. A Moxie domain has one
+		// thread, so an unbuffered channel would have no possible listener: the
+		// first send could never complete. `chan T{}` is lowered to capacity 1,
+		// so a constant below one is a declaration that cannot work.
+		if len(sizeArgs) > 0 {
+			if c, ok := sizeArgs[0].(*SSAConst); ok {
+				if ci, ok2 := c.val.(*ConstInt); ok2 && ci.V < 1 {
+					reportCompileError("channel capacity must be at least 1: a Moxie domain has one thread, so an unbuffered channel has no possible listener")
+					return nil
+				}
+			}
+		}
 		mc := &SSAMakeChan{}
 		mc.typ = typ
 		mc.name = fb.nextName()
