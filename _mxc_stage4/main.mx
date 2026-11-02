@@ -343,7 +343,17 @@ func optBc(bcFile string) {
 // These are the flags llc is given in addition to -O2 (see objTool). The
 // section flags are what makes --gc-sections able to drop an unreferenced
 // function, and they are not implied by the optimization level.
-var objFlags = []string{"-function-sections", "-data-sections"}
+// A zero-value declaration plus initObjectFlags: a package-level variable with
+// an initialiser is a language error (the initialiser is package code, and its
+// store is a store to a global outside an init-named function).
+var objFlags []string
+
+// initObjectFlags fills objFlags once, before any object is built. It is
+// init-named because it stores a package-level variable, which only an
+// initialiser may do.
+func initObjectFlags() {
+	objFlags = []string{"-function-sections", "-data-sections"}
+}
 
 // toolVersion returns a tool's version line, or "" when it cannot be read.
 func toolVersion(tool string) (s string) {
@@ -1166,7 +1176,7 @@ func acquireRepoLock(mpath, repoPath string) (ok bool) {
 	if holder == "" {
 		holder = "unknown"
 	}
-	lastHolder = holder
+	cstate.noteLockHolder(holder)
 	return false
 }
 
@@ -1185,28 +1195,23 @@ func releaseRepoLock(mpath, repoPath string) {
 	os.Remove(repoLockPath(mpath, repoPath))
 }
 
-// lastHolder is the pid recorded in the lock file the last acquire lost to,
-// so the timeout can name who is holding it.
-var lastHolder string
-
-// heldRepoLocks are the per-repository locks this process holds. A build keeps
-// them for its whole life: a repository is checked out (or a worktree
-// materialised) while packages from it are still being compiled, and a second
-// build must not change the tree underneath the first. They are released on
-// every exit path, including fatal errors and interrupts.
-var heldRepoLocks []string
+// The repository locks this process holds, and the pid named in the last lock
+// file it lost to, live in compilerState (cstate.mx): a build keeps a lock for
+// its whole life - a repository is checked out while packages from it are still
+// being compiled, and a second build must not change the tree underneath the
+// first - and the stores happen outside any init-named function, which the
+// language does not allow on a package-level variable.
 
 // holdRepoLock takes a repository's lock, waiting for another process, and
 // keeps it until this process exits.
 func holdRepoLock(mpath, repo string) {
 	waitRepoLock(mpath, repo)
-	heldRepoLocks = mxutil.Ensure(heldRepoLocks, 1)
-	heldRepoLocks = push(heldRepoLocks, mpath | "\x00" | repo)
+	cstate.holdRepoLock(mpath, repo)
 }
 
 // releaseHeldRepoLocks drops every lock this process holds.
 func releaseHeldRepoLocks() {
-	for _, h := range heldRepoLocks {
+	for _, h := range cstate.heldRepoLocks {
 		nul := int32(-1)
 		for i := int32(0); i < int32(len(h)); i++ {
 			if h[i] == 0 {
@@ -1219,7 +1224,7 @@ func releaseHeldRepoLocks() {
 		}
 		releaseRepoLock(h[:nul], h[nul+1:])
 	}
-	heldRepoLocks = nil
+	cstate.releaseHeldLocks()
 }
 
 func autoFetchRepo(pkgPath, version string) (s string) {
@@ -1439,13 +1444,13 @@ func waitRepoLock(mpath, repo string) {
 		// few rounds first so a holder that is merely mid-checkout (and about
 		// to release) is not broken out from under.
 		if tries == 5 {
-			if !processAlive(lastHolder) {
-				mxutil.WriteStr(2, "  breaking stale lock: " | repo | " (pid " | lastHolder | " is gone)\n")
+			if !processAlive(cstate.lastHolder) {
+				mxutil.WriteStr(2, "  breaking stale lock: " | repo | " (pid " | cstate.lastHolder | " is gone)\n")
 				os.Remove(repoLockPath(mpath, repo))
 			}
 		}
 		if tries > 900 {
-			fatal("repo locked for over three minutes: " | repo | " (held by pid " | lastHolder | ", " | repoLockPath(mpath, repo) | ")")
+			fatal("repo locked for over three minutes: " | repo | " (held by pid " | cstate.lastHolder | ", " | repoLockPath(mpath, repo) | ")")
 		}
 	}
 }
@@ -2209,7 +2214,11 @@ func pkgCacheKey(dir string, files []string) (s string) {
 			continue
 		}
 		nb := []byte{:len(all) + len(data) + 1}
-		copy(nb[:len(all)], all)
+		// CopyAt, not copy(nb[:len(all)], all): a subslice is a copy, so the
+		// accumulated bytes were copied into a throwaway and nb kept only the
+		// new file's data - the concatenation hashed the LAST file, not all of
+		// them, and two package caches could collide on it.
+		mxutil.CopyAt(nb, 0, all)
 		mxutil.CopyAt(nb, len(all), data)
 		nb[len(all)+len(data)] = 0
 		all = nb
@@ -3282,36 +3291,24 @@ func coverPkg(path string) (ok bool) {
 // reference by then. Reading one crashed the compiler at the end of the first
 // -cover build, which is why this table does not follow the alloc-site table's
 // plain-slice shape.
-var coverNames []string
-var coverCount int32
-
 const maxCoverSites = int32(1) << 20
 
+// resetCoverSites and addCoverSite are the call-site shape; the storage is
+// compilerState's (see cstate.mx), because a store to a package-level variable
+// outside an init-named function is a language error.
 func resetCoverSites() {
-	coverCount = 0
+	cstate.resetCover()
 }
 
-func addCoverSite(name string) (id int32) {
-	a := runtime.RootArena()
-	if a == nil || coverCount >= maxCoverSites {
-		return -1
-	}
-	if coverNames == nil {
-		coverNames = unsafe.Slice((*string)(unsafe.Pointer(runtime.ArenaAlloc(a, uintptr(maxCoverSites)*unsafe.Sizeof("")))), maxCoverSites)
-	}
-	id = coverCount
-	coverNames[id] = rootCopyString(a, name)
-	coverCount++
-	return id
-}
+func addCoverSite(name string) (id int32) { return cstate.addCover(name) }
 
-func coverSiteCount() (n int32) { return coverCount }
+func coverSiteCount() (n int32) { return cstate.coverCount }
 
 func coverSiteName(i int32) (s string) {
-	if i < 0 || i >= coverCount {
+	if i < 0 || i >= cstate.coverCount {
 		return ""
 	}
-	return coverNames[i]
+	return cstate.coverNames[i]
 }
 
 // rootCopyString copies s into the root arena, so it outlives the frame that
@@ -6883,6 +6880,8 @@ func scanSelectorCalls(src []byte) (methods []string) {
 func main() {
 	// Root arena is the domain root's arena, set up by the runtime.
 	// 2GB virtual - pages committed on touch by the MMU.
+	initCompilerState()
+	initObjectFlags()
 	initCompileCtx()
 	// The target must be known before InitUniverse: uintptr's width depends
 	// on it, and InitUniverse builds the type table once per process.
@@ -8253,6 +8252,8 @@ func workerEntryExport(arg unsafe.Pointer) {
 	// region, initHeap() sets the bump pointer, initAll() runs package inits.
 	// Mirrors the parent main() init order: compile ctx, universe, build state.
 	runtime.InitCShared()
+	initCompilerState()
+	initObjectFlags()
 	initCompileCtx()
 	cctx.universe = InitUniverse()
 	SetUniverseGlobals(cctx.universe)

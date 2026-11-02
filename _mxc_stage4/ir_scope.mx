@@ -10,7 +10,7 @@ import (
 // checkUseAfterFree: no-op in arena model.
 func checkUseAfterFree(f *SSAFunction) {}
 
-func strContains(s, sub string) bool {
+func strContains(s, sub string) (ok bool) {
 	if len(sub) == 0 {
 		return true
 	}
@@ -29,7 +29,7 @@ func strContains(s, sub string) bool {
 // The resolved build module cannot stand in for it: a target outside any module
 // falls back to MOXIEROOT so that its imports resolve, and inheriting that
 // fallback would exempt every out-of-tree user package from the restrictions.
-func targetIsMoxieModule() bool {
+func targetIsMoxieModule() (ok bool) {
 	if bst == nil {
 		return false
 	}
@@ -38,9 +38,13 @@ func targetIsMoxieModule() bool {
 
 // isUserPackagePath mirrors legacy restrict.go isUserPackage: a package is
 // subject to Moxie language restrictions if its import path contains a dot
-// (user module paths look like domain paths), except golang.org/x/ and the
-// compiler's own /pkg/ infrastructure. Main packages are user code unless
-// the target itself lives in the moxie compiler module.
+// (user module paths look like domain paths), except golang.org/x/.
+//
+// Main packages are user code, always. They were exempt when the target lived
+// in the moxie module, which meant the compiler's own source was never checked
+// by its own rules - and legacy has always checked it (its isUserPackage
+// returns true for "main" unconditionally, and the bootstrap builds
+// _mxc_stage4 through it).
 //
 // A leading vendor/ is stripped first. stage4 compiles stdlib-vendored code
 // under the path `vendor/golang.org/x/...`, while legacy's go/types reports the
@@ -48,22 +52,14 @@ func targetIsMoxieModule() bool {
 // exemption missed every vendored package here and the language rules fired on
 // them - `golang.org/x/crypto/chacha20poly1305` was rejected for unnamed return
 // values the moment that rule landed. Normalising reproduces legacy's view.
-func isUserPackagePath(path string) bool {
+func isUserPackagePath(path string) (ok bool) {
 	if path == "main" || path == "command-line-arguments" {
-		return !targetIsMoxieModule()
+		return true
 	}
 	if mxutil.HasPrefix(path, "vendor/") {
 		path = path[7:]
 	}
 	if mxutil.HasPrefix(path, "golang.org/x/") {
-		return false
-	}
-	// Compiler infrastructure packages (pkg/types, pkg/syntax, pkg/mxutil, ...)
-	// are exempt, exactly as legacy's isUserPackage exempts them by the same
-	// "/pkg/" test. Without this a rule added here could fire on the compiler's
-	// own packages - which it did: the subslice-copy rule reported
-	// pkg/mxregexp, a package legacy has always exempted.
-	if hasSlashPkgSegment(path) {
 		return false
 	}
 	for i := int32(0); i < int32(len(path)); i++ {
@@ -90,7 +86,7 @@ func hasSlashPkgSegment(path string) (ok bool) {
 // whether or not a manifest exists (loader.go: `if p.Module.Main &&
 // p.Module.Path != "git.smesh.lol/moxie"`), so the gate here is the same test
 // without a module file: a target that is not the toolchain is the main module.
-func targetIsMainModule() bool {
+func targetIsMainModule() (ok bool) {
 	if bst == nil {
 		return false
 	}
@@ -101,7 +97,7 @@ func targetIsMainModule() bool {
 // belongs to the repository the target lives in. The '+' text rule applies
 // there and nowhere else: a dependency from another repository keeps '+', as
 // it does under legacy's Module.Main gate.
-func isTargetPkg(pkgPath string) bool {
+func isTargetPkg(pkgPath string) (ok bool) {
 	if bst == nil || pkgPath == "" {
 		return false
 	}
@@ -384,7 +380,7 @@ func ssaGlobalRoot(v SSAValue, depth int32) (s string) {
 // code may set globals. The prefix rule is legacy's, kept verbatim so both
 // compilers accept exactly the same functions - the constructor an app calls
 // to build its state lives in the root arena and is named initState/initX.
-func isInitFuncName(name string) bool {
+func isInitFuncName(name string) (ok bool) {
 	if name == "init" {
 		return true
 	}

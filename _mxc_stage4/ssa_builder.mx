@@ -2255,11 +2255,10 @@ type ifaceAssign struct {
 	pos     string
 }
 
-var pendingIfaceAssigns []ifaceAssign
 
 // checkIfaceAssignments judges the recorded assignments and clears the list.
 func checkIfaceAssignments() {
-	for _, pa := range pendingIfaceAssigns {
+	for _, pa := range cstate.pendingIface {
 		tIface, isIface := SafeUnderlying(pa.T).(*TCInterface)
 		if !isIface || !IfaceCheckConclusive(pa.V, tIface) {
 			continue
@@ -2274,7 +2273,7 @@ func checkIfaceAssignments() {
 		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 		push(cctx.compileErrors, pa.pos | "cannot use value of type " | pa.V.String() | " as " | pa.T.String() | " in " | pa.what | " (does not implement " | pa.T.String() | " (missing method " | missing | "))")
 	}
-	pendingIfaceAssigns = nil
+	cstate.pendingIface = nil
 }
 
 func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
@@ -2405,8 +2404,8 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 				if _, vTP := V.(*TypeParam); !vTP {
 					if IfaceCheckConclusive(V, tIface) {
 						if IfaceMethodSetLocal(V, fb.fn.Pkg.Pkg) {
-							pendingIfaceAssigns = mxutil.Ensure(pendingIfaceAssigns, 1)
-							push(pendingIfaceAssigns, ifaceAssign{V: V, T: T, localPkg: fb.fn.Pkg.Pkg, what: what, pos: fb.errPos()})
+							cstate.pendingIface = mxutil.Ensure(cstate.pendingIface, 1)
+							push(cstate.pendingIface, ifaceAssign{V: V, T: T, localPkg: fb.fn.Pkg.Pkg, what: what, pos: fb.errPos()})
 						}
 					}
 				}
@@ -2576,7 +2575,7 @@ func constReprSkipUnsigned(T Type, cv ConstVal, explicitNeg bool) (skip bool) {
 // nil when T already holds the value. A shift result takes the left operand's
 // type, so letting the count's type decide truncated 0x20000000000000 to zero
 // (math.expm1 computed 0 instead of 4.6e18).
-func shiftConstWiden(x SSAValue, T Type) Type {
+func shiftConstWiden(x SSAValue, T Type) (rt Type) {
 	c := ssaExtractConst(x)
 	if c == nil || c.val == nil {
 		return nil

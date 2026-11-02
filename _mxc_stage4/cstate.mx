@@ -1,0 +1,98 @@
+package main
+
+import (
+	"git.smesh.lol/moxie/pkg/mxutil"
+	"runtime"
+	"unsafe"
+)
+
+// compilerState is the compiler's mutable process state that is not already a
+// field of a receiver: a recursion guard, the deferred interface-assignment
+// queue, the coverage site table, and the repository locks this process holds.
+//
+// It is one self-mutating type behind one package-level pointer for a reason
+// that is now enforced rather than exempted: a store to a package-level
+// variable outside an init-named function is a language error, because two
+// domains forked from one address space must not see different values of a
+// global. The compiler is single-domain, so the rule buys it nothing - but the
+// rule is the rule, and the compliant shape for mutable state is a receiver
+// whose methods own the writes. Every one of these was a plain global before
+// (fromTailDepth, pendingIfaceAssigns, coverNames/coverCount, lastHolder,
+// heldRepoLocks) and each was a "package globals are immutable outside init"
+// diagnostic once `_mxc_stage4` stopped being exempt from its own rules.
+//
+// Reads stay direct (`cstate.coverCount`) - reading a global is legal; only
+// stores had to move behind a method.
+type compilerState struct {
+	tailDepth     int32
+	pendingIface  []ifaceAssign
+	coverNames    []string
+	coverCount    int32
+	lastHolder    string
+	heldRepoLocks []string
+}
+
+// cstate is assigned once, by initCompilerState, which is init-named and may
+// therefore store a global.
+var cstate *compilerState
+
+func initCompilerState() {
+	cstate = &compilerState{}
+}
+
+// enterTail guards typeFromTail against a recursive type whose Tail names
+// itself. It reports whether the walk is too deep, having already undone its
+// own increment so the caller does not have to.
+func (s *compilerState) enterTail() (tooDeep bool) {
+	s.tailDepth = s.tailDepth + 1
+	if s.tailDepth > 40 {
+		s.tailDepth = s.tailDepth - 1
+		return true
+	}
+	return false
+}
+
+func (s *compilerState) leaveTail() {
+	s.tailDepth = s.tailDepth - 1
+}
+
+// resetCover clears the coverage site table between builds.
+func (s *compilerState) resetCover() {
+	s.coverCount = 0
+}
+
+// addCover records one coverage site name in the root arena and returns its
+// id. The table must live in the root arena: each name is built in a package's
+// transient arena and read again after every package has been emitted, so a
+// frame-arena string dangles by then.
+func (s *compilerState) addCover(name string) (id int32) {
+	a := runtime.RootArena()
+	if a == nil || s.coverCount >= maxCoverSites {
+		return -1
+	}
+	if s.coverNames == nil {
+		s.coverNames = unsafe.Slice((*string)(unsafe.Pointer(runtime.ArenaAlloc(a, uintptr(maxCoverSites)*unsafe.Sizeof("")))), maxCoverSites)
+	}
+	id = s.coverCount
+	s.coverNames[id] = rootCopyString(a, name)
+	s.coverCount++
+	return id
+}
+
+// noteLockHolder records the pid named in a lock file this process lost to, so
+// the wait loop can decide whether the holder is still alive.
+func (s *compilerState) noteLockHolder(pid string) {
+	s.lastHolder = pid
+}
+
+// holdRepoLock records one acquired repository lock.
+func (s *compilerState) holdRepoLock(mpath, repo string) {
+	s.heldRepoLocks = mxutil.Ensure(s.heldRepoLocks, 1)
+	s.heldRepoLocks = push(s.heldRepoLocks, mpath | "\x00" | repo)
+}
+
+// releaseHeldLocks forgets the locks this process holds; the files themselves
+// are unlinked by the caller.
+func (s *compilerState) releaseHeldLocks() {
+	s.heldRepoLocks = nil
+}

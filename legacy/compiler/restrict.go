@@ -35,33 +35,17 @@ func (b *builder) isUserPackage(pkg *ssa.Package) bool {
 		return false
 	}
 	path := pkg.Pkg.Path()
-	// The moxie compiler's own packages are exempt from user restrictions.
-	// A package that DIRECTLY imports the moxie compiler infrastructure
-	// (git.smesh.lol/moxie/pkg/...) is compiler code. A build rooted at the
-	// moxie module also compiles its own infrastructure packages directly
-	// (path becomes "command-line-arguments"); those are exempt too, mirroring
-	// stage4's buildHasMoxieModule() gate.
-	if b.pkgModulePath == "git.smesh.lol/moxie" {
-		importsMoxiePkg := false
-		for _, imp := range pkg.Pkg.Imports() {
-			if strings.HasPrefix(imp.Path(), "git.smesh.lol/moxie/pkg/") {
-				importsMoxiePkg = true
-				break
-			}
-		}
-		if importsMoxiePkg {
-			return false
-		}
-	}
+	// No package is exempt for being "the compiler's own". It was: anything
+	// under a /pkg/ path, and any build rooted at the moxie module. The first
+	// rule also exempted every sibling repository's pkg/ tree, which is how
+	// morly's store compiled a dozen writes through a subslice and smesh's
+	// nostr.Tags stored a []*Tag in a []Tag field. The compiler's own source
+	// now satisfies the same rules it enforces (stage4's package checks report
+	// nothing on _mxc_stage4).
 	if path == "main" || path == "command-line-arguments" {
-		return b.pkgModulePath != "git.smesh.lol/moxie"
+		return true
 	}
 	if strings.HasPrefix(path, "golang.org/x/") {
-		return false
-	}
-	// Compiler infrastructure packages (pkg/types, pkg/syntax, pkg/mxutil, etc.)
-	// are exempt from user restrictions.
-	if strings.Contains(path, "/pkg/") {
 		return false
 	}
 	return strings.Contains(path, ".")
