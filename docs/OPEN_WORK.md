@@ -23710,3 +23710,20 @@ Evidence: with legacy, `chan Body{:2:limit}` where `limit := int64(65536)`
 crosses a 60000-byte body and prints `worker got 60000`; a constant budget and
 a call-valued budget both work; `chan T{:0}` still rejects; `spawn_frame_budget`
 skips the wasm phase because the SAB boundary owns its rings.
+
+**The numbers.** Bootstrap fixpoint `803e0d3f` (s2 == s3, runtime baked). With
+the installed stage4 compiler, `limit := int64(65536); in := chan Body{:2:limit}`
+carries a 60000-byte body and prints `worker got 60000`; `chan Body{:1:1024}`
+panics with
+
+    spawn channel: encoded frame of 2007 bytes exceeds the 1024-byte frame
+    budget. Variable-length fields and their cap tags: main.Body.Data unstated (4096)
+
+so the message states what actually crossed, what the declaration allowed, and
+which fields the walk would size; `0a/spawn_frame_budget` passes; and morly's
+whole suite (370 tests) passes with the migrated wire types. nostr and smesh
+have no `spawn` calls, so they needed no migration.
+
+The one-line lesson worth keeping: `ssa.MakeChan.Budget` had to be added to
+`Operands()`, because an operand the SSA does not list is an operand the
+compiler is free to delete.
