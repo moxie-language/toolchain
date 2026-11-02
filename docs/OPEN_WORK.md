@@ -23536,3 +23536,20 @@ app repo is gitignored, and `moxie build -target wasm` keeps an app-supplied cop
 ("the app does not ship it" otherwise). A stale copy there kept the old env in
 the staged tree even after the runtime was fixed, so the fix only took effect
 once the file was deleted and the build staged the runtime's own.
+
+### Round 342, the numbers
+
+Full sweep on the tree that carries rounds 336-342, `-j 1`, every phase in one
+run:
+
+    317 / 317 passed, 0 failed, 0 skipped
+
+Every phase: 0a (123), 0b (62), 1 (4), 1b (45 packages), 1c (4), 2 (selfhost
+fixpoint), 3 (IR validate), 4 (smoke), 5 (wasm, 119), 6 (instrumentation),
+**7 (ui:build + ui:smoke, 11 passed)**, 8 (netsmoke), tree-cleanliness.
+
+That is the first fully green sweep in this campaign. The two gates that were
+red through it - phase 5's ed25519 trap and phase 7's smoke suite - are both
+closed: the first by the intervening constructor/codec work (verified, five
+crypto fixtures native == wasm), the second by the worker env's missing
+`__multi3` (round 342).
