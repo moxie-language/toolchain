@@ -247,6 +247,9 @@ func (v *MakeMap) String() string {
 
 func (v *MakeChan) String() string {
 	from := v.Parent().relPkg()
+	if v.Budget != nil {
+		return fmt.Sprintf("make %s %s %s", relType(v.Type(), from), relName(v.Size, v), relName(v.Budget, v))
+	}
 	return fmt.Sprintf("make %s %s", relType(v.Type(), from), relName(v.Size, v))
 }
 

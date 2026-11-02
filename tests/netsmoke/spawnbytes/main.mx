@@ -8,6 +8,12 @@
 // that fills exactly one 8-byte ring slot, one byte past it, and a body spanning
 // many slots, each byte chosen so a shifted or truncated read changes the sum.
 //
+// The element is a struct with a cap tag because a spawn channel's ring is
+// sized from the element type before the fork: an untagged body would be one
+// 4096-byte page, and the 100000-byte case would be over its own declared
+// budget (a loud panic, not a silent wrap). The tag states 128 KiB, so the ring
+// carries every case here.
+//
 // A scalar control rides the same spawn on a chan int32: if that ever fails, the
 // boundary itself is broken and this fixture is not measuring the slice path.
 //
@@ -19,7 +25,11 @@ import (
 	"os"
 )
 
-var fails int32
+// Body is the channel element: the cap tag is the frame budget the ring is
+// built from.
+type Body struct {
+	Data []byte `cap:"131072"`
+}
 
 // sum is an order sensitive checksum: a shifted read changes it.
 func sum(b []byte) (s int32) {
@@ -41,19 +51,20 @@ func make(n int32) (b []byte) {
 
 // child echoes the length and checksum of every body it receives, then the
 // scalar control's value, then exits.
-func child(bodies chan []byte, scalars chan int32, back chan int32) {
+func child(bodies chan Body, scalars chan int32, back chan int32) {
 	n := <-scalars
 	s := <-scalars
 	back <- s
 	for i := int32(0); i < n; i++ {
 		b := <-bodies
-		back <- int32(len(b))
-		back <- sum(b)
+		back <- int32(len(b.Data))
+		back <- sum(b.Data)
 	}
 }
 
 func main() {
-	bodies := chan []byte{}
+	var fails int32
+	bodies := chan Body{}
 	scalars := chan int32{}
 	back := chan int32{}
 	spawn(child, bodies, scalars, back)
@@ -79,7 +90,7 @@ func main() {
 		body := make(sizes[c])
 		wantLen := int32(len(body))
 		wantSum := sum(body)
-		bodies <- body
+		bodies <- Body{Data: body}
 		gotLen := <-back
 		gotSum := <-back
 		if gotLen != wantLen || gotSum != wantSum {

@@ -836,6 +836,11 @@ type MakeMap struct {
 type MakeChan struct {
 	register
 	Size Value // int; size of buffer; zero => synchronous.
+	// Budget is the frame byte budget stated as the channel literal's second
+	// field (Moxie: `chan T{depth, bytes}`), or nil when the budget comes from
+	// the compiler's walk of the element type. It may be a run-time expression,
+	// so a relay policy read from config can size the ring.
+	Budget Value
 }
 
 // The MakeSlice instruction yields a slice of length Len backed by a
@@ -1780,7 +1785,11 @@ func (v *Lookup) Operands(rands []*Value) []*Value {
 }
 
 func (v *MakeChan) Operands(rands []*Value) []*Value {
-	return append(rands, &v.Size)
+	rands = append(rands, &v.Size)
+	if v.Budget != nil {
+		rands = append(rands, &v.Budget)
+	}
+	return rands
 }
 
 func (v *MakeClosure) Operands(rands []*Value) []*Value {

@@ -73,6 +73,36 @@ func IsMoxieStringTarget(importPath string) bool {
 // The rewrite is token-aware: it uses go/scanner to avoid matching inside
 // strings or comments. It only rewrites when 'chan' is followed by a type
 // expression and then '{' in expression context.
+// splitChanSpec splits a channel literal's inner text into its element count
+// and its optional per-element byte budget at the first TOP-LEVEL colon, the
+// notation `chan T{:depth:bytes}`. A colon inside brackets is part of a slice
+// expression, not a field separator. An empty depth means the default (one
+// slot), which is how `chan T{::65536}` states a budget with no element count.
+func splitChanSpec(inner string) (depth, budget string) {
+	parens, brackets, braces := 0, 0, 0
+	for i := 0; i < len(inner); i++ {
+		switch inner[i] {
+		case '(':
+			parens++
+		case ')':
+			parens--
+		case '[':
+			brackets++
+		case ']':
+			brackets--
+		case '{':
+			braces++
+		case '}':
+			braces--
+		case ':':
+			if parens == 0 && brackets == 0 && braces == 0 {
+				return strings.TrimSpace(inner[:i]), strings.TrimSpace(inner[i+1:])
+			}
+		}
+	}
+	return strings.TrimSpace(inner), ""
+}
+
 func RewriteChanLiterals(src []byte, fset *token.FileSet) RewriteResult {
 	type tok struct {
 		pos    int
@@ -255,22 +285,27 @@ func RewriteChanLiterals(src []byte, fset *token.FileSet) RewriteResult {
 			bufExpr = strings.TrimSpace(bufExpr[1:])
 		}
 
+		// chan T{depth, budget}: the second field is the PER-MESSAGE byte budget,
+		// which the ring is sized from. It is an ordinary expression,
+		// so relay policy read from config can set it at run time. A channel
+		// with no stated depth still gets one slot.
+		depthExpr, budgetExpr := splitChanSpec(bufExpr)
+		if depthExpr == "" {
+			depthExpr = "1"
+		}
+
 		// Write everything before this channel literal.
 		result.Write(src[lastEnd:toks[chanIdx].pos])
-
-		// Unspecified capacity is ONE slot. A Moxie domain has one thread, so an
-		// unbuffered channel would have no possible listener; one slot is the
-		// mailbox the event-loop model needs - the first send never blocks, and
-		// the second waits until the receiver has taken the first.
-		if bufExpr == "" {
-			bufExpr = "1"
-		}
 
 		makeOffset := result.Len()
 		result.WriteString("__slicealloc(chan ")
 		result.WriteString(typeText)
 		result.WriteString(", ")
-		result.WriteString(bufExpr)
+		result.WriteString(depthExpr)
+		if budgetExpr != "" {
+			result.WriteString(", ")
+			result.WriteString(budgetExpr)
+		}
 		result.WriteString(")")
 		offsets = append(offsets, makeOffset)
 

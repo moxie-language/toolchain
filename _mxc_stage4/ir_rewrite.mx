@@ -861,12 +861,13 @@ func rewriteChanMakeLiterals(src []byte) (buf []byte) {
 			chunks = mxutil.Ensure(chunks, 1)
 			push(chunks, src[i:idx])
 		}
-		// Unspecified capacity is ONE slot. A Moxie domain has one thread, so an
-		// unbuffered channel would have no possible listener; one slot is the
-		// mailbox the event-loop model needs - the first send never blocks, and
-		// the second waits until the receiver has taken the first.
-		if len(inner) == 0 {
-			inner = []byte("1")
+		// chan T{depth, budget}: the second field is the PER-MESSAGE byte budget,
+		// which the ring is sized from. It is an ordinary expression,
+		// so relay policy read from config can set it at run time. A channel
+		// with no stated depth still gets one slot.
+		depth, budget := splitChanSpec(inner)
+		if len(depth) == 0 {
+			depth = []byte("1")
 		}
 		chunks = mxutil.Ensure(chunks, 1)
 		push(chunks, []byte("__slicealloc("))
@@ -875,7 +876,13 @@ func rewriteChanMakeLiterals(src []byte) (buf []byte) {
 		chunks = mxutil.Ensure(chunks, 1)
 		push(chunks, []byte(", "))
 		chunks = mxutil.Ensure(chunks, 1)
-		push(chunks, inner)
+		push(chunks, depth)
+		if len(budget) > 0 {
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, []byte(", "))
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, budget)
+		}
 		chunks = mxutil.Ensure(chunks, 1)
 		push(chunks, []byte(")"))
 		i = closeIdx + 1
@@ -884,4 +891,36 @@ func rewriteChanMakeLiterals(src []byte) (buf []byte) {
 		return src
 	}
 	return joinChunks(chunks)
+}
+
+// splitChanSpec splits a channel literal's inner text into its element count
+// and its optional per-element byte budget at the first TOP-LEVEL colon, the
+// notation `chan T{:depth:bytes}`. A colon inside brackets is part of a slice
+// expression, not a field separator. An empty depth means the default (one
+// slot), which is how `chan T{::65536}` states a budget with no element count.
+func splitChanSpec(inner []byte) (depth, budget []byte) {
+	parens := int32(0)
+	brackets := int32(0)
+	braces := int32(0)
+	for i := int32(0); i < len(inner); i++ {
+		switch inner[i] {
+		case '(':
+			parens++
+		case ')':
+			parens--
+		case '[':
+			brackets++
+		case ']':
+			brackets--
+		case '{':
+			braces++
+		case '}':
+			braces--
+		case ':':
+			if parens == 0 && brackets == 0 && braces == 0 {
+				return lTrimSpace(inner[:i]), lTrimSpace(inner[i+1:])
+			}
+		}
+	}
+	return lTrimSpace(inner), nil
 }

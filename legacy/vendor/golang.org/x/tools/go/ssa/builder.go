@@ -371,10 +371,14 @@ func (b *builder) builtin(fn *Function, obj *types.Builtin, args []ast.Expr, typ
 
 		case *types.Chan:
 			var sz Value = vZero
-			if len(args) == 2 {
+			var budget Value
+			if len(args) >= 2 {
 				sz = b.expr(fn, args[1])
 			}
-			v := &MakeChan{Size: sz}
+			if len(args) == 3 {
+				budget = b.expr(fn, args[2])
+			}
+			v := &MakeChan{Size: sz, Budget: budget}
 			v.setPos(pos)
 			v.setType(typ)
 			return fn.emit(v)

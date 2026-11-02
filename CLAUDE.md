@@ -490,6 +490,20 @@ so every type has a budget and every ring has a size. A channel, interface,
 function value or type parameter in the frame path is a compile error: no count
 can bound it.
 
+**The declaration may state the budget itself, and it may be a variable.**
+`chan T{:count:bytes}` is the notation - first field the number of elements,
+second field the bytes per element (one element is one message) - and the second
+field overrides the type walk, evaluated where the channel is created, so a
+relay policy read from config can size its own rings:
+
+    limit := int64(cfg.MaxEventBytes)
+    in := chan wire.Event{:16:limit}   // 16 messages of slack, limit bytes each
+
+`chan T{::bytes}` states the budget with the one-slot default. The tag walk and
+the declared budget are the same number to the runtime; the difference is where
+it comes from (the type or the call site), which is why the panic message always
+prints the budget it actually used.
+
 **Overrunning the budget panics, and the panic names the fix.** Both ends of a
 spawn channel are trusted code fixed at compile time, so a frame that encodes
 past its budget is a declaration that does not describe the data - the

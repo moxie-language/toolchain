@@ -30,10 +30,25 @@ func (b *builder) createMakeChan(expr *ssa.MakeChan) llvm.Value {
 	elementSize := b.targetData.TypeAllocSize(b.getLLVMType(elemType))
 	elementSizeValue := llvm.ConstInt(b.uintptrType, elementSize, false)
 	budget := b.frameBudget(elemType, nil, 0, expr.Pos())
-	if budget > frameBudgetMax {
-		b.addError(expr.Pos(), fmt.Sprintf(
-			"spawn: %s has a %d-byte frame budget, over the %d-byte maximum; reduce its cap dimensions", elemType, budget, frameBudgetMax))
-		budget = frameBudgetMax
+	var budgetVal llvm.Value
+	if expr.Budget != nil {
+		// `chan T{depth, bytes}` states the frame budget in the declaration, and
+		// it may be a run-time expression so relay policy read from config can
+		// size the ring. A constant is still checked here; a computed one is
+		// checked by spawnRingDataSize when the ring is created.
+		if c, ok := expr.Budget.(*ssa.Const); ok && !c.IsNil() && c.Int64() > frameBudgetMax {
+			b.addError(expr.Pos(), fmt.Sprintf(
+				"spawn: channel frame budget %d is over the %d-byte maximum", c.Int64(), frameBudgetMax))
+		}
+		budgetVal = b.extendInteger(b.getValue(expr.Budget, getPos(expr)),
+			expr.Budget.Type().Underlying().(*types.Basic), b.uintptrType)
+	} else {
+		if budget > frameBudgetMax {
+			b.addError(expr.Pos(), fmt.Sprintf(
+				"spawn: %s has a %d-byte frame budget, over the %d-byte maximum; reduce its cap dimensions", elemType, budget, frameBudgetMax))
+			budget = frameBudgetMax
+		}
+		budgetVal = llvm.ConstInt(b.uintptrType, uint64(budget), false)
 	}
 	notePtr, noteLen := b.budgetNoteOperand(b.frameNote(elemType, "", ""))
 	bufSize := b.getValue(expr.Size, getPos(expr))
@@ -46,7 +61,7 @@ func (b *builder) createMakeChan(expr *ssa.MakeChan) llvm.Value {
 	ch := b.createRuntimeCall("chanMake", []llvm.Value{
 		elementSizeValue,
 		bufSize,
-		llvm.ConstInt(b.uintptrType, uint64(budget), false),
+		budgetVal,
 		notePtr, noteLen,
 	}, "")
 	if b.PrintAllocs != nil {
@@ -189,6 +204,9 @@ func (b *builder) frameNote(t types.Type, path, tag string) (s string) {
 		return ""
 	}
 	if named, ok := t.(*types.Named); ok {
+		if path == "" {
+			path = types.TypeString(named, nil)
+		}
 		t = named.Underlying()
 	}
 	switch ut := t.Underlying().(type) {

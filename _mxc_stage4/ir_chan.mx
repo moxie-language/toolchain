@@ -639,12 +639,25 @@ func (e *irEmitter) emitMakeChan(m *SSAMakeChan) {
 		bufSz = e.sextToIpt(m.Size, e.operand(m.Size))
 	}
 	budget := int32(4096)
+	budgetReg := ""
 	if elem != nil {
 		budget = e.frameBudget(elem, nil, 0)
 		if budget > 16<<20 {
 			reportCompileError("spawn: " | elem.String() | " has a frame budget over the 16MB maximum; reduce its cap dimensions")
 			budget = 16 << 20
 		}
+	}
+	if m.Budget != nil {
+		// `chan T{depth, bytes}` states the frame budget in the declaration, and
+		// it may be a run-time expression so relay policy read from config can
+		// size the ring. A constant over the ceiling is caught here; a computed
+		// one is caught by spawnRingDataSize when the ring is created.
+		if c, ok := m.Budget.(*SSAConst); ok {
+			if ci, ok2 := c.val.(*ConstInt); ok2 && ci.V > 16<<20 {
+				reportCompileError("spawn: channel frame budget is over the 16MB maximum")
+			}
+		}
+		budgetReg = e.sextToIpt(m.Budget, e.operand(m.Budget))
 	}
 	note := ""
 	if elem != nil {
@@ -658,7 +671,11 @@ func (e *irEmitter) emitMakeChan(m *SSAMakeChan) {
 	}
 	e.w("  ") ; e.w(reg) ; e.w(" = call ptr @runtime.chanMake(")
 	e.w(ipt) ; e.w(" ") ; e.w(elemSz) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(bufSz)
-	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(irItoa(budget))
+	if budgetReg != "" {
+		e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(budgetReg)
+	} else {
+		e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(irItoa(budget))
+	}
 	e.w(", ") ; e.w(notePtr) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(noteLen) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.chanMake", "ptr", ipt | ", " | ipt | ", " | ipt | ", ptr, " | ipt)
 	// The channel's storage is the runtime allocator's; the byte size is not
@@ -692,7 +709,8 @@ func (e *irEmitter) frameBudget(t Type, dims []int64, di int32) (n int32) {
 			// tag + varint length + varint capacity + bytes
 			return int32(1 + 10 + c)
 		}
-		return 1 + budgetBasicWidth(ut.Kind)
+		// A basic value is written raw: no tag byte.
+		return budgetBasicWidth(ut.Kind)
 	case *Slice:
 		if c := budgetDim(dims, di); c > 0 {
 			return int32(1 + 10 + c*int64(e.frameBudget(ut.Elem, dims, di+1)))

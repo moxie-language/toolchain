@@ -80,6 +80,7 @@ func main() {
 	patchBuiltinMethods(dstDir)
 	patchPtrRecvMethodSet(dstDir)
 	patchArrayCapNegative(dstDir)
+	patchChanFrameBudget(dstDir)
 
 	fmt.Fprintf(os.Stderr, "patched go/types in %s\n", dstDir)
 }
@@ -743,6 +744,30 @@ func patchExportAccess(dir string) {
 	src = mustReplace(f, src,
 		"\t\t\t\tif !exp.Exported() {\n\t\t\t\t\tcheck.errorf(e.Sel, UnexportedName, \"name %s not exported by package %s\", sel, pkg.name)\n\t\t\t\t\t// ok to continue\n\t\t\t\t}",
 		"\t\t\t\t// Moxie: all identifiers accessible cross-package.\n\t\t\t\t// Capital/# prefix marks stable API contract, not access control.\n\t\t\t\t_ = exp.Exported()")
+
+	mustWrite(f, src)
+}
+
+// patchChanFrameBudget lets `__slicealloc(chan T, depth, bytes)` carry a second
+// size argument. Moxie states a spawn channel's frame byte budget next to its
+// declared depth, and that budget may be a run-time expression (relay policy
+// read from config). Go's make validation allows one size argument for a
+// channel and treats two as slice len/cap, which does not apply to a channel.
+func patchChanFrameBudget(dir string) {
+	f := filepath.Join(dir, "builtins.go")
+	src := mustRead(f)
+
+	src = mustReplace(f, src,
+		"\t\tvar min int // minimum number of arguments\n\t\tswitch u.(type) {\n\t\tcase *Slice:\n\t\t\tmin = 2\n\t\tcase *Map, *Chan:\n\t\t\tmin = 1\n\t\tdefault:",
+		"\t\tvar min int // minimum number of arguments\n\t\tmax := 0  // maximum number of size arguments\n\t\tswitch u.(type) {\n\t\tcase *Slice:\n\t\t\tmin = 2\n\t\t\tmax = 2\n\t\tcase *Map:\n\t\t\tmin = 1\n\t\t\tmax = 1\n\t\tcase *Chan:\n\t\t\tmin = 1\n\t\t\tmax = 2 // depth, then the frame byte budget\n\t\tdefault:")
+
+	src = mustReplace(f, src,
+		"\t\tif nargs < min || min+1 < nargs {\n\t\t\tcheck.errorf(call, WrongArgCount, invalidOp+\"%v expects %d or %d arguments; found %d\", call, min, min+1, nargs)\n\t\t\treturn\n\t\t}",
+		"\t\tif nargs < min || max+1 < nargs {\n\t\t\tcheck.errorf(call, WrongArgCount, invalidOp+\"%v expects %d to %d arguments; found %d\", call, min, max+1, nargs)\n\t\t\treturn\n\t\t}")
+
+	src = mustReplace(f, src,
+		"\t\tif len(sizes) == 2 && sizes[0] > sizes[1] {",
+		"\t\tif _, isSlice := u.(*Slice); isSlice && len(sizes) == 2 && sizes[0] > sizes[1] {")
 
 	mustWrite(f, src)
 }

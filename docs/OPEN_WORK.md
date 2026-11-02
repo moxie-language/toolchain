@@ -23663,3 +23663,50 @@ stack-slot reuse for the boxed interface rather than at the channel.
 two overflow messages are captured by hand; and no compiler diagnostic exists
 for "subslice passed to a parameter that writes", which stays a documented
 static-analysis target.
+
+**Axiom fit.** The rule is Metal before anything else: the declaration is a key
+that states exactly what may cross (`cap:"..."` per dimension, a page when
+unstated), and the frame budget is that key's shape. Chain->Evade -
+boundary-coherence-or-nothing - is why an unbounded dimension is refused rather
+than given a heap-sized default: a spawn boundary whose message size is unknown
+is not a boundary. Charm->Alert is the failure mode: the overrun dies at the
+send with the actual size, the budget and the offending field paths, upstream of
+the corruption, instead of wrapping a ring or growing a buffer. Fire: the ring
+is a number computed before the fork, `pow2((N+1) * align8(4 + budget))`, not a
+hope adjusted at run time. Earth: the memory is the channel's own, allocated
+from its declaration, never resized across the boundary. Wood: legacy and
+stage4 walk the same type graph and produce the same budget and the same note,
+and the bootstrap fixpoint is the proof they agree.
+
+### Round 345: the channel declaration states its per-element budget, and the two compilers agree on the number
+
+**`chan T{:count:bytes}`** is the notation now: the first field is the number
+of elements (messages) outstanding, the second is the byte budget PER ELEMENT,
+and it may be any integer expression - `limit := cfg.MaxEventBytes; in :=
+chan wire.Event{:16:limit}` sizes the pair from relay policy read at run time.
+`chan T{::bytes}` states the budget with the one-slot default. The rewriter
+splits at the first TOP-LEVEL colon (a colon inside brackets is a slice
+expression), and both compilers carry the value as an SSA operand into
+`chanMake`, so a constant is checked against the 16 MiB ceiling at compile time
+and a computed one is checked when the ring pair is created.
+
+**The bilateral bug this exposed: legacy's operand was silently dropped.**
+`ssa.MakeChan` gained a `Budget` field, but `Operands()` did not list it, so the
+load that produced the budget had no referrers; a late pass removed it and
+`createMakeChan` then panicked with "SSA value not previously found". Add the
+operand to `Operands()` (and to `String()`) and the load survives. The lesson is
+general: a new operand on a vendored SSA node is not live until `Operands()`
+says so.
+
+**Budget parity.** The same probe built with both compilers disagreed by one
+byte: stage4 added a tag byte for every basic field, but `codecEncodeValue`
+writes basics RAW (`isBasicKind` -> `codecWriteRaw`). Legacy was right and
+stage4 now matches, so `struct{N int32; Body []byte}` is 4117 bytes on both. The
+note also lost its type name in legacy (`struct{N int32; ...}` instead of
+`main.Untagged`) because it unwrapped the named type before recording the path;
+the name is taken before the unwrap now.
+
+Evidence: with legacy, `chan Body{:2:limit}` where `limit := int64(65536)`
+crosses a 60000-byte body and prints `worker got 60000`; a constant budget and
+a call-valued budget both work; `chan T{:0}` still rejects; `spawn_frame_budget`
+skips the wasm phase because the SAB boundary owns its rings.
