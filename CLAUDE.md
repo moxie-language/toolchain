@@ -479,10 +479,29 @@ tags as a channel element type (one page per unstated dimension): the startup
 config is not exempt from sizing.
 
 **The spawn ABI.** `spawn(fn, arg...)` passes values (copied, frozen at the
-call) and channels (shared). The target declares no return values - its
-termination breaker is the channel `spawn` returns, which closes when the child
-ends - and it may not reach a channel through a package global: a spawned
-domain's channels are exactly its parameters, the only capabilities it gets.
+call) and channels (shared). The target's one result is the domain's
+termination breaker, and it is written as a special word:
+
+    func worker(in chan Request, out chan Response) (closed chan struct{}) {
+        for {
+            select {
+            case <-closed:
+                return closed
+            case req := <-in:
+                out <- handle(req)
+            }
+        }
+    }
+
+`closed` is a special word, like `sigint`: `close(ch)` stays the builtin, and
+`closed` names the breaker channel the target returns. The same channel object
+is what `spawn` returns to the parent, so the breaker closes when the child
+ends and either side can close it early. The signature is the marker: a function
+is callable via `spawn` only with exactly `(closed chan struct{})` as its
+result. `main` is the other entry point and selects on `sigint` (SIGINT from the
+shell); a spawn target selects on `closed` (the parent's close, or the kernel
+reaper when the parent dies without one). A target may not reach a channel
+through a package global: its parameters are the only capabilities it gets.
 
 **The ring is sized before the fork, from the declaration.** A spawn channel is
 an atomic FIFO, not a pipe: its size must be known when the rings are created,
