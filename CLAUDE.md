@@ -439,11 +439,52 @@ Do not assume project structure from convention. Read the actual code.
 
 ## Spawn Channel Model
 
-Spawn channels are non-blocking on both sides. The runtime uses `moxie_peek` + retry-with-yield (1ms sleep, 100 retries) for receives and `pipeSendNB` + retry-with-yield for sends. No domain ever blocks in a syscall waiting for the other side. Both sides of the socketpair are symmetric concurrent peers.
-
 **ChanID convention**: chanID 0 = control (close signals), chanID 1 = first spawn channel arg, chanID 2 = second, etc.
 
-**Timeout behavior**: after 100ms of retries with no progress, send/recv returns false. Callers should handle this as "peer busy or dead" - check `PipeClosed(fd)` to distinguish.
+**A spawn channel is a pipe, not a queue.** One handle carries two SPSC rings
+(`ringSend`/`ringRecv`, mirrored on each side), so both ends may send and
+receive; close is signalled on the control channel. Backpressure is the ring
+being full: the sender parks on the ring's read index (`ringParkRead`, 20ms
+bounds, then it rechecks ring state and peer liveness) and the reader advancing
+the index is the wake. There is no yield-and-retry loop and no 100ms give-up;
+a send returns false only on a closed channel or a dead peer. `cap`/`len` on a
+spawn-bound handle describe the local queue, which is never used on that path.
+
+**Buffer sizes are controllable and are sized from a declared frame budget.**
+`chan T{:N}` in a spawn call means N messages may be OUTSTANDING - sent and not
+yet received - before the sender parks. N = 0 is a rendezvous: the sender parks
+until the receiver takes the single in-flight frame. The ring is always N+1
+slots deep, because a sent frame must exist in shared memory until it is read:
+
+    ring = header + (N+1) * align8(4 + frameBudget(T))
+
+`frameBudget(T)` is exact when T is fixed-shape - no slice, string, map,
+interface, chan or func anywhere in the graph - because the codec's wire cost is
+tags + `uint32` lengths + fields, and a back-reference only ever shortens it.
+
+A variable-length T states its budget with a struct-field tag, ONE NUMBER PER
+VARIABLE-LENGTH DIMENSION, outermost first, and the final number is BYTES when
+that dimension's leaf is string/[]byte:
+
+    Field []byte      `cap:"65536"`      // 1 dimension: bytes
+    Rows  [][]byte    `cap:"8,16,1024"`  // 8 rows, 16 cells, 1024 bytes per cell
+    Tags  []string    `cap:"32,64"`      // 32 tags, 64 bytes each
+    Kinds []uint16    `cap:"16"`         // 16 elements, element width fixed
+
+The count must match the type: `cap:"2,3"` on `[][][]byte` is a compile error
+naming the type and the number of dimensions it needs, because the purpose of
+the number is to size the ring between two threads - a dimension left unbounded
+leaves the frame unbounded. A struct stops the chain: its own fields carry their
+own tags (or are fixed-shape), so `[]Request` takes one number and Request's
+budget is computed from its fields.
+
+Refused by name, never guessed: a map, interface, chan or func inside the budget
+path, because its wire size is not a function of a count and an element width.
+
+A value whose encoding exceeds its budget panics naming the type, the field path,
+the budget and the actual. The tag is a promise the encoder keeps, not a hint.
+Capacity 0 keeps the 32MiB ceiling-sized ring, so code that declares no buffer
+behaves exactly as it does today.
 
 ## Spawn Architecture: Managers and Workers
 
