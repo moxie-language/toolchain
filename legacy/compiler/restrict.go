@@ -45,6 +45,12 @@ func (b *builder) isUserPackage(pkg *ssa.Package) bool {
 	if path == "main" || path == "command-line-arguments" {
 		return true
 	}
+	// A leading vendor/ is not part of the import path's identity: stage4
+	// compiles stdlib-vendored code under `vendor/golang.org/x/...` and strips
+	// the prefix before the golang.org/x test, so legacy has to strip it too or
+	// the two compilers disagree about src/vendor/golang.org/x/crypto - which
+	// stage4 exempts and legacy did not.
+	path = strings.TrimPrefix(path, "vendor/")
 	if strings.HasPrefix(path, "golang.org/x/") {
 		return false
 	}
