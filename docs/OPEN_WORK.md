@@ -23423,3 +23423,47 @@ value (Moxie has no interface values to print).
 
 Verified: a wasm program that reads stdin (`os.Stdin.Read`) builds and links at
 544994 bytes, and `5/rand_fill` still matches native output.
+
+### Round 341: no exemptions
+
+Both compilers exempted packages for being "the compiler's own": anything whose
+path contains `/pkg/`, and any main package whose build root was the moxie
+module. The first rule exempted every sibling repository's pkg/ tree as well,
+which is exactly where this campaign's silent-corruption bugs lived: morly's
+store compiled a dozen writes through a subslice and smesh's `nostr.NewTags`
+stored a `[]*Tag` in a `[]Tag` field, and both compilers called the code clean.
+
+The exemption is gone from stage4 (`ir_scope.mx`) and from legacy
+(`restrict.go isUserPackage`). The compiler's own source now satisfies the same
+rules it enforces, and the price was 27 diagnostics, all mechanical:
+
+- ten functions with unnamed results named them (legacy rejects those);
+- the mutable process state that lived in package-level globals - the
+  typeFromTail recursion guard, `pendingIfaceAssigns`, the coverage site table,
+  `lastHolder`/`heldRepoLocks` - is `compilerState` behind one package-level
+  pointer (`_mxc_stage4/cstate.mx`), each store behind a method, because a store
+  to a package-level variable outside an init-named function is a language
+  error. Reads stay direct.
+- `objFlags` is a zero-value declaration filled by `initObjectFlags`;
+- `copy(nb[:len(all)], all)` in the package-cache hash is `CopyAt(nb, 0, all)`:
+  the subslice copy meant the cache key hashed only the LAST file, which is a
+  cache-collision bug on its own;
+- `syntax.CompileExportMap` was written by the compiler and read by nobody: the
+  dead global and its write are gone.
+
+Legacy had to be rebuilt for the first time in this campaign
+(`GOROOT=/opt/go1.25.3 bash legacy/build.sh`; it regenerates its patched
+GOROOT). With the exemption gone it builds `_mxc_stage4` with zero restriction
+diagnostics, and so does the stage4 built from it. That also settles the
+wood-law question this change raised: both compilers now apply the same rules to
+the same packages.
+
+Measured, bootstrap fixpoint `528605f1`:
+
+- full sweep, `-j 1`, all phases in one run: **316/317**. Everything native
+  (0a 123, 0b 62, 1 4, 1b 45 packages, 1c 4, 2 selfhost fixpoint, 3, 4, 6), the
+  wasm sweep (119) and netsmoke (8) - and tree-cleanliness.
+- the one red is still **7/whole-phase**: `ui:build` PASSES (nine wasm bundles,
+  runtime staging, relay built from source) and `ui:smoke` ends at round 329's
+  documented `3 passed, 3 failed, 5 errors`, Selenium timeouts in the browser
+  flows. That is the app/relay side and it was red before this work.
