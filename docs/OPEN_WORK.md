@@ -23344,3 +23344,61 @@ the aeaddep dependency build; `reject_field_assign_mismatch` rejects on stage4 a
 on legacy; bootstrap fixpoint holds. Legacy already rejected every one of these,
 so this round is stage4-only: wood law is satisfied by matching, not by
 mirroring.
+
+### Round 338: the gate numbers on the round-337 compiler
+
+Bootstrap fixpoint `c8668a9e` (s2 == s3), installed as `./moxie`. Then the whole
+suite, one unit at a time (`-j 1`, ~9 hours):
+
+- native: **198/199**. 0a 123/123, 0b 62/62 (including the new
+  `reject_field_assign_mismatch`), 1 4/4, 1b "45 packages ok", 1c 4/4
+  (net/http 1009s), 2 selfhost, 3 IR validate, 4 smoke, 6 instrumentation
+  (574s, including the aeaddep gcm dependency build that the first round-337
+  attempt broke), tree-cleanliness.
+- the one red is **7/whole-phase**: `ui:build` PASSES - nine wasm bundles plus
+  the runtime staging, relay built from source - and `ui:smoke` ends at the same
+  place round 329 documented: `3 passed, 3 failed, 5 errors`, Selenium timeouts
+  in the browser flows (`test_console_log_version`, `TestFeed`,
+  `test_dark_mode_toggle`, the signed-in group). That is the app/relay side, not
+  the compiler, and it was red before this work started.
+- wasm: **119/119**. Phase 5 (119 units, ~5h at -j 1) and phase 8 netsmoke, with
+  the fixed codec and the new element-store checks.
+
+Siblings, each with its own harness:
+
+- **nostr** 13 packages, 194 tests, rc=0.
+- **morly** 26 packages, **370 tests**, rc=0 - the suite that was 153-tests-and-
+  one-red at the start of this campaign. Getting the last unit green took two
+  more reads-into-a-copy fixes (round 339).
+- **smesh** `make test-unit` rc=0 (18 tests) after round 337's test-support
+  repairs; the app's browser smoke suite is the phase-7 failure above.
+
+### Round 339: the store's binary search read its records into a copy
+
+`pkg/store/sorted.File.readAt` did `s.f.ReadAt(dst[:s.recLen], off)`. A subslice
+is a copy, so the record was read into a throwaway and `dst` stayed zeroed -
+exactly the round-336 class, in the foundation of every point lookup:
+
+- every binary search compared zeros against the key, always answered "less
+  than", and returned `count` as the lower bound - past the end of the file. A
+  flushed index was invisible: `TestRebuildFromWAL` indexed six events, flushed
+  them, and then answered an empty-filter query with **0** serials while
+  `Count()` said 6.
+- with that fixed, one record came back instead of six: `fileChunker.get` had the
+  same shape on `c.chunk`, so the chunked scan reader handed the merge zeros for
+  every record. Zeros sort before every real key, so the scan emitted the same
+  zero-serial record repeatedly and the caller's dedup collapsed it to one.
+
+Both now `resize` (same memory, corrected length) instead of subslicing. The
+write paths in the same package (`bufFile.Write(s.buf[:n])`, `tmp.Write(rec)`)
+are harmless: a write READS the copy, and the bytes are the same ones.
+
+Measured: `pkg/store` 24/24 including `TestRebuildFromWAL` ("rebuilt count 6 of
+6"), and the whole morly suite green at 370 tests.
+
+Two notes for the diagnostic that is still the real fix for this class
+(round 334's open item): the subslice-copy rule exempts any path containing
+`/pkg/`, which is why every one of these compiled silently in the sibling repos,
+and a read that writes through a slice parameter is the same shape as a write
+that is lost - the call `f.ReadAt(x[i:j], off)` looks like a read at the call
+site and is a write at the callee's.
