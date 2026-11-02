@@ -2057,6 +2057,19 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 	case *ssa.Store:
 		llvmAddr := b.getValue(instr.Addr, getPos(instr))
 		llvmVal := b.getValue(instr.Val, getPos(instr))
+		if llvmVal.IsNil() || llvmAddr.IsNil() {
+			// createExpr returned a zero handle without an error, so there is
+			// nothing to store INTO. Handing it to Builder.CreateStore
+			// dereferences NULL inside the C API and takes the whole compiler
+			// down with SIGSEGV - which is what morly's tree did on a
+			// `*chan struct{} = <chan struct{} value>` store (the value's
+			// handle comes back nil). Name the instruction and stop building
+			// this function: a diagnostic the caller can act on beats a crash,
+			// and the underlying missing createExpr case is recorded in
+			// docs/OPEN_WORK.md.
+			b.addError(instr.Pos(), "internal: no LLVM value for this store (value type "+instr.Val.Type().String()+", address type "+instr.Addr.Type().String()+")")
+			return
+		}
 		b.createNilCheck(instr.Addr, llvmAddr, "store")
 		if b.targetData.TypeAllocSize(b.getLLVMType(instr.Val.Type())) == 0 {
 			return
