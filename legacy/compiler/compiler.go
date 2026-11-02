@@ -1818,8 +1818,32 @@ func (b *builder) createFunction() {
 					continue
 				}
 				dbgVar := b.getLocalVariable(variable)
+				if dbgVar.IsNil() {
+					// No DWARF record was created for this variable (the
+					// type map did not cover it). Binding a location needs a
+					// real DILocalVariable: passing a nil metadata handle
+					// dereferences NULL inside the LLVM C API and the whole
+					// compiler dies with SIGSEGV during createFunction - which
+					// is what morly's tree did. Debug info for one variable is
+					// optional; the program is not.
+					continue
+				}
 				pos := b.program.Fset.Position(instr.Pos())
-				b.dibuilder.InsertValueAtEnd(b.getValue(instr.X, getPos(instr)), dbgVar, b.dibuilder.CreateExpression(nil), llvm.DebugLoc{
+				dbgVal := b.getValue(instr.X, getPos(instr))
+				if dbgVal.IsNil() {
+					// The SSA value has no LLVM value yet: b.locals holds a zero
+					// entry for a variable that was only declared (a named
+					// result nothing ever stores, for instance). A dbg.value
+					// needs a real value; handing the C API a zero handle
+					// dereferences NULL and the compiler dies with SIGSEGV
+					// during createFunction. That is what morly's `done`
+					// variable did, on every build of the relay.
+					//
+					// Debug info is best effort per variable - the program is
+					// not - so the record is skipped rather than fabricated.
+					continue
+				}
+				b.dibuilder.InsertValueAtEnd(dbgVal, dbgVar, b.dibuilder.CreateExpression(nil), llvm.DebugLoc{
 					Line:  uint(pos.Line),
 					Col:   uint(pos.Column),
 					Scope: b.difunc,
@@ -2034,7 +2058,7 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		llvmAddr := b.getValue(instr.Addr, getPos(instr))
 		llvmVal := b.getValue(instr.Val, getPos(instr))
 		b.createNilCheck(instr.Addr, llvmAddr, "store")
-		if b.targetData.TypeAllocSize(llvmVal.Type()) == 0 {
+		if b.targetData.TypeAllocSize(b.getLLVMType(instr.Val.Type())) == 0 {
 			return
 		}
 		b.CreateStore(llvmVal, llvmAddr)
