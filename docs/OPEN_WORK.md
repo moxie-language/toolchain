@@ -23402,3 +23402,24 @@ Two notes for the diagnostic that is still the real fix for this class
 and a read that writes through a slice parameter is the same shape as a write
 that is lost - the call `f.ReadAt(x[i:j], off)` looks like a read at the call
 site and is a write at the callee's.
+
+### Round 340: wasm reads its stdin, and the last dead interface{} goes
+
+`MoxieRead` was a `-1` stub on wasm, justified by "no wasm caller". That was
+true of the spawn handshake it exists for (no fork, no pipe fds on this target)
+but it also meant a wasm program could not read its stdin: `getchar` reads byte
+by byte through fd_read, and any block read had nothing to call. It now lives in
+`runtime_wasm.mx` next to `MoxieWrite`, over the WASI `fd_read` the host already
+implements, with the iovec and count as package state so a read reached from the
+allocator's failure paths cannot allocate. The browser hosts answer EOF (there
+is no stdin in a page or a worker), which is the correct answer for them: a read
+that returns 0 at end of input, not -1 as an error.
+
+The stdlib's last real `interface{}` went with it: `printitf` in `print.mx` and
+`print_wasm.mx` was a type-switch printer with no callers, the only code in
+`src/` that still needed the empty interface. Removed both, plus the stale
+`fmt/doc.mx` example that told readers an interface operand prints its concrete
+value (Moxie has no interface values to print).
+
+Verified: a wasm program that reads stdin (`os.Stdin.Read`) builds and links at
+544994 bytes, and `5/rand_fill` still matches native output.

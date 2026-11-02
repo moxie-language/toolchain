@@ -58,6 +58,33 @@ func MoxieWrite(fd int32, buf unsafe.Pointer, count int32) int32 {
 	return moxieWriteNW
 }
 
+// MoxieRead is the runtime's raw fd read, next to fd_read for the same reason
+// MoxieWrite sits next to fd_write: on wasm the descriptors are WASI's, so a
+// read of fd 0 is a real read of whatever the host piped in.
+//
+// The stub it replaces returned -1 with no wasm caller. That was true of the
+// spawn handshake, which has no wasm path, but it also meant a wasm program
+// could not read its stdin at all: `getchar` reads byte by byte through
+// fd_read, and anything that wanted `MoxieRead`'s block read had no way to ask
+// for one. The iovec and the count are package state for the same reason
+// MoxieWrite's are - taking the address of a local to hand to an import
+// allocates, and a read can be reached from the allocator's failure paths.
+var (
+	moxieReadIOV [2]uintptr
+	moxieReadNR  int32
+)
+
+func MoxieRead(fd int32, buf unsafe.Pointer, count int32) int32 {
+	if count <= 0 {
+		return 0
+	}
+	moxieReadIOV[0] = uintptr(buf)
+	moxieReadIOV[1] = uintptr(count)
+	moxieReadNR = 0
+	fd_read(fd, unsafe.Pointer(&moxieReadIOV[0]), 1, unsafe.Pointer(&moxieReadNR))
+	return moxieReadNR
+}
+
 // stdinPeek holds the byte buffered() read ahead for getchar().
 var stdinPeek byte
 
