@@ -23837,3 +23837,20 @@ compilers; the migration still spells it `(closed chan struct{})`, and the
 language documents that spelling. Without this, every cross-package spawn in
 morly was rejected ("BroadcastWorker must be declared with exactly one
 result") while the same-package fixtures compiled.
+
+**Round 346 close-out: what is green and what is not.** Green: the spawn ABI
+rule and the breaker lifecycle compile in both compilers, bootstrap to fixpoint
+`5ef57322`, and the probes print what they should (direct call panics; a
+parent's return closes the child's `closed`; a panic closes before it prints).
+Morly builds (10.6MB relay). NOT green: `0a/http_header_api` now **segfaults**
+after compiling, so the breaker path breaks `net/http`'s chan workers - it is
+the top item for the next round, with `src/net/http/chanpool.mx`'s
+`chanWorkerLoop` as the suspect (it spawns, selects, and now returns the
+breaker). Morly's suite times out at 2400s with no failure reported, which is
+the same class of hang and may share the cause. The full sweep has not been run
+on this compiler.
+
+**Still unimplemented, in order:** the reason-on-close (panic message sent over
+the breaker before the close), the `sigint` half (handler must stop `_exit`ing
+and wake the domain; every `main` gains the select; both compilers enforce it),
+the select checks for spawn targets, and the value-parameter budget encode.
