@@ -478,13 +478,27 @@ leaves the frame unbounded. A struct stops the chain: its own fields carry their
 own tags (or are fixed-shape), so `[]Request` takes one number and Request's
 budget is computed from its fields.
 
+**No capacity means UNBUFFERED, not "no buffer".** `chan T{}` in a spawn call is
+a rendezvous: one frame slot, the sender waits for the receiver to take it, and
+the payload crosses the ring like a pipe. That is the point of synchronisation
+between the two domains - a sender that has to wait is telling you the receiving
+domain is not returning to its select promptly enough, which is a design fault
+you want visible, not a queue you want deep enough to hide it. A frame must
+still exist in shared memory between the write and the read, so a spawn channel
+needs a frame budget whether or not it declares a capacity: `:N` is how many
+frames may be outstanding, the budget is how big each one is.
+
 Refused by name, never guessed: a map, interface, chan or func inside the budget
 path, because its wire size is not a function of a count and an element width.
 
 A value whose encoding exceeds its budget panics naming the type, the field path,
 the budget and the actual. The tag is a promise the encoder keeps, not a hint.
-Capacity 0 keeps the 32MiB ceiling-sized ring, so code that declares no buffer
-behaves exactly as it does today.
+
+Open decision: a spawn-facing type with no `cap:` tag and a variable shape. Either
+it is refused at compile time (every spawn channel must state a budget, so the
+migration of existing spawn callers is mandatory in the same change) or it gets a
+default budget - 64 KiB, say - and panics above it (lenient, and the default is a
+guess, but a loud one). Not yet chosen; nothing is implemented for either.
 
 ## Spawn Architecture: Managers and Workers
 
