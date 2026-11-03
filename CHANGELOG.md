@@ -34,6 +34,23 @@ compiler as it self-hosts to a reproducible binary.
 - **Breaker lifecycle** - a spawn's breaker is created before the fork, tracked
   on the domain, closed at every return of the spawning function, on a panic,
   and by the kernel reaper when a parent dies without one.
+- **The termination select is enforced** - both compilers refuse a `main` that
+  does not consume `sigint` and a spawn target that does not consume its
+  `closed` breaker, so a program that cannot be told to stop is a compile
+  error rather than a kill. A receive counts as well as a select arm, because
+  a single-arm select is lowered into one.
+- **Value parameters are copied across spawn** - the whole value graph is
+  encoded against the cap-tag budget, checked, and decoded into the root arena
+  at the spawn call, so a child's slices and pointers never point into the
+  parent's frames. Overrunning the budget panics naming the fields and their
+  `cap` tags.
+- **`moxie get` resolves import paths** through their own `?go-get=1`
+  discovery document, so `moxie get moxielang.dev/pkg/mxutil` finds the module
+  root and the repository with no knowledge of the host. `moxielang.dev` serves
+  the discovery document, a browser 301 and git's smart-HTTP endpoints.
+- **The package cache is bounded** - generations untouched for two hours are
+  pruned on every build (`removeAll` had never deleted a non-empty tree, so
+  they accumulated: 368 generations, 90 GB).
 
 Versions are tagged with `vX.Y.Z` and capture user-visible changes - compiler
 features, language rules, runtime additions, and fixes that change observable
