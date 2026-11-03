@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-BASE_URL="https://github.com/moxie-language/toolchain-releases"
+BASE_URL="https://moxielang.dev-releases"
 INSTALL_DIR="${MOXIE_INSTALL_DIR:-/opt/moxie}"
 
 ARCH=$(uname -m)

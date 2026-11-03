@@ -200,7 +200,7 @@ func ModulePrefix(startDir string) string {
 	// so the report had nothing to select the module's files with.
 	if root := os.Getenv("MOXIEROOT"); root != "" {
 		if rabs, err := filepath.Abs(root); err == nil && within(dir, rabs) {
-			return "github.com/moxie-language/toolchain/"
+			return "moxielang.dev/"
 		}
 	}
 	mpath := os.Getenv("MOXIEPATH")

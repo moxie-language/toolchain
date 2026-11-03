@@ -70,4 +70,4 @@ git push origin "$VERSION" -f
 cd - >/dev/null
 
 rm -rf "$STAGE" "$RELEASES_DIR"
-echo "released $VERSION -> github.com/moxie-language/toolchain-releases" >&2
+echo "released $VERSION -> moxielang.dev-releases" >&2

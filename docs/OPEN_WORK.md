@@ -852,7 +852,7 @@ original diagnosis, kept as the record.
 toolchain's own path**:
 
 ```
-bst.globalModPrefix = "github.com/moxie-language/toolchain"
+bst.globalModPrefix = "moxielang.dev"
 bst.globalModDir    = root                              // MOXIEROOT
 bst.rootModPrefix   = targetImportPath(root, target)     // the TARGET's repo
 ```
@@ -873,7 +873,7 @@ tree that is not the toolchain itself misreports:
 - **Unit** (`moxie test -cover ./pkg/store` in morly): the synthetic test
   package's path is one `coverPkg` accepts, so it *does* instrument and the
   numbers are real, but every file is attributed to the toolchain directory:
-  `91.8% 661/720 github.com/moxie-language/toolchain/engine.mx` is
+  `91.8% 661/720 moxielang.dev/engine.mx` is
   `git.smesh.lol/morly/pkg/store/engine.mx`. This also means smesh's pre-carve
   percentages were measured through the same misattribution - the numbers hold,
   the reported paths do not.
@@ -2902,7 +2902,7 @@ Working layout that matters: the checkouts live at
 
    **Legacy now resolves by layout too.** `legacy/loader/mxlist.go` gained
    `layoutRepoDir`, consulted after the package's own module and before the
-   `replace`/module-cache readers: `github.com/moxie-language/toolchain/...` is `$MOXIEROOT`,
+   `replace`/module-cache readers: `moxielang.dev/...` is `$MOXIEROOT`,
    a repository the build root's `MANIFEST` pins is the
    `$MOXIEPATH/.refs/<repo>/<ref>` worktree `moxie get` materialises, and every
    other repository is its checkout under `$MOXIEPATH`. A pin whose worktree is
@@ -2959,7 +2959,7 @@ Working layout that matters: the checkouts live at
    settle which side the rule is on, then enable it for one scope at a time and
    keep the tree green after each stage.**
    (b) forbid **dot imports** (all 20 are the compiler's
-   `. "github.com/moxie-language/toolchain/pkg/types"`; 3087 identifiers to qualify) or, if
+   `. "moxielang.dev/pkg/types"`; 3087 identifiers to qualify) or, if
    that price is refused, make a dot import's names participate in the conflict
    check instead of being invisible. **Done, by the second option**: the 20
    dot imports in `_mxc_stage4/` remain, and a dot import's names now
@@ -3321,7 +3321,7 @@ diagnostic from it is a guess.
 
 Nothing is enforced on a directory target that has no `moxie.mod`: legacy
 skips `CheckPlusOnText` unless `p.Module.Main && p.Module.Path !=
-"github.com/moxie-language/toolchain"` (`legacy/loader/loader.go:439`), and outside a module
+"moxielang.dev"` (`legacy/loader/loader.go:439`), and outside a module
 the loader rewrites `+` to the pipe operator before any check sees it. So
 `println("a" + "b")` in a manifest-less directory is **accepted** by legacy,
 and the same program with a `moxie.mod` is **rejected**. stage4 now mirrors
@@ -3407,7 +3407,7 @@ until that is decided; the inventory above is the evidence for the decision.
 
 `grep '^\s*\.\s*"'` over every tree: `_mxc_stage4` 20, and **zero** in `pkg/`,
 `src/`, `nostr`, `morly`, `musiquay`. All 20 are the same import —
-`. "github.com/moxie-language/toolchain/pkg/types"` — pulling ~100 exported names into file
+`. "moxielang.dev/pkg/types"` — pulling ~100 exported names into file
 scope, with 3087 identifier occurrences across 34,488 lines.
 
 Neither compiler can see them: legacy `checkImportNameCollisions` skips blank
@@ -3471,7 +3471,7 @@ stage4 `_mxc_stage4/ir_scope.mx:44` — exempt when the path is `main` or
 `command-line-arguments` and the build root is the moxie module, or it starts
 `golang.org/x/`, or it contains `/pkg/`, or it contains no `.`. Legacy has two
 more shapes: `isUserPackage` (SSA import path, same clauses plus "imports
-`github.com/moxie-language/toolchain/pkg/`") and `isUserPackageByPath` (AST, real directory
+`moxielang.dev/pkg/`") and `isUserPackageByPath` (AST, real directory
 path, *no* `/pkg/` clause, and `main` is always user code).
 
 What the gate turns off (user-only checks): package-level initialisers and
@@ -3549,9 +3549,9 @@ What must be built or replaced:
    `musiquay` just works with no `replace`. CI must clone into a clean
    `MOXIEPATH` instead of building in a working tree.
 6. **The toolchain's own repo**: the compiler imports
-   `github.com/moxie-language/toolchain/pkg/...`. Without the module-prefix rule that resolves
+   `moxielang.dev/pkg/...`. Without the module-prefix rule that resolves
    through `$MOXIEPATH` too, so the toolchain checkout must sit at
-   `$MOXIEPATH/github.com/moxie-language/toolchain` (it does). Either document that as a layout
+   `$MOXIEPATH/moxielang.dev` (it does). Either document that as a layout
    invariant or keep one explicit toolchain-prefix rule for `$MOXIEROOT`.
 7. **Stdlib and vendor**: unchanged (`$MOXIEROOT/src`, `$MOXIEROOT/src/vendor`).
 8. **`moxie test`'s package identity**: the test harness maps its synthetic
@@ -3605,7 +3605,7 @@ require (
   mutates what a developer is editing and two builds cannot fight over one
   tree. A repo with no MANIFEST entry resolves to the main checkout itself,
   which is the co-development path (edit `nostr`, build `musiquay`).
-- **Toolchain imports stay unversioned.** `github.com/moxie-language/toolchain/pkg/...`
+- **Toolchain imports stay unversioned.** `moxielang.dev/pkg/...`
   resolves once against `$MOXIEROOT`: the compiler cannot import a revision of
   itself other than the one it is built from, and `MANIFEST` never names it.
 - **Repo boundary is unchanged**: the first two components of a dotted import
@@ -3755,7 +3755,7 @@ fixed.
 **Consequence:** phase 2 (selfhost, with `selfhost:fixpoint stage2 == stage3`)
 and the `:legacy` half of phase 6 are green - not environmental any more.
 
-- Build: `MOXIEROOT=/home/mleku/moxie/github.com/moxie-language/toolchain ./moxie build -a -o out ./_mxc_stage4`;
+- Build: `MOXIEROOT=/home/mleku/moxie/moxielang.dev ./moxie build -a -o out ./_mxc_stage4`;
   full bootstrap `./build.sh` (needs `moxie-new` absent or it bootstraps from a
   stale binary); legacy needs `PATH=/tmp/moxie-goroot/bin:$PATH GOROOT=/tmp/moxie-goroot`.
 - Tests: `tests/run.sh --full` (155 checks, both compilers);
@@ -4289,7 +4289,7 @@ error-handler function: `Scanner`/`Source` hold the owning `*Parser` and call
 reports **zero closure captures** in `pkg/syntax`, and the suite is
 **171/171, 0 failures**. The carve-out is not yet removable for two other
 reasons, both in `pkg/syntax` and only when it is treated as user code:
-`Pos undefined (type github.com/moxie-language/toolchain/pkg/syntax.AssignStmt has no field or
+`Pos undefined (type moxielang.dev/pkg/syntax.AssignStmt has no field or
 method Pos)` and `not enough arguments in call`. Both need positions - stage4's
 `compileErrors` carry bare strings and the log shows neither line - so the next
 step is to instrument `checkNamedReturns`/the type-checker error path to print
@@ -8064,7 +8064,7 @@ Two things had to be learned to get there:
 
 - The panic is a **runtime** panic of the compiler binary itself, not a
   compile-time diagnostic. A core dump backtrace shows it raised by generated
-  dispatch code inside `github.com/moxie-language/toolchain/pkg/types.(*Signature).String()`,
+  dispatch code inside `moxielang.dev/pkg/types.(*Signature).String()`,
   called from `checkAssignable` <- `checkCallArgs` <- `buildPkgCall`: the compiler
   was building an argument-mismatch MESSAGE for a call in net/http, and rendering
   the signature dispatched `String()` on a `Type` that has no arm.
@@ -11343,7 +11343,7 @@ So the target is:
    to the other `src/...` packages: `dom`, `idb`, `ws`, `sw`, `store`,
    `crypto`/`subtle`, `webgl`, plus an `app` package that owns the entry point,
    routing and asset metadata. Import path shape: whatever the tree settles on
-   for stdlib (`github.com/moxie-language/toolchain/...`).
+   for stdlib (`moxielang.dev/...`).
 2. The JS side stays `jsruntime/*.mjs` (it is already single-copy) and gains the
    host scaffolding that every app currently re-copies: the loader, the service
    worker, the `$runtime`/`$sw` staging, and the wasm-host module template.
@@ -11484,7 +11484,7 @@ Order that keeps the tree green:
      native stubs and wasm bodies verbatim;
   2. a stdlib fixture that uses them, built for wasm and run by phase 5 through
      the stdlib host page;
-  3. point smesh at `github.com/moxie-language/toolchain/web/...`, delete its copies, run it in a
+  3. point smesh at `moxielang.dev/web/...`, delete its copies, run it in a
      browser (its Makefile already takes `JSRUNTIME ?= ../moxie/jsruntime`);
   4. then musiquay;
   5. then the scaffolding emission, so `$runtime/` and `*-wasm-host.mjs` stop
@@ -14489,7 +14489,7 @@ unit is confirmed present and passing.
 **What was already true, and is now verified rather than assumed.** The smesh
 front end is real (20K lines of Moxie across `web/wasm/app/`) and it is built
 entirely on the stdlib framework. The modules it imports are all
-`github.com/moxie-language/toolchain/src/web/*`:
+`moxielang.dev/src/web/*`:
 
 | imported by the UI | stdlib source |
 | --- | --- |
@@ -15110,7 +15110,7 @@ is one file and one build per step, and it has now paid for itself three times.
 Reduced to a controlled pair of probes, differing by ONE import:
 
     // probe A
-    import ("fmt"; "github.com/moxie-language/toolchain/pkg/mxutil")
+    import ("fmt"; "moxielang.dev/pkg/mxutil")
     func main() { fmt.Println("fmt ok"); mxutil.WriteStr(2, "mxutil ok\n") }
     ->  fmt ok
         mxutil ok
@@ -22601,7 +22601,7 @@ was spent on them. Everything below is committed in its own repository.
 ### moxie: embed had not been compiled since its import moved into a comment
 
     // In source files that don't refer to [embed.FS], use a blank import (
-        "github.com/moxie-language/toolchain/pkg/mxutil"import _ "embed").
+        "moxielang.dev/pkg/mxutil"import _ "embed").
 
 A doc-comment line had been split by an edit and the import path written into
 the comment, so the package never imported mxutil and `mxutil.CopyFrom` was
@@ -23872,3 +23872,19 @@ the rule's real cases live (a spawn at the top of its function).
 
 Evidence: fixpoint `1a1aeb1c`; `http_header_api` builds and prints `header ok`;
 `spawn_frame_budget` builds and runs under the new import root.
+
+**The import root is the vanity domain: `moxielang.dev`.** The permanent address
+for the toolchain is the domain, not the GitHub org path: the repository stays
+at github.com/moxie-language/toolchain, and the domain serves the redirect.
+Every Moxie import, the loader's hardcoded toolchain path, the docs and the
+scripts now say `moxielang.dev`; the legacy Go module (`moxie/...`) is internal
+and unchanged. Bootstrap fixpoint `30c0c24b` (s2 == s3), and an app builds and
+runs against it. morly, smesh and nostr keep their own module paths; their
+toolchain imports follow the vanity root.
+
+A note for the domain: a Go vanity import normally answers `?go-get=1` with
+`<meta name="go-import">`; the Pages meta-refresh redirect described for
+moxielang.dev is a browser bounce, not that, and Moxie's own loader never does
+an HTTP lookup (it resolves the toolchain through MOXIEROOT and pinned repos
+through MANIFEST), so nothing in this tree depends on the meta tag. The redirect
+only matters to a Go tool asking `go get` for the legacy module.

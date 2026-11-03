@@ -90,7 +90,7 @@ func mxListPackagesImpl(config *compileopts.Config, goroot string, inputPkg stri
 	// walked before it are not the input package and keep '+'.
 	if len(r.sorted) > 0 {
 		last := r.sorted[len(r.sorted)-1]
-		if !last.Module.Main && last.Module.Path != "github.com/moxie-language/toolchain" {
+		if !last.Module.Main && last.Module.Path != "moxielang.dev" {
 			last.Module.Main = true
 		}
 	}
@@ -470,13 +470,13 @@ func (r *resolver) resolveDir(importPath string, srcDir string) (string, error) 
 		return srcDirInstalled, nil
 	}
 
-	// 6. The compiler's own infrastructure packages (github.com/moxie-language/toolchain/pkg/
+	// 6. The compiler's own infrastructure packages (moxielang.dev/pkg/
 	// -> MOXIEROOT/pkg/). The runtime and converted stdlib import these
 	// (e.g. mxutil), so they must resolve for any module, not just the moxie
 	// module itself.
-	if strings.HasPrefix(importPath, "github.com/moxie-language/toolchain/pkg/") {
+	if strings.HasPrefix(importPath, "moxielang.dev/pkg/") {
 		if root := goenv.Get("MOXIEROOT"); root != "" {
-			rel := strings.TrimPrefix(importPath, "github.com/moxie-language/toolchain/")
+			rel := strings.TrimPrefix(importPath, "moxielang.dev/")
 			dir := filepath.Join(root, rel)
 			if isDir(dir) {
 				return dir, nil
@@ -526,7 +526,7 @@ func moduleFromRoots(dir string) (modPath, modDir string) {
 	}
 	if root := goenv.Get("MOXIEROOT"); root != "" {
 		if rabs, err2 := filepath.Abs(root); err2 == nil && withinDir(abs, rabs) {
-			return "github.com/moxie-language/toolchain", rabs
+			return "moxielang.dev", rabs
 		}
 	}
 	mpath := os.Getenv("MOXIEPATH")
@@ -656,7 +656,7 @@ func (r *resolver) layoutRepoDir(importPath string) (string, error) {
 	if !ok {
 		return "", nil
 	}
-	if repo == "github.com/moxie-language/toolchain" {
+	if repo == "moxielang.dev" {
 		if r.moxieRoot == "" {
 			return "", nil
 		}

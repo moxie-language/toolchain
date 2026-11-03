@@ -22,7 +22,7 @@ run_one() {
 	{
 		echo "package main"
 		echo ""
-		echo "import _ \"github.com/moxie-language/toolchain/pkg/$name\""
+		echo "import _ \"moxielang.dev/pkg/$name\""
 		echo ""
 		echo "func main() {"
 		echo "}"
