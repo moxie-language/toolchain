@@ -1175,6 +1175,39 @@ func (e *irEmitter) checkSpawnTarget(fn *SSAFunction) (ok bool) {
 	return true
 }
 
+// spawnArgCopy hands one value parameter across the spawn boundary as a frozen
+// copy: the runtime encodes it against the budget the compiler's cap-tag walk
+// computes - the same walk that sizes a spawn channel's ring - panics if it does
+// not fit, and decodes it into the root arena, so the child's slices and
+// pointers do not point into this frame. Returns the value loaded out of the
+// copy, which is what the startup bundle carries.
+func (e *irEmitter) spawnArgCopy(t Type, val string) (reg string) {
+	lt := e.llvmType(t)
+	e.nextReg++
+	alloca := "%spawnarg" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(alloca) ; e.w(" = alloca ") ; e.w(lt) ; e.w("\n")
+	e.w("  store ") ; e.w(lt) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(alloca) ; e.w("\n")
+	budget := e.frameBudget(t, nil, 0)
+	note := e.frameNote(t, "", "")
+	notePtr := "ptr null"
+	noteLen := "0"
+	if len(note) > 0 {
+		notePtr = "ptr " | e.strConstGlobal(e.addStringConst(note))
+		noteLen = irItoa64(int64(len(note)))
+	}
+	desc := e.emitTypeDescFor(t)
+	e.nextReg++
+	copyReg := "%spawnargc" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(copyReg) ; e.w(" = call ptr @runtime.SpawnArgCopy(ptr ")
+	e.w(alloca) ; e.w(", ptr ") ; e.w(desc) ; e.w(", i32 ") ; e.w(irItoa(budget))
+	e.w(", ") ; e.w(notePtr) ; e.w(", i64 ") ; e.w(noteLen) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.SpawnArgCopy", "ptr", "ptr, ptr, i32, ptr, i64")
+	e.nextReg++
+	reg = "%spawnargv" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(lt) ; e.w(", ptr ") ; e.w(copyReg) ; e.w("\n")
+	return reg
+}
+
 func (e *irEmitter) emitSpawnCall(c *SSACall) {
 	if e.ptrBits == 32 {
 		e.emitWasmSpawnCall(c)
@@ -1207,11 +1240,16 @@ func (e *irEmitter) emitSpawnCall(c *SSACall) {
 		argTypes = mxutil.Ensure(argTypes, 1)
 		push(argTypes, lt)
 		argVals = mxutil.Ensure(argVals, 1)
-		push(argVals, e.operand(arg))
 		if _, isChan := SafeUnderlying(arg.SSAType()).(*TCChan); isChan {
+			// Channels are shared: the child gets the same ring.
+			push(argVals, e.operand(arg))
 			chanIdxs = mxutil.Ensure(chanIdxs, 1)
 			push(chanIdxs, int32(i-1))
 			nChans++
+		} else {
+			// Values are copied: the runtime freezes the whole graph into the
+			// root arena, refusing to if it does not fit its declared budget.
+			push(argVals, e.spawnArgCopy(arg.SSAType(), e.operand(arg)))
 		}
 	}
 

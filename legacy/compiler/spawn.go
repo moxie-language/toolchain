@@ -8,6 +8,7 @@ package compiler
 import (
 	"fmt"
 	"go/constant"
+	"go/token"
 	"go/types"
 
 	"moxie/loader"
@@ -162,7 +163,16 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 
 	var params []llvm.Value
 	for _, arg := range concreteArgs {
-		params = append(params, b.expandFormalParam(b.getValue(arg, instr.Pos()))...)
+		v := b.getValue(arg, instr.Pos())
+		// Channels are shared; values are copied. A value's own bytes are
+		// copied by the bundle, but its slices and pointers would still look
+		// into this frame, so the runtime copies the whole graph at the
+		// boundary (and refuses to if it does not fit its declared budget).
+		if _, isChan := arg.Type().Underlying().(*types.Chan); isChan {
+			params = append(params, b.expandFormalParam(v)...)
+			continue
+		}
+		params = append(params, b.spawnArgCopy(arg.Type(), v, instr.Pos())...)
 	}
 
 	paramBundle := b.emitPointerPack(params)
@@ -240,6 +250,33 @@ func isSpawnTargetSig(sig *types.Signature) bool {
 	// one type, and a signature read back from another package's export data
 	// spells []byte as the basic string, so the test is text, not slice-of-byte.
 	return moxieTextType(ch.Elem())
+}
+
+// spawnArgCopy hands one value parameter across the spawn boundary as a frozen
+// copy. The runtime encodes the value against the budget the compiler's cap-tag
+// walk computes - the same walk that sizes a spawn channel's ring - panics if it
+// does not fit, and decodes it into the root arena, so the child's slices and
+// pointers do not point into this frame. The value is then loaded out of the
+// copy, which is what the bundle carries and the child receives.
+func (b *builder) spawnArgCopy(t types.Type, v llvm.Value, pos token.Pos) []llvm.Value {
+	llvmType := b.getLLVMType(t)
+	alloca, size := b.createTemporaryAlloca(llvmType, "spawn.arg")
+	b.CreateStore(v, alloca)
+	budget := b.frameBudget(t, nil, 0, pos)
+	note := b.frameNote(t, "", "")
+	notePtr, noteLen := b.budgetNoteOperand(note)
+	desc := b.getTypeCode(t)
+	i32 := b.ctx.Int32Type()
+	copied := b.createRuntimeCall("SpawnArgCopy", []llvm.Value{
+		alloca,
+		desc,
+		llvm.ConstInt(i32, uint64(budget), false),
+		notePtr,
+		noteLen,
+	}, "spawn.argcopy")
+	val := b.CreateLoad(llvmType, copied, "spawn.argval")
+	b.emitLifetimeEnd(alloca, size)
+	return b.expandFormalParam(val)
 }
 
 // validateSpawnArg checks one parameter of a spawned function. A channel

@@ -24110,3 +24110,50 @@ phase is touched.
 
 Remaining work, unchanged: the value-parameter budget encode, and enforcing the
 termination select in both compilers together with migrating the tree's mains.
+
+### Round 354: value parameters are copied, and their budget is enforced
+
+The spawn call packed each value parameter's own bytes and the child read them
+out of the parent's frame. The bytes were copied, but their contents were not:
+a slice or pointer field still pointed into the parent's frames, which pop the
+moment the spawning function returns. `SpawnArgCopy` closes that: the runtime
+encodes the value against the budget the compiler's cap-tag walk computes (the
+same walk that sizes a spawn channel's ring), panics if the encoding does not
+fit, and decodes it into the ROOT ARENA, so the graph the child reads lives as
+long as the domain. Both compilers emit one call per value parameter
+(`b.spawnArgCopy` in legacy, `e.spawnArgCopy` in stage4) and pack the loaded
+copy; channels still cross as the shared handle they are.
+
+Evidence, on a legacy-built stage4 and on the bootstrapped binary:
+`spawn(worker, Cfg{N: 7, Name: []byte("hello")}, d)` prints `cfg n= 7 len= 5
+name= hello`; and a `Cfg.Name []byte \`cap:"16"\`` holding 6000 bytes dies with
+
+    panic: spawn argument: encoded value of 6011 bytes exceeds the 37-byte
+    budget. Variable-length fields and their cap tags: main.Cfg.Name cap:"16"
+
+(a 134 exit). morly builds and runs with its `dbengine.Config` crossing the
+boundary, and that struct now states its sizes (`DataDir`/`MuteBlacklist`
+1024, `Admins` 64×72) because the startup config is part of the spawn's
+footprint.
+
+### Round 355: the 90 GB package cache, and why the wasm phases melted the box
+
+The package cache is keyed by the compiler's source hash and build id, so every
+compiler build starts a new generation. Nothing ever removed the old ones,
+because `removeAll` - the helper behind `cache clean`, scratch cleanup and the
+generation prune - listed ONE level and `os.Remove`d each entry. A generation
+directory contains `pkg/<name>/…`, so every nested directory survived, the
+final remove failed, and the error was ignored. Measured: **368 generations,
+90 GB**, and `cache clean` reporting success while deleting nothing.
+
+`removeAll` now calls `os.RemoveAll`. `pruneCacheGenerations` runs at the start
+of every build and drops generations nothing has touched for two hours
+(keeping the current one), and `cache clean` prunes too. After one clean:
+368 → 3 generations, 90 GB → 101 MB.
+
+The wasm phases were the other half of it: the runtime package could not
+compile (round 351), so every wasm unit recompiled the whole stdlib closure and
+then failed - 117 times in a sweep, each with seven parallel clang/llc workers.
+With the runtime fixed the cache fills, and one fixture now validates end to end
+in **4.1 s** warm (native build + wasm build + browser run); the cold cost is
+paid once per compiler generation.

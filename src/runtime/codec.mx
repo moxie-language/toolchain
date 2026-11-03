@@ -1823,3 +1823,52 @@ func codecSetRetTransient(b bool) {
 	codecRetTransient = b
 }
 
+
+// SpawnArgCopy is the spawn boundary's value-parameter handoff: it encodes one
+// value, checks the encoding against the budget the declaration states, and
+// decodes it back into a copy in the ROOT arena. A spawn call then packs that
+// copy's bytes instead of the caller's own, which is what makes "values are
+// copied" true for the contents too: a slice or pointer field would otherwise
+// hand the child a window into the parent's frames, which pop when the
+// spawning function returns.
+//
+// The budget is the compiler's frameBudget walk over the parameter type: the
+// same number, from the same cap tags, that sizes a spawn channel's ring. A
+// value parameter is part of the spawn's footprint, so it is not exempt from
+// sizing; an overrun panics naming the fields whose tags set it, before the
+// fork, in the process that made the mistake.
+func SpawnArgCopy(val unsafe.Pointer, typ *RawType, budget int32, notePtr unsafe.Pointer, noteLen uintptr) (dup unsafe.Pointer) {
+	var cb CodecBuf
+	var ss codecSeenSet
+	codecSeenInit(&ss)
+	// Cross-domain: the child gets this memory after a fork, so a stable-slice
+	// frame (a header into the encoder's own arena) is exactly what must not be
+	// produced. Everything reachable is written out and read back.
+	codecCrossDomain = true
+	codecEncodeValue(&cb, &ss, val, typ)
+	codecCrossDomain = false
+	n := int32(len(cb.data))
+	if n > budget {
+		spawnArgBudgetPanic(n, budget, notePtr, noteLen)
+	}
+	var ds codecDecodeSeen
+	codecDecodeSeenInit(&ds)
+	cb.pos = 0
+	// The copy outlives this frame: the child reads it, and the frame pops as
+	// soon as the spawning function returns. The root arena lives as long as
+	// the domain, so that is where the decoded graph goes.
+	save := CurrentArena()
+	SetCurrentArena(trueRootArena())
+	dup = codecDecodeValue(&cb, &ds, typ)
+	SetCurrentArena(save)
+	return dup
+}
+
+// spawnArgBudgetPanic reports a value parameter that encoded past its budget.
+func spawnArgBudgetPanic(actual, budget int32, notePtr unsafe.Pointer, noteLen uintptr) {
+	var note []byte
+	if notePtr != nil && noteLen > 0 {
+		note = unsafe.Slice((*byte)(notePtr), noteLen)
+	}
+	runtimePanic("spawn argument: encoded value of " | itoa(actual) | " bytes exceeds the " | itoa(budget) | "-byte budget. Variable-length fields and their cap tags: " | note)
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"runtime"
+	"time"
 	"unsafe"
 
 	"moxielang.dev/pkg/mxcover"
@@ -4928,15 +4929,15 @@ func cachedMxhPath(cacheBase, pkgPath, hash, version string) (s string) {
 	return mxutil.JoinPath(mxutil.JoinPath(cacheBase, safeName(pkgPath)), versionedCacheName(hash, version, ".mxh"))
 }
 
+// removeAll removes a whole tree. It used to list one level and os.Remove each
+// entry, which cannot remove a directory that has anything in it: every nested
+// dir survived, the top-level remove failed, and the error was ignored - so
+// `cache clean` and the generation prune reported success while deleting
+// nothing, and the package cache grew to 368 generations and 90 GB. os.RemoveAll
+// is the recursive remover; this wrapper exists only so the call sites read
+// short.
 func removeAll(path string) {
-	entries := listFiles(path, "")
-	if entries == nil {
-		return
-	}
-	for _, e := range entries {
-		os.Remove(mxutil.JoinPath(path, e))
-	}
-	os.Remove(path)
+	os.RemoveAll(path)
 }
 
 func walkStdlibPkgs(srcDir, prefix string, out []string) (result []string) {
@@ -5348,18 +5349,65 @@ func cmdInstall(pkgName string) {
 	mxutil.WriteStr(2, "install: " | compilePath | " cached\n")
 }
 
+// cacheShelfLife is how long a package-cache generation survives without being
+// touched. The generation directory is keyed by the compiler's source hash and
+// build id, so EVERY compiler build starts a new one and the previous
+// generation is dead weight. Nothing pruned them: measured on this tree, 368
+// generations and 90 GB, because `cache clean` removed only the generation it
+// happened to run under. Two hours is longer than one bootstrap chain (which
+// spawns several generations in minutes) and shorter than a day's work.
+const cacheShelfLife = int64(2) * 60 * 60 * 1000 * 1000 * 1000 // 2h in ns
+
+// pruneCacheGenerations removes cache generations nothing has touched for
+// cacheShelfLife, always keeping the current one. A generation in use by a
+// concurrent build is written continuously, so its mtime stays inside the
+// window and it is spared. This is a cache, so an over-eager prune costs a
+// rebuild, never correctness - which is why the rule can be this blunt.
+func pruneCacheGenerations() (removed int32) {
+	root := mxutil.JoinPath(getMoxiePath(), "cache")
+	cur := moxieCacheDir()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0
+	}
+	now := time.Now()
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		p := mxutil.JoinPath(root, e.Name())
+		if p == cur {
+			continue
+		}
+		fi, ierr := e.Info()
+		if ierr != nil || fi == nil {
+			continue
+		}
+		if now.Sub(fi.ModTime()) < time.Duration(cacheShelfLife) {
+			continue
+		}
+		removeAll(p)
+		removed++
+	}
+	return removed
+}
+
 func cacheClean() {
 	base := pkgCacheDir()
 	mxutil.WriteStr(2, "cleaning cache: " | base | "\n")
 	entries := listFiles(base, "")
 	if entries == nil {
 		mxutil.WriteStr(2, "  (empty)\n")
-		return
+	} else {
+		for _, e := range entries {
+			removeAll(mxutil.JoinPath(base, e))
+		}
+		os.Remove(base)
 	}
-	for _, e := range entries {
-		removeAll(mxutil.JoinPath(base, e))
+	n := pruneCacheGenerations()
+	if n > 0 {
+		mxutil.WriteStr(2, "  pruned " | simpleItoa(n) | " stale generation(s)\n")
 	}
-	os.Remove(base)
 	mxutil.WriteStr(2, "  done\n")
 }
 
@@ -7156,6 +7204,10 @@ func main() {
 
 	root := moxieRoot()
 	applyTargetFlag(targetFlag)
+	// The generation directory is per compiler build, so an old one is dead
+	// weight: prune the ones nothing has touched in cacheShelfLife, here rather
+	// than in a command nobody runs, so the cache cannot grow without bound.
+	pruneCacheGenerations()
 	triple := "x86_64-unknown-linux-musleabihf"
 	if mxutil.TargetArch() == "wasm" {
 		triple = "wasm32-unknown-wasi"
