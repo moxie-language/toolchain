@@ -205,7 +205,7 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	waitFnType, waitFn := b.getFunction(b.program.ImportedPackage("runtime").Members["PipeWaitChildReady"].(*ssa.Function))
 	b.createCall(waitFnType, waitFn, []llvm.Value{llvm.Undef(b.dataPtrType)}, "child.ready")
 
-	// Return the breaker channel (chan struct{}) that closes when the child
+	// Return the breaker channel (chan []byte) that closes when the child
 	// exits. Register it with the domain so a panic closes it, and note it on
 	// the frame so every return of this function closes it too.
 	lcFnType, lcFn := b.getFunction(b.program.ImportedPackage("runtime").Members["SpawnLifecycleChannel"].(*ssa.Function))
@@ -221,28 +221,25 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 }
 
 // isSpawnTargetSig reports whether sig is the declared shape of a spawned
-// function: exactly one result, named closed, of type chan struct{}. That result
-// is the domain's breaker - the same channel spawn returns - and its presence in
-// the signature is what marks the function as a spawn target.
+// function: exactly one result, of type chan []byte. That result is the
+// domain's breaker - the same channel spawn returns - and its presence in the
+// signature is what marks the function as a spawn target.
 func isSpawnTargetSig(sig *types.Signature) bool {
 	if sig == nil || sig.Results().Len() != 1 {
 		return false
 	}
 	r := sig.Results().At(0)
 	// The name is documentation; the contract is the type - exactly one
-	// result, a `chan struct{}`, which is the domain's breaker.
+	// result, a `chan []byte`, which is the domain's breaker.
 	ch, ok := r.Type().Underlying().(*types.Chan)
 	if !ok || ch.Dir() != types.SendRecv {
 		return false
 	}
 	// The breaker carries the reason a target stopped (a panic message, empty
-	// on a clean stop) before it closes, so its element is []byte.
-	sl, ok := ch.Elem().Underlying().(*types.Slice)
-	if !ok {
-		return false
-	}
-	el, ok := sl.Elem().Underlying().(*types.Basic)
-	return ok && el.Kind() == types.Uint8
+	// on a clean stop) before it closes, so its element is text. Moxie text is
+	// one type, and a signature read back from another package's export data
+	// spells []byte as the basic string, so the test is text, not slice-of-byte.
+	return moxieTextType(ch.Elem())
 }
 
 // validateSpawnArg checks one parameter of a spawned function. A channel

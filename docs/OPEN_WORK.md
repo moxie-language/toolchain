@@ -23963,3 +23963,40 @@ only `<-sigint` with a legacy-built stage4, and gdb the crash - the region-table
 panic names the allocation site's return address, which resolves through the
 compiler's own symbol table. The mechanism (flag + poll + static channel + the
 rewrite) is otherwise straightforward and worth keeping in this shape.
+
+### Round 349: the breaker contract is text, not slice-of-byte
+
+`isSpawnTargetSig` required the breaker's element to be a `*types.Slice` of
+uint8. That held inside one package and failed the moment the target was
+imported: stage4 compiles each package in its own process and reads the other
+package's declarations back from serialized type descriptors
+(`compile_exports.mx`'s `parseTypeDesc`), which folds `[]uint8` into the basic
+`string` - one type, two spellings - so `chan []byte` arrived as `chan string`
+and every cross-package spawn in morly was refused while the same-package
+fixtures compiled. The probe made it exact: a two-package program with
+`func Worker(in chan int32) (closed chan []byte)` printed the imported result
+type as `chan string` and was rejected; the same function declared in the
+caller's package was accepted.
+
+Both compilers now test Moxie text (`moxieTextType` in legacy,
+`types.TextType` in stage4), not slice-of-byte. `Identical` already unified the
+two spellings, so arguments and results type-check either way; only the
+spawn-signature marker was structural. morly migrated the holders too: every
+`done`/`workerDone`/`proxyDone`/`blossomDone` field, pool element, parameter
+and helper result that receives a spawn result is `chan []byte` (ready
+channels stay `chan struct{}`, they are not breakers). morly then builds clean
+(10.6MB) against the fixed compiler, and a cross-package probe compiles and
+exits 0.
+
+Bootstrap: fixpoint `b9b336a4` (s2 == s3). The frame-budget walk already
+handled the basic-string spelling on both sides, so a cross-package frame type
+is budgeted the same as a local one.
+
+Two fixture faults surfaced with the fix: `tls_handshake.mx`'s `serverDomain`
+declares the breaker result but its body ended in `ln.Close()` with no
+`return closed` ("missing return"), now fixed. The tree-cleanliness check in
+`quickcheck` fails while a change is uncommitted, which is why it reported on
+this round's run before the commit.
+
+Still open, unchanged: `sigint` (main's select) and the value-parameter budget
+encode, both as described in round 348.

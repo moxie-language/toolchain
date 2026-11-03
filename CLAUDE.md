@@ -482,7 +482,7 @@ config is not exempt from sizing.
 call) and channels (shared). The target's one result is the domain's
 termination breaker, and it is written as a special word:
 
-    func worker(in chan Request, out chan Response) (closed chan struct{}) {
+    func worker(in chan Request, out chan Response) (closed chan []byte) {
         for {
             select {
             case <-closed:
@@ -496,9 +496,13 @@ termination breaker, and it is written as a special word:
 `closed` is a special word, like `sigint`: `close(ch)` stays the builtin, and
 `closed` names the breaker channel the target returns. The same channel object
 is what `spawn` returns to the parent, so the breaker closes when the child
-ends and either side can close it early. The signature is the marker: a function
-is callable via `spawn` only with exactly `(closed chan struct{})` as its
-result. `main` is the other entry point and selects on `sigint` (SIGINT from the
+ends and either side can close it early; before it closes it carries the
+reason the domain stopped (a panic message, empty on a clean stop). The
+signature is the marker: a function is callable via `spawn` only with exactly
+one result, a `chan []byte`, which is that breaker. A signature read back from
+another package's export data spells `[]byte` as `string` because Moxie text is
+one type, so the compiler tests for text, not for a slice of bytes. `main` is
+the other entry point and selects on `sigint` (SIGINT from the
 shell); a spawn target selects on `closed` (the parent's close, or the kernel
 reaper when the parent dies without one). A target may not reach a channel
 through a package global: its parameters are the only capabilities it gets.
