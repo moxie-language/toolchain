@@ -24263,3 +24263,37 @@ Evidence: `mxc-sel3` refuses a plain `main` ("main must select on sigint") and a
 target whose loop only receives ("spawn: worker never selects on its closed
 breaker"), accepts the migrated pair (which runs and prints `handled 5`), and
 builds both the compiler itself and morly.
+
+### Round 359: what the first enforcement pass got wrong
+
+Three things the sweep caught, all fixed:
+
+**The check ran where errors are never read.** Stage4 reads
+`cctx.compileErrors` exactly once, right after the SSA build and before the
+emitter; a `reportCompileError` during emission is printed after the package was
+already judged compilable. The first version of the check lived in
+`emitFunction`, and a program with no select compiled happily. It now runs as
+`checkTerminationSelects` between the SSA build and that gate, and the probes
+prove both directions: a plain `main` and a target whose loop only receives are
+refused, the migrated pair compiles and runs.
+
+**A single-arm select is not a Select.** `select { case <-closed: …; default: }`
+is lowered by the legacy SSA builder into a plain receive (dumped: `select
+nonblocking [<-nil:chan []byte]` once, and nothing for the target), so a check
+that demanded an `*ssa.Select` refused correct code. Both compilers now accept
+either shape: a select arm, or a receive of the terminator
+(`terminationConsumed`). The rule is that the signal is consumed, not that one
+instruction form spells it.
+
+**A legacy binding gap, recorded not hidden.** In the legacy compiler
+`addResultVar` materializes the result alloca, but for these targets the dump
+shows `closed` reading as the zero value - so a legacy-built child's
+`<-closed` arm is dead, while stage4's `bindSpawnClosed` binds the named result
+properly. The legacy check does not judge a result it could not materialize (it
+cannot see the operand at all); the shipping compiler binds and checks it. This
+is a legacy-side defect, listed here rather than papered over.
+
+Also fixed: the compiler's own generators must satisfy the rules they enforce -
+`generateTestMain` now emits the entry select (a test binary is a batch
+program), and `cmd/mxcover`, `cmd/mxlex` and `cmd/gen-unicode-tables` gained it.
+Phase 6 caught all three.

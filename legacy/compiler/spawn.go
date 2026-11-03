@@ -236,15 +236,58 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	return doneCh, nil
 }
 
-// closedSelectPresent reports whether fn selects on its own closed breaker. The
-// prologue binds the result alloca (Comment "closed") to the domain's breaker,
-// and the closed arm's channel is a load of it, so the operand is either the
-// alloca or the load.
+// terminationConsumed reports whether fn consumes a termination signal from
+// chanVal (or, when wantSigint is set, from the sigint builtin's channel).
 //
-// A function with no SSA body is not judged: a target imported from a package
-// this compilation has not built has nothing to inspect, and refusing it would
-// reject a correct program. The check is a compile-time discipline, not a
-// proof, so the absence of a body is the honest boundary.
+// A select arm is the intended shape, but a SINGLE-ARM select is lowered by the
+// SSA builder into a plain receive - `select { case <-closed: ...; default: }`
+// becomes a non-blocking receive, and `select { case <-closed: ... }` a blocking
+// one - so requiring a Select instruction would refuse correct code that this
+// compiler itself produced. The rule is therefore about the signal being
+// consumed, and either shape satisfies it.
+func terminationConsumed(fn *ssa.Function, chanVal ssa.Value, wantSigint bool) bool {
+	if fn == nil || len(fn.Blocks) == 0 {
+		return true
+	}
+	match := func(ch ssa.Value) bool {
+		if wantSigint {
+			call, ok := ch.(*ssa.Call)
+			if !ok {
+				return false
+			}
+			bi, ok := call.Call.Value.(*ssa.Builtin)
+			return ok && bi.Name() == "__sigint"
+		}
+		if ch == chanVal {
+			return true
+		}
+		if u, ok := ch.(*ssa.UnOp); ok && u.X == chanVal {
+			return true
+		}
+		return false
+	}
+	for _, blk := range fn.Blocks {
+		for _, instr := range blk.Instrs {
+			switch in := instr.(type) {
+			case *ssa.Select:
+				for _, st := range in.States {
+					if match(st.Chan) {
+						return true
+					}
+				}
+			case *ssa.UnOp:
+				if in.Op == token.ARROW && match(in.X) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// closedSelectPresent reports whether fn consumes its own closed breaker's
+// termination signal. The prologue binds the result alloca (Comment "closed"),
+// so the operand is that alloca or a load of it.
 func closedSelectPresent(fn *ssa.Function) bool {
 	if fn == nil || len(fn.Blocks) == 0 {
 		return true
@@ -258,48 +301,19 @@ func closedSelectPresent(fn *ssa.Function) bool {
 		}
 	}
 	if closedAlloc == nil {
-		return false
+		// The builder did not materialize the result variable, so `closed`
+		// reads as the zero value and no select can name it. That is this
+		// compiler's binding gap (stage4 binds the result alloca and the
+		// shipping compilers check it there), not a fault in the program, so
+		// the check does not judge what it cannot see. Recorded in OPEN_WORK.
+		return true
 	}
-	return selectsOn(fn, closedAlloc)
+	return terminationConsumed(fn, closedAlloc, false)
 }
 
-// sigintSelectPresent reports whether fn selects on the termination channel.
-// `sigint` is lowered to the __sigint builtin, so the arm's channel is that
-// call.
+// sigintSelectPresent reports whether fn consumes the termination channel.
 func sigintSelectPresent(fn *ssa.Function) bool {
-	return selectsOn(fn, nil)
-}
-
-// selectsOn reports whether fn has a select whose receive arm names chanVal, or
-// (chanVal == nil) the sigint builtin's channel.
-func selectsOn(fn *ssa.Function, chanVal ssa.Value) bool {
-	for _, blk := range fn.Blocks {
-		for _, instr := range blk.Instrs {
-			sel, ok := instr.(*ssa.Select)
-			if !ok {
-				continue
-			}
-			for _, st := range sel.States {
-				if chanVal == nil {
-					call, ok := st.Chan.(*ssa.Call)
-					if !ok {
-						continue
-					}
-					if bi, ok := call.Call.Value.(*ssa.Builtin); ok && bi.Name() == "__sigint" {
-						return true
-					}
-					continue
-				}
-				if st.Chan == chanVal {
-					return true
-				}
-				if u, ok := st.Chan.(*ssa.UnOp); ok && u.X == chanVal {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	return terminationConsumed(fn, nil, true)
 }
 
 // checkEntrySelect enforces the termination rule at the program entry: a
