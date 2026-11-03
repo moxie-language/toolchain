@@ -24044,3 +24044,23 @@ selecting on `sigint`, every spawn target on `closed`), and the tree's mains are
 not migrated to it, so the word is available but unused. Enforcing before the
 migration would break every fixture, so enforcement and migration are one
 change. The value-parameter budget encode is still unwired.
+
+### Round 351: the wasm runtime compiles again
+
+The full sweep (phase 5, the wasm target, and phase 1c's wasm package builds)
+found that NO wasm build had worked for several commits:
+`spawn_wasm.mx`'s `breakerFallback` called `chanMake(ptrSize*3, 1, ptrSize*3,
+nil, 0)` and `ptrSize` is a local of `domain.mx`/`chan.mx`, not a package
+variable. The result was "undefined: ptrSize" twice and then "not enough
+arguments in call (want 5, have 3)" - the compiler dropped the unresolved
+arguments - so the wasm runtime package never type-checked and every browser
+build failed before the program was even considered.
+
+The size is now a local in `breakerFallback`. A wasm build of a fixture
+compiles and links (`-> app.wasm` plus the JS host), and phases 1c/5 are
+re-run after the fix.
+
+Sweep results before that fix: 0a 124/124, 0b 64/64, 1 4/4, 1b 1/1, all green;
+phase 5's units up to the fix failed on this build error and the units after it
+passed. The sweep's 9000s budget expired during phase 7, so 2, 3, 4, 6, 7 and 8
+are re-run separately rather than as part of one timed run.
