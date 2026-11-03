@@ -18,15 +18,34 @@ Moxie descends from [TinyGo](https://tinygo.org/). All embedded targets and thre
 
 ## Axioms
 
-Everything in Moxie derives from two axioms. They are stated, justified, and expanded into thirty lemmas in **[docs/axioms.md](docs/axioms.md)**, which is the normative document: where any other document appears to conflict with it, the axioms win.
+Everything in Moxie derives from three axioms. They are stated, justified, and expanded into thirty lemmas in **[docs/axioms.md](docs/axioms.md)**, which is the normative document: where any other document appears to conflict with it, the axioms win.
 
 **A1 - just the facts.** Every property that governs execution is declared and statically checkable. Nothing that determines behaviour is inferred, negotiated, or discovered at runtime.
 
 **A2 - total isolation.** No component can address another component's state, and every fact has exactly one authoritative owner. State has one owner; interfaces have two.
 
-The operational test: a proposed feature must name the axiom that forces it. If neither axiom forces it, it is an opinion, and it is deleted.
+**A3 - closure.** Every capability and every input is declared, and the declaration is exhaustive: anything not declared is unreachable. The default is deny. No ambient filesystem, network, clock, environment, signal, or global registry; every perturbation is a declared message or a declared value.
 
-Every rule below is a consequence of those two. Where a section states a rule, it is a lemma from docs/axioms.md.
+The three are load-bearing together: A1 says what must be written down, A2 says what cannot be reached in memory, and A3 says what cannot be reached even though it is not another component's memory. Each closes what the previous one leaves open.
+
+The operational test: a proposed feature must name the axiom that forces it. If no axiom forces it, it is an opinion, and it is deleted.
+
+Every rule below is a consequence of those three. Where a section states a rule, it is a lemma from docs/axioms.md.
+
+## Address
+
+`moxielang.dev` is the toolchain's canonical address and import root. The
+toolchain's own packages import as `moxielang.dev/...`, and the domain answers
+three audiences at one address:
+
+- **Go tooling** (`go get`, `go list`) asks with `?go-get=1` and receives the
+  `go-import` discovery document, which names this repository.
+- **A browser** gets a real 301 to the repository page.
+- **git** asks for `/info/refs` and is redirected to the repository's git
+  endpoint, so `git clone https://moxielang.dev` works.
+
+The site block, the page and a Cloudflare Worker variant live in
+[`site/vanity/`](site/vanity/), beside the verification commands.
 
 ## Quick Start
 
@@ -174,7 +193,7 @@ All native binaries are fully statically linked.
 
 ## Documentation
 
-- **[docs/axioms.md](docs/axioms.md)** - The two axioms, their justification, and the derived lemmas (normative)
+- **[docs/axioms.md](docs/axioms.md)** - The three axioms, their justification, and the derived lemmas (normative)
 - **[REFERENCE.md](REFERENCE.md)** - Complete language specification
 - **[TUTORIAL.md](TUTORIAL.md)** - Learn Moxie from scratch
 - **[EXAMPLE_CLAUDE.md](EXAMPLE_CLAUDE.md)** - AI coding assistant configuration

@@ -2,7 +2,7 @@
 
 *Domain-isolated, event-driven program design: principles, patterns, and worked examples.*
 
-The rules in this document are applications of the two axioms in [axioms.md](axioms.md), not independent recommendations. The Five Laws in section 2 are the axioms read at the inter-domain scale, and sections 3 and 4 are the patterns that follow from them in practice. Where a rule here appears to conflict with the axioms, the axioms are correct.
+The rules in this document are applications of the three axioms in [axioms.md](axioms.md), not independent recommendations. The Five Laws in section 2 are the axioms read at the inter-domain scale, and sections 3 and 4 are the patterns that follow from them in practice. Where a rule here appears to conflict with the axioms, the axioms are correct.
 
 ---
 

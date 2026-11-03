@@ -1,0 +1,37 @@
+# moxielang.dev: the vanity import root for the Moxie toolchain.
+#
+# Three audiences, one address, and they need different answers:
+#
+#   * Go's module resolution (`go get`, `go list`) asks for ?go-get=1 and must
+#     receive a 200 with the go-import meta tag. A redirect here is a resolution
+#     failure.
+#   * git's HTTP transport asks for /info/refs?service=git-upload-pack, so it is
+#     sent to the repository's GIT endpoint with the path and query preserved -
+#     `git clone https://moxielang.dev` then works, because git follows a 301
+#     only when the target is still a git endpoint.
+#   * A browser wants a location: it gets a real 301 to the repository page, not
+#     a client-side meta refresh.
+#
+# TLS is Caddy's job (automatic, Let's Encrypt). DNS: an A/AAAA record for
+# moxielang.dev pointing at the host that runs this.
+{$VANITY_ADDR:moxielang.dev} {
+	encode zstd gzip
+
+	@goGet query go-get=1
+	handle @goGet {
+		root * {$VANITY_ROOT:./public}
+		rewrite * /index.html
+		file_server
+	}
+
+	# The smart-HTTP endpoints: the path AND the query have to survive, and the
+	# target has to be the .git URL github serves them from.
+	@gitSmart path */info/refs */git-upload-pack */git-receive-pack
+	handle @gitSmart {
+		redir https://github.com/moxie-language/toolchain.git{uri} 301
+	}
+
+	handle {
+		redir https://github.com/moxie-language/toolchain 301
+	}
+}

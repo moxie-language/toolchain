@@ -24157,3 +24157,38 @@ then failed - 117 times in a sweep, each with seven parallel clang/llc workers.
 With the runtime fixed the cache fills, and one fixture now validates end to end
 in **4.1 s** warm (native build + wasm build + browser run); the cold cost is
 paid once per compiler generation.
+
+### Round 356: moxielang.dev answers, and the README states three axioms
+
+The vanity import root is live on the host the A records point at (smesh.lol,
+Caddy). One address, three answers, each for a client that needs a different
+one:
+
+- `?go-get=1` -> 200 with the `go-import` meta tag (Go tooling; a redirect here
+  is a resolution failure)
+- anything else from a browser -> 301 to the repository page
+- `/info/refs`, `/git-upload-pack`, `/git-receive-pack` -> 301 to
+  `.../toolchain.git{uri}` with the query preserved, which is what makes
+  `git ls-remote https://moxielang.dev` work (git only follows a redirect whose
+  target is still a git endpoint)
+
+`www.moxielang.dev` redirects to the bare name. The certificate was issued on
+the first reload. Configs, page and verification commands live in
+`site/vanity/`; the deployed copy is `/var/www/moxielang/index.html` plus the
+two site blocks in `/etc/caddy/Caddyfile` (backed up first, style
+`Caddyfile.bak-before-moxielang-git3-*`).
+
+Two honest limits, both recorded in `site/vanity/README.md`: the repository is
+Moxie source, so `go get` of a *package* resolves the module root and stops at
+"no Go files" (no `go.mod`, no Go packages - not a gap the tag can close), and
+Moxie's own fetcher does not read the `go-import` tag (`moxie get` takes a git
+URL and derives the module path from it). Teaching the fetcher discovery is
+open work, listed here rather than claimed.
+
+README: it said "two axioms" while `docs/axioms.md` states three. A3 (closure -
+every capability and input is declared, anything undeclared is unreachable, the
+default is deny) is now in the README with the reason the three are
+load-bearing together, and `docs/architecture.md` and
+`docs/MOXIE_ARCHITECTURE_PATTERNS.md` no longer say "two". The README also
+gains an "Address" section stating the canonical import root and what the
+domain answers.

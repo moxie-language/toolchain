@@ -6,7 +6,7 @@ The server is dumb. The client is smart. Each domain is sovereign.
 
 Moxie enforces isolation at the language level. Domains are OS processes. There is no shared memory. Communication is serialized across each domain boundary. Each domain runs a single thread with channels and select for event dispatch.
 
-Everything in this document is the mechanical realization of the two axioms in [axioms.md](axioms.md), with the lemma ids given where a claim is a consequence of one. Where this document and the axioms disagree, the axioms are correct.
+Everything in this document is the mechanical realization of the three axioms in [axioms.md](axioms.md), with the lemma ids given where a claim is a consequence of one. Where this document and the axioms disagree, the axioms are correct.
 
 ## Compilation Pipeline
 
