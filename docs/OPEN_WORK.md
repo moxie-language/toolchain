@@ -24192,3 +24192,35 @@ load-bearing together, and `docs/architecture.md` and
 `docs/MOXIE_ARCHITECTURE_PATTERNS.md` no longer say "two". The README also
 gains an "Address" section stating the canonical import root and what the
 domain answers.
+
+### Round 357: the fetcher resolves import paths through their own address
+
+`moxie get` took a git URL and derived the module path from it, so an import
+path like `moxielang.dev/pkg/mxutil` was resolved as host-plus-one-segment
+(`moxielang.dev/pkg`) - the wrong module root for a vanity address, and no
+checkout could be found for it.
+
+It now reads the address's discovery document, the way Go's module resolution
+does: `https://<path>?go-get=1` is fetched, the `go-import` meta tag is parsed
+(`<prefix> <vcs> <repo-url>`, longest prefix that contains the requested path
+wins), and the prefix becomes the module root while the URL becomes the clone
+source. Discovery is skipped for a spec that already names a URL (scheme
+present), when `-offline` is given, and when the module is already checked out,
+so an existing workflow never pays for the lookup.
+
+Evidence:
+
+    $ moxie get moxielang.dev/pkg/mxutil
+      clone https://github.com/moxie-language/toolchain.git -> /tmp/moxie-get/moxielang.dev
+      Cloning into '/tmp/moxie-get/moxielang.dev'...
+      /tmp/moxie-get/moxielang.dev/pkg/mxutil
+
+The document is fetched with `curl` through the same shell path the compiler
+already uses for `git`: linking an HTTP client, a TLS stack and an X.509 root
+loader into the compiler to read one small page would be paid on every
+bootstrap, and this compiler is measured in bootstrap minutes. A missing `curl`
+surfaces as a failed discovery, and the plain-URL form still works.
+
+The legacy bootstrap compiler has no `get`/`fetch` command at all, so there is
+nothing to mirror there; this is a CLI feature of the compiler that ships, not a
+codegen rule.

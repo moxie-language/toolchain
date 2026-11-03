@@ -47,23 +47,24 @@ git ls-remote https://moxielang.dev
 Checked on 2026-11-03: the certificate was issued on the reload, and all three
 lines above came back exactly as shown.
 
+## What consumes the discovery document
+
+`moxie get` reads it. An argument with no scheme is resolved through the
+address's own document before any checkout is attempted, so
+
+```sh
+moxie get moxielang.dev/pkg/mxutil
+#   clone https://github.com/moxie-language/toolchain.git -> ~/moxie/moxielang.dev
+#   ~/moxie/moxielang.dev/pkg/mxutil
+```
+
+works with no knowledge of the repository host, and it resolves the module root
+to `moxielang.dev` - not to the `moxielang.dev/pkg` that a host-plus-one-segment
+guess would produce. `-offline` skips the fetch and uses what is checked out.
+
 ## Not part of the contract: `go get` of a package
 
 The repository is Moxie source (`.mx`), not Go source, and it has no root
 `go.mod`. `go get moxielang.dev/pkg/mxutil` therefore resolves the module root
 and stops with "no Go files" - correct, and not something a `go.mod` would fix
 without shipping Go packages that do not exist.
-
-Moxie's own fetcher likewise does not read the `go-import` tag: `moxie get`
-takes a git URL (`moxie get https://github.com/moxie-language/toolchain.git`)
-and derives the module path from it. The vanity address is therefore for Go
-tooling, browsers and git today; teaching the fetcher the discovery protocol is
-recorded in `docs/OPEN_WORK.md`, not claimed here.
-
-## Alternative deployment (Cloudflare)
-
-If the domain's DNS moves to Cloudflare, `cloudflare-worker.js` answers the same
-three ways from a Worker routed as `moxielang.dev/*` (plus
-`www.moxielang.dev/*` if that name exists). Two details matter there too: the
-`?go-get=1` answer is a 200 and not a redirect, and the git redirect keeps the
-`.git` prefix and the query string.

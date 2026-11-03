@@ -1810,12 +1810,196 @@ func materialiseRef(mpath, repo, ref string, force bool) (dir string) {
 	return wt
 }
 
+// findSub returns the index of needle in hay at or after from, or -1.
+func findSub(hay, needle string, from int32) (idx int32) {
+	hn := int32(len(hay))
+	nn := int32(len(needle))
+	if nn == 0 {
+		return from
+	}
+	i := from
+	for i+nn <= hn {
+		ok := true
+		for k := int32(0); k < nn; k++ {
+			if hay[i+k] != needle[k] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return i
+		}
+		i++
+	}
+	return -1
+}
+
+// attrValue returns the value of attribute key in a tag's text, quoted or not,
+// or "" when the attribute is absent.
+func attrValue(tag, key string) (v string) {
+	k := findSub(tag, key, 0)
+	for k >= 0 {
+		whole := k == 0
+		if !whole {
+			switch tag[k-1] {
+			case ' ', '\t', '\n', '<', '"', '\'':
+				whole = true
+			}
+		}
+		if whole {
+			j := k + int32(len(key))
+			for j < int32(len(tag)) && (tag[j] == ' ' || tag[j] == '\t') {
+				j++
+			}
+			if j < int32(len(tag)) && tag[j] == '=' {
+				j++
+				for j < int32(len(tag)) && (tag[j] == ' ' || tag[j] == '\t') {
+					j++
+				}
+				if j < int32(len(tag)) && (tag[j] == '"' || tag[j] == '\'') {
+					q := tag[j]
+					j++
+					e := j
+					for e < int32(len(tag)) && tag[e] != q {
+						e++
+					}
+					return tag[j:e]
+				}
+				eu := j
+				for eu < int32(len(tag)) && tag[eu] != ' ' && tag[eu] != '>' && tag[eu] != '\n' {
+					eu++
+				}
+				return tag[j:eu]
+			}
+		}
+		k = findSub(tag, key, k+1)
+	}
+	return ""
+}
+
+// pathHasPrefix reports whether importPath is prefix itself or sits under it at
+// a path boundary.
+func pathHasPrefix(importPath, prefix string) (ok bool) {
+	if prefix == "" {
+		return false
+	}
+	if importPath == prefix {
+		return true
+	}
+	return mxutil.HasPrefix(importPath, prefix) && int32(len(importPath)) > int32(len(prefix)) && importPath[int32(len(prefix))] == '/'
+}
+
+// parseGoImport reads the discovery document's go-import meta tag. The content
+// is "<prefix> <vcs> <repo-url>": the prefix is the module root as the address
+// spells it and the URL is where its git repository lives. The longest prefix
+// that contains the requested path wins when a page states several, which is
+// how Go resolves a nested module.
+func parseGoImport(doc, importPath string) (prefix, repoURL string) {
+	i := int32(0)
+	for {
+		k := findSub(doc, "<meta", i)
+		if k < 0 {
+			break
+		}
+		e := findSub(doc, ">", k)
+		if e < 0 {
+			break
+		}
+		tag := doc[k:e]
+		if attrValue(tag, "name") == "go-import" {
+			content := attrValue(tag, "content")
+			sp1 := findSub(content, " ", 0)
+			if sp1 > 0 {
+				pre := content[:sp1]
+				rest := content[sp1+1:]
+				vcs := rest
+				url := ""
+				if sp2 := findSub(rest, " ", 0); sp2 > 0 {
+					vcs = rest[:sp2]
+					url = rest[sp2+1:]
+				}
+				if vcs == "git" && url != "" && pathHasPrefix(importPath, pre) && int32(len(pre)) > int32(len(prefix)) {
+					prefix = pre
+					repoURL = url
+				}
+			}
+		}
+		i = e + 1
+	}
+	return prefix, repoURL
+}
+
+// isURLSpec reports whether a get spec already names a repository URL, so no
+// discovery document is needed for it.
+func isURLSpec(s string) (ok bool) {
+	for _, p := range []string{"ssh://", "https://", "http://", "git://", "file://"} {
+		if mxutil.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// curlCapture fetches a URL and returns the body, or "" when the fetch fails.
+// The network is reached through a shell here for the same reason checkouts are
+// - because this compiler already does - and because discovery is one GET of a
+// small HTML document: linking an HTTP client, a TLS stack and an X.509 root
+// loader into the compiler to fetch a page would be paid on every bootstrap.
+func curlCapture(url string) (out string) {
+	mpath := getMoxiePath()
+	mkdirAll(mxutil.JoinPath(mpath, "cache"), 0755)
+	tmp := mxutil.JoinPath(mxutil.JoinPath(mpath, "cache"), "discover-" | simpleItoa(os.Getpid()) | ".html")
+	cmd := "curl -fsSL --max-time 30 -H 'Accept: text/html' '" | url | "' > '" | tmp | "' 2>/dev/null"
+	if run([]string{"sh", "-c", cmd}) != 0 {
+		os.Remove(tmp)
+		return ""
+	}
+	data, ok := mxutil.ReadFile(tmp)
+	os.Remove(tmp)
+	if !ok {
+		return ""
+	}
+	return string(data)
+}
+
+// discoverImport resolves an import path through the address's own discovery
+// document, the way Go's module resolution does: https://<path>?go-get=1 states
+// the module root and the git URL that serves it. This is what makes
+// `moxie get moxielang.dev/pkg/mxutil` work: the module root is moxielang.dev,
+// which no host-plus-one-segment guess would produce.
+//
+// Returns empty strings when the address serves no discovery document, which is
+// the ordinary case for a plain repository host whose path the local checkout
+// and the MANIFEST already describe.
+func discoverImport(importPath string) (prefix, repoURL string) {
+	doc := curlCapture("https://" | importPath | "?go-get=1")
+	if doc == "" {
+		return "", ""
+	}
+	return parseGoImport(doc, importPath)
+}
+
 // getRepo is one `moxie get` argument's worth of work. It returns the directory
 // the import path resolves to, or "" on failure.
 func getRepo(spec, remote, protocol string, offline, force, pin bool) (dir string) {
 	pkgPath, ref := splitImportRef(spec)
 	repo := repoRootOf(pkgPath)
 	mpath := getMoxiePath()
+	if !offline && !isURLSpec(pkgPath) {
+		// An import path with no scheme is resolved through its own address when
+		// the module is not already checked out: the discovery document names the
+		// module root, which need not be host-plus-one-segment, and the URL to
+		// clone from.
+		_, have := mxutil.ReadFile(mxutil.JoinPath(mxutil.JoinPath(mpath, repo), ".git/HEAD"))
+		if !have {
+			if pre, url := discoverImport(pkgPath); url != "" {
+				repo = pre
+				if remote == "" {
+					remote = url
+				}
+			}
+		}
+	}
 	waitRepoLock(mpath, repo)
 	checkout := ensureCheckout(mpath, repo, remote, protocol, offline)
 	if checkout == "" {

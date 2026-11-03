@@ -43,6 +43,9 @@ three audiences at one address:
 - **A browser** gets a real 301 to the repository page.
 - **git** asks for `/info/refs` and is redirected to the repository's git
   endpoint, so `git clone https://moxielang.dev` works.
+- **`moxie get`** reads the same document: `moxie get moxielang.dev/pkg/mxutil`
+  resolves the module root and the repository URL from it, with no knowledge of
+  the repository host.
 
 The site block, the page and a Cloudflare Worker variant live in
 [`site/vanity/`](site/vanity/), beside the verification commands.
