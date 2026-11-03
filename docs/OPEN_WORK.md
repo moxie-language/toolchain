@@ -23936,3 +23936,30 @@ in the generated IR (the conversion emitted an empty-struct operand). The probe
 prints `len(reason)` instead. That conversion is used all over the tree on
 parameters and fields, so the failing shape is narrower than the operation -
 recorded for a dedicated look.
+
+### Round 348: the sigint attempt, withdrawn
+
+What was built: a graceful SIGINT in `signal.c` (a handler that only sets a
+`sig_atomic_t`, never `_exit`s), a static termination channel in the runtime
+(`sigintChanStorage`, so no allocation and no global chan store), a
+`SigintChan()` accessor the loader's rewrite could name, and the predeclared
+word `sigint` -> `runtime.SigintChan()` in both rewriters (identifier-only,
+skipping strings, backtick raw strings and comments), with the receive path
+special-cased to poll the flag.
+
+What failed: the bootstrap's stage4 self-compile died with "arena: region table
+full" before any sigint code could run - and it kept dying after the
+`initDomain` hook was removed and after the global chan store was replaced by
+the static-struct accessor. That means the crash is in the *interaction* the
+rewrite introduces (the stage4 compiler's own source contains the word `sigint`
+in comments and in the new rewrite helper), not in the signal plumbing, and it
+was not diagnosed before the context budget ran out. The whole attempt was
+withdrawn rather than committed: `git checkout` of the six touched files, a
+legacy rebuild and a fresh bootstrap put the tree back at fixpoint `88429764`
+with nothing uncommitted.
+
+Next attempt should reproduce it small: compile a one-file program containing
+only `<-sigint` with a legacy-built stage4, and gdb the crash - the region-table
+panic names the allocation site's return address, which resolves through the
+compiler's own symbol table. The mechanism (flag + poll + static channel + the
+rewrite) is otherwise straightforward and worth keeping in this shape.
