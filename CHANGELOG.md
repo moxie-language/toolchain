@@ -1,5 +1,40 @@
 # Moxie Changelog
 
+## v1.0.0-rc.0
+
+The first release on the public toolchain repository (`moxielang.dev`, staged
+at `github.com/moxie-language/toolchain`). Everything below the tag is the
+compiler as it self-hosts to a reproducible binary.
+
+- **The import root is `moxielang.dev`** - the toolchain's own packages import
+  under the vanity domain, and the loader resolves it, so a toolchain module
+  states its dependency by name rather than by checkout path.
+- **A spawn target's result is the breaker, `chan []byte`** - `spawn(fn, ...)`
+  returns the target's one declared result, and the reason a domain stopped
+  (a panic message, empty on a clean stop) travels on that channel before it
+  closes. The result is matched as Moxie text, so a signature read back from
+  another package's export data (`[]byte` arrives as `string`) is the same
+  contract.
+- **`sigint` is the domain's termination channel** - `main` selects on
+  `sigint`, a spawn target on `closed`. The word lowers to `__sigint()`, a
+  builtin typed `chan []byte`; the runtime creates the channel once, in the
+  root arena, and the signal handler only raises a flag. Every point where the
+  domain waits closes it from normal context, so a select arm on it fires like
+  an arm on any closed channel. A program that wants its own cleanup can still
+  install the immediate handler.
+- **Spawn channels are mailboxes with a declared message depth** - `chan T{}`
+  is one slot, `chan T{:N}` is N outstanding messages, and `chan T{:count:bytes}`
+  states the per-message frame budget (both fields may be run-time expressions,
+  so relay policy read from config sizes its own rings). A frame that encodes
+  past its budget panics with the actual size, the budget, and the
+  compiler-generated list of `cap` tags that set it. `:0` is a compile error.
+- **Frame budgets come from `cap` struct tags** - one number per
+  variable-length dimension, counted in elements (bytes at a `string`/`[]byte`
+  leaf), with one 4096-byte page for an unstated dimension.
+- **Breaker lifecycle** - a spawn's breaker is created before the fork, tracked
+  on the domain, closed at every return of the spawning function, on a panic,
+  and by the kernel reaper when a parent dies without one.
+
 Versions are tagged with `vX.Y.Z` and capture user-visible changes - compiler
 features, language rules, runtime additions, and fixes that change observable
 behaviour. Point-releases under the same minor typically group related
