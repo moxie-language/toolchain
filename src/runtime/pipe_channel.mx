@@ -107,6 +107,30 @@ func peerAlive(ch *channel) bool {
 	return childAlive(ch.spawnPid)
 }
 
+// breakerSendReason puts the reason a domain stopped onto its breaker as a
+// structural []byte frame, BEFORE the breaker closes, so the parent reads it
+// with an ordinary receive on the channel spawn returned: it learns why the
+// child stopped before it loses the ability to ask. The frame is encoded, not a
+// raw slice header, because the reason must be copied into the parent's arena -
+// a header would point into the dead child's pages.
+func breakerSendReason(ch *channel, msg string) {
+	if ch == nil {
+		return
+	}
+	n := len(msg)
+	if n > breakerReasonMax {
+		n = breakerReasonMax
+	}
+	reason := []byte(msg[:n])
+	var cb CodecBuf
+	var ss codecSeenSet
+	codecSeenInit(&ss)
+	var rt RawType
+	rt = RawType{meta: uint8(KindBytes)}
+	codecEncodeValue(&cb, &ss, unsafe.Pointer(&reason), &rt)
+	PipeChanSend(ch, cb.data)
+}
+
 // breakerFallback is the native answer to a nil breaker: the target was called
 // instead of spawned, so no domain and no breaker exist. Fail loud.
 func breakerFallback() *channel {
@@ -198,6 +222,11 @@ func PipeChanRecv(ch *channel) ([]byte, bool) {
 			return nil, false
 		}
 		if !peerAlive(ch) {
+			// The reap that noticed the death may have just put the final
+			// reason on the ring; deliver it before declaring the channel dead.
+			if lateData, late := ringRecv(ch.ringRecv); late {
+				return lateData, true
+			}
 			ringClose(ch.ringRecv)
 			if childSpawnTarget {
 				// The domain is orphaned: append its own counters before

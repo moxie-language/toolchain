@@ -57,6 +57,9 @@ func SpawnLifecycleChannel() *channel {
 	if spawnBreaker == nil {
 		spawnBreaker = spawnBreakerMake()
 	}
+	// The breaker is the parent's handle to this child: peer liveness and the
+	// reap close both key off the pid, exactly like a negotiated channel.
+	spawnBreaker.spawnPid = lastSpawnPid
 	if domainList != nil {
 		domainList.doneCh = spawnBreaker
 	}
@@ -72,7 +75,10 @@ func spawnBreakerMake() *channel {
 	ptrSize := unsafe.Sizeof(uintptr(0))
 	save := CurrentArena()
 	SetCurrentArena(trueRootArena())
-	ch := chanMake(ptrSize*3, 1, ptrSize*3, nil, 0)
+	// The element is a []byte reason (a slice header on the wire), and the
+	// budget must fit the encoded reason plus its tags, not just the header.
+	oneReason := ptrSize*3 + 64 + breakerReasonMax
+	ch := chanMake(ptrSize*3, 1, oneReason, nil, 0)
 	SetCurrentArena(save)
 	// The breaker crosses the fork, so the CLOSE has to be visible on both
 	// sides: it rides the control ring (chanID 0), whose closed flag lives in
@@ -139,8 +145,8 @@ func domainReapChildren() {
 					msg = "non-zero exit"
 				}
 				// msg == "" for clean exit
-				e.doneCh.trySend(unsafe.Pointer(&msg))
-				chanClose(e.doneCh)
+				breakerSendReason(e.doneCh, msg)
+				SpawnClose(e.doneCh)
 			}
 		}
 	}

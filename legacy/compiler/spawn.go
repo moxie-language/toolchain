@@ -110,7 +110,7 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	sig := targetFn.Signature
 	if !isSpawnTargetSig(sig) {
 		b.addError(instr.Pos(), fmt.Sprintf(
-			"spawn: %s must be declared with exactly one result, (closed chan struct{}), which is the domain's breaker; a function without it cannot be spawned",
+			"spawn: %s must be declared with exactly one result, (closed chan []byte), which is the domain's breaker; a function without it cannot be spawned",
 			targetFn.Name()))
 		return llvm.Value{}, nil
 	}
@@ -235,8 +235,14 @@ func isSpawnTargetSig(sig *types.Signature) bool {
 	if !ok || ch.Dir() != types.SendRecv {
 		return false
 	}
-	st, ok := ch.Elem().Underlying().(*types.Struct)
-	return ok && st.NumFields() == 0
+	// The breaker carries the reason a target stopped (a panic message, empty
+	// on a clean stop) before it closes, so its element is []byte.
+	sl, ok := ch.Elem().Underlying().(*types.Slice)
+	if !ok {
+		return false
+	}
+	el, ok := sl.Elem().Underlying().(*types.Basic)
+	return ok && el.Kind() == types.Uint8
 }
 
 // validateSpawnArg checks one parameter of a spawned function. A channel

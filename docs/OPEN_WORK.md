@@ -23888,3 +23888,31 @@ moxielang.dev is a browser bounce, not that, and Moxie's own loader never does
 an HTTP lookup (it resolves the toolchain through MOXIEROOT and pinned repos
 through MANIFEST), so nothing in this tree depends on the meta tag. The redirect
 only matters to a Go tool asking `go get` for the legacy module.
+
+### Round 347: the breaker carries a reason, and the reason is a code-first line
+
+The breaker's element is `[]byte`, so a domain can say WHY it stopped before the
+breaker closes: `runtimePanic` encodes the message as a structural `[]byte`
+frame (`breakerSendReason`), sends it on the domain's breaker, then closes and
+prints. The reap path sends the exit status as the same kind of frame, and
+`PipeChanRecv` drains once more after the peer is found dead, because the reap
+that noticed the death is what puts that final frame on the ring. On a panic
+the message is the diagnostic text, whose FIRST SPACE-SEPARATED TOKEN is the
+process exit code by convention (`134` for the abort a panic produces, `0` for
+a clean stop, `128+signal` for a killed domain); the same text is printed to the
+shared stderr, so every component's failure is readable in one stream.
+
+Three wiring bugs were fixed on the way: the breaker had no peer pid, so the
+parent's receive never noticed the child die and parked forever; the reap closed
+it with the local `chanClose` instead of the ring close, so the parent never saw
+it; and its frame budget was the slice-header size (24 bytes), smaller than the
+encoded reason, so the panic path itself panicked.
+
+**Still open:** the parent's receive decodes to an empty slice
+(`reason len: 0 ok: false`) - the frame is sent, but `PipeChanRecvStructural`'s
+decode of the runtime-encoded `[]byte` does not produce a value. Next probe:
+print the first bytes of the frame at `PipeChanRecvStructural` and the `td`
+kind it decodes with; the likely mismatch is the hand-built
+`RawType{meta: KindBytes}` descriptor versus the compiler's descriptor for
+`[]byte` (which carries `Elem`). Value-parameter budgets, `sigint`, and the full
+sweep remain after it.
