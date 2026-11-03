@@ -435,7 +435,7 @@ func (p *Package) Check() error {
 	// Two-pass Moxie rewrite: pipe concat (|), byte comparisons, switches.
 	needsRecheck := false
 	if isMoxieStringTarget(p.ImportPath) {
-		if p.Module.Main && p.Module.Path != "git.smesh.lol/moxie" {
+		if p.Module.Main && p.Module.Path != "github.com/moxie-language/toolchain" {
 			if plusErrs := checkPlusOnText(p.Files, &p.info, p.program.fset); len(plusErrs) > 0 {
 				return Errors{p, plusErrs}
 			}

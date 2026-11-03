@@ -6,7 +6,7 @@ to it.
 
 ## 0. What you inherit
 
-Repository: `/home/mleku/moxie/git.smesh.lol/moxie`, branch `dev`, level with
+Repository: `/home/mleku/moxie/github.com/moxie-language/toolchain`, branch `dev`, level with
 `origin/dev`. Confirm with `git status --porcelain` (empty) and
 `git rev-list --left-right --count origin/dev...HEAD` (`0 0`).
 

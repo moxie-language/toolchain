@@ -145,7 +145,7 @@ MOXIE=/path/to/moxie ./build.sh
 ### From Release Tarball
 
 ```sh
-curl -fsSL https://git.smesh.lol/moxie-releases/raw/install.sh | bash
+curl -fsSL https://github.com/moxie-language/toolchain-releases/raw/install.sh | bash
 ```
 
 The installer downloads the latest release, extracts to `/opt/moxie` (or `$MOXIE_INSTALL_DIR`),
@@ -161,7 +161,7 @@ export MOXIEROOT="/opt/moxie"
 ### From Git
 
 ```sh
-git clone https://git.smesh.lol/moxie
+git clone https://github.com/moxie-language/toolchain
 cd moxie
 ./build.sh
 cp moxie ~/.local/bin/

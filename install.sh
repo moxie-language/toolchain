@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-BASE_URL="https://git.smesh.lol/moxie-releases"
+BASE_URL="https://github.com/moxie-language/toolchain-releases"
 INSTALL_DIR="${MOXIE_INSTALL_DIR:-$HOME/.local/share/moxie}"
 BINDIR="${MOXIE_BINDIR:-$HOME/.local/bin}"
 

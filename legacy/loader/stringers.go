@@ -32,8 +32,8 @@ import (
 // imports change.
 func renderSkipPkg(pkgPath string) bool {
 	switch pkgPath {
-	case "array", "errors", "git.smesh.lol/moxie/pkg/mxregexp",
-		"git.smesh.lol/moxie/pkg/mxutil", "internal/binary", "internal/task", "io",
+	case "array", "errors", "github.com/moxie-language/toolchain/pkg/mxregexp",
+		"github.com/moxie-language/toolchain/pkg/mxutil", "internal/binary", "internal/task", "io",
 		"math/bits", "moxie", "runtime", "runtime/interrupt", "unsafe":
 		return true
 	}

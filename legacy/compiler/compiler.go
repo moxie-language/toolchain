@@ -4274,7 +4274,7 @@ func (c *compilerContext) isSovereignNamedType(t types.Type) bool {
 	// package and dead groups die with their arena - no exemption needed.
 	if obj := named.Obj(); obj != nil && obj.Pkg() != nil {
 		p := obj.Pkg().Path()
-		if p == "main" || p == "git.smesh.lol/moxie/pkg/syntax" || p == "syntax" {
+		if p == "main" || p == "github.com/moxie-language/toolchain/pkg/syntax" || p == "syntax" {
 			return false
 		}
 	}
@@ -4445,7 +4445,7 @@ func funcNeedsArenaCopy(fn *ssa.Function) bool {
 	path := fn.Pkg.Pkg.Path()
 	if path == "runtime" || path == "unsafe" || path == "syscall" || path == "os" ||
 		path == "main" ||
-		strings.HasPrefix(path, "git.smesh.lol/moxie/pkg/") {
+		strings.HasPrefix(path, "github.com/moxie-language/toolchain/pkg/") {
 		return false
 	}
 	sig := fn.Signature
