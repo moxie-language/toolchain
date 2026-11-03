@@ -24311,3 +24311,33 @@ written by hand:
   panic called `itoa`, which lives in `spawnhandshake.mx` under `//:build
   linux`: every wasm build failed with `undefined: itoa`. The panic now uses a
   local `codecItoa`, so a wasm build can name the same mistake.
+
+### Round 361: the gate state at v1.0.0-rc.0, and the one gate that will not run
+
+Everything green on the final compiler (fixpoint `69d989be`, s2 == s3; the two
+commits after it - a wasm-safe `codecItoa` and the generated sweep mains - do
+not reach the compiler's own closure, which the identical s2 hash confirms):
+
+    0a  124/124        0b  64/64          1   4/4
+    1b  stdlib sweep   1c  4/4 wasm       2   selfhost
+    3   IR validate     4  binary smoke   5   118/118 wasm fixtures
+    6   instrumentation 8  netsmoke, real sockets
+    restrictions 63/63  quickcheck 15/15
+
+NOT green: phase 7 (the UI app). Its build half passes - `ui:build`, nine wasm
+bundles plus the relay built from source - and then the app's own selenium
+suite produces a 4-byte pytest log and is killed by its 600 s timeout, with no
+verdict line. Two separate causes were found and only one was ours to fix:
+
+- the suite's stale-relay cleanup anchored on this checkout's relay path, so a
+  relay built into a temp dir (which is what the phase does) survived and held
+  port 23334 for the next run. Fixed in smesh's `test/conftest.py`: whatever
+  holds the test port is a stale relay, whatever its path.
+- with that fixed the suite still hangs before collection output, which is the
+  browser side (selenium/chromium) on this host, not the compiler: every earlier
+  attempt reached the same point with the same empty log, including runs from
+  before the termination work.
+
+So the UI suite is recorded as NOT VERIFIED rather than claimed. The compiler
+changes it would exercise (the entry select in nine bundles and the relay) are
+covered by the build half of the same phase and by 5, 1c, 8.
