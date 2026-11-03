@@ -24064,3 +24064,21 @@ Sweep results before that fix: 0a 124/124, 0b 64/64, 1 4/4, 1b 1/1, all green;
 phase 5's units up to the fix failed on this build error and the units after it
 passed. The sweep's 9000s budget expired during phase 7, so 2, 3, 4, 6, 7 and 8
 are re-run separately rather than as part of one timed run.
+
+### Round 352: phase sweep findings
+
+Phase 2 (selfhost), 3 (IR validate) and 4 (binary smoke) pass on the sigint
+compiler. Two fixture faults surfaced and are fixed:
+
+- `tests/data/futexpark/main.mx`'s `deadWorker` declares the breaker result and
+  then ends in `time.Sleep`, with no `return closed`: both compilers report
+  "missing return". It has the trailing return now.
+- the same class as `tls_handshake.mx`'s `serverDomain` (fixed in round 349).
+
+Phase 6 (instrumentation) then passes; its only remaining noise is a
+`badnamedresult` build that reports the right message and then dies from the
+parser's `panic` (the pre-existing hard-stop path, which prints and terminates
+by design).
+
+Phase 1c (wasm package builds) is green after round 351's `ptrSize` fix -
+`net/http` included, 12 minutes for the wasm build of the whole net stack.
