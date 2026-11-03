@@ -19,9 +19,17 @@ import (
 // messages: that park is the wakeup the test is about.
 func echoWorker(in chan int32, out chan int32) (closed chan []byte) {
 	for {
-		v, ok := <-in
+		var v int32
+		var ok bool
+		select {
+		case <-closed:
+			return closed
+		case rv, rok := <-in:
+			v = rv
+			ok = rok
+		}
 		if !ok {
-			return
+			return closed
 		}
 		out <- v * 2
 	}
@@ -31,10 +39,22 @@ func echoWorker(in chan int32, out chan int32) (closed chan []byte) {
 // then has to notice the peer died.
 func deadWorker(in chan int32, out chan int32) (closed chan []byte) {
 	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-closed:
+	default:
+	}
 	return closed
 }
 
 func main() {
+	// Termination: a batch program must still be stoppable, so the entry
+	// handles the channel the runtime closes on SIGINT/SIGTERM.
+	select {
+	case <-sigint:
+		return
+	default:
+	}
+
 	// Chan memory must outlive this frame: the forked child reads the same
 	// channel memory, so allocate it in the root arena.
 	runtime.SovereignSetArena(runtime.RootArena())

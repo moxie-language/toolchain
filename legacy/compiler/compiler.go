@@ -1780,6 +1780,11 @@ func (b *builder) createFunction() {
 	// Check Moxie language restrictions on user code.
 	b.checkMoxieRestrictions()
 
+	// The program entry has to handle termination, and the spawn targets it
+	// starts have to handle their own: the first is checked here, the second at
+	// each spawn call.
+	b.checkEntrySelect()
+
 	// -cover instruments the module's own code only; decided once per function
 	// so the per-block emission does not repeat the package walk.
 	b.coverThisFunc = b.Cover && b.coverPkg(b.fn.Pkg)

@@ -269,7 +269,17 @@ func chanWorkerLoop(jobs chan int32, results chan int32) (closed chan []byte) {
 		// no-accumulation unit saw as +2096kB over its 400 exchanges. The
 		// comment below is the rule: one iteration, one arena boundary.
 		runtime.ManualArenaEnter(arena)
-		i := <-jobs
+		// The worker serves its inbox and watches its termination breaker in
+		// the same select: a shutdown must not wait for the next request.
+		var i int32
+		select {
+		case <-closed:
+			runtime.ManualArenaExit(arena)
+			runtime.ArenaReset(arena)
+			return closed
+		case j := <-jobs:
+			i = j
+		}
 		if i < 0 {
 			runtime.ManualArenaExit(arena)
 			runtime.ArenaReset(arena)

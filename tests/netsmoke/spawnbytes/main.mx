@@ -52,17 +52,37 @@ func make(n int32) (b []byte) {
 // child echoes the length and checksum of every body it receives, then the
 // scalar control's value, then exits.
 func child(bodies chan Body, scalars chan int32, back chan int32) (closed chan []byte) {
+	select {
+	case <-closed:
+		return closed
+	default:
+	}
 	n := <-scalars
 	s := <-scalars
 	back <- s
 	for i := int32(0); i < n; i++ {
-		b := <-bodies
+		var b Body
+		select {
+		case <-closed:
+			return closed
+		case bb := <-bodies:
+			b = bb
+		}
 		back <- int32(len(b.Data))
 		back <- sum(b.Data)
 	}
+	return closed
 }
 
 func main() {
+	// Termination: a batch program must still be stoppable, so the entry
+	// handles the channel the runtime closes on SIGINT/SIGTERM.
+	select {
+	case <-sigint:
+		return
+	default:
+	}
+
 	var fails int32
 	bodies := chan Body{}
 	scalars := chan int32{}

@@ -127,6 +127,12 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 			targetFn.Name(), globalName))
 		return llvm.Value{}, nil
 	}
+	if !closedSelectPresent(targetFn) {
+		b.addError(instr.Pos(), fmt.Sprintf(
+			"spawn: %s never selects on its closed breaker; a spawned domain must handle termination, so its loop selects on <-closed and returns the breaker",
+			targetFn.Name()))
+		return llvm.Value{}, nil
+	}
 
 	if len(concreteArgs) != sig.Params().Len() {
 		b.addError(instr.Pos(), fmt.Sprintf("spawn: %s expects %d arguments, got %d",
@@ -228,6 +234,92 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		b.spawnBreakers = append(b.spawnBreakers, doneCh)
 	}
 	return doneCh, nil
+}
+
+// closedSelectPresent reports whether fn selects on its own closed breaker. The
+// prologue binds the result alloca (Comment "closed") to the domain's breaker,
+// and the closed arm's channel is a load of it, so the operand is either the
+// alloca or the load.
+//
+// A function with no SSA body is not judged: a target imported from a package
+// this compilation has not built has nothing to inspect, and refusing it would
+// reject a correct program. The check is a compile-time discipline, not a
+// proof, so the absence of a body is the honest boundary.
+func closedSelectPresent(fn *ssa.Function) bool {
+	if fn == nil || len(fn.Blocks) == 0 {
+		return true
+	}
+	var closedAlloc *ssa.Alloc
+	for _, blk := range fn.Blocks {
+		for _, instr := range blk.Instrs {
+			if a, ok := instr.(*ssa.Alloc); ok && a.Comment == "closed" {
+				closedAlloc = a
+			}
+		}
+	}
+	if closedAlloc == nil {
+		return false
+	}
+	return selectsOn(fn, closedAlloc)
+}
+
+// sigintSelectPresent reports whether fn selects on the termination channel.
+// `sigint` is lowered to the __sigint builtin, so the arm's channel is that
+// call.
+func sigintSelectPresent(fn *ssa.Function) bool {
+	return selectsOn(fn, nil)
+}
+
+// selectsOn reports whether fn has a select whose receive arm names chanVal, or
+// (chanVal == nil) the sigint builtin's channel.
+func selectsOn(fn *ssa.Function, chanVal ssa.Value) bool {
+	for _, blk := range fn.Blocks {
+		for _, instr := range blk.Instrs {
+			sel, ok := instr.(*ssa.Select)
+			if !ok {
+				continue
+			}
+			for _, st := range sel.States {
+				if chanVal == nil {
+					call, ok := st.Chan.(*ssa.Call)
+					if !ok {
+						continue
+					}
+					if bi, ok := call.Call.Value.(*ssa.Builtin); ok && bi.Name() == "__sigint" {
+						return true
+					}
+					continue
+				}
+				if st.Chan == chanVal {
+					return true
+				}
+				if u, ok := st.Chan.(*ssa.UnOp); ok && u.X == chanVal {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// checkEntrySelect enforces the termination rule at the program entry: a
+// program that cannot be told to stop has to be killed, and a domain's whole
+// point is that it stops when asked. In this compiler a `main` that survives to
+// codegen IS the entry (a library package's main is renamed to init by the
+// loader), so the name is the test.
+func (b *builder) checkEntrySelect() {
+	// The process entry (`runtime.main`, called by C) is also named main; the
+	// PROGRAM entry is the main function of the package named main.
+	if b.fn == nil || b.fn.Name() != "main" || len(b.fn.Blocks) == 0 {
+		return
+	}
+	if b.fn.Pkg == nil || b.fn.Pkg.Pkg == nil || b.fn.Pkg.Pkg.Name() != "main" {
+		return
+	}
+	if sigintSelectPresent(b.fn) {
+		return
+	}
+	b.addError(b.fn.Pos(), "main must select on sigint: add a `case <-sigint:` arm to its select (or a non-blocking one at entry for a batch program), because a program that cannot be told to stop has to be killed")
 }
 
 // isSpawnTargetSig reports whether sig is the declared shape of a spawned

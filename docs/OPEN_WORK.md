@@ -24224,3 +24224,42 @@ surfaces as a failed discovery, and the plain-URL form still works.
 The legacy bootstrap compiler has no `get`/`fetch` command at all, so there is
 nothing to mirror there; this is a CLI feature of the compiler that ships, not a
 codegen rule.
+
+### Round 358: the termination select is enforced, and the tree is migrated
+
+Both compilers now refuse a program that cannot be stopped:
+
+- **the program entry** (the `main` function of the package named `main`, not
+  the runtime's `runtime.main`) must select on `sigint`;
+- **every spawn target** must select on its own `closed` breaker.
+
+Legacy checks both in `createFunction`/`createSpawn`. Stage4 checks them in a
+post-pass over the built package (`checkTerminationSelects`), because the
+package's error list is read exactly once, before the emitter runs: an error
+recorded during emission is printed after the package was already judged
+compilable. That was measured - the check "worked" in the emitter and no build
+ever failed.
+
+The tree is migrated in the same change: 155 `main`s (the should_compile, data,
+netsmoke and should_run fixtures) gained a prologue select, and every spawn
+target now serves its inbox and watches its breaker in one select - the pool
+worker in `net/http`, the futexpark and spawnbytes/spawncost workers, the TLS
+fixture's server domain, and morly's Proxy/Blossom/Broadcast/Ingest workers,
+`dbengine.Run`, its test helpers and its main. `dbengine.Run` also keeps its
+`eng.Flush()`/`eng.Close()` on BOTH exit paths, because a closed inbox and a
+closed breaker mean the same thing to that domain.
+
+Two limits, both deliberate and recorded:
+
+- a target imported from another package is not checked: its body belongs to
+  that package's compilation, so the check sees what the current package
+  compiled (morly's library workers were migrated anyway, because the rule is
+  the rule, not because the compiler could see them);
+- the rejection fixtures (`tests/restrictions`, `legacy/tests/restrict`) are
+  not migrated: they are expected to fail, and the gate pins the message each
+  one must fail with. The sweep checks that the pinned messages still win.
+
+Evidence: `mxc-sel3` refuses a plain `main` ("main must select on sigint") and a
+target whose loop only receives ("spawn: worker never selects on its closed
+breaker"), accepts the migrated pair (which runs and prints `handled 5`), and
+builds both the compiler itself and morly.

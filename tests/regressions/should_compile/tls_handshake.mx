@@ -212,6 +212,12 @@ func serverDomain(caCh chan []byte, addrCh chan []byte, resCh chan []byte) (clos
 	addrCh <- []byte(ln.Addr().String())
 	cfg = tls.Config{Certificates: []tls.Certificate{cert}}
 	for i = 0; i < nConns; i++ {
+		select {
+		case <-closed:
+			ln.Close()
+			return closed
+		default:
+		}
 		serveOne(ln, &cfg, i, resCh)
 	}
 	ln.Close()
@@ -317,6 +323,14 @@ func badCase(addr []byte, roots *x509.CertPool, resCh chan []byte) (fails int32)
 }
 
 func main() {
+	// Termination: a batch program must still be stoppable, so the entry
+	// handles the channel the runtime closes on SIGINT/SIGTERM.
+	select {
+	case <-sigint:
+		return
+	default:
+	}
+
 	var caCh chan []byte
 	var addrCh chan []byte
 	var resCh chan []byte

@@ -25,15 +25,35 @@ type Untagged struct {
 func worker(in chan Req, one chan Untagged) (closed chan []byte) {
 	time.Sleep(100 * time.Millisecond)
 	for i := 0; i < 2; i++ {
-		r := <-in
+		var r Req
+		select {
+		case <-closed:
+			return closed
+		case rv := <-in:
+			r = rv
+		}
 		fmt.Println("  req", r.ID, "tags", len(r.Tags), "body", len(r.Body))
 	}
-	u := <-one
+	var u Untagged
+	select {
+	case <-closed:
+		return closed
+	case uv := <-one:
+		u = uv
+	}
 	fmt.Println("  untagged body", len(u.Body))
 	return closed
 }
 
 func main() {
+	// Termination: a batch program must still be stoppable, so the entry
+	// handles the channel the runtime closes on SIGINT/SIGTERM.
+	select {
+	case <-sigint:
+		return
+	default:
+	}
+
 	in := chan Req{:4}
 	one := chan Untagged{}
 	done := spawn(worker, in, one)

@@ -1142,6 +1142,138 @@ func isSpawnTargetSig(sig *Signature) (ok bool) {
 	return TextType(ch.Elem)
 }
 
+// selectsOn reports whether fn has a select whose receive arm names chanVal, or
+// - when wantSigint is set - the sigint builtin's channel. A function with no
+// body is not judged: a target imported from a package this compilation has not
+// built has nothing to inspect, and refusing it would reject a correct program.
+func selectsOn(fn *SSAFunction, chanVal SSAValue, wantSigint bool) (ok bool) {
+	if fn == nil || len(fn.Blocks) == 0 {
+		return true
+	}
+	for _, blk := range fn.Blocks {
+		for _, instr := range blk.Instrs {
+			sel, isSel := instr.(*SSASelect)
+			if !isSel {
+				continue
+			}
+			for _, st := range sel.States {
+				if wantSigint {
+					c, isCall := st.Chan.(*SSACall)
+					if !isCall {
+						continue
+					}
+					if bi, isBuiltin := c.Call.Value.(*SSABuiltin); isBuiltin && bi.SSAName() == "__sigint" {
+						return true
+					}
+					continue
+				}
+				if st.Chan == chanVal {
+					return true
+				}
+				if u, isUnop := st.Chan.(*SSAUnOp); isUnop && u.X == chanVal {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// targetSelectsOnClosed reports whether a spawn target selects on its own
+// closed breaker: the target's named result IS that breaker, and the closed
+// arm's channel is a load of it.
+func targetSelectsOnClosed(fn *SSAFunction) (ok bool) {
+	if fn == nil || len(fn.Blocks) == 0 {
+		return true
+	}
+	if !isSpawnTargetSig(fn.Signature) || len(fn.NamedResults) == 0 {
+		return false
+	}
+	return selectsOn(fn, fn.NamedResults[0], false)
+}
+
+// checkTerminationSelects enforces the two entry-point rules on a package's
+// SSA, after the whole package has been built and before the emission gate:
+//
+//   - the PROGRAM entry (the main function of the package named main) selects
+//     on sigint, because a program that cannot be told to stop has to be killed;
+//   - every function passed to spawn selects on its closed breaker, because a
+//     spawned domain must stop when its parent closes the breaker, not when its
+//     next message happens to arrive.
+//
+// It runs here rather than at emission because an error recorded during
+// emission is printed after the package has already been judged compilable -
+// the errors list is read exactly once, before the emitter runs.
+func checkTerminationSelects(pkg *SSAPackage) {
+	if pkg == nil || pkg.Members == nil {
+		return
+	}
+	for _, m := range pkg.Members {
+		fn, isFn := m.(*SSAFunction)
+		if !isFn {
+			continue
+		}
+		if fn.name == "main" && pkg.Pkg != nil && pkg.Pkg.Name == "main" && !selectsOn(fn, nil, true) {
+			reportCompileError("main must select on sigint: add a `case <-sigint:` arm to its select (or a non-blocking one at entry for a batch program), because a program that cannot be told to stop has to be killed")
+		}
+		checkSpawnCalls(fn)
+	}
+}
+
+// checkSpawnCalls walks one function body for spawn calls and checks each static
+// target: it must select on its closed breaker, and it must not reach a channel
+// through a package global (the channels of a spawned domain are its
+// parameters).
+func checkSpawnCalls(fn *SSAFunction) {
+	if fn == nil {
+		return
+	}
+	for _, blk := range fn.Blocks {
+		for _, instr := range blk.Instrs {
+			c, isCall := instr.(*SSACall)
+			if !isCall {
+				continue
+			}
+			bi, isBuiltin := c.Call.Value.(*SSABuiltin)
+			if !isBuiltin || bi.SSAName() != "spawn" || len(c.Call.Args) == 0 {
+				continue
+			}
+			target, isFn := c.Call.Args[0].(*SSAFunction)
+			if !isFn || target == nil {
+				continue
+			}
+			if !targetSelectsOnClosed(target) {
+				reportCompileError("spawn: " | target.name | " never selects on its closed breaker; a spawned domain must handle termination, so its loop selects on <-closed and returns the breaker")
+				continue
+			}
+			if gname, found := spawnTargetChannelGlobal(target); found {
+				reportCompileError("spawn: " | target.name | " reads channel global " | gname | "; a spawned domain's channels must be its parameters, so pass it through the spawn call")
+			}
+		}
+	}
+}
+
+// spawnTargetChannelGlobal reports the first channel-typed package global the
+// target's body reads.
+func spawnTargetChannelGlobal(fn *SSAFunction) (name string, found bool) {
+	for _, blk := range fn.Blocks {
+		for _, instr := range blk.Instrs {
+			u, isUnop := instr.(*SSAUnOp)
+			if !isUnop {
+				continue
+			}
+			g, isGlobal := u.X.(*SSAGlobal)
+			if !isGlobal {
+				continue
+			}
+			if _, isChan := SafeUnderlying(g.typ).(*TCChan); isChan {
+				return g.name, true
+			}
+		}
+	}
+	return "", false
+}
+
 // checkSpawnTarget enforces the spawn ABI: a parameter is either a channel (the
 // domain's only route to another domain) or a static startup value frozen at the
 // spawn call, and the function must not return a value - its termination breaker
@@ -1171,6 +1303,10 @@ func (e *irEmitter) checkSpawnTarget(fn *SSAFunction) (ok bool) {
 				return false
 			}
 		}
+	}
+	if !targetSelectsOnClosed(fn) {
+		reportCompileError("spawn: " | fn.name | " never selects on its closed breaker; a spawned domain must handle termination, so its loop selects on <-closed and returns the breaker")
+		return false
 	}
 	return true
 }
