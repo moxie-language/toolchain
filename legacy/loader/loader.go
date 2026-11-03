@@ -318,7 +318,14 @@ func (p *Package) parseFile(path string, data []byte, mode parser.Mode) (*ast.Fi
 	data = rewriteMoxiePragmas(data)
 	data = rewritePkgMainToInit(data)
 
-	chanResult := rewriteChanLiterals(data, p.program.fset)
+	// The termination word goes first: sigint becomes __sigint(), and the
+	// channel/slice passes below parse that output as their input.
+	sigintResult := rewriteSigintWord(data, p.program.fset)
+	if sigintResult.Err != nil {
+		return nil, sigintResult.Err
+	}
+
+	chanResult := rewriteChanLiterals(sigintResult.Src, p.program.fset)
 	if chanResult.Err != nil {
 		return nil, chanResult.Err
 	}

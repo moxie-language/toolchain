@@ -55,10 +55,43 @@ void moxie_signal_enable(uint32_t sig) {
     sigaction(sig, &act, NULL);
 }
 
-// Interrupt handling for a program that owns resources it must clean up before
-// dying. The program overrides moxie_on_interrupt; the default does nothing.
-// _exit is used because the handler must not run atexit handlers or flush
-// stdio that a nested fault could be holding.
+// Termination by signal. The handler does ONE thing: raise a flag. It may
+// interrupt an allocation, a channel operation or a held lock, so it must not
+// allocate, close a channel, or call anything that does. The domain polls the
+// flag at every point where it waits, closes its termination channel there
+// (normal context, its own state), and its select on `sigint` fires like a
+// receive on any closed channel.
+static volatile sig_atomic_t sigint_pending = 0;
+
+static void sigint_flag_handler(int sig) {
+    (void)sig;
+    sigint_pending = 1;
+}
+
+// moxie_sigint_install routes the signals that mean "stop" to the flag:
+// SIGINT from the terminal and SIGTERM from a supervisor. SA_RESTART keeps an
+// interrupted syscall resuming normally, so the flag stays the only change.
+void moxie_sigint_install(void) {
+    struct sigaction act = { 0 };
+    act.sa_handler = &sigint_flag_handler;
+    act.sa_flags = SA_RESTART;
+    sigaction(SIGINT, &act, NULL);
+    sigaction(SIGTERM, &act, NULL);
+}
+
+// moxie_sigint_pending reports whether a stop signal has arrived.
+int32_t moxie_sigint_pending(void) {
+    return (int32_t)sigint_pending;
+}
+
+// A program that owns resources it must release before dying can ask for the
+// immediate path instead: it overrides moxie_on_interrupt, and the handler runs
+// that and leaves. _exit is used because the handler must not run atexit
+// handlers or flush stdio that a nested fault could be holding.
+//
+// Installing this REPLACES the graceful flag handler for the signals it
+// installs. That is the program's decision, and it is one-way: the runtime
+// installs the flag handler at startup, so a program opts out only by asking.
 __attribute__((weak)) void moxie_on_interrupt(void) {}
 
 static void interrupt_handler(int sig) {
@@ -66,8 +99,6 @@ static void interrupt_handler(int sig) {
     _exit(128 + sig);
 }
 
-// moxie_install_interrupt_handler cleans up on the signals that mean "stop":
-// SIGINT from the terminal and SIGTERM from a supervisor.
 void moxie_install_interrupt_handler(void) {
     struct sigaction act = { 0 };
     act.sa_handler = &interrupt_handler;

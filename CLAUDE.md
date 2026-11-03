@@ -493,19 +493,25 @@ termination breaker, and it is written as a special word:
         }
     }
 
-`closed` is a special word, like `sigint`: `close(ch)` stays the builtin, and
-`closed` names the breaker channel the target returns. The same channel object
-is what `spawn` returns to the parent, so the breaker closes when the child
-ends and either side can close it early; before it closes it carries the
-reason the domain stopped (a panic message, empty on a clean stop). The
-signature is the marker: a function is callable via `spawn` only with exactly
-one result, a `chan []byte`, which is that breaker. A signature read back from
-another package's export data spells `[]byte` as `string` because Moxie text is
-one type, so the compiler tests for text, not for a slice of bytes. `main` is
-the other entry point and selects on `sigint` (SIGINT from the
-shell); a spawn target selects on `closed` (the parent's close, or the kernel
-reaper when the parent dies without one). A target may not reach a channel
-through a package global: its parameters are the only capabilities it gets.
+**`sigint` is the other entry point's channel.** `main` selects on `sigint`
+(SIGINT from the shell, SIGTERM from a supervisor); a spawn target selects on
+`closed` (the parent's close, or the kernel reaper when the parent dies without
+one). Both are predeclared words, and neither is `close`: `close(ch)` stays the
+builtin. `sigint` is a `chan []byte` the runtime owns, one per domain: it is
+created on first use in the root arena (`SigintChan`), so it outlives every
+frame that selects on it.
+
+The signal handler does ONE thing - raise a flag. It may interrupt an
+allocation, a channel operation or a held lock, so it must not allocate, close
+a channel or take a lock. Every point where the domain waits (the send, receive
+and select park loops) polls the flag and closes `sigint` there, in normal
+context; a select arm on it then fires like an arm on any closed channel, and a
+direct receive returns. A program that wants its own cleanup on the way out can
+still ask for the immediate path (`moxie_install_interrupt_handler`), which
+replaces the graceful disposition - that is the program's decision to make.
+
+A target may not reach a channel through a package global: its parameters are
+the only capabilities it gets.
 
 **The ring is sized before the fork, from the declaration.** A spawn channel is
 an atomic FIFO, not a pipe: its size must be known when the rings are created,

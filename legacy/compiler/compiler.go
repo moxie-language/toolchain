@@ -2677,6 +2677,10 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon, callInstr *ssa.Call)
 		switch call.Name() {
 		case "spawn":
 			return b.createSpawn(instr)
+		case "__sigint":
+			// The termination channel is the runtime's, created in the root
+			// arena at startup; the word only names it.
+			return b.createRuntimeCall("SigintChan", nil, "sigint"), nil
 		case "Sizeof", "Alignof":
 			// unsafe.Sizeof/Alignof inspect the static type of the operand;
 			// the operand is not evaluated (Go spec). Building params first

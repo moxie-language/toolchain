@@ -308,6 +308,7 @@ func chanSend(ch *channel, value unsafe.Pointer, op *channelOp) {
 	// Wait until a receiver picks up the value.
 	if !hasScheduler {
 		for t.DataUint32() == chanOperationWaiting {
+			sigintPoll()
 			if hasPoll {
 				netpollBlock(100)
 			} else {
@@ -316,6 +317,7 @@ func chanSend(ch *channel, value unsafe.Pointer, op *channelOp) {
 			fireTimers()
 		}
 	} else {
+		sigintPoll()
 		task.Pause()
 	}
 
@@ -409,6 +411,7 @@ func chanRecv(ch *channel, value unsafe.Pointer, op *channelOp) bool {
 			// parent that waited on <-done never noticed the exit, because
 			// nothing else runs while this loop is parked.
 			domainReapChildren()
+			sigintPoll()
 			if hasPoll {
 				netpollBlock(100)
 			} else {
@@ -417,6 +420,7 @@ func chanRecv(ch *channel, value unsafe.Pointer, op *channelOp) bool {
 			fireTimers()
 		}
 	} else {
+		sigintPoll()
 		task.Pause()
 	}
 
@@ -434,6 +438,46 @@ var DomainClosed *channel
 // ClosedBreakerChan is the domain's breaker, bound to a spawn target's `closed`
 // result in the function prologue.
 func ClosedBreakerChan() *channel { return DomainClosed }
+
+// sigintChan is the domain's termination channel. The predeclared word `sigint`
+// names it, so it must outlive every frame that selects on it: it is created on
+// first use in the root arena.
+var sigintChan *channel
+
+// sigintFired records that the termination channel has been closed, so a flag
+// observed at two poll sites closes once.
+var sigintFired bool
+
+// SigintChan is the termination channel; the compiler lowers `sigint` to this
+// call. A receive on it fires when the process is told to stop, and a select
+// arm on it runs then like any arm on a closed channel.
+func SigintChan() (ch *channel) {
+	if sigintChan != nil {
+		return sigintChan
+	}
+	ptrSize := unsafe.Sizeof(uintptr(0))
+	save := CurrentArena()
+	SetCurrentArena(trueRootArena())
+	sigintChan = chanMake(ptrSize*3, 1, ptrSize*3+64, nil, 0)
+	SetCurrentArena(save)
+	return sigintChan
+}
+
+// sigintPoll closes the termination channel once the signal handler has raised
+// the flag. The handler itself cannot: it may interrupt an allocation, a
+// channel operation or a held lock. Every point where the domain waits calls
+// this, so the close happens in normal context and receivers wake through the
+// ordinary closed-channel path.
+func sigintPoll() {
+	if sigintChan == nil || sigintFired {
+		return
+	}
+	if !sigintPending() {
+		return
+	}
+	sigintFired = true
+	chanClose(sigintChan)
+}
 
 // AssertBreaker binds a spawn target's closed result and fails loud when the
 // function was called directly instead of spawned: a nil breaker disables the
@@ -638,6 +682,10 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 	}
 	if !hasScheduler {
 		for t.DataUint32() == chanOperationWaiting {
+			// The termination channel is one of the arms only if the program
+			// selected on it; closing it otherwise is harmless and leaves this
+			// select waiting on the channels it actually named.
+			sigintPoll()
 			if hasPipeBound {
 				if pipeSelectRecheck(t, states, recvbuf) {
 					break
@@ -663,6 +711,7 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 			// Same recheck loop for the scheduler.tasks variant. Yields
 			// between checks via Gosched to share the CPU.
 			for t.DataUint32() == chanOperationWaiting {
+				sigintPoll()
 				if pipeSelectRecheck(t, states, recvbuf) {
 					break
 				}
@@ -670,6 +719,7 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 				sleepTicks(nanosecondsToTicks(1_000_000))
 			}
 		} else {
+			sigintPoll()
 			task.Pause()
 		}
 	}

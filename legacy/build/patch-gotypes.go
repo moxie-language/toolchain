@@ -81,6 +81,7 @@ func main() {
 	patchPtrRecvMethodSet(dstDir)
 	patchArrayCapNegative(dstDir)
 	patchChanFrameBudget(dstDir)
+	patchSigintBuiltin(dstDir)
 
 	fmt.Fprintf(os.Stderr, "patched go/types in %s\n", dstDir)
 }
@@ -781,6 +782,49 @@ func patchChanFrameBudget(dir string) {
 	src = mustReplace(f, src,
 		"\t\tif len(sizes) == 2 && sizes[0] > sizes[1] {",
 		"\t\tif _, isSlice := u.(*Slice); isSlice && len(sizes) == 2 && sizes[0] > sizes[1] {")
+
+	mustWrite(f, src)
+}
+
+// patchSigintBuiltin adds the __sigint builtin: the call that names the
+// domain's termination channel, which the predeclared word `sigint` is lowered
+// to. It is a zero-argument expression returning chan []byte - the same handle
+// on both sides, so a select arm and a direct receive see the same close.
+func patchSigintBuiltin(dir string) {
+	f := filepath.Join(dir, "universe.go")
+	src := mustRead(f)
+
+	src = mustReplace(f, src,
+		"\t_Resize\n\n\t// package unsafe",
+		"\t_Resize\n\t_Sigint\n\n\t// package unsafe")
+
+	src = mustReplace(f, src,
+		"\t_Resize:  {\"resize\", 2, false, statement},",
+		"\t_Resize:  {\"resize\", 2, false, statement},\n\t_Sigint:  {\"__sigint\", 0, false, expression},")
+
+	mustWrite(f, src)
+
+	f = filepath.Join(dir, "builtins.go")
+	src = mustRead(f)
+
+	src = mustReplace(f, src,
+		"\tcase _Recover:\n\t\t// recover() string",
+		`	case _Sigint:
+		// __sigint() chan []byte: the domain's termination channel, closed
+		// when the process is told to stop. The handle is the runtime's, so
+		// every call names the same channel.
+		if nargs != 0 {
+			check.errorf(call, WrongArgCount, invalidOp+"__sigint takes no arguments")
+			return
+		}
+		x.mode = value
+		x.typ = NewChan(SendRecv, NewSlice(universeByte))
+		if check.recordTypes() {
+			check.recordBuiltinType(call.Fun, makeSig(x.typ))
+		}
+
+	case _Recover:
+		// recover() string`)
 
 	mustWrite(f, src)
 }

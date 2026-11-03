@@ -321,6 +321,75 @@ func RewriteChanLiterals(src []byte, fset *token.FileSet) RewriteResult {
 }
 
 // ---------------------------------------------------------------------------
+// 1a. Termination word rewrite (text-level, before parsing)
+// ---------------------------------------------------------------------------
+
+// RewriteSigint lowers the predeclared word sigint - the domain's termination
+// channel - to the call that names it, __sigint(). It runs FIRST, on the source
+// as written, so the channel and slice passes that follow parse its output and
+// need no offset compensation.
+//
+// The scan is token-aware: a scanner yields an IDENT only for real code, so the
+// word inside a string, a rune literal or a comment is never touched, and a
+// field named sigint (x.sigint) is left alone. A declaration of the name is
+// left alone too (the next token is a type), because the word is predeclared
+// and a shadowing declaration is a source error the parser reports.
+func RewriteSigint(src []byte, fset *token.FileSet) RewriteResult {
+	type tok struct {
+		pos, end int
+		tok      token.Token
+		lit      string
+	}
+
+	localFset := token.NewFileSet()
+	file := localFset.AddFile("", localFset.Base(), len(src))
+	var s scanner.Scanner
+	s.Init(file, src, nil, scanner.ScanComments)
+
+	var toks []tok
+	for {
+		pos, t, lit := s.Scan()
+		if t == token.EOF {
+			break
+		}
+		offset := file.Offset(pos)
+		end := offset + len(lit)
+		if lit == "" {
+			end = offset + len(t.String())
+		}
+		toks = append(toks, tok{pos: offset, end: end, tok: t, lit: lit})
+	}
+
+	var result bytes.Buffer
+	lastEnd := 0
+	for i, t := range toks {
+		if t.tok != token.IDENT || t.lit != "sigint" {
+			continue
+		}
+		if i > 0 {
+			switch toks[i-1].tok {
+			case token.PERIOD, token.VAR, token.TYPE, token.FUNC:
+				continue
+			}
+		}
+		if i+1 < len(toks) {
+			switch toks[i+1].tok {
+			case token.IDENT, token.LBRACK, token.CHAN, token.MAP, token.STRUCT, token.INTERFACE:
+				continue
+			}
+		}
+		result.Write(src[lastEnd:t.pos])
+		result.WriteString("__sigint()")
+		lastEnd = t.end
+	}
+	if lastEnd == 0 {
+		return RewriteResult{Src: src}
+	}
+	result.Write(src[lastEnd:])
+	return RewriteResult{Src: result.Bytes()}
+}
+
+// ---------------------------------------------------------------------------
 // 1b. Slice size literal rewrite (text-level, before parsing)
 // ---------------------------------------------------------------------------
 

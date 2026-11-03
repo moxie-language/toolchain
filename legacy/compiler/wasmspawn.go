@@ -214,9 +214,11 @@ func (b *builder) createWasmSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		return llvm.Value{}, nil
 	}
 
-	if sig.Results().Len() != 0 {
+	// The spawn ABI is one rule for both targets: exactly one result, the
+	// domain's breaker, a chan []byte.
+	if !isSpawnTargetSig(sig) {
 		b.addError(instr.Pos(), fmt.Sprintf(
-			"spawn: %s must not return values; a spawned function reports termination through the breaker channel spawn returns",
+			"spawn: %s must be declared with exactly one result, (closed chan []byte), which is the domain's breaker; a function without it cannot be spawned",
 			targetFn.Name()))
 		return llvm.Value{}, nil
 	}

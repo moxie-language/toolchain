@@ -24000,3 +24000,47 @@ this round's run before the commit.
 
 Still open, unchanged: `sigint` (main's select) and the value-parameter budget
 encode, both as described in round 348.
+
+### Round 350: sigint lands (the word, the flag, the poll)
+
+Round 348's attempt is not what landed. The failure there was the *rewrite*
+shape, not the signal plumbing, so this round changed the shape:
+
+- `sigint` is lowered to a predeclared **builtin call**, `__sigint()`, and the
+  call is typed `chan []byte` by the same mechanism `__slicealloc` uses. In
+  legacy that is a patched GOROOT (`_Sigint` id in `universe.go`, a case in
+  `builtins.go`'s `check.builtin`); in stage4 it is `BuiltinSigint` in the
+  universe plus a `buildBuiltinCall` case. The compiler emits
+  `runtime.SigintChan()`, so the word names the domain's channel and nothing
+  else.
+- The rewrite runs **first**, on the source as written: legacy's
+  `mxtext.RewriteSigint` and stage4's `rewriteSigintWord` scan tokens/bytes,
+  skip comments, quoted strings, raw strings and rune literals, match the
+  identifier as a whole word, and leave `x.sigint` and a declaration of the
+  name alone. Both later passes (channel literals, slice literals) parse the
+  rewritten source as their input, so no offset compensation is needed - which
+  is where round 348 went wrong.
+- The runtime creates the channel lazily in the **root arena**
+  (`SigintChan`), so it outlives every frame that selects on it. The C handler
+  does one thing: raise `sig_atomic_t`. `sigintPoll()` closes the channel once,
+  from normal context, and it is called in every point where the domain waits:
+  the send loop, the receive loop, and both branches of `chanSelect`'s wait.
+  The handler itself never allocates, closes or locks.
+- The old immediate `_exit` path survives as the app's explicit choice
+  (`moxie_install_interrupt_handler`, used by the compiler to clean its scratch
+  dirs); installing it replaces the graceful disposition. The runtime installs
+  the flag handler at startup.
+- wasm defines `sigintPending() = false`: a browser domain is stopped by the
+  host tearing down the Worker, so the channel simply never closes there.
+
+Evidence: a one-file program that parks in `select { case <-sigint: }` prints
+`waiting`, then `sigint`, then `done` when sent SIGINT - compiled by the
+legacy-built stage4 AND by the bootstrapped `./moxie`. The self-compile that
+died in round 348 ("arena: region table full") now completes, and the bootstrap
+reaches fixpoint `dd4a0c92` (s2 == s3). `tests/restrictions` is 63/63.
+
+Not yet done: the compilers do not yet *enforce* the select (every `main`
+selecting on `sigint`, every spawn target on `closed`), and the tree's mains are
+not migrated to it, so the word is available but unused. Enforcing before the
+migration would break every fixture, so enforcement and migration are one
+change. The value-parameter budget encode is still unwired.

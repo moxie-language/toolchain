@@ -469,6 +469,172 @@ func scanWasmImportMap(src []byte, pkgPath string) (m map[string][]string) {
 }
 
 
+// rewriteSigintWord lowers the predeclared word `sigint` - the domain's
+// termination channel - to the call that names it, __sigint(). It runs before
+// every other rewrite, so the channel and slice passes parse its output and
+// need no offset compensation.
+//
+// One pass over the bytes, skipping line comments, block comments, quoted
+// strings, raw strings and rune literals, matching the identifier as a whole
+// word. A field named sigint (x.sigint) and a declaration of the name are left
+// alone: the token before and after tell them apart from a value use.
+func rewriteSigintWord(src []byte) (buf []byte) {
+	n := len(src)
+	// Size the output up front from a crude count of the word: over-counting
+	// only wastes capacity, and push fails loud rather than growing.
+	occ := int32(0)
+	for k := int32(0); k+6 <= n; k++ {
+		if src[k] == 's' && src[k+1] == 'i' && src[k+2] == 'g' && src[k+3] == 'i' && src[k+4] == 'n' && src[k+5] == 't' && !isIdentPartByte(src, k-1) && !isIdentPartByte(src, k+6) {
+			occ++
+		}
+	}
+	if occ == 0 {
+		return src
+	}
+	out := []byte{:0:n + occ*5}
+	last := int32(0)
+	changed := false
+	i := int32(0)
+	for i < n {
+		c := src[i]
+		if c == '/' && i+1 < n && src[i+1] == '/' {
+			for i < n && src[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if c == '/' && i+1 < n && src[i+1] == '*' {
+			i += 2
+			for i+1 < n && !(src[i] == '*' && src[i+1] == '/') {
+				i++
+			}
+			i += 2
+			continue
+		}
+		if c == '"' || c == '\'' {
+			quote := c
+			i++
+			for i < n {
+				if src[i] == '\\' {
+					i += 2
+					continue
+				}
+				if src[i] == quote {
+					i++
+					break
+				}
+				i++
+			}
+			continue
+		}
+		if c == '`' {
+			i++
+			for i < n && src[i] != '`' {
+				i++
+			}
+			i++
+			continue
+		}
+		if isIdentStartByte(c) {
+			j := i + 1
+			for j < n && isIdentPartByte(src, j) {
+				j++
+			}
+			if j-i == 6 && src[i] == 's' && sigintAt(src, i) && sigintValueUse(src, i, j) {
+				out = appendCopy(out, src, last, i)
+				out = appendLit(out, "__sigint()")
+				last = j
+				changed = true
+			}
+			i = j
+			continue
+		}
+		i++
+	}
+	if !changed {
+		return src
+	}
+	out = appendCopy(out, src, last, n)
+	return out
+}
+
+// sigintAt reports whether src[start:] begins with the word sigint.
+func sigintAt(src []byte, start int32) (ok bool) {
+	const w = "sigint"
+	for k := int32(0); k < 6; k++ {
+		if start+k >= len(src) || src[start+k] != w[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// isIdentPartByte reports whether b can continue an identifier.
+func isIdentPartByte(src []byte, k int32) (ok bool) {
+	if k < 0 || k >= len(src) {
+		return false
+	}
+	b := src[k]
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
+// sigintValueUse reports whether the word at [start,end) is a value use rather
+// than a field name or a declaration of the name.
+func sigintValueUse(src []byte, start, end int32) (ok bool) {
+	k := start - 1
+	for k >= 0 && (src[k] == ' ' || src[k] == '\t') {
+		k--
+	}
+	if k >= 0 && src[k] == '.' {
+		return false
+	}
+	if k >= 0 && (wordEndsAt(src, k+1, "var") || wordEndsAt(src, k+1, "type") || wordEndsAt(src, k+1, "func")) {
+		return false
+	}
+	j := end
+	for j < len(src) && (src[j] == ' ' || src[j] == '\t') {
+		j++
+	}
+	if j < len(src) {
+		nc := src[j]
+		if isIdentStartByte(nc) {
+			return false
+		}
+		switch nc {
+		case '[':
+			return false
+		}
+	}
+	return true
+}
+
+// isIdentStartByte reports whether b can start an identifier.
+func isIdentStartByte(b byte) (ok bool) {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+}
+
+// appendCopy appends src[from:to] to dst.
+func appendCopy(dst []byte, src []byte, from, to int32) (r []byte) {
+	r = dst
+	if to <= from {
+		return r
+	}
+	r = mxutil.Ensure(r, to-from)
+	for k := from; k < to; k++ {
+		r = push(r, src[k])
+	}
+	return r
+}
+
+// appendLit appends a literal string to dst.
+func appendLit(dst []byte, s string) (r []byte) {
+	r = mxutil.Ensure(dst, int32(len(s)))
+	for k := int32(0); k < int32(len(s)); k++ {
+		r = push(r, s[k])
+	}
+	return r
+}
+
 func stripDuplicatePackageClauses2(src []byte) (buf []byte) {
 	// Fast path: count package clauses. If only one, return src unchanged.
 	count := int32(0)
