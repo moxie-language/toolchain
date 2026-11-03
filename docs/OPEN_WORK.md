@@ -24297,3 +24297,17 @@ Also fixed: the compiler's own generators must satisfy the rules they enforce -
 `generateTestMain` now emits the entry select (a test binary is a batch
 program), and `cmd/mxcover`, `cmd/mxlex` and `cmd/gen-unicode-tables` gained it.
 Phase 6 caught all three.
+
+### Round 360: the sweep's three discoveries about generated programs
+
+Phase 1, 1b and 1c found three more places where the rule reached code nobody had
+written by hand:
+
+- `tests/syntax`, `tests/types` and three sibling fixture directories keep
+  their own mains; migrated.
+- phases 1 and 1b GENERATE a main for their sweep package, so those scripts now
+  emit the entry select (a sweep binary is a batch program like any other).
+- `src/runtime/codec.mx` is shared by every target, and the new value-argument
+  panic called `itoa`, which lives in `spawnhandshake.mx` under `//:build
+  linux`: every wasm build failed with `undefined: itoa`. The panic now uses a
+  local `codecItoa`, so a wasm build can name the same mistake.

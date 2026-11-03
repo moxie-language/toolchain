@@ -1870,5 +1870,33 @@ func spawnArgBudgetPanic(actual, budget int32, notePtr unsafe.Pointer, noteLen u
 	if notePtr != nil && noteLen > 0 {
 		note = unsafe.Slice((*byte)(notePtr), noteLen)
 	}
-	runtimePanic("spawn argument: encoded value of " | itoa(actual) | " bytes exceeds the " | itoa(budget) | "-byte budget. Variable-length fields and their cap tags: " | note)
+	runtimePanic("spawn argument: encoded value of " | codecItoa(actual) | " bytes exceeds the " | codecItoa(budget) | "-byte budget. Variable-length fields and their cap tags: " | note)
+}
+
+// codecItoa renders an int32 in decimal. The runtime's itoa lives in a
+// linux-only file, and this panic is shared code: a wasm build must be able to
+// name the same mistake.
+func codecItoa(n int32) (s string) {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	u := uint32(n)
+	if neg {
+		u = uint32(-n)
+	}
+	var d []byte
+	d = []byte{:0:12}
+	for u > 0 {
+		d = push(d, byte('0'+u%10))
+		u /= 10
+	}
+	if neg {
+		d = push(d, '-')
+	}
+	out := []byte{:0:int32(len(d))}
+	for i := int32(0); i < int32(len(d)); i++ {
+		out = push(out, d[int32(len(d))-1-i])
+	}
+	return string(out)
 }

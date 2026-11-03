@@ -25,6 +25,11 @@ run_one() {
 		echo "import _ \"moxielang.dev/pkg/$name\""
 		echo ""
 		echo "func main() {"
+		echo "	select {"
+		echo "	case <-sigint:"
+		echo "		return"
+		echo "	default:"
+		echo "	}"
 		echo "}"
 	} >"$UNIT_WORK/pkg/main.mx"
 	MOXIEROOT="$ROOT" "$MOXIE" build -o "$UNIT_WORK/out" "$UNIT_WORK/pkg" \
