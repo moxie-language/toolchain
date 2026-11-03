@@ -24082,3 +24082,31 @@ by design).
 
 Phase 1c (wasm package builds) is green after round 351's `ptrSize` fix -
 `net/http` included, 12 minutes for the wasm build of the whole net stack.
+
+### Round 353: gate state at v1.0.0-rc.0
+
+Green on the sigint compiler (fixpoint `dd4a0c92`, plus the two native-neutral
+commits after it - a wasm-only runtime file and a test fixture):
+
+    0a  124/124      0b  64/64       1   4/4        1b  1/1
+    1c  4/4 wasm     2   selfhost    3   IR validate 4  binary smoke
+    6   instrumentation (after the futexpark fixture fix)
+    8   netsmoke, real sockets
+
+Not completed, and not claimed: phase 5 (117 wasm fixtures, each built and run
+in Chromium) finished 15 units green after round 351's fix and the earlier
+units' failures were all that fix's build error, but the full browser run was
+stopped; phase 7 (UI app) reached `ui:build` PASS - 9 wasm bundles plus the
+relay built from source - and its selenium suite was stopped before a verdict.
+Both are browser suites and were stopped deliberately: running them put this
+machine into swap.
+
+While stopping the sweep, a phase-7 scripting fault surfaced: `tests/util.sh`
+defaults `MOXIE=./moxie`, and the phase then does `(cd "$RLY" && "$MOXIE" ...)`,
+so a *direct* invocation of `tests/phase7_ui.sh` builds nothing ("No such file
+or directory") - only the unitrun wrapper passes an absolute path. That is a
+test-harness bug, not a compiler one, and it is worth fixing next time the UI
+phase is touched.
+
+Remaining work, unchanged: the value-parameter budget encode, and enforcing the
+termination select in both compilers together with migrating the tree's mains.
