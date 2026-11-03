@@ -23916,3 +23916,23 @@ kind it decodes with; the likely mismatch is the hand-built
 `RawType{meta: KindBytes}` descriptor versus the compiler's descriptor for
 `[]byte` (which carries `Elem`). Value-parameter budgets, `sigint`, and the full
 sweep remain after it.
+
+**The reason arrives, and the exit code leads it.** The last piece was the
+spawn result's TYPE: both compilers typed `spawn(...)` as `chan struct{}`
+regardless of the target, so the caller's receive used the raw path and the
+reason (a structural `[]byte` frame) never reached user code even though the
+child sent it. Both compilers now type the spawn result exactly as the target
+declared it - the target's single result, `chan []byte` - and the parent's
+receive decodes the reason: `reason len: 20 ok: true` for a child that panics,
+`0 ` for one that stops cleanly. The text is the exit code first
+(`134` for the abort a panic produces, `0` clean, `128+signal` killed) followed
+by the diagnostic, which the failing component also prints to the shared stderr.
+The reason frame is encoded cross-domain, so the parent gets its own copy rather
+than a header into the dying child's arena. Fixpoint `654c8f01`.
+
+**A compiler bug found by the probe:** `string(x)` where `x` is a `[]byte`
+local produced `invalid cast opcode for cast from '{}' to '{ ptr, i64, i64 }'`
+in the generated IR (the conversion emitted an empty-struct operand). The probe
+prints `len(reason)` instead. That conversion is used all over the tree on
+parameters and fields, so the failing shape is narrower than the operation -
+recorded for a dedicated look.

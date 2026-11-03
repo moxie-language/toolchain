@@ -6221,12 +6221,18 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 	case BuiltinSpawn:
 		fb.checkSpawnSignature(args)
 		call7 := &SSACall{Call: SSACallCommon{Value: b, Args: args}}
-		// spawn returns the control channel: chan struct{}, bidirectional
-		// because either side may close it. It was typed <-chan string, a
-		// leftover from when the control channel carried strings, so every
-		// `done := spawn(...)` stored into a chan struct{} field was a type
-		// error - pkg/broadcast's Broadcaster.done was the first to hit it.
+		// spawn returns the target's breaker channel, typed exactly as the
+		// target declared it: the reason the domain stopped travels on that
+		// same channel, so the caller's receive must see the element type.
 		call7.typ = NewTCChan(TCSendRecv, &TCStruct{})
+		if len(args) > 0 {
+			if sig, ok := SafeUnderlying(args[0].SSAType()).(*Signature); ok && sig.Results != nil && sig.Results.Len() == 1 {
+				r := sig.Results.At(0)
+				if r != nil && r.Typ != nil {
+					call7.typ = r.Typ
+				}
+			}
+		}
 		call7.name = fb.nextName()
 		fb.emit(call7)
 		return call7

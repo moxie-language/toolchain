@@ -395,8 +395,21 @@ func patchSpawnBuiltin(dir string) {
 				return
 			}
 		}
+		// spawn returns the target's breaker channel, not a fixed
+		// chan struct{}: the target declares (closed chan []byte) and the
+		// reason it stopped travels on that same channel, so the caller's
+		// receive must be typed as the target returned it.
+		fnArg := 0
+		if isString(x.typ) {
+			fnArg = 1
+		}
 		x.mode = value
 		x.typ = NewChan(SendRecv, NewStruct(nil, nil))
+		if fnArg < len(args) {
+			if sig, ok := under(args[fnArg].typ).(*Signature); ok && sig.Results().Len() == 1 {
+				x.typ = sig.Results().At(0).typ
+			}
+		}
 		// Synthesize a signature for the spawn ident so the SSA builder
 		// can construct a *Builtin with a *types.Signature when it visits
 		// the call. Without this, fn.instanceType(e).(*types.Signature)

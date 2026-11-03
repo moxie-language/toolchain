@@ -113,21 +113,30 @@ func peerAlive(ch *channel) bool {
 // child stopped before it loses the ability to ask. The frame is encoded, not a
 // raw slice header, because the reason must be copied into the parent's arena -
 // a header would point into the dead child's pages.
-func breakerSendReason(ch *channel, msg string) {
+func breakerSendReason(ch *channel, code int32, msg string) {
 	if ch == nil {
 		return
 	}
-	n := len(msg)
+	// The first space-separated token is the process exit code, the standard
+	// unix return value: a panic aborts (134), a clean stop is 0, a killed
+	// domain is 128+signal. The rest is the diagnostic, printed to the shared
+	// stderr by the component that failed.
+	text := itoa(code) | " " | msg
+	n := len(text)
 	if n > breakerReasonMax {
 		n = breakerReasonMax
 	}
-	reason := []byte(msg[:n])
+	reason := []byte(text[:n])
 	var cb CodecBuf
 	var ss codecSeenSet
 	codecSeenInit(&ss)
 	var rt RawType
 	rt = RawType{meta: uint8(KindBytes)}
+	// Cross-domain: a stable-slice frame would hand the parent a header pointing
+	// into this dying domain's arena. The parent needs its own copy.
+	codecCrossDomain = true
 	codecEncodeValue(&cb, &ss, unsafe.Pointer(&reason), &rt)
+	codecCrossDomain = false
 	PipeChanSend(ch, cb.data)
 }
 
