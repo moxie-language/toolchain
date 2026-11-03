@@ -116,6 +116,16 @@ func capTagCounts(tag string) (dims []int64) {
 // ring a spawn channel carries, so a dimension that cannot be bounded at all
 // (channel, interface, function, type parameter) is an error, never a guess.
 func (b *builder) frameBudget(t types.Type, dims []int64, di int, pos token.Pos) (n int64) {
+	return b.frameBudgetDepth(t, dims, di, pos, 0)
+}
+
+// frameBudgetDepth bounds the walk: a type graph with a cycle (a struct
+// pointing at itself) would otherwise recurse until the stack dies. Past the
+// bound one page is counted, which can only over-estimate the frame.
+func (b *builder) frameBudgetDepth(t types.Type, dims []int64, di int, pos token.Pos, depth int) (n int64) {
+	if depth > 48 {
+		return frameBudgetDefault
+	}
 	if t == nil {
 		return frameBudgetDefault
 	}
@@ -135,32 +145,29 @@ func (b *builder) frameBudget(t types.Type, dims []int64, di int, pos token.Pos)
 		return int64(b.targetData.TypeAllocSize(b.getLLVMType(t)))
 	case *types.Slice:
 		if c := dimCount(dims, di); c > 0 {
-			return 1 + 10 + c*b.frameBudget(ut.Elem(), dims, di+1, pos)
+			return 1 + 10 + c*b.frameBudgetDepth(ut.Elem(), dims, di+1, pos, depth+1)
 		}
 		return 1 + 10 + frameBudgetDefault
 	case *types.Array:
-		return 1 + 10 + int64(ut.Len())*b.frameBudget(ut.Elem(), dims, di+1, pos)
+		return 1 + 10 + int64(ut.Len())*b.frameBudgetDepth(ut.Elem(), dims, di+1, pos, depth+1)
 	case *types.Pointer:
-		return 1 + b.frameBudget(ut.Elem(), dims, di, pos)
+		return 1 + b.frameBudgetDepth(ut.Elem(), dims, di, pos, depth+1)
 	case *types.Map:
 		if c := dimCount(dims, di); c > 0 {
-			return 1 + 5 + c*(b.frameBudget(ut.Key(), nil, 0, pos)+b.frameBudget(ut.Elem(), nil, 0, pos))
+			return 1 + 5 + c*(b.frameBudgetDepth(ut.Key(), nil, 0, pos, depth+1)+b.frameBudgetDepth(ut.Elem(), nil, 0, pos, depth+1))
 		}
 		return 1 + 5 + frameBudgetDefault
 	case *types.Struct:
 		n = 1 + 5
 		for i := 0; i < ut.NumFields(); i++ {
-			n += b.frameBudget(ut.Field(i).Type(), capTagCounts(ut.Tag(i)), 0, pos)
+			n += b.frameBudgetDepth(ut.Field(i).Type(), capTagCounts(ut.Tag(i)), 0, pos, depth+1)
 		}
 		return n
-	case *types.Chan:
-		b.addError(pos, fmt.Sprintf("spawn: %s contains a channel, which has no computable frame size; pass channels as top-level spawn arguments", t))
-	case *types.Interface:
-		b.addError(pos, fmt.Sprintf("spawn: %s contains an interface, which has no computable frame size", t))
-	case *types.Signature:
-		b.addError(pos, fmt.Sprintf("spawn: %s contains a function value, which has no computable frame size", t))
-	case *types.TypeParam:
-		b.addError(pos, fmt.Sprintf("spawn: %s is a type parameter, which has no computable frame size", t))
+	case *types.Chan, *types.Interface, *types.Signature, *types.TypeParam:
+		// Not sizeable, and not legal in a spawn frame either: the spawn
+		// validator refuses those types by name, so the budget is not the gate.
+		// Counting a page keeps the number an over-estimate rather than making
+		// every make(chan) in the tree report a diagnostic.
 	}
 	return frameBudgetDefault
 }
@@ -200,6 +207,13 @@ func (b *builder) budgetNoteOperand(note string) (ptr llvm.Value, n llvm.Value) 
 // carried on the channel and appears in the panic that fires when an encoding
 // overruns its budget, so it must name the declaration a programmer changes.
 func (b *builder) frameNote(t types.Type, path, tag string) (s string) {
+	return b.frameNoteDepth(t, path, tag, 0)
+}
+
+func (b *builder) frameNoteDepth(t types.Type, path, tag string, depth int) (s string) {
+	if depth > 48 {
+		return ""
+	}
 	if t == nil {
 		return ""
 	}
@@ -218,14 +232,14 @@ func (b *builder) frameNote(t types.Type, path, tag string) (s string) {
 		if strings.Contains(tag, `cap:"`) || elemIsByte(ut.Elem()) {
 			return capNoteEntry(path, tag)
 		}
-		if sub := b.frameNote(ut.Elem(), path+"[]", ""); sub != "" {
+		if sub := b.frameNoteDepth(ut.Elem(), path+"[]", "", depth+1); sub != "" {
 			return capNoteEntry(path, tag) + "; " + sub
 		}
 		return capNoteEntry(path, tag)
 	case *types.Array:
-		return b.frameNote(ut.Elem(), path, tag)
+		return b.frameNoteDepth(ut.Elem(), path, tag, depth+1)
 	case *types.Pointer:
-		return b.frameNote(ut.Elem(), path, tag)
+		return b.frameNoteDepth(ut.Elem(), path, tag, depth+1)
 	case *types.Map:
 		return capNoteEntry(path, tag)
 	case *types.Struct:
@@ -234,7 +248,7 @@ func (b *builder) frameNote(t types.Type, path, tag string) (s string) {
 		}
 		var parts []string
 		for i := 0; i < ut.NumFields(); i++ {
-			if sub := b.frameNote(ut.Field(i).Type(), path+"."+ut.Field(i).Name(), ut.Tag(i)); sub != "" {
+			if sub := b.frameNoteDepth(ut.Field(i).Type(), path+"."+ut.Field(i).Name(), ut.Tag(i), depth+1); sub != "" {
 				parts = append(parts, sub)
 			}
 		}

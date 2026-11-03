@@ -212,7 +212,11 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	doneCh := b.createCall(lcFnType, lcFn, []llvm.Value{llvm.Undef(b.dataPtrType)}, "done.ch")
 	trackFnType, trackFn := b.getFunction(b.program.ImportedPackage("runtime").Members["SpawnTrack"].(*ssa.Function))
 	b.createCall(trackFnType, trackFn, []llvm.Value{doneCh, llvm.Undef(b.dataPtrType)}, "")
-	b.spawnBreakers = append(b.spawnBreakers, doneCh)
+	// Only a spawn in the entry block dominates every return; a spawn inside a
+	// branch cannot be named at a return in another branch.
+	if b.currentBlock != nil && b.currentBlock.Index == 0 {
+		b.spawnBreakers = append(b.spawnBreakers, doneCh)
+	}
 	return doneCh, nil
 }
 

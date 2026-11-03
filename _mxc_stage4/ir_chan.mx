@@ -692,6 +692,16 @@ func (e *irEmitter) emitMakeChan(m *SSAMakeChan) {
 // ring a spawn channel carries, so a dimension that cannot be bounded at all
 // (channel, interface, function, type parameter) is an error, never a guess.
 func (e *irEmitter) frameBudget(t Type, dims []int64, di int32) (n int32) {
+	return e.frameBudgetDepth(t, dims, di, 0)
+}
+
+// frameBudgetDepth is frameBudget with a recursion bound. A type graph with a
+// cycle (a struct pointing at itself) would otherwise recurse until the stack
+// dies; past the bound the walk counts one page, which can only over-estimate.
+func (e *irEmitter) frameBudgetDepth(t Type, dims []int64, di int32, depth int32) (n int32) {
+	if depth > 48 {
+		return 4096
+	}
 	if t == nil {
 		return 4096
 	}
@@ -713,32 +723,30 @@ func (e *irEmitter) frameBudget(t Type, dims []int64, di int32) (n int32) {
 		return budgetBasicWidth(ut.Kind)
 	case *Slice:
 		if c := budgetDim(dims, di); c > 0 {
-			return int32(1 + 10 + c*int64(e.frameBudget(ut.Elem, dims, di+1)))
+			return int32(1 + 10 + c*int64(e.frameBudgetDepth(ut.Elem, dims, di+1, depth+1)))
 		}
 		return 1 + 10 + 4096
 	case *Array:
-		return int32(1 + 10 + ut.Len*int64(e.frameBudget(ut.Elem, dims, di+1)))
+		return int32(1 + 10 + ut.Len*int64(e.frameBudgetDepth(ut.Elem, dims, di+1, depth+1)))
 	case *Pointer:
-		return 1 + e.frameBudget(ut.Base, dims, di)
+		return 1 + e.frameBudgetDepth(ut.Base, dims, di, depth+1)
 	case *TCMap:
 		if c := budgetDim(dims, di); c > 0 {
-			return int32(1 + 5 + c*int64(e.frameBudget(ut.Key, nil, 0)+e.frameBudget(ut.Elem, nil, 0)))
+			return int32(1 + 5 + c*int64(e.frameBudgetDepth(ut.Key, nil, 0, depth+1)+e.frameBudgetDepth(ut.Elem, nil, 0, depth+1)))
 		}
 		return 1 + 5 + 4096
 	case *TCStruct:
 		n = 1 + 5
 		for i := int32(0); i < ut.NumFields(); i++ {
-			n += e.frameBudget(ut.Field(i).Typ, budgetTagCounts(ut.Tag(i)), 0)
+			n += e.frameBudgetDepth(ut.Field(i).Typ, budgetTagCounts(ut.Tag(i)), 0, depth+1)
 		}
 		return n
-	case *TCChan:
-		reportCompileError("spawn: " | t.String() | " contains a channel, which has no computable frame size; pass channels as top-level spawn arguments")
-	case *TCInterface:
-		reportCompileError("spawn: " | t.String() | " contains an interface, which has no computable frame size")
-	case *Signature:
-		reportCompileError("spawn: " | t.String() | " contains a function value, which has no computable frame size")
-	case *TypeParam:
-		reportCompileError("spawn: " | t.String() | " is a type parameter, which has no computable frame size")
+	case *TCChan, *TCInterface, *Signature, *TypeParam:
+		// Not sizeable, and not legal in a spawn frame either: the spawn
+		// validator refuses those types by name, so the budget is not the
+		// gate. Counting one page keeps the number an over-estimate instead of
+		// crashing the compiler while it prints a diagnostic for every channel
+		// it sees (the walk runs for EVERY make(chan), not only spawn ones).
 	}
 	return 4096
 }
@@ -818,6 +826,13 @@ func budgetParseCount(s []byte) (n int64) {
 // carried on the channel and appears in the panic that fires when an encoding
 // overruns its budget, so it must name the declaration a programmer changes.
 func (e *irEmitter) frameNote(t Type, path, tag string) (s string) {
+	return e.frameNoteDepth(t, path, tag, 0)
+}
+
+func (e *irEmitter) frameNoteDepth(t Type, path, tag string, depth int32) (s string) {
+	if depth > 48 {
+		return ""
+	}
 	if t == nil {
 		return ""
 	}
@@ -834,14 +849,14 @@ func (e *irEmitter) frameNote(t Type, path, tag string) (s string) {
 		if lIndex(tag, []byte("cap:\"")) >= 0 || budgetElemIsByte(ut.Elem) {
 			return capNoteEntry(path, tag)
 		}
-		if sub := e.frameNote(ut.Elem, path|"[]", ""); sub != "" {
+		if sub := e.frameNoteDepth(ut.Elem, path|"[]", "", depth+1); sub != "" {
 			return capNoteEntry(path, tag) | "; " | sub
 		}
 		return capNoteEntry(path, tag)
 	case *Array:
-		return e.frameNote(ut.Elem, path, tag)
+		return e.frameNoteDepth(ut.Elem, path, tag, depth+1)
 	case *Pointer:
-		return e.frameNote(ut.Base, path, tag)
+		return e.frameNoteDepth(ut.Base, path, tag, depth+1)
 	case *TCMap:
 		return capNoteEntry(path, tag)
 	case *TCStruct:
@@ -850,7 +865,7 @@ func (e *irEmitter) frameNote(t Type, path, tag string) (s string) {
 		}
 		parts := ""
 		for i := int32(0); i < ut.NumFields(); i++ {
-			sub := e.frameNote(ut.Field(i).Typ, path|"."|ut.Field(i).Name, ut.Tag(i))
+			sub := e.frameNoteDepth(ut.Field(i).Typ, path|"."|ut.Field(i).Name, ut.Tag(i), depth+1)
 			if sub == "" {
 				continue
 			}

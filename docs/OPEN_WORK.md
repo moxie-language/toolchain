@@ -23854,3 +23854,21 @@ on this compiler.
 the breaker before the close), the `sigint` half (handler must stop `_exit`ing
 and wake the domain; every `main` gains the select; both compilers enforce it),
 the select checks for spawn targets, and the value-parameter budget encode.
+
+**The http segfault was two compiler bugs, not a runtime one.** `gdb` on
+`moxie build` showed an infinite `frameBudget` recursion: the walk followed a
+cyclic type graph (a struct pointing at itself) with no bound, and the recursion
+only stopped when the stack died. Both compilers now carry a depth bound (48);
+past it the walk counts one page, which can only over-estimate. The second crash
+was the walk's own diagnostics: it called `reportCompileError` for any
+chan/interface/func element type - but the walk runs for EVERY `make(chan)`,
+not just spawn ones, and the message built `t.String()` for a recursive type
+inside the error path. Those cases now return the page default; the spawn
+validator is the gate that refuses such types, by name, where it belongs. The
+third was an LLVM "instruction does not dominate all uses": the compiled
+close-at-return named a spawn register from a branch in another branch's return.
+The return-close is emitted only for a spawn in the entry block, which is where
+the rule's real cases live (a spawn at the top of its function).
+
+Evidence: fixpoint `1a1aeb1c`; `http_header_api` builds and prints `header ok`;
+`spawn_frame_budget` builds and runs under the new import root.

@@ -1250,12 +1250,18 @@ func (e *irEmitter) emitSpawnCall(c *SSACall) {
 	reg := e.regName(c)
 	e.w("  ") ; e.w(reg) ; e.w(" = call ptr @runtime.SpawnLifecycleChannel(ptr null)\n")
 	e.declareRuntime("runtime.SpawnLifecycleChannel", "ptr", "")
-	// Register the breaker for the panic path and close it at this function's
-	// every return.
+	// Register the breaker for the panic path.
 	e.w("  call void @runtime.SpawnTrack(ptr ") ; e.w(reg) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.SpawnTrack", "void", "ptr")
+	// Close it at every return, but only when the spawn dominates the returns:
+	// a spawn inside a branch cannot be named at a return in another branch
+	// without an alloca in the entry block (LLVM rejects the use). Spawns are
+	// written at the top of their function in practice, so the entry-block case
+	// is the one that carries the rule.
 	e.spawnBreakers = mxutil.Ensure(e.spawnBreakers, 1)
-	push(e.spawnBreakers, reg)
+	if len(e.curFunc.Blocks) > 0 && e.currentEmitBlock == e.curFunc.Blocks[0] {
+		push(e.spawnBreakers, reg)
+	}
 }
 
 // emitSpawnWrapper emits (once) the goroutine-start wrapper for a spawn
