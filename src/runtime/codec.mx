@@ -29,6 +29,35 @@ func codecStrHdr() uintptr { return unsafe.Sizeof(_string{}) }
 // codec are laid out in target words.
 func codecPtrSize() uintptr { return unsafe.Sizeof(uintptr(0)) }
 
+// codecDataFloor is the lowest address a real object can occupy on this target.
+// It is a property of the TARGET, not a constant, and the constant was wrong on
+// wasm32: wasm-ld places the first data segment at 1024, so descriptors and
+// string data legitimately live below 0x1000 there. Measured: a wasm build's
+// interface type descriptor sat at 0xAC8, the encoder's plausibility guard
+// (tc > 0x1000) refused it, wrote an interface tag with NO value, and the
+// decoder then ran off the end of its buffer in codecReadVarint - every wasm
+// program trapped in package init, which is why the wasm half of phase 5 had
+// been skipped rather than failing. Native keeps the first page: mmap_min_addr
+// is never below it.
+func codecDataFloor() uintptr {
+	if codecPtrSize() < 8 {
+		return 1024
+	}
+	return 0x1000
+}
+
+// codecVoidPtr reports an address no allocation can start at. The native floor
+// is 64 KiB, the value this check has always used to tell a stale or synthetic
+// base from a live one; wasm32's data base is 1024, and using the native floor
+// there silently encoded every string below 64 KiB as EMPTY - a data-loss path
+// that a target-aware floor removes.
+func codecVoidPtr(addr uintptr) (ok bool) {
+	if codecPtrSize() < 8 {
+		return addr < 1024
+	}
+	return addr < 65536
+}
+
 // codecArenaContains reports whether addr lies in any allocated region of a.
 func codecArenaContains(a *Arena, p uintptr) (ok bool) {
 	if a == nil {
@@ -894,7 +923,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 			codecWriteRaw(cb, unsafe.Pointer(&s), codecStrHdr())
 			return
 		}
-		if s.length > 0 && (s.ptr == nil || uintptr(unsafe.Pointer(s.ptr)) < 65536) {
+		if s.length > 0 && (s.ptr == nil || codecVoidPtr(uintptr(unsafe.Pointer(s.ptr)))) {
 			codecWriteVarint(cb, codecTagStr)
 			codecWriteVarint(cb, uint64(0))
 			codecWriteVarint(cb, uint64(0))
@@ -1038,17 +1067,18 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		iface := *(*_interface)(ptr)
 		codecWriteVarint(cb, codecTagIface)
 		codecWriteBytes(cb, unsafe.Slice((*byte)(unsafe.Pointer(&iface.typecode)), codecPtrSize()))
-		// Plausibility bound for a type descriptor pointer: above the first
-		// page and below the top of the address space. On a 32-bit target
-		// the whole space is plausible, so there is no upper bound to apply:
-		// 2^48 does not fit a uintptr there, and shifting a 32-bit value by
-		// 48 is not expressible at all.
+		// Plausibility bound for a type descriptor pointer: above the
+		// target's data floor (codecDataFloor - 1024 on wasm32, the native
+		// first page elsewhere) and below the top of the address space. On a
+		// 32-bit target the whole space is plausible, so there is no upper
+		// bound to apply: 2^48 does not fit a uintptr there, and shifting a
+		// 32-bit value by 48 is not expressible at all.
 		tc := uintptr(iface.typecode)
 		tcMax := ^uintptr(0)
 		if codecPtrSize() >= 8 {
 			tcMax = ^uintptr(0) >> 16
 		}
-		if tc > 0x1000 && tc < tcMax {
+		if tc >= codecDataFloor() && tc < tcMax {
 			ct := (*RawType)(iface.typecode)
 			if ct.Kind() != Invalid && ct.Size() <= 65536 {
 				// Zero-size structs (e.g. empty context markers) still
