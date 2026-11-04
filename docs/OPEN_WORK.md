@@ -24641,3 +24641,87 @@ End-to-end on the box, from a wiped tree and an empty cache: `s1` (legacy-built)
 → phase 0a **33/33 PASS** on a cold cache → `s2` → `s3` → `s4`, `s3 == s4`
 (`c546da31`), installed as `./moxie` → runtime bake written. The 33 units are
 the ones without verdicts; the honest full-count run is `--force`.
+
+### Round 373: a language rule that depended on the job count
+
+`0b`'s `reject_plus_text` and `reject_plusassign_text` - the fixtures that pin
+`'+' is not allowed for text concatenation` - passed on the local machine and
+failed on the box with "compiler did not reject (exit 0)". Same sources, same
+compiler binary (`c546da31`, checked by hash), same fixture file (checked by
+hash). The determining variable was neither the host nor the toolchain: it was
+the number of compiler worker processes.
+
+`plusIsBanned` asks `targetIsMainModule()` and then `isTargetPkg(pkgPath)`, which
+is `pkgPath == bst.targetPkgPath`, falling back to the module prefix - which is
+`""` for a program that lives in no module, as a fixture does. The worker
+metadata carried `rootModPrefix` but never `targetPkgPath`, so in a worker
+`bst.targetPkgPath` was `""`, the comparison failed, the module prefix said "no
+module", and the rule did not apply. Serial builds applied it; worker builds did
+not. The local machine's TLS probe had been forcing the serial path, which is
+why the gate was green there.
+
+That is a language rule whose answer depended on `-j`, and it required neither a
+new feature nor a guard to fix: `targetPkgPath` is now part of the module context
+the workers receive, like `rootModPrefix`. Verified on the box with the
+rebuilt compiler: `-j 1` and `-j 4` both report the restriction, and `0b` is
+**64/64** at the default job count. `legacy/` has no worker processes and always
+applied the rule, so there is no legacy mirror.
+
+### Round 374: the wasm target had not been verified, and it did not work
+
+With the box finally able to run a browser, `phase 5` reported 117 units and
+**116 SKIPPED** ("chromium not available to playwright"). A suite that skips is
+not a suite that passed - and underneath the skips was a target that could not
+run a single program:
+
+    [domain] RuntimeError: unreachable
+        at app.wasm.runtime.codecReadVarint
+        at app.wasm.runtime.codecDecodeValue
+        at app.wasm.errors.New
+        at app.wasm.errors.main
+
+`errors.init` calls `New`, `New` returns an `error` interface, and the return
+protocol's decode ran off the end of its buffer. Instrumenting
+`codecDecodeValue` showed the shape in two lines: decode at `pos=0 len=6
+kind=20` (interface), then decode at `pos=6 len=6 kind=21` - the encoder had
+written the interface's tag and type descriptor and **nothing for the value**.
+
+The encoder writes an interface's value only when the descriptor pointer passes a
+plausibility guard, and that guard was `tc > 0x1000`: a native null-page
+constant. `wasm-ld` places the first data segment at 1024, so a real descriptor
+lives below `0x1000` - measured at `0xAC8`. The decoder has no such guard; it
+follows whatever descriptor it is given, so it walked into the empty tail and
+trapped. The same class was hiding one line up the file: a string whose base was
+below 65536 was encoded as an EMPTY string, so on wasm every string below 64 KiB
+would have been silently dropped.
+
+Both floors are now target functions (`codecDataFloor`, `codecVoidPtr`): 1024
+where a word is 4 bytes, the existing `0x1000`/64 KiB values on 64-bit targets.
+`codec.mx` is one file shared by both compilers, so the fix is bilateral by
+construction. Verified: a trivial program that trapped at `errors.init` prints
+`hello wasm` in the browser (rc=0), and `phase 5` went from 3 pass / 9 fail to
+the run recorded in round 376.
+
+The lesson is not "wasm was broken"; it is that **the skip was invisible**. A
+phase that cannot run its subject reports the same green as one that ran it, and
+a browser-less host had been reporting green for a target that trapped before
+`main`.
+
+### Round 375: what a test host needs that a compiler host does not
+
+Three gates reach outside the toolchain, and each one was found by a failure that
+read like a compiler defect:
+
+- **A browser.** Phases 1c and 5 run wasm modules in Playwright's chromium. The
+  provisioning script now installs `playwright` plus its chromium and refuses to
+  finish unless chromium launches, because the alternative is 116 silent skips.
+- **The sample app and its relay.** Phase 7 builds `../smesh` and `../morly`,
+  then runs the app's own Selenium suite: Python with `selenium`, `pytest`,
+  `websocket-client`, and a Firefox + geckodriver. Ubuntu ships firefox only as
+  a snap, so the box got Mozilla's tarball and geckodriver's release binary;
+  `docs/building.md` states the requirement and the variable that overrides the
+  app path (`MOXIE_UI_APP`).
+- **Patience about parallelism.** `-j 4` on a 30 GB host put four compiler
+  builds and a 250-package fixture in flight at once; `phase 6`'s legacy build
+  died mid-run with a Go trace under that pressure and passed when re-run alone.
+  The box runs the full sweep at `-j 2` for the record.
