@@ -4,23 +4,39 @@ State carried across context compaction. Ordered queue, the decisions already
 taken, the findings that motivated them, and the two designs in flight
 (module removal, user-code exemption). Update this file when the queue moves.
 
-## STANDING ISSUES (round 379) - the current queue, runtime outward
+## STANDING ISSUES (round 379) - the current queue
 
-Round 378 closed items 1-5 and 7; the evidence is in "ROUND 378 CLOSE" below.
-What is left is verification, not design.
+Round 378 closed everything it listed, and round 379 closed the wasm panic gate
+and the wasm spawn defects that gate exposed. What is left is one pre-existing
+gap and one environment note.
 
-### 1. Wasm panic action: a browser gate - the only open item
+### 1. Legacy cannot build for the wasm target (pre-existing)
 
-Item 1's native half is gated by `smoke:panic-stderr` (phase 4): a spawned
-worker panics, stdout is empty, stderr is `panic: worker died`, exit 134. The
-wasm half - the message reaches the page as stderr and `stopAllDomains` in
-`jsruntime/host.mjs` ends the whole tree - is implemented but no fixture
-exercises it. Add a wasm fixture that panics in a spawned worker and assert the
-page console line and that a sibling worker stops.
+`legacy/moxie build -target wasm` crashed on ANY program at `e21b7be0` (before
+the round's changes) inside `ssa.MethodValue`: `defBuiltinStringMethods` in
+`legacy/build/patch-gotypes.go` declared the placeholder builtin `String()`
+methods with no receiver, and MethodValue dereferences it on the first named
+type over a builtin (`interrupt.State`). That is fixed - the placeholders now
+carry a receiver - and legacy native spawn works again. The wasm target then
+reaches `internal/task: missing function body` and stops. This is a wood-law
+gap, not a regression: stage4 is the only compiler that has ever produced wasm.
+It needs its own round: start from the `internal/task` failure, then exercise
+the spawn ABI and the panic gate with `MOXIE=legacy/moxie`.
 
-The full sweep is green; the numbers are in "ROUND 378 CLOSE" item 6.
+### 2. The sweep needs a sane GOROOT on this host
 
-## ROUND 378 CLOSE (measured 2026-11-04, local 14 GB host)
+`tests/phase6_instrumentation.sh` builds a Go reference tool with the host's
+`go`, and this shell exports `GOROOT=/home/mleku/go`, an empty directory:
+`package strings is not in std`. With `GOROOT=/opt/go1.25.3` phase 6 is green.
+The repo needs no change; the host environment does.
+
+### 3. The Hetzner box went offline mid-run
+
+It came up at 21:20 and was synced with the 378 commit, but became unreachable
+(no ICMP, SSH timed out) while its bootstrap was running. The local 14 GB host
+carried the final verification. Re-sync and re-run when it is back.
+
+## ROUND 378 CLOSE## ROUND 378 CLOSE (measured 2026-11-04, local 14 GB host)
 
 The queue that stood here was items 1-7, runtime outward. All but the gates are
 fixed. The box is not needed any more: the dispatch fix took the wasm module
@@ -92,11 +108,17 @@ from the frame ends the domains it started.
   exit 0). The object stage that used to be OOM-killed now peaks at ~900 MB for
   the 57 MB `net/http` module.
 - phase 4: green, including the new panic unit.
-- full sweep on `c3e48768` (2026-11-04, local): **323 units, 322 passed, 0
+- full sweep on `c3357341` (2026-11-04, local): **323 units, 322 passed, 0
   failed, 1 skipped**, exit 0. `1c/net/http` PASS, phase 2 (selfhost) PASS,
   phase 5 (Chromium fixtures) PASS, phase 7 (UI app + relay) PASS, phase 8
   (netsmoke, both dispatch modes) PASS, `tree-cleanliness` PASS. The skip is
   `spawn_closed_crosspkg`, declared native-only and exercised natively in 0a.
+- full sweep on `1642902a` (the round's final commit, local, cold compiler):
+  **324 units, 322 passed, 1 skipped, 1 failed** - the failure was phase 6's Go
+  reference build under this host's stale `GOROOT`, and phase 6 PASSes in 179 s
+  with `GOROOT=/opt/go1.25.3`. `1c/net/http` PASS (cold, 18 min),
+  `5/panic-tree` PASS, phase 2 selfhost PASS, phase 7 PASS, phase 8 PASS,
+  `tree-cleanliness` PASS.
 
 The Hetzner host is off and was not used for this round; the notes about its
 patched GOROOT remain valid for the next time it is used. Locally, `legacy/
@@ -131,6 +153,29 @@ Behind that failure sat a second one, only reachable once the object stage
 worked: a wasm library link defined `runtime.stacksave` in both `initAll` and
 `wasi_stubs.ll`. The stub now defines it only when the runtime is not in the
 build closure, which is the condition `initAll` uses.
+
+### 8. Wasm spawn and the page's panic action - CLOSED (round 379)
+
+The panic gate the queue asked for exposed that wasm spawn had never worked:
+`__spawn_entry` ran a target without initializing the domain (no root arena,
+"domainRoot not initialized"), the Worker staged the child's arguments with
+`__alloc` before that init, the child's `PipeChanSendRaw`/`RecvRaw` were stubs
+returning false (every direct send dropped, every direct receive waited on an
+empty ring), the child wrapper's element size was the channel type's (a pointer,
+4 bytes, for every element), and the root Worker never learned the module URL
+for its own children. All five are fixed: `WasmSpawnInit` at the top of
+`__spawn_entry`, a static `__spawn_scratch` staging area, real raw routes, the
+element type's size, and `__moxie_wasm_url` set in both Worker entry paths.
+No wasm fixture had ever exercised spawn because the only two that used it
+declared themselves native-only.
+
+The gate is `5/panic-tree`: a spawned domain panics, its message reaches the
+page as one line of stderr (printstring now writes the whole string in one
+`fd_write`, and the Worker's stderr is line-buffered), a sibling that would
+print after 1.5 s does not, and the page records that `stopAllDomains` ran
+(`window.__moxie_panic`). Its negative control, with `stopAllDomains` disabled,
+fails the gate. `run.py` also reports partial stdout on a timeout, which is
+what made the hang diagnosable.
 
 ## REMAINING WORK (as of round 73) - historical snapshot
 
