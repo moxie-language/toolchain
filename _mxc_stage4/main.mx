@@ -5997,7 +5997,6 @@ func cmdUpdate(rebuildAll bool) {
 		return
 	}
 	mxutil.WriteStr(2, "rebuilding all cached packages...\n")
-	mpath := getMoxiePath()
 	root := moxieRoot()
 	ensureModuleRoot(root)
 	cacheBase := pkgCacheDir()
@@ -6012,6 +6011,21 @@ func cmdUpdate(rebuildAll bool) {
 	mkdirAll(tmpdir, 0755)
 	registerScratch(tmpdir)
 	registerBuiltins()
+	// The cache names WHAT to rebuild; the rebuild set is the import closure of
+	// those packages in dependency order, because a package is type-checked
+	// against its imports' exports (loadMxhInto, after each package compiles)
+	// and its SSA resolves imported symbols through them. Rebuilding a cached
+	// package on its own therefore fails whenever its imports are not also
+	// cached - and on a fresh host that is the normal state, because the runtime
+	// bake is the only thing that writes a new generation: the cache then holds
+	// "runtime" alone and every imported name comes back undefined.
+	//
+	// resolveAll returns one root's closure with each import before the package
+	// that imports it, and concatenating those lists keeps that property: any
+	// list holding a package also holds its imports earlier in the same list, so
+	// a package's first occurrence never precedes an unbuilt import.
+	var pkgs []*pkgInfo
+	added := map[string]bool{}
 	for _, pkgDir := range pkgDirs {
 		pkgPath := ""
 		for i := 0; i < len(pkgDir); i++ {
@@ -6024,19 +6038,17 @@ func cmdUpdate(rebuildAll bool) {
 		if len(pkgPath) > 0 && pkgPath[0] == '/' {
 			continue
 		}
-		mxutil.WriteStr(2, "  rebuild " | pkgPath | "\n")
-		pkg := discoverPkg(pkgPath, root)
-		if pkg == nil {
-			candidate := mxutil.JoinPath(mpath, pkgPath)
-			mxF := listFiles(candidate, ".mx")
-			if len(mxF) > 0 {
-				pkg = discoverPkg(pkgPath, root)
+		for _, rp := range resolveAll(pkgPath, root) {
+			if added[rp.path] {
+				continue
 			}
+			added[rp.path] = true
+			pkgs = mxutil.Ensure(pkgs, 1)
+			pkgs = push(pkgs, rp)
 		}
-		if pkg == nil {
-			mxutil.WriteStr(2, "    skip (source not found)\n")
-			continue
-		}
+	}
+	for _, pkg := range pkgs {
+		mxutil.WriteStr(2, "  rebuild " | pkg.path | "\n")
 		compilePath := pkg.path
 		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 			compilePath = pkg.name
