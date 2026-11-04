@@ -8624,10 +8624,22 @@ func workerEntryExport(arg unsafe.Pointer) {
 	}
 
 	// The worker's pkgHash must be able to resolve an import to its package,
-	// exactly as the serial path can (resolver.walk fills pkgByPath there).
+	// exactly as the serial path can (resolver.walk fills pkgByPath there, with
+	// BOTH the import spelling and the package's own path as keys). Keying only
+	// the resolved path makes the key disagree with the parent's for an import
+	// whose spelling differs from it, which is the same class of divergence as
+	// the export/object key split: the worker then reads a file the parent
+	// never wrote.
 	bst.pkgByPath = map[string]*pkgInfo{}
 	for i := int32(0); i < int32(len(meta.pkgs)); i++ {
 		bst.pkgByPath[meta.pkgs[i].path] = meta.pkgs[i]
+	}
+	for i := int32(0); i < int32(len(meta.pkgs)); i++ {
+		for _, imp := range meta.pkgs[i].imports {
+			if di, ok := idxByPath[imp]; ok {
+				bst.pkgByPath[imp] = meta.pkgs[di]
+			}
+		}
 	}
 
 	// Compute hashes for all packages (worker's own bst.pkgKeyMemo)

@@ -24604,3 +24604,40 @@ fresh cache (twice, plus a forced warm rebuild) and builds with `-j 4`, because
 the loss was in the workers' registry and a serial build has the whole link set
 in one process. Verified red then green on the same box: the unpatched compiler
 fails cold and passes warm, the patched one passes all three cases.
+
+### Round 372: running the bootstrap script for real
+
+`scripts/provision-build-host.sh --bootstrap` from a clean tree found three
+more defects, each of which had been a manual step that "worked" because a human
+was watching:
+
+- **s1 must come from the reference compiler.** `build.sh` picks its bootstrap
+  binary in the order `./moxie-new`, `./moxie`, `./legacy/moxie`, then `$PATH` -
+  a developer's order, right for iterating on a tree whose compiler works and
+  wrong for a bootstrap, where `./moxie` is the binary being replaced. Measured:
+  a stale `./moxie` built s1, s1 inherited its short interface-dispatch table,
+  and s1 then panicked compiling `compress_roundtrip` with `interface dispatch:
+  no impl for Read (16 impl(s), none matches)`. A bootstrap that reproduces the
+  bug it exists to replace. The script now passes `MOXIE=legacy/moxie`.
+- **Convergence took the extra generation.** s2 != s3, s3 == s4, which is the
+  documented arrival (CLAUDE.md, Convergence: the legacy pipeline differs and
+  the first bootstrap inherits that). The script demanded s2 == s3 and reported
+  a convergence failure at the exact point where the compiler had converged. It
+  now accepts s2 == s3 or s3 == s4, refuses only "no generation reproduces
+  itself", and installs the generation whose successor reproduced it.
+- **`build.sh`'s regression gate examined nothing.** `unitrun.sh` skips a unit
+  that already has a verdict, so on a host that has run the suite before, the
+  bootstrap's `--phases 0a --fail-fast` ran zero units, printed no verdicts, and
+  returned success. The gate now passes `--force`.
+
+One same-family fix went in with it: a worker process assembled `pkgByPath` from
+canonical paths only, while `resolver.walk` keys it by the import spelling *and*
+the package path. Any import whose spelling differs from its package's path made
+the worker's key disagree with the parent's, which is the export/object split of
+round 371 in a different place: the worker asks for a file the parent never
+wrote. The worker now adds each package's import spellings too.
+
+End-to-end on the box, from a wiped tree and an empty cache: `s1` (legacy-built)
+→ phase 0a **33/33 PASS** on a cold cache → `s2` → `s3` → `s4`, `s3 == s4`
+(`c546da31`), installed as `./moxie` → runtime bake written. The 33 units are
+the ones without verdicts; the honest full-count run is `--force`.

@@ -113,8 +113,14 @@ mv "$MOXIEROOT/moxie-new" "$MOXIEROOT/moxie"
 "$MOXIEROOT/moxie" update --all
 
 # run regression validation
+#
+# --force, because the unit results are persistent state: without it a unit that
+# passed once is skipped, so on a machine that has run the suite before this
+# "check" examines nothing, prints no verdicts, and returns success. Measured on
+# a fresh build host: s1 was installed, zero units ran, and the bootstrap
+# reported the regression check as passed. A gate that skips is not a gate.
 echo "=== Regression Check ==="
-if ! MOXIE="$MOXIEROOT/moxie" bash "$MOXIEROOT/tests/unitrun.sh" --phases 0a --fail-fast; then
+if ! MOXIE="$MOXIEROOT/moxie" bash "$MOXIEROOT/tests/unitrun.sh" --phases 0a --fail-fast --force; then
     echo "REGRESSION DETECTED: bootstrap build suspect" >&2
     exit 1
 fi

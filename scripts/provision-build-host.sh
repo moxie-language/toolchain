@@ -180,6 +180,15 @@ if [ "$RUN_BOOTSTRAP" = 1 ]; then
 	# step uses `-a` (build.sh does) because a compiler built against a different
 	# runtime must not reuse cached .bc.
 	#
+	# s1 MUST come from legacy/moxie, so MOXIE pins it. Left to itself build.sh
+	# prefers ./moxie-new, then ./moxie, then legacy/moxie - a developer's order,
+	# which is right for iterating on a tree whose compiler works and wrong for
+	# a bootstrap, where ./moxie may be the very binary being replaced. Measured:
+	# a stale ./moxie built s1, s1 inherited its short interface-dispatch table,
+	# and s1 then panicked compiling compress_roundtrip with "no impl for Read
+	# (16 impl(s), none matches)" - a bootstrap that reproduces the bug it is
+	# supposed to replace.
+	#
 	# The bake is LAST and uses the installed compiler, because the bake is
 	# compiler-specific: sysroot/runtime_go.bc is read by application links, and
 	# a blob written by a different compiler generation is exactly the drift that
@@ -199,22 +208,39 @@ if [ "$RUN_BOOTSTRAP" = 1 ]; then
 			exit 1
 		fi
 	}
-	step "s1 (build.sh: legacy builds _mxc_stage4)" bash ./build.sh
+	step "s1 (legacy builds _mxc_stage4)" env MOXIE="$TOOLCHAIN/legacy/moxie" bash ./build.sh
 	step "s2 (s1 rebuilds _mxc_stage4)" ./moxie build -a -o mxc-stage4-2 ./_mxc_stage4
 	step "s3 (s2 rebuilds _mxc_stage4)" ./mxc-stage4-2 build -a -o mxc-stage4-3 ./_mxc_stage4
 	s2="$(sha256sum mxc-stage4-2 | cut -d' ' -f1)"
 	s3="$(sha256sum mxc-stage4-3 | cut -d' ' -f1)"
-	if [ "$s2" != "$s3" ]; then
-		printf '   FAIL fixpoint: s2=%s\n         s3=%s (log: %s)\n' "$s2" "$s3" "$blog" >&2
-		exit 1
+	# Convergence may take one generation longer than the minimum: the legacy
+	# pipeline differs (interp + LowerInterfaces + globaldce) and the first
+	# bootstrap inherits that, so s1 != s2 is expected and s2 == s3 is not the
+	# only acceptable arrival - s3 == s4 is the other (CLAUDE.md, Convergence).
+	# What is never acceptable is no generation reproducing itself at all.
+	# Measured on the box: this tree took the extra generation, s3 == s4.
+	if [ "$s2" = "$s3" ]; then
+		ok "fixpoint: s2 == s3 (${s2:0:16})"
+		final=mxc-stage4-2
+	else
+		step "s4 (s3 rebuilds _mxc_stage4; s2 != s3, so one extra generation)" \
+			./mxc-stage4-3 build -a -o mxc-stage4-4 ./_mxc_stage4
+		s4="$(sha256sum mxc-stage4-4 | cut -d' ' -f1)"
+		if [ "$s3" != "$s4" ]; then
+			printf '   FAIL fixpoint: no generation reproduces itself\n' >&2
+			printf '         s2=%s\n         s3=%s\n         s4=%s (log: %s)\n' \
+				"$s2" "$s3" "$s4" "$blog" >&2
+			exit 1
+		fi
+		ok "fixpoint: s3 == s4 (${s3:0:16})"
+		final=mxc-stage4-3
 	fi
-	ok "fixpoint: s2 == s3 (${s2:0:16})"
-	cp mxc-stage4-2 ./moxie
-	ok "installed mxc-stage4-2 as ./moxie"
+	cp "$final" ./moxie
+	ok "installed $final as ./moxie"
 	step "runtime bake (with the installed compiler)" ./moxie build-runtime
 	ok "baked $(sha256sum sysroot/runtime_go.bc | cut -d' ' -f1 | cut -c1-16)"
 fi
 
 printf '\nprovisioned. Re-run with --check to verify, then:\n'
-printf '  cd %s && bash build.sh          # bootstrap to the fixpoint\n' "$TOOLCHAIN"
+printf '  %s --bootstrap   # s1 -> s2/s3 (or s3/s4) -> bake, the whole protocol\n' "$0"
 printf '  cd %s && bash run_tests.sh      # the full gate\n' "$TOOLCHAIN"
