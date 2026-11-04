@@ -24341,3 +24341,39 @@ verdict line. Two separate causes were found and only one was ours to fix:
 So the UI suite is recorded as NOT VERIFIED rather than claimed. The compiler
 changes it would exercise (the entry select in nine bundles and the relay) are
 covered by the build half of the same phase and by 5, 1c, 8.
+
+### Round 362: a select receive on a codec-framed spawn channel does not decode
+
+Moving morly's workers from a plain receive to a select over {closed, in} broke
+the relay: the feed test hung after four passing tests, blocked on the WebSocket
+`recv()` that waits for the relay's OK, because the ingest worker never decoded
+the event. The cause is a rule this tree already records in
+`server.mx` ("a select receive on a codec-framed spawn channel does not
+decode"), and it is a compiler limitation, not a morly one.
+
+The correct shape for a domain whose inbox carries codec-framed messages is:
+
+    for {
+        select {
+        case <-closed:
+            return closed
+        default:
+        }
+        msg, ok := <-in        // a plain receive decodes
+        if !ok {
+            return closed
+        }
+        ...
+    }
+
+The select only *checks* termination (non-blocking, so it reads no frame); the
+message itself is taken by the receive that does decode it. morly's five workers
+and `dbengine.Run` are back to that shape with the breaker check, and the two
+fixtures whose elements are codec-framed (`spawncost`'s `chan []byte`,
+`spawnbytes`' `chan Body`) follow it too. `chan int32`/`chan int64` frames are
+raw scalars and select works there (`chanpool`, futexpark), which is why phase 6
+and phase 8 stayed green through the wrong shape.
+
+The scheduler-side gap is recorded here rather than fixed: the select path's
+`tryPipeRecv` should decode exactly as `PipeChanRecvRaw` does, and until it does
+the rule above is the one to write to.
