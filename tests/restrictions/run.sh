@@ -1,6 +1,13 @@
 #!/bin/bash
 # Phase 0b: restriction fixtures. Each fixture is its own unit: the compiler
 # must reject it, with the error named in its '// expected:' header.
+#
+# A fixture that declares `main` must also select on sigint. The entry rule is
+# reported before the restriction under test - it is checked while main's SSA is
+# built and it stops compilation - so a fixture without the arm fails with
+# "main must select on sigint" and the error it exists to pin is never reached.
+# Measured on reject_plus_text and reject_plusassign_text, which passed on every
+# compiler built before the entry rule landed.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
