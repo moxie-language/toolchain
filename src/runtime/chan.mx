@@ -44,6 +44,7 @@ package runtime
 
 import (
 	"internal/task"
+	"moxie"
 	"runtime/interrupt"
 	"unsafe"
 )
@@ -170,6 +171,79 @@ type channelOp struct {
 type chanSelectState struct {
 	ch    *channel
 	value unsafe.Pointer
+	// A spawn-bound arm moves a FRAME, and an element that holds references
+	// must be encoded with the same format the peer's direct receive decodes.
+	// codec is the element's own codec when its type has one; td is the
+	// structural codec's type descriptor when it does not. Both nil means the
+	// element is self-contained and its extent IS the frame. They are set by
+	// the compiler, which knows the element type of every arm.
+	codec moxie.Codec
+	td    *RawType
+}
+
+// codecFrameEncode renders one channel element as the frame the peer's decode
+// expects. Exactly one of c and td is set for an element that holds references -
+// its own codec when the type has one, the structural codec otherwise - and both
+// are nil when the element is self-contained, in which case its extent IS the
+// frame. size is the element's size in bytes.
+func codecFrameEncode(c moxie.Codec, td *RawType, value unsafe.Pointer, size uintptr) (frame []byte, ok bool) {
+	if c != nil {
+		var w moxie.PipeWriter
+		if err := c.EncodeTo(&w); err != nil {
+			return nil, false
+		}
+		return w.Buf, true
+	}
+	if td != nil {
+		var cb CodecBuf
+		var ss codecSeenSet
+		codecSeenInit(&ss)
+		// Nothing may be aliased across a domain boundary: a stable-slice frame
+		// would hand the receiver a reference into this side's memory.
+		codecCrossDomain = true
+		codecEncodeValue(&cb, &ss, value, td)
+		codecCrossDomain = false
+		return cb.data, true
+	}
+	if size == 0 {
+		return nil, true
+	}
+	if value == nil {
+		return nil, false
+	}
+	return unsafe.Slice((*byte)(value), size), true
+}
+
+// codecFrameDecode places one received frame into value, the receiver's own
+// T-sized slot. The codec route decodes through the codec's own value pointer
+// (which is that same slot); the structural route relocates into value; an
+// extent frame is exactly the element's bytes, and a length that disagrees with
+// the element type is a compiler bug that is reported as one.
+func codecFrameDecode(c moxie.Codec, td *RawType, value unsafe.Pointer, size uintptr, frame []byte) (ok bool) {
+	if c != nil {
+		var r moxie.PipeReader
+		r.Buf = frame
+		return c.DecodeFrom(&r) == nil
+	}
+	if td != nil {
+		var cb CodecBuf
+		cb.data = frame
+		var ds codecDecodeSeen
+		codecDecodeSeenInit(&ds)
+		p := codecDecodeValue(&cb, &ds, td)
+		if p == nil {
+			return false
+		}
+		memcpy(value, p, td.Size())
+		return true
+	}
+	if uintptr(len(frame)) != size {
+		runtimePanic("spawn extent frame size mismatch: received " | codecItoa(int32(len(frame))) | " bytes for a " | codecItoa(int32(size)) | "-byte element")
+	}
+	if size > 0 && value != nil {
+		recvStore(value, unsafe.Pointer(&frame[0]), size)
+	}
+	return true
 }
 
 func chanMake(elementSize uintptr, bufSize uintptr, frameBudget uintptr, notePtr unsafe.Pointer, noteLen uintptr) *channel {
@@ -248,10 +322,6 @@ func (ch *channel) bufferPop(value unsafe.Pointer) {
 // the send succeeded. Interrupts must be disabled and the lock must be held
 // when calling this function.
 func (ch *channel) trySend(value unsafe.Pointer) bool {
-	// Spawn-boundary pipe channel: route through pipe instead of in-runtime queue.
-	if ch.spawnBound {
-		return ch.tryPipeSend(value)
-	}
 	// To make sure we send values in the correct order, we can only send
 	// directly to a receiver when there are no values in the buffer.
 
@@ -344,10 +414,6 @@ func chanSend(ch *channel, value unsafe.Pointer, op *channelOp) {
 // whether the receive operation succeeded. Interrupts must be disabled and the
 // lock must be held when calling this function.
 func (ch *channel) tryRecv(value unsafe.Pointer) (received, ok bool) {
-	// Spawn-boundary pipe channel: route through pipe instead of in-runtime queue.
-	if ch.spawnBound {
-		return ch.tryPipeRecv(value)
-	}
 	// To make sure we keep the values in the channel in the correct order, we
 	// first have to read values from the buffer before we can look at the
 	// senders.
@@ -627,6 +693,23 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 			continue
 		}
 
+		if state.ch.spawnBound {
+			// The boundary arm moves a frame, not the element's extent: an
+			// element that holds references is encoded here, exactly as its
+			// direct send would encode it, and the peer decodes one format.
+			if state.value == nil { // chan receive
+				if received, ok := state.ch.tryPipeRecv(recvbuf, state.codec, state.td); received {
+					selectIndex = uint32(i)
+					selectOk = ok
+					break
+				}
+			} else if state.ch.tryPipeSend(state.value, state.codec, state.td) { // chan send
+				selectIndex = uint32(i)
+				break
+			}
+			continue
+		}
+
 		if state.value == nil { // chan receive
 			if received, ok := state.ch.tryRecv(recvbuf); received {
 				selectIndex = uint32(i)
@@ -777,7 +860,7 @@ func pipeSelectRecheck(t *task.Task, states []chanSelectState, recvbuf unsafe.Po
 		}
 		var newDataValue uint32
 		if state.value == nil {
-			received, ok := state.ch.tryPipeRecv(recvbuf)
+			received, ok := state.ch.tryPipeRecv(recvbuf, state.codec, state.td)
 			if !received {
 				continue
 			}
@@ -788,7 +871,7 @@ func pipeSelectRecheck(t *task.Task, states []chanSelectState, recvbuf unsafe.Po
 				newDataValue |= chanOperationOk
 			}
 		} else {
-			if !state.ch.tryPipeSend(state.value) {
+			if !state.ch.tryPipeSend(state.value, state.codec, state.td) {
 				continue
 			}
 			newDataValue = uint32(uint32(i)<<2) | chanOperationOk

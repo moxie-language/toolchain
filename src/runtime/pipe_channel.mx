@@ -286,11 +286,11 @@ func PipeChanSendRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
 	if ch == nil || !ch.spawnBound {
 		return false
 	}
-	var data []byte
-	if size > 0 {
-		data = unsafe.Slice((*byte)(ptr), size)
+	frame, ok := codecFrameEncode(nil, nil, ptr, uintptr(size))
+	if !ok {
+		return false
 	}
-	return PipeChanSend(ch, data)
+	return PipeChanSend(ch, frame)
 }
 
 // PipeChanRecvRaw routes a raw chan recv through the recv ring into ptr
@@ -310,14 +310,7 @@ func PipeChanRecvRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
 	if !ok {
 		return false
 	}
-	if size <= 0 {
-		return true
-	}
-	if int32(len(data)) != size {
-		runtimePanic("spawn extent frame size mismatch: received " | codecItoa(int32(len(data))) | " bytes for a " | codecItoa(size) | "-byte element")
-	}
-	recvStore(ptr, unsafe.Pointer(&data[0]), uintptr(size))
-	return true
+	return codecFrameDecode(nil, nil, ptr, uintptr(size), data)
 }
 
 // SharedBuffer maps n bytes of MAP_SHARED anonymous memory and returns it as a
@@ -344,18 +337,18 @@ func SharedBuffer(n int32) (b []byte) {
 // --- structural codec at the spawn boundary ---
 //
 // A channel element that holds a slice, map, interface or pointer CANNOT cross
-// the boundary as raw bytes: the raw bytes are an address, and the child's
-// address space is a fork of the parent's taken at spawn, so the child reads
-// whatever happens to be at that address in its own copy-on-write view. Measured
-// on a runtime-built []byte: the child received the right length and the bytes
-// [4, 0, 0, ...] - 4 is the first-batch floor of the push allocator, i.e. the
-// child was reading allocator metadata, not the payload.
+// the boundary as raw bytes: the raw bytes are a reference into this domain's
+// arenas, and the receiver's frame that owns them is gone by the time it looks.
+// Measured under fork (where the reference read the CHILD's copy-on-write view):
+// the child received the right length and the bytes [4, 0, 0, ...] - 4 is the
+// first-batch floor of the push allocator, i.e. allocator metadata, not the
+// payload.
 //
-// So such an element is encoded with the STRUCTURAL codec (codecEncodeValue /
-// codecDecodeValue, the same walk spawn's argument codec uses) and decoded into
-// the receiver's arena. This is the codec's slice encode/decode at the boundary,
-// not a caller-side workaround: the payload crosses by value and the child owns
-// the bytes it gets.
+// So such an element is encoded - with its own Codec when the type has one, with
+// the STRUCTURAL codec (codecEncodeValue / codecDecodeValue, the same walk
+// spawn's argument codec uses) when it does not - and decoded into the
+// receiver's arena. The decode is the relocation: the payload crosses by value
+// and the receiver owns the bytes it gets.
 //
 // ChanSendStructural / ChanRecvStructural are the compiler's entries for such
 // elements. They dispatch exactly like ChanSendDual / ChanRecvDual: a local
@@ -366,15 +359,11 @@ func PipeChanSendStructural(ch *channel, td *RawType, value unsafe.Pointer) bool
 	if ch == nil || !ch.spawnBound || td == nil || value == nil {
 		return false
 	}
-	var cb CodecBuf
-	var ss codecSeenSet
-	codecSeenInit(&ss)
-	// Nothing may be aliased across a domain boundary: the receiver is a fork,
-	// and a stable-slice frame would hand it a pointer into this address space.
-	codecCrossDomain = true
-	codecEncodeValue(&cb, &ss, value, td)
-	codecCrossDomain = false
-	return PipeChanSend(ch, cb.data)
+	frame, ok := codecFrameEncode(nil, td, value, ch.elementSize)
+	if !ok {
+		return false
+	}
+	return PipeChanSend(ch, frame)
 }
 
 // PipeChanRecvStructural drains one frame and decodes it into value, which is
@@ -388,16 +377,7 @@ func PipeChanRecvStructural(ch *channel, td *RawType, value unsafe.Pointer) bool
 	if !ok {
 		return false
 	}
-	var cb CodecBuf
-	cb.data = data
-	var ds codecDecodeSeen
-	codecDecodeSeenInit(&ds)
-	p := codecDecodeValue(&cb, &ds, td)
-	if p == nil {
-		return false
-	}
-	memcpy(value, p, td.Size())
-	return true
+	return codecFrameDecode(nil, td, value, ch.elementSize, data)
 }
 
 // ChanSendStructural is ChanSendDual's structural counterpart, emitted for chan
@@ -419,20 +399,28 @@ func ChanRecvStructural(ch *channel, td *RawType, value unsafe.Pointer, op *chan
 	return chanRecv(ch, value, op)
 }
 
-// tryPipeSend attempts a NON-blocking send on a spawn-bound channel.
-// Used by trySend / chanSelect on spawn channels - must not block, or
-// the cooperative event loop deadlocks (the parent can't pivot to recv
-// from the worker that would unblock this send).
-func (ch *channel) tryPipeSend(value unsafe.Pointer) bool {
-	sz := int32(ch.elementSize)
-	var data []byte
-	if sz > 0 {
-		data = unsafe.Slice((*byte)(value), sz)
+// tryPipeSend attempts a NON-blocking send on a spawn-bound channel, encoding
+// the element at the moment the select arm fires - a frame premised on an arm
+// that may never win would pay the encode for nothing, and EncodeTo is a
+// caller-written method.
+//
+// It must not block: the cooperative event loop would deadlock, since the peer
+// that would unblock it is the one this loop has to keep servicing.
+func (ch *channel) tryPipeSend(value unsafe.Pointer, c moxie.Codec, td *RawType) bool {
+	frame, ok := codecFrameEncode(c, td, value, ch.elementSize)
+	if !ok {
+		return false
 	}
-	if chSendRing(ch) != 0 && ringDepth(chSendRing(ch)) < uint32(ch.bufCap) {
-		return ringSend(chSendRing(ch), data)
+	if chSendRing(ch) == 0 || ringDepth(chSendRing(ch)) >= uint32(ch.bufCap) {
+		return false
 	}
-	return false
+	if uintptr(len(frame)) > ch.frameBudget {
+		pipeBudgetPanic(ch, uintptr(len(frame)))
+	}
+	if !ringFits(chSendRing(ch), int32(len(frame))) {
+		runtimePanic("PipeChanSend: frame exceeds ring size")
+	}
+	return ringSend(chSendRing(ch), frame)
 }
 
 // tryPipeRecv attempts a non-blocking receive on a spawn-bound channel.
@@ -440,28 +428,27 @@ func (ch *channel) tryPipeSend(value unsafe.Pointer) bool {
 //   (true, true)  : data received into value
 //   (true, false) : channel closed
 //   (false, _)    : no data right now, would block; caller should retry
-func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
-	if chRecvRing(ch) != 0 {
-		data, rok := ringRecv(chRecvRing(ch))
-		if rok {
-			// value is nil for a select case that binds nothing
-			// (`case <-closed:`), so there is nowhere to put the payload.
-			if value != nil {
-				if uintptr(len(data)) == ch.elementSize {
-					recvStore(value, unsafe.Pointer(&data[0]), ch.elementSize)
-				} else {
-					memzero(value, ch.elementSize)
-				}
-			}
+func (ch *channel) tryPipeRecv(value unsafe.Pointer, c moxie.Codec, td *RawType) (received, ok bool) {
+	if chRecvRing(ch) == 0 {
+		return false, false
+	}
+	data, rok := ringRecv(chRecvRing(ch))
+	if rok {
+		// value is nil for a select case that binds nothing
+		// (`case <-closed:`), so there is nowhere to put the payload.
+		if value == nil {
 			return true, true
 		}
-		if ringIsClosed(chRecvRing(ch)) {
-			if value != nil {
-				recvZero(value, ch.elementSize)
-			}
+		if !codecFrameDecode(c, td, value, ch.elementSize, data) {
 			return true, false
 		}
-		return false, false
+		return true, true
+	}
+	if ringIsClosed(chRecvRing(ch)) {
+		if value != nil {
+			recvZero(value, ch.elementSize)
+		}
+		return true, false
 	}
 	return false, false
 }
@@ -501,11 +488,11 @@ func PipeChanSendCodec(ch *channel, c moxie.Codec) bool {
 	if ch == nil || !ch.spawnBound {
 		return false
 	}
-	var w moxie.PipeWriter
-	if err := c.EncodeTo(&w); err != nil {
+	frame, ok := codecFrameEncode(c, nil, nil, ch.elementSize)
+	if !ok {
 		return false
 	}
-	return PipeChanSend(ch, w.Buf)
+	return PipeChanSend(ch, frame)
 }
 
 // PipeChanRecvCodec drains a frame from the recv ring and decodes into c
@@ -522,12 +509,7 @@ func PipeChanRecvCodec(ch *channel, c moxie.Codec) bool {
 	if !ok {
 		return false
 	}
-	var r moxie.PipeReader
-	r.Buf = data
-	if err := c.DecodeFrom(&r); err != nil {
-		return false
-	}
-	return true
+	return codecFrameDecode(c, nil, nil, ch.elementSize, data)
 }
 
 // PipeChildReady sets the shared ready flag so the parent's

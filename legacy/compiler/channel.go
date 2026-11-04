@@ -537,37 +537,23 @@ func (b *builder) createSelect(expr *ssa.Select) llvm.Value {
 	// into regular chan operations during SSA construction so we don't have to
 	// optimize such small selects.
 
-	// Go through all the cases. Create the selectStates slice and and
-	// determine the receive buffer size and alignment.
+	// Size the receive buffer first: a receive arm's state carries a codec whose
+	// value pointer IS that buffer, so the buffer has to exist before the states
+	// are built.
 	recvbufSize := uint64(0)
 	recvbufAlign := 0
-	var selectStates []llvm.Value
-	chanSelectStateType := b.getLLVMRuntimeType("chanSelectState")
 	for _, state := range expr.States {
-		ch := b.chanOperandValue(state.Chan)
-		selectState := llvm.ConstNull(chanSelectStateType)
-		selectState = b.CreateInsertValue(selectState, ch, 0, "")
-		switch state.Dir {
-		case types.RecvOnly:
-			// Make sure the receive buffer is big enough and has the correct alignment.
-			llvmType := b.getLLVMType(state.Chan.Type().Underlying().(*types.Chan).Elem())
-			if size := b.targetData.TypeAllocSize(llvmType); size > recvbufSize {
-				recvbufSize = size
-			}
-			if align := b.targetData.ABITypeAlignment(llvmType); align > recvbufAlign {
-				recvbufAlign = align
-			}
-		case types.SendOnly:
-			// Store this value in an alloca and put a pointer to this alloca
-			// in the send state.
-			sendValue := b.getValue(state.Send, state.Pos)
-			alloca := llvmutil.CreateEntryBlockAlloca(b.Builder, sendValue.Type(), "select.send.value")
-			b.CreateStore(sendValue, alloca)
-			selectState = b.CreateInsertValue(selectState, alloca, 1, "")
-		default:
-			panic("unreachable")
+		if state.Dir != types.RecvOnly {
+			continue
 		}
-		selectStates = append(selectStates, selectState)
+		// Make sure the receive buffer is big enough and has the correct alignment.
+		llvmType := b.getLLVMType(state.Chan.Type().Underlying().(*types.Chan).Elem())
+		if size := b.targetData.TypeAllocSize(llvmType); size > recvbufSize {
+			recvbufSize = size
+		}
+		if align := b.targetData.ABITypeAlignment(llvmType); align > recvbufAlign {
+			recvbufAlign = align
+		}
 	}
 
 	// Create a receive buffer, where the received value will be stored.
@@ -589,6 +575,31 @@ func (b *builder) createSelect(expr *ssa.Select) llvm.Value {
 			llvm.ConstInt(b.ctx.Int32Type(), 0, false),
 			llvm.ConstInt(b.ctx.Int32Type(), 0, false),
 		}, "select.recvbuf")
+	}
+
+	// Go through all the cases. Create the selectStates slice.
+	var selectStates []llvm.Value
+	chanSelectStateType := b.getLLVMRuntimeType("chanSelectState")
+	for _, state := range expr.States {
+		ch := b.chanOperandValue(state.Chan)
+		selectState := llvm.ConstNull(chanSelectStateType)
+		selectState = b.CreateInsertValue(selectState, ch, 0, "")
+		switch state.Dir {
+		case types.RecvOnly:
+			// value stays null: that is how the runtime recognises a receive.
+			selectState = b.storeSelectFrame(selectState, state.Chan, recvbuf)
+		case types.SendOnly:
+			// Store this value in an alloca and put a pointer to this alloca
+			// in the send state.
+			sendValue := b.getValue(state.Send, state.Pos)
+			alloca := llvmutil.CreateEntryBlockAlloca(b.Builder, sendValue.Type(), "select.send.value")
+			b.CreateStore(sendValue, alloca)
+			selectState = b.CreateInsertValue(selectState, alloca, 1, "")
+			selectState = b.storeSelectFrame(selectState, state.Chan, alloca)
+		default:
+			panic("unreachable")
+		}
+		selectStates = append(selectStates, selectState)
 	}
 
 	// Create the states slice (allocated on the stack).
@@ -653,6 +664,24 @@ func (b *builder) createSelect(expr *ssa.Select) llvm.Value {
 	b.selectRecvBuf[expr] = recvbuf
 
 	return results
+}
+
+// storeSelectFrame fills the frame-format words of a select state (see the
+// runtime's chanSelectState): the element's own codec when its type has one, the
+// structural codec's type descriptor when it does not, and nothing at all for a
+// self-contained element, whose extent IS the message. dest is the slot the frame
+// encodes from (send) or decodes into (receive).
+func (b *builder) storeSelectFrame(state llvm.Value, ch ssa.Value, dest llvm.Value) llvm.Value {
+	chanType := ch.Type().Underlying().(*types.Chan)
+	elemType := chanType.Elem()
+	if !typeNeedsReloc(elemType) {
+		return state
+	}
+	if b.elemTypeImplementsCodec(chanType) {
+		codec := b.createPipeChanCodecIface(elemType, dest)
+		return b.CreateInsertValue(state, codec, 2, "")
+	}
+	return b.CreateInsertValue(state, b.getTypeCode(elemType), 3, "")
 }
 
 // getChanSelectResult returns the special values from a *ssa.Extract expression

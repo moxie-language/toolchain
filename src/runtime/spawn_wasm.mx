@@ -133,27 +133,59 @@ func SpawnChannelWrap(handle uintptr, elementSize uintptr) (ch *channel) {
 	return ch
 }
 
-// tryPipeSend writes one value to the boundary ring.
-func (ch *channel) tryPipeSend(value unsafe.Pointer) bool {
+// tryPipeSend writes one value to the boundary ring, encoding it when the
+// element holds references: the frame must be the one the peer's direct receive
+// decodes. Both encode and decode live in chan.mx (codecFrameEncode /
+// codecFrameDecode) because the select ABI needs them on both targets.
+func (ch *channel) tryPipeSend(value unsafe.Pointer, c moxie.Codec, td *RawType) bool {
 	h := sabHandleOf(ch)
 	if h == 0 {
 		return false
 	}
-	SpawnChannelSend(h, value, int32(ch.elementSize))
+	if c == nil && td == nil {
+		SpawnChannelSend(h, value, int32(ch.elementSize))
+		return true
+	}
+	frame, ok := codecFrameEncode(c, td, value, ch.elementSize)
+	if !ok {
+		return false
+	}
+	if len(frame) == 0 {
+		SpawnChannelSend(h, nil, 0)
+		return true
+	}
+	SpawnChannelSend(h, unsafe.Pointer(&frame[0]), int32(len(frame)))
 	return true
 }
 
 // tryPipeRecv reads one value from the boundary ring. A closed ring (-1)
 // reports ok=false, matching the local receiver's behaviour on a closed
 // channel.
-func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
+func (ch *channel) tryPipeRecv(value unsafe.Pointer, c moxie.Codec, td *RawType) (received, ok bool) {
 	h := sabHandleOf(ch)
 	if h == 0 {
 		return false, false
 	}
-	n := SpawnChannelRecv(h, value, int32(ch.elementSize))
+	if c == nil && td == nil {
+		n := SpawnChannelRecv(h, value, int32(ch.elementSize))
+		if n < 0 {
+			return false, false
+		}
+		return true, true
+	}
+	buf := []byte{:sabFrameMax}
+	n := SpawnChannelRecv(h, unsafe.Pointer(&buf[0]), int32(len(buf)))
 	if n < 0 {
 		return false, false
+	}
+	if n > int32(len(buf)) {
+		runtimePanic("moxie/spawn: boundary frame exceeds the receive buffer")
+	}
+	if value == nil {
+		return true, true
+	}
+	if !codecFrameDecode(c, td, value, ch.elementSize, buf[:n]) {
+		return true, false
 	}
 	return true, true
 }
@@ -209,17 +241,15 @@ func SharedBuffer(n int32) (b []byte) {
 // the bytes to the bridge.
 func ChanSendStructural(ch *channel, td *RawType, value unsafe.Pointer, op *channelOp) {
 	if ch != nil && ch.spawnBound && ch.sabHandle != 0 {
-		var cb CodecBuf
-		var ss codecSeenSet
-		codecSeenInit(&ss)
-		codecCrossDomain = true
-		codecEncodeValue(&cb, &ss, value, td)
-		codecCrossDomain = false
-		if len(cb.data) == 0 {
+		frame, ok := codecFrameEncode(nil, td, value, ch.elementSize)
+		if !ok {
+			return
+		}
+		if len(frame) == 0 {
 			SpawnChannelSend(ch.sabHandle, nil, 0)
 			return
 		}
-		SpawnChannelSend(ch.sabHandle, unsafe.Pointer(&cb.data[0]), int32(len(cb.data)))
+		SpawnChannelSend(ch.sabHandle, unsafe.Pointer(&frame[0]), int32(len(frame)))
 		return
 	}
 	chanSend(ch, value, op)
@@ -235,16 +265,7 @@ func ChanRecvStructural(ch *channel, td *RawType, value unsafe.Pointer, op *chan
 		if n > int32(len(buf)) {
 			runtimePanic("moxie/spawn: boundary frame exceeds the receive buffer")
 		}
-		var cb CodecBuf
-		cb.data = buf[:n]
-		var ds codecDecodeSeen
-		codecDecodeSeenInit(&ds)
-		p := codecDecodeValue(&cb, &ds, td)
-		if p == nil {
-			return false
-		}
-		memcpy(value, p, td.Size())
-		return true
+		return codecFrameDecode(nil, td, value, ch.elementSize, buf[:n])
 	}
 	return chanRecv(ch, value, op)
 }
@@ -253,15 +274,15 @@ func ChanRecvStructural(ch *channel, td *RawType, value unsafe.Pointer, op *chan
 
 func ChanSendDual(ch *channel, c moxie.Codec, value unsafe.Pointer, op *channelOp) {
 	if ch != nil && ch.spawnBound && ch.sabHandle != 0 {
-		var w moxie.PipeWriter
-		if err := c.EncodeTo(&w); err != nil {
+		frame, ok := codecFrameEncode(c, nil, value, ch.elementSize)
+		if !ok {
 			return
 		}
-		if len(w.Buf) == 0 {
+		if len(frame) == 0 {
 			SpawnChannelSend(ch.sabHandle, nil, 0)
 			return
 		}
-		SpawnChannelSend(ch.sabHandle, unsafe.Pointer(&w.Buf[0]), int32(len(w.Buf)))
+		SpawnChannelSend(ch.sabHandle, unsafe.Pointer(&frame[0]), int32(len(frame)))
 		return
 	}
 	chanSend(ch, value, op)
@@ -277,12 +298,7 @@ func ChanRecvDual(ch *channel, c moxie.Codec, value unsafe.Pointer, op *channelO
 		if n > int32(len(buf)) {
 			runtimePanic("moxie/spawn: boundary frame exceeds the receive buffer")
 		}
-		var r moxie.PipeReader
-		r.Buf = buf[:n]
-		if err := c.DecodeFrom(&r); err != nil {
-			return false
-		}
-		return true
+		return codecFrameDecode(c, nil, value, ch.elementSize, buf[:n])
 	}
 	return chanRecv(ch, value, op)
 }

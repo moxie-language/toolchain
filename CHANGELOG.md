@@ -64,6 +64,15 @@ compiler as it self-hosts to a reproducible binary.
   element predicate is checked first and counts a `string` as a reference, so a
   `chan string` across a spawn boundary is now encoded instead of handing the
   receiver a `{ptr,len}` pair into the sender's frame.
+- **A `select` arm on a spawn channel carries its frame format** - the arm's
+  state names the element's codec or the structural type descriptor, so the
+  runtime encodes at the moment the arm fires. Before this the select path moved
+  raw element bytes while a direct send encoded them, so a select receive of a
+  struct carrying a `[]byte` arrived zeroed and a select send of one corrupted
+  the ring ("codec expected struct tag", core dump). Encode and decode are now
+  one shared pair (`codecFrameEncode`/`codecFrameDecode`) that every channel
+  entry point - extent, codec, structural, select, native and wasm - routes
+  through.
 - **The package cache is bounded** - generations untouched for two hours are
   pruned on every build (`removeAll` had never deleted a non-empty tree, so
   they accumulated: 368 generations, 90 GB).

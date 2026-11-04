@@ -490,6 +490,18 @@ capacity computed at run time is rejected by `chanMake` before any send can hang
 on it. The rule is the same inside a thread and across a spawn boundary: a
 channel is a mailbox or a FIFO queue, never a rendezvous.
 
+**A select arm carries the frame format.** `chanSelectState` is
+`{ch, value, codec, td}` and the compiler fills `codec`/`td` per arm from the
+element type, exactly as the direct send/recv path chooses: the element's own
+codec when its type has one, the structural codec's type descriptor when it has
+not, both null when the element is self-contained (the extent is the frame). The
+runtime encodes at the moment the arm FIRES, so a losing arm never pays a
+caller-written `EncodeTo`. Before this, a select arm moved raw element bytes
+while a direct send encoded them: a select receive of a struct carrying a
+`[]byte` arrived zeroed and a select send of one corrupted the ring. There is one
+encode/decode pair (`codecFrameEncode`/`codecFrameDecode` in chan.mx) and every
+channel entry point on both targets routes through it.
+
 **The depth is a message count, not a byte threshold.** The ring header carries
 `sentFrames` and `recvFrames`, each written by one side only, so
 `sentFrames - recvFrames` is the outstanding count: the SAME `:N` slack whatever

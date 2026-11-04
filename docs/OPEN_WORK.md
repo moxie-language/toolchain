@@ -24850,9 +24850,34 @@ bilateral check:
    close, which a receiver would treat as its termination arm. It panics with
    both sizes now.
 
-Open, not fixed: a `select` arm on a spawn-bound channel still moves the element
-as raw bytes (`tryPipeSend`/`tryPipeRecv` use `ch.elementSize`), so an element
-that holds references is *extent* on the select path and *encoded* on the direct
-send path. For a pointer-free element the two paths now agree, which is the
-common case; a select send of a slice-carrying struct over a spawn channel is
-still a protocol mismatch and is the next thing in this area.
+### Round 377 (continued): the select arm was the other half
+
+The round's own probe found a worse defect on the way out, and it is worth the
+space because it was LIVE in morly: a `select` arm on a spawn-bound channel moved
+the element as raw bytes (`tryPipeSend`/`tryPipeRecv` used `ch.elementSize`),
+while a direct send on the same channel encodes it. The two paths therefore
+disagreed about the frame, and the failure was not subtle:
+
+    case 1  direct send -> select recv     arrived as zeros (frame consumed, dropped)
+    case 2  select send -> direct recv     "codec expected struct tag" + core dump
+
+`pkg/relay/server/server_workers.mx` does `case resp = <-s.proxyOut[i]` on a
+channel of `wire.ProxyResponse`, which carries a `[]byte`, so every proxy
+response was arriving zeroed.
+
+A select arm now carries the frame format with it. `chanSelectState` is
+`{ch, value, codec, td}`, filled by the compiler per arm: the element's own codec
+when its type has one, the structural codec's type descriptor when it has not,
+and both null for a self-contained element (extent) or a local channel. The
+runtime encodes at the moment the arm FIRES (`tryPipeSend`/`tryPipeRecv`), not
+before: a frame premised on an arm that may never win would pay a caller-written
+`EncodeTo` for nothing. Encode and decode are now ONE pair of functions
+(`codecFrameEncode`/`codecFrameDecode` in chan.mx, shared by both targets) that
+every channel entry point routes through - the extent, codec and structural
+paths, and the select path, on native and wasm - so there is one place where "how
+an element becomes a frame" is decided.
+
+Verified with the same probe source on both compilers: select recv of a struct
+carrying `[]byte` and a string, select send of the same, direct send/recv
+unchanged, 12-byte extent round trip still 17us, wasm module still builds
+(917 KB). Bootstrap: s1 de8dd490, s2 == s3 414d77a9.

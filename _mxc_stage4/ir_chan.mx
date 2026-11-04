@@ -454,6 +454,31 @@ func (e *irEmitter) emitCodecChanSend(s *SSASend) {
 	e.declareRuntime("runtime.ChanSendDual", "void", "ptr, " | ity | ", ptr, ptr")
 }
 
+// emitSelectFrame stores the frame-format words of a select state: the element's
+// codec when its type has one, the structural codec's type descriptor when it
+// does not, and nothing at all for a self-contained element, whose extent is the
+// message. dest is the value slot the frame encodes from (send) or decodes into
+// (receive).
+func (e *irEmitter) emitSelectFrame(st *SSASelectState, dest string, gep string) {
+	elemT := e.chanElemTType(st.Chan.SSAType())
+	if !elemNeedsReloc(elemT) {
+		return
+	}
+	if e.elemImplementsCodec(st.Chan.SSAType()) {
+		e.nextReg++
+		cGep := "%selcg" | irItoa(e.nextReg)
+		e.w("  ") ; e.w(cGep) ; e.w(" = getelementptr inbounds ") ; e.w("{ptr, ptr, ") ; e.w(e.ifaceType()) ; e.w(", ptr}, ptr ") ; e.w(gep) ; e.w(", i32 0, i32 2\n")
+		codec := e.emitCodecIface(elemT, dest)
+		e.w("  store ") ; e.w(e.ifaceType()) ; e.w(" ") ; e.w(codec) ; e.w(", ptr ") ; e.w(cGep) ; e.w("\n")
+		return
+	}
+	td := e.emitTypeDescFor(elemT)
+	e.nextReg++
+	tGep := "%seltg" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(tGep) ; e.w(" = getelementptr inbounds ") ; e.w("{ptr, ptr, ") ; e.w(e.ifaceType()) ; e.w(", ptr}, ptr ") ; e.w(gep) ; e.w(", i32 0, i32 3\n")
+	e.w("  store ptr ") ; e.w(td) ; e.w(", ptr ") ; e.w(tGep) ; e.w("\n")
+}
+
 func (e *irEmitter) emitSelect(s *SSASelect) {
 	// A select with no clauses is the one legacy shortcuts in createSelect:
 	// select {} blocks forever, which the runtime reports through deadlock()
@@ -471,7 +496,12 @@ func (e *irEmitter) emitSelect(s *SSASelect) {
 	ipt := e.intptrType()
 	sty := e.sliceType()
 	nStates := int32(len(s.States))
-	stateType := "{ptr, ptr}"  // chanSelectState: {ch, value}
+	// chanSelectState: {ch, value, codec, td}. The last two name the frame
+	// format for a spawn-bound arm whose element holds references - its own
+	// codec, or the structural codec's type descriptor - so the boundary arm
+	// moves the same frame a direct send would. Both zero for a self-contained
+	// element (extent) and for every local arm.
+	stateType := "{ptr, ptr, " | e.ifaceType() | ", ptr}"
 	opType := "{ptr, ptr, i32, ptr}" // channelOp
 
 	// Find largest recv element type for recvbuf.
@@ -530,8 +560,12 @@ func (e *irEmitter) emitSelect(s *SSASelect) {
 			e.w("  ") ; e.w(svAlloca) ; e.w(" = alloca ") ; e.w(sendElemType) ; e.w("\n")
 			e.w("  store ") ; e.w(sendElemType) ; e.w(" ") ; e.w(sendVal) ; e.w(", ptr ") ; e.w(svAlloca) ; e.w("\n")
 			e.w("  store ptr ") ; e.w(svAlloca) ; e.w(", ptr ") ; e.w(valGep) ; e.w("\n")
+			e.emitSelectFrame(st, svAlloca, gep)
 		} else {
 			e.w("  store ptr null, ptr ") ; e.w(valGep) ; e.w("\n")
+			if st.Dir == SelectDirRecv && st.Chan != nil {
+				e.emitSelectFrame(st, recvbuf, gep)
+			}
 		}
 	}
 
