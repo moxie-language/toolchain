@@ -584,15 +584,10 @@ func chanClose(ch *channel) {
 	// end so its receiver-side bridge / chan recv observes the close.
 	if ch.spawnBound {
 		PipeChanCloseSignal(ch)
-		// The domain's CONTROL breaker (chanID 0) is its termination handle:
-		// closing it ends the domain. A target parked in its select wakes and
-		// returns; a target wedged inside a fetch or a blocking syscall never
-		// will, and the parent has no other way to reclaim it, so the close
-		// escalates to the kernel. Only the parent side kills: a child closing
-		// its own breaker is announcing its exit, not ending anyone.
-		if ch.spawnChanID == 0 && ch.spawnPid > 0 && !childSpawnTarget {
-			spawnTerminatePid(ch.spawnPid)
-		}
+		// A control breaker is its domain's termination handle: closing it ends
+		// the domain, and a domain inside a long task is ended by the kernel
+		// because no Moxie code will run to see the close. See spawnKillOnClose.
+		spawnKillOnClose(ch)
 	}
 }
 
