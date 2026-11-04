@@ -520,8 +520,13 @@ tags as a channel element type (one page per unstated dimension): the startup
 config is not exempt from sizing.
 
 **The spawn ABI.** `spawn(fn, arg...)` passes values (copied, frozen at the
-call) and channels (shared). The target's one result is the domain's
-termination breaker, and it is written as a special word:
+call) and channels (shared). The target's ONE result must be NAMED `closed` and
+be of type `chan []byte`: that name and type together are what make a function a
+spawn target, and the runtime binds the domain's breaker into it. A function that
+merely happens to return a `chan []byte` under another name is an ordinary
+function and may be called directly - matching the shape alone made every such
+helper a target and died in its prologue. The target writes its breaker as a
+special word:
 
     func worker(in chan Request, out chan Response) (closed chan []byte) {
         for {

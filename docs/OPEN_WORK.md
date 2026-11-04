@@ -24881,3 +24881,135 @@ Verified with the same probe source on both compilers: select recv of a struct
 carrying `[]byte` and a string, select send of the same, direct send/recv
 unchanged, 12-byte extent round trip still 17us, wasm module still builds
 (917 KB). Bootstrap: s1 de8dd490, s2 == s3 414d77a9.
+### Round 377 (continued): a returning frame is not an owner
+
+The relay was run against the new compiler and its workers died instantly, once
+per respawn, forever (61 respawns in 4 s). The cause was not the runtime and not
+the worker's inputs:
+
+- The worker's first statement selects on `closed`; `closed` was already closed
+  microseconds after the thread started.
+- Both compilers emitted `runtime.SpawnClose(breaker)` at **every return** of the
+  function that spawned it ("a child never outlives the frame that spawned it",
+  `533add8a`). morly spawns inside `newProxyWorker` and RETURNS the breaker to
+  its caller, so the callee closed the very handle it was handing over.
+- `pollProxyWorkers` then saw `workerAlive(done) == false` and called
+  `respawnProxyWorker`, which is morly code - the runtime has no restart, retry
+  or reaper at all (grep `respawn|restart|reap` in `src/runtime`: one comment
+  saying there is nothing to reap).
+
+The rule is gone from both compilers. A frame returning is not the owner deciding
+a domain is finished - a pool constructor hands the breaker out precisely so the
+caller owns it. The owner ends a domain with `close(breaker)`; `main` returning
+ends every domain with the process; a panicking domain aborts the process
+(`abort()`, status 134), which is what makes a panic terminal rather than a
+respawn loop. `SpawnTrack`/`SpawnCloseAll` stay for the panic path.
+
+Verified narrowly, both compilers (s1 c800ef9c, s2 == s3 6b199c0b):
+
+- a worker spawned by a helper that RETURNS its breaker keeps beating after the
+  helper's frame is gone (3 beats, then `close(breaker)` stops it cleanly);
+- a worker that panics aborts the whole application: `panic: worker exploded on
+  purpose`, status 134, core dumped, and main never reached its next line;
+- morly (`make build`, new compiler) starts 13 worker domains and keeps them:
+  no `respawned` lines, `/health` 200, threads grow with the spawn tree.
+
+Note for the panic path: `runtimePanic` still closes the breakers and sends a
+reason frame BEFORE `abort()`. Nothing can read that reason - every domain is in
+the same process and the process is dying - so the reason-carrying breaker
+protocol is fork-era machinery. Left in place, recorded here.
+
+Also confirmed by accident, and worth writing down because it looks like a bug
+and is not: a plain function whose signature is `func f(...) (chan []byte)` is a
+spawn target by signature, so calling it directly panics with "spawn target called
+directly: closed breaker is nil". Spawn it, or give the helper a second result.
+(That was the shape-only rule; Round 378 makes the result NAME part of the
+contract, so this function is ordinary and calls directly.)
+
+### Round 378: the name is the target
+
+A spawn target was identified by its SHAPE: exactly one result of type
+`chan []byte`. That made every ordinary function returning a `chan []byte` a
+spawn target, so calling one directly died in its prologue with "spawn target
+called directly". A helper of morly's that returned a channel was the case that
+found it.
+
+The contract is now the NAME with the type: the sole result must be named
+`closed`. `closed` is the predeclared word a target selects on, and the runtime
+binds the domain's breaker into it; the shape alone was a proxy that held only
+until a helper returned a channel.
+
+`closed` has to reach a caller in another package, so the name must cross the
+export boundary. Result names are not carried in export data, and the spawn call
+site can be in a different package - morly spawns `wire.ProxyWorker`,
+`wire.IngestWorker`, `wire.BroadcastWorker`, `wire.BlossomWorker` and
+`dbengine.Run` from other packages - so it is encoded on the func line as
+
+    func closed <name> <sig>
+
+and not in the signature descriptor, because descriptors are compared as TEXT
+when an interface impl is matched to its method and a name in there splits every
+match. `generateMxh` writes it for a sole result named `closed` and of channel
+type; `loadMxhDataIn` consumes that word as a marker and parses the function name
+and signature exactly as before.
+
+- `TargetDeclared bool` on `Signature` (`pkg/types/tc_types.mx`), set by the
+  loader from the marker and consulted by `isSpawnTargetSig` (`ir_call.mx`).
+- Legacy has no marker and needs none: it parses every imported package from
+  source with go/parser, so `r.Name()` is already `closed` across a boundary.
+  Both predicates now require the name - legacy `spawn.go`, stage4 `ir_call.mx` -
+  so the two compilers agree on what a target is even though they learn it by
+  different routes.
+
+Verified:
+
+- stage4 built and triple-bootstrapped (16:03-16:05; s2 == s3, 5bc1dd10).
+- morly, cold `make build` with mxc-stage4 and again warm: 15 threads (13 worker
+  domains among them), stable across 8 s, **0 `respawn` lines**, `/health` 200.
+  The 377 ownership fix and the name marker hold together.
+- new fixture `tests/regressions/should_compile/spawn_closed_crosspkg`:
+  `lib.Worker` (result named `closed`) is spawned from `main`, `lib.Plain`
+  (result named `out`) is called directly, and both run. Green on stage4 through
+  `tests/regressions/run.sh`, and on legacy.
+- the marker is load-bearing, measured: the fixture's lib mxh carries
+  `func closed Worker chan:[]byte,chan:[]byte->chan:[]byte` and
+  `func Plain chan:[]byte->chan:[]byte`. Stripping `closed ` from `Worker`'s
+  line and forcing ONLY `main` to recompile (lib stays cached) fails the build
+  with "spawn: Worker must be declared with exactly one result, (closed chan
+  []byte)...". Regenerating lib's mxh restores the run, so the importer reads the
+  marker rather than source it happens to have.
+
+No migration: every spawn target in the tree already names its result `closed`
+(17 in morly; the moxie stdlib and fixtures likewise) and no function returns a
+`chan []byte` under another name, so the marker describes existing code rather
+than imposing a new rule.
+
+Round 377 audit (who owns a spawned pool): the apps own what they spawn. morly
+keeps every breaker in the server or broadcaster it hands to the caller and
+closes a slot's breaker before replacing it; musiquay has no `spawn`. The one
+dropped breaker in the stdlib is `net/http.ChanServeTimeout`, which spawns its
+worker pool and discards the breakers - if it returns on a listen or serve
+error, the pool now outlives its frame (every current caller is about to exit,
+so the process ends it). Open item: the frame is the owner, so it should close
+what it spawned on the way out. The same function's workers also read
+`chanGlobalMux`/`chanSlotBuf`, package globals the parent writes after the
+spawn; under the thread model each domain has its own copy, so the
+`DispatchSpawned` path needs a look independent of the breakers.
+
+Found while running the wasm phase, and NOT caused by 377 or 378: the wasm target
+does not build with stage4 at HEAD. `17cceab8` added the `c == nil && td == nil`
+branch to `spawn_wasm.mx`'s `tryPipeRecv`, and its nested `n :=` shadows the
+function-body `n` declared later. The no-shadowing rule is position-insensitive
+by design ("a name is taken for the whole block it appears in"), so this is a
+real violation rather than a checker bug: legacy's `checkScopeShadowing` should
+reject it too. Every wasm fixture fails with
+`tryPipeRecv: 'n' shadows declaration in enclosing scope`, including
+`close_breaker.mx`, which predates both rounds, and `src/runtime` is unmodified
+in this tree - the commit's "wasm module still builds" was a warm runtime, not a
+compile of this source. The fix is a rename in `tryPipeRecv`.
+
+The fixture above is native-only (`//:wasmtest skip`). `validate.sh` now honours
+that header for directory fixtures as well as `.mx` files: its discovery loop
+only checked the `.mx` shape, and an explicit target - the driver runs one
+fixture per job - never passed through it, so a directory fixture could not opt
+out at all.

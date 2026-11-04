@@ -1,0 +1,51 @@
+//:wasmtest skip
+// A spawn target reached across a package boundary, and an ordinary function
+// that only LOOKS like one.
+//
+// WHAT THIS PROVES: main imports lib, so main's type checker sees lib's
+// signatures as they arrive from lib's export data, where result names are not
+// carried. The spawn of lib.Worker therefore depends on the `closed` result
+// name surviving that boundary: the compiler writes it on the func line as
+// `func closed Worker <sig>`, because a name inside the signature descriptor
+// would split interface-method matching. The direct call to lib.Plain depends
+// on the absence of that marker: a function returning `(out chan []byte)` is
+// not a spawn target and must run rather than die in a prologue.
+//
+// WHAT IT DOES NOT PROVE: which cache path the build took. A build that
+// re-type-checks lib in the same process has the name in hand and would pass
+// without the marker; the worker path and any warm build read the .mxh. This
+// fixture is the regression guard for the behaviour, and the mxh itself is
+// checked directly when the round is documented.
+package main
+
+import (
+	"fmt"
+	"tests/regressions/should_compile/spawn_closed_crosspkg/lib"
+)
+
+func main() {
+	// Termination: a batch program must still be stoppable, so the entry
+	// handles the channel the runtime closes on SIGINT/SIGTERM.
+	select {
+	case <-sigint:
+		return
+	default:
+	}
+
+	// An ordinary function with a `chan []byte` result, called directly.
+	plain := chan []byte{}
+	lib.Plain(plain)
+	got := <-plain
+	fmt.Println("direct len", len(got))
+
+	// A spawn target in another package.
+	in := chan []byte{}
+	out := chan []byte{}
+	done := spawn(lib.Worker, in, out)
+	in <- []byte("ping")
+	msg := <-out
+	fmt.Println("echo len", len(msg))
+	close(done)
+	<-done
+	fmt.Println("crosspkg spawn ok")
+}

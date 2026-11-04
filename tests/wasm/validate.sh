@@ -94,6 +94,19 @@ mkdir -p "$WORK"
 
 for t in "${TARGETS[@]}"; do
     name="$(basename "$t")"; name="${name%.mx}"
+    # A fixture can declare itself native-only. The opt-out lives on the
+    # program's main file, which for a directory fixture is main.mx; the
+    # discovery loops above only checked the .mx shape, and an explicit target
+    # (the driver runs one fixture per job) never passed through them at all.
+    # One check here covers both shapes and both entry paths.
+    skipfile="$t"
+    if [ -d "$t" ]; then
+        skipfile="$t/main.mx"
+    fi
+    if grep -q '//:wasmtest skip' "$skipfile" 2>/dev/null; then
+        printf '%-32s SKIP  (declared native-only)\n' "$name"
+        continue
+    fi
     d="$WORK/$name"
     mkdir -p "$d/pkg"
     if [ -f "$t" ]; then

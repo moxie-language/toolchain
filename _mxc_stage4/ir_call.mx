@@ -1117,9 +1117,9 @@ func (e *irEmitter) emitPrintArg(val string, t Type) {
 // call runtime.spawnDomain, mark each channel arg pipe-bound on the parent
 // side, wait for the child to be ready, and return the lifecycle channel.
 // isSpawnTargetSig reports whether sig is the declared shape of a spawned
-// function: exactly one result, of type chan []byte. That result is the
-// domain's breaker - the same channel spawn returns - and its presence in the
-// signature is what marks the function as a spawn target.
+// function: exactly one result, NAMED `closed`, of type chan []byte. That result
+// is the domain's breaker - the same channel spawn returns - and its name and
+// type together are what mark the function as a spawn target.
 func isSpawnTargetSig(sig *Signature) (ok bool) {
 	if sig == nil || sig.Results == nil || sig.Results.Len() != 1 {
 		return false
@@ -1128,9 +1128,15 @@ func isSpawnTargetSig(sig *Signature) (ok bool) {
 	if r == nil || r.Typ == nil {
 		return false
 	}
-	// The name is the spelling the language documents, but an imported
-	// signature may not carry it, so the contract is the TYPE: exactly one
-	// result, a `chan []byte`, which is the domain's breaker.
+	// The result must be NAMED `closed`, and it must be the only one. That name
+	// is the entry point's whole contract: `closed` is the predeclared word a
+	// spawn target selects on, and the runtime binds the domain's breaker into
+	// it. Matching the shape alone made every ordinary function that happens to
+	// return a `chan []byte` a spawn target, so calling it directly died in its
+	// prologue with "spawn target called directly".
+	if r.Name != "closed" && !sig.TargetDeclared {
+		return false
+	}
 	ch, ok := SafeUnderlying(r.Typ).(*TCChan)
 	if !ok || ch.Dir != TCSendRecv {
 		return false
@@ -1480,15 +1486,6 @@ func (e *irEmitter) emitSpawnCall(c *SSACall) {
 	// Register the breaker for the panic path.
 	e.w("  call void @runtime.SpawnTrack(ptr ") ; e.w(reg) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.SpawnTrack", "void", "ptr")
-	// Close it at every return, but only when the spawn dominates the returns:
-	// a spawn inside a branch cannot be named at a return in another branch
-	// without an alloca in the entry block (LLVM rejects the use). Spawns are
-	// written at the top of their function in practice, so the entry-block case
-	// is the one that carries the rule.
-	e.spawnBreakers = mxutil.Ensure(e.spawnBreakers, 1)
-	if len(e.curFunc.Blocks) > 0 && e.currentEmitBlock == e.curFunc.Blocks[0] {
-		push(e.spawnBreakers, reg)
-	}
 }
 
 // emitSpawnWrapper emits (once) the goroutine-start wrapper for a spawn

@@ -222,17 +222,18 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	b.createCall(waitFnType, waitFn, []llvm.Value{llvm.Undef(b.dataPtrType)}, "child.ready")
 
 	// Return the breaker channel (chan []byte) that closes when the child
-	// exits. Register it with the domain so a panic closes it, and note it on
-	// the frame so every return of this function closes it too.
+	// exits. Register it with the domain so a panic closes it.
+	//
+	// The compiler does NOT close it at return. A frame returning is not the
+	// owner deciding a domain is finished: the function may be handing the
+	// breaker to its caller, which is exactly what a worker-pool constructor
+	// does, and closing it there killed the worker microseconds after its
+	// thread started. The owner ends a domain with close(breaker); the process
+	// ending reclaims every domain there is.
 	lcFnType, lcFn := b.getFunction(b.program.ImportedPackage("runtime").Members["SpawnLifecycleChannel"].(*ssa.Function))
 	doneCh := b.createCall(lcFnType, lcFn, []llvm.Value{llvm.Undef(b.dataPtrType)}, "done.ch")
 	trackFnType, trackFn := b.getFunction(b.program.ImportedPackage("runtime").Members["SpawnTrack"].(*ssa.Function))
 	b.createCall(trackFnType, trackFn, []llvm.Value{doneCh, llvm.Undef(b.dataPtrType)}, "")
-	// Only a spawn in the entry block dominates every return; a spawn inside a
-	// branch cannot be named at a return in another branch.
-	if b.currentBlock != nil && b.currentBlock.Index == 0 {
-		b.spawnBreakers = append(b.spawnBreakers, doneCh)
-	}
 	return doneCh, nil
 }
 
@@ -385,8 +386,15 @@ func isSpawnTargetSig(sig *types.Signature) bool {
 		return false
 	}
 	r := sig.Results().At(0)
-	// The name is documentation; the contract is the type - exactly one
-	// result, a `chan []byte`, which is the domain's breaker.
+	// The result must be NAMED `closed`, and it must be the only one. That name
+	// is the entry point's whole contract: the language predeclares `closed` as
+	// the word a spawn target selects on, and the runtime binds the domain's
+	// breaker into it. Matching the shape alone made every ordinary function
+	// that happens to return a `chan []byte` a spawn target, so calling it
+	// directly died in its prologue with "spawn target called directly".
+	if r.Name() != "closed" {
+		return false
+	}
 	ch, ok := r.Type().Underlying().(*types.Chan)
 	if !ok || ch.Dir() != types.SendRecv {
 		return false

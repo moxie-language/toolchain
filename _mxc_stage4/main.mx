@@ -4392,6 +4392,20 @@ func typeDescWrite(b *mxhBuf, t Type) {
 	}
 }
 
+// sigIsSpawnDecl reports whether sig is the spawn target declaration: one
+// result, named `closed`, of channel type.
+func sigIsSpawnDecl(sig *Signature) (ok bool) {
+	if sig == nil || sig.Results == nil || sig.Results.Len() != 1 {
+		return false
+	}
+	r := sig.Results.At(0)
+	if r == nil || r.Name != "closed" {
+		return false
+	}
+	_, isChan := SafeUnderlying(r.Typ).(*TCChan)
+	return isChan
+}
+
 func sigDescWrite(b *mxhBuf, sig *Signature) {
 	if sig.Params != nil {
 		for i := int32(0); i < sig.Params.Len(); i++ {
@@ -4463,7 +4477,18 @@ func generateMxh(pkg *TCPackage) (s string) {
 		if fn, ok := obj.(*TCFunc); ok {
 			sig := fn.Signature()
 			if sig != nil {
-				b.w("func ") ; b.w(objName) ; b.w(" ")
+				b.w("func ")
+				// A spawn target's declaration is `(closed chan []byte)`, and
+				// the NAME is the contract, so it has to survive the export: the
+				// target's prologue is compiled in its own package, but the spawn
+				// call site may be in another one. The marker rides the func line
+				// rather than the signature descriptor because descriptors are
+				// compared as TEXT when an interface impl is matched to the
+				// method it implements - a name in there splits every match.
+				if sigIsSpawnDecl(sig) {
+					b.w("closed ")
+				}
+				b.w(objName) ; b.w(" ")
 				sigDescWrite(&b, sig) ; b.nl()
 			}
 		} else if vr, ok2 := obj.(*TCVar); ok2 {
@@ -5034,13 +5059,26 @@ func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
 			if ws2 >= we2 {
 				continue
 			}
-			fname := string(d[ws2:we2])
+			// `func closed <name> <sig>` marks a spawn target: its sole result
+			// is the domain's breaker, and the name is what makes it one.
+			mark := string(d[ws2:we2])
+			target := mark == "closed"
+			if target {
+				ws2, we2 = mxhNextWord(d, we2, le2)
+				if ws2 >= we2 {
+					continue
+				}
+				mark = string(d[ws2:we2])
+			}
+			fname := mark
 			ss, se := mxhNextWord(d, we2, le2)
 			if ss < se {
 				sig := parseSignatureDesc(string(d[ss:se]))
+				sig.TargetDeclared = target
 				pkg.Scope.Insert(NewTCFunc(pkg, fname, sig))
 			} else {
 				sig := parseSignatureDesc("")
+				sig.TargetDeclared = target
 				pkg.Scope.Insert(NewTCFunc(pkg, fname, sig))
 			}
 		} else if mxhHasPrefix(d, ls2, le2, "var ") {

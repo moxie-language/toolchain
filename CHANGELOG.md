@@ -31,9 +31,17 @@ compiler as it self-hosts to a reproducible binary.
 - **Frame budgets come from `cap` struct tags** - one number per
   variable-length dimension, counted in elements (bytes at a `string`/`[]byte`
   leaf), with one 4096-byte page for an unstated dimension.
-- **Breaker lifecycle** - a spawn's breaker is created before the fork, tracked
-  on the domain, closed at every return of the spawning function, on a panic,
-  and by the kernel reaper when a parent dies without one.
+- **A spawn target's result must be NAMED `closed`** - the name is part of the
+  contract, not only the type: a function returning a `chan []byte` under
+  another name is ordinary and may be called directly. The name crosses package
+  boundaries as `func closed <name> <sig>` on the func line of the export data,
+  because result names are not carried there and a name inside the signature
+  descriptor would split interface-method matching.
+- **Breaker lifecycle** - a spawn's breaker is created before the thread starts,
+  tracked on the domain for the panic path, and closed by its owner with
+  `close(breaker)`. It is not closed when the spawning function returns: that
+  function may be handing the breaker to its caller. `main` returning ends every
+  domain with the process, and a panic aborts it (status 134).
 - **The termination select is enforced** - both compilers refuse a `main` that
   does not consume `sigint` and a spawn target that does not consume its
   `closed` breaker, so a program that cannot be told to stop is a compile
@@ -48,6 +56,13 @@ compiler as it self-hosts to a reproducible binary.
   discovery document, so `moxie get moxielang.dev/pkg/mxutil` finds the module
   root and the repository with no knowledge of the host. `moxielang.dev` serves
   the discovery document, a browser 301 and git's smart-HTTP endpoints.
+- **A spawn's breaker is closed only by its owner** - the compilers no longer
+  close the breakers a function created when that function returns. A pool
+  constructor hands the breaker to its caller, and closing it there killed the
+  worker microseconds after its thread started; a returning frame is not the
+  owner deciding a domain is finished. `close(breaker)` ends a domain, `main`
+  returning ends every domain with the process, and a panic aborts the process
+  (status 134) rather than leaving a domain to be restarted.
 - **A domain is a thread, not a process** - `spawn` starts a pthread with its
   own stack, TLS domain root, arenas and package globals, instead of forking.
   There are no PIDs, no `pdeathsig`, no `waitpid` and no reaper; a closed
