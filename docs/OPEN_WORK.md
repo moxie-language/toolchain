@@ -9,31 +9,16 @@ taken, the findings that motivated them, and the two designs in flight
 Round 378 closed items 1-5 and 7; the evidence is in "ROUND 378 CLOSE" below.
 What is left is verification, not design.
 
-### 1. A full sweep on the committed tree
-
-`tests/unitrun.sh` with the new compiler, from cold, all phases. Accept: 323
-units with zero failures, phase 5 green in Chromium, phase 8 green in BOTH
-dispatch modes, and the bootstrap fixpoint `s2 == s3`. `tree-cleanliness` is
-part of every phase, so this run belongs on the commit, not on a dirty tree.
-
-The first run on `e21b7be0` measured 323 units: 321 passed, 1 skipped
-(`spawn_closed_crosspkg`, declared native-only) and 1 failed, `7/whole-phase`,
-with "no output". The failure was the HARNESS, not the tree: `util.sh` enables
-errexit, and phase 7's `stop_relay` assigned `pids="$(pgrep ...)"` - status 1
-when the suite left no relay, which is the healthy case - so the phase died
-before it could report the suite that had just passed (11 passed, exit 1). The
-box masked it because its suite leaked a relay. `30999715` makes an empty
-pid list success and lets the kills find an already-dead pid; phase 7 then
-passes on the clean commit in 58 s.
-
-### 2. The wasm panic action has no automated browser gate
+### 1. Wasm panic action: a browser gate - the only open item
 
 Item 1's native half is gated by `smoke:panic-stderr` (phase 4): a spawned
 worker panics, stdout is empty, stderr is `panic: worker died`, exit 134. The
-wasm half - the message reaches the page as stderr and `stopAllDomains` ends the
-whole tree - is implemented in `jsruntime/host.mjs` but no fixture exercises it.
-Add a wasm fixture that panics in a spawned worker and assert the page console
-line and that a sibling worker stops.
+wasm half - the message reaches the page as stderr and `stopAllDomains` in
+`jsruntime/host.mjs` ends the whole tree - is implemented but no fixture
+exercises it. Add a wasm fixture that panics in a spawned worker and assert the
+page console line and that a sibling worker stops.
+
+The full sweep is green; the numbers are in "ROUND 378 CLOSE" item 6.
 
 ## ROUND 378 CLOSE (measured 2026-11-04, local 14 GB host)
 
@@ -98,7 +83,7 @@ range` before).
 on the listen failure and on every `serveNextConn` error return, so a return
 from the frame ends the domains it started.
 
-### 6. Gates - bootstrap and 1c are green; the sweep is item 1 above
+### 6. Gates - bootstrap, phase 1c and the full sweep are green
 
 - bootstrap: s1 from legacy, s2 from s1, s3 from s2; `sha256sum mxc-s2-new
   mxc-s3-new` = `94529e3f5dd9d50f469c96f9c4070956a90340a500dd7636f83d1b94350caee7`
@@ -107,6 +92,11 @@ from the frame ends the domains it started.
   exit 0). The object stage that used to be OOM-killed now peaks at ~900 MB for
   the 57 MB `net/http` module.
 - phase 4: green, including the new panic unit.
+- full sweep on `c3e48768` (2026-11-04, local): **323 units, 322 passed, 0
+  failed, 1 skipped**, exit 0. `1c/net/http` PASS, phase 2 (selfhost) PASS,
+  phase 5 (Chromium fixtures) PASS, phase 7 (UI app + relay) PASS, phase 8
+  (netsmoke, both dispatch modes) PASS, `tree-cleanliness` PASS. The skip is
+  `spawn_closed_crosspkg`, declared native-only and exercised natively in 0a.
 
 The Hetzner host is off and was not used for this round; the notes about its
 patched GOROOT remain valid for the next time it is used. Locally, `legacy/
