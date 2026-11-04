@@ -112,12 +112,22 @@ func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
 		childParentPid = moxie_getppid()
 		DomainClosed = spawnBreaker
 
-		// Reaper: if this domain's parent dies without closing anything - a
-		// SIGKILL, a crash - the kernel delivers SIGTERM here. That is the one
-		// supervision gap the capability model cannot close, because the holder
-		// of the terminate channel is gone. The ppid is rechecked after the
-		// call because the parent may have died before prctl ran.
-		moxie_set_pdeathsig(15) // SIGTERM
+		// Reaper: the one supervision gap the capability model cannot close is a
+		// parent that dies WITHOUT closing the terminate channel - a SIGKILL, a
+		// crash - because the holder of that channel is gone. The kernel is the
+		// only witness left, and it must be given a kill, not a signal to
+		// handle: SIGTERM only raises the sigint flag, and a domain parked in a
+		// select on its `closed` breaker never wakes to see it (it has no arm on
+		// sigint, by design). Measured: with SIGTERM here, `kill -9` of a parent
+		// left the child domain alive indefinitely - a relay that is respawned
+		// while its old worker is wedged accumulated 2,600+ parked domains
+		// before any of them died.
+		//
+		// SIGKILL makes the guarantee unconditional and recursive: every child
+		// has its own pdeathsig, so a whole tree dies with its root. A parent
+		// that is merely stopping closes the breakers instead and its children
+		// exit cleanly, which is the normal path and is unaffected.
+		moxie_set_pdeathsig(9) // SIGKILL
 		if moxie_getppid() != childParentPid {
 			exit(0)
 		}
@@ -199,6 +209,40 @@ func moxie_spawn_call(fn uintptr, argp unsafe.Pointer)
 
 //export moxie_set_pdeathsig
 func moxie_set_pdeathsig(sig uint32)
+
+// spawnTerminatePid ends one child domain and reaps it. The breaker is the
+// parent's termination handle, so closing it must END the domain rather than
+// merely signal it: a target parked in its select wakes on the closed flag and
+// returns, but a target wedged inside a long operation (a hung network fetch, a
+// blocking syscall) will never run Moxie code again, and the parent has no other
+// way to reclaim it. The kernel is the only mechanism that reaches such a
+// process, so the close escalates SIGTERM -> SIGKILL with a short grace and
+// reaps the child, leaving no zombie and no live domain behind.
+//
+// Measured without this: a relay that replaced a stuck worker left the old
+// domain running forever (the parent overwrote the slot and dropped the handle),
+// and one relay accumulated 2,600+ live domains, each its own process.
+func spawnTerminatePid(pid int32) {
+	if pid <= 0 {
+		return
+	}
+	var status int32
+	if moxie_waitpid(pid, unsafe.Pointer(&status), 1) > 0 { // WNOHANG: already gone
+		domainReapChildren()
+		return
+	}
+	moxie_kill(pid, 15) // SIGTERM
+	for i := 0; i < 20; i++ {
+		if moxie_waitpid(pid, unsafe.Pointer(&status), 1) > 0 {
+			domainReapChildren()
+			return
+		}
+		sleepTicks(timeUnit(1_000_000)) // 1ms
+	}
+	moxie_kill(pid, 9) // SIGKILL
+	moxie_waitpid(pid, unsafe.Pointer(&status), 0)
+	domainReapChildren()
+}
 
 // MakePipe creates a unidirectional pipe via libc pipe(2). Returns the
 // (read, write) fds, or (-1, -1) on failure. The fds are inherited by
