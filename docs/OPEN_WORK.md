@@ -108,9 +108,26 @@ phase 5 green from cold.
 
 Heavy verification runs on the Hetzner box (`ssh hetzner`:
 root@2.31.151.214, key `~/.ssh/id_mlekucom`, 8 cores, 30 GB, LLVM 22). It has
-clang-22/llvm-link-22/ld.lld-22/opt and python3; Go (for `legacy/`) and
-playwright/Chromium (for phase 5) must be installed. The tree is synced there by
-`git bundle`; the local checkout remains the editing surface.
+clang-22/llvm-link-22/ld.lld-22/opt, python3 with playwright/Chromium, and a Go
+1.25.3 install; the tree is synced there by `git bundle`, and the local checkout
+remains the editing surface.
+
+The first bootstrap there failed, and the cause is worth keeping: a fresh
+`go build` of `legacy/` from a stock Go cannot compile the tree - `pkg/mxregexp`
+reports `undefined: push`/`resize`. The legacy compiler needs `go/types`
+patched with Moxie's builtins, which `legacy/build/patch-gotypes.go` installs
+into a GOROOT target. The working `legacy/moxie` on this machine was built
+against a patched tree that is no longer here (the local `/opt/go1.25.3` is
+stock), which is why a fresh local build fails while the checked-in binary
+looks fine. On the box:
+
+    cp -a /opt/go /opt/go-moxie
+    GOROOT=/opt/go go run build/patch-gotypes.go /opt/go-moxie
+    # build legacy, and run the bootstrap, with GOROOT=/opt/go-moxie
+
+The patch target must be a full Go tree; pointing it at the source GOROOT fails
+copying testdata into itself. CLAUDE.md's bootstrap step 1 (`cd legacy && go
+build`) omits this and only works on a host whose GOROOT was already patched.
 
 ## REMAINING WORK (as of round 73) - historical snapshot
 
