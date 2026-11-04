@@ -56,9 +56,21 @@ The site block, the page and a Cloudflare Worker variant live in
 
 **LLVM 22** is pinned across the stack: clang, ld.lld, llvm-link, opt and
 llvm-extract must all be major version 22, and the legacy bootstrap compiler
-links libLLVM-22. Go 1.25+ is needed only to build that bootstrap compiler.
+links libLLVM-22. **Go 1.25.3 exactly** is needed only to build that bootstrap
+compiler - it patches `go/types` by exact source text, so a newer Go is a
+different source tree and the patch refuses to apply.
 
-Most distributions ship LLVM 22 as the unversioned toolchain, so:
+On a bare Ubuntu 24.04 host, `scripts/provision-build-host.sh` does the whole
+job - pinned Go, LLVM 22 under the unversioned names the driver asks for,
+compiler-rt builtins, the llvm-glue library, and the bootstrap through
+`s2 == s3`:
+
+```sh
+sudo bash scripts/provision-build-host.sh --check      # report, change nothing
+sudo bash scripts/provision-build-host.sh --bootstrap  # provision + fixpoint
+```
+
+Elsewhere, most distributions ship LLVM 22 as the unversioned toolchain:
 
 ```sh
 # Arch

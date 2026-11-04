@@ -19,17 +19,45 @@ link time.
 | opt | 22 | `-passes=default<O2>` on compiled packages | yes |
 | llvm-extract | 22 | extracting functions during IR validation | yes |
 | libLLVM | 22 | linked into the legacy Go compiler | bootstrap only |
-| Go | 1.25+ | building the legacy bootstrap compiler | bootstrap only |
+| llvm-config | 22 | `build.sh` asks it for the driver major, then holds every tool to that | yes |
+| Go | 1.25.3 **exactly** | building the legacy bootstrap compiler | bootstrap only |
 | git | any | `fetch`/`update` of module dependencies | yes |
 | wasm-ld | 22 | linking WASM targets (browser) | WASM only |
 | musl | - | `sysroot/musl/lib.a` and `crt1.o` | prebuilt in tree |
 
-Note on tool names: many distributions ship LLVM 22 as the *unversioned*
-toolchain, because 22 is a current release. Others install only versioned
-names. `build.sh` accepts either but **verifies the major version reported by
-`--version`** rather than trusting the name, so a machine whose unversioned
+Go is pinned to 1.25.3, not "1.25+": `legacy/build/patch-gotypes.go` patches
+`go/types` by exact source text, so a newer Go is a different source tree and
+the patch refuses to apply (measured on 1.27.3). Bumping Go means re-checking
+every anchor in that file in the same commit.
+
+Note on tool names: the compiler invokes `clang`, `opt`, `llvm-link`, `llc`,
+`ld.lld`, `llvm-extract` and `llvm-config` by their **unversioned** names, and
+`build.sh` **verifies the major version each one reports** rather than trusting
+the name. Distributions where 22 is the current release ship those names; on
+Debian/Ubuntu the packages install only `opt-22` and friends, so the
+unversioned names must be linked (see below). A machine whose unversioned
 `clang` is actually 20 fails immediately with a list of what is wrong, rather
 than producing unreadable bitcode halfway through a build.
+
+### Provisioning a build host
+
+`scripts/provision-build-host.sh` is the supported way to turn a bare Ubuntu
+24.04 machine into a build host, and it is the only supported one - every step
+in it exists because a fresh machine was missing it and a build failed:
+
+```sh
+sudo bash scripts/provision-build-host.sh --check     # report, change nothing
+sudo bash scripts/provision-build-host.sh             # provision (idempotent)
+sudo bash scripts/provision-build-host.sh --bootstrap # provision, then fixpoint
+```
+
+It installs the pinned Go and LLVM 22, links the unversioned tool names into
+`/usr/local/bin`, sparse-clones llvm-project at `release/22.x` for
+`lib/compiler-rt-builtins`, builds `llvm-glue/libmoxie-llvm-glue.so`, and then
+runs the bootstrap through `s2 == s3` and the runtime bake. Those four things
+are deliberately **not** in the repository: builtins sources are provisioned
+rather than versioned, and the glue `.so` is a build product (a stale one is a
+hard failure at start-up with "missing symbol MoxieCreateCompileUnit").
 
 ### Arch Linux
 
@@ -91,10 +119,10 @@ sudo dnf install llvm clang lld
 Prebuilt binaries for many platforms are published at
 <https://releases.llvm.org>; LLVM 22 is announced at
 <https://www.phoronix.com/news/LLVM-Clang-22.1-Released>. If you build from
-source, put the resulting `bin` directory on `PATH`. The build scripts locate
-`libLLVM-22` through `llvm-config-22` or the usual `/usr/lib/llvm-22`-style
-prefixes, and fall back to an unversioned `llvm-config` whose reported major
-version is 22.
+source, put the resulting `bin` directory on `PATH` under the unversioned names
+the driver asks for, since `build.sh` takes its major from `llvm-config` and then
+requires `clang`, `llc`, `ld.lld`, `opt`, `llvm-link` and `llvm-extract` to
+report that same major.
 
 ### musl and compiler-rt
 
@@ -115,10 +143,11 @@ cd legacy
 cd ..
 ```
 
-Then run the bootstrap protocol documented in the repository root `CLAUDE.md`
-under "Bootstrap Build Protocol". In short: legacy builds the stage4 compiler,
-that compiler bakes the runtime, and then builds itself until a generation
-reproduces its own binary byte for byte.
+Then run the bootstrap protocol. `scripts/provision-build-host.sh --bootstrap`
+does the whole cycle, which is: the legacy compiler builds the stage4 compiler
+(`build.sh`), that compiler rebuilds itself until a generation reproduces its own
+binary byte for byte (`s2 == s3`), the `s2` binary is installed as `./moxie`, and
+that installed compiler writes the runtime bake.
 
 ## Building from Source
 
@@ -131,8 +160,10 @@ The Moxie compiler is self-hosting. You need an existing moxie binary to bootstr
 
 `build.sh` finds a moxie binary (in order: `./moxie-new`, `./moxie`,
 `./legacy/moxie`, then `$PATH`), compiles the compiler source
-(`_mxc_stage4/`), verifies the output, then rebuilds the cached packages with
-the new compiler.
+(`_mxc_stage4/`), verifies the output, and installs it as `./moxie`. That is
+**one generation** (s1), not the fixpoint: the self-hosting protocol in
+`scripts/provision-build-host.sh --bootstrap` continues with s2 and s3 and
+asserts `s2 == s3`, then bakes the runtime with the installed compiler.
 
 To bootstrap with a specific binary:
 
