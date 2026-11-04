@@ -1261,6 +1261,38 @@ func checkSpawnCalls(fn *SSAFunction) {
 			if gname, found := spawnTargetChannelGlobal(target); found {
 				reportCompileError("spawn: " | target.name | " reads channel global " | gname | "; a spawned domain's channels must be its parameters, so pass it through the spawn call")
 			}
+			if mxutil.TargetArch() == "wasm" {
+				checkWasmSpawnValueParams(target)
+			}
+		}
+	}
+}
+
+// checkWasmSpawnValueParams refuses a value parameter whose bytes carry a
+// pointer or a slice header on the wasm target. A wasm domain has its own
+// linear memory, so such a value would cross as an address into the parent's
+// memory, which the child cannot read. The native path copies the graph through
+// the codec and decodes it on the child side; that decode does not exist on the
+// wasm boundary yet, so the compiler refuses rather than handing the child a
+// dangling header.
+//
+// Checked here, with the rest of the spawn rules, because the compiler reads
+// its error list once, right after the SSA build: an error recorded while the
+// wasm call is emitted is printed after the package was already accepted.
+func checkWasmSpawnValueParams(target *SSAFunction) {
+	if target == nil || target.Signature == nil || target.Signature.Params == nil {
+		return
+	}
+	for pi := int32(0); pi < target.Signature.Params.Len(); pi++ {
+		pt := target.Signature.Params.At(pi).Typ
+		if pt == nil {
+			continue
+		}
+		if _, isChan := SafeUnderlying(pt).(*TCChan); isChan {
+			continue
+		}
+		if typeNeedsCodec(pt) {
+			reportCompileError("spawn: wasm value parameter " | irItoa(pi+1) | " of " | target.name | " carries pointers or slices, which the wasm boundary cannot copy yet; pass it through a spawn channel")
 		}
 	}
 }

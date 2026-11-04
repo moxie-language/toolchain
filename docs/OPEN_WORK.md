@@ -24421,3 +24421,22 @@ round 362 (select over the inbox instead of a plain receive), not the browser:
 with the workers back to "check the breaker, then plain receive", the feed test
 runs and fails on its own assertions rather than hanging. The phase's remaining
 work is that assertion, which is the app's test, not the compiler's.
+
+### Round 366: the wasm refusal belongs before the gate too
+
+`emitWasmSpawnCall` first recorded the "value parameter carries pointers"
+refusal, and the build still linked: the same trap as the termination check -
+`compileErrors` is read once, before the emitter. It is now
+`checkWasmSpawnValueParams` in the post-SSA pass, next to the other spawn rules,
+and the probe proves the direction: a struct with a `[]byte` field passed to a
+wasm spawn fails with
+
+    ; spawn: wasm value parameter 1 of worker carries pointers or slices, which
+      the wasm boundary cannot copy yet; pass it through a spawn channel
+
+while an ordinary wasm fixture still builds and stages its host. No wasm-eligible
+fixture in the tree spawns at all, so nothing regresses; the error exists so the
+first program that tries it learns why instead of reading the parent's memory
+through a copied header.
+
+Fixpoint after the change: `4fd41386` (s2 == s3).
