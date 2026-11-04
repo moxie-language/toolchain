@@ -685,6 +685,28 @@ not by itself a failure; a generation failing to reproduce itself
 Do not use `sha256sum mxc-stage4 mxc-stage4-2` as the fixpoint check. A
 mismatch there is expected and carries no signal.
 
+### A cache key must not depend on measurement state
+
+Two objects in this cache have different lifetimes and different inputs, and
+conflating them is how round 371 lost the interface-dispatch table on every
+cold build:
+
+- **Export data (`.mxh`)** is a function of a package's SOURCES for a target and
+  its imports' export keys. Nothing else. `pkgExportHash` computes it, and
+  `cachedMxhPath` names the file from the package, never from a caller's hash.
+- **An object (`.bc`)** additionally depends on the dispatch fingerprint,
+  because dispatch arms are enumerated into the package that makes the call.
+  `pkgHash` keeps that term, with the link-set fallback for a package that has
+  not been measured yet.
+
+A key that folds in "has the measurement run?" gives one blob two names inside
+one build: the dependency pre-pass writes the pre-measurement name and the
+compile phase - the same process when serial, a worker when parallel - reads the
+post-measurement one. A generation directory is per compiler build, so the first
+build after any upgrade is cold and hits exactly that window; every later build
+is warm and hides it. Any gate that only ever runs warm builds cannot see this
+class at all, which is what `tests/phase0c_coldcache.sh` exists for.
+
 ## What NOT To Do
 
 - Never add dependencies without explicit approval
