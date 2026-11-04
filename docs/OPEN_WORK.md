@@ -24725,3 +24725,70 @@ read like a compiler defect:
   builds and a 250-package fixture in flight at once; `phase 6`'s legacy build
   died mid-run with a Go trace under that pressure and passed when re-run alone.
   The box runs the full sweep at `-j 2` for the record.
+
+### Round 376: a domain is a thread
+
+`spawn` forked. Every domain carried a PID it never needed, and the whole
+termination story existed to manage that: `pdeathsig`, `waitpid`, a pid table, a
+reaper, a lockdown pipe, and a class of bugs where a wedged or abandoned domain
+outlived its owner as a stray process - one relay accumulated 2,600+ live
+domains, all children of a single process.
+
+A domain is now a pthread: same address space, its own TLS (domain root,
+arenas, package globals) and its own stack. `src/runtime/thread_unix.c` is the
+primitive (64 MB stack, trampoline into `moxie_runtime_thread_entry`), the same
+shape the compiler's own worker pool had been using in `_mxc_stage4/host.c` all
+along. `spawnDomain` builds the breaker, the ring pairs and a `spawnHandoff` in
+the root arena and starts the thread; the child entry runs `InitCShared` (its
+own root, heap and package initialisers) and copies the handoff into its TLS,
+because fork handed all of that over by inheritance and a thread does not
+inherit TLS.
+
+Three defects showed up the moment the model changed, and each one is worth
+keeping:
+
+1. **One channel object cannot hold two directions.** A forked child used to get
+   its own copy of the channel struct with `ringSend`/`ringRecv` swapped; two
+   threads share the object, so the parent's binding and the child's
+   overwrote each other and both ends parked on the wrong ring - a send and a
+   receive that never met. The struct now stores the PAIR once and the direction
+   is chosen by role (`chSendRing`/`chRecvRing`).
+2. **`exit(0)` on peer death killed the process.** `PipeChanRecv` exited the
+   child PROCESS when its parent was gone. That is right for a process and fatal
+   for a thread: it terminated every other domain in the program - the symptom
+   was a program that stopped mid-sleep with status 0 and no output. It now
+   returns `ok=false`, which is the target's termination arm.
+3. **Legacy had no per-thread globals.** stage4 emits
+   `thread_local(initialexec)` for package variables; legacy emitted plain
+   globals, so a legacy-built program shared one copy of every global across its
+   domains and a spawned thread corrupted the parent's state (an immediate nil
+   dereference in a probe that only spawns a worker). `getGlobal` now sets
+   thread-local storage, which is the bilateral half, and
+   `legacy/compileopts` lists the new C file so the legacy link finds
+   `moxie_thread_spawn`.
+
+Termination moved with the model. A closed breaker used to reach the target
+through a signal only because the target was a process; now the runtime makes
+the close reach the WAITS: a spawn target's channel operations recheck its own
+`DomainClosed`, so a receive parked in a work loop returns instead of sleeping,
+and a spawn channel records the breaker of the domain it was handed to
+(`ownerBreaker`), so a parent parked on a channel whose domain ended wakes and
+reports the close. A domain that never returns to a check is reclaimed by the
+process: when main returns every domain goes with it. No signal, no reaper, no
+pid table, no stray process.
+
+Deleted with the model: `moxie_fork` as the spawn path, `pdeathsig`, `getppid`
+liveness, `waitpid`/`kill`, the domain pid table and its reaper, the secalloc
+lockdown pipe, and `moxie_kill`. `Fork()`/`Waitpid()` remain as explicit
+cross-process utilities for tests that genuinely want a second process.
+
+Verified narrowly (no suite runs, per the instruction): one domain (1 process, 2
+threads), 50 domains (1 process, 51 threads, correct sums), value parameters
+with a cap-tagged slice, on both compilers; breaker close ends a parked receive;
+`futexpark`'s two assertions (wake ok, dead ok); a domain parked in a 30 s sleep
+is reclaimed at process exit with no stray process; wasm still builds.
+
+Found and NOT fixed by this: `spawn_frame_budget` decodes its frames as zeros -
+the same output under the old fork compiler, so it is a pre-existing
+channel-codec defect and is the next thing to chase.
+

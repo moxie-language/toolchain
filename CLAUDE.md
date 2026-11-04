@@ -141,10 +141,13 @@ Named return values remain REQUIRED (`func f() (n int32)` is legal,
 `func f() int32` is not): a named result is assignable like any local, and the
 return protocol needs a slot to relocate.
 
-Package-scoped variables remain IMMUTABLE outside `init()`. That rule is not
-about threads inside a domain (there is one) but about DOMAINS: a fork shares
-the pages, so two domains reading the same global must see the same value, and a
-value that changes after `init()` has no defined meaning across them.
+Package-scoped variables remain IMMUTABLE outside `init()`. Every package
+variable is thread-local, so each domain gets its own copy, initialised by the
+package initialisers that run when the domain starts (`InitCShared`). A write
+after `init()` therefore changes one domain's copy while every other domain
+keeps the value it was born with - the same declaration meaning two different
+things depending on who reads it. That is why it is a language error rather than
+a convention.
 
 Only METHOD RECEIVERS are tracked for store-back. Changes to receiver fields are
 tracked and serialized at return along with return values. The serialization

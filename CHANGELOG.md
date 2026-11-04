@@ -48,6 +48,13 @@ compiler as it self-hosts to a reproducible binary.
   discovery document, so `moxie get moxielang.dev/pkg/mxutil` finds the module
   root and the repository with no knowledge of the host. `moxielang.dev` serves
   the discovery document, a browser 301 and git's smart-HTTP endpoints.
+- **A domain is a thread, not a process** - `spawn` starts a pthread with its
+  own stack, TLS domain root, arenas and package globals, instead of forking.
+  There are no PIDs, no `pdeathsig`, no `waitpid` and no reaper; a closed
+  breaker reaches the waiting loops, and the process ending takes every domain
+  with it. Package variables are per-domain storage in both compilers, so no two
+  domains share mutable state by accident, and the isolation is the capability
+  contract rather than an MMU boundary.
 - **The package cache is bounded** - generations untouched for two hours are
   pruned on every build (`removeAll` had never deleted a non-empty tree, so
   they accumulated: 368 generations, 90 GB).
