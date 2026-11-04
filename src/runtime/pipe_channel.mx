@@ -4,14 +4,18 @@ package runtime
 
 // Spawn channel IPC - bridges channels across spawn domain boundaries
 // over shared SPSC ring buffers (mmap MAP_SHARED). No socketpair, no
-// pipe: both arm and amd targets have threads and shared memory, so the
+// pipe: a domain is a thread, both ends share the address space, so the
 // ring is the one true transport. This file is the ring-routing layer
 // the compiler-emitted chan ops dispatch through.
+//
+// A frame is the element's own bytes when the element holds no references, and
+// its codec's output otherwise (see PipeChanSendRaw). The ring does not care
+// which: it carries a length-prefixed frame.
 //
 // Control signals ride the same shared memory:
 //   - channel close  -> ringClose (the ring header's closed flag)
 //   - child-ready    -> a shared spawnCtl.ready atomic
-//   - child death    -> waitpid on the parent, getppid on the child
+//   - child death    -> the child's DomainClosed flag, published as it returns
 
 import (
 	"moxie"
@@ -127,7 +131,7 @@ func breakerSendReason(ch *channel, code int32, msg string) {
 	// unix return value: a panic aborts (134), a clean stop is 0, a killed
 	// domain is 128+signal. The rest is the diagnostic, printed to the shared
 	// stderr by the component that failed.
-	text := itoa(code) | " " | msg
+	text := codecItoa(code) | " " | msg
 	n := len(text)
 	if n > breakerReasonMax {
 		n = breakerReasonMax
@@ -210,9 +214,9 @@ func PipeChanSend(ch *channel, encoded []byte) bool {
 // than have the ring quietly wrap. The note carried on the channel is the
 // compiler's list of the variable-length fields and the caps they declare.
 func pipeBudgetPanic(ch *channel, actual uintptr) {
-	head := "spawn channel: encoded frame of " | itoa(int32(actual)) | " bytes exceeds the "
+	head := "spawn channel: encoded frame of " | codecItoa(int32(actual)) | " bytes exceeds the "
 	tail := "-byte frame budget. Variable-length fields and their cap tags: " | ch.frameNote
-	runtimePanic(head | itoa(int32(ch.frameBudget)) | tail)
+	runtimePanic(head | codecItoa(int32(ch.frameBudget)) | tail)
 }
 
 // PipeChanRecv is the runtime entry the compiler emits in place of the
@@ -270,8 +274,14 @@ func PipeChanCloseSignal(ch *channel) {
 
 // PipeChanSendRaw routes a raw memory-layout chan send through the send
 // ring. Non-blocking with retry-and-yield, same as PipeChanSend.
-// Native-only - both endpoints share the same architecture (fork
-// inherits the binary), so raw layout is portable.
+//
+// This is the extent path, and it is the whole protocol for an element type
+// that holds no references: both ends are threads in one address space running
+// the same binary, so the value's bytes ARE its wire form, and the codec that
+// used to re-encode them was paying a method dispatch and a tag per field to
+// reproduce bytes that were already there. An element that holds references
+// stays on the codec path - its pointers point into the sender's arena, and the
+// relocation the codec performs is the point.
 func PipeChanSendRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
 	if ch == nil || !ch.spawnBound {
 		return false
@@ -285,9 +295,13 @@ func PipeChanSendRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
 
 // PipeChanRecvRaw routes a raw chan recv through the recv ring into ptr
 // (which must point to a buffer of size bytes). Returns ok (true on
-// receive, false on closed/dead). On size mismatch it also returns
-// false - the protocol invariant that both ends know the element
-// layout has been violated.
+// receive, false on closed/dead).
+//
+// A frame whose length is not the element size means the two ends disagree
+// about the element type. Both ends are generated from one declaration, so that
+// is a compiler bug, and it is reported as one: returning false here would
+// present it as an ordinary close and the receiver would loop or exit on a
+// channel that is perfectly alive.
 func PipeChanRecvRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
 	if ch == nil || !ch.spawnBound {
 		return false
@@ -300,7 +314,7 @@ func PipeChanRecvRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
 		return true
 	}
 	if int32(len(data)) != size {
-		return false
+		runtimePanic("spawn extent frame size mismatch: received " | codecItoa(int32(len(data))) | " bytes for a " | codecItoa(size) | "-byte element")
 	}
 	recvStore(ptr, unsafe.Pointer(&data[0]), uintptr(size))
 	return true

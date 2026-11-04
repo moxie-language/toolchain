@@ -24792,3 +24792,67 @@ Found and NOT fixed by this: `spawn_frame_budget` decodes its frames as zeros -
 the same output under the old fork compiler, so it is a pre-existing
 channel-codec defect and is the next thing to chase.
 
+### Round 377: the extent is the message
+
+A thread domain made the codec optional in a way the fork domain never could.
+The codec exists to turn a value into bytes another machine with a different
+layout can read; both ends of a spawn channel are now threads in ONE address
+space running ONE binary, so for an element type that holds no references the
+bytes in the sender are already the bytes the receiver wants. A memcpy into the
+ring is the whole protocol.
+
+The compiler now asks the element type first, and the extent check runs BEFORE
+the codec question:
+
+- no references -> `runtime.chanSend`/`chanRecv` -> `PipeChanSendRaw`/
+  `PipeChanRecvRaw`, a memcpy of the element's extent;
+- references and a custom codec -> `ChanSendDual`/`ChanRecvDual` (the codec IS
+  the relocation);
+- references and no codec -> `ChanSendStructural`/`ChanRecvStructural`.
+
+The predicate is `typeNeedsReloc` (legacy) / `elemNeedsReloc` (stage4). It treats
+a channel and a function value as handles, not payloads - their bytes ARE the
+message - which is what the old `elemNeedsStructural`/`typeNeedsStructural`
+already did, except that it did not count a STRING as a reference. A `chan
+string` across a spawn boundary was therefore raw-copied: a {ptr,len} pair
+pointing into the sender's arena. Under fork that read allocator metadata; under
+threads it read live memory until the sender's frame popped, so it appeared to
+work right up until it did not. Fixed by the same predicate that routes the
+extent path.
+
+Measured on a 12-byte struct with a deliberately wrong codec (EncodeTo writes
+zeros, DecodeFrom sets -1), 2000 one-slot round trips, same probe source, old
+compiler vs new:
+
+    before  codec path   191 ms   95 us/round trip   value arrived as -1
+    after   extent path   34 ms   16 us/round trip   value arrived intact
+    legacy  extent path   57 ms   28 us/round trip   value arrived intact
+
+The case that must NOT be skipped still is not: a struct carrying a `[]byte` AND
+a codec still arrives through `DecodeFrom` (proven by its marker), and a
+pointer-carrying struct with no codec still arrives through the structural codec.
+
+Found on the way, both pre-existing and both fixed here because they blocked the
+bilateral check:
+
+1. **`legacy/moxie build-runtime` had been broken.** `src/runtime/
+   spawnhandshake.mx` (the fork-era cross-binary hash exchange, referenced by
+   nothing since the fork path was deleted) used `+` for text concatenation,
+   which both compilers reject, so the legacy bake died there; behind it,
+   `pipe_channel.mx` used `itoa`, which is not a runtime function at all (the
+   runtime's own decimal renderer is `codecItoa`, and the pipe path is
+   linux-only while `codecItoa` is shared). The dead file is deleted and the four
+   call sites use `codecItoa`. A stage4 bake now compiles the same file the
+   legacy bake does, which is the point of the bake being bilateral at all.
+2. **`PipeChanRecvRaw` reported a size mismatch as `ok=false`.** Both ends are
+   generated from one declaration, so a frame whose length is not the element
+   size is a compiler bug - and returning false presented it as an ordinary
+   close, which a receiver would treat as its termination arm. It panics with
+   both sizes now.
+
+Open, not fixed: a `select` arm on a spawn-bound channel still moves the element
+as raw bytes (`tryPipeSend`/`tryPipeRecv` use `ch.elementSize`), so an element
+that holds references is *extent* on the select path and *encoded* on the direct
+send path. For a pointer-free element the two paths now agree, which is the
+common case; a select send of a slice-carrying struct over a spawn channel is
+still a protocol mismatch and is the next thing in this area.

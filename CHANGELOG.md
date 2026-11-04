@@ -55,6 +55,15 @@ compiler as it self-hosts to a reproducible binary.
   with it. Package variables are per-domain storage in both compilers, so no two
   domains share mutable state by accident, and the isolation is the capability
   contract rather than an MMU boundary.
+- **A spawn channel skips the codec for a pointer-free element** - both ends are
+  threads in one address space running one binary, so an element that holds no
+  pointer, slice, string, map or interface crosses as its own bytes: a memcpy
+  into the ring is the message. A type that DOES hold references stays on its
+  codec (the decode is the relocation) or on the structural codec when it has
+  none. Measured on a 12-byte struct, one-slot round trip: 95us -> 16us. The
+  element predicate is checked first and counts a `string` as a reference, so a
+  `chan string` across a spawn boundary is now encoded instead of handing the
+  receiver a `{ptr,len}` pair into the sender's frame.
 - **The package cache is bounded** - generations untouched for two hours are
   pruned on every build (`removeAll` had never deleted a non-empty tree, so
   they accumulated: 368 generations, 90 GB).

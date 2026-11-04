@@ -286,24 +286,33 @@ func (b *builder) createChanSend(instr *ssa.Send) {
 			return
 		}
 	}
-	// Native: any chan whose element type implements moxie.Codec routes
-	// through ChanSendDual at runtime, which dispatches on ch.pipeBoundFd.
-	// This preserves correctness through array / slice / struct-field
-	// indirection where the compiler's per-SSA-value tracking can't see
-	// that the chan was originally passed to spawn().
-	if b.elemTypeImplementsCodec(instr.X.Type()) {
-		b.createCodecChanSend(instr)
-		return
-	}
 	// A send's X is the VALUE being sent, so its type IS the element type -
 	// unwrapping it as a chan panics on every send whose value is not itself a
 	// channel (types.Basic for a []byte). The recv hook below reads
 	// unop.X.Type() as the chan because a receive's operand IS the channel.
-	if typeNeedsStructural(instr.X.Type()) {
-		b.createStructuralChanSend(instr)
+	//
+	// A self-contained element crosses as its own bytes: the extent check comes
+	// first, so a pointer-free type pays a memcpy and not its Codec round trip.
+	if !typeNeedsReloc(instr.X.Type()) {
+		b.createExtentChanSend(instr)
 		return
 	}
+	// Native: a chan whose element holds references routes through its Codec
+	// when it has one, ChanSendDual at runtime, which dispatches on
+	// ch.spawnBound. This preserves correctness through array / slice /
+	// struct-field indirection where the compiler's per-SSA-value tracking
+	// can't see that the chan was originally passed to spawn().
+	if b.elemTypeImplementsCodec(instr.X.Type()) {
+		b.createCodecChanSend(instr)
+		return
+	}
+	b.createStructuralChanSend(instr)
+}
 
+// createExtentChanSend sends a self-contained value: the store into the alloca
+// is the message, and runtime.chanSend routes a spawn-bound channel straight to
+// PipeChanSendRaw, the memcpy of the extent.
+func (b *builder) createExtentChanSend(instr *ssa.Send) {
 	ch := b.getValue(instr.Chan, getPos(instr))
 	chanValue := b.getValue(instr.X, getPos(instr))
 
@@ -367,14 +376,24 @@ func (b *builder) createChanRecv(unop *ssa.UnOp) llvm.Value {
 			return b.createWasmSABChanRecv(unop, handle)
 		}
 	}
-	// Native: dual-path runtime dispatch for Codec-implementing types.
 	chanType := unop.X.Type().Underlying().(*types.Chan)
+	// A self-contained element is copied straight into the receiver's slot;
+	// an element that holds references is decoded, which is its relocation.
+	if !typeNeedsReloc(chanType.Elem()) {
+		return b.createExtentChanRecv(unop)
+	}
+	// Native: dual-path runtime dispatch for Codec-implementing types.
 	if b.elemTypeImplementsCodec(chanType.Elem()) {
 		return b.createCodecChanRecv(unop)
 	}
-	if typeNeedsStructural(chanType.Elem()) {
-		return b.createStructuralChanRecv(unop)
-	}
+	return b.createStructuralChanRecv(unop)
+}
+
+// createExtentChanRecv is the recv half of the extent path:
+// runtime.chanRecv routes a spawn-bound channel to PipeChanRecvRaw, which copies
+// the frame into the receiver's own slot.
+func (b *builder) createExtentChanRecv(unop *ssa.UnOp) llvm.Value {
+	chanType := unop.X.Type().Underlying().(*types.Chan)
 
 	valueType := b.getLLVMType(chanType.Elem())
 	ch := b.chanOperandValue(unop.X)
@@ -750,24 +769,32 @@ func (b *builder) createCodecChanRecv(unop *ssa.UnOp) llvm.Value {
 	return received
 }
 
-// typeNeedsStructural reports whether a channel element cannot cross a spawn
-// boundary as raw bytes: a slice, string, map, interface or pointer element's
-// raw bytes are an ADDRESS in the sender's arena space, and the receiver is a
-// forked domain, so it would read whatever its own copy-on-write view holds at
-// that address. Measured on a runtime-built []byte: the child got the right
-// length and the bytes [4, 0, 0, ...] - the push allocator's first-batch
-// marker, i.e. allocator metadata, not the payload.
+// typeNeedsReloc reports whether a channel element's bytes are NOT the message:
+// the element holds a reference into an arena (a pointer, slice, string, map or
+// interface, or a struct/array containing one), so a raw copy would hand the
+// receiver an address whose frame dies when the sender returns. Measured on a
+// runtime-built []byte before the codec path existed: the receiver got the right
+// length and the bytes [4, 0, 0, ...] - the push allocator's first-batch marker,
+// i.e. allocator metadata, not the payload.
 //
-// Such an element is encoded with the structural codec instead
-// (runtime.ChanSendStructural / ChanRecvStructural). Channels and funcs stay
-// raw: they are handles, not payloads.
-func typeNeedsStructural(t types.Type) bool {
+// Such an element is encoded - by its own Codec when it has one, by the
+// structural codec otherwise (runtime.ChanSendStructural / ChanRecvStructural) -
+// and the decode is the relocation that gives the receiver its own copy.
+//
+// The complement is the extent path: a self-contained element crosses as its own
+// bytes. Both ends of a spawn channel are threads in one address space running
+// the same binary, so a pointer-free value needs no encoding at all.
+//
+// Channels and funcs count as self-contained: a channel is one object both ends
+// hold (a capability, not a payload) and a func value is a code pointer. Both
+// are handles, and a handle's bytes ARE the message.
+func typeNeedsReloc(t types.Type) bool {
 	if t == nil {
 		return false
 	}
 	switch u := t.Underlying().(type) {
 	case *types.Basic:
-		return u.Kind() == types.UnsafePointer
+		return u.Kind() == types.UnsafePointer || u.Kind() == types.String || u.Kind() == types.UntypedString
 	case *types.Pointer:
 		return true
 	case *types.Slice:
@@ -777,10 +804,10 @@ func typeNeedsStructural(t types.Type) bool {
 	case *types.Interface:
 		return true
 	case *types.Array:
-		return typeNeedsStructural(u.Elem())
+		return typeNeedsReloc(u.Elem())
 	case *types.Struct:
 		for i := 0; i < u.NumFields(); i++ {
-			if typeNeedsStructural(u.Field(i).Type()) {
+			if typeNeedsReloc(u.Field(i).Type()) {
 				return true
 			}
 		}

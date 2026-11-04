@@ -47,17 +47,31 @@ Runtime entries: `codecSovereignArena(recv)` lazily acquires/registers,
 
 ### Codec Dispatch Policy
 
-The structural codec is used in two places, with this rule:
+A value crosses a spawn channel by one of three routes, and the element type
+decides which before any code is generated:
 
-- **Spawn channels always use the builtin structural codec.** Cross-domain
-  boundaries serialize values structurally (the full `codecEncodeValue` /
-  `codecDecodeValue` graph walk with back-references). No exceptions - the
-  wire format between domains is fixed.
-- **Direct codec calls check for a custom encode/decode method first.** When
-  serialization is invoked directly on a type (e.g. to a buffer), dispatch to
-  the type's own `MarshalBinary`/`UnmarshalBinary`-style method if one is
-  defined (`encoding.BinaryMarshaler` / `encoding.BinaryUnmarshaler`); only
-  fall back to the structural codec when no custom method exists.
+- **No references in the element: the extent is the message.** Both ends are
+  threads in one address space running the same binary, so an element that holds
+  no pointer, slice, string, map or interface needs no encoding - a memcpy of
+  its bytes into the ring IS the wire form (`PipeChanSendRaw` /
+  `PipeChanRecvRaw`). This includes a pointer-free type that defines its own
+  codec: the round trip could only reproduce the bytes that were already there.
+  Measured on a 12-byte struct: 95us -> 16us per round trip.
+- **References and a custom codec: the codec is the relocation.**
+  `EncodeTo`/`DecodeFrom` run, and the decode gives the receiver its own copy in
+  its own arena.
+- **References and no custom codec: the builtin structural codec.** The full
+  `codecEncodeValue` / `codecDecodeValue` graph walk with back-references.
+
+A channel and a function value are handles, not payloads: their bytes ARE the
+message. The predicate is `typeNeedsReloc` (legacy) and `elemNeedsReloc`
+(stage4), and it is checked FIRST, before the codec question.
+
+**Direct codec calls check for a custom encode/decode method first.** When
+serialization is invoked directly on a type (e.g. to a buffer), dispatch to
+the type's own `MarshalBinary`/`UnmarshalBinary`-style method if one is
+defined (`encoding.BinaryMarshaler` / `encoding.BinaryUnmarshaler`); only
+fall back to the structural codec when no custom method exists.
 
 ## Moxie Memory Model
 
@@ -627,9 +641,10 @@ correlated by id. Queries and commands are the only inbound traffic.
 **Share by communicating, not communicate by sharing.** Domains are threads and
 share one address space, so the separation is a CONTRACT rather than an MMU
 boundary: channels (SPSC ring buffers) are the only inter-domain state, values
-cross them copied through the codec, there is no API that hands another domain a
-pointer, and every package variable is thread-local so nothing is shared by
-accident. Function values and closure captures cannot transit
+cross them copied - as their own bytes when the element holds no references,
+through the codec (which is the relocation) when it does - there is no API that
+hands another domain a pointer, and every package variable is thread-local so
+nothing is shared by accident. Function values and closure captures cannot transit
 a spawn boundary - only code pointers, codec-serialized values, and channels.
 A closure lives in its function arena and may only receive data read-only
 via parameters; if mutation is required, use a sovereign self-mutating type.

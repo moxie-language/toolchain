@@ -133,14 +133,22 @@ func (e *irEmitter) emitCodecIface(elemType Type, valPtr string) (reg string) {
 }
 
 func (e *irEmitter) emitChanRecv(u *SSAUnOp) {
+	elemT := chanElemType(u.X.SSAType())
+	if !elemNeedsReloc(elemT) {
+		e.emitExtentChanRecv(u)
+		return
+	}
 	if e.elemImplementsCodec(u.X.SSAType()) {
 		e.emitCodecChanRecv(u)
 		return
 	}
-	if elemNeedsStructural(chanElemType(u.X.SSAType())) {
-		e.emitStructuralChanRecv(u)
-		return
-	}
+	e.emitStructuralChanRecv(u)
+}
+
+// emitExtentChanRecv is the recv for a self-contained element: the frame is
+// copied straight into the receiver's slot. runtime.chanRecv routes a
+// spawn-bound channel to PipeChanRecvRaw, the receiving half of the extent path.
+func (e *irEmitter) emitExtentChanRecv(u *SSAUnOp) {
 	reg := e.regName(u)
 	elemType := e.chanElemType(u.X.SSAType())
 	ch := e.operand(u.X)
@@ -184,21 +192,22 @@ func chanElemType(t Type) (tv Type) {
 	return nil
 }
 
-// elemNeedsStructural reports whether a channel element CANNOT cross a spawn
-// boundary as raw bytes.
+// elemNeedsReloc reports whether a channel element's bytes are NOT the message:
+// the element holds a reference into an arena (a pointer, slice, string, map or
+// interface, or a struct/array containing one), so a raw copy would hand the
+// receiver an address whose frame dies when the sender returns. Such an element
+// is encoded - by its own Codec when it has one, by the structural codec
+// otherwise - and the decode is the relocation that gives the receiver its own
+// copy.
 //
-// The spawn boundary copies the element's raw bytes into a shared ring, and the
-// receiver is a forked domain: a raw slice/string/map/interface/pointer is an
-// address in the SENDER's arena space, so the child reads whatever its own
-// copy-on-write view holds at that address. Measured on a runtime-built []byte:
-// the child got the right length and the bytes [4, 0, 0, ...] - the push
-// allocator's first-batch marker, i.e. allocator metadata, not the payload.
+// The complement is the extent path: a self-contained element crosses as its
+// own bytes. Both ends of a spawn channel are threads in one address space
+// running the same binary, so a pointer-free value needs no encoding at all.
 //
-// Such an element is encoded with the structural codec instead
-// (runtime.ChanSendStructural / ChanRecvStructural). Types that implement
-// moxie.Codec keep their own EncodeTo/DecodeFrom path, which is checked first.
-// Channels and funcs stay raw: they are handles, not payloads.
-func elemNeedsStructural(t Type) (ok bool) {
+// Channels and funcs count as self-contained: a channel is one object both ends
+// hold (a capability, not a payload) and a func value is a code pointer. Both
+// are handles, and a handle's bytes ARE the message.
+func elemNeedsReloc(t Type) (ok bool) {
 	if t == nil {
 		return false
 	}
@@ -208,7 +217,7 @@ func elemNeedsStructural(t Type) (ok bool) {
 	}
 	switch tt := u.(type) {
 	case *Basic:
-		return tt.Kind == UnsafePointer
+		return tt.Kind == UnsafePointer || tt.Kind == TCString || tt.Kind == UntypedString
 	case *Pointer:
 		return true
 	case *Slice:
@@ -218,10 +227,10 @@ func elemNeedsStructural(t Type) (ok bool) {
 	case *TCInterface:
 		return true
 	case *Array:
-		return elemNeedsStructural(tt.Elem)
+		return elemNeedsReloc(tt.Elem)
 	case *TCStruct:
 		for i := 0; i < tt.NumFields(); i++ {
-			if elemNeedsStructural(tt.Field(i).Typ) {
+			if elemNeedsReloc(tt.Field(i).Typ) {
 				return true
 			}
 		}
@@ -281,6 +290,38 @@ func (e *irEmitter) emitStructuralChanSend(s *SSASend) {
 	e.declareRuntime("runtime.ChanSendStructural", "void", "ptr, ptr, ptr, ptr")
 }
 
+// emitExtentChanSend is the send for a self-contained element: the value's
+// bytes go into the ring and that is the whole message. runtime.chanSend routes
+// a spawn-bound channel to PipeChanSendRaw, which is the memcpy of the extent.
+func (e *irEmitter) emitExtentChanSend(s *SSASend, elemType string) {
+	ch := e.operand(s.Chan)
+	val := e.operand(s.X)
+	opType := "{ptr, ptr, i32, ptr}"
+
+	e.nextReg++
+	valAlloca := "%chansv" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(valAlloca) ; e.w(" = alloca ") ; e.w(elemType) ; e.w("\n")
+
+	valSrcType := e.llvmType(s.X.SSAType())
+	resolved := e.resolvedType(s.X, valSrcType)
+	if resolved != valSrcType {
+		valSrcType = resolved
+	}
+	if valSrcType == elemType {
+		e.w("  store ") ; e.w(elemType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+	} else {
+		e.w("  store ") ; e.w(valSrcType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
+	}
+
+	e.nextReg++
+	opAlloca := "%chansop" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(opAlloca) ; e.w(" = alloca ") ; e.w(opType) ; e.w("\n")
+	e.w("  store ") ; e.w(opType) ; e.w(" zeroinitializer, ptr ") ; e.w(opAlloca) ; e.w("\n")
+
+	e.w("  call void @runtime.chanSend(ptr ") ; e.w(ch) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w(", ptr ") ; e.w(opAlloca) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.chanSend", "void", "ptr, ptr, ptr")
+}
+
 // emitStructuralChanRecv is the recv counterpart: the runtime decodes the frame
 // into the receiver's own slot, so a slice arrives with a fresh backing in the
 // receiver's arena.
@@ -323,41 +364,16 @@ func (e *irEmitter) emitStructuralChanRecv(u *SSAUnOp) {
 }
 
 func (e *irEmitter) emitChanSend(s *SSASend) {
+	elemT := chanElemType(s.Chan.SSAType())
+	if !elemNeedsReloc(elemT) {
+		e.emitExtentChanSend(s, e.chanElemType(s.Chan.SSAType()))
+		return
+	}
 	if e.elemImplementsCodec(s.Chan.SSAType()) {
 		e.emitCodecChanSend(s)
 		return
 	}
-	if elemNeedsStructural(chanElemType(s.Chan.SSAType())) {
-		e.emitStructuralChanSend(s)
-		return
-	}
-	elemType := e.chanElemType(s.Chan.SSAType())
-	ch := e.operand(s.Chan)
-	val := e.operand(s.X)
-	opType := "{ptr, ptr, i32, ptr}"
-
-	e.nextReg++
-	valAlloca := "%chansv" | irItoa(e.nextReg)
-	e.w("  ") ; e.w(valAlloca) ; e.w(" = alloca ") ; e.w(elemType) ; e.w("\n")
-
-	valSrcType := e.llvmType(s.X.SSAType())
-	resolved := e.resolvedType(s.X, valSrcType)
-	if resolved != valSrcType {
-		valSrcType = resolved
-	}
-	if valSrcType == elemType {
-		e.w("  store ") ; e.w(elemType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
-	} else {
-		e.w("  store ") ; e.w(valSrcType) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w("\n")
-	}
-
-	e.nextReg++
-	opAlloca := "%chansop" | irItoa(e.nextReg)
-	e.w("  ") ; e.w(opAlloca) ; e.w(" = alloca ") ; e.w(opType) ; e.w("\n")
-	e.w("  store ") ; e.w(opType) ; e.w(" zeroinitializer, ptr ") ; e.w(opAlloca) ; e.w("\n")
-
-	e.w("  call void @runtime.chanSend(ptr ") ; e.w(ch) ; e.w(", ptr ") ; e.w(valAlloca) ; e.w(", ptr ") ; e.w(opAlloca) ; e.w(", ptr null)\n")
-	e.declareRuntime("runtime.chanSend", "void", "ptr, ptr, ptr")
+	e.emitStructuralChanSend(s)
 }
 
 // emitCodecChanRecv emits the dual-path chan recv for a chan whose element
