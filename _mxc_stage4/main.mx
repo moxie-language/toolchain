@@ -8382,12 +8382,12 @@ func ringRecvInt32(ring unsafe.Pointer) (v int32, ok bool) {
 // Text format: newline-separated fields. All strings are raw UTF-8.
 // Layout:
 //   numPkgs\n
-//   triple\n targetOS\n targetArch\n clang\n tmpdir\n cacheBase\n root\n modPrefix\n modDir\n rootModPrefix\n
+//   triple\n targetOS\n targetArch\n clang\n tmpdir\n cacheBase\n root\n modPrefix\n modDir\n rootModPrefix\n targetPkgPath\n
 //   for each pkg: path\n name\n dir\n version\n
 //     numFiles\n file1\n ... numCfiles\n cf1\n ... numBcfiles\n bf1\n ...
 //     numImports\n imp1\n ...
 
-func serializePkgMeta(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase, root, modPrefix, modDir, rootModPrefix string) (data []byte) {
+func serializePkgMeta(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase, root, modPrefix, modDir, rootModPrefix, targetPkgPath string) (data []byte) {
 	var b []byte
 	b = b | simpleItoa(len(pkgs))
 	b = mxutil.Ensure(b, 1)
@@ -8423,6 +8423,16 @@ func serializePkgMeta(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase, root, m
 	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	b = b | rootModPrefix
+	b = mxutil.Ensure(b, 1)
+	push(b, '\n')
+	// The target's compiled path, because restrictions are gated on it: without
+	// it a worker's bst.targetPkgPath is "" and isTargetPkg falls through to the
+	// module prefix, which is "" for a program that lives in no module - so the
+	// '+' text rule silently did not apply to a standalone program built with
+	// workers while the serial path rejected it. Measured: 0b's
+	// reject_plus_text accepted a[]byte + b[]byte on the 8-core host and
+	// rejected it on a host whose TLS probe forced the serial path.
+	b = b | targetPkgPath
 	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	for _, p := range pkgs {
@@ -8507,6 +8517,9 @@ type workerMeta struct {
 	// be the MOXIEROOT fallback) so workers gate restrictions identically to
 	// the parent.
 	rootModPrefix string
+	// targetPkgPath is the compiled path of the package the build asked for,
+	// which is what isTargetPkg matches before it consults the module prefix.
+	targetPkgPath string
 }
 
 func deserializePkgMeta(data []byte) (m *workerMeta) {
@@ -8523,6 +8536,7 @@ func deserializePkgMeta(data []byte) (m *workerMeta) {
 	m.modPrefix, pos = deserLine(data, pos)
 	m.modDir, pos = deserLine(data, pos)
 	m.rootModPrefix, pos = deserLine(data, pos)
+	m.targetPkgPath, pos = deserLine(data, pos)
 	m.pkgs = []*pkgInfo{:numPkgs}
 	for i := int32(0); i < numPkgs; i++ {
 		p := &pkgInfo{}
@@ -8606,6 +8620,7 @@ func workerEntryExport(arg unsafe.Pointer) {
 	bst.globalModPrefix = meta.modPrefix
 	bst.globalModDir = meta.modDir
 	bst.rootModPrefix = meta.rootModPrefix
+	bst.targetPkgPath = meta.targetPkgPath
 	bst.quietDiscover = true
 
 	// The target comes from the metadata, never from the triple string: both
@@ -8904,7 +8919,7 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 	// Phase 2: serialize metadata and spawn workers
 	root := moxieRoot()
 	meta := serializePkgMeta(pkgs, triple, clang, tmpdir, cacheBase, root,
-		bst.globalModPrefix, bst.globalModDir, bst.rootModPrefix)
+		bst.globalModPrefix, bst.globalModDir, bst.rootModPrefix, bst.targetPkgPath)
 
 	workers := []*workerInfo{:jobs}
 	for wi := int32(0); wi < jobs; wi++ {
