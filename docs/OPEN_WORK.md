@@ -24506,3 +24506,101 @@ The check is strict again: the nil operand inside a spawn target *is* consumptio
 (`closedConsumedAsNil`), which is what the lowering acts on. Verified both ways -
 the probe and futexpark build and run, and a target whose loop only receives is
 refused with the termination message.
+
+### Round 369: the build host is provisioned, not accumulated
+
+A fresh Ubuntu 24.04 host could not build this tree, and every failure was state
+a machine accumulates and the repository never described. Each one is now a line
+of `scripts/provision-build-host.sh`, which is the only supported bootstrap:
+
+- **The unversioned LLVM tools do not exist on Debian/Ubuntu.** The compiler
+  invokes `clang`, `opt`, `llvm-link`, `llc`, `ld.lld` and `llvm-config` by bare
+  name on purpose (a `-22` suffix on a binary that is really 23 is the lie that
+  let this stack drift), and the distro installs `opt-22` only. The first
+  bootstrap on the box died at `mxc: opt failed`, halfway through, with the
+  binary it had already built sitting there looking finished.
+- **`lib/compiler-rt-builtins` was a tracked ABSOLUTE symlink** into one
+  developer's llvm checkout, so a fresh clone's first builtin failed to build
+  with no clue why. Untracked, ignored, and the script sparse-clones
+  llvm-project at `release/22.x` for it.
+- **`llvm-glue/libmoxie-llvm-glue.so` is a build product** and a stale one is a
+  hard failure at start-up (`missing symbol MoxieCreateCompileUnit`). The stale
+  `legacy/llvm-glue` duplicate carried two of the three shims, nothing
+  referenced it, and building it was how a wrong `.so` reached `lib/`.
+- **Go is 1.25.3 exactly, not "1.25+".** `patch-gotypes.go` patches `go/types`
+  by exact source text; 1.27.3 refuses to apply.
+
+The script also does what `build.sh` does not: `s1`, `s2`, `s3`, the `s2 == s3`
+fixpoint, install, and the runtime bake with the installed compiler. `build.sh`
+produces one generation and then runs `update --all` and phase 0a, which is a
+developer's loop, not the bootstrap. `--check` reports what a host is missing
+and changes nothing, which is how the missing-tool class got a name instead of a
+stack trace.
+
+### Round 370: `update --all` rebuilt packages in filesystem order
+
+The rebuild loop walked the cache directory and recompiled each package on its
+own, in readdir order. A package is type-checked against its imports' exports
+and its SSA resolves imported symbols through them, so a package whose imports
+had not been rebuilt first came back with every imported name undefined - 200
+errors and `compile error for runtime` on the box.
+
+That is not an edge case. A runtime bake is the only thing that writes a new
+generation to the cache, so a fresh host's generation holds `runtime` alone, and
+`build.sh` runs `update --all` on every bootstrap: it failed there, every time.
+The cache now names WHAT to rebuild and the set is each cached package's closure
+from `resolveAll`, concatenated with duplicates dropped. The proof that this
+keeps dependencies first is one sentence: any list holding a package also holds
+its imports earlier in that same list, so a package's first occurrence never
+precedes an unbuilt import.
+
+`legacy/` has no `update` verb - the package cache is stage4's - so there is no
+mirror for this one.
+
+### Round 371: a cold cache lost the dispatch table
+
+The box's phase 0a failed three units, then passed one of them on a rerun, and
+the same sources built correctly on the local machine. Reducing it:
+
+| cache | binary | result |
+| --- | --- | --- |
+| empty | `moxie` (legacy-built) | fmt prints `?` |
+| warm | the same binary | correct |
+| empty | local fixpoint compiler | fmt prints `?` |
+| warm | the same binary | correct |
+
+So the input was not the compiler, the toolchain or the optimizer - `opt` was
+blamed first and cleared, as was LLVM 22 versus 23 - it was the *cache*, and the
+pass/fail was deterministic per cache state. `strace` named it in one run: the
+dependency pre-pass writes `_tmp_t/4f14e1d0.mxh` and three worker pids then look
+for `_tmp_t/91f10802.mxh`. Two names for one package's export data, inside one
+build.
+
+The cause is `pkgHash`, the OBJECT key: it folds in `bst.pkgDispFingerprint` when
+that has been measured and falls back to the link-set key when it has not. The
+export blob was named from it, so the pre-pass (before
+`measureDispFingerprints`) and the compile phase (after) disagreed about the
+name. On a generation that had never been written the read missed, the worker's
+sub-registry stayed empty, and the dispatch table it emitted was short: fmt
+carried **78 impls instead of 86**, the 8 missing ones being the root package's
+synthesized `String` methods. Disassembling both `fmt` bitcodes showed the
+difference as exactly that: the count in the panic string, plus the
+`reflect/types.type.pkgpath:main` descriptor the cold build never referenced.
+
+Why it survived every gate: a cache generation is per compiler build, so the
+first build after any compiler upgrade is cold, and everything after it is warm.
+The suite is a sequence of warm builds, and the local machine's cache had been
+warm for days. The first program a new user builds is the broken one.
+
+The fix is the right key rather than a bigger one. `pkgExportHash` covers what
+export data IS a function of - the sources for this target plus the imports'
+export keys - and `cachedMxhPath` derives its own name from the package, so no
+call site can pass an object key to an export path again. The fingerprint stays
+on the object key, where it belongs, because dispatch arms are baked into the
+object.
+
+`tests/phase0c_coldcache.sh` makes the class a gate: it points `MOXIEPATH` at a
+fresh cache (twice, plus a forced warm rebuild) and builds with `-j 4`, because
+the loss was in the workers' registry and a serial build has the whole link set
+in one process. Verified red then green on the same box: the unpatched compiler
+fails cold and passes warm, the patched one passes all three cases.
