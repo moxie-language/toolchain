@@ -42,7 +42,7 @@ echo "mode: $PHASE"
 # real UI" is a basic gate, not a long-tail one. It costs ~3.5 minutes because it
 # builds the nine bundles; a warm package cache brings the app bundle build to
 # seconds and the rest is the browser suite.
-UNIT_PHASES_QUICK="0a,0b,1,7"
+UNIT_PHASES_QUICK="0a,0b,0c,1,7"
 UNIT_PHASES_FULL="all"
 
 case "$PHASE" in
@@ -65,7 +65,7 @@ case "$PHASE" in
 	# Historical phase numbers: 0 was regressions+restrictions, 1b/1c were
 	# their own scripts. They are units now (0a, 0b, 1, 1b, 1c).
 	case "$2" in
-		0) PHASES="0a,0b" ;;
+		0) PHASES="0a,0b,0c" ;;
 		1) PHASES="1" ;;
 		1b) PHASES="1b" ;;
 		1c) PHASES="1c" ;;

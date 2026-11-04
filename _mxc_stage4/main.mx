@@ -48,6 +48,11 @@ type buildState struct {
 	// hash a dependency that the memo does not hold yet (pkgHash).
 	pkgByPath   map[string]*pkgInfo
 	pkgHashBusy map[string]bool
+	// pkgExportKeyMemo caches the EXPORT key (pkgExportHash): sources plus
+	// imports' export keys, with no dispatch fingerprint and no link-set
+	// fallback. Separate memo because that key is a different value.
+	pkgExportKeyMemo map[string]string
+	pkgExportBusy    map[string]bool
 	// clangVer is the toolchain's version line, read once. The object cache
 	// keys on it, so an object made by one clang is never reused by another
 	// (objStampFor).
@@ -2519,6 +2524,65 @@ func pkgHash(p *pkgInfo) (s string) {
 	acc = acc | []byte("|C") | []byte(caps)
 	hv := fnvHash(acc)
 	bst.pkgKeyMemo[p.path] = hv
+	return hv
+}
+
+// pkgExportHash is the key for a package's EXPORT blob (the .mxh text). It
+// covers what export data is a function of - the sources for this target and,
+// recursively, its imports' export keys - and deliberately omits the two terms
+// that make pkgHash right for OBJECT files: the dispatch fingerprint and the
+// link-set fallback.
+//
+// Folding those in gave one export blob two names inside a single build. The
+// dependency pre-pass writes the .mxh BEFORE any fingerprint exists, so its key
+// falls back to the link-set key; the compile phase reads it AFTER
+// measureDispFingerprints, so its key carries the fingerprint. On a cache
+// generation that had never been written - the first build after any compiler
+// upgrade, because the generation directory is per compiler build - the read
+// missed and a worker process started that package's compile with an empty
+// sub-registry. Measured: fmt's interface-dispatch table held 78 impls instead
+// of 86, the 8 missing ones being the root package's synthesized String
+// methods, so fmt printed '?' for every Stringer. Deterministic per binary and
+// masked by any warm cache, which is how it survived every gate.
+func pkgExportHash(p *pkgInfo) (s string) {
+	if bst.pkgExportKeyMemo == nil {
+		bst.pkgExportKeyMemo = map[string]string{}
+	}
+	if h, ok := bst.pkgExportKeyMemo[p.path]; ok {
+		return h
+	}
+	sorted := []string{:0:len(p.imports)}
+	for _, imp := range p.imports {
+		sorted = mxutil.Ensure(sorted, 1)
+		push(sorted, imp)
+	}
+	for i := int32(1); i < int32(len(sorted)); i++ {
+		for j := i; j > 0 && sorted[j] < sorted[j-1]; j-- {
+			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
+		}
+	}
+	acc := []byte(mxutil.TargetOS() | "/" | mxutil.TargetArch() | "|")
+	acc = acc | []byte(pkgCacheKey(p.dir, p.files))
+	for _, imp := range sorted {
+		if dh, ok := bst.pkgExportKeyMemo[imp]; ok {
+			acc = acc | []byte("|") | dh
+			continue
+		}
+		if dp, found := bst.pkgByPath[imp]; found && dp != nil && dp != p {
+			if bst.pkgExportBusy == nil {
+				bst.pkgExportBusy = map[string]bool{}
+			}
+			if !bst.pkgExportBusy[imp] {
+				bst.pkgExportBusy[imp] = true
+				acc = acc | []byte("|") | pkgExportHash(dp)
+				bst.pkgExportBusy[imp] = false
+				continue
+			}
+		}
+		acc = acc | []byte("|?") | []byte(imp)
+	}
+	hv := fnvHash(acc)
+	bst.pkgExportKeyMemo[p.path] = hv
 	return hv
 }
 
@@ -5109,8 +5173,15 @@ func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
 	return true
 }
 
-func cachedMxhPath(cacheBase, pkgPath, hash, version string) (s string) {
-	return mxutil.JoinPath(mxutil.JoinPath(cacheBase, safeName(pkgPath)), versionedCacheName(hash, version, ".mxh"))
+// cachedMxhPath names a package's export blob. The path derives from the
+// package, never from a caller-supplied hash: export data is a function of the
+// sources and the imports' export keys (pkgExportHash), and a caller that knew
+// better used to fold in pkgHash - the OBJECT key, whose dispatch fingerprint
+// exists only after measurement - so the pre-pass and the compile phase
+// disagreed about the name and a cold cache generation lost the blob.
+func cachedMxhPath(cacheBase string, p *pkgInfo) (s string) {
+	return mxutil.JoinPath(mxutil.JoinPath(cacheBase, safeName(p.path)),
+		versionedCacheName(pkgExportHash(p), p.version, ".mxh"))
 }
 
 // removeAll removes a whole tree. It used to list one level and os.Remove each
@@ -5185,7 +5256,7 @@ func cmdCacheWarm() {
 		}
 		hash := pkgHash(pkg)
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
-		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+		cachedMxh := cachedMxhPath(cacheBase, pkg)
 		bcOk := mxutil.FileExists(cached)
 		mxhOk := mxutil.FileExists(cachedMxh)
 		if bcOk && mxhOk {
@@ -5651,8 +5722,7 @@ func dispIndexCheck(pkgs []*pkgInfo, cacheBase string, ifaceMethods map[string]b
 	arena := runtime.ArenaNew(64 * 1024 * 1024)
 	loaded := int32(0)
 	for _, pkg := range pkgs {
-		hash := pkgHash(pkg)
-		if data, ok := mxutil.ReadFile(cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)); ok {
+		if data, ok := mxutil.ReadFile(cachedMxhPath(cacheBase, pkg)); ok {
 			if loadMxhDataIn(data, arena) {
 				loaded++
 			}
@@ -5829,8 +5899,7 @@ func cmdDispIndex() {
 	scanned := int32(0)
 	methodLines := int32(0)
 	for _, pkg := range pkgs {
-		hash := pkgHash(pkg)
-		mxhPath := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+		mxhPath := cachedMxhPath(cacheBase, pkg)
 		data, ok := mxutil.ReadFile(mxhPath)
 		if !ok {
 			continue
@@ -6073,7 +6142,7 @@ func cmdUpdate(rebuildAll bool) {
 			cacheWrite(cached, data)
 		}
 		if len(cctx.lastMxhData) > 0 {
-			cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+			cachedMxh := cachedMxhPath(cacheBase, pkg)
 			cacheWrite(cachedMxh, []byte(cctx.lastMxhData))
 			cctx.lastMxhData = ""
 		}
@@ -6321,8 +6390,7 @@ func cmdTest(args []string) {
 		if dp == pkg {
 			compilePath = "main"
 		}
-		hash := pkgHash(dp)
-		cachedMxh := cachedMxhPath(cacheBase, dp.path, hash, dp.version)
+		cachedMxh := cachedMxhPath(cacheBase, dp)
 		if mxhOk := mxutil.FileExists(cachedMxh); mxhOk && !forceRebuild && dp != pkg {
 			loadMxh(cachedMxh)
 			src := concatSources(dp.dir, dp.files)
@@ -6372,7 +6440,7 @@ func cmdTest(args []string) {
 
 		hash := pkgHash(dp)
 		cached := cachedBcPath(cacheBase, dp.path, hash, dp.version)
-		cachedMxh := cachedMxhPath(cacheBase, dp.path, hash, dp.version)
+		cachedMxh := cachedMxhPath(cacheBase, dp)
 
 		if dp != pkg {
 			bcOk := mxutil.FileExists(cached)
@@ -6899,8 +6967,7 @@ func prepareDispatchIndex(pkgs []*pkgInfo, cacheBase string, skip *pkgInfo) {
 		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
-		hash := pkgHash(pkg)
-		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+		cachedMxh := cachedMxhPath(cacheBase, pkg)
 		if mxutil.FileExists(cachedMxh) {
 			// Load the cached mxh, do not merely skip it. Packages are in
 			// dependency order, and a later package whose mxh is missing is
@@ -6924,8 +6991,7 @@ func prepareDispatchIndex(pkgs []*pkgInfo, cacheBase string, skip *pkgInfo) {
 		if ipkg.baked || ipkg == skip {
 			continue
 		}
-		ihash := pkgHash(ipkg)
-		if data, ok := mxutil.ReadFile(cachedMxhPath(cacheBase, ipkg.path, ihash, ipkg.version)); ok {
+		if data, ok := mxutil.ReadFile(cachedMxhPath(cacheBase, ipkg)); ok {
 			d := string(data)
 			cctx.dispMethodsByPkg[dispPkgKey(ipkg)] = dispParseMethods(d)
 			dispParseIfaceMethods(d, cctx.dispIfaceMethods)
@@ -7524,8 +7590,7 @@ func main() {
 						compilePath = p.name
 					}
 					src := concatSources(p.dir, p.files)
-					hash := pkgHash(p)
-					cachedMxh := cachedMxhPath(cacheBase, p.path, hash, p.version)
+					cachedMxh := cachedMxhPath(cacheBase, p)
 					cdir := mxutil.JoinPath(cacheBase, safeName(p.path))
 					mkdirAll(cdir, 0755)
 					TypeCheckOnly(src, compilePath, cachedMxh, p.dir)
@@ -7589,8 +7654,7 @@ func main() {
 		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
 			compilePath = pkg.name
 		}
-		hash := pkgHash(pkg)
-		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+		cachedMxh := cachedMxhPath(cacheBase, pkg)
 		if mxutil.FileExists(cachedMxh) && !forceRebuild {
 			if !tier1(dispPkgKey(pkg), cctx.dispIfaceMethods, cctx.dispMethodsByPkg) {
 				// Tier 2 AND already cached: no dispatch can reach it, its mxh
@@ -7618,8 +7682,7 @@ func main() {
 						continue
 					}
 					importsLoaded[imp] = true
-					ih := pkgHash(ip)
-					if idata, iok := mxutil.ReadFile(cachedMxhPath(cacheBase, ip.path, ih, ip.version)); iok {
+					if idata, iok := mxutil.ReadFile(cachedMxhPath(cacheBase, ip)); iok {
 						loadMxhData(idata)
 					}
 				}
@@ -8052,8 +8115,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 				if tier1(ik, cctx.dispIfaceMethods, cctx.dispMethodsByPkg) {
 					continue
 				}
-				ih := pkgHash(ip)
-				if data, ok := mxutil.ReadFile(cachedMxhPath(cacheBase, ip.path, ih, ip.version)); ok {
+				if data, ok := mxutil.ReadFile(cachedMxhPath(cacheBase, ip)); ok {
 					// One arena per tier-2 package, sized to the graph it holds
 					// (the package's mxh text is a few KB): a flat 32MB per
 					// package reserved ~1792MB of mostly-empty mappings by the
@@ -8092,7 +8154,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 
 		hash := pkgHash(pkg)
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
-		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+		cachedMxh := cachedMxhPath(cacheBase, pkg)
 
 		bcOk := mxutil.FileExists(cached)
 		mxhOk := mxutil.FileExists(cachedMxh)
@@ -8576,7 +8638,7 @@ func workerEntryExport(arg unsafe.Pointer) {
 
 	// Whole-link registry: dispatch chains must see every type in the link,
 	// not just the compiling package's deps.
-	if lsErr := workerLoadLinkSet(meta, hashes); lsErr != "" {
+	if lsErr := workerLoadLinkSet(meta); lsErr != "" {
 		workerSendResult(ringB, -1, lsErr)
 		return
 	}
@@ -8592,7 +8654,7 @@ func workerEntryExport(arg unsafe.Pointer) {
 			continue
 		}
 		pkg := meta.pkgs[idx]
-		errMsg := workerCompilePkg(pkg, hashes[idx], meta, idxByPath, hashes)
+		errMsg := workerCompilePkg(pkg, hashes[idx], meta, idxByPath)
 		workerSendResult(ringB, idx, errMsg)
 	}
 }
@@ -8619,7 +8681,7 @@ func workerSendResult(ring unsafe.Pointer, idx int32, errMsg string) {
 
 // workerLoadDeps recursively loads .mxh files for a package's imports,
 // ensuring transitive deps are loaded before the package that references them.
-func workerLoadDeps(pkg *pkgInfo, meta *workerMeta, idxByPath map[string]int32, hashes []string) (errMsg string) {
+func workerLoadDeps(pkg *pkgInfo, meta *workerMeta, idxByPath map[string]int32) (errMsg string) {
 	for _, imp := range pkg.imports {
 		di, ok := idxByPath[imp]
 		if !ok {
@@ -8634,11 +8696,10 @@ func workerLoadDeps(pkg *pkgInfo, meta *workerMeta, idxByPath map[string]int32, 
 			continue
 		}
 		// Recursively load this dep's deps first
-		if depErr := workerLoadDeps(dep, meta, idxByPath, hashes); depErr != "" {
+		if depErr := workerLoadDeps(dep, meta, idxByPath); depErr != "" {
 			return depErr
 		}
-		depHash := hashes[di]
-		cachedMxh := cachedMxhPath(meta.cacheBase, dep.path, depHash, dep.version)
+		cachedMxh := cachedMxhPath(meta.cacheBase, dep)
 		if !loadMxh(cachedMxh) {
 			return "missing dep .mxh for " | dep.path
 		}
@@ -8656,7 +8717,7 @@ func workerLoadDeps(pkg *pkgInfo, meta *workerMeta, idxByPath map[string]int32, 
 // spawn-channel Codec dispatch fall through to "no impl" depending on which
 // worker happened to compile the runtime. The set is fixed at startup, so
 // this is deterministic, not scheduling-dependent.
-func workerLoadLinkSet(meta *workerMeta, hashes []string) (errMsg string) {
+func workerLoadLinkSet(meta *workerMeta) (errMsg string) {
 	for i := int32(0); i < int32(len(meta.pkgs)); i++ {
 		dep := meta.pkgs[i]
 		compilePath := dep.path
@@ -8666,7 +8727,7 @@ func workerLoadLinkSet(meta *workerMeta, hashes []string) (errMsg string) {
 		if existing := cctx.universe.Registry[compilePath]; existing != nil && !existing.Synthetic {
 			continue
 		}
-		cachedMxh := cachedMxhPath(meta.cacheBase, dep.path, hashes[i], dep.version)
+		cachedMxh := cachedMxhPath(meta.cacheBase, dep)
 		if !mxutil.FileExists(cachedMxh) {
 			continue
 		}
@@ -8681,10 +8742,10 @@ func workerLoadLinkSet(meta *workerMeta, hashes []string) (errMsg string) {
 
 // workerCompilePkg compiles one package in the worker thread. All deps must
 // already have .mxh in cache. Returns empty string on success, error text on failure.
-func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map[string]int32, hashes []string) (errMsg string) {
+func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map[string]int32) (errMsg string) {
 	// The whole link set is already loaded (workerLoadLinkSet at startup);
 	// reloading the deps is a no-op that keeps a lone worker correct.
-	if loadErr := workerLoadDeps(pkg, meta, idxByPath, hashes); loadErr != "" {
+	if loadErr := workerLoadDeps(pkg, meta, idxByPath); loadErr != "" {
 		return loadErr
 	}
 
@@ -8725,7 +8786,7 @@ func workerCompilePkg(pkg *pkgInfo, hash string, meta *workerMeta, idxByPath map
 
 	// Cache .mxh (already generated inside CompileToIR's arena)
 	if len(cctx.lastMxhData) > 0 {
-		cachedMxh := cachedMxhPath(meta.cacheBase, pkg.path, hash, pkg.version)
+		cachedMxh := cachedMxhPath(meta.cacheBase, pkg)
 		cacheWrite(cachedMxh, []byte(cctx.lastMxhData))
 		cctx.lastMxhData = ""
 	}
@@ -8779,7 +8840,7 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 		}
 		hash := pkgHash(pkg)
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
-		cachedMxh := cachedMxhPath(cacheBase, pkg.path, hash, pkg.version)
+		cachedMxh := cachedMxhPath(cacheBase, pkg)
 		bcOk := mxutil.FileExists(cached)
 		mxhOk := mxutil.FileExists(cachedMxh)
 		if bcOk && mxhOk && !forceRebuild {

@@ -89,6 +89,7 @@ declare -A PHASE_SCRIPT=(
 	[5]="phase5_wasm.sh"
 )
 declare -A PHASE_MONO=(
+	[0c]="phase0c_coldcache.sh"
 	[2]="phase2_selfhost.sh"
 	[7]="phase7_ui.sh"
 	[3]="phase3_ir_validate.sh"
@@ -96,7 +97,7 @@ declare -A PHASE_MONO=(
 	[6]="phase6_instrumentation.sh"
 	[8]="phase8_netsmoke.sh"
 )
-ALL_PHASES=(0a 0b 1 1b 1c 2 3 4 5 6 7 8)
+ALL_PHASES=(0a 0b 0c 1 1b 1c 2 3 4 5 6 7 8)
 
 usage() {
 	awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
