@@ -58,15 +58,37 @@ func spawnRingDataSize(slots, budget uintptr) uint32 {
 	return uint32(size)
 }
 
+// spawnHandoff is what a forked child used to inherit for free: the breaker,
+// the ring pairs, the control block and the target. A thread starts with zeroed
+// TLS, so the values are copied into it explicitly before the target runs.
+type spawnHandoff struct {
+	fn      uintptr
+	argp    unsafe.Pointer
+	breaker *channel
+	ctl     uintptr
+	nChans  int32
+	rings   [16][2]uintptr
+}
+
+// spawnDomain starts one domain THREAD running fn(args).
+//
+// A domain is a thread, not a process: same address space, its own TLS block
+// (domain root, arenas, package globals) and its own stack. That is the whole
+// concurrency model made literal - one thread of execution per domain, a closed
+// breaker observed by the loop, and no PID, no reaper, no orphan. The channels
+// are still SPSC ring buffers and values still cross them through the codec;
+// the only thing that changes is that the rings are ordinary memory instead of
+// a window into another process.
 func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
-	// The breaker is created BEFORE the fork: the parent's handle (returned by
-	// SpawnLifecycleChannel) and the child's DomainClosed must be one object, so
-	// a close by either side is visible to both.
+	// The control ring and the breaker first: the breaker rides that ring, and
+	// both threads must hold the same pointers.
 	spawnCtlRing = ringCreate(4096)
+	// The breaker is the parent's handle to the domain and the child's
+	// DomainClosed: one object, in the root arena because it outlives the frame.
 	spawnBreaker = spawnBreakerMake()
 
-	// Create ring buffer pairs for each channel before fork.
-	// mmap(MAP_SHARED) so both processes share the same physical memory.
+	// Ring pairs, sized from each channel's declared depth and frame budget.
+	// The sizing rules do not change with threads; only the mapping does.
 	spawnRingCount = nChans
 	for i := int32(0); i < nChans && i < 16; i++ {
 		// One page and one slot when the channel is nil or was never noted:
@@ -76,6 +98,9 @@ func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
 		ch := spawnChanSet[i]
 		spawnChanSet[i] = nil
 		if ch != nil {
+			// One channel belongs to the child it was handed to; the parent's
+			// waits consult that child's breaker for liveness.
+			ch.ownerBreaker = spawnBreaker
 			if ch.frameBudget > 0 {
 				budget = ch.frameBudget
 			}
@@ -84,81 +109,69 @@ func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
 			}
 		}
 		dataSize := spawnRingDataSize(slots, budget)
-		spawnRingSet[i][0] = ringCreate(dataSize) // parent→child
-		spawnRingSet[i][1] = ringCreate(dataSize) // child→parent
+		spawnRingSet[i][0] = ringCreate(dataSize) // parent->child
+		spawnRingSet[i][1] = ringCreate(dataSize) // child->parent
 	}
 
-	// Shared control block for the child-ready handshake (MAP_SHARED).
+	// Control block for the child-ready handshake. Both threads see it directly
+	// now; the handshake remains because it is what makes the channel bindings
+	// visible before the parent sends its first frame.
 	spawnCtlPtr = spawnCtlCreate()
 
-	// Create the lockdown pipe (parent reads, child writes). Best
-	// effort: a failure here just leaves the child pointed at stderr.
-	lockdownFds := []int32{:2}
-	lockdownFds[0] = -1
-	lockdownFds[1] = -1
-	if moxie_pipe(unsafe.Pointer(&lockdownFds[0])) < 0 {
-		lockdownFds[0] = -1
-		lockdownFds[1] = -1
+	// The handoff lives in the ROOT arena: the child reads it before it has an
+	// arena of its own, and it must survive the spawning frame returning.
+	save := CurrentArena()
+	SetCurrentArena(trueRootArena())
+	h := (*spawnHandoff)(alloc(unsafe.Sizeof(spawnHandoff{}), nil))
+	SetCurrentArena(save)
+	h.fn = fn
+	h.argp = argp
+	h.breaker = spawnBreaker
+	h.ctl = spawnCtlPtr
+	h.nChans = spawnRingCount
+	for i := int32(0); i < 16; i++ {
+		h.rings[i][0] = spawnRingSet[i][0]
+		h.rings[i][1] = spawnRingSet[i][1]
 	}
 
-	pid := moxie_fork()
-	if pid < 0 {
-		runtimePanic("spawn: fork failed")
+	if moxie_thread_spawn(unsafe.Pointer(h)) != 0 {
+		runtimePanic("spawn: thread create failed")
 	}
-
-	if pid == 0 {
-		// Child process - run the spawned function directly.
-		childSpawnTarget = true
-		childParentPid = moxie_getppid()
-		DomainClosed = spawnBreaker
-
-		// Reaper: the one supervision gap the capability model cannot close is a
-		// parent that dies WITHOUT closing the terminate channel - a SIGKILL, a
-		// crash - because the holder of that channel is gone. The kernel is the
-		// only witness left, and it must be given a kill, not a signal to
-		// handle: SIGTERM only raises the sigint flag, and a domain parked in a
-		// select on its `closed` breaker never wakes to see it (it has no arm on
-		// sigint, by design). Measured: with SIGTERM here, `kill -9` of a parent
-		// left the child domain alive indefinitely - a relay that is respawned
-		// while its old worker is wedged accumulated 2,600+ parked domains
-		// before any of them died.
-		//
-		// SIGKILL makes the guarantee unconditional and recursive: every child
-		// has its own pdeathsig, so a whole tree dies with its root. A parent
-		// that is merely stopping closes the breakers instead and its children
-		// exit cleanly, which is the normal path and is unaffected.
-		moxie_set_pdeathsig(9) // SIGKILL
-		if moxie_getppid() != childParentPid {
-			exit(0)
-		}
-
-		// Wire the lockdown channel: close the read end (parent's side),
-		// route fault notifications to the write end. Done before
-		// spawnCall so any allocation made by user code is covered.
-		if lockdownFds[0] >= 0 {
-			moxie_close(lockdownFds[0])
-			SetSecureLockdownFd(lockdownFds[1])
-		}
-
-		// Call the function directly. With no scheduler, the child
-		// domain is single-threaded and runs to completion.
-		spawnCall(fn, argp)
-
-		// Exit child process. Its counters are a private copy of the table
-		// made at fork, so append them to the coverage dump before the
-		// process goes away; the parent cannot report them.
-		coverBeforeExit()
-		exit(0)
-	}
-
-	// Parent process.
-	lastSpawnPid = pid
-	if lockdownFds[1] >= 0 {
-		moxie_close(lockdownFds[1]) // close child's write end
-	}
-
-	domainRegister(pid, lockdownFds[0])
 }
+
+// moxie_runtime_thread_entry is the child side of a spawn. It runs on the new
+// thread with zeroed TLS, so it builds the domain here: InitCShared gives this
+// thread its own root arena, heap and package initialisers, and the handoff
+// fills in the spawn state that would otherwise have come from fork.
+//
+//export moxie_runtime_thread_entry
+func moxie_runtime_thread_entry(arg unsafe.Pointer) {
+	h := (*spawnHandoff)(arg)
+	childSpawnTarget = true
+	DomainClosed = h.breaker
+	spawnBreaker = h.breaker
+	spawnCtlPtr = h.ctl
+	spawnRingCount = h.nChans
+	for i := int32(0); i < 16; i++ {
+		spawnRingSet[i][0] = h.rings[i][0]
+		spawnRingSet[i][1] = h.rings[i][1]
+	}
+	InitCShared()
+	spawnCall(h.fn, h.argp)
+	// The domain is done: close the breaker if the target did not, so the parent
+	// observes the end exactly as it would from a forked child's exit. The
+	// closed flag is one object both threads hold.
+	if !ringIsClosed(h.breaker.ringA) {
+		SpawnClose(h.breaker)
+	}
+	// Returning ends THIS thread: the C trampoline calls pthread_exit on the
+	// result. The process and every other domain keep running, and the process
+	// exits when main returns.
+}
+
+//export moxie_thread_spawn
+func moxie_thread_spawn(arg unsafe.Pointer) int32
+
 
 // spawnCtl is the shared spawn-control block: one per spawn, mmap'd
 // MAP_SHARED before fork so parent and child both see the same memory.
@@ -170,19 +183,16 @@ type spawnCtl struct {
 
 var spawnCtlPtr uintptr // most recent spawn's control block (0 = none)
 
-// lastSpawnPid is the parent's most recently spawned child pid. Read by
-// MarkParentPipeChannel to tag the channel with its peer pid for death
-// detection, and by PipeWaitChildReady to check child liveness.
-var lastSpawnPid int32
 
-// childSpawnTarget is true iff this process is running as a spawn child.
-// Replaces the old ChildPipeFd sentinel: a child has no fd to check, it
-// has a flag set in the child branch of spawnDomain.
+// childSpawnTarget is true iff this DOMAIN is a spawn target. It is TLS, so it
+// is set in the new thread by moxie_runtime_thread_entry and is false in the
+// parent. Nothing about it is process-scoped any more.
 var childSpawnTarget bool
 
-// childParentPid is the child's parent pid (via getppid at spawn time),
-// used to detect parent death (orphaning) on the child side.
-var childParentPid int32
+// spawnBreaker is the handle of the spawn being established (or the most
+// recent one): what spawn returns to the parent and DomainClosed names in the
+// child. Root-arena object, TLS pointer.
+var spawnBreaker *channel
 
 func spawnCtlCreate() uintptr {
 	p := sysMapShared(unsafe.Sizeof(spawnCtl{}))
@@ -207,60 +217,10 @@ func spawnCall(fn uintptr, argp unsafe.Pointer) {
 //export moxie_spawn_call
 func moxie_spawn_call(fn uintptr, argp unsafe.Pointer)
 
-//export moxie_set_pdeathsig
-func moxie_set_pdeathsig(sig uint32)
-
-// spawnKillOnClose ends the child domain a control breaker belongs to. The
-// breaker is the parent's termination handle: a closed breaker is a domain that
-// must stop, and a domain inside a long task will not see it until that task
-// ends - if it ever does. Only the parent side acts, and only for the control
-// channel (chanID 0): a child closing its own breaker is announcing its exit.
-// Wasm has no processes, so that file defines this as a no-op.
-func spawnKillOnClose(ch *channel) {
-	if ch == nil || childSpawnTarget || ch.spawnChanID != 0 || ch.spawnPid <= 0 {
-		return
-	}
-	spawnTerminatePid(ch.spawnPid)
-}
-
-// spawnTerminatePid ends one child domain and reaps it. The breaker is the
-// parent's termination handle, so closing it must END the domain rather than
-// merely signal it: a target parked in its select wakes on the closed flag and
-// returns, but a target wedged inside a long operation (a hung network fetch, a
-// blocking syscall) will never run Moxie code again, and the parent has no other
-// way to reclaim it. The kernel is the only mechanism that reaches such a
-// process, so the close escalates SIGTERM -> SIGKILL with a short grace and
-// reaps the child, leaving no zombie and no live domain behind.
-//
-// Measured without this: a relay that replaced a stuck worker left the old
-// domain running forever (the parent overwrote the slot and dropped the handle),
-// and one relay accumulated 2,600+ live domains, each its own process.
-func spawnTerminatePid(pid int32) {
-	if pid <= 0 {
-		return
-	}
-	var status int32
-	if moxie_waitpid(pid, unsafe.Pointer(&status), 1) > 0 { // WNOHANG: already gone
-		domainReapChildren()
-		return
-	}
-	moxie_kill(pid, 15) // SIGTERM
-	for i := 0; i < 20; i++ {
-		if moxie_waitpid(pid, unsafe.Pointer(&status), 1) > 0 {
-			domainReapChildren()
-			return
-		}
-		sleepTicks(timeUnit(1_000_000)) // 1ms
-	}
-	moxie_kill(pid, 9) // SIGKILL
-	moxie_waitpid(pid, unsafe.Pointer(&status), 0)
-	domainReapChildren()
-}
 
 // MakePipe creates a unidirectional pipe via libc pipe(2). Returns the
-// (read, write) fds, or (-1, -1) on failure. The fds are inherited by
-// children created via spawn (which uses fork internally), so a parent
-// domain can hand the write end to a child for fault notification.
+// (read, write) fds, or (-1, -1) on failure. A domain thread inherits the
+// process's fd table, so a domain can hand the write end to another domain.
 func MakePipe() (int32, int32) {
 	fds := []int32{:2}
 	r := moxie_pipe(unsafe.Pointer(&fds[0]))
@@ -308,7 +268,9 @@ func moxie_getppid() int32
 //export moxie_pipe
 func moxie_pipe(fds unsafe.Pointer) int32
 
-// moxie_waitpid is declared in domain.mx.
+//export moxie_waitpid
+func moxie_waitpid(pid int32, status unsafe.Pointer, options int32) int32
+
 
 // MoxieWrite / MoxieRead are the generic fd read/write wrappers (defined in
 // spawn_unix.c). Used by spawnhandshake and the cross-binary type-server;

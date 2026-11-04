@@ -25,7 +25,24 @@ import (
 const ringMaxMsg = 32 << 20
 
 // channelIsPipeBound reports whether the channel is on a spawn boundary.
-// A spawn-bound channel always has ringSend/ringRecv bound; the compiler
+// chSendRing and chRecvRing resolve a channel's direction for THIS domain.
+// The parent sends on the parent->child ring and receives on the other; a spawn
+// target does the reverse. One shared object, role-based direction.
+func chSendRing(ch *channel) uintptr {
+	if childSpawnTarget {
+		return ch.ringB
+	}
+	return ch.ringA
+}
+
+func chRecvRing(ch *channel) uintptr {
+	if childSpawnTarget {
+		return ch.ringA
+	}
+	return ch.ringB
+}
+
+// A spawn-bound channel always has both rings bound; the compiler
 // and chan.mx dispatch on spawnBound to route off the in-runtime queue.
 func channelIsPipeBound(ch *channel) bool {
 	return ch != nil && ch.spawnBound
@@ -52,59 +69,48 @@ func MarkChildPipeChannel(ch *channel, chanID uint16) {
 		return
 	}
 	MarkChannelPipeBound(ch, chanID)
-	// Bind ring buffers (child reverses send/recv vs parent).
+	// One pair, bound identically from either side: chSendRing/chRecvRing pick
+	// the direction by role, because both domains hold this same object.
 	idx := int32(chanID) - 1
 	if idx >= 0 && idx < spawnRingCount {
-		ch.ringRecv = spawnRingSet[idx][0] // parent→child = child receives
-		ch.ringSend = spawnRingSet[idx][1] // child→parent = child sends
+		ch.ringA = spawnRingSet[idx][0] // parent->child
+		ch.ringB = spawnRingSet[idx][1] // child->parent
 	}
-	ch.spawnPid = childParentPid // peer is the parent
+	ch.spawnPid = 0 // threads: the peer is this process, liveness is the closed flag
 }
 
 // MarkParentPipeChannel binds ch to the most recently spawned child's
 // ring pair at chanID. Emitted by createSpawn after spawnDomain returns.
 // No-op if no spawn has occurred (defensive - should not happen).
 func MarkParentPipeChannel(ch *channel, chanID uint16) {
-	if lastSpawnPid <= 0 {
-		return
-	}
 	MarkChannelPipeBound(ch, chanID)
-	// Bind ring buffers (parent perspective).
 	idx := int32(chanID) - 1
 	if idx >= 0 && idx < spawnRingCount {
-		ch.ringSend = spawnRingSet[idx][0] // parent→child = parent sends
-		ch.ringRecv = spawnRingSet[idx][1] // child→parent = parent receives
+		ch.ringA = spawnRingSet[idx][0] // parent->child
+		ch.ringB = spawnRingSet[idx][1] // child->parent
 	}
-	ch.spawnPid = lastSpawnPid // peer is the child
+	ch.spawnPid = 0 // threads: the peer is this process, liveness is the closed flag
 }
 
-// childAlive reports whether a child pid is still alive (parent side).
-// Reaps via waitpid(WNOHANG) first so the domain entry reflects death.
-func childAlive(pid int32) bool {
-	if pid <= 0 {
-		return true
-	}
-	domainReapChildren()
-	e := domainLookupByPid(pid)
-	return e == nil || e.alive
-}
-
-// parentAlive reports whether our original spawn parent is still alive
-// (child side). Detects orphaning: getppid() stops returning the pid we
-// captured at spawn once the parent dies and we are reparented.
-func parentAlive() bool {
-	return !childSpawnTarget || moxie_getppid() == childParentPid
-}
-
-// peerAlive reports whether the channel's remote peer is still alive.
+// peerAlive reports whether this domain should keep WAITING on ch. A spawn
+// target's peer is its parent in the same process - there is no pid to poll, so
+// the domain's own breaker is the signal: once the parent closes DomainClosed,
+// every blocking operation in the target must return instead of parking
+// forever. That is what makes termination observable inside a work loop, which
+// is where a cooperative domain actually spends its time: a worker parked on
+// its inbox has not returned to the top-level select and never will on its own.
+//
+// In the parent the peer cannot be observed this way (a channel does not know
+// which domain owns it); the parent's liveness test is the breaker it holds,
+// and a parent that must not block uses a non-blocking poll.
 func peerAlive(ch *channel) bool {
-	if ch.spawnPid <= 0 {
-		return true
+	if childSpawnTarget && DomainClosed != nil {
+		return !ringIsClosed(DomainClosed.ringA) && !DomainClosed.closed
 	}
-	if childSpawnTarget {
-		return parentAlive()
+	if ch != nil && ch.ownerBreaker != nil {
+		return !ringIsClosed(ch.ownerBreaker.ringA) && !ch.ownerBreaker.closed
 	}
-	return childAlive(ch.spawnPid)
+	return true
 }
 
 // breakerSendReason puts the reason a domain stopped onto its breaker as a
@@ -161,7 +167,7 @@ func PipeChanSend(ch *channel, encoded []byte) bool {
 	if ch == nil || !ch.spawnBound {
 		return false
 	}
-	if ch.ringSend == 0 {
+	if chSendRing(ch) == 0 {
 		return false
 	}
 	// The ring is sized from this budget, so a message over it means the
@@ -174,7 +180,7 @@ func PipeChanSend(ch *channel, encoded []byte) bool {
 	if uintptr(len(encoded)) > ch.frameBudget {
 		pipeBudgetPanic(ch, uintptr(len(encoded)))
 	}
-	if !ringFits(ch.ringSend, int32(len(encoded))) {
+	if !ringFits(chSendRing(ch), int32(len(encoded))) {
 		runtimePanic("PipeChanSend: frame exceeds ring size")
 	}
 	// One slot is the default (`chan T{}`): the mailbox the event-loop model
@@ -183,17 +189,17 @@ func PipeChanSend(ch *channel, encoded []byte) bool {
 	slots := uint32(ch.bufCap)
 	need := ringAlign8(4 + uint32(len(encoded)))
 	for {
-		if ringIsClosed(ch.ringSend) {
+		if ringIsClosed(chSendRing(ch)) {
 			return false
 		}
-		if ringDepth(ch.ringSend) < slots && ringSend(ch.ringSend, encoded) {
+		if ringDepth(chSendRing(ch)) < slots && ringSend(chSendRing(ch), encoded) {
 			return true
 		}
 		if !peerAlive(ch) {
-			ringClose(ch.ringSend)
+			ringClose(chSendRing(ch))
 			return false
 		}
-		ringParkRead(ch.ringSend, need)
+		ringParkRead(chSendRing(ch), need)
 	}
 }
 
@@ -219,33 +225,31 @@ func PipeChanRecv(ch *channel) ([]byte, bool) {
 	if ch == nil || !ch.spawnBound {
 		return nil, false
 	}
-	if ch.ringRecv == 0 {
+	if chRecvRing(ch) == 0 {
 		return nil, false
 	}
 	for {
-		data, ok := ringRecv(ch.ringRecv)
+		data, ok := ringRecv(chRecvRing(ch))
 		if ok {
 			return data, true
 		}
-		if ringIsClosed(ch.ringRecv) {
+		if ringIsClosed(chRecvRing(ch)) {
 			return nil, false
 		}
 		if !peerAlive(ch) {
-			// The reap that noticed the death may have just put the final
-			// reason on the ring; deliver it before declaring the channel dead.
-			if lateData, late := ringRecv(ch.ringRecv); late {
+			// The final reason may have landed on the ring just before the
+			// close; deliver it before declaring the channel dead.
+			if lateData, late := ringRecv(chRecvRing(ch)); late {
 				return lateData, true
 			}
-			ringClose(ch.ringRecv)
-			if childSpawnTarget {
-				// The domain is orphaned: append its own counters before
-				// leaving, the parent's table does not hold them.
-				coverBeforeExit()
-				exit(0)
-			}
+			ringClose(chRecvRing(ch))
+			// ok=false is the answer. A forked child used to exit() the PROCESS
+			// here, which is right for a process and fatal for a thread: it
+			// terminated every other domain in the program. The target gets
+			// false and returns, which is its termination arm.
 			return nil, false
 		}
-		ringParkWrite(ch.ringRecv)
+		ringParkWrite(chRecvRing(ch))
 	}
 }
 
@@ -256,11 +260,11 @@ func PipeChanCloseSignal(ch *channel) {
 	if ch == nil || !ch.spawnBound {
 		return
 	}
-	if ch.ringSend != 0 {
-		ringClose(ch.ringSend)
+	if chSendRing(ch) != 0 {
+		ringClose(chSendRing(ch))
 	}
-	if ch.ringRecv != 0 {
-		ringClose(ch.ringRecv)
+	if chRecvRing(ch) != 0 {
+		ringClose(chRecvRing(ch))
 	}
 }
 
@@ -411,8 +415,8 @@ func (ch *channel) tryPipeSend(value unsafe.Pointer) bool {
 	if sz > 0 {
 		data = unsafe.Slice((*byte)(value), sz)
 	}
-	if ch.ringSend != 0 && ringDepth(ch.ringSend) < uint32(ch.bufCap) {
-		return ringSend(ch.ringSend, data)
+	if chSendRing(ch) != 0 && ringDepth(chSendRing(ch)) < uint32(ch.bufCap) {
+		return ringSend(chSendRing(ch), data)
 	}
 	return false
 }
@@ -423,8 +427,8 @@ func (ch *channel) tryPipeSend(value unsafe.Pointer) bool {
 //   (true, false) : channel closed
 //   (false, _)    : no data right now, would block; caller should retry
 func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
-	if ch.ringRecv != 0 {
-		data, rok := ringRecv(ch.ringRecv)
+	if chRecvRing(ch) != 0 {
+		data, rok := ringRecv(chRecvRing(ch))
 		if rok {
 			// value is nil for a select case that binds nothing
 			// (`case <-closed:`), so there is nowhere to put the payload.
@@ -437,7 +441,7 @@ func (ch *channel) tryPipeRecv(value unsafe.Pointer) (received, ok bool) {
 			}
 			return true, true
 		}
-		if ringIsClosed(ch.ringRecv) {
+		if ringIsClosed(chRecvRing(ch)) {
 			if value != nil {
 				recvZero(value, ch.elementSize)
 			}
@@ -528,9 +532,6 @@ func PipeChildReady() {
 // (i.e. its channels are marked and it is running), or the child dies
 // first. Uses non-blocking yield + waitpid for the liveness check.
 func PipeWaitChildReady() bool {
-	if lastSpawnPid <= 0 {
-		return false
-	}
 	if spawnCtlPtr == 0 {
 		return false
 	}
@@ -538,9 +539,6 @@ func PipeWaitChildReady() bool {
 	for i := 0; i < 500; i++ {
 		if atomicLoadU32(&ctl.ready) != 0 {
 			return true
-		}
-		if !childAlive(lastSpawnPid) {
-			return false
 		}
 		// Block on the ready word itself: the child wakes it the moment its
 		// channels are bound. Polling with a timer sleep made every spawn pay
@@ -555,9 +553,8 @@ func PipeWaitChildReady() bool {
 // event loop should poll this and exit cleanly when it returns true,
 // rather than blocking forever on a recv that will never come.
 //
-// Implementation: getppid() comparison. Once the original parent dies,
-// the child is reparented (to init or a subreaper) and getppid() stops
-// returning the pid captured at spawn time.
 func ChildPipeClosed() bool {
-	return !parentAlive()
+	// A domain thread cannot be orphaned: its parent is the same process. The
+	// process ending ends the thread with it.
+	return false
 }

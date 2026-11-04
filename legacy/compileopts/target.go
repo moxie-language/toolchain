@@ -125,6 +125,7 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"src/runtime/secalloc.c",
 			"src/runtime/signal.c",
 			"src/runtime/spawn_unix.c",
+			"src/runtime/thread_unix.c", // domains are threads (pthread_create)
 			"src/runtime/futex_linux.c",
 			"src/runtime/ffi_linux.c")
 	case "js":

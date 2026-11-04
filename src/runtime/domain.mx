@@ -4,67 +4,16 @@ package runtime
 
 import "unsafe"
 
-// Domain registry - tracks child domains spawned by this process.
-// Single-threaded cooperative scheduler, so no lock needed.
+// A domain is a THREAD. There is no registry of child pids, no waitpid, no
+// reaper and no lifecycle pipe: a thread lives in this process, so a domain
+// that returns is finished and a process that exits takes every domain with it.
+// What survives from the fork era is the breaker: one channel object shared by
+// the parent (the handle spawn returns) and the child (DomainClosed), whose
+// close is how either side says "terminate".
 
-type domainEntry struct {
-	pid        int32
-	lockdownFd int32    // parent's read end of the secalloc lockdown pipe; -1 if none
-	doneCh     *channel // lifecycle channel - closed when child exits
-	alive      bool
-	next       *domainEntry
-}
-
-var domainList *domainEntry
-
-// The entry outlives this frame. Allocating it in the per-function arena
-// would be reclaimed when this returns, and the next registration would
-// land on the same address with next pointing at itself, so
-// domainReapChildren would never reach the end of the list.
-func domainRegister(pid, lockdownFd int32) {
-	save := CurrentArena()
-	SetCurrentArena(trueRootArena())
-	domainList = &domainEntry{
-		pid:        pid,
-		lockdownFd: lockdownFd,
-		alive:      true,
-		next:       domainList,
-	}
-	SetCurrentArena(save)
-}
-
-// LastSpawnedLockdownFd returns the parent's read end of the secalloc
-// lockdown pipe for the most recently spawned child. The parent's event
-// loop watches this fd; one byte arriving (the marker
-// "MOXIE_SECALLOC_LOCKDOWN\n") means the child tripped a guard page and
-// its arenas have been wiped synchronously.
-//
-// Returns -1 if no child has been spawned, or if pipe creation failed at
-// spawn time.
-func LastSpawnedLockdownFd() int32 {
-	if domainList == nil {
-		return -1
-	}
-	return domainList.lockdownFd
-}
-
-// SpawnLifecycleChannel creates a buffered chan string (capacity 1) and
-// stores it in the most recently registered domain entry. The compiler
-// emits a call to this after spawnDomain returns. domainReapChildren
-// sends the exit status string on the channel then closes it.
-// Empty string = clean exit, non-empty = error description.
-func SpawnLifecycleChannel() *channel {
-	if spawnBreaker == nil {
-		spawnBreaker = spawnBreakerMake()
-	}
-	// The breaker is the parent's handle to this child: peer liveness and the
-	// reap close both key off the pid, exactly like a negotiated channel.
-	spawnBreaker.spawnPid = lastSpawnPid
-	if domainList != nil {
-		domainList.doneCh = spawnBreaker
-	}
-	return spawnBreaker
-}
+// spawnCtlRing is the control ring of the spawn being established: the
+// breaker's closed flag lives in it, and both threads hold the same pointer.
+var spawnCtlRing uintptr
 
 // spawnBreakerMake creates the one breaker channel shared by a spawn: the
 // parent holds the handle spawn returns, the child binds the same object as
@@ -80,132 +29,28 @@ func spawnBreakerMake() *channel {
 	oneReason := ptrSize*3 + 64 + breakerReasonMax
 	ch := chanMake(ptrSize*3, 1, oneReason, nil, 0)
 	SetCurrentArena(save)
-	// The breaker crosses the fork, so the CLOSE has to be visible on both
-	// sides: it rides the control ring (chanID 0), whose closed flag lives in
-	// MAP_SHARED memory. A plain channel's closed flag would be copy-on-write
-	// and the child would never see the parent's close.
+	// The breaker rides the control ring (chanID 0) rather than a channel's own
+	// closed word: the flag is one object both ends hold, so a close by either
+	// is visible to both without a message.
 	ch.spawnBound = true
 	ch.spawnChanID = 0
-	ch.ringSend = spawnCtlRing
-	ch.ringRecv = spawnCtlRing
+	ch.ringA = spawnCtlRing
+	ch.ringB = spawnCtlRing
 	return ch
 }
 
-// spawnCtlRing is the control ring shared by a spawn's breaker: closing it is
-// how either side says "terminate", and both ends observe the same flag.
-var spawnCtlRing uintptr
-
-func domainCount() int32 {
-	n := 0
-	for e := domainList; e != nil; e = e.next {
-		if e.alive {
-			n++
-		}
+// SpawnLifecycleChannel returns the breaker of the spawn that just started. The
+// compiler emits a call to it after spawnDomain; the parent keeps what it
+// returns as the domain's termination handle and its reason channel.
+func SpawnLifecycleChannel() (ch *channel) {
+	if spawnBreaker == nil {
+		spawnBreaker = spawnBreakerMake()
 	}
-	return n
+	return spawnBreaker
 }
 
-func domainLookupByPid(pid int32) *domainEntry {
-	for e := domainList; e != nil; e = e.next {
-		if e.pid == pid {
-			return e
-		}
-	}
-	return nil
-}
-
-// domainReapChildren checks for exited children and marks them dead.
-// Non-blocking (WNOHANG). Call periodically from the scheduler.
-// Sends exit status string on the lifecycle channel before closing it.
-// spawnBreaker is the parent's handle to the most recent spawn's breaker,
-// created before the fork so the child inherits the same object. DomainClosed
-// (chan.mx) is the child's view of the same channel.
-var spawnBreaker *channel
-
-func domainReapChildren() {
-	for e := domainList; e != nil; e = e.next {
-		if !e.alive {
-			continue
-		}
-		var status int32
-		r := moxie_waitpid(e.pid, unsafe.Pointer(&status), 1) // WNOHANG=1
-		if r > 0 {
-			e.alive = false
-			if e.lockdownFd >= 0 {
-				moxie_close(e.lockdownFd)
-			}
-			if e.doneCh != nil && !e.doneCh.closed {
-				// Send exit status string (buffered cap 1, won't block)
-				var msg string
-				sig := status & 0x7f
-				code := (status >> 8) & 0xff
-				why := code
-				if sig != 0 {
-					msg = "killed by signal"
-					why = 128 + sig
-				} else if code != 0 {
-					msg = "non-zero exit"
-				}
-				// msg == "" for clean exit
-				breakerSendReason(e.doneCh, why, msg)
-				SpawnClose(e.doneCh)
-			}
-		}
-	}
-}
-
-// domainShutdownAll sends SIGTERM to all live children, then waits
-// with a timeout. Stragglers get SIGKILL.
-func domainShutdownAll() {
-	// Signal all children.
-	for e := domainList; e != nil; e = e.next {
-		if e.alive {
-			moxie_kill(e.pid, 15) // SIGTERM
-		}
-	}
-
-	// Wait briefly for exits.
-	for i := 0; i < 100; i++ {
-		allDead := true
-		for e := domainList; e != nil; e = e.next {
-			if !e.alive {
-				continue
-			}
-			var status int32
-			r := moxie_waitpid(e.pid, unsafe.Pointer(&status), 1)
-			if r > 0 {
-				e.alive = false
-				if e.lockdownFd >= 0 {
-					moxie_close(e.lockdownFd)
-				}
-			} else {
-				allDead = false
-			}
-		}
-		if allDead {
-			return
-		}
-		sleepTicks(timeUnit(10_000_000)) // 10ms
-	}
-
-	// SIGKILL stragglers.
-	for e := domainList; e != nil; e = e.next {
-		if e.alive {
-			moxie_kill(e.pid, 9) // SIGKILL
-			var status int32
-			moxie_waitpid(e.pid, unsafe.Pointer(&status), 0)
-			e.alive = false
-			if e.lockdownFd >= 0 {
-				moxie_close(e.lockdownFd)
-			}
-		}
-	}
-}
-
-// C functions defined in spawn_unix.c.
-
-//export moxie_waitpid
-func moxie_waitpid(pid int32, status unsafe.Pointer, options int32) int32
-
-//export moxie_kill
-func moxie_kill(pid int32, sig int32) int32
+// LastSpawnedLockdownFd has no fd to report: the secalloc lockdown pipe existed
+// to carry a child PROCESS's guard-page fault back to its parent. A domain is a
+// thread now, so a fault is the process's fault and reaches stderr like any
+// other diagnostic.
+func LastSpawnedLockdownFd() int32 { return -1 }

@@ -683,6 +683,20 @@ func (c *compilerContext) getGlobal(g *ssa.Global) llvm.Value {
 		llvmType := c.getLLVMType(typ)
 		llvmGlobal = llvm.AddGlobal(c.mod, llvmType, info.linkName)
 
+		// Every package variable is per-DOMAIN storage, because a domain is a
+		// thread: the variable lives in TLS so each domain has its own copy,
+		// exactly as stage4 emits thread_local(initialexec) for the same
+		// declarations (ir_types.mx tlsPrefix). Without this a legacy-built
+		// program shares one copy of every global across its domains, and a
+		// spawned thread corrupts the parent's state - measured as an immediate
+		// nil dereference in a probe that only spawns a worker.
+		//
+		// An extern global is a C symbol: its storage class belongs to the C
+		// side, so it is left alone.
+		if !info.extern {
+			llvmGlobal.SetThreadLocal(true)
+		}
+
 		// Set alignment from the //go:align comment.
 		alignment := c.targetData.ABITypeAlignment(llvmType)
 		if info.align > alignment {

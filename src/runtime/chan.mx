@@ -68,8 +68,19 @@ type channel struct {
 	spawnBound  bool
 	spawnChanID uint16
 	spawnPid    int32    // peer pid for death detection (0 = local/none)
-	ringSend    uintptr  // SPSC ring for sending (0 = local channel)
-	ringRecv    uintptr  // SPSC ring for receiving (0 = local channel)
+	// A spawn channel carries one SPSC ring per DIRECTION, and both domains
+	// hold the SAME channel object - a domain is a thread, so parent and child
+	// share memory. The pair is therefore stored once and the direction is
+	// chosen by role: a forked child used to get its own copy of this struct
+	// with the two fields swapped, which two threads cannot do.
+	ringA       uintptr  // parent->child direction (0 = local channel)
+	ringB       uintptr  // child->parent direction (0 = local channel)
+	// ownerBreaker is the termination breaker of the domain on the other end of
+	// this spawn channel, recorded by spawnDomain. A parked parent rechecks it
+	// exactly as the fork runtime rechecked the child pid: when the domain ends,
+	// its breaker closes, and the parent's wait returns instead of parking
+	// forever on a peer that no longer exists.
+	ownerBreaker *channel
 	// frameBudget is the compiler-computed byte ceiling on one structurally
 	// encoded message. The ring a spawn channel carries is sized from it (the
 	// declared depth plus one in-flight frame), so a message that overruns it
@@ -406,11 +417,6 @@ func chanRecv(ch *channel, value unsafe.Pointer, op *channelOp) bool {
 	// Wait until a sender provides a value.
 	if !hasScheduler {
 		for t.DataUint32() == chanOperationWaiting {
-			// A child domain's death closes its lifecycle channel in
-			// domainReapChildren. Blocking here without reaping meant a
-			// parent that waited on <-done never noticed the exit, because
-			// nothing else runs while this loop is parked.
-			domainReapChildren()
 			sigintPoll()
 			if hasPoll {
 				netpollBlock(100)
@@ -584,10 +590,9 @@ func chanClose(ch *channel) {
 	// end so its receiver-side bridge / chan recv observes the close.
 	if ch.spawnBound {
 		PipeChanCloseSignal(ch)
-		// A control breaker is its domain's termination handle: closing it ends
-		// the domain, and a domain inside a long task is ended by the kernel
-		// because no Moxie code will run to see the close. See spawnKillOnClose.
-		spawnKillOnClose(ch)
+		// A control breaker is its domain's termination handle. A domain is a
+		// thread in this process, so the close is observed by its loop where it
+		// runs Moxie code; there is no process to signal and nothing to reap.
 	}
 }
 

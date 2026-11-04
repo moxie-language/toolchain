@@ -56,10 +56,6 @@ int moxie_waitpid(int pid, int *status, int options) {
     return (int)waitpid((pid_t)pid, status, options);
 }
 
-int moxie_kill(int pid, int sig) {
-    return kill((pid_t)pid, sig);
-}
-
 // Pipe creation — wraps libc pipe(2). Returns 0 on success, -1 on failure.
 // fds[0] is the read end, fds[1] is the write end. Used by user code that
 // wants to set up an inherited fd for the secure-allocator lockdown channel
