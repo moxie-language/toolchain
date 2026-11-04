@@ -24401,3 +24401,23 @@ The legacy check does not judge what it cannot see (a result the builder never
 materialized), and the defect is recorded here as the next legacy task: either
 materialize the result alloca for a named result the body reads, or bind the
 breaker by a builtin like `__sigint()` instead of by an alloca comment.
+
+### Round 364: the narrow `string([]byte)` cast bug does not reproduce
+
+Round 349 recorded a shape where `string(x)` over a `[]byte` local emitted
+`invalid cast opcode for cast from '{}' to '{ ptr, i64, i64 }'`, with the note
+that it was narrower than the operation. Re-probed on both compilers with the
+four shapes that matter - a channel receive (`d := <-ch`), a map value
+(`m[1]`), a struct field (`h.Body`), and a slice element (`xs[1]`) - all four
+compile and print the right text under legacy and under the shipping stage4. The
+item is closed as observed-working; if the original shape surfaces again the
+next step is the exact expression, because the family is green.
+
+### Round 365: phase 7's hang was the decode rule, not the browser
+
+The UI phase's suite stopped after four passing tests, blocked on the WebSocket
+`recv()` that waits for the relay's `OK`. The cause was the worker migration of
+round 362 (select over the inbox instead of a plain receive), not the browser:
+with the workers back to "check the breaker, then plain receive", the feed test
+runs and fails on its own assertions rather than hanging. The phase's remaining
+work is that assertion, which is the app's test, not the compiler's.
