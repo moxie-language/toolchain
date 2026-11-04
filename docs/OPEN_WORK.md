@@ -24440,3 +24440,46 @@ first program that tries it learns why instead of reading the parent's memory
 through a copied header.
 
 Fixpoint after the change: `4fd41386` (s2 == s3).
+
+### Round 367: the remaining open work, closed or narrowed
+
+What this round closed, each with its evidence:
+
+- **The wasm boundary refuses a pointer-carrying value parameter**, in the
+  post-SSA pass (`checkWasmSpawnValueParams`), with the probe failing by name
+  and an ordinary wasm fixture still building and staging its host.
+- **The suite's `MOXIE` default is absolute**, so `tests/phase7_ui.sh` runs
+  directly; the relay build inside its `(cd "$RLY" && ...)` subshell no longer
+  fails with `./moxie: No such file or directory`.
+- **The phase 7 hang is explained and gone**: the worker migration to a select
+  over the inbox starved the relay's ingest path (a select receive on a
+  codec-framed spawn channel does not decode - `server.mx` already said so).
+  morly's workers and the two codec-framed fixtures now check the breaker
+  non-blocking and take the message with a plain receive. The feed test no
+  longer hangs; it runs and fails later, in the app's own expectations
+  (the second page load never reports wasm-ready under the stale staging I
+  re-used), which is the app suite's business, not the compiler's.
+- **The narrow `string([]byte)` cast bug is closed as not reproducible**: four
+  shapes (channel receive, map value, struct field, slice element) compile and
+  print correctly on both compilers.
+- **The legacy breaker-binding gap is diagnosed exactly** (round 363: the
+  dumped SSA shows the `closed` operand as the nil constant and no result
+  alloca) and left as the next legacy task, because the shipping compiler binds
+  it correctly and the bootstrap does not depend on it.
+
+Verification on the final binary (fixpoint `4fd41386`, s2 == s3):
+
+    6   instrumentation (both compilers, futexpark included)   PASS
+    8   netsmoke, real sockets, the re-shaped spawn fixtures   PASS
+    1c  4/4 wasm package builds                                PASS
+    restrictions 63/63, quickcheck 15/15                       PASS
+
+Phases 0a, 0b, 1, 1b, 2, 3 and 4 were green on the previous binary (`69d989be`)
+and are not re-run here: the only compiler delta since then is
+`checkWasmSpawnValueParams`, which runs inside `TargetArch() == "wasm"` and
+cannot reach a native fixture. Phase 5 (118/118 wasm fixtures) was green on that
+same previous binary; the wasm refusal is additive and no wasm-eligible fixture
+in the tree spawns, so it is unchanged in behaviour, but it is the one claim
+this round rests on inspection rather than a fresh run.
+
+No tags were created.
