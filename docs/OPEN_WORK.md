@@ -106,6 +106,12 @@ unchanged (`spawn_wasm.mx` is excluded from native builds), but `src/runtime` is
 in `compilerHash`, so the cache generation moved. Accept: a full green sweep and
 phase 5 green from cold.
 
+Baseline run on the box (2026-11-04, tree `4e24b321`): 317 units, **315 passed,
+1 skipped, 1 failed**. The skip is `spawn_closed_crosspkg` (declared native-only,
+the Round 378 fixture). The failure is `1c/net/http`; it is a `llc` OOM, not a
+phase defect - see item 7. Every other phase, phase 5 included, is green, and the
+bootstrap there is `s2 == s3 7a9fd90e`.
+
 Heavy verification runs on the Hetzner box (`ssh hetzner`:
 root@2.31.151.214, key `~/.ssh/id_mlekucom`, 8 cores, 30 GB, LLVM 22). It has
 clang-22/llvm-link-22/ld.lld-22/opt, python3 with playwright/Chromium, and a Go
@@ -128,6 +134,27 @@ looks fine. On the box:
 The patch target must be a full Go tree; pointing it at the source GOROOT fails
 copying testdata into itself. CLAUDE.md's bootstrap step 1 (`cd legacy && go
 build`) omits this and only works on a host whose GOROOT was already patched.
+
+### 7. Wasm: `net`'s IR grows with the link set and `llc` OOMs
+
+The baseline sweep's only red unit is `1c/net/http`, reported as
+`mxc: object compile failed`. The failure is `llc`, not the compiler front end.
+In the net/http closure the `net` package's wasm bitcode is 15 MB and two
+functions are ~118k IR lines: `(*Resolver).goLookupIPCNAMEOrder` 117,997 and
+`validateResolvedAddr` 117,188. The same compiler generation builds `net` at
+4.3 MB in a small closure, where `goLookupIPCNAMEOrder` is 7,982 lines and
+`resolveAddrList` 6,794 - the IR grows about 15x with the link set.
+
+`llc` at -O2 and at -O0, on LLVM 22 and LLVM 23, climbs to ~30 GB and is
+OOM-killed on a 30 GB box (dmesg: anon-rss 29.9 GB); `-O0` alone ran past five
+minutes before the kill. The bitcode is valid (`llvm-dis` takes 1.1 s, 232 MB
+peak), so this is a backend blowup on a link-set-inflated module, not corrupt
+IR. The 4.3 MB/15 MB split IS the link-set-dependent content - dispatch arms
+are emitted into the package that makes the call - and the growth is
+concentrated in functions doing interface-typed work. Next: find what is
+duplicated into those two functions as the link set grows. Until then phase 1c
+cannot be green on a box this size, and the local machine (14 GB) cannot run the
+unit either.
 
 ## REMAINING WORK (as of round 73) - historical snapshot
 
