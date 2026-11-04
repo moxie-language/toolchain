@@ -51,6 +51,22 @@ compiler as it self-hosts to a reproducible binary.
 - **The package cache is bounded** - generations untouched for two hours are
   pruned on every build (`removeAll` had never deleted a non-empty tree, so
   they accumulated: 368 generations, 90 GB).
+- **A cache key never depends on measurement state** - export data is named by
+  its sources and its imports' export keys (`pkgExportHash`), while the object
+  key keeps the dispatch fingerprint, because dispatch arms are baked into the
+  object. Folding the fingerprint into the export name gave one blob two names
+  inside one build, so the first build after any compiler upgrade - a cold
+  cache generation - lost the export blob, and the interface-dispatch table it
+  emitted was missing every impl from the root package: `fmt` printed `?` for
+  every `Stringer`. Warm builds were correct, which is why every gate was
+  green; `tests/phase0c_coldcache.sh` now runs cold on purpose.
+- **A bare host bootstraps from one versioned script** -
+  `scripts/provision-build-host.sh` provisions the pinned Go 1.25.3 and LLVM 22
+  (with the unversioned tool names the driver asks for), supplies the
+  compiler-rt sources and the llvm-glue library the repository does not carry,
+  and runs `s1 -> s2/s3 (or s3/s4) -> bake`. `--check` reports what a host is
+  missing and changes nothing. The bootstrap pins `legacy/moxie` as s1's
+  compiler instead of trusting whatever `./moxie` happens to be in the tree.
 
 Versions are tagged with `vX.Y.Z` and capture user-visible changes - compiler
 features, language rules, runtime additions, and fixes that change observable
