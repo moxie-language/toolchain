@@ -73,10 +73,21 @@ need. Two gates reach outside the toolchain:
   it and proves it launches.
 - **Phase 7 (UI app)** is a sample application, not part of this repository: it
   needs the app checkout beside this one (`$ROOT/../smesh`, override with
-  `MOXIE_UI_APP`), the relay checkout (`$ROOT/../morly`), and Python with
-  `selenium`, `pytest` and `websocket-client`, plus a Chrome and its driver. A
-  host without them fails at `ui:preconditions` with the path it looked for -
-  a setup answer, not a compiler result.
+  `MOXIE_UI_APP`), the relay checkout (`$ROOT/../morly`, override with
+  `MOXIE_RELAY_REPO`), and Python with `selenium`, `pytest` and
+  `websocket-client`, plus a Firefox and geckodriver. A host without them fails
+  at `ui:preconditions` with the path it looked for - a setup answer, not a
+  compiler result.
+- **The app workspace has to keep the compiler's module convention.** Neither
+  `smesh` nor `morly` carries a `moxie.mod`: a package's module root is derived
+  from its path under `$MOXIEPATH` (default `$HOME/moxie`) as `<host>/<repo>`.
+  A checkout placed outside that tree resolves its own imports to nothing and
+  the build tries to `git clone` them from the network, which is how phase 7
+  failed on a host that had every checkout but in the wrong place:
+  `auto-fetch git.smesh.lol ... the package is not vendored`. Put the
+  checkouts at `$HOME/moxie/git.smesh.lol/<repo>` (and any sibling repos they
+  import: `morly` needs `nostr` and `musiquay`) and a symlink from the app path
+  the phase expects is enough.
 
 ### Arch Linux
 
