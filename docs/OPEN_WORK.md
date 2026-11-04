@@ -22,9 +22,14 @@ started the binary only through fd 2. The write to stderr is the first thing the
 panic path does; the sends and closes go, they do not merely move. The
 `panic(msg)` builtin (`_panic`) already prints first.
 
-Wasm is a host boundary rather than a process: if a trapped worker still has to
-close its breaker so the page observes the end, that is a wasm question and may
-follow the print, never precede it.
+Wasm is a host boundary, not a process, and its panic path is not a stderr
+write: a panic in a spawned domain must post its message to the page so the
+page's console prints it where the user can see it, and the page must then run
+the generic panic action - stop the page and every worker domain spawned for it
+- so wasm matches native's "one domain's death ends all of them". The message
+therefore still crosses to the parent on wasm, as the host-boundary panic
+protocol, not as a value travelling on the breaker. Sequence on both targets:
+report first, tear down second.
 
 Accept: a panicking domain writes `panic: ...` to the process's stderr, the
 shell sees it, and the process aborts (status 134) with no reason-frame send.
@@ -47,6 +52,11 @@ channel back to `chan struct{}` and delete the reason machinery:
 - the `spawn` return type and every target signature, `(closed chan struct{})`,
   in moxie, morly and the fixtures;
 - the docs that state the ABI (`CLAUDE.md`, `docs/spawn.md`, `CHANGELOG.md`).
+
+This is the NATIVE ABI. On wasm the panic message still has to reach the page
+and the page still has to stop itself and its workers (item 1), so the host
+bridge keeps a panic-message path; what goes is the breaker's reason frame,
+which only ever served native's fork.
 
 `sigint` is `chan []byte` for the same empty reason; decide it in the same
 change. Accept: a target selects on `<-closed` and returns it, `close(breaker)`
@@ -95,6 +105,12 @@ warm runtime. Re-run the s1 -> s3 bootstrap: the compiler binary should be
 unchanged (`spawn_wasm.mx` is excluded from native builds), but `src/runtime` is
 in `compilerHash`, so the cache generation moved. Accept: a full green sweep and
 phase 5 green from cold.
+
+Heavy verification runs on the Hetzner box (`ssh hetzner`:
+root@2.31.151.214, key `~/.ssh/id_mlekucom`, 8 cores, 30 GB, LLVM 22). It has
+clang-22/llvm-link-22/ld.lld-22/opt and python3; Go (for `legacy/`) and
+playwright/Chromium (for phase 5) must be installed. The tree is synced there by
+`git bundle`; the local checkout remains the editing surface.
 
 ## REMAINING WORK (as of round 73) - historical snapshot
 
