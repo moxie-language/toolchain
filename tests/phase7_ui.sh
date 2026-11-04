@@ -131,13 +131,13 @@ rm -rf "$PY_LOG"
 # interrupted, and they are what makes the phase look like it is eating memory.
 # The phase asked for that process, so the phase ends it, whatever the suite's
 # own teardown managed, and says so when it finds any left.
-relay_pids() { pgrep -f -- "$RELAY_BIN" 2>/dev/null; }
+relay_pids() { pgrep -f -- "$RELAY_BIN" 2>/dev/null || true; }
 stop_relay() {
 	local pids n try
 	pids="$(relay_pids)"
 	[ -n "$pids" ] || return 0
 	n=$(printf '%s\n' "$pids" | wc -l)
-	kill $pids 2>/dev/null
+	kill $pids 2>/dev/null || true
 	try=0
 	while [ "$try" -lt 25 ]; do
 		sleep 0.2
@@ -146,7 +146,7 @@ stop_relay() {
 		try=$((try + 1))
 	done
 	if [ -n "$pids" ]; then
-		kill -9 $pids 2>/dev/null
+		kill -9 $pids 2>/dev/null || true
 	fi
 	printf '  stopped %s relay process(es) the suite left running\n' "$n"
 }
