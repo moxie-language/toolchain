@@ -24377,3 +24377,27 @@ and phase 8 stayed green through the wrong shape.
 The scheduler-side gap is recorded here rather than fixed: the select path's
 `tryPipeRecv` should decode exactly as `PipeChanRecvRaw` does, and until it does
 the rule above is the one to write to.
+
+### Round 363: the legacy breaker binding, from the dump
+
+The legacy SSA for a spawn target that reads its breaker:
+
+    func main.worker:
+    0: entry:
+        t0 = select nonblocking [<-nil:chan []byte]
+        ...
+        return nil:chan []byte
+
+The `closed` operand is the **nil constant**, and there is no result alloca for
+the `closed` result at all - so `createFunction`'s binding (which looks for an
+`*ssa.Alloc` whose Comment is "closed" and stores the breaker into it) finds
+nothing, and a legacy-built child's `<-closed` arm is dead. stage4's
+`bindSpawnClosed` binds the named-result alloca and is correct; the shipping
+compiler is stage4, and the bootstrap only uses legacy to build it (whose own
+entry point reads `sigint`, not `closed`), so the impact is a legacy-built
+application, not the toolchain.
+
+The legacy check does not judge what it cannot see (a result the builder never
+materialized), and the defect is recorded here as the next legacy task: either
+materialize the result alloca for a named result the body reads, or bind the
+breaker by a builtin like `__sigint()` instead of by an alloca comment.
