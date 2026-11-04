@@ -11,10 +11,20 @@ What is left is verification, not design.
 
 ### 1. A full sweep on the committed tree
 
-`tests/unitrun.sh` with the new compiler, from cold, all phases. Accept: 317
+`tests/unitrun.sh` with the new compiler, from cold, all phases. Accept: 323
 units with zero failures, phase 5 green in Chromium, phase 8 green in BOTH
 dispatch modes, and the bootstrap fixpoint `s2 == s3`. `tree-cleanliness` is
 part of every phase, so this run belongs on the commit, not on a dirty tree.
+
+The first run on `e21b7be0` measured 323 units: 321 passed, 1 skipped
+(`spawn_closed_crosspkg`, declared native-only) and 1 failed, `7/whole-phase`,
+with "no output". The failure was the HARNESS, not the tree: `util.sh` enables
+errexit, and phase 7's `stop_relay` assigned `pids="$(pgrep ...)"` - status 1
+when the suite left no relay, which is the healthy case - so the phase died
+before it could report the suite that had just passed (11 passed, exit 1). The
+box masked it because its suite leaked a relay. `30999715` makes an empty
+pid list success and lets the kills find an already-dead pid; phase 7 then
+passes on the clean commit in 58 s.
 
 ### 2. The wasm panic action has no automated browser gate
 
