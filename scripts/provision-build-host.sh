@@ -99,8 +99,13 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq \
 	build-essential ca-certificates git curl tar xz-utils rsync tmux python3 \
-	pkg-config zlib1g-dev libssl-dev gdb >/dev/null
+	pkg-config zlib1g-dev libssl-dev gdb nodejs >/dev/null
 ok "base packages"
+# nodejs: phase 5 emits the page-side bootstrap (<name>-wasm-host.mjs) and RUNS
+# it under node. Without node that unit reports "the emitted bootstrap failed to
+# run (rc=2)", which reads as a compiler defect and is not one - measured on a
+# host that had everything else.
+ok "node $(node --version)"
 
 say "LLVM ${LLVM_MAJOR} (apt.llvm.org, tested ${LLVM_TESTED})"
 if [ ! -e /etc/apt/sources.list.d/llvm-${LLVM_MAJOR}.list ]; then

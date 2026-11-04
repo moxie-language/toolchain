@@ -54,10 +54,27 @@ sudo bash scripts/provision-build-host.sh --bootstrap # provision, then fixpoint
 It installs the pinned Go and LLVM 22, links the unversioned tool names into
 `/usr/local/bin`, sparse-clones llvm-project at `release/22.x` for
 `lib/compiler-rt-builtins`, builds `llvm-glue/libmoxie-llvm-glue.so`, and then
-runs the bootstrap through `s2 == s3` and the runtime bake. Those four things
+runs the bootstrap through `s2 == s3` (or `s3 == s4`, the documented
+one-extra-generation arrival) and the runtime bake. Those four things
 are deliberately **not** in the repository: builtins sources are provisioned
 rather than versioned, and the glue `.so` is a build product (a stale one is a
 hard failure at start-up with "missing symbol MoxieCreateCompileUnit").
+
+### What the test suite needs beyond the compiler
+
+The script installs what the compiler and phases 0a/0b/0c/1/1b/1c/2/3/4/6/8
+need. Two gates reach outside the toolchain:
+
+- **Phase 5 (wasm)** runs the emitted page bootstrap
+  (`<name>-wasm-host.mjs`) under `node`. Without node that unit reports "the
+  emitted bootstrap failed to run (rc=2)", which reads as a compiler defect and
+  is not one.
+- **Phase 7 (UI app)** is a sample application, not part of this repository: it
+  needs the app checkout beside this one (`$ROOT/../smesh`, override with
+  `MOXIE_UI_APP`), the relay checkout (`$ROOT/../morly`), and Python with
+  `selenium`, `pytest` and `websocket-client`, plus a Chrome and its driver. A
+  host without them fails at `ui:preconditions` with the path it looked for -
+  a setup answer, not a compiler result.
 
 ### Arch Linux
 
