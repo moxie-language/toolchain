@@ -360,7 +360,7 @@ func (b *builder) chanOperandValue(v ssa.Value) llvm.Value {
 		return val
 	}
 	ch, ok := v.Type().Underlying().(*types.Chan)
-	if !ok || !moxieTextType(ch.Elem()) {
+	if !ok || !breakerElem(ch.Elem()) {
 		return val
 	}
 	brk := b.createRuntimeCall("ClosedBreakerChan", nil, "closed")

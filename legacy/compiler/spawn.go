@@ -268,7 +268,7 @@ func terminationConsumed(fn *ssa.Function, chanVal ssa.Value, wantSigint bool) b
 		// operand to the domain's breaker at emission). The consumption is
 		// real, so the check counts it.
 		if c, ok := ch.(*ssa.Const); ok && c.IsNil() {
-			if tc, ok2 := ch.Type().Underlying().(*types.Chan); ok2 && moxieTextType(tc.Elem()) {
+			if tc, ok2 := ch.Type().Underlying().(*types.Chan); ok2 && breakerElem(tc.Elem()) {
 				return true
 			}
 		}
@@ -330,7 +330,7 @@ func closedConsumedAsNil(fn *ssa.Function) bool {
 			case *ssa.Select:
 				for _, st := range in.States {
 					if c, ok := st.Chan.(*ssa.Const); ok && c.IsNil() {
-						if tc, ok2 := st.Chan.Type().Underlying().(*types.Chan); ok2 && moxieTextType(tc.Elem()) {
+						if tc, ok2 := st.Chan.Type().Underlying().(*types.Chan); ok2 && breakerElem(tc.Elem()) {
 							return true
 						}
 					}
@@ -340,7 +340,7 @@ func closedConsumedAsNil(fn *ssa.Function) bool {
 					continue
 				}
 				if c, ok := in.X.(*ssa.Const); ok && c.IsNil() {
-					if tc, ok2 := in.X.Type().Underlying().(*types.Chan); ok2 && moxieTextType(tc.Elem()) {
+					if tc, ok2 := in.X.Type().Underlying().(*types.Chan); ok2 && breakerElem(tc.Elem()) {
 						return true
 					}
 				}
@@ -373,6 +373,14 @@ func (b *builder) checkEntrySelect() {
 		return
 	}
 	b.addError(b.fn.Pos(), "main must select on sigint: add a `case <-sigint:` arm to its select (or a non-blocking one at entry for a batch program), because a program that cannot be told to stop has to be killed")
+}
+
+// breakerElem reports whether T is the element of a breaker channel: the empty
+// struct, because a breaker carries no message. A spawn target's `closed`
+// result and the channel `spawn` returns are both typed with it.
+func breakerElem(T types.Type) bool {
+	st, ok := T.Underlying().(*types.Struct)
+	return ok && st.NumFields() == 0
 }
 
 // isSpawnTargetSig reports whether sig is the declared shape of a spawned
