@@ -37,6 +37,16 @@ compiler as it self-hosts to a reproducible binary.
   data, because result names are not carried there and a name inside the
   signature descriptor would split interface-method matching. The marker is
   parenthesised so it can never be read as a function identifier.
+- **A spawned wasm domain is a real domain** - `__spawn_entry` initializes the
+  runtime (`WasmSpawnInit`: the root arena and package initialisers that
+  `_start` does for the root), stages its packed arguments in a static
+  `__spawn_scratch` area (there is no arena before initialization), and builds
+  a real channel object around each SAB handle. Spawn-bound sends and receives
+  no longer route to stubs that returned false: the element bytes cross the
+  bridge, and the child wrapper is sized from the element type. A panic in a
+  spawned domain reaches the page as one stderr line (line-buffered), and the
+  page stops every domain it spawned; `tests/wasm/panic_tree` gates that with a
+  sibling that would print after 1.5 s.
 - **A panic prints to stderr before it dies** - the diagnostic is the first
   thing the panic path writes, on fd 2, and the process then aborts (status
   134). It does not signal through breakers: native has one process, so no
