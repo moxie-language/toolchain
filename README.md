@@ -90,7 +90,7 @@ See [docs/building.md](docs/building.md) for the full dependency list,
 per-distribution instructions, and the bootstrap protocol.
 
 ```sh
-# Build the compiler
+# Build the compiler (one generation, installed as ./moxie)
 ./build.sh
 
 # Build a program
@@ -98,6 +98,11 @@ export MOXIEROOT=/path/to/moxie
 moxie build -o hello .
 ./hello
 ```
+
+`./build.sh` produces one generation. The self-hosting fixpoint - the binary
+reproducing itself byte for byte, then baking the runtime that application links
+read - is `scripts/provision-build-host.sh --bootstrap`; see
+[docs/building.md](docs/building.md#provisioning-a-build-host).
 
 ```moxie
 package main
