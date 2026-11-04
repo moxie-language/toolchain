@@ -620,6 +620,23 @@ via parameters; if mutation is required, use a sovereign self-mutating type.
 propagates to every domain holding it (pipe-bound close signal fan-out).
 A nil breaker means never canceled.
 
+**Termination is cooperative, and the check belongs at every wait.** A domain is
+single-threaded and cooperative: it can only observe a closed breaker where it
+runs Moxie code. So the arm goes at every point that waits - the top-level event
+select, and again inside each work loop, each poll iteration, each batch - and a
+long-running task must be broken into units that let the loop come back around
+and look. A worker that parks on a receive and never returns to its select
+cannot be told to stop; worse, a manager that replaces such a worker without
+closing its breaker loses the only handle to it, which is how one relay
+accumulated 2,600+ live domains, all children of a single process.
+
+The runtime enforces the contract rather than trusting it: closing a domain's
+control breaker terminates that domain (SIGTERM, a 20 ms grace, then SIGKILL,
+reaped), and an orphaned domain is killed by its parent-death signal, so a whole
+tree dies with its root even when no Moxie code will ever run again. Those are
+backstops for the cases cooperation cannot reach, not a substitute for the
+checks: a closed breaker should be seen by the loop, not by the kernel.
+
 ## Complexity of Tasks Estimation
 
 Complexity estimates from general web-stack priors do not apply; measure against the Moxie baseline, not the npm baseline. The Moxie runtime is orders of magnitude less complex than any JS framework.
