@@ -65,10 +65,12 @@ hard failure at start-up with "missing symbol MoxieCreateCompileUnit").
 The script installs what the compiler and phases 0a/0b/0c/1/1b/1c/2/3/4/6/8
 need. Two gates reach outside the toolchain:
 
-- **Phase 5 (wasm)** runs the emitted page bootstrap
-  (`<name>-wasm-host.mjs`) under `node`. Without node that unit reports "the
-  emitted bootstrap failed to run (rc=2)", which reads as a compiler defect and
-  is not one.
+- **Phases 1c and 5 (wasm)** run every wasm module in a real browser through
+  Playwright's chromium, so a host needs `playwright` with its chromium
+  installed. Without a browser those units report SKIPPED - and a suite of
+  skips is not a verified wasm target, which is how a defect that trapped every
+  wasm program in package init stayed hidden. The provisioning script installs
+  it and proves it launches.
 - **Phase 7 (UI app)** is a sample application, not part of this repository: it
   needs the app checkout beside this one (`$ROOT/../smesh`, override with
   `MOXIE_UI_APP`), the relay checkout (`$ROOT/../morly`), and Python with
