@@ -61,7 +61,17 @@ The structural codec is used in two places, with this rule:
 
 ## Moxie Memory Model
 
-NO HEAP. Heap is shared memory, moxie has no shared memory. Stack and arena only.
+NO HEAP. Stack and arena only, one arena stack per DOMAIN.
+
+A domain is a THREAD in one process (pthread, 64 MB stack, its own TLS: domain
+root, arenas, package globals). Domains therefore share an address space, and
+the language keeps them separate by contract, not by hardware: a spawn hands over
+copied values and channel handles and nothing else, there is no API to reach
+another domain's memory, and every package variable is thread-local so no two
+domains share mutable state by accident. The old fork model bought the same
+property with an MMU and paid for it with PIDs, pdeathsig, waitpid, a reaper and
+a class of stray processes; the capability boundary is the contract that
+actually matters.
 
 per-function arena stack. compiler emits FnArenaPush() at function entry, relocates return values and receiver writes into caller's arena via three-pass mark-compact (RelocInit/RelocMark/RelocForward/RelocCompact/RelocFixupAll), then FnArenaPop + ArenaRelease at function exit. no escape analysis, no scope chains, no individual free. all reclamation is bulk: arena release per function return (pooled), munmap per domain exit. there is no free() builtin. DomainRoot holds fnStack[512]*Arena with fnTop index.
 
@@ -424,7 +434,7 @@ Generic Web APIs that belong upstream in `jsruntime/`: DOM, IndexedDB, WebSocket
 - If the needed code is in another language, prefer to reimplement it from specification/RFC/NIP/BIP/etc
 - Prefer one file over many files when the logic is related
 - When writing utility scripts, tooling, or standalone programs, always use Moxieunless there is a specific technical reason requiring another language. This means: no reflection, no cgo, no full runtime features. If a task seems like it needs Python, reconsider whether it can be done in Moxie. It can always be done in Moxie.
-- Remember that Moxie has no goroutines - it uses kernel threads for spawn(). Spawn channels are carried across lock-free SPSC ring buffers (shared memory, no pipe syscall). A channel is a mailbox with the depth its declaration gives it - `chan T{}` is one slot, `chan T{:N}` is N - and there is no unbuffered channel, because a domain has exactly one thread and nothing could receive while a rendezvous sender waits. A send returns once its frame is in the ring; it parks on the ring's read index when the declared number of messages is already outstanding (or the ring lacks room for the frame), and the receiver advancing that index is the wake. blockRecv/blockSend use a futex on the ring's write/read index so the kernel puts the thread to sleep instead of spinning. There are no other concurrency primitives because there is only one thread of execution per domain - spawn creates a new domain with its own thread.
+- Remember that Moxie has no goroutines - a domain IS a thread (pthread), and `spawn` starts one. Spawn channels are carried across lock-free SPSC ring buffers in the shared address space (no pipe, no syscall, no second process). A channel is a mailbox with the depth its declaration gives it - `chan T{}` is one slot, `chan T{:N}` is N - and there is no unbuffered channel, because a domain has exactly one thread and nothing could receive while a rendezvous sender waits. A send returns once its frame is in the ring; it parks on the ring's read index when the declared number of messages is already outstanding (or the ring lacks room for the frame), and the receiver advancing that index is the wake. blockRecv/blockSend use a futex on the ring's write/read index so the kernel puts the thread to sleep instead of spinning. There are no other concurrency primitives because there is only one thread of execution per domain - spawn creates a new domain with its own thread.
 - For browser/frontend moxie code, compile to WASM (`GOOS=js GOARCH=wasm`). JS shims and host-bridging live in `jsruntime/`. Native targets (linux/amd64, darwin/arm64, etc.) remain first-class - relays, servers, and CLI tools compile via `moxie build`.
 
 ## Architecture Reading
@@ -442,9 +452,11 @@ Do not assume project structure from convention. Read the actual code.
 **ChanID convention**: chanID 0 = control (close signals), chanID 1 = first spawn channel arg, chanID 2 = second, etc.
 
 **A spawn channel is a mailbox with N slots, and N is what its declaration
-says.** One handle carries two SPSC byte rings (`ringSend`/`ringRecv`, mirrored
-on each side), so both ends may send and receive; close is signalled on the
-control channel. `chan T{:N}` means N messages may be OUTSTANDING - sent and not
+says.** One handle carries two SPSC byte rings, one per direction, so both ends may
+send and receive; close is signalled on the control channel. Both domains hold
+the SAME channel object (they are threads in one address space), so the
+direction is chosen by role - `chSendRing`/`chRecvRing` - and never by which
+copy of a struct you are holding. `chan T{:N}` means N messages may be OUTSTANDING - sent and not
 yet received - before the sender parks. A send returns as soon as its frame is
 in the ring; it parks when that many are already waiting, or when the ring has
 no room for the frame. Parking is on the ring's read index (`ringParkRead`, 20ms
@@ -495,8 +507,8 @@ termination breaker, and it is written as a special word:
 
 **`sigint` is the other entry point's channel.** `main` selects on `sigint`
 (SIGINT from the shell, SIGTERM from a supervisor); a spawn target selects on
-`closed` (the parent's close, or the kernel reaper when the parent dies without
-one). Both are predeclared words, and neither is `close`: `close(ch)` stays the
+`closed` (the parent's close, which also happens when the parent's process
+ends, because a domain thread cannot outlive it). Both are predeclared words, and neither is `close`: `close(ch)` stays the
 builtin. `sigint` is a `chan []byte` the runtime owns, one per domain: it is
 created on first use in the root arena (`SigintChan`), so it outlives every
 frame that selects on it.
@@ -513,7 +525,7 @@ replaces the graceful disposition - that is the program's decision to make.
 A target may not reach a channel through a package global: its parameters are
 the only capabilities it gets.
 
-**The ring is sized before the fork, from the declaration.** A spawn channel is
+**The ring is sized before the thread starts, from the declaration.** A spawn channel is
 an atomic FIFO, not a pipe: its size must be known when the rings are created,
 which is before the domain exists. The data area is
 
@@ -574,8 +586,8 @@ visible, not a queue you want deep enough to hide it.
 
 ## Spawn Architecture: Managers and Workers
 
-Spawn is heavyweight (fork + socketpair + ring pairs). Goroutine conventions do
-not apply. Every domain in a spawn tree takes exactly ONE role:
+Spawn is heavyweight by design (pthread_create + a 64 MB stack + ring pairs +
+a fresh domain init). Goroutine conventions do not apply. Every domain in a spawn tree takes exactly ONE role:
 
 - **Manager**: owns an event loop. It spawns workers, owns the channels, and
   multiplexes signals. The loop is tight - poll, identify the channel that
@@ -609,9 +621,12 @@ Timer registrations are messages; timeouts are never per-wait spawns.
 loop over {inbox, role breakers} and replies over the pipe-bound ring pair
 correlated by id. Queries and commands are the only inbound traffic.
 
-**Share by communicating, not communicate by sharing.** There is no shared
-memory between domains; channels (ring buffers in MAP_SHARED memory) are the
-only inter-domain state. Function values and closure captures cannot transit
+**Share by communicating, not communicate by sharing.** Domains are threads and
+share one address space, so the separation is a CONTRACT rather than an MMU
+boundary: channels (SPSC ring buffers) are the only inter-domain state, values
+cross them copied through the codec, there is no API that hands another domain a
+pointer, and every package variable is thread-local so nothing is shared by
+accident. Function values and closure captures cannot transit
 a spawn boundary - only code pointers, codec-serialized values, and channels.
 A closure lives in its function arena and may only receive data read-only
 via parameters; if mutation is required, use a sovereign self-mutating type.
@@ -630,12 +645,14 @@ cannot be told to stop; worse, a manager that replaces such a worker without
 closing its breaker loses the only handle to it, which is how one relay
 accumulated 2,600+ live domains, all children of a single process.
 
-The runtime enforces the contract rather than trusting it: closing a domain's
-control breaker terminates that domain (SIGTERM, a 20 ms grace, then SIGKILL,
-reaped), and an orphaned domain is killed by its parent-death signal, so a whole
-tree dies with its root even when no Moxie code will ever run again. Those are
-backstops for the cases cooperation cannot reach, not a substitute for the
-checks: a closed breaker should be seen by the loop, not by the kernel.
+The runtime makes the close reach the waits: a spawn target's channel operations
+recheck its own `DomainClosed`, so a receive parked in a work loop returns
+instead of sleeping forever, and a parent's spawn channels remember the breaker
+of the domain they were handed to, so a parent parked on a channel whose domain
+ended wakes and reports the close. A domain that never returns to a check is
+still reclaimed - not by a signal, since a thread has none, but by the process:
+when main returns every domain goes with it. That is the guarantee the fork
+model could only approximate, and it needs no reaper.
 
 ## Complexity of Tasks Estimation
 
