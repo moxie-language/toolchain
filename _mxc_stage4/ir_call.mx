@@ -1141,11 +1141,10 @@ func isSpawnTargetSig(sig *Signature) (ok bool) {
 	if !ok || ch.Dir != TCSendRecv {
 		return false
 	}
-	// The breaker carries the reason a target stopped (a panic message, or
-	// empty on a clean stop) before it closes, so its element is text. Moxie
-	// text is one type, and a signature read back from another package's
-	// export data spells []byte as the basic string, so the test is text.
-	return TextType(ch.Elem)
+	// The breaker is a signal, so its element is the empty struct: nothing is
+	// ever sent on it, and a close is the whole message.
+	st, okSt := SafeUnderlying(ch.Elem).(*TCStruct)
+	return okSt && st != nil && st.NumFields() == 0
 }
 
 // terminationConsumed reports whether fn consumes a termination signal from
@@ -1335,7 +1334,7 @@ func (e *irEmitter) checkSpawnTarget(fn *SSAFunction) (ok bool) {
 	}
 	sig := fn.Signature
 	if !isSpawnTargetSig(sig) {
-		reportCompileError("spawn: " | fn.name | " must be declared with exactly one result, (closed chan []byte), which is the domain's breaker; a function without it cannot be spawned")
+		reportCompileError("spawn: " | fn.name | " must be declared with exactly one result, (closed chan struct{}), which is the domain's breaker; a function without it cannot be spawned")
 		return false
 	}
 	for _, blk := range fn.Blocks {
@@ -1483,9 +1482,6 @@ func (e *irEmitter) emitSpawnCall(c *SSACall) {
 	reg := e.regName(c)
 	e.w("  ") ; e.w(reg) ; e.w(" = call ptr @runtime.SpawnLifecycleChannel(ptr null)\n")
 	e.declareRuntime("runtime.SpawnLifecycleChannel", "ptr", "")
-	// Register the breaker for the panic path.
-	e.w("  call void @runtime.SpawnTrack(ptr ") ; e.w(reg) ; e.w(", ptr null)\n")
-	e.declareRuntime("runtime.SpawnTrack", "void", "ptr")
 }
 
 // emitSpawnWrapper emits (once) the goroutine-start wrapper for a spawn

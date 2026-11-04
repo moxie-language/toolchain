@@ -2,14 +2,12 @@
 
 package runtime
 
-import "unsafe"
-
 // A domain is a THREAD. There is no registry of child pids, no waitpid, no
 // reaper and no lifecycle pipe: a thread lives in this process, so a domain
 // that returns is finished and a process that exits takes every domain with it.
-// What survives from the fork era is the breaker: one channel object shared by
+// What survives from the fork era is the breaker: one `chan struct{}` shared by
 // the parent (the handle spawn returns) and the child (DomainClosed), whose
-// close is how either side says "terminate".
+// close is how either side says "terminate". Nothing is ever sent on it.
 
 // spawnCtlRing is the control ring of the spawn being established: the
 // breaker's closed flag lives in it, and both threads hold the same pointer.
@@ -20,14 +18,11 @@ var spawnCtlRing uintptr
 // DomainClosed, and closing either end closes both views. It lives in the root
 // arena because it outlives the frame that spawns.
 func spawnBreakerMake() *channel {
-	// string = {ptr, len, cap} = 3 pointers
-	ptrSize := unsafe.Sizeof(uintptr(0))
 	save := CurrentArena()
 	SetCurrentArena(trueRootArena())
-	// The element is a []byte reason (a slice header on the wire), and the
-	// budget must fit the encoded reason plus its tags, not just the header.
-	oneReason := ptrSize*3 + 64 + breakerReasonMax
-	ch := chanMake(ptrSize*3, 1, oneReason, nil, 0)
+	// The element is struct{}: a breaker is a signal, so the frame is empty and
+	// the ring carries none. bufSize 1 is the mailbox rule, not a payload.
+	ch := chanMake(0, 1, 0, nil, 0)
 	SetCurrentArena(save)
 	// The breaker rides the control ring (chanID 0) rather than a channel's own
 	// closed word: the flag is one object both ends hold, so a close by either
@@ -41,7 +36,7 @@ func spawnBreakerMake() *channel {
 
 // SpawnLifecycleChannel returns the breaker of the spawn that just started. The
 // compiler emits a call to it after spawnDomain; the parent keeps what it
-// returns as the domain's termination handle and its reason channel.
+// returns as the domain's termination handle.
 func SpawnLifecycleChannel() (ch *channel) {
 	if spawnBreaker == nil {
 		spawnBreaker = spawnBreakerMake()

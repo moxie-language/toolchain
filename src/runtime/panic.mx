@@ -21,6 +21,12 @@ func moxie_longjmp(frame *deferFrame)
 
 func panicStrategy() uint8 { return 1 }
 
+// printFD is the descriptor printstring/printptr write through. It is stdout
+// until a panic redirects it: a panic's diagnostic belongs on stderr, the one
+// stream the shell or supervisor that started the binary always shows, and
+// every panic path sets this before its first character.
+var printFD int32 = 1
+
 // DeferFrame is a stack allocated object that stores information for the
 // current "defer frame", which is used in functions that use the `defer`
 // keyword.
@@ -60,6 +66,7 @@ func panicOrGoexit(message string, panicking panicState) {
 		// Exit the goroutine instead of printing a panic message.
 		deadlock()
 	}
+	printFD = 2
 	printstring("panic: ")
 	printstring(message)
 	printnl()
@@ -74,15 +81,12 @@ func _panicstr(msg string) {
 
 // Cause a runtime panic, which is (currently) always a string.
 func runtimePanic(msg string) {
-	// A panic terminates the subtree before it prints: every breaker this
-	// domain created is closed, and so is this domain's own breaker, so the
-	// parent sees the child die and closes its other children in turn.
-	// reason, close, diagnostic, terminate: the parent reads the reason from the
-	// breaker before the close fires, so it never learns that something ended at
-	// the moment it stops being able to ask.
-	breakerSendReason(DomainClosed, 134, msg)
-	SpawnCloseAll()
-	SpawnClose(DomainClosed)
+	// Print FIRST. Native has one process and a panic aborts it, so no other
+	// domain can read a reason from a breaker: the shell that started the
+	// binary sees the message only through fd 2. Wasm has no process, so the
+	// same diagnostic crosses the host boundary as the page's stderr and the
+	// trap that follows is the page's cue to stop every domain it spawned -
+	// report first, tear down second, on both targets.
 	_panicstr(msg)
 }
 
@@ -90,6 +94,7 @@ func runtimePanicAt(addr unsafe.Pointer, msg string) {
 	if panicStrategy() == moxie.PanicStrategyTrap {
 		trap()
 	}
+	printFD = 2
 	if hasReturnAddr {
 		// Note: the string "panic: runtime error at " is also used in
 		// runtime_cortexm_hardfault.go. It is kept the same so that the string

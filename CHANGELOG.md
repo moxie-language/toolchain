@@ -9,15 +9,14 @@ compiler as it self-hosts to a reproducible binary.
 - **The import root is `moxielang.dev`** - the toolchain's own packages import
   under the vanity domain, and the loader resolves it, so a toolchain module
   states its dependency by name rather than by checkout path.
-- **A spawn target's result is the breaker, `chan []byte`** - `spawn(fn, ...)`
-  returns the target's one declared result, and the reason a domain stopped
-  (a panic message, empty on a clean stop) travels on that channel before it
-  closes. The result is matched as Moxie text, so a signature read back from
-  another package's export data (`[]byte` arrives as `string`) is the same
-  contract.
+- **A spawn target's result is the breaker, `chan struct{}`** - `spawn(fn, ...)`
+  returns the target's one declared result. The breaker is a signal, not a
+  message: nothing is ever sent on it, and a close is the whole event. A panic
+  does not send a reason through it - the process aborting is the message, and
+  the diagnostic is on stderr (see below).
 - **`sigint` is the domain's termination channel** - `main` selects on
   `sigint`, a spawn target on `closed`. The word lowers to `__sigint()`, a
-  builtin typed `chan []byte`; the runtime creates the channel once, in the
+  builtin typed `chan struct{}`; the runtime creates the channel once, in the
   root arena, and the signal handler only raises a flag. Every point where the
   domain waits closes it from normal context, so a select arm on it fires like
   an arm on any closed channel. A program that wants its own cleanup can still
@@ -32,16 +31,20 @@ compiler as it self-hosts to a reproducible binary.
   variable-length dimension, counted in elements (bytes at a `string`/`[]byte`
   leaf), with one 4096-byte page for an unstated dimension.
 - **A spawn target's result must be NAMED `closed`** - the name is part of the
-  contract, not only the type: a function returning a `chan []byte` under
+  contract, not only the type: a function returning a `chan struct{}` under
   another name is ordinary and may be called directly. The name crosses package
-  boundaries as `func closed <name> <sig>` on the func line of the export data,
-  because result names are not carried there and a name inside the signature
-  descriptor would split interface-method matching.
-- **Breaker lifecycle** - a spawn's breaker is created before the thread starts,
-  tracked on the domain for the panic path, and closed by its owner with
-  `close(breaker)`. It is not closed when the spawning function returns: that
-  function may be handing the breaker to its caller. `main` returning ends every
-  domain with the process, and a panic aborts it (status 134).
+  boundaries as `func (closed) <name> <sig>` on the func line of the export
+  data, because result names are not carried there and a name inside the
+  signature descriptor would split interface-method matching. The marker is
+  parenthesised so it can never be read as a function identifier.
+- **A panic prints to stderr before it dies** - the diagnostic is the first
+  thing the panic path writes, on fd 2, and the process then aborts (status
+  134). It does not signal through breakers: native has one process, so no
+  domain could read a reason after the abort. On wasm the same text reaches the
+  page as stderr and the page stops every domain it spawned, which is the
+  browser counterpart of the process ending. A spawn's breaker is closed by its
+  owner with `close(breaker)`; `main` returning ends every domain with the
+  process.
 - **The termination select is enforced** - both compilers refuse a `main` that
   does not consume `sigint` and a spawn target that does not consume its
   `closed` breaker, so a program that cannot be told to stop is a compile
@@ -63,6 +66,13 @@ compiler as it self-hosts to a reproducible binary.
   owner deciding a domain is finished. `close(breaker)` ends a domain, `main`
   returning ends every domain with the process, and a panic aborts the process
   (status 134) rather than leaving a domain to be restarted.
+- **Interface dispatch only enumerates implementers of the interface** - an
+  invoke arm is emitted only for a type whose method set covers every method of
+  the static interface, the same filter the legacy lowering already applied. A
+  name match alone enumerated `http2FrameHeader` into `sockaddr.String()`
+  chains: `net`'s wasm bitcode was 15 MB with two functions over 100k IR lines,
+  and `llc` was killed at ~30 GB. The filter took the same module to 7.5 MB and
+  the largest function to 54k lines, and `1c/net/http` compiles.
 - **A domain is a thread, not a process** - `spawn` starts a pthread with its
   own stack, TLS domain root, arenas and package globals, instead of forking.
   There are no PIDs, no `pdeathsig`, no `waitpid` and no reaper; a closed

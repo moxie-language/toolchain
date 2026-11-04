@@ -502,9 +502,11 @@ func chanRecv(ch *channel, value unsafe.Pointer, op *channelOp) bool {
 
 // chanClose closes the given channel. If this channel has a receiver or is
 // empty, it closes the channel. Else, it panics.
+
 // DomainClosed is the breaker channel of the domain being run: in a spawn child
 // it is the same object the parent received from spawn, so a close by either
-// side is visible to both. Nil in the root domain.
+// side is visible to both. Nil in the root domain. It is a signal, not a
+// message: `chan struct{}` with nothing ever sent on it.
 var DomainClosed *channel
 
 // ClosedBreakerChan is the domain's breaker, bound to a spawn target's `closed`
@@ -527,10 +529,9 @@ func SigintChan() (ch *channel) {
 	if sigintChan != nil {
 		return sigintChan
 	}
-	ptrSize := unsafe.Sizeof(uintptr(0))
 	save := CurrentArena()
 	SetCurrentArena(trueRootArena())
-	sigintChan = chanMake(ptrSize*3, 1, ptrSize*3+64, nil, 0)
+	sigintChan = chanMake(0, 1, 0, nil, 0)
 	SetCurrentArena(save)
 	return sigintChan
 }
@@ -561,26 +562,6 @@ func AssertBreaker(ch *channel) *channel {
 	return ch
 }
 
-// spawnTracked is every breaker this domain created, for the panic path: a
-// panicking parent closes all of them, terminating its subtree, which cascades
-// because each child's panic closes the breakers it created in turn.
-var spawnTracked [64]*channel
-var spawnTrackedN int32
-
-// SpawnTrack records a breaker so a panic can close it.
-func SpawnTrack(ch *channel) {
-	if ch == nil || spawnTrackedN >= 64 {
-		return
-	}
-	spawnTracked[spawnTrackedN] = ch
-	spawnTrackedN++
-}
-
-// breakerReasonMax bounds the reason that crosses the breaker: the control ring
-// holds one frame, so a larger diagnostic is truncated rather than allowed to
-// fail the send while the domain is dying.
-const breakerReasonMax = 1024
-
 // SpawnClose closes a breaker once; nil is a no-op because a spawn that failed
 // has no child to terminate.
 func SpawnClose(ch *channel) {
@@ -588,8 +569,8 @@ func SpawnClose(ch *channel) {
 		return
 	}
 	if ch.spawnBound {
-		// The breaker crosses the fork: closing it means closing the control
-		// ring both sides read, not setting a copy-on-write flag.
+		// The breaker rides the control ring both sides read, not a
+		// copy-on-write flag: closing it means closing that ring.
 		PipeChanCloseSignal(ch)
 		return
 	}
@@ -597,15 +578,6 @@ func SpawnClose(ch *channel) {
 		return
 	}
 	chanClose(ch)
-}
-
-// SpawnCloseAll closes every breaker this domain created and forgets them.
-func SpawnCloseAll() {
-	for i := int32(0); i < spawnTrackedN; i++ {
-		SpawnClose(spawnTracked[i])
-		spawnTracked[i] = nil
-	}
-	spawnTrackedN = 0
 }
 
 func chanClose(ch *channel) {

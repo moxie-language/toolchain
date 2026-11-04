@@ -1077,8 +1077,28 @@ export function startBundle(wasm, opts = {}) {
   return { worker, port: chan.port1, ready };
 }
 
+// Every Worker this realm started. A panic ends the whole tree, the way an
+// abort ends every domain in a native process; without the set a failed domain
+// would leave its siblings running with nobody to talk to.
+const liveDomains = new Set();
+
+// stopAllDomains is the generic panic action: terminate every Worker this realm
+// holds, then let the page stop its own loop. A worker forwards the event to
+// its parent, so the action runs at every level of the spawn tree and ends at
+// the page.
+function stopAllDomains(reason) {
+  for (const d of liveDomains) {
+    try { d.terminate(); } catch (e) { /* already gone */ }
+  }
+  liveDomains.clear();
+  if (typeof globalThis.__moxie_panic === 'function') {
+    try { globalThis.__moxie_panic(reason); } catch (e) { /* the hook is the app's */ }
+  }
+}
+
 export function startDomain(boot, onSettled, relayUp, appPort) {
   const w = new Worker(new URL('./worker-host.mjs', import.meta.url), { type: 'module' });
+  liveDomains.add(w);
   // The document is here; the module is in that Worker. A root domain gets one
   // end of a MessageChannel to ask this thread for DOM work, and this thread
   // serves it, because the page is the only place the document exists. A
@@ -1107,22 +1127,40 @@ export function startDomain(boot, onSettled, relayUp, appPort) {
       // page's counterpart for the life of the app - the page drives it through
       // the relay after _start returns - so its Worker stays alive, and only an
       // error or the page going away ends it.
+      liveDomains.delete(w);
       if (relayUp) w.terminate();
       onSettled && onSettled(null);
     }
     else if (m.kind === 'error') {
-      w.terminate();
       // Every domain failure reaches the page, whether or not a caller is still
       // waiting. A callback that panics after _start returns has no caller left
       // - the loader's promise settled long ago - and a failure that only went
-      // to a settled promise would look exactly like success.
+      // to a settled promise would look exactly like success. The diagnostic
+      // was already printed as stderr by the panic path; the trap that follows
+      // is the cue to stop every domain this realm holds.
       console.error('[domain] ' + m.error + '\n');
+      w.terminate();
+      liveDomains.delete(w);
+      stopAllDomains(m.error);
+      up('panic', m.error);
       if (onSettled) onSettled(new Error(m.error));
+    }
+    else if (m.kind === 'panic') {
+      // A domain deeper in this tree died: stop every domain here too and pass
+      // the event up, so the page ends the whole tree it started.
+      console.error('[domain] panic: ' + m.text + '\n');
+      stopAllDomains(m.text);
+      up('panic', m.text);
+      if (onSettled) onSettled(new Error(m.text));
     }
   });
   w.addEventListener('error', (e) => {
     const msg = String(e.message || e.error || e);
     console.error('[domain] ' + msg + '\n');
+    w.terminate();
+    liveDomains.delete(w);
+    stopAllDomains(msg);
+    up('panic', msg);
     if (onSettled) onSettled(new Error(msg));
   });
   const msg = { ...boot, stubs: globalThis.__moxie_test_stubs === true };

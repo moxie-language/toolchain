@@ -215,10 +215,10 @@ func (b *builder) createWasmSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	}
 
 	// The spawn ABI is one rule for both targets: exactly one result, the
-	// domain's breaker, a chan []byte.
+	// domain's breaker, a chan struct{}.
 	if !isSpawnTargetSig(sig) {
 		b.addError(instr.Pos(), fmt.Sprintf(
-			"spawn: %s must be declared with exactly one result, (closed chan []byte), which is the domain's breaker; a function without it cannot be spawned",
+			"spawn: %s must be declared with exactly one result, (closed chan struct{}), which is the domain's breaker; a function without it cannot be spawned",
 			targetFn.Name()))
 		return llvm.Value{}, nil
 	}

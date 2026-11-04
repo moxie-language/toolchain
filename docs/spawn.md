@@ -8,11 +8,34 @@ See [REFERENCE.md](../REFERENCE.md) for the complete language reference.
 done := spawn(funcName, arg1, arg2, ...)
 ```
 
-Creates a new domain: an isolated OS process (native) or Worker (JS), running `funcName(arg1, arg2, ...)` with its own arena. Within a domain there is no scheduler and no task switching (lemma L1). Returns `chan struct{}` (the lifecycle channel).
+Creates a new domain: a THREAD in the same process (native) or a Worker (JS), running `funcName(arg1, arg2, ...)` with its own arena. Within a domain there is no scheduler and no task switching (lemma L1). Returns `chan struct{}`, the lifecycle channel (the domain's breaker).
+
+## Target Signature
+
+The target's one result must be named `closed` and be of type `chan struct{}`. That name and type together are what make a function a spawn target; the runtime binds the domain's breaker into it.
+
+```go
+func worker(in chan Request, out chan Response) (closed chan struct{}) {
+    for {
+        select {
+        case <-closed:
+            return closed
+        case req := <-in:
+            out <- handle(req)
+        }
+    }
+}
+```
+
+The breaker is a signal, not a message: nothing is ever sent on it, and `close(breaker)` is the whole event. A parent stops its worker with `close(done)`, and a worker's own death closes its breaker.
 
 ## Codec Requirement
 
-All data arguments and channel element types must implement `moxie.Codec`:
+A value crosses a spawn channel by one of three routes, decided by the element type:
+
+- no references in the element: the extent is the message (a raw copy into the ring);
+- references and a custom codec (`moxie.Codec`: `EncodeTo`/`DecodeFrom`): the codec is the relocation;
+- references and no custom codec: the builtin structural codec, with back-references.
 
 ```go
 import "moxie"
@@ -42,11 +65,17 @@ User-defined structs implement Codec by defining EncodeTo/DecodeFrom methods tha
 ```go
 import "moxie"
 
-func worker(n moxie.Int32, scale moxie.Float64) {
+func worker(n moxie.Int32, scale moxie.Float64) (closed chan struct{}) {
     println(float64(n) * float64(scale))
+    return closed
 }
 
 func main() {
+    select {
+    case <-sigint:
+        return
+    default:
+    }
     spawn(worker, moxie.Int32(42), moxie.Float64(2.5))
 }
 ```
@@ -55,38 +84,34 @@ func main() {
 
 The compiler validates:
 - The first argument must be a function
-- Result type is `chan struct{}`, the lifecycle channel
-- All data argument types implement `moxie.Codec`
-- All channel element types implement `moxie.Codec`
+- The target's sole result is `(closed chan struct{})`
+- Data and channel element types are encodable: every variable-length
+  dimension has a `cap` tag, and a channel, interface, function value or type
+  parameter in the frame path is a compile error
 - No `interface{}` values cross the boundary
-- No pointers, functions, or nested channels
+- The target selects on `closed` and returns it
+- The target does not reach a channel through a package global
 
 Channel arguments are tagged as spawn-bound. The parent binds its halves with `MarkParentPipeChannel` per channel argument; the child binds the reversed halves before running the target.
 
-## Move Semantics
+## Values and Channels
 
-Non-constant, non-channel values passed to `spawn` cannot be used afterward:
-
-```go
-x := compute()
-spawn(worker, x)
-println(x)        // compile error: ownership moved to child
-```
+Values are copied and frozen at the spawn call; channels are shared handles. A spawn boundary is a sharing boundary, not an isolation boundary: the child holds the same rings the parent holds. A response arrives over a channel the caller passed in, never through mutable package state - package variables are thread-local, and a new domain starts with zeroed TLS.
 
 ## Channel Behavior
 
-A spawn-bound channel is a pair of shared SPSC ring buffers, one per direction, mapped `MAP_SHARED` before `fork` (32MB data area per direction, lazily faulted). Each direction has exactly one writer and one reader, so no lock is needed (lemmas L12, L13).
+A spawn-bound channel is a pair of shared SPSC ring buffers, one per direction. The data area is `pow2((N + 1) * align8(4 + frameBudget(T)))`: `N` is the declared depth and `frameBudget(T)` is the compiler's upper bound on one encoded message, from the `cap` tags. Both ends are threads in one address space, so the rings are ordinary shared memory, one writer and one reader per direction, and no lock is needed (lemmas L12, L13).
 
-Blocking operations retry with yield: `ringSend` and `ringRecv` are attempted, and on backpressure or emptiness the domain sleeps for 1ms and retries until the operation succeeds, the ring closes, or the peer dies. `select` uses the non-blocking `tryPipeSend`/`tryPipeRecv` variants, which must never block. Both sides are symmetric concurrent peers, and there is no parent/child behavioural distinction. Backpressure is expressed by ring occupancy, not by a sender blocking in a syscall (lemma L21).
+A send returns as soon as its frame is in the ring; it parks on the ring's read index (`ringParkRead`, with 20ms bounds, then a recheck of ring state and peer liveness) only when the declared number of messages is already outstanding, and the receiver advancing that index is the wake. `select` uses the non-blocking `tryPipeSend`/`tryPipeRecv` variants, which must never block. There is no yield-and-retry loop and no give-up.
 
-Control rides the same shared memory: channel close is the ring header's closed flag, child readiness is a shared atomic the parent spins on, and peer death is `waitpid` on the parent side and `getppid` on the child side. Inversion cannot happen: an orphaned child observes the `getppid` change and exits.
+Control rides the same shared memory: channel close is the ring header's closed flag, child readiness is a shared atomic the parent spins on, and a domain's death is the close of its breaker - the same `chan struct{}` the parent got from `spawn` and the child calls `closed`.
 
 ## Native Implementation
 
-`fork()` plus the shared ring pairs and a shared control block, all created before the fork. The child gets a COW copy of parent memory, sets `childSpawnTarget`, routes guard-page fault notifications to a lockdown pipe (observability only), then runs the wrapper directly: unpack arguments, mark the child-side ring halves, signal ready, call the target. There is no scheduler and no run queue (lemma L1).
+A domain is a `pthread` (64 MB stack), created by `spawnDomain` with its own TLS: domain root, arena stack and package globals. The ring pairs and the control block are created before the thread starts, and the child receives them through a handoff record in the root arena. The child sets `childSpawnTarget`, binds its side of the rings, signals ready and calls the target. There is no scheduler and no run queue (lemma L1).
 
-Each domain has its own bump-pointer arena. There is no GC; the arena is released by `munmap` on domain exit, and a function's arena is released at return after its return values are relocated into the caller's arena (lemma L19).
+Each domain has its own arena stack. There is no GC; a domain's arenas are released when its thread exits, and a function's arena is released at return after its return values are relocated into the caller's arena (lemma L19).
 
 ## JS Implementation
 
-`$rt.domain.spawn(async () => fn(args))`. Slices spread-copied, maps `Object.assign`'d. Isolated microtask scheduler per domain.
+Each domain is a dedicated Worker driving a WebAssembly instance, with spawn channels carried on SharedArrayBuffer-backed rings. `sigint` never fires in a Worker; a browser module is stopped by the host tearing down the Worker. A panic posts its message to the page as stderr, and the page stops every domain it spawned - the browser counterpart of one process aborting.

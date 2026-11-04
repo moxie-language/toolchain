@@ -42,6 +42,7 @@ import (
 	"os"
 	"strconv"
 	"time"
+	"unsafe"
 
 	"runtime"
 )
@@ -326,13 +327,18 @@ func ChanServeTimeout(addr string, mux *ChanMux, mode int32, workers int32, idle
 		if n < 1 {
 			n = 1
 		}
-		// The table and the slot ring go into the package globals BEFORE the
-		// first spawn: a worker inherits them by fork. The ring is MAP_SHARED,
-		// so the shell's writes AFTER the fork are visible to the workers - an
-		// ordinary arena cannot do that (the child's copy is private).
+		// The table and the slot ring are shared by address, not by fork: a
+		// domain is a thread in this process, so an ordinary pointer reaches
+		// the same memory. A package global would not survive the boundary -
+		// package variables are thread-local and a new domain starts with
+		// zeroed TLS - so the two addresses travel as spawn arguments and the
+		// worker installs them in its own copy. The ring is MAP_SHARED and
+		// already faulted, so the shell's writes after the spawn are visible.
 		chanGlobalMux = mux
 		chanSlotBuf = runtime.SharedBuffer(chanSlotCount * chanSlotBytes)
 		chanSlotPrefault()
+		slotPtr := uintptr(unsafe.Pointer(unsafe.SliceData(chanSlotBuf)))
+		muxPtr := uintptr(unsafe.Pointer(mux))
 		pool = &chanPool{mux: mux}
 		for i := int32(0); i < n; i++ {
 			j := chan int32{}
@@ -341,15 +347,19 @@ func ChanServeTimeout(addr string, mux *ChanMux, mode int32, workers int32, idle
 			pool.jobs = push(pool.jobs, j)
 			pool.results = mxutil.Ensure(pool.results, 1)
 			pool.results = push(pool.results, r)
-			spawn(chanWorkerLoop, j, r)
+			closed := spawn(chanWorkerLoop, j, r, slotPtr, muxPtr)
+			pool.breakers = mxutil.Ensure(pool.breakers, 1)
+			pool.breakers = push(pool.breakers, closed)
 		}
 	}
 	ln, lerr := net.Listen("tcp", addr)
 	if lerr != nil {
+		pool.closeBreakers()
 		return lerr
 	}
 	for {
 		if aerr := serveNextConn(ln, mux, pool, idle); aerr != nil {
+			pool.closeBreakers()
 			return aerr
 		}
 	}

@@ -111,7 +111,7 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	sig := targetFn.Signature
 	if !isSpawnTargetSig(sig) {
 		b.addError(instr.Pos(), fmt.Sprintf(
-			"spawn: %s must be declared with exactly one result, (closed chan []byte), which is the domain's breaker; a function without it cannot be spawned",
+			"spawn: %s must be declared with exactly one result, (closed chan struct{}), which is the domain's breaker; a function without it cannot be spawned",
 			targetFn.Name()))
 		return llvm.Value{}, nil
 	}
@@ -221,8 +221,8 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	waitFnType, waitFn := b.getFunction(b.program.ImportedPackage("runtime").Members["PipeWaitChildReady"].(*ssa.Function))
 	b.createCall(waitFnType, waitFn, []llvm.Value{llvm.Undef(b.dataPtrType)}, "child.ready")
 
-	// Return the breaker channel (chan []byte) that closes when the child
-	// exits. Register it with the domain so a panic closes it.
+	// Return the breaker channel (chan struct{}) that closes when the child
+	// exits.
 	//
 	// The compiler does NOT close it at return. A frame returning is not the
 	// owner deciding a domain is finished: the function may be handing the
@@ -232,8 +232,6 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	// ending reclaims every domain there is.
 	lcFnType, lcFn := b.getFunction(b.program.ImportedPackage("runtime").Members["SpawnLifecycleChannel"].(*ssa.Function))
 	doneCh := b.createCall(lcFnType, lcFn, []llvm.Value{llvm.Undef(b.dataPtrType)}, "done.ch")
-	trackFnType, trackFn := b.getFunction(b.program.ImportedPackage("runtime").Members["SpawnTrack"].(*ssa.Function))
-	b.createCall(trackFnType, trackFn, []llvm.Value{doneCh, llvm.Undef(b.dataPtrType)}, "")
 	return doneCh, nil
 }
 
@@ -399,11 +397,10 @@ func isSpawnTargetSig(sig *types.Signature) bool {
 	if !ok || ch.Dir() != types.SendRecv {
 		return false
 	}
-	// The breaker carries the reason a target stopped (a panic message, empty
-	// on a clean stop) before it closes, so its element is text. Moxie text is
-	// one type, and a signature read back from another package's export data
-	// spells []byte as the basic string, so the test is text, not slice-of-byte.
-	return moxieTextType(ch.Elem())
+	// The breaker is a signal, so its element is the empty struct: nothing is
+	// ever sent on it, and a close is the whole message.
+	st, okSt := ch.Elem().Underlying().(*types.Struct)
+	return okSt && st != nil && st.NumFields() == 0
 }
 
 // spawnArgCopy hands one value parameter across the spawn boundary as a frozen

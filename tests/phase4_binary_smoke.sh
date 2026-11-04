@@ -25,4 +25,24 @@ else
 	log_fail "$name" "$(tail -3 "$td/build.log" 2>/dev/null)"
 fi
 
+# 4b: a panic prints to the process's stderr and aborts (status 134). The
+# breaker does not carry a reason: the process ending is the event.
+name="smoke:panic-stderr"
+pdir="$td/panic"
+mkdir -p "$pdir/pkg"
+cp "$SCRIPT_DIR/data/panicstderr/main.mx" "$pdir/pkg/main.mx"
+if MOXIEROOT="$MOXIEROOT" "$MOXIE" build -o "$pdir/panic" "$pdir/pkg" >"$pdir/build.log" 2>&1; then
+	rc=0
+	"$pdir/panic" >"$pdir/stdout" 2>"$pdir/stderr" || rc=$?
+	out="$(cat "$pdir/stdout" 2>/dev/null)"
+	err="$(cat "$pdir/stderr" 2>/dev/null)"
+	if [ "$rc" = "134" ] && [ "$err" = "panic: worker died" ] && [ -z "$out" ]; then
+		log_pass "$name" "stderr carried the panic, exit 134"
+	else
+		log_fail "$name" "rc=$rc stdout=[$out] stderr=[$err]"
+	fi
+else
+	log_fail "$name" "$(tail -3 "$pdir/build.log" 2>/dev/null)"
+fi
+
 rm -rf "$td"

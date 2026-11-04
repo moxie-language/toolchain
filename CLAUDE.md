@@ -521,14 +521,15 @@ config is not exempt from sizing.
 
 **The spawn ABI.** `spawn(fn, arg...)` passes values (copied, frozen at the
 call) and channels (shared). The target's ONE result must be NAMED `closed` and
-be of type `chan []byte`: that name and type together are what make a function a
-spawn target, and the runtime binds the domain's breaker into it. A function that
-merely happens to return a `chan []byte` under another name is an ordinary
-function and may be called directly - matching the shape alone made every such
-helper a target and died in its prologue. The target writes its breaker as a
-special word:
+be of type `chan struct{}`: that name and type together are what make a function
+a spawn target, and the runtime binds the domain's breaker into it. A function
+that merely happens to return a `chan struct{}` under another name is an
+ordinary function and may be called directly - matching the shape alone made
+every such helper a target and died in its prologue. The breaker is a SIGNAL,
+not a message: nothing is ever sent on it, and a close is the whole event. The
+target writes its breaker as a special word:
 
-    func worker(in chan Request, out chan Response) (closed chan []byte) {
+    func worker(in chan Request, out chan Response) (closed chan struct{}) {
         for {
             select {
             case <-closed:
@@ -543,9 +544,9 @@ special word:
 (SIGINT from the shell, SIGTERM from a supervisor); a spawn target selects on
 `closed` (the parent's close, which also happens when the parent's process
 ends, because a domain thread cannot outlive it). Both are predeclared words, and neither is `close`: `close(ch)` stays the
-builtin. `sigint` is a `chan []byte` the runtime owns, one per domain: it is
+builtin. `sigint` is a `chan struct{}` the runtime owns, one per domain: it is
 created on first use in the root arena (`SigintChan`), so it outlives every
-frame that selects on it.
+frame that selects on it. Like `closed`, it is a signal and is only ever closed.
 
 The signal handler does ONE thing - raise a flag. It may interrupt an
 allocation, a channel operation or a held lock, so it must not allocate, close

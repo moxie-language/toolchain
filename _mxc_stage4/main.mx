@@ -4478,15 +4478,17 @@ func generateMxh(pkg *TCPackage) (s string) {
 			sig := fn.Signature()
 			if sig != nil {
 				b.w("func ")
-				// A spawn target's declaration is `(closed chan []byte)`, and
+				// A spawn target's declaration is `(closed chan struct{})`, and
 				// the NAME is the contract, so it has to survive the export: the
 				// target's prologue is compiled in its own package, but the spawn
 				// call site may be in another one. The marker rides the func line
 				// rather than the signature descriptor because descriptors are
 				// compared as TEXT when an interface impl is matched to the
-				// method it implements - a name in there splits every match.
+				// method it implements - a name in there splits every match. It
+				// is `(closed)`, not `closed`, so it can never be mistaken for a
+				// function of that name.
 				if sigIsSpawnDecl(sig) {
-					b.w("closed ")
+					b.w("(closed) ")
 				}
 				b.w(objName) ; b.w(" ")
 				sigDescWrite(&b, sig) ; b.nl()
@@ -5059,10 +5061,11 @@ func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
 			if ws2 >= we2 {
 				continue
 			}
-			// `func closed <name> <sig>` marks a spawn target: its sole result
-			// is the domain's breaker, and the name is what makes it one.
+			// `func (closed) <name> <sig>` marks a spawn target: its sole
+			// result is the domain's breaker, and the name is what makes it
+			// one. The marker is parenthesised so it is not an identifier.
 			mark := string(d[ws2:we2])
-			target := mark == "closed"
+			target := mark == "(closed)"
 			if target {
 				ws2, we2 = mxhNextWord(d, we2, le2)
 				if ws2 >= we2 {
@@ -7864,16 +7867,26 @@ func main() {
 		objList := objFiles(clang, wasmTriple, allBcFiles)
 		objList = mxutil.Ensure(objList, 1)
 		push(objList, clangCompileToObj(clang, wasmTriple,initAllBc))
-		// Stubs for symbols not provided by stage4-compiled runtime
+		// Stubs for symbols not provided by stage4-compiled runtime.
+		//
+		// stacksave is one of them only when the runtime is NOT in the build
+		// closure: a source-compiled runtime leaves the symbol bodyless and
+		// initAll defines it (above). Defining it here too is a duplicate
+		// symbol at wasm-ld, which is how a wasm LIBRARY build (phase 1c)
+		// failed after llc was fixed.
+		stubSS := ""
+		if !hasRuntimePkg {
+			stubSS = "declare ptr @llvm.stacksave.p0()\n" |
+				"define ptr @runtime.stacksave(ptr %_ctx) {\n" |
+				"  %1 = call ptr @llvm.stacksave.p0()\n" |
+				"  ret ptr %1\n" |
+				"}\n"
+		}
 		wasiStubs := mxutil.JoinPath(tmpdir, "wasi_stubs.ll")
 		writeFile(wasiStubs, []byte(
 			"target datalayout = \"e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20\"\n" |
 			"target triple = \"wasm32-unknown-wasi\"\n" |
-			"declare ptr @llvm.stacksave.p0()\n" |
-			"define ptr @runtime.stacksave(ptr %_ctx) {\n" |
-			"  %1 = call ptr @llvm.stacksave.p0()\n" |
-			"  ret ptr %1\n" |
-			"}\n" |
+			stubSS |
 			"define void @moxie_longjmp(ptr %0, ptr %1) {\n" |
 			"  call void @llvm.trap()\n" |
 			"  unreachable\n" |

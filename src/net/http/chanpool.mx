@@ -15,6 +15,10 @@ package http
 // allocation in the steady state - the shell reuses its own slot for every
 // request on a connection, so the request body costs no bytes after warm-up.
 //
+// A domain is a thread, so the ring's address is the same in both domains; it
+// is passed to the worker as a spawn argument because a package global is
+// thread-local and the worker starts with zeroed TLS.
+//
 // Why not send the encoded message as a []byte on a chan []byte? That allocates
 // a fresh slice per message, and the point of the ring is that the steady state
 // allocates nothing.
@@ -26,9 +30,9 @@ package http
 // slots give the handoff headroom without the "connections times slots" sizing
 // that got the first ring attempt reverted.
 //
-// The router table is a package global read by the workers, which is sound
-// because spawn forks: every worker inherits the table as it stands when the
-// pool starts, and the table is built at startup and only read afterwards.
+// The router table is read by the workers through the address the shell passes
+// at spawn: it is built at startup and only read afterwards, so the sharing is
+// read-only and needs no copy.
 
 import (
 	"errors"
@@ -36,7 +40,8 @@ import (
 	"unsafe"
 )
 
-// chanGlobalMux is the table the pool workers read.
+// chanGlobalMux is the table the pool workers read. The shell assigns its own
+// copy; each worker installs the address it received at spawn.
 var chanGlobalMux *ChanMux
 
 func chanRouteHandler(id int32) (h ChanHandler) {
@@ -66,7 +71,8 @@ const (
 	chanSlotFrame = int32(32) // fixed header words: len, status, route, 3 lens, bodylen, nheaders
 )
 
-// chanSlotBuf is the shared ring, inherited by every worker at fork.
+// chanSlotBuf is the shared ring. The shell creates it; each worker
+// reconstructs the same view from the address it received at spawn.
 var chanSlotBuf []byte
 
 // chanSlotInFlightMax records the largest number of pool calls in flight, the
@@ -253,7 +259,13 @@ func chanSlotGetResp(slot []byte) (resp *Resp, ok bool) {
 // handler call there, writes the response back into the same slot and resets the
 // arena, so a worker that served a million requests holds no more memory than
 // one that served one.
-func chanWorkerLoop(jobs chan int32, results chan int32) (closed chan []byte) {
+func chanWorkerLoop(jobs chan int32, results chan int32, slotPtr, muxPtr uintptr) (closed chan struct{}) {
+	// The shell's package globals are not this domain's: package variables are
+	// thread-local and a new domain starts with zeroed TLS. The two addresses
+	// travel as spawn arguments - the ring is process memory and the table is
+	// read-only after startup - and are installed before the first receive.
+	chanSlotBuf = unsafe.Slice((*byte)(unsafe.Pointer(slotPtr)), chanSlotCount*chanSlotBytes)
+	chanGlobalMux = (*ChanMux)(muxPtr)
 	prevScope := runtime.SetArenaScope(ArenaScopeRequest)
 	arena := runtime.ArenaAcquire(chanRequestArenaBytes)
 	runtime.SetArenaScope(prevScope)
@@ -319,10 +331,24 @@ func chanWorkerLoop(jobs chan int32, results chan int32) (closed chan []byte) {
 // they share with the shell. next rotates so a connection does not always land
 // on the same worker.
 type chanPool struct {
-	mux     *ChanMux
-	jobs    []chan int32
-	results []chan int32
-	next    int32
+	mux      *ChanMux
+	jobs     []chan int32
+	results  []chan int32
+	breakers []chan struct{}
+	next     int32
+}
+
+// closeBreakers ends every worker this pool started. The spawning frame owns
+// its children: a return from ChanServeTimeout must not leave a domain behind,
+// which is why the breakers are kept rather than dropped at spawn.
+func (p *chanPool) closeBreakers() {
+	if p == nil {
+		return
+	}
+	for i := int32(0); i < int32(len(p.breakers)); i++ {
+		close(p.breakers[i])
+	}
+	p.breakers = nil
 }
 
 func (p *chanPool) pick() (i int32) {

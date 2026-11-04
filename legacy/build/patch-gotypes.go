@@ -396,10 +396,10 @@ func patchSpawnBuiltin(dir string) {
 				return
 			}
 		}
-		// spawn returns the target's breaker channel, not a fixed
-		// chan struct{}: the target declares (closed chan []byte) and the
-		// reason it stopped travels on that same channel, so the caller's
-		// receive must be typed as the target returned it.
+		// spawn returns the target's breaker channel: the target declares
+		// (closed chan struct{}) and the caller's value must be typed as the
+		// target returned it. The default (a target whose signature is not
+		// available yet) is the same chan struct{}.
 		fnArg := 0
 		if isString(x.typ) {
 			fnArg = 1
@@ -788,7 +788,7 @@ func patchChanFrameBudget(dir string) {
 
 // patchSigintBuiltin adds the __sigint builtin: the call that names the
 // domain's termination channel, which the predeclared word `sigint` is lowered
-// to. It is a zero-argument expression returning chan []byte - the same handle
+// to. It is a zero-argument expression returning chan struct{} - the same handle
 // on both sides, so a select arm and a direct receive see the same close.
 func patchSigintBuiltin(dir string) {
 	f := filepath.Join(dir, "universe.go")
@@ -810,15 +810,16 @@ func patchSigintBuiltin(dir string) {
 	src = mustReplace(f, src,
 		"\tcase _Recover:\n\t\t// recover() string",
 		`	case _Sigint:
-		// __sigint() chan []byte: the domain's termination channel, closed
+		// __sigint() chan struct{}: the domain's termination channel, closed
 		// when the process is told to stop. The handle is the runtime's, so
-		// every call names the same channel.
+		// every call names the same channel; the element is the empty struct
+		// because the close is the whole message.
 		if nargs != 0 {
 			check.errorf(call, WrongArgCount, invalidOp+"__sigint takes no arguments")
 			return
 		}
 		x.mode = value
-		x.typ = NewChan(SendRecv, NewSlice(universeByte))
+		x.typ = NewChan(SendRecv, NewStruct(nil, nil))
 		if check.recordTypes() {
 			check.recordBuiltinType(call.Fun, makeSig(x.typ))
 		}

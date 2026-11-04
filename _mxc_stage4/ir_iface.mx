@@ -1720,6 +1720,44 @@ func (e *irEmitter) emitInvokeArgs(args []invokeArg) {
 	}
 }
 
+// implCoversIface reports whether an invoke arm's receiver can be the dynamic
+// type of a value of the static interface: every method the interface requires
+// must be in the receiver's method set. The invoked method is the caller's
+// business - emitInvoke has already compared its signature against the
+// interface's - so it is not rechecked here; what this adds is the REST of the
+// interface, which is what separates a real implementation from a type that
+// merely shares a method name. Without it every `x.String()` over a big link
+// set dispatches through every Stringer in the program: `sockaddr.String()`
+// carried io/fs.PathError and http2FrameHeader arms, 9,574 type-ID compares in
+// one function, and llc died on the module (net's wasm bitcode, round 378).
+//
+// The universe error interface declares String() beside Error() because Moxie's
+// fmt prints errors through it, but a concrete error type is not required to
+// declare String; String is therefore not required when Error is present, the
+// same exception emitIfaceAssertOK applies.
+func (e *irEmitter) implCoversIface(impl ifaceImpl, ifaceT *TCInterface, methodName string) (ok bool) {
+	names, _ := collectIfaceMethodInfo(ifaceT, 0)
+	hasError := false
+	for i := 0; i < len(names); i++ {
+		if names[i] == "Error" {
+			hasError = true
+		}
+	}
+	for i := 0; i < len(names); i++ {
+		n := names[i]
+		if n == methodName {
+			continue
+		}
+		if hasError && n == "String" {
+			continue
+		}
+		if !HasMethod(impl.recvType, n) {
+			return false
+		}
+	}
+	return true
+}
+
 // boxConcreteToIfaceParam emits interface boxing when a concrete arg is
 // passed to an interface-typed method parameter. Without this, the raw
 // alloca+store+load cast leaves the typecode zero and the callee's own
@@ -1878,6 +1916,11 @@ func (e *irEmitter) emitInvoke(inv *SSAInvoke) {
 					continue
 				}
 			}
+		}
+		// A candidate that does not implement the static interface cannot be
+		// the value's dynamic type; emitting it only lengthens the chain.
+		if inv.IfaceType != nil && !e.implCoversIface(impl, inv.IfaceType, inv.MethodName) {
+			continue
 		}
 		impls = mxutil.Ensure(impls, 1)
 		push(impls, impl)

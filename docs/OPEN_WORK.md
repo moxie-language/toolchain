@@ -4,157 +4,133 @@ State carried across context compaction. Ordered queue, the decisions already
 taken, the findings that motivated them, and the two designs in flight
 (module removal, user-code exemption). Update this file when the queue moves.
 
-## STANDING ISSUES (round 378) - the current queue, runtime outward
+## STANDING ISSUES (round 379) - the current queue, runtime outward
 
-Ordered by proximity to the runtime: what lives in `src/runtime` first, then the
-spawn ABI the compilers enforce, then the stdlib built on both, then the tree
-gates. Each item carries the decision already taken, so it does not have to be
-re-argued. Nothing here is fixed unless the item says so.
+Round 378 closed items 1-5 and 7; the evidence is in "ROUND 378 CLOSE" below.
+What is left is verification, not design.
 
-### 1. Panic: print to the process's stderr first, then die
+### 1. A full sweep on the committed tree
 
-`runtimePanic` (`src/runtime/panic.mx:76`) sends a reason frame on the domain's
-breaker, closes every tracked breaker and this domain's breaker, and only then
-prints through `_panicstr` and calls `abort()`. On native every domain is a
-thread in one process and the process is aborting, so no other domain can read
-that reason - the work is unobservable, and the message reaches the shell that
-started the binary only through fd 2. The write to stderr is the first thing the
-panic path does; the sends and closes go, they do not merely move. The
-`panic(msg)` builtin (`_panic`) already prints first.
+`tests/unitrun.sh` with the new compiler, from cold, all phases. Accept: 317
+units with zero failures, phase 5 green in Chromium, phase 8 green in BOTH
+dispatch modes, and the bootstrap fixpoint `s2 == s3`. `tree-cleanliness` is
+part of every phase, so this run belongs on the commit, not on a dirty tree.
 
-Wasm is a host boundary, not a process, and its panic path is not a stderr
-write: a panic in a spawned domain must post its message to the page so the
-page's console prints it where the user can see it, and the page must then run
-the generic panic action - stop the page and every worker domain spawned for it
-- so wasm matches native's "one domain's death ends all of them". The message
-therefore still crosses to the parent on wasm, as the host-boundary panic
-protocol, not as a value travelling on the breaker. Sequence on both targets:
-report first, tear down second.
+### 2. The wasm panic action has no automated browser gate
 
-Accept: a panicking domain writes `panic: ...` to the process's stderr, the
-shell sees it, and the process aborts (status 134) with no reason-frame send.
+Item 1's native half is gated by `smoke:panic-stderr` (phase 4): a spawned
+worker panics, stdout is empty, stderr is `panic: worker died`, exit 134. The
+wasm half - the message reaches the page as stderr and `stopAllDomains` ends the
+whole tree - is implemented in `jsruntime/host.mjs` but no fixture exercises it.
+Add a wasm fixture that panics in a spawned worker and assert the page console
+line and that a sibling worker stops.
 
-### 2. The breaker is a signal, not a message: `chan struct{}`
+## ROUND 378 CLOSE (measured 2026-11-04, local 14 GB host)
 
-The target's result and the handle `spawn` returns are `chan []byte` carrying an
-exit code and a bounded reason (`breakerReasonMax`, `breakerSendReason`, the
-reason-sized ring in `spawnBreakerMake`). That text existed to carry a death
-reason from a forked child back to the parent, which then wrote it to the shell.
-With threads the parent and the child share one stderr and the shell reads the
-child directly; item 1 makes the panic path print there. Roll the kill/died
-channel back to `chan struct{}` and delete the reason machinery:
+The queue that stood here was items 1-7, runtime outward. All but the gates are
+fixed. The box is not needed any more: the dispatch fix took the wasm module
+from a 30 GB `llc` blowup to ~300 MB, so the local machine builds the whole
+`net/http` closure.
 
-- `src/runtime/chan.mx`: `DomainClosed`, `SpawnClose`, the reason note;
-- `src/runtime/domain.mx`: the `oneReason` budget in `spawnBreakerMake`;
-- `src/runtime/pipe_channel.mx`: `breakerSendReason`; `spawn_wasm.mx`'s no-op;
-- both compilers' `isSpawnTargetSig`: the element is no longer text and the
-  `TextType(ch.Elem)` test goes;
-- the `spawn` return type and every target signature, `(closed chan struct{})`,
-  in moxie, morly and the fixtures;
-- the docs that state the ABI (`CLAUDE.md`, `docs/spawn.md`, `CHANGELOG.md`).
+### 1. Panic prints first, to stderr - CLOSED
 
-This is the NATIVE ABI. On wasm the panic message still has to reach the page
-and the page still has to stop itself and its workers (item 1), so the host
-bridge keeps a panic-message path; what goes is the breaker's reason frame,
-which only ever served native's fork.
+`runtimePanic` no longer sends or closes anything: it prints and aborts, and
+`printFD = 2` (set at the top of every panic path, and used by `putchar` on both
+targets) puts the diagnostic on the process's stderr. `SpawnTrack`,
+`spawnTracked`, `SpawnCloseAll` and the compiler call that registered breakers
+are deleted with the path they served.
 
-`sigint` is `chan []byte` for the same empty reason; decide it in the same
-change. Accept: a target selects on `<-closed` and returns it, `close(breaker)`
-stops it, no `breakerSendReason`/`breakerReasonMax` remains, and every spawn
-target compiles on both compilers.
+Evidence: `tests/data/panicstderr`, run as phase 4 `smoke:panic-stderr` - a
+spawned worker panics; stdout empty, stderr exactly `panic: worker died`, exit
+status 134.
 
-### 3. The `closed` marker is an identifier
+### 2. The breaker is a signal: `chan struct{}` - CLOSED
 
-The target's name crosses the export boundary as `func closed <name> <sig>`
-(`_mxc_stage4/main.mx:4480` writes it, `:5062` reads it). `closed` is not a
-reserved identifier, so a package-level `func closed(...)` is written as
-`func closed (<sig>)` and read as a marker: the importer gets a function named
-`(<sig>)` and `closed` disappears. Either reserve `closed` at package scope or
-make the marker un-identifier-like (`(closed)`). Accept: a package declaring
-`func closed` either is rejected by name or exports and imports correctly; never
-a rename.
+- runtime: `spawnBreakerMake` and `SigintChan` make an empty-struct breaker
+  (`chanMake(0, 1, 0, ...)`); `breakerSendReason`, `breakerReasonMax`,
+  `DomainClosed`'s reason frame and both `spawn_wasm`/`pipe_channel` copies are
+  gone; `breakerFallback` is one empty slot.
+- both compilers: `isSpawnTargetSig` requires an empty-struct element, the
+  `spawn` default result and `__sigint` are `chan struct{}` (stage4
+  `ssa_builder.mx`, legacy `patch-gotypes.go`), and the error text says so.
+- every target signature in `src/`, `tests/` and `morly` is
+  `(closed chan struct{})`; `CLAUDE.md`, `docs/spawn.md` and `CHANGELOG.md`
+  state the ABI.
 
-### 4. `DispatchSpawned` is broken under the thread model
+Evidence: the cross-package fixture spawns `lib.Worker` `(closed chan
+struct{})`, echoes a message and `close(done)` stops it; the bootstrap below
+compiles all of this with both compilers; the spawned HTTP pool runs.
 
-Verified on this tree: `./server 127.0.0.1:39129 spawned`, one request, then
-`panic: chanpool: slot window out of range` before a response. `ChanServeTimeout`
-(`src/net/http/chanpath.mx:333`) writes `chanGlobalMux` and `chanSlotBuf` as
-package globals after spawning the pool; globals are `thread_local`, a domain
-starts with zeroed TLS, and the worker's slot buffer is empty. Fork inherited
-them; threads cannot. Design to choose: (a) carry the request and response over
-the existing job/result channels instead of the shared slot ring, or (b) pass
-the mapping through the spawn handoff as the channel rings already are. The
-handler table has the same problem and holds interfaces. If the mode has no
-user, delete it. Accept: a spawned-mode request gets a response and the child
-reads no parent-written global.
+### 3. The `closed` marker - CLOSED, no rename
 
-### 5. `ChanServeTimeout` discards its pool's breakers
+The export marker is now `(closed)`, not `closed` (writer `main.mx:4491`,
+reader `:5068`), so it is not an identifier at all. The collision was already
+unreachable: an unexported `func closed` never enters export data, and a
+package-level `closed` cannot coexist with a target whose result is `closed` -
+the result shadows it and the compiler rejects the package (`Worker: 'closed'
+shadows declaration in enclosing scope`, measured with a scratch fixture and
+reverted). No identifier was reserved and nothing was renamed.
 
-`spawn(chanWorkerLoop, j, r)` (`chanpath.mx:344`) drops the breaker, and the
-function returns on a listen or serve error, so the pool outlives the frame.
-The frame is the owner: close what it spawned on the way out. Subsumed if item 4
-redesigns the pool. Accept: every error return ends the domains it started.
+### 4. `DispatchSpawned` - CLOSED
 
-### 6. Gates: full sweep, phase 5, bootstrap
+The pool's two shared addresses travel as spawn arguments (option b): the shell
+passes `uintptr` of the slot ring and of the routing table, the worker installs
+them in its own TLS before its first receive. Package globals are still
+thread-local and the child reads no parent-written global.
 
-The "every gate is green" table below is a round-73 snapshot (`65294d1c`),
-before rounds 371-378. Re-run `tests/unitrun.sh` on this tree; phase 5
-especially, since the wasm shadow fix was checked on two fixtures only
-(`close_breaker`, `asn1_tag_crosspkg`) and the last full phase-5 run measured a
-warm runtime. Re-run the s1 -> s3 bootstrap: the compiler binary should be
-unchanged (`spawn_wasm.mx` is excluded from native builds), but `src/runtime` is
-in `compilerHash`, so the cache generation moved. Accept: a full green sweep and
-phase 5 green from cold.
+Evidence: `./netsmoke-server 127.0.0.1:39177 spawned`, one request, response
+`hello path=/smoke` (the same request panicked `chanpool: slot window out of
+range` before).
 
-Baseline run on the box (2026-11-04, tree `4e24b321`): 317 units, **315 passed,
-1 skipped, 1 failed**. The skip is `spawn_closed_crosspkg` (declared native-only,
-the Round 378 fixture). The failure is `1c/net/http`; it is a `llc` OOM, not a
-phase defect - see item 7. Every other phase, phase 5 included, is green, and the
-bootstrap there is `s2 == s3 7a9fd90e`.
+### 5. `ChanServeTimeout` breakers - CLOSED
 
-Heavy verification runs on the Hetzner box (`ssh hetzner`:
-root@2.31.151.214, key `~/.ssh/id_mlekucom`, 8 cores, 30 GB, LLVM 22). It has
-clang-22/llvm-link-22/ld.lld-22/opt, python3 with playwright/Chromium, and a Go
-1.25.3 install; the tree is synced there by `git bundle`, and the local checkout
-remains the editing surface.
+`chanPool.breakers` keeps every handle `spawn` returned; `closeBreakers()` runs
+on the listen failure and on every `serveNextConn` error return, so a return
+from the frame ends the domains it started.
 
-The first bootstrap there failed, and the cause is worth keeping: a fresh
-`go build` of `legacy/` from a stock Go cannot compile the tree - `pkg/mxregexp`
-reports `undefined: push`/`resize`. The legacy compiler needs `go/types`
-patched with Moxie's builtins, which `legacy/build/patch-gotypes.go` installs
-into a GOROOT target. The working `legacy/moxie` on this machine was built
-against a patched tree that is no longer here (the local `/opt/go1.25.3` is
-stock), which is why a fresh local build fails while the checked-in binary
-looks fine. On the box:
+### 6. Gates - bootstrap and 1c are green; the sweep is item 1 above
 
-    cp -a /opt/go /opt/go-moxie
-    GOROOT=/opt/go go run build/patch-gotypes.go /opt/go-moxie
-    # build legacy, and run the bootstrap, with GOROOT=/opt/go-moxie
+- bootstrap: s1 from legacy, s2 from s1, s3 from s2; `sha256sum mxc-s2-new
+  mxc-s3-new` = `94529e3f5dd9d50f469c96f9c4070956a90340a500dd7636f83d1b94350caee7`
+  (both).
+- phase 1c: `mxc-s1-new build -target wasm src/net/http` links (`-> nh3.wasm`,
+  exit 0). The object stage that used to be OOM-killed now peaks at ~900 MB for
+  the 57 MB `net/http` module.
+- phase 4: green, including the new panic unit.
 
-The patch target must be a full Go tree; pointing it at the source GOROOT fails
-copying testdata into itself. CLAUDE.md's bootstrap step 1 (`cd legacy && go
-build`) omits this and only works on a host whose GOROOT was already patched.
+The Hetzner host is off and was not used for this round; the notes about its
+patched GOROOT remain valid for the next time it is used. Locally, `legacy/
+build.sh` must be run with `GOROOT=/opt/go1.25.3` because the shell environment
+points `GOROOT` at an empty `/home/mleku/go`.
 
-### 7. Wasm: `net`'s IR grows with the link set and `llc` OOMs
+### 7. Dispatch arms enumerated by method name only - CLOSED
 
-The baseline sweep's only red unit is `1c/net/http`, reported as
-`mxc: object compile failed`. The failure is `llc`, not the compiler front end.
-In the net/http closure the `net` package's wasm bitcode is 15 MB and two
-functions are ~118k IR lines: `(*Resolver).goLookupIPCNAMEOrder` 117,997 and
-`validateResolvedAddr` 117,188. The same compiler generation builds `net` at
-4.3 MB in a small closure, where `goLookupIPCNAMEOrder` is 7,982 lines and
-`resolveAddrList` 6,794 - the IR grows about 15x with the link set.
+Root cause: `emitInvoke` emitted one arm for every type in the link set that had
+a method of the invoked NAME and a matching signature - `sockaddr.String()`
+carried `http2FrameHeader`, `io/fs.PathError` and every other Stringer in the
+program - because `findIfaceImpls` selects by method name and nobody asked
+whether the candidate implements the STATIC interface. Legacy's lowering had
+always filtered (`satisfiesInterfaces`), so stage4 was the divergent side.
 
-`llc` at -O2 and at -O0, on LLVM 22 and LLVM 23, climbs to ~30 GB and is
-OOM-killed on a 30 GB box (dmesg: anon-rss 29.9 GB); `-O0` alone ran past five
-minutes before the kill. The bitcode is valid (`llvm-dis` takes 1.1 s, 232 MB
-peak), so this is a backend blowup on a link-set-inflated module, not corrupt
-IR. The 4.3 MB/15 MB split IS the link-set-dependent content - dispatch arms
-are emitted into the package that makes the call - and the growth is
-concentrated in functions doing interface-typed work. Next: find what is
-duplicated into those two functions as the link set grows. Until then phase 1c
-cannot be green on a box this size, and the local machine (14 GB) cannot run the
-unit either.
+Fix: `implCoversIface` (`ir_iface.mx`) keeps a candidate only when every other
+method of `inv.IfaceType` is in its method set (`pkg/types.HasMethod`, the
+name-only rule `IfaceMissingMethod` uses, with the universe-error `String`
+exception `emitIfaceAssertOK` already applied). The invoked method is not
+rechecked: `emitInvoke` has already compared its signature.
+
+Measured on the `net/http` wasm closure:
+
+| | before | after |
+| --- | --- | --- |
+| `net` module | 15,077,684 B | 7,564,160 B |
+| `(*Resolver).goLookupIPCNAMEOrder` | 117,998 lines | 54,545 lines |
+| `validateResolvedAddr` | 117,189 lines | 12,011 lines |
+| `llc` on `net` | ~30 GB, OOM-killed | ~306 MB, ~2 min |
+
+Behind that failure sat a second one, only reachable once the object stage
+worked: a wasm library link defined `runtime.stacksave` in both `initAll` and
+`wasi_stubs.ll`. The stub now defines it only when the runtime is not in the
+build closure, which is the condition `initAll` uses.
 
 ## REMAINING WORK (as of round 73) - historical snapshot
 
