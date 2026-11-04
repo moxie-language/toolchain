@@ -24997,16 +24997,19 @@ spawn; under the thread model each domain has its own copy, so the
 `DispatchSpawned` path needs a look independent of the breakers.
 
 Found while running the wasm phase, and NOT caused by 377 or 378: the wasm target
-does not build with stage4 at HEAD. `17cceab8` added the `c == nil && td == nil`
+did not build with stage4 at HEAD. `17cceab8` added the `c == nil && td == nil`
 branch to `spawn_wasm.mx`'s `tryPipeRecv`, and its nested `n :=` shadows the
 function-body `n` declared later. The no-shadowing rule is position-insensitive
 by design ("a name is taken for the whole block it appears in"), so this is a
 real violation rather than a checker bug: legacy's `checkScopeShadowing` should
-reject it too. Every wasm fixture fails with
+reject it too. Every wasm fixture failed with
 `tryPipeRecv: 'n' shadows declaration in enclosing scope`, including
-`close_breaker.mx`, which predates both rounds, and `src/runtime` is unmodified
-in this tree - the commit's "wasm module still builds" was a warm runtime, not a
-compile of this source. The fix is a rename in `tryPipeRecv`.
+`close_breaker.mx`, which predates both rounds, and `src/runtime` was unmodified
+by those rounds - the commit's "wasm module still builds" was a warm runtime,
+not a compile of this source. Fixed by renaming the nested declaration to `got`:
+the wasm target builds again and `close_breaker.mx` passes the browser
+comparison (1 passed, 0 failed). It is its own commit, because it is
+`17cceab8`'s regression rather than this round's.
 
 The fixture above is native-only (`//:wasmtest skip`). `validate.sh` now honours
 that header for directory fixtures as well as `.mx` files: its discovery loop
