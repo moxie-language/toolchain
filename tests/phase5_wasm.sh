@@ -51,6 +51,10 @@ done < <(ls -d "$ROOT"/tests/regressions/should_compile/*/ 2>/dev/null | sort)
 # any one program, and it must be re-checked when the runtime or the loader
 # changes.
 UNITS+=(emitted-host)
+# A panic in a spawned domain is a browser contract no output-diff fixture can
+# express: the module is SUPPOSED to die, and the page is supposed to stop the
+# tree. It has its own harness (tests/wasm/panic_check.sh).
+UNITS+=(panic-tree)
 
 target_for() {
 	local name="$1"
@@ -64,6 +68,16 @@ target_for() {
 run_one() {
 	local name="$1" target log
 	unit_begin
+	if [ "$name" = "panic-tree" ]; then
+		log="$UNIT_WORK/panic.log"
+		if MOXIE="$MOXIE" bash "$ROOT/tests/wasm/panic_check.sh" >"$log" 2>&1; then
+			unit_ok "wasm:panic-tree" "$(tail -1 "$log" | sed 's/^ *//')"
+		else
+			unit_no "wasm:panic-tree" "$(grep -m1 'FAIL:' "$log" | sed 's/^ *FAIL: *//')"
+		fi
+		unit_exit
+		return
+	fi
 	if [ "$name" = "emitted-host" ]; then
 		log="$UNIT_WORK/emit.log"
 		if bash "$ROOT/tests/wasm/emit_check.sh" >"$log" 2>&1; then

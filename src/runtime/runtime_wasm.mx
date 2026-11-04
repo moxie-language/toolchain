@@ -235,6 +235,34 @@ func wasmAlloc(size int32) int32 {
 	return int32(uintptr(ptr))
 }
 
+// WasmSpawnInit prepares a spawned wasm domain. A spawned domain runs
+// __spawn_entry, never _start, so without this the first allocation of the
+// target (or of its prologue) would find no domain root: package initialisers
+// and the root arena are that call's job on this entry point exactly as they
+// are _start's.
+func WasmSpawnInit() {
+	InitCShared()
+	wasmExportsReady = true
+}
+
+// spawnScratchSize bounds the packed argument blob the Worker stages for a
+// spawned domain before that domain exists. A value parameter's cap tags bound
+// its encoded size, so 64 KiB is headroom; the host checks before writing.
+const spawnScratchSize = 64 << 10
+
+// spawnScratch is STATIC storage, not an arena allocation: the host writes the
+// parent's packed arguments here BEFORE __spawn_entry runs, when the domain has
+// no allocator yet. Its address is stable across memory growth.
+var spawnScratch [spawnScratchSize]byte
+
+//export __spawn_scratch
+func wasmSpawnScratch() int32 {
+	return int32(uintptr(unsafe.Pointer(&spawnScratch[0])))
+}
+
+//export __spawn_scratch_size
+func wasmSpawnScratchSize() int32 { return spawnScratchSize }
+
 // _start is the WASI entry point for WASM executables.
 // WASM is single-threaded, so we bypass the scheduler and call main directly.
 //

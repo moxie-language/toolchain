@@ -886,6 +886,12 @@ export function buildWorkerBridge(channels, dom) {
 // not the memory itself, because these imports are built before instantiation
 // completes and the buffer only exists once the instance is returned.
 export function buildHostImports(mem) {
+  // stderr is line-buffered: the runtime prints a panic as several pieces
+  // (printstring("panic: "), the message, printnl()), and a postMessage per
+  // piece reached the page's console as one fragment per line. stdout is not
+  // buffered - a program's own writes are already whole lines, and a partial
+  // line at exit would otherwise be lost.
+  let stderrBuf = '';
   return {
     wasi_snapshot_preview1: {
       fd_write(fd, iovs, iovs_len, nwritten) {
@@ -898,7 +904,16 @@ export function buildHostImports(mem) {
           // The module runs in a Worker, so its output cannot reach the page
           // through the console alone: forward each write over the port and
           // let the page decide where stdout and stderr go.
-          globalThis.postMessage({ kind: fd === 1 ? 'stdout' : 'stderr', text: s });
+          if (fd === 2) {
+            stderrBuf += s;
+            let nl;
+            while ((nl = stderrBuf.indexOf('\n')) >= 0) {
+              globalThis.postMessage({ kind: 'stderr', text: stderrBuf.slice(0, nl + 1) });
+              stderrBuf = stderrBuf.slice(nl + 1);
+            }
+          } else {
+            globalThis.postMessage({ kind: fd === 1 ? 'stdout' : 'stderr', text: s });
+          }
           totalWritten += len;
         }
         dv.setUint32(nwritten, totalWritten, true);

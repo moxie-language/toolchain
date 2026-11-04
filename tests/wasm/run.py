@@ -42,6 +42,10 @@ MODULE = WASM
 # slow (a 7MB crypto closure instantiating in a worker), which is information
 # the gate should show as a slow pass rather than as a boot failure.
 TIMEOUT = int(os.environ.get("RUN_WAIT_MS", "20000"))
+# How long the page keeps collecting output after it reports the module's fate.
+# A fixture that asserts another domain did NOT act needs a window longer than
+# that domain's own delay; a panic/tree-stop test is the reason this exists.
+SETTLE = int(os.environ.get("RUN_SETTLE_MS", "600"))
 SW_TIMEOUT = int(os.environ.get("RUN_WAIT_MS", "45000"))
 
 
@@ -129,16 +133,29 @@ def main():
         try:
             page.wait_for_function("window.__done === true", timeout=SW_TIMEOUT if SW else TIMEOUT)
         except Exception:
-            print("TIMEOUT: module did not finish loading")
+            # A module that parks or spins never sets __done, and its logs are
+            # the only evidence of how far it got. Dropping them made a hang
+            # look like a module that never started.
+            try:
+                sofar = page.evaluate(
+                    "() => ({logs: window.__logs || [], errs: window.__consoleErrors || []})"
+                )
+                print("TIMEOUT: module did not finish loading; stdout so far: "
+                      + json.dumps(sofar["logs"]))
+                for e in sofar["errs"]:
+                    sys.stderr.write(e if e.endswith("\n") else e + "\n")
+            except Exception:
+                print("TIMEOUT: module did not finish loading")
             browser.close()
             srv.shutdown()
             return 1
         # The module is passive after _start: the page drives it through the
         # relay, so its last output can arrive after __done. Give the callbacks
         # room to land before reading the log.
-        page.wait_for_timeout(600)
+        page.wait_for_timeout(SETTLE)
         out = page.evaluate(
             "() => ({logs: window.__logs, error: window.__error,"
+            " panicReason: window.__panicReason || null,"
             " errs: window.__consoleErrors, sw: window.__sw || null,"
             " swError: window.__swError || null,"
             " bundle: window.__bundle || null,"
@@ -196,6 +213,15 @@ def main():
             return 1
         if state != "activated" or not fetched:
             return 1
+    # A panic in a spawned domain stops the whole tree; the page records the
+    # action on the hook host.html defines. That is a failure for an ordinary
+    # fixture and the expected outcome for a panic test, so report it as its own
+    # verdict and let the caller decide.
+    if out["panicReason"] is not None:
+        print("panic action: " + out["panicReason"], file=sys.stderr)
+        for line in out["logs"]:
+            print(line, end="")
+        return 1
     # -q prints only the module's stdout, so callers can diff it against a
     # native run.
     for line in out["logs"]:

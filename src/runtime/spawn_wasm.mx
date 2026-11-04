@@ -207,16 +207,25 @@ func PipeChanCloseSignal(ch *channel) {
 // is a fail-loud panic, not a silent truncation.
 const sabFrameMax = 1 << 20
 
-// PipeChanSendRaw / PipeChanRecvRaw are the native ring routes for chan ops
-// on a spawn-bound channel whose element type does not implement moxie.Codec.
-// The wasm boundary always carries an encoded frame, so there is nothing to
-// route here; the SAB path above handles every spawn-bound channel.
+// PipeChanSendRaw / PipeChanRecvRaw are the routes chanSend/chanRecv take for
+// a spawn-bound channel whose element holds no references: the element's bytes
+// ARE the message. On native they use the mmap rings; on wasm the same message
+// goes over the SAB bridge. They must NOT be stubs - a false return drops the
+// value silently, which is how every wasm spawn channel sent into the void
+// while its receiver waited on an empty ring.
 func PipeChanSendRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
-	return false
+	if ch == nil || !ch.spawnBound {
+		return false
+	}
+	return ch.tryPipeSend(ptr, nil, nil)
 }
 
 func PipeChanRecvRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
-	return false
+	if ch == nil || !ch.spawnBound {
+		return false
+	}
+	received, ok := ch.tryPipeRecv(ptr, nil, nil)
+	return received && ok
 }
 
 // SharedBuffer is native-only. WASM has no anonymous shared mapping it can hand

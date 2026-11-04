@@ -441,6 +441,16 @@ func (c *compilerContext) emitWasmSpawnEntry(irbuilder llvm.Builder) {
 	irbuilder.CreateUnreachable()
 	irbuilder.SetInsertPointAtEnd(entryBlock)
 
+	// A spawned domain never runs _start: this call is its runtime
+	// initialization (root arena, package initialisers) before any target code
+	// or argument decode can allocate.
+	if rtPkg := c.program.ImportedPackage("runtime"); rtPkg != nil {
+		if member, ok := rtPkg.Members["WasmSpawnInit"].(*ssa.Function); ok {
+			initType, initFn := c.getFunction(member)
+			irbuilder.CreateCall(initType, initFn, []llvm.Value{llvm.Undef(c.dataPtrType)}, "")
+		}
+	}
+
 	sw := irbuilder.CreateSwitch(fnIdx, defaultBlock, len(c.wasmSpawnTargets))
 
 	for _, target := range c.wasmSpawnTargets {
@@ -459,13 +469,27 @@ func (c *compilerContext) emitWasmSpawnEntry(irbuilder llvm.Builder) {
 			param := sig.Params().At(i)
 			llvmType := c.getLLVMType(param.Type())
 
-			if _, isChan := param.Type().Underlying().(*types.Chan); isChan {
-				// Load int32 handle from chanHandlesPtr[chanIdx], inttoptr.
+			if ch, isChan := param.Type().Underlying().(*types.Chan); isChan {
+				// Load int32 handle from chanHandlesPtr[chanIdx], then build the
+				// child's channel object around it. The handle is not a pointer:
+				// inttoptr it and the target's send/recv/close would write
+				// through an address that was never a *channel.
 				handleGEP := irbuilder.CreateGEP(i32, chanHandlesPtr, []llvm.Value{
 					llvm.ConstInt(i32, uint64(chanIdx), false),
 				}, "chan.handle.gep")
 				handle := irbuilder.CreateLoad(i32, handleGEP, "chan.handle")
-				chanPtr := irbuilder.CreateIntToPtr(handle, ptrType, "chan.ptr")
+				elemSz := c.targetData.TypeAllocSize(c.getLLVMType(ch.Elem()))
+				rtPkg := c.program.ImportedPackage("runtime")
+				member, ok := rtPkg.Members["SpawnChannelWrap"].(*ssa.Function)
+				if !ok {
+					panic("emitWasmSpawnEntry: runtime.SpawnChannelWrap not found")
+				}
+				wrapType, wrapFn := c.getFunction(member)
+				chanPtr := irbuilder.CreateCall(wrapType, wrapFn, []llvm.Value{
+					handle,
+					llvm.ConstInt(i32, elemSz, false),
+					llvm.Undef(c.dataPtrType),
+				}, "chan.wrap")
 				callArgs = append(callArgs, chanPtr)
 				chanIdx++
 			} else {

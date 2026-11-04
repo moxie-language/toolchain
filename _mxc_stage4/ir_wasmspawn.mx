@@ -231,8 +231,13 @@ func (e *irEmitter) emitWasmSpawnEntry() {
 	// Declared here rather than through declareRuntime: the declaration block
 	// is emitted before this runs, so anything registered now would be dropped.
 	e.w("\ndeclare ptr @runtime.SpawnChannelWrap(") ; e.w(ipt) ; e.w(", ") ; e.w(ipt) ; e.w(", ptr)\n")
+	e.w("declare void @runtime.WasmSpawnInit(ptr)\n")
 	e.w("declare void @llvm.trap()\n")
 	e.w("\ndefine void @__spawn_entry(") ; e.w(i32) ; e.w(" %fnIdx, ptr %argPtr, ") ; e.w(i32) ; e.w(" %argLen, ptr %chanHandlesPtr, ") ; e.w(i32) ; e.w(" %nChans) {\nentry:\n")
+	// A spawned domain never runs _start: this call is its runtime
+	// initialization (root arena, package initialisers) before any target code
+	// or argument decode can allocate.
+	e.w("  call void @runtime.WasmSpawnInit(ptr null)\n")
 	e.w("  switch ") ; e.w(i32) ; e.w(" %fnIdx, label %spawn.bad [\n")
 	for _, t := range e.wasmSpawnTargets {
 		e.w("    ") ; e.w(i32) ; e.w(" ") ; e.w(irItoa(t.fnIdx)) ; e.w(", label %spawn.case") ; e.w(irItoa(t.fnIdx)) ; e.w("\n")
@@ -266,7 +271,16 @@ func (e *irEmitter) emitWasmSpawnEntry() {
 				hp := "%shp" | irItoa(e.nextReg)
 				// The child gets an ordinary channel whose handle routes send,
 				// receive and close to the parent's ring.
-				e.w("  ") ; e.w(hp) ; e.w(" = call ptr @runtime.SpawnChannelWrap(") ; e.w(ipt) ; e.w(" ") ; e.w(hv) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(irItoa(int32(TypeSize(pt)))) ; e.w(", ptr null)\n")
+				// The wrapper's element size is the ELEMENT's, not the channel
+				// type's (a channel value is a pointer, which would say 4 for
+				// every channel and truncate a []byte frame).
+				elemSz := int32(4)
+				if et := e.chanElemTType(pt); et != nil {
+					if tsz := TypeSize(et); tsz > 0 {
+						elemSz = int32(tsz)
+					}
+				}
+				e.w("  ") ; e.w(hp) ; e.w(" = call ptr @runtime.SpawnChannelWrap(") ; e.w(ipt) ; e.w(" ") ; e.w(hv) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(irItoa(elemSz)) ; e.w(", ptr null)\n")
 				push(callArgs, "ptr " | hp)
 				chanN++
 				continue

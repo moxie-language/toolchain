@@ -12,9 +12,16 @@ type stringer interface {
 
 //:nobounds
 func printstring(s string) {
-	for i := 0; i < len(s); i++ {
-		putchar(s[i])
+	// One fd_write for the whole string, not one per byte. A wasm fd_write
+	// crosses the host boundary, and the host reports each call as its own
+	// message: a panic line printed byte by byte reached the page's console as
+	// one character per line, which is unreadable where the user is supposed
+	// to see it. MoxieWrite keeps the iovec in package state, so this path
+	// still does not allocate - it runs from the allocator's failure paths.
+	if len(s) == 0 {
+		return
 	}
+	MoxieWrite(printFD, unsafe.Pointer(unsafe.SliceData(s)), int32(len(s)))
 }
 
 func printuint8(n uint8) {

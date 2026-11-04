@@ -81,6 +81,11 @@ function serveCallbacks(port) {
 }
 
 function runRoot(wasmPath, relayPort, appBridgeUrl, appPort) {
+  // A spawned domain is started from THIS realm (spawnWorker reads
+  // globalThis.__moxie_wasm_url), and the page's loader set that only in the
+  // page's own realm. Without this the child's boot message carried
+  // `wasm: undefined`, it fetched a 404 page and instantiated HTML.
+  globalThis.__moxie_wasm_url = wasmPath;
   instantiate(wasmPath, new Map(), relayPort, appBridgeUrl, appPort).then((inst) => {
     setHostModule(inst);
     serveCallbacks(relayPort);
@@ -92,6 +97,9 @@ function runRoot(wasmPath, relayPort, appBridgeUrl, appPort) {
 }
 
 function runEntry(wasmPath, fnIdx, args, chanList) {
+  // A spawned domain that spawns again reads this in spawnWorker, exactly as
+  // the root does.
+  globalThis.__moxie_wasm_url = wasmPath;
   // A spawned domain holds no page connection: the document is reachable only
   // from the domain the page handed a relay port to.
   instantiate(wasmPath, bindChannels(chanList), null, null, null).then((inst) => {
@@ -100,12 +108,20 @@ function runEntry(wasmPath, fnIdx, args, chanList) {
       throw new Error('module has no __spawn_entry export; it was not built with spawn support');
     }
     // The compiler packs scalar args into linear memory; __spawn_entry reads
-    // them from there, and channel params arrive as int32 handles.
-    const ptr = inst.exports.__alloc(args.length);
-    new Uint8Array(memory.buffer, ptr, args.length).set(args);
-    const dv = new DataView(memory.buffer);
+    // them from there, and channel params arrive as int32 handles. The staging
+    // area is STATIC (__spawn_scratch), not __alloc: this Worker has just
+    // instantiated the module and the domain does not exist until
+    // __spawn_entry initializes it, so there is no arena to allocate from.
     const handles = (chanList || []).map(c => c.handle);
-    const hptr = inst.exports.__alloc(handles.length * 4);
+    const need = args.length + handles.length * 4;
+    const cap = inst.exports.__spawn_scratch_size();
+    if (need > cap) {
+      throw new Error('spawn arguments exceed the wasm staging area: ' + need + ' > ' + cap);
+    }
+    const ptr = inst.exports.__spawn_scratch();
+    new Uint8Array(memory.buffer, ptr, args.length).set(args);
+    const hptr = ptr + ((args.length + 3) & ~3);
+    const dv = new DataView(memory.buffer);
     handles.forEach((h, i) => dv.setInt32(hptr + i * 4, h, true));
     inst.exports.__spawn_entry(fnIdx, ptr, args.length, hptr, handles.length);
     globalThis.postMessage({ kind: 'done' });

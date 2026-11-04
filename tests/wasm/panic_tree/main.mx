@@ -1,0 +1,63 @@
+// A panic in a spawned wasm domain ends the WHOLE tree, the way an abort ends
+// every domain in a native process. The page learns the message as stderr and
+// stops every Worker it spawned for this module.
+//
+// The fixture makes both halves observable: one spawned domain panics, and a
+// sibling would print "sibling survived" 1.5 s later. The harness runs the
+// module, waits three seconds, and requires the panic line on stderr and the
+// absence of the sibling line - a page that merely stopped the failing domain
+// would forward the sibling's print through the still-live root worker.
+package main
+
+import "time"
+
+func panicker(trigger chan int32) (closed chan struct{}) {
+	for {
+		select {
+		case <-closed:
+			return closed
+		case <-trigger:
+			panic("sibling died")
+		}
+	}
+}
+
+// hold busy-waits, because time.Sleep is a no-op on wasm (sleepTicks is
+// empty: a Worker cannot yield to a scheduler it does not have). It runs in
+// this domain's own thread, and it must not allocate per iteration.
+func hold() {
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+	}
+}
+
+func survivor(wake chan int32) (closed chan struct{}) {
+	for {
+		select {
+		case <-closed:
+			return closed
+		case <-wake:
+			hold()
+			println("sibling survived")
+			return closed
+		}
+	}
+}
+
+func main() {
+	select {
+	case <-sigint:
+		return
+	default:
+	}
+	trigger := chan int32{}
+	wake := chan int32{}
+	spawn(panicker, trigger)
+	spawn(survivor, wake)
+	trigger <- 1
+	wake <- 1
+	// Return. A root domain that parks in Atomics.wait stops forwarding its
+	// children's messages (their postMessage sits in this Worker's queue), so
+	// the page would never see the panic. Returning lets this Worker's event
+	// loop run while the page keeps the root alive.
+}
