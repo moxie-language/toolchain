@@ -4,7 +4,104 @@ State carried across context compaction. Ordered queue, the decisions already
 taken, the findings that motivated them, and the two designs in flight
 (module removal, user-code exemption). Update this file when the queue moves.
 
-## REMAINING WORK (as of round 73) - read this first
+## STANDING ISSUES (round 378) - the current queue, runtime outward
+
+Ordered by proximity to the runtime: what lives in `src/runtime` first, then the
+spawn ABI the compilers enforce, then the stdlib built on both, then the tree
+gates. Each item carries the decision already taken, so it does not have to be
+re-argued. Nothing here is fixed unless the item says so.
+
+### 1. Panic: print to the process's stderr first, then die
+
+`runtimePanic` (`src/runtime/panic.mx:76`) sends a reason frame on the domain's
+breaker, closes every tracked breaker and this domain's breaker, and only then
+prints through `_panicstr` and calls `abort()`. On native every domain is a
+thread in one process and the process is aborting, so no other domain can read
+that reason - the work is unobservable, and the message reaches the shell that
+started the binary only through fd 2. The write to stderr is the first thing the
+panic path does; the sends and closes go, they do not merely move. The
+`panic(msg)` builtin (`_panic`) already prints first.
+
+Wasm is a host boundary rather than a process: if a trapped worker still has to
+close its breaker so the page observes the end, that is a wasm question and may
+follow the print, never precede it.
+
+Accept: a panicking domain writes `panic: ...` to the process's stderr, the
+shell sees it, and the process aborts (status 134) with no reason-frame send.
+
+### 2. The breaker is a signal, not a message: `chan struct{}`
+
+The target's result and the handle `spawn` returns are `chan []byte` carrying an
+exit code and a bounded reason (`breakerReasonMax`, `breakerSendReason`, the
+reason-sized ring in `spawnBreakerMake`). That text existed to carry a death
+reason from a forked child back to the parent, which then wrote it to the shell.
+With threads the parent and the child share one stderr and the shell reads the
+child directly; item 1 makes the panic path print there. Roll the kill/died
+channel back to `chan struct{}` and delete the reason machinery:
+
+- `src/runtime/chan.mx`: `DomainClosed`, `SpawnClose`, the reason note;
+- `src/runtime/domain.mx`: the `oneReason` budget in `spawnBreakerMake`;
+- `src/runtime/pipe_channel.mx`: `breakerSendReason`; `spawn_wasm.mx`'s no-op;
+- both compilers' `isSpawnTargetSig`: the element is no longer text and the
+  `TextType(ch.Elem)` test goes;
+- the `spawn` return type and every target signature, `(closed chan struct{})`,
+  in moxie, morly and the fixtures;
+- the docs that state the ABI (`CLAUDE.md`, `docs/spawn.md`, `CHANGELOG.md`).
+
+`sigint` is `chan []byte` for the same empty reason; decide it in the same
+change. Accept: a target selects on `<-closed` and returns it, `close(breaker)`
+stops it, no `breakerSendReason`/`breakerReasonMax` remains, and every spawn
+target compiles on both compilers.
+
+### 3. The `closed` marker is an identifier
+
+The target's name crosses the export boundary as `func closed <name> <sig>`
+(`_mxc_stage4/main.mx:4480` writes it, `:5062` reads it). `closed` is not a
+reserved identifier, so a package-level `func closed(...)` is written as
+`func closed (<sig>)` and read as a marker: the importer gets a function named
+`(<sig>)` and `closed` disappears. Either reserve `closed` at package scope or
+make the marker un-identifier-like (`(closed)`). Accept: a package declaring
+`func closed` either is rejected by name or exports and imports correctly; never
+a rename.
+
+### 4. `DispatchSpawned` is broken under the thread model
+
+Verified on this tree: `./server 127.0.0.1:39129 spawned`, one request, then
+`panic: chanpool: slot window out of range` before a response. `ChanServeTimeout`
+(`src/net/http/chanpath.mx:333`) writes `chanGlobalMux` and `chanSlotBuf` as
+package globals after spawning the pool; globals are `thread_local`, a domain
+starts with zeroed TLS, and the worker's slot buffer is empty. Fork inherited
+them; threads cannot. Design to choose: (a) carry the request and response over
+the existing job/result channels instead of the shared slot ring, or (b) pass
+the mapping through the spawn handoff as the channel rings already are. The
+handler table has the same problem and holds interfaces. If the mode has no
+user, delete it. Accept: a spawned-mode request gets a response and the child
+reads no parent-written global.
+
+### 5. `ChanServeTimeout` discards its pool's breakers
+
+`spawn(chanWorkerLoop, j, r)` (`chanpath.mx:344`) drops the breaker, and the
+function returns on a listen or serve error, so the pool outlives the frame.
+The frame is the owner: close what it spawned on the way out. Subsumed if item 4
+redesigns the pool. Accept: every error return ends the domains it started.
+
+### 6. Gates: full sweep, phase 5, bootstrap
+
+The "every gate is green" table below is a round-73 snapshot (`65294d1c`),
+before rounds 371-378. Re-run `tests/unitrun.sh` on this tree; phase 5
+especially, since the wasm shadow fix was checked on two fixtures only
+(`close_breaker`, `asn1_tag_crosspkg`) and the last full phase-5 run measured a
+warm runtime. Re-run the s1 -> s3 bootstrap: the compiler binary should be
+unchanged (`spawn_wasm.mx` is excluded from native builds), but `src/runtime` is
+in `compilerHash`, so the cache generation moved. Accept: a full green sweep and
+phase 5 green from cold.
+
+## REMAINING WORK (as of round 73) - historical snapshot
+
+The gate table and queue in this block were measured at `65294d1c`, before
+rounds 371-378 (threads, spawn ownership, codec frame dispatch, the wasm
+runtime). It is kept for the reasoning, not for its numbers; where it disagrees
+with STANDING ISSUES above, the latter is current.
 
 ### Current state, the queue it leaves, and what not to reopen (round 15 close)
 
@@ -24788,9 +24885,11 @@ with a cap-tagged slice, on both compilers; breaker close ends a parked receive;
 `futexpark`'s two assertions (wake ok, dead ok); a domain parked in a 30 s sleep
 is reclaimed at process exit with no stray process; wasm still builds.
 
-Found and NOT fixed by this: `spawn_frame_budget` decodes its frames as zeros -
-the same output under the old fork compiler, so it is a pre-existing
-channel-codec defect and is the next thing to chase.
+`spawn_frame_budget` was recorded here as decoding its frames as zeros. It is
+fixed on this tree: the built binary prints `req 1 tags 3 body 5`,
+`req 2 tags 1 body 6000`, `untagged body 4096`. The codec/frame work in Round 377
+closed it. The regression runner only checks the exit status, so a passing
+fixture is not evidence the values are right - this was read off the binary.
 
 ### Round 377: the extent is the message
 
@@ -24915,9 +25014,11 @@ Verified narrowly, both compilers (s1 c800ef9c, s2 == s3 6b199c0b):
   no `respawned` lines, `/health` 200, threads grow with the spawn tree.
 
 Note for the panic path: `runtimePanic` still closes the breakers and sends a
-reason frame BEFORE `abort()`. Nothing can read that reason - every domain is in
-the same process and the process is dying - so the reason-carrying breaker
-protocol is fork-era machinery. Left in place, recorded here.
+reason frame BEFORE it prints, let alone before `abort()`. Nothing can read that
+reason - every domain is in the same process and the process is dying - so the
+reason-carrying breaker protocol is fork-era machinery. Recorded as STANDING
+ISSUES 1 (print to stderr first) and 2 (roll the breaker back to
+`chan struct{}`) at the head of this file.
 
 Also confirmed by accident, and worth writing down because it looks like a bug
 and is not: a plain function whose signature is `func f(...) (chan []byte)` is a
@@ -24990,11 +25091,14 @@ closes a slot's breaker before replacing it; musiquay has no `spawn`. The one
 dropped breaker in the stdlib is `net/http.ChanServeTimeout`, which spawns its
 worker pool and discards the breakers - if it returns on a listen or serve
 error, the pool now outlives its frame (every current caller is about to exit,
-so the process ends it). Open item: the frame is the owner, so it should close
-what it spawned on the way out. The same function's workers also read
+so the process ends it). The frame is the owner and should close what it
+spawned on the way out - STANDING ISSUES 5. The same function's workers also read
 `chanGlobalMux`/`chanSlotBuf`, package globals the parent writes after the
 spawn; under the thread model each domain has its own copy, so the
-`DispatchSpawned` path needs a look independent of the breakers.
+`DispatchSpawned` path is broken now, not merely suspect: one request panics
+with `chanpool: slot window out of range` because the worker's TLS copy of
+`chanSlotBuf` is empty. The dispatch break is STANDING ISSUES 4 at the head of
+this file.
 
 Found while running the wasm phase, and NOT caused by 377 or 378: the wasm target
 did not build with stage4 at HEAD. `17cceab8` added the `c == nil && td == nil`
