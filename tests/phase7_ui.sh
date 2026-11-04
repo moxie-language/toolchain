@@ -123,10 +123,40 @@ log_pass "ui:build" "$bundles bundles + runtime staging; $relay_note"
 # ── run the app's own smoke suite; it starts and stops the relay itself
 PY_LOG="$(tempdir ui)/pytest.log"
 rm -rf "$PY_LOG"
+
+# The relay the suite starts is a Moxie SPAWN TREE: the binary forks one domain
+# per worker, and `timeout` (or a kill) ends pytest without ending them. Every
+# aborted or timed-out run therefore left a live relay behind - measured on the
+# developer machine: a dozen morly processes still resident after one run was
+# interrupted, and they are what makes the phase look like it is eating memory.
+# The phase asked for that process, so the phase ends it, whatever the suite's
+# own teardown managed, and says so when it finds any left.
+relay_pids() { pgrep -f -- "$RELAY_BIN" 2>/dev/null; }
+stop_relay() {
+	local pids n try
+	pids="$(relay_pids)"
+	[ -n "$pids" ] || return 0
+	n=$(printf '%s\n' "$pids" | wc -l)
+	kill $pids 2>/dev/null
+	try=0
+	while [ "$try" -lt 25 ]; do
+		sleep 0.2
+		pids="$(relay_pids)"
+		[ -n "$pids" ] || break
+		try=$((try + 1))
+	done
+	if [ -n "$pids" ]; then
+		kill -9 $pids 2>/dev/null
+	fi
+	printf '  stopped %s relay process(es) the suite left running\n' "$n"
+}
+trap stop_relay EXIT
+
 (cd "$APP" && SMESH_RELAY_BIN="$RELAY_BIN" \
 	ORLY_STATIC_DIR="$STAGE" \
 	timeout "$SUITE_TIMEOUT" python3 -m pytest test/test_app.py -q) >"$PY_LOG" 2>&1
 rc=$?
+stop_relay
 
 summary="$(grep -E '^[0-9]+ (passed|failed)|passed|failed' "$PY_LOG" | tail -1)"
 if [ "$rc" = 0 ]; then
