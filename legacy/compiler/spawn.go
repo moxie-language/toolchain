@@ -264,6 +264,15 @@ func terminationConsumed(fn *ssa.Function, chanVal ssa.Value, wantSigint bool) b
 		if u, ok := ch.(*ssa.UnOp); ok && u.X == chanVal {
 			return true
 		}
+		// A target that only reads its closed result gets the nil constant
+		// here (no result alloca; see chanOperandValue, which resolves that
+		// operand to the domain's breaker at emission). The consumption is
+		// real, so the check counts it.
+		if c, ok := ch.(*ssa.Const); ok && c.IsNil() {
+			if tc, ok2 := ch.Type().Underlying().(*types.Chan); ok2 && moxieTextType(tc.Elem()) {
+				return true
+			}
+		}
 		return false
 	}
 	for _, blk := range fn.Blocks {
@@ -301,14 +310,45 @@ func closedSelectPresent(fn *ssa.Function) bool {
 		}
 	}
 	if closedAlloc == nil {
-		// The builder did not materialize the result variable, so `closed`
-		// reads as the zero value and no select can name it. That is this
-		// compiler's binding gap (stage4 binds the result alloca and the
-		// shipping compilers check it there), not a fault in the program, so
-		// the check does not judge what it cannot see. Recorded in OPEN_WORK.
-		return true
+		// The builder did not materialize the result variable: the target's
+		// body reads the nil constant instead (round 363). chanOperandValue
+		// resolves that operand to the domain's breaker when the body is
+		// emitted, so the consumption is still checkable - against the nil
+		// operand itself, which terminationConsumed accepts for this shape.
+		return terminationConsumed(fn, nil, false) && closedConsumedAsNil(fn)
 	}
 	return terminationConsumed(fn, closedAlloc, false)
+}
+
+// closedConsumedAsNil reports whether fn consumes the breaker through the nil
+// operand this compiler produces for an unbound result: a select arm or receive
+// whose channel is a nil chan-of-text value. It is the shape
+// chanOperandValue resolves at emission, so the check and the lowering agree.
+func closedConsumedAsNil(fn *ssa.Function) bool {
+	for _, blk := range fn.Blocks {
+		for _, instr := range blk.Instrs {
+			switch in := instr.(type) {
+			case *ssa.Select:
+				for _, st := range in.States {
+					if c, ok := st.Chan.(*ssa.Const); ok && c.IsNil() {
+						if tc, ok2 := st.Chan.Type().Underlying().(*types.Chan); ok2 && moxieTextType(tc.Elem()) {
+							return true
+						}
+					}
+				}
+			case *ssa.UnOp:
+				if in.Op != token.ARROW {
+					continue
+				}
+				if c, ok := in.X.(*ssa.Const); ok && c.IsNil() {
+					if tc, ok2 := in.X.Type().Underlying().(*types.Chan); ok2 && moxieTextType(tc.Elem()) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // sigintSelectPresent reports whether fn consumes the termination channel.

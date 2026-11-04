@@ -334,6 +334,30 @@ func (b *builder) createChanSend(instr *ssa.Send) {
 	}
 }
 
+// chanOperandValue resolves the channel a receive or select arm names. A spawn
+// target's single result is the domain's breaker, but this compiler's SSA leaves
+// that result unbound for a target that only reads it - the dumped SSA shows the
+// operand as the nil constant, with no result alloca to bind (round 363). A
+// receive on a nil channel blocks forever, so the arm would be dead and the
+// domain could never be told to stop. A nil chan-of-text operand inside a spawn
+// target is therefore that breaker, and it resolves to the one the domain
+// actually got.
+func (b *builder) chanOperandValue(v ssa.Value) llvm.Value {
+	val := b.getValue(v, getPos(v))
+	if b.fn == nil || !isSpawnTargetSig(b.fn.Signature) {
+		return val
+	}
+	if !val.IsConstant() || !val.IsNull() {
+		return val
+	}
+	ch, ok := v.Type().Underlying().(*types.Chan)
+	if !ok || !moxieTextType(ch.Elem()) {
+		return val
+	}
+	brk := b.createRuntimeCall("ClosedBreakerChan", nil, "closed")
+	return b.createRuntimeCall("AssertBreaker", []llvm.Value{brk}, "closed")
+}
+
 // createChanRecv emits a pseudo chan receive operation. It is lowered to the
 // actual channel receive operation during goroutine lowering.
 func (b *builder) createChanRecv(unop *ssa.UnOp) llvm.Value {
@@ -353,7 +377,7 @@ func (b *builder) createChanRecv(unop *ssa.UnOp) llvm.Value {
 	}
 
 	valueType := b.getLLVMType(chanType.Elem())
-	ch := b.getValue(unop.X, getPos(unop))
+	ch := b.chanOperandValue(unop.X)
 
 	// Allocate memory to receive into.
 	isZeroSize := b.targetData.TypeAllocSize(valueType) == 0
@@ -501,7 +525,7 @@ func (b *builder) createSelect(expr *ssa.Select) llvm.Value {
 	var selectStates []llvm.Value
 	chanSelectStateType := b.getLLVMRuntimeType("chanSelectState")
 	for _, state := range expr.States {
-		ch := b.getValue(state.Chan, state.Pos)
+		ch := b.chanOperandValue(state.Chan)
 		selectState := llvm.ConstNull(chanSelectStateType)
 		selectState = b.CreateInsertValue(selectState, ch, 0, "")
 		switch state.Dir {
@@ -694,7 +718,7 @@ func (b *builder) createCodecChanSend(instr *ssa.Send) {
 func (b *builder) createCodecChanRecv(unop *ssa.UnOp) llvm.Value {
 	elemType := unop.X.Type().Underlying().(*types.Chan).Elem()
 	elemLLVM := b.getLLVMType(elemType)
-	ch := b.getValue(unop.X, getPos(unop))
+	ch := b.chanOperandValue(unop.X)
 
 	valAlloca, valAllocaSize := b.createTemporaryAlloca(elemLLVM, "chan.value")
 	b.CreateStore(llvm.ConstNull(elemLLVM), valAlloca)
@@ -803,7 +827,7 @@ func (b *builder) createStructuralChanSend(instr *ssa.Send) {
 func (b *builder) createStructuralChanRecv(unop *ssa.UnOp) llvm.Value {
 	elemType := unop.X.Type().Underlying().(*types.Chan).Elem()
 	elemLLVM := b.getLLVMType(elemType)
-	ch := b.getValue(unop.X, getPos(unop))
+	ch := b.chanOperandValue(unop.X)
 
 	valAlloca, valAllocaSize := b.createTemporaryAlloca(elemLLVM, "chan.value")
 	b.CreateStore(llvm.ConstNull(elemLLVM), valAlloca)

@@ -24483,3 +24483,26 @@ in the tree spawns, so it is unchanged in behaviour, but it is the one claim
 this round rests on inspection rather than a fresh run.
 
 No tags were created.
+
+### Round 368: the legacy breaker is bound at the channel operand
+
+Round 363's diagnosis is confirmed behaviourally, and fixed. The probe: a child
+parks on its breaker, the parent spawns it and returns.
+
+    from legacy (before):   child: started / panic: deadlock  <- nil channel
+    from stage4:            child: started / parent: returning / child: closed
+    from legacy (after):    child: started / parent: returning / child: closed
+
+`chanOperandValue` (legacy/compiler/channel.go) resolves the channel a receive
+or select arm names, and when the current function is a spawn target and the
+operand is a nil `chan` of text, it substitutes `AssertBreaker(ClosedBreakerChan())`.
+The compiler's inability to materialize the result means the operand is the nil
+constant, and a receive on nil blocks forever - the arm would be dead. `[]byte`
+is the breaker's element and a spawn target's only result, so the substitution
+is exactly the domain's breaker, and it is a lowering rule with a comment rather
+than a silent default.
+
+The check is strict again: the nil operand inside a spawn target *is* consumption
+(`closedConsumedAsNil`), which is what the lowering acts on. Verified both ways -
+the probe and futexpark build and run, and a target whose loop only receives is
+refused with the termination message.
