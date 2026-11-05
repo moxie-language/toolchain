@@ -111,6 +111,13 @@ fetch(wasmUrl)
   .then(({ instance }) => {
     memory = instance.exports.memory;
     setHostModule(instance);
+    // A service worker is the one host with no page: it can instantiate a
+    // module, but it cannot start a domain Worker and has no hub port to give
+    // one. A module built with spawn support therefore fails HERE, at boot,
+    // rather than at the first spawn() with a null route.
+    if (typeof instance.exports.__spawn_entry === 'function') {
+      throw new Error('this module was built with spawn support, but a service worker has no page-supervised hub; wasm spawn needs jsruntime/loader.mjs or startBundle');
+    }
     instance.exports._start();
     // The module has had its chance to register handlers; anything still queued
     // is an event this worker does not serve, and leaving it pending would keep

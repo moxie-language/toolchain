@@ -1,0 +1,50 @@
+// A spawns B and exits. B keeps logging - its port goes to the page's hub,
+// never through A - and exits cleanly when the root has finished with it. This
+// is the orphan invariant of the wasm hub (docs/WASM_HUB.md): a clean exit
+// adopts the subtree instead of killing it. Native has no hub; the same program
+// must still produce the same output there.
+package main
+
+func b(in chan int32, done chan int32) (closed chan struct{}) {
+	select {
+	case <-closed:
+		return closed
+	default:
+	}
+	for i := int32(0); i < 3; i++ {
+		v := <-in
+		println("b got", v)
+		done <- v
+	}
+	return closed
+}
+
+func a(toB chan int32, fromB chan int32) (closed chan struct{}) {
+	select {
+	case <-closed:
+		return closed
+	default:
+	}
+	spawn(b, toB, fromB)
+	println("a spawned b")
+	return closed
+}
+
+func main() {
+	select {
+	case <-sigint:
+		return
+	default:
+	}
+	toB := chan int32{:1}
+	fromB := chan int32{:1}
+	aDone := spawn(a, toB, fromB)
+	<-aDone
+	println("a is gone")
+	for i := int32(0); i < 3; i++ {
+		toB <- i + 10
+		v := <-fromB
+		println("root got", v)
+	}
+	println("root done")
+}

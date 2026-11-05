@@ -252,20 +252,16 @@ func (b *builder) createWasmSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 			slotSize = 64
 		}
 		slotCount := uint32(16)
-		handle := b.emitBridgeCall("channel_create", []llvm.Value{
+		// SpawnChannelHandle reuses the ring of a channel already on a boundary
+		// and creates one only for a channel that has never crossed one; it
+		// also tags the channel at run time, so the parent's sends and receives
+		// stay on the same ring through the copies and reloads SSA introduces.
+		handle := b.createRuntimeCall("SpawnChannelHandle", []llvm.Value{
+			b.getValue(arg, instr.Pos()),
 			llvm.ConstInt(i32, uint64(slotSize), false),
 			llvm.ConstInt(i32, uint64(slotCount), false),
-		}, i32)
+		}, "spawn.chanhandle")
 		chanHandles = append(chanHandles, handle)
-		// Tag the parent's channel so its sends and receives reach the ring.
-		// Marking at run time keeps this correct through the copies and reloads
-		// SSA introduces: the same source variable is a different SSA value at
-		// the spawn and at the send, so tracking SSA values misses it (the bug
-		// stage4 fixed, and the reason this compiler no longer keeps a map).
-		b.createRuntimeCall("MarkChannelSAB", []llvm.Value{
-			b.getValue(arg, instr.Pos()),
-			handle,
-		}, "")
 	}
 
 	// --- scalar args: pack into a stack buffer ---

@@ -92,6 +92,25 @@ func sabHandleOf(ch *channel) uintptr {
 	return ch.sabHandle
 }
 
+// SpawnChannelHandle returns the boundary handle for a channel the compiler is
+// about to pass to spawn(). A channel that already sits on a boundary HAS a
+// ring and a handle: reusing it is what lets a domain pass a channel through
+// another spawn (a manager handing a worker's pipe on to a sibling) without
+// splitting it into two rings the far end never reads. Only a channel that has
+// never crossed a boundary gets one created here, from the compiler's element
+// size.
+func SpawnChannelHandle(ch *channel, slotSize int32, slotCount int32) int32 {
+	if ch == nil {
+		return 0
+	}
+	if ch.spawnBound && ch.sabHandle != 0 {
+		return int32(ch.sabHandle)
+	}
+	h := SpawnChannelCreate(slotSize, slotCount)
+	MarkChannelSAB(ch, uintptr(h))
+	return int32(h)
+}
+
 // MarkChannelSAB tags a channel as sitting on a wasm spawn boundary and
 // records the ring handle the host created for it. The parent calls this for
 // each channel it passes to spawn(); afterwards send and receive on that

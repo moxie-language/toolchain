@@ -37,6 +37,63 @@ or test run must print a canary line first and assert it arrived; "no output"
 means the rig is broken, never that the code is innocent. The canary is in
 `spawn_worker_print_fd`, and the domain init seeds the sink.
 
+## ROUND 386: ONE HUB, TWO PLANES
+
+The page is a switchboard already, so control and logs now share one protocol
+there and the data plane still bypasses it. `docs/WASM_HUB.md` is the contract:
+five control kinds (spawn, exit, panic, rebind, heartbeat) with a lineage id
+(`1.3.2`) and a parent id, hub-assigned and never reused; logs are the second
+plane on the same port and the same id; a spawn channel is a ring the spawning
+domain created, whose handles the page moves without reading a byte.
+
+- **Hub module with a Node test.** `jsruntime/supervisor.mjs` has no DOM, no
+  Worker and no page: the host supplies `start`, `stop`, `log`, `fault` and
+  `exited`, so the whole protocol runs under `node --test`
+  (`tests/supervisor/hub.test.mjs`, 13 cases, wired as the `5/hub-protocol`
+  unit). It covers the orphan invariant and the parked-parent shape at the
+  protocol level, both with fake ports and no browser.
+- **Logs star to the page.** A domain posts each write to the hub, which
+  assembles lines per domain and drains a queue on a task. A parent no longer
+  forwards a child's output: a parent that forwards is a parent parked in a
+  receive, which is the blocking-select defect in another costume. The hub is
+  the only place that sees every id, so it is where a line becomes whole - two
+  domains printing concurrently used to splice each other's lines
+  (`b gotroot got 10`).
+- **Missing ids, documented.** A spawn from an unknown id (or from the wrong
+  port) is REFUSED and answered, because a domain the tree cannot place is one
+  no `exit` can match and no `stop` can find. A log from an unknown id is still
+  printed as `?` - evidence must survive a stale lineage. Exit/panic/heartbeat
+  from an unknown id are counted and dropped.
+- **Root exit is not a process exit on wasm.** `_start` returning resolves the
+  loader and the page keeps the root Worker for callbacks, so the hub adopts the
+  root's children at the page and they keep running; the app stops them by
+  closing their breakers. A page teardown (`stopAll`) ends the tree. The first
+  cut stopped the root's Worker on exit, which killed every post-`_start`
+  callback - `web_dom_roundtrip` failing at its fetch step was the diagnostic.
+- **Channels keep their ring through a second spawn.**
+  `runtime.SpawnChannelHandle` reuses the existing SAB handle for a channel that
+  already sits on a boundary and creates a ring only for a channel that has
+  never crossed one. Before this, a manager passing a worker's channel on to a
+  sibling created a second ring, and the two ends waited on different rings
+  (found by `spawn_orphan`: A spawns B with the channel main created).
+- **Two new browser units.** `spawn_orphan` (A spawns B, A exits, B keeps
+  logging and exits cleanly) and `spawn_parked_parent` (the parent spawns and
+  immediately parks in a receive only the child can wake) pass in phase 5 as
+  output-matches-native.
+- **Init-time supervisor check.** A module built with spawn support
+  (`__spawn_entry` present) that boots without a supervisor port now fails at
+  boot with a named message; `sw-host.mjs`, the one host with no page, refuses
+  it there. Native needs no broker (a fork is its own tree); the divergence is
+  recorded in the protocol doc.
+- **Found, not fixed: native intermediate spawn + receive hangs.** A spawned
+  domain that spawns a child and then blocks in a receive on the channel the
+  child writes never wakes natively (the root-level shape works, and so does a
+  spawned domain receiving from the root). The parked-parent fixture therefore
+  tests the root-level shape; the intermediate case is open.
+
+Next: the lattice (a hub per arena / per bundle with subtree survival policy),
+once 1-3 have run for a while.
+
 ## ROUND 385: WASM SPAWN - THE DEADLOCK, THE BREAKER, AND THE BLOCKING SELECT
 
 ### RESOLVED: wasm spawn (three defects, not one)

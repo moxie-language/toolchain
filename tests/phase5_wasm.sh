@@ -55,6 +55,9 @@ UNITS+=(emitted-host)
 # express: the module is SUPPOSED to die, and the page is supposed to stop the
 # tree. It has its own harness (tests/wasm/panic_check.sh).
 UNITS+=(panic-tree)
+# The hub protocol is a Node test with fake ports: no browser, no wasm, no
+# compiler. It is the fast half of this phase's evidence.
+UNITS+=(hub-protocol)
 
 target_for() {
 	local name="$1"
@@ -68,6 +71,21 @@ target_for() {
 run_one() {
 	local name="$1" target log
 	unit_begin
+	if [ "$name" = "hub-protocol" ]; then
+		log="$UNIT_WORK/hub.log"
+		if ! command -v node >/dev/null 2>&1; then
+			unit_skipped "hub:protocol" "node is not available"
+			unit_exit
+			return
+		fi
+		if node --test "$ROOT/tests/supervisor/hub.test.mjs" >"$log" 2>&1; then
+			unit_ok "hub:protocol" "$(grep -c '^ok ' "$log") protocol tests passed"
+		else
+			unit_no "hub:protocol" "$(grep -m1 '^not ok' "$log" | sed 's/^not ok [0-9]* - //')"
+		fi
+		unit_exit
+		return
+	fi
 	if [ "$name" = "panic-tree" ]; then
 		log="$UNIT_WORK/panic.log"
 		if MOXIE="$MOXIE" bash "$ROOT/tests/wasm/panic_check.sh" >"$log" 2>&1; then

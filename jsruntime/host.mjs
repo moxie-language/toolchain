@@ -184,6 +184,8 @@ idb_kv_get_all(sp, sl, _sc, fnID, doneID) {
   };
 }
 
+import { createHub } from './supervisor.mjs';
+
 // buildBridge returns the import object for the "bridge" module. The same
 // shape is used by the page and by a spawned domain's Worker; the two differ
 // only in which end of the channel rings they own, so the channel table and
@@ -209,6 +211,10 @@ export function buildBridge(opts = {}) {
   }
   const isWorker = opts.isWorker ? 1 : 0;
   const supervisor = opts.supervisor || null;
+  // This domain's place in the tree. Assigned by the hub; a root is "1" and its
+  // parent is "0". The bridge only reports them, it never chooses.
+  const domainId = opts.id || '1';
+  const domainParent = opts.parent || '0';
   const D = opts.dom;
   if (!D) throw new Error('buildBridge: no DOM implementation; a module runs in a Worker, so pass the relay proxy from relay.mjs');
   return {
@@ -899,7 +905,13 @@ export function buildBridge(opts = {}) {
       if (!supervisor) {
         throw new Error('spawn: no supervisor port to the page; a wasm domain cannot start a Worker itself, so spawn needs the page-supervised host (jsruntime/host.mjs)')
       }
-      supervisor.postMessage({ kind: 'spawn', fnIdx, args, chans, wasm, breaker });
+      // Control plane: the hub routes by id and starts the domain. The payload
+      // (args, chans, breaker) is opaque to it: the handles ride into the
+      // child's boot message and the ring bytes never leave the two domains.
+      supervisor.postMessage({
+        kind: 'spawn', id: domainId, parent: domainParent,
+        wasm, fnIdx, args, chans, breaker,
+      });
     },
   };
 }
@@ -908,8 +920,8 @@ export function buildBridge(opts = {}) {
 // functions as the page, over the channel rings the parent handed over. dom is
 // the relay proxy when the domain holds a port to the page's document, and null
 // for a spawned domain, which has no page connection of its own.
-export function buildWorkerBridge(channels, dom, supervisor) {
-  return buildBridge({ channels, isWorker: true, dom, supervisor });
+export function buildWorkerBridge(channels, dom, supervisor, id, parent) {
+  return buildBridge({ channels, isWorker: true, dom, supervisor, id, parent });
 }
 
 // buildHostImports returns the non-bridge import object every Moxie wasm
@@ -917,7 +929,15 @@ export function buildWorkerBridge(channels, dom, supervisor) {
 // shims the stdlib closure pulls in. mem is a getter for the module's memory,
 // not the memory itself, because these imports are built before instantiation
 // completes and the buffer only exists once the instance is returned.
-export function buildHostImports(mem) {
+export function buildHostImports(mem, hooks = {}) {
+  // A domain's stdout/stderr is a log-plane message to the hub, not a
+  // postMessage to whoever created the Worker: the creating realm may be parked
+  // in wasm and never pump it. The host passes the sink; the default keeps a
+  // module running without the page-supervised host (a service worker) able to
+  // print to its own console.
+  const output = hooks.onOutput || ((fd, text) => {
+    globalThis.postMessage({ kind: fd === 2 ? 'stderr' : 'stdout', text });
+  });
   // stderr is line-buffered: the runtime prints a panic as several pieces
   // (printstring("panic: "), the message, printnl()), and a postMessage per
   // piece reached the page's console as one fragment per line. stdout is not
@@ -940,11 +960,11 @@ export function buildHostImports(mem) {
             stderrBuf += s;
             let nl;
             while ((nl = stderrBuf.indexOf('\n')) >= 0) {
-              globalThis.postMessage({ kind: 'stderr', text: stderrBuf.slice(0, nl + 1) });
+              output(2, stderrBuf.slice(0, nl + 1));
               stderrBuf = stderrBuf.slice(nl + 1);
             }
           } else {
-            globalThis.postMessage({ kind: fd === 1 ? 'stdout' : 'stderr', text: s });
+            output(fd === 1 ? 1 : 2, s);
           }
           totalWritten += len;
         }
@@ -1032,10 +1052,7 @@ export function buildHostImports(mem) {
         return () => {
           if (!noted) {
             noted = true;
-            globalThis.postMessage({
-              kind: 'stderr',
-              text: `host: env.${prop} is not provided by the host; returning 0\n`,
-            });
+            output(2, `host: env.${prop} is not provided by the host; returning 0\n`);
           }
           return 0;
         };
@@ -1055,10 +1072,7 @@ export function buildHostImports(mem) {
       gojs: new Proxy({}, {
         get(_target, prop) {
           return (..._args) => {
-            globalThis.postMessage({
-              kind: 'stderr',
-              text: `[test-host] gojs.${String(prop)} called: the gojs bridge is not provided by this host\n`,
-            });
+            output(2, `[test-host] gojs.${String(prop)} called: the gojs bridge is not provided by this host\n`);
             return 0;
           };
         },
@@ -1067,25 +1081,94 @@ export function buildHostImports(mem) {
   };
 }
 
-// spawnWorker starts a new domain for a Moxie spawn. The child runs the same
-// module in a dedicated Worker; the module cannot create one itself, and the
-// bound channel rings travel to the child as SharedArrayBuffers, which is the
-// only inter-domain state there is.
-function spawnWorker(fnIdx, argBytes, chans, wasm, breaker) {
-  startDomain({
-    kind: 'entry',
-    wasm: wasm || globalThis.__moxie_wasm_url,
-    fnIdx,
-    args: argBytes,
-    chans: chans.map(c => ({ handle: c.handle, sab: c.sab })),
-    breaker: breaker || null,
-  }, null, true);
+// The hub. One per page: every domain is started by this realm, every domain
+// holds one port to it, and control and logs are addressed by lineage id. See
+// docs/WASM_HUB.md. The data plane (SharedArrayBuffers) never enters this file.
+let hub = null;
+const settles = new Map();   // root id -> the promise resolver its loader holds
+
+function ensureHub() {
+  if (hub) return hub;
+  hub = createHub({
+    start: (boot) => spawnDomain(boot),
+    stop: (handle, node) => {
+      // A root's Worker is the page's counterpart for the life of the app: the
+      // page drives it through the relay after _start returns, so its exit
+      // marks the tree finished without killing the Worker. Every other domain
+      // is finished when its entry returns.
+      if (node && node.root) return;
+      try { handle.terminate(); } catch (e) { /* already gone */ }
+    },
+    log: (entry) => {
+      if (entry.fd === 2) console.error(entry.text);
+      else console.log(entry.text);
+    },
+    fault: ({ id, text }) => {
+      console.error('[domain] ' + text + '\n');
+      for (const cb of settles.values()) cb(new Error(text));
+      settles.clear();
+      if (typeof globalThis.__moxie_panic === 'function') {
+        try { globalThis.__moxie_panic(text); } catch (e) { /* the hook is the app's */ }
+      }
+    },
+    exited: (id, root) => {
+      if (!root) return;
+      const cb = settles.get(id);
+      if (cb) { settles.delete(id); cb(null); }
+    },
+    schedule: (fn) => setTimeout(fn, 0),
+  });
+  return hub;
 }
 
-// startDomain creates the Worker that runs a Moxie domain and posts it its
-// boot message. A domain always runs in its own Worker: channel receives
-// block in Atomics.wait, which the browser forbids on the page thread, and a
-// domain that spawns must itself be able to create a Worker.
+// openDomain creates the Worker and the supervisor port for one domain and
+// starts dispatching the port into the hub. Nothing is posted yet: a root's id
+// comes from attachRoot, a child's from the spawn request that created it, and
+// the boot message has to carry the id.
+function openDomain() {
+  const h = ensureHub();
+  const worker = new Worker(new URL('./worker-host.mjs', import.meta.url), { type: 'module' });
+  const sup = new MessageChannel();
+  sup.port1.onmessage = (e) => h.handle(sup.port1, e.data);
+  sup.port1.start();
+  return { worker, supPort: sup.port2, port: sup.port1 };
+}
+
+// postBoot hands the domain its id, its parent, its channel handles and its one
+// port to the page. The payload is never inspected here: args and chans travel
+// into the child's boot message verbatim.
+function postBoot(worker, boot, supPort, id, relayUp, appPort) {
+  let relayPort = null;
+  if (!relayUp) {
+    // The document is on this thread. A root domain gets one end of a
+    // MessageChannel to ask for DOM work, and serveRelay answers it; a spawned
+    // domain gets none, because only the page hands out the page connection.
+    const chan = new MessageChannel();
+    serveRelay(chan.port1);
+    relayPort = chan.port2;
+  }
+  const h = ensureHub();
+  worker.addEventListener('error', (e) => {
+    h.panic(id, String(e.message || e.error || e));
+  });
+  if (boot.wasm) boot = { ...boot, wasm: new URL(boot.wasm, globalThis.location.href).href };
+  const msg = { ...boot, id, parent: boot.parent || '0',
+    stubs: globalThis.__moxie_test_stubs === true,
+    supervisorPort: supPort, relayPort, appPort };
+  const ports = [supPort];
+  if (relayPort) ports.push(relayPort);
+  if (appPort) ports.push(appPort);
+  worker.postMessage(msg, ports);
+}
+
+// spawnDomain is the hub's start hook: the hub has already named the domain
+// (boot.id/boot.parent), so this only creates the Worker and posts the boot.
+function spawnDomain(boot) {
+  const { worker, supPort, port } = openDomain();
+  postBoot(worker, boot, supPort, boot.id, true, null);
+  return { handle: worker, port };
+}
+
 // startBundle starts a SECOND bundle as its own Worker and hands the page the
 // other end of a MessagePort to it.
 //
@@ -1125,113 +1208,14 @@ export function startBundle(wasm, opts = {}) {
   return { worker, port: chan.port1, ready };
 }
 
-// Every Worker this realm started. A panic ends the whole tree, the way an
-// abort ends every domain in a native process; without the set a failed domain
-// would leave its siblings running with nobody to talk to.
-const liveDomains = new Set();
-
-// stopAllDomains is the generic panic action: terminate every Worker this realm
-// holds, then let the page stop its own loop. A worker forwards the event to
-// its parent, so the action runs at every level of the spawn tree and ends at
-// the page.
-function stopAllDomains(reason) {
-  for (const d of liveDomains) {
-    try { d.terminate(); } catch (e) { /* already gone */ }
-  }
-  liveDomains.clear();
-  if (typeof globalThis.__moxie_panic === 'function') {
-    try { globalThis.__moxie_panic(reason); } catch (e) { /* the hook is the app's */ }
-  }
-}
-
+// startDomain starts a ROOT domain: one module's tree, with the page as its
+// parent (id 0). Its id is assigned here, because the boot message carries it.
 export function startDomain(boot, onSettled, relayUp, appPort) {
-  const w = new Worker(new URL('./worker-host.mjs', import.meta.url), { type: 'module' });
-  // The supervisor link: this realm starts the domain and every domain the
-  // domain asks for. It is the only way a spawn completes while the spawning
-  // thread is parked in Atomics.wait, and this realm is the page, which is
-  // never parked in wasm.
-  const sup = new MessageChannel();
-  sup.port1.onmessage = (e) => {
-    const m = e.data;
-    if (!m) return;
-    if (m.kind === 'spawn') spawnWorker(m.fnIdx, m.args || new Uint8Array(0), m.chans || [], m.wasm, m.breaker || null);
-  };
-  sup.port1.start();
-  liveDomains.add(w);
-  // The document is here; the module is in that Worker. A root domain gets one
-  // end of a MessageChannel to ask this thread for DOM work, and this thread
-  // serves it, because the page is the only place the document exists. A
-  // spawned domain gets none: only the page hands out the page connection.
-  let relayPort = null;
-  if (!relayUp) {
-    const chan = new MessageChannel();
-    serveRelay(chan.port1);
-    relayPort = chan.port2;
-  }
-  // A spawned domain reports to the domain that spawned it, not to the page, so
-  // its output would otherwise stop one hop short and never be seen. relayUp
-  // forwards it along the chain; in the page the same postMessage has no
-  // listener and is ignored, so this is safe at every level.
-  const up = (kind, text) => {
-    if (relayUp) globalThis.postMessage({ kind, text });
-  };
-  w.addEventListener('message', (e) => {
-    const m = e.data;
-    if (!m) return;
-    if (m.kind === 'stdout') { console.log(m.text); up('stdout', m.text); }
-    else if (m.kind === 'stderr') { console.error(m.text); up('stderr', m.text); }
-    else if (m.kind === 'done') {
-      // A spawned domain is finished when its entry function returns: it holds
-      // no port, so nothing can call into it afterwards. The root domain is the
-      // page's counterpart for the life of the app - the page drives it through
-      // the relay after _start returns - so its Worker stays alive, and only an
-      // error or the page going away ends it.
-      liveDomains.delete(w);
-      if (relayUp) w.terminate();
-      onSettled && onSettled(null);
-    }
-    else if (m.kind === 'error') {
-      // Every domain failure reaches the page, whether or not a caller is still
-      // waiting. A callback that panics after _start returns has no caller left
-      // - the loader's promise settled long ago - and a failure that only went
-      // to a settled promise would look exactly like success. The diagnostic
-      // was already printed as stderr by the panic path; the trap that follows
-      // is the cue to stop every domain this realm holds.
-      console.error('[domain] ' + m.error + '\n');
-      w.terminate();
-      liveDomains.delete(w);
-      stopAllDomains(m.error);
-      up('panic', m.error);
-      if (onSettled) onSettled(new Error(m.error));
-    }
-    else if (m.kind === 'panic') {
-      // A domain deeper in this tree died: stop every domain here too and pass
-      // the event up, so the page ends the whole tree it started.
-      console.error('[domain] panic: ' + m.text + '\n');
-      stopAllDomains(m.text);
-      up('panic', m.text);
-      if (onSettled) onSettled(new Error(m.text));
-    }
-  });
-  w.addEventListener('error', (e) => {
-    const msg = String(e.message || e.error || e);
-    console.error('[domain] ' + msg + '\n');
-    w.terminate();
-    liveDomains.delete(w);
-    stopAllDomains(msg);
-    up('panic', msg);
-    if (onSettled) onSettled(new Error(msg));
-  });
-  // Resolve the module path here, against the realm creating the domain: a
-  // spawned domain inherits this absolute URL through __moxie_wasm_url.
-  if (boot.wasm) boot = { ...boot, wasm: new URL(boot.wasm, globalThis.location.href).href };
-  const msg = { ...boot, stubs: globalThis.__moxie_test_stubs === true,
-    supervisorPort: sup.port2, relayPort, appPort };
-  const ports = [sup.port2];
-  if (relayPort) ports.push(relayPort);
-  if (appPort) ports.push(appPort);
-  w.postMessage(msg, ports);
-  return w;
+  const { worker, supPort, port } = openDomain();
+  const id = ensureHub().attachRoot({ port, handle: worker });
+  if (onSettled) settles.set(id, onSettled);
+  postBoot(worker, boot, supPort, id, relayUp === true, appPort);
+  return worker;
 }
 
 // setHostModule points the host-side callbacks at a freshly instantiated

@@ -1,5 +1,43 @@
 # Moxie Changelog
 
+## v1.0.0-rc.3
+
+- **One hub, two planes on wasm.** Control (spawn, exit, panic, rebind,
+  heartbeat) and logs share one port and one lineage id (`1.3.2`, hub-assigned,
+  never reused); the data plane does not go through the page - a spawn channel
+  is a ring the spawning domain created, whose handles the page moves without
+  reading a byte. The contract is `docs/WASM_HUB.md`.
+- **The hub is its own module with a Node test.** `jsruntime/supervisor.mjs`
+  has no DOM, no Worker and no page, so the protocol runs under `node --test`
+  (`5/hub-protocol`, 13 cases): lineage, refused spawns, missing ids, the
+  orphan invariant, the parked-parent shape, line assembly, panic, bounded
+  drains.
+- **Logs star to the page.** A domain posts what it writes to the hub; a parent
+  never forwards a child's output (that would be a parent parked in a receive).
+  Lines are assembled per domain, so two domains printing at once can no longer
+  splice each other's lines.
+- **Missing ids are a protocol decision, not an accident.** A spawn from an
+  unknown id or from the wrong port is refused and answered; a log from an
+  unknown id still prints, as `?`; other unknown-id control messages are
+  counted and dropped.
+- **A root's exit is not a process exit on wasm.** `_start` returning resolves
+  the loader and the page keeps the root Worker for callbacks, so its children
+  are adopted by the page and keep running; the app stops them with their
+  breakers. The first cut terminated the root, which silently killed every
+  post-`_start` callback.
+- **A channel keeps its ring through a second spawn.**
+  `runtime.SpawnChannelHandle` reuses the existing SAB handle for a channel
+  already on a boundary, so a manager can pass a worker's channel on without
+  splitting it into two rings.
+- **Init-time supervisor check.** A module built with spawn support that boots
+  without a supervisor now fails at boot, not at its first `spawn()`; the
+  service-worker host refuses it with a named message.
+- **New fixtures:** `spawn_orphan` (A spawns B, A exits, B keeps logging and
+  exits cleanly) and `spawn_parked_parent` (the parent parks in a receive right
+  after spawning), both green as wasm-output-matches-native.
+- **Recorded, open:** natively, a spawned domain that spawns a child and then
+  blocks in a receive on that child's channel never wakes.
+
 ## v1.0.0-rc.2
 
 - **Wasm spawn works, and it is page-supervised.** A Worker started by a
