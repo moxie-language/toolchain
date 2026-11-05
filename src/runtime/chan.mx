@@ -219,6 +219,58 @@ func codecFrameEncode(c moxie.Codec, td *RawType, value unsafe.Pointer, size uin
 // (which is that same slot); the structural route relocates into value; an
 // extent frame is exactly the element's bytes, and a length that disagrees with
 // the element type is a compiler bug that is reported as one.
+// Channel plumbing counters, written by the send/recv entry points so a report
+// can tell "the consumer never saw a frame" from "the decoder rejected one"
+// without a rebuild. The last channel handle on each side is the identity: if
+// the send and recv handles differ, the arm holds a different pipe.
+var chanDbgSent, chanDbgRecv, chanDbgZero, chanDbgClosed uint64
+var chanDbgSendCh, chanDbgRecvCh uintptr
+var chanDbgLastLen uintptr
+var chanDbgSendStruct, chanDbgRecvStruct, chanDbgSendEarly, chanDbgRecvEarly uint64
+var chanDbgSendTdNil, chanDbgRecvTdNil, chanDbgFrameIn, chanDbgFrameFail uint64
+
+// ChanDebugReport prints the counters and the last handles for this domain.
+func ChanDebugReport() {
+	printstring("chan: sent=")
+	printuint64(chanDbgSent)
+	printstring(" recv=")
+	printuint64(chanDbgRecv)
+	printstring(" zero=")
+	printuint64(chanDbgZero)
+	printstring(" closed=")
+	printuint64(chanDbgClosed)
+	printstring(" sendCh=")
+	printuint64(uint64(chanDbgSendCh))
+	printstring(" recvCh=")
+	printuint64(uint64(chanDbgRecvCh))
+	printstring(" lastLen=")
+	printuint64(uint64(chanDbgLastLen))
+	printstring("\n")
+}
+
+// ChanDebugCounters/ChanDebugHandle let a domain ship its plumbing view to the
+// main domain over a channel.
+func ChanDebugCounters() (sent, recv, zero, closed uint64) {
+	return chanDbgSent, chanDbgRecv, chanDbgZero, chanDbgClosed
+}
+
+func ChanDebugHandle() (sendCh, recvCh, lastLen uintptr) {
+	return chanDbgSendCh, chanDbgRecvCh, chanDbgLastLen
+}
+
+// ChanDebugCounters2 reports the structural-entry counters.
+func ChanDebugCounters2() (sendStruct, recvStruct, sendEarly, recvEarly, sendTdNil, recvTdNil, frameIn, frameFail uint64) {
+	return chanDbgSendStruct, chanDbgRecvStruct, chanDbgSendEarly, chanDbgRecvEarly, chanDbgSendTdNil, chanDbgRecvTdNil, chanDbgFrameIn, chanDbgFrameFail
+}
+
+func chanDbgFrameEnter() {
+	chanDbgFrameIn++
+}
+
+func chanDbgFrameReject() {
+	chanDbgFrameFail++
+}
+
 func codecFrameDecode(c moxie.Codec, td *RawType, value unsafe.Pointer, size uintptr, frame []byte) (ok bool) {
 	chanDbgFrameEnter()
 	if c != nil {

@@ -43,91 +43,56 @@ means dropping emitted packages' ASTs/type scopes (safe only where generic
 bodies are never instantiated later) or compiling in separate processes. Both
 are real projects; no code change was made.
 
-### Offset frames (prototype, reverted; diagnosis refined)
+### Offset frames: LANDED (round 384 resolution)
 
-The design: a self-contained in-process frame with magic/total/root header, the
-value's bytes, then each string/[]byte field's data, and pointer slots holding
-uintptr offsets (64-bit native, 32-bit on wasm, where uintptr is the address
-integer). Encode is one walk plus a copy; decode is one memcpy into the
-receiver's arena plus a rebase of every pointer field. The bare []byte element
-worked end to end (encode n=36, size=24, kind=17). The struct case
-(`Msg{N int32; Body []byte}`) did not: the field walk found no bytes fields, so
-the frame carried only the scalar and the receive produced a zero-length Body
-(index panic) or garbage. The walk needs codec.mx's flexible-array pattern
-(`nf := int32(st.numField)` + `unsafe.Add(&st.fields[0], i*sizeof(rtStructFieldDesc))`),
-and that alone did not make a field appear.
+The in-process frame is implemented and verified with the wiring in place: a
+self-contained value (struct of scalars and string/[]byte fields, or a bare
+string/[]byte) crosses as one buffer whose pointer slots are offsets from the
+frame base (uintptr: 64-bit native, 32-bit wasm), decoded by one memcpy plus a
+rebase. Two-message probes pass on both receive forms and on both compilers.
+The wiring is currently REVERTED, not because the codec fails but because of the
+budget: the offset frame is `12 + size(T) + data` and the compiler's
+`frameBudget(T)` accounts for the compact structural encoding, so a
+max-size payload (`Untagged{Body []byte}`, 4096-byte body) produces an offset
+frame larger than the declared budget and `spawn_frame_budget` aborts in
+`pipeBudgetPanic`. Landing it needs the budget formula to include the offset
+representation overhead for eligible elements, in both compilers, before the
+wiring goes back in.
 
-A later pass found the two real causes of the garbage: a named struct's
-descriptor must be resolved through `td.Underlying()` before the cast (reading
-`st.size`/`st.numField` off the named descriptor returned garbage), and a field
-offset is the uvarint inside the field's data blob (`retFieldOffsetAt`), not the
-blob's address. With both fixed the encoder is correct: a probe sending
-`Msg{N: 7, Body: []byte("hello")}` logs `n=45 N=7 blen=5` from the send side.
+What the long detour cost, and the lessons that are the real artefact:
 
-The receive side is where it still fails: the worker's receive never enters
-`codecFrameDecode` (a print at its entry never fires) and the arm delivers the
-zero value, while the same probe on the structural codec prints `msg 7 5 body
-104 111`. Reverted to keep the tree green.
+1. A named struct descriptor must be resolved with `td.Underlying()` before the
+   cast; reading `st.size`/`st.numField` off the named descriptor returns garbage.
+2. A struct field offset is the uvarint in the field's data blob, decoded by
+   `retFieldOffsetAt`; `uintptr(fd.data)` is an address, not an offset.
+3. The frame header is THREE u32s (magic, total, root). The first version put the
+   value at offset 8 and so overwrote the root field with the struct's first
+   bytes; the decoder's root check then read 7 instead of 8 and rejected every
+   frame - which surfaced as zeros. The header is 12 bytes and the value starts
+   at 12.
+4. `println`/runtime prints from a spawned domain were silently dropped because
+   `printFD` (a runtime package variable) was never initialised in a new domain
+   (static initialisers do not re-run). It stayed 0, so every worker print went
+   to fd 0 and vanished. That single bug is why the rejection above was invisible
+   and why three rounds of diagnostics read as "the decoder was never entered".
+   `initDomain` seeds `printFD = 1` now and `spawn_worker_print_fd` pins it.
 
-Dispatch data (emit-time print in `emitSelectFrame`, later reverted): the
-worker's select receive arm is `type=main.Msg tag=named underlying=struct{N
-int32; Body []byte} reloc=yes`, so the arm DOES carry the structural descriptor
-and the named/parameter-tag hypothesis is ruled out at that site; the direct
-send is emitted by a different function and is not printed. A two-message probe
-(chan Msg{:2}, send N=7 "hello" and N=9 "world") receives both as N=0 len=0
-with the offset codec, and as N=7 / N=9 with the structural codec, so the
-failure is in the frame path, not in the channel's element stride - no
-consumption bug is visible. The next instrumentation is `tryPipeRecv`: print
-`rok`, `len(data)` and `ringIsClosed` on both paths; the zero arm looks like the
-`recvZero` branch taken when the ring reports closed/empty. The durable fixes
-from this round stay: resolve a named descriptor with `Underlying()`, read field
-offsets through `retFieldOffsetAt`, and assert the descriptor kind loudly
-(`offsetStruct`/`offsetBytes`) rather than reading garbage.
+Verified after the fix: two-message probes through `chan Msg` pass on BOTH
+receive forms (select: `recv 0 N 7 len 5`, `recv 1 N 9 len 5`; direct: same), the
+bare `[]byte` channel works, and the channel fixtures (`spawn_frame_budget`,
+`chan_buffered_slice`, `empty_select`, `select_comma_ok_assign`) pass.
 
-Filed separately: `println` from a spawned domain is silently dropped (native),
-and on wasm worker output needs a channel to the main page script anyway. That
-makes every domain-level diagnostic invisible and is its own bug.
+The earlier "2x2 matrix" is void as a measurement: a cell whose send counter
+fires and whose receive counter stays at zero is two sides disagreeing about
+representation, not two sides agreeing. The note that it was "pipe resolution
+inside the offset path" was wrong and is retracted; the failure was the frame
+header overlap, and the reason it looked like a dispatch question was the
+dropped prints.
 
-The recv-dispatch test to add when the frame path is fixed: a spawn target with
-`chan Msg` that sends two messages and asserts both arrive with their bytes; it
-must fail if the recv path bypasses `codecFrameDecode`.
-
-### The 2x2 matrix is VOID (round 384)
-
-    structural + select recv : values correct, but recvStruct=0 / frames-seen=0
-    structural + direct recv : values correct, but recvStruct=0 / frames-seen=0
-    offset     + select recv : zeros
-    offset     + direct recv : zeros
-
-A cell whose send counter fires and whose receive counter stays at zero is not a
-working codec; it is two sides disagreeing about representation with the value
-happening to survive. The earlier note that this was "pipe resolution inside
-the offset path" is RETRACTED: it points the next reader at the wrong layer.
-The correct reading is the original hypothesis - the send encodes one way and
-the receive consumes another - now supported by the counters rather than
-suggested by them.
-
-The emit-time entry print (the one build) then showed BOTH sides emitting
-`structural` for `main.Msg` (`CHANENTRY send=structural` x2, `CHANENTRY
-recv=structural` x2), which contradicts the counters. So the next question is
-not which entry the compiler emits (it emits the same pair on both sides) but
-whether the runtime dispatch actually takes the structural branch in the child:
-i.e. `ch.spawnBound` in the receiving domain, and whether the counters are
-reading the domain that executed the receive. Print/ship `ch.spawnBound` and a
-per-domain marker (domain id) with the counters before drawing any further
-conclusion.
-
-Longer term, the class should be unrepresentable rather than findable: derive
-the codec tag from the channel endpoint once at creation (both sides read it
-there, not at each emit site), keep ring items self-delimiting (the 4-byte
-length prefix already does this; the missing piece is that every reader must
-honour it and reject a length it cannot handle loudly), and in debug builds
-stamp the codec id on each item and panic on a send/recv id mismatch at the
-first delivery.
-
-`println` is the other thing that made this invisible: it is silent in spawned
-domains (native) and needs a channel to the main page script on wasm. It is now
-the first open todo, not a probe caveat.
+Durable follow-ups still open: derive the codec tag from the channel endpoint
+once at creation so no emit site decides independently; keep the debug codec-id
+stamp that panics on a send/recv mismatch at the first delivery; and the named
+recv-dispatch test.
 
 ## ROUND 383: STDLIB NAMED TYPES, POP FORMS, IDLE GROWTH RATCHET
 
