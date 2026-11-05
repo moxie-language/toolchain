@@ -1,0 +1,84 @@
+/*
+Named types over slices and maps carry methods, and their mutations persist.
+
+A name over []T or map[K]V is allowed; its purpose is the METHOD SET an
+unnamed type cannot have. The receiver is a pointer like every Moxie receiver,
+so `*n = push(*n, x)` and `(*c)[k] = v` write the CALLER's variable. Go's
+value receiver copies the slice/map header and only element writes survive -
+that split does not exist here because value receivers are refused outright.
+
+The fixture is end-to-end: it checks that push and reslicing inside a method
+reach the caller, that slicing and push keep the named type, and that map
+writes through a *named map* receiver are visible after the call.
+*/
+package main
+
+type Names []string
+
+func (n *Names) Add(s string) {
+	*n = push(*n, s)
+}
+
+func (n *Names) Set(i int32, s string) {
+	(*n)[i] = s
+}
+
+func (n *Names) Drop() {
+	*n = (*n)[1:]
+}
+
+type Counts map[string]int32
+
+func (c *Counts) Inc(k string) {
+	(*c)[k] = (*c)[k] + 1
+}
+
+func (c *Counts) Clear(k string) {
+	delete(*c, k)
+}
+
+func main() {
+	select {
+	case <-sigint:
+		return
+	default:
+	}
+
+	var n Names
+	n.Add("a")
+	n.Add("b")
+	n.Add("c")
+	if len(n) != 3 {
+		panic("Add did not reach the caller")
+	}
+	n.Set(1, "B")
+	if n[1] != "B" {
+		panic("element write did not reach the caller")
+	}
+	n.Drop()
+	if len(n) != 2 || n[0] != "B" {
+		panic("reslice inside the method did not reach the caller")
+	}
+
+	var sub Names = n[0:1]
+	if len(sub) != 1 || sub[0] != "B" {
+		panic("slicing a named slice lost its type")
+	}
+	var more Names = push(n, "z")
+	if len(more) != 3 || len(n) != 2 {
+		panic("push did not keep the named slice type")
+	}
+
+	c := Counts{}
+	c.Inc("x")
+	c.Inc("x")
+	c.Inc("y")
+	if c["x"] != 2 || len(c) != 2 {
+		panic("map method write did not reach the caller")
+	}
+	c.Clear("y")
+	if len(c) != 1 {
+		panic("map delete through the receiver did not reach the caller")
+	}
+	println("named types ok")
+}

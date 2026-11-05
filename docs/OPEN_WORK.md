@@ -4,6 +4,54 @@ State carried across context compaction. Ordered queue, the decisions already
 taken, the findings that motivated them, and the two designs in flight
 (module removal, user-code exemption). Update this file when the queue moves.
 
+## ROUND 381: NAMED TYPES OVER SLICES AND MAPS ARE ALLOWED
+
+The ban is gone. A type name over a slice or map is a normal Moxie type with a
+method set, and the methods use pointer receivers like every other Moxie
+method. That is the whole of the semantics change: `func (n *Names) Add(s
+string) { *n = push(*n, s) }` writes the caller's variable, and
+`(*c)[k] = v` writes the caller's map. Go's value-receiver copy - element
+writes survive, a receiver rebinding does not - cannot occur because value
+receivers remain a compile error for every type. Mutation through a
+pointer-receiver method is therefore persistent by construction.
+
+Both compilers had to change, and both had latent bugs that only a named type
+over a slice or map could reach:
+
+- legacy: the patched `Identical`/`unify` treated ANY byte slice as identical
+  to string, so `K(x)` over a named byte slice was a no-op and the value was
+  boxed under the []byte type code; every `i.(K)` then failed. Identity is now
+  limited to the UNNAMED []byte. The vendored SSA `moxieNormalize` had the
+  same hole through `Underlying()`; a named type is now left alone.
+- stage4: `collectMethodsDepth`/`hasMethodNamed` substituted the string method
+  set for a named byte slice (the name's own methods vanished); the
+  substitution is now only for unnamed text types. `runtimeKindOf` emitted
+  KindSlice for a named []byte, but the descriptor for []byte is `basic:bytes`;
+  the return codec then read an element descriptor from a two-field bytes
+  descriptor and crashed in `RawType.Size`. Named []byte is KindBytes.
+- stage4: `isForeignNamed` compared against the package the SSA function is
+  EMITTED into; a monomorphized generic body is placed in the caller's package
+  while its source belongs to the declaring package, so the fips140/ecdh
+  generic constructors were told they were naming a foreign package's
+  unexported fields. The builder now carries `srcPkgPath`.
+- both: the restriction tests that pinned the ban are removed
+  (`legacy/tests/restrict/fail_named_slice.mx`, `fail_named_map.mx`, the
+  phase-6 `namedslice` fixture, `tests/data/namedslice`).
+
+Named types restored in the stdlib where the wrapper was only there for the
+ban: `crypto/ed25519.PublicKey`/`PrivateKey`, `asn1.ObjectIdentifier`,
+`asn1.RawContent`, `net.Buffers`, `bidi.bracketPairs`. Still struct-wrapped and
+worth converting when touched: `net.IP`/`IPMask`/`HardwareAddr` (currently
+aliases with free functions), `net/http.Header`, `net/url.Values`,
+`net/textproto.MIMEHeader` (aliases with free functions),
+`image.Palette` (the `&image.Palette{Element: ...}` sites need an addressable
+value), `archive/tar`'s format type, and flate's sort helpers.
+
+Verification: phases 0a+0b 188/189 on mxc-s22 (the one failure is
+`tree-cleanliness`, expected with a dirty tree); `named_types_methods`,
+`net_buffers_api`, `asn1_oid_der`, `asn1_builder_der`, `ed25519_roundtrip`,
+plus a tls+x509+asn1+ed25519 smoke probe run on BOTH compilers.
+
 ## ROUND 380 VERIFICATION
 
 Final sources built as `mxc-s12` (that is, mxc-s8 compiling `_mxc_stage4` with

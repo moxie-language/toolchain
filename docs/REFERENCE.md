@@ -672,20 +672,29 @@ type Point struct { X, Y float64 }
 type Reader interface { Read(p []byte) (n int, err error) }
 ```
 
-Named types may only be declared over value types (numeric, bool, string,
-array, struct) and interface types. Named slice types and named map types are
-compile errors:
+Named types may be declared over any type that can carry methods: numeric,
+bool, string, array, struct, slice, map and interface types. A name over a
+slice or map exists to give that type a METHOD SET, and that is a good reason
+to have the name:
 
 ```moxie
-type Events []Event          // compile error
-type Index map[string]int32  // compile error
+type Events []Event
+func (e *Events) Add(v Event) { *e = push(*e, v) }
+
+type Index map[string]int32
+func (x *Index) Add(k string, n int32) { (*x)[k] = (*x)[k] + n }
 ```
 
-Slices and maps are reference types - a named wrapper over a reference type
-creates a receiver that cannot mutate its own elements through closures, forces
-every method to take a pointer receiver for append semantics, and produces
-ambiguous ownership at every call site. Methods belong on the struct that holds
-the slice, not on the slice itself.
+The receiver is a pointer, as for every Moxie method, and that is what makes
+the mutation real: `*e = push(*e, v)` writes the caller's variable and the new
+header survives the return. Go's value receiver is the reason a method on a
+named slice there looks like it "forks" its receiver: element writes reach the
+shared backing array while a rebinding of the receiver is lost, so some
+mutations persist and some vanish. Moxie does not have that split - value
+receivers are refused outright, and there is nothing concurrent here (one
+thread per domain, no shared mutable state) for the copy to protect. A slice
+or map is a pointer with metadata; a pointer receiver is exactly what it
+needs.
 
 ### Variable Declarations
 

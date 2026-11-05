@@ -219,6 +219,17 @@ func isByteSlice(t Type) bool {
 	}
 	return false
 }
+// isUnnamedByteSlice is isByteSlice for the IDENTITY patches. Only the unnamed
+// []byte is identical to string: a named slice over byte is a type of its own
+// with its own method set, and treating it as identical collapsed its
+// conversions to []byte. A K value boxed in an interface then carried the
+// []byte type code, and every subsequent i.(K) was false.
+func isUnnamedByteSlice(t Type) bool {
+	if _, ok := Unalias(t).(*Slice); !ok {
+		return false
+	}
+	return isByteSlice(t)
+}
 `)
 
 	// Patch 2: Add slice comparability — any slice of comparable elements is comparable.
@@ -319,7 +330,7 @@ func patchIdentical(dir string) {
 	// types: []string = [][]byte, map[string]V = map[[]byte]V, etc.
 	src = mustReplace(f, src,
 		"\tswitch x := x.(type) {\n\tcase *Basic:\n\t\t// Basic types are singletons except for the rune and byte\n\t\t// aliases, thus we cannot solely rely on the x == y check\n\t\t// above. See also comment in TypeName.IsAlias.\n\t\tif y, ok := y.(*Basic); ok {\n\t\t\treturn x.kind == y.kind\n\t\t}",
-		"\t// Moxie: string and []byte are identical types.\n\tif (isString(x) && isByteSlice(y)) || (isByteSlice(x) && isString(y)) {\n\t\treturn true\n\t}\n\n\tswitch x := x.(type) {\n\tcase *Basic:\n\t\t// Basic types are singletons except for the rune and byte\n\t\t// aliases, thus we cannot solely rely on the x == y check\n\t\t// above. See also comment in TypeName.IsAlias.\n\t\tif y, ok := y.(*Basic); ok {\n\t\t\treturn x.kind == y.kind\n\t\t}")
+		"\t// Moxie: string and the UNNAMED []byte are identical types.\n\tif (isString(x) && isUnnamedByteSlice(y)) || (isUnnamedByteSlice(x) && isString(y)) {\n\t\treturn true\n\t}\n\n\tswitch x := x.(type) {\n\tcase *Basic:\n\t\t// Basic types are singletons except for the rune and byte\n\t\t// aliases, thus we cannot solely rely on the x == y check\n\t\t// above. See also comment in TypeName.IsAlias.\n\t\tif y, ok := y.(*Basic); ok {\n\t\t\treturn x.kind == y.kind\n\t\t}")
 
 	mustWrite(f, src)
 }
@@ -332,7 +343,7 @@ func patchUnify(dir string) {
 	// Generic constraint satisfaction uses unify(), not Identical().
 	src = mustReplace(f, src,
 		"\t// nothing to do if x == y\n\tif x == y || Unalias(x) == Unalias(y) {\n\t\treturn true\n\t}",
-		"\t// nothing to do if x == y\n\tif x == y || Unalias(x) == Unalias(y) {\n\t\treturn true\n\t}\n\n\t// Moxie: string and []byte unify (string=[]byte).\n\tif (isString(x) && isByteSlice(y)) || (isByteSlice(x) && isString(y)) {\n\t\treturn true\n\t}")
+		"\t// nothing to do if x == y\n\tif x == y || Unalias(x) == Unalias(y) {\n\t\treturn true\n\t}\n\n\t// Moxie: string and the UNNAMED []byte unify (string=[]byte).\n\tif (isString(x) && isUnnamedByteSlice(y)) || (isUnnamedByteSlice(x) && isString(y)) {\n\t\treturn true\n\t}")
 
 	mustWrite(f, src)
 }

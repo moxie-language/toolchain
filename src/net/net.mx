@@ -835,27 +835,21 @@ type buffersWriter interface {
 // optimized into an OS-specific batch write operation (such as
 // "writev").
 //
-// Buffers is a STRUCT holding the runs, not a named slice type: a named slice
-// type is not allowed in Moxie, and the alias-plus-free-functions route used for
-// net.IPMask and url.Values does not fit here - Read and WriteTo CONSUME what
-// they write, and a slice assigned through a free function's parameter does not
-// write back. The methods keep their pointer receivers, so call sites are
-// unchanged; construction is Buffers{Runs: ...}.
-type Buffers struct {
-	Runs [][]byte
-}
+// It is a named slice type: Read and WriteTo consume the runs they write, and
+// the pointer receiver gives those methods the caller's value.
+type Buffers [][]byte
 
 // WriteTo writes contents of the buffers to w.
 //
 // WriteTo implements [io.WriterTo] for [Buffers].
 //
-// WriteTo modifies v.Runs as well as v.Runs[i] for 0 <= i < len(v.Runs),
-// but does not modify v.Runs[i][j] for any i, j.
+// WriteTo modifies v as well as v[i] for 0 <= i < len(v),
+// but does not modify v[i][j] for any i, j.
 func (v *Buffers) WriteTo(w io.Writer) (n int64, err error) {
 	if wv, ok := w.(buffersWriter); ok {
 		return wv.writeBuffers(v)
 	}
-	for _, b := range v.Runs {
+	for _, b := range *v {
 		nb, err1 := w.Write(b)
 		n += int64(nb)
 		if err1 != nil {
@@ -871,18 +865,18 @@ func (v *Buffers) WriteTo(w io.Writer) (n int64, err error) {
 //
 // Read implements [io.Reader] for [Buffers].
 //
-// Read modifies v.Runs as well as v.Runs[i] for 0 <= i < len(v.Runs),
-// but does not modify v.Runs[i][j] for any i, j.
+// Read modifies v as well as v[i] for 0 <= i < len(v),
+// but does not modify v[i][j] for any i, j.
 func (v *Buffers) Read(p []byte) (n int32, err error) {
 	// The destination is p at an offset, not p[n0:]: a sub-slice is a COPY under
 	// the slice rule, so only the first run reached the caller's buffer and the
 	// rest of the drained runs were lost.
-	for n < int32(len(p)) && len(v.Runs) > 0 {
-		n0 := mxutil.CopyAt(p, n, v.Runs[0])
+	for n < int32(len(p)) && len(*v) > 0 {
+		n0 := mxutil.CopyAt(p, n, (*v)[0])
 		v.consume(int64(n0))
 		n += n0
 	}
-	if len(v.Runs) == 0 {
+	if len(*v) == 0 {
 		err = io.EOF
 	}
 	return
@@ -892,14 +886,14 @@ func (v *Buffers) consume(n int64) {
 	// Declared outside the loop: a declaration in the body of a self-mutating
 	// method allocates in the sovereign arena on every iteration.
 	var ln0 int64
-	for len(v.Runs) > 0 {
-		ln0 = int64(len(v.Runs[0]))
+	for len(*v) > 0 {
+		ln0 = int64(len((*v)[0]))
 		if ln0 > n {
-			v.Runs[0] = v.Runs[0][n:]
+			(*v)[0] = (*v)[0][n:]
 			return
 		}
 		n -= ln0
-		v.Runs[0] = nil
-		v.Runs = v.Runs[1:]
+		(*v)[0] = nil
+		*v = (*v)[1:]
 	}
 }

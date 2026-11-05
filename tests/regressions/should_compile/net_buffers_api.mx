@@ -1,17 +1,14 @@
 /*
-net.Buffers is a STRUCT holding the runs, and its consuming methods still consume.
+net.Buffers is a named slice of runs, and its consuming methods consume.
 
-A named slice type is not allowed in Moxie, so `type Buffers [][]byte` became
-`type Buffers struct { Runs [][]byte }` (round 97). The alias-plus-free-functions
-route used for net.IPMask and url.Values does NOT fit here: Read and WriteTo
-consume what they write, and a slice assigned through a free function's parameter
-does not write back - the mutation would be lost. Pointer-receiver methods on a
-struct keep it, and every call site is unchanged (`v.WriteTo(w)`, `v.Read(p)`);
-what changes is construction: `Buffers{Runs: ...}`.
+`type Buffers [][]byte` carries pointer-receiver methods, so Read and WriteTo
+see the caller's value and the consumption persists: a slice assigned through a
+free function's parameter would not write back. Construction is an ordinary
+slice literal, `net.Buffers{...}`, and the runs are reached as elements.
 
-This fixture pins the semantics that made the route necessary: WriteTo drains the
-runs it wrote, and Read drains whole runs and the consumed part of a partial one,
-leaving the remainder in Runs[0].
+This fixture pins the semantics: WriteTo drains the runs it wrote, and Read
+drains whole runs and the consumed part of a partial one, leaving the remainder
+in element 0.
 */
 package main
 
@@ -29,7 +26,7 @@ func main() {
 	default:
 	}
 
-	b := net.Buffers{Runs: [][]byte{[]byte("ab"), []byte("cd"), []byte("ef")}}
+	b := net.Buffers{[]byte("ab"), []byte("cd"), []byte("ef")}
 	var buf bytes.Buffer
 	n, err := b.WriteTo(&buf)
 	if err != nil {
@@ -41,10 +38,10 @@ func main() {
 	if buf.String() != "abcdef" {
 		panic("out: " | buf.String())
 	}
-	if len(b.Runs) != 0 {
+	if len(b) != 0 {
 		panic("writeto does not consume")
 	}
-	c := net.Buffers{Runs: [][]byte{[]byte("ab"), []byte("cd")}}
+	c := net.Buffers{[]byte("ab"), []byte("cd")}
 	p := []byte{:3}
 	rn, rerr := c.Read(p)
 	if rerr != nil {
@@ -56,7 +53,7 @@ func main() {
 	if string(p) != "abc" {
 		panic("read: " | string(p))
 	}
-	if len(c.Runs) != 1 || string(c.Runs[0]) != "d" {
+	if len(c) != 1 || string(c[0]) != "d" {
 		panic("remainder")
 	}
 	println("buffers ok")

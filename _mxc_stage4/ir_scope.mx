@@ -155,16 +155,17 @@ func checkParenCallTarget(e *syntax.CallExpr, pkgPath string) {
 	push(cctx.compileErrors, "parenthesized call target is not allowed: write f(x), not (f)(x)")
 }
 
-// checkPackageDecls mirrors the two declaration rules of legacy restrict.go
+// checkPackageDecls mirrors the declaration rule of legacy restrict.go
 // checkPackageRestrictions: a package-level var may not carry an initializer
-// (declare the zero value, assign in init()), and a named slice or map type is
-// not allowed (use []T / map[K]V directly). The gate is the same predicate the
+// (declare the zero value, assign in init()). The gate is the same predicate the
 // other restriction checks use, so the same package is checked by both
 // compilers rather than only in the bootstrap.
 //
-// A named type may carry methods, and []T directly cannot; that is the whole
-// reason the rule has a cost, and the migration that removes the named types
-// turns their methods into free functions.
+// A named slice or map type is allowed, and a name over a slice or map is what
+// gives those types a method set. Methods use pointer receivers like every
+// Moxie method, so a method that writes the receiver writes the caller's value;
+// a value receiver would be the copy whose rebinding Go loses, and it stays a
+// compile error for slice and map receivers exactly as for structs.
 func checkPackageDecls(files []*syntax.File, pkgPath string) {
 	if !isUserPackagePath(restrictPath(pkgPath)) {
 		return
@@ -175,25 +176,6 @@ func checkPackageDecls(files []*syntax.File, pkgPath string) {
 		}
 		for _, d := range f.DeclList {
 			switch t := d.(type) {
-			case *syntax.TypeDecl:
-				if t.Name == nil || t.Type == nil {
-					continue
-				}
-				// An alias introduces no new named type: `type X = []T` is
-				// another spelling of []T, so the rule does not apply to it.
-				if t.Alias {
-					continue
-				}
-				switch t.Type.(type) {
-				case *syntax.SliceType:
-					declErr("named slice type '" | t.Name.Value | "' is not allowed: use []T directly")
-				case *syntax.ArrayType:
-					if at := t.Type.(*syntax.ArrayType); at.Len == nil {
-						declErr("named slice type '" | t.Name.Value | "' is not allowed: use []T directly")
-					}
-				case *syntax.MapType:
-					declErr("named map type '" | t.Name.Value | "' is not allowed: use map[K]V directly")
-				}
 			case *syntax.VarDecl:
 				if t.Values == nil {
 					continue

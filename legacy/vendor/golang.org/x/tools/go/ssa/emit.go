@@ -228,6 +228,12 @@ func moxieIdentical(a, b types.Type) bool {
 // with a canonical form (string) at every structural position.
 // In Moxie, string and []byte are the same type with identical layout.
 func moxieNormalize(t types.Type) types.Type {
+	// A NAMED type is its own type. K over []byte is not string: normalizing
+	// through its underlying made a conversion K(x) a no-op, so a K value was
+	// boxed in an interface under the []byte type code and every i.(K) failed.
+	if _, isNamed := types.Unalias(t).(*types.Named); isNamed {
+		return t
+	}
 	u := t.Underlying()
 	// string -> string (already canonical)
 	if b, ok := u.(*types.Basic); ok && b.Kind() == types.String {

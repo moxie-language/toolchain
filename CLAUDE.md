@@ -400,6 +400,17 @@ n := int32(42)
 msg := "count: " | n.String() | " items"
 ```
 
+## Named Types Over Slices and Maps
+
+A name over a slice or map is allowed, and its purpose is the METHOD SET: a
+named slice or map can have methods that an unnamed `[]T` never can. The
+receiver is a pointer like every Moxie receiver, so a method that reslices or
+pushes writes the caller's variable - there is no Go-style "value receiver
+copy" where element writes survive and a rebinding does not. That fork is a
+Go artifact of shared-memory caution; a domain has one thread and no shared
+mutable state, so the pointer is the whole story. Value receivers stay a
+compile error for every type, slice and map included.
+
 ## No Reflect, No Empty Interface (any)
 
 `reflect` and the empty interface (`any` / `interface{}`) are **removed** from

@@ -39,25 +39,11 @@ const (
 )
 
 // PublicKey is the type of Ed25519 public keys.
-//
-// This is a struct wrapping the raw key bytes rather than a named slice:
-// Moxie forbids named slice types, and this package must still assert on the
-// key's value type from crypto/tls and crypto/x509. The constructor is
-// [PublicKeyOf] and the raw bytes are read back with [PublicKey.Bytes].
-type PublicKey struct {
-	b []byte
-}
-
-// PublicKeyOf returns a PublicKey holding b. It replaces the conversion
-// ed25519.PublicKey(b), which a struct type cannot carry.
-func PublicKeyOf(b []byte) (k PublicKey) {
-	k.b = b
-	return
-}
+type PublicKey []byte
 
 // Bytes returns the raw key bytes.
 func (k *PublicKey) Bytes() (b []byte) {
-	return k.b
+	return *k
 }
 
 // Equal reports whether pub and x have the same value.
@@ -66,35 +52,22 @@ func (pub *PublicKey) Equal(x crypto.PublicKey) (okay bool) {
 	if !ok {
 		return false
 	}
-	return subtle.ConstantTimeCompare(pub.b, xx.b) == 1
+	return subtle.ConstantTimeCompare(*pub, []byte(xx)) == 1
 }
 
 // PrivateKey is the type of Ed25519 private keys. It implements [crypto.Signer].
-//
-// Like [PublicKey] it is a struct wrapping the raw bytes, with a free
-// constructor ([PrivateKeyOf]) and a value that satisfies crypto.Signer via a
-// value box.
-type PrivateKey struct {
-	b []byte
-}
-
-// PrivateKeyOf returns a PrivateKey holding b. It replaces the conversion
-// ed25519.PrivateKey(b), which a struct type cannot carry.
-func PrivateKeyOf(b []byte) (k PrivateKey) {
-	k.b = b
-	return
-}
+type PrivateKey []byte
 
 // Bytes returns the raw key bytes.
 func (k *PrivateKey) Bytes() (b []byte) {
-	return k.b
+	return *k
 }
 
 // Public returns the [PublicKey] corresponding to priv.
 func (priv *PrivateKey) Public() (out crypto.PublicKey) {
 	publicKey := []byte{:PublicKeySize}
-	mxutil.CopyFrom(publicKey, priv.b, 32)
-	return PublicKeyOf(publicKey)
+	mxutil.CopyFrom(publicKey, *priv, 32)
+	return PublicKey(publicKey)
 }
 
 // Equal reports whether priv and x have the same value.
@@ -103,14 +76,14 @@ func (priv *PrivateKey) Equal(x crypto.PrivateKey) (okay bool) {
 	if !ok {
 		return false
 	}
-	return subtle.ConstantTimeCompare(priv.b, xx.b) == 1
+	return subtle.ConstantTimeCompare(*priv, []byte(xx)) == 1
 }
 
 // Seed returns the private key seed corresponding to priv. It is provided for
 // interoperability with RFC 8032. RFC 8032's private keys correspond to seeds
 // in this package.
 func (priv *PrivateKey) Seed() (b []byte) {
-	return push([]byte{:0:SeedSize}, priv.b[:SeedSize]...)
+	return push([]byte{:0:SeedSize}, (*priv)[:SeedSize]...)
 }
 
 
@@ -124,7 +97,7 @@ func (priv *PrivateKey) Seed() (b []byte) {
 // A value of type [Options] can be used as opts, or crypto.Hash(0) or
 // crypto.SHA512 directly to select plain Ed25519 or Ed25519ph, respectively.
 func (priv *PrivateKey) Sign(rand io.Reader, message []byte, opts crypto.SignerOpts) (signature []byte, err error) {
-	k, err := ed25519.NewPrivateKey(priv.b)
+	k, err := ed25519.NewPrivateKey(*priv)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +163,7 @@ func NewKeyFromSeed(seed []byte) (out PrivateKey) {
 	// Outline the function body so that the returned key can be stack-allocated.
 	privateKey := []byte{:PrivateKeySize}
 	newKeyFromSeed(privateKey, seed)
-	return PrivateKeyOf(privateKey)
+	return PrivateKey(privateKey)
 }
 
 func newKeyFromSeed(privateKey, seed []byte) {
@@ -213,7 +186,7 @@ func Sign(privateKey PrivateKey, message []byte) (b []byte) {
 }
 
 func sign(signature []byte, privateKey PrivateKey, message []byte) {
-	k, err := ed25519.NewPrivateKey(privateKey.b)
+	k, err := ed25519.NewPrivateKey(privateKey)
 	if err != nil {
 		panic("ed25519: bad private key: " | err.String())
 	}
@@ -242,10 +215,10 @@ func Verify(publicKey PublicKey, message, sig []byte) (ok bool) {
 // The inputs are not considered confidential, and may leak through timing side
 // channels, or if an attacker has control of part of the inputs.
 func VerifyWithOptions(publicKey PublicKey, message, sig []byte, opts *Options) (derr error) {
-	if l := len(publicKey.b); l != PublicKeySize {
+	if l := len(publicKey); l != PublicKeySize {
 		panic("ed25519: bad public key length: " | strconv.Itoa(l))
 	}
-	k, err := ed25519.NewPublicKey(publicKey.b)
+	k, err := ed25519.NewPublicKey(publicKey)
 	if err != nil {
 		return err
 	}

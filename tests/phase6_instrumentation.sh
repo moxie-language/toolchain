@@ -690,8 +690,6 @@ reject_fixture plustext "'+' is not allowed for text concatenation"
 # ("package-level var 'counter' with initializer is not allowed"), so the pin is
 # the part both compilers share verbatim.
 reject_fixture declvar "with initializer is not allowed"
-# 6x.2: a named slice type.
-reject_fixture namedslice "named slice type 'Names' is not allowed"
 
 # 6y..6z: the no-conflict rule reaches imports. Legacy rejects both shapes
 # through its own type checker (a redeclared import; a declaration already

@@ -1051,7 +1051,6 @@ func isUserPackageByPath(path string) bool {
 
 // checkPackageRestrictions runs package-scope checks that aren't per-function:
 // - reject var X = expr at package scope (step 8)
-// - reject named slice/map types (step 9)
 // - reject scope shadowing including builtins (step 10)
 // - enforce init() rules: main pkg can't have init, library max one, no select/spawn
 func (c *compilerContext) checkPackageRestrictions(pkg *loader.Package) {
@@ -1124,25 +1123,6 @@ func (c *compilerContext) checkPackageRestrictions(pkg *loader.Package) {
 								names += nm.Name
 							}
 							c.addError(vs.Pos(), "moxie: package-level var '"+names+"' with initializer is not allowed: use zero-value declaration and init()")
-						}
-					}
-				case token.TYPE:
-					for _, spec := range d.Specs {
-						ts := spec.(*ast.TypeSpec)
-						// An alias introduces no new named type: `type X = []T`
-						// is another spelling of []T, so the rule does not
-						// apply to it. stage4 exempts them the same way.
-						if ts.Assign.IsValid() {
-							continue
-						}
-						switch ts.Type.(type) {
-						case *ast.ArrayType:
-							at := ts.Type.(*ast.ArrayType)
-							if at.Len == nil {
-								c.addError(ts.Pos(), "moxie: named slice type '"+ts.Name.Name+"' is not allowed: use []T directly")
-							}
-						case *ast.MapType:
-							c.addError(ts.Pos(), "moxie: named map type '"+ts.Name.Name+"' is not allowed: use map[K]V directly")
 						}
 					}
 				}

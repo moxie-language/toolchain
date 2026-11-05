@@ -396,11 +396,15 @@ func collectMethodsDepth(T Type, ms map[string]*TCFunc, ptrOk bool, depth int32)
 		return
 	}
 	if u, isSlice := SafeUnderlying(T).(*Slice); isSlice && isTextType(T) {
-		// string and []byte are one type, so a []byte carries the string method
-		// set: a channel of []byte handed to fmt was "missing method String"
-		// while `string(x)` of the same bytes never was.
-		collectMethodsDepth(Typ[TCString], ms, false, depth+1)
-		return
+		// string and []byte are one type, so an UNNAMED []byte carries the
+		// string method set: a channel of []byte handed to fmt was "missing
+		// method String" while `string(x)` of the same bytes never was. A
+		// NAMED slice over byte has its own method set - that is the reason
+		// the name exists - so it must not be replaced by string's.
+		if _, isNamed := T.(*Named); !isNamed {
+			collectMethodsDepth(Typ[TCString], ms, false, depth+1)
+			return
+		}
 	}
 	switch t := T.(type) {
 	case *Basic:
@@ -563,7 +567,9 @@ func hasMethodNamed(T Type, name string, depth int32) (ok bool) {
 		return false
 	}
 	if u, isSlice := SafeUnderlying(T).(*Slice); isSlice && isTextType(T) {
-		return hasMethodNamed(Typ[TCString], name, depth+1)
+		if _, isNamed := T.(*Named); !isNamed {
+			return hasMethodNamed(Typ[TCString], name, depth+1)
+		}
 	}
 	switch t := T.(type) {
 	case *Basic:
