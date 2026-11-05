@@ -4,39 +4,39 @@ State carried across context compaction. Ordered queue, the decisions already
 taken, the findings that motivated them, and the two designs in flight
 (module removal, user-code exemption). Update this file when the queue moves.
 
-## NEXT: IDLE-TIME ARENA GROOMING (designed, not built)
+## IDLE-TIME ARENA GROOMING: MEASURED, NOT WORTH IT IN THIS ALLOCATOR
 
-Felten and Ott's 1995 argument: collect at idle so the active path never pays.
-Arenas make it cheaper than tracing: an idle domain can drop the tail of an
-arena and `madvise(MADV_DONTNEED)` the pages away, so the cost is proportional
-to pages returned, not to live data. That is the whole advantage of having no
-heap, and the same reason freeing is bulk here.
+Felten and Ott's argument (collect at idle so the active path never pays) was
+tried as tail trimming: in the select park loop, `madvise(MADV_DONTNEED)` the
+pages past the arena's bump offset, one page per readiness re-check. Implemented,
+baked, measured, reverted. The measurement is the finding:
 
-The design constraint is that idle work must be incremental and abortable, or
-it lands on the message that wakes the domain:
+- `/proc/self/statm` field 1 is VmSize, not RSS; field 2 is resident. A probe
+  that touches a 40 MB slice and parks shows VmSize 257 MB but resident 42 MB.
+- The 24 MB of the 64 MB chain region past the bump offset was NEVER resident:
+  no write ever touched it, so dropping it changes nothing. Resident RSS stayed
+  at 65781/65781 pages across seven seconds of idle parking (VmSize) and
+  VmRSS 42 MB (field 2), flat.
+- There is no resident idle tail to collect because of how the allocator
+  releases: a frame arena over `arenaPoolMaxBytes` (4 MB) is UNMAPPED at return
+  (`ArenaFree`), and the pool holds at most `arenaPoolMax` (8) arenas whose
+  regions are 64 KB, i.e. <=512 KB total. Growth backings abandoned inside a
+  live frame sit BELOW the bump offset, interleaved with live data, so a tail
+  trim cannot reach them.
 
-- one page at a time, yield between pages, and re-check the inbox/select arms
-  before each page;
-- then the worst case is a single page of delay, not a full compaction in the
-  middle of an arrival, and the page is refaulted (zero-filled) by the next
-  allocation with no bookkeeping change (`off` is not moved).
+The real idle work is already in place: `chanSelect` drains the sovereign
+compaction queue (`SovDrainCompactions(1)`), which reclaims dead blocks in
+sovereign arenas - the only arenas that retain growth garbage while a receiver
+lives. Ordinary frames are released wholesale at return.
 
-The trigger already exists: `chanSelect` drains the sovereign compaction queue
-at every select (`SovDrainCompactions(1)`), and its blocking park loop is the
-domain's idle window. Tail trimming belongs in that loop, with a small budget
-per iteration and the arm re-check between pages. Arenas to trim: the domain's
-root arena and the arenas on its fn stack (a suspended frame's unused tail is
-safe to release; it refaults when the frame resumes). The arena pool's idle
-arenas are the other candidate and the place a big frame's RSS actually sits
-after it returns.
+If idle page trimming is ever wanted, it has to start from a policy change:
+retain large arenas in the pool (raise `arenaPoolMaxBytes`) and trim their used
+ranges at idle, trading resident RSS while active for mmap churn on reuse. That
+is a separate, measurable decision - do not add the trim without it.
 
-The acceptance test is two numbers, as stated:
-
-1. RSS falls while the domain is idle (read /proc/self/statm from a probe).
-2. The first message after idleness is answered with no stall.
-
-If (1) holds and (2) fails, the grooming is running while the cat is trying to
-eat, and the budget/abort point is wrong.
+The acceptance test remains two numbers: RSS (field 2) falls while idle, and the
+first message after idleness is answered with no stall. On the current policy
+the first number does not move.
 
 ## ROUND 382: VALUE RECEIVERS OVER NAMED SLICES/MAPS, COMPACTION AT SELECT
 
