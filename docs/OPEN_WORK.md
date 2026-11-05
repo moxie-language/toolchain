@@ -4,6 +4,18 @@ State carried across context compaction. Ordered queue, the decisions already
 taken, the findings that motivated them, and the two designs in flight
 (module removal, user-code exemption). Update this file when the queue moves.
 
+## ROUND 380 VERIFICATION
+
+Final sources built as `mxc-s12` (that is, mxc-s8 compiling `_mxc_stage4` with
+the round's changes):
+
+- phase 2 (selfhost + fixpoint): PASS, 183 s.
+- phase 5 (wasm fixtures): **117 units, 116 passed, 0 failed, 1 skipped** (the
+  declared native-only crosspkg).
+- phases 0a + 0b + 4 + 1c: **192 units, 192 passed, 0 failed**.
+- `tests/wasm/validate.sh` under `legacy/moxie` (the legacy-built wasm sweep):
+  see the run recorded below.
+
 ## STANDING ISSUES (round 380) - legacy/wood-law residuals
 
 The full legacy-wasm sweep on the box (117 fixtures, two at a time) closed the
