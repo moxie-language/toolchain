@@ -115,6 +115,18 @@ accepted 45 bytes at all (PipeChanSend counts the send before its budget and
 space checks), so print `ringSend`'s return and the ring's `writeIdx`/`readIdx`
 on both sides.
 
+Entry counters shipped from the worker changed the picture again: on the
+STRUCTURAL direct-recv cell the values arrive correctly while
+`recvStruct=0` and `codecFrameDecode` frames-seen `=0`. So the working receive
+never touches `PipeChanRecvStructural` or the frame decoder at all - the direct
+receive for a `chan Msg` element is emitted through a different entry (the
+codec-interface or extent dispatch), and the structural cell only proves that
+entry works. The offset cells fail because the offset frame is written by
+`PipeChanSendStructural`, which the other receive entry does not read back the
+same way. Next: identify the receive function the compiler actually emits for
+the direct case (grep the emitted IR for the recv call) and route the offset
+frame through the same send/receive pair instead of the structural one.
+
 The endianness point is the reason both formats exist: the offset frame is a
 memory copy and therefore host-endian, while the wire codec is one fixed
 little-endian format for pipes and sockets. Same walk, different byte order and

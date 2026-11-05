@@ -326,7 +326,12 @@ func SharedBuffer(n int32) (b []byte) {
 
 // PipeChanSendStructural encodes one value structurally onto the send ring.
 func PipeChanSendStructural(ch *channel, td *RawType, value unsafe.Pointer) bool {
+	chanDbgSendStruct++
 	if ch == nil || !ch.spawnBound || td == nil || value == nil {
+		chanDbgSendEarly++
+		if td == nil {
+			chanDbgSendTdNil++
+		}
 		return false
 	}
 	frame, ok := codecFrameEncode(nil, td, value, ch.elementSize)
@@ -340,7 +345,12 @@ func PipeChanSendStructural(ch *channel, td *RawType, value unsafe.Pointer) bool
 // the receiver's own T-sized slot. A slice element therefore arrives with a
 // fresh backing in the receiver's current arena.
 func PipeChanRecvStructural(ch *channel, td *RawType, value unsafe.Pointer) bool {
+	chanDbgRecvStruct++
 	if ch == nil || !ch.spawnBound || td == nil || value == nil {
+		chanDbgRecvEarly++
+		if td == nil {
+			chanDbgRecvTdNil++
+		}
 		return false
 	}
 	data, ok := PipeChanRecv(ch)
@@ -405,6 +415,8 @@ func (ch *channel) tryPipeSend(value unsafe.Pointer, c moxie.Codec, td *RawType)
 var chanDbgSent, chanDbgRecv, chanDbgZero, chanDbgClosed uint64
 var chanDbgSendCh, chanDbgRecvCh uintptr
 var chanDbgLastLen uintptr
+var chanDbgSendStruct, chanDbgRecvStruct, chanDbgSendEarly, chanDbgRecvEarly uint64
+var chanDbgSendTdNil, chanDbgRecvTdNil, chanDbgFrameIn, chanDbgFrameFail uint64
 
 // ChanDebugReport prints the counters and the last handles for this domain.
 func ChanDebugReport() {
@@ -433,6 +445,23 @@ func ChanDebugCounters() (sent, recv, zero, closed uint64) {
 
 func ChanDebugHandle() (sendCh, recvCh, lastLen uintptr) {
 	return chanDbgSendCh, chanDbgRecvCh, chanDbgLastLen
+}
+
+// ChanDebugCounters2 reports the structural-entry counters: how many calls
+// reached the structural path, how many returned early, how many had a nil
+// descriptor, and how many frames reached codecFrameDecode.
+func ChanDebugCounters2() (sendStruct, recvStruct, sendEarly, recvEarly, sendTdNil, recvTdNil, frameIn, frameFail uint64) {
+	return chanDbgSendStruct, chanDbgRecvStruct, chanDbgSendEarly, chanDbgRecvEarly, chanDbgSendTdNil, chanDbgRecvTdNil, chanDbgFrameIn, chanDbgFrameFail
+}
+
+// chanDbgFrameEnter is called from codecFrameDecode so a domain can report
+// whether the decoder was entered (frames seen) without a print.
+func chanDbgFrameEnter() {
+	chanDbgFrameIn++
+}
+
+func chanDbgFrameReject() {
+	chanDbgFrameFail++
 }
 
 func (ch *channel) tryPipeRecv(value unsafe.Pointer, c moxie.Codec, td *RawType) (received, ok bool) {
