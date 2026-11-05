@@ -48,6 +48,14 @@ log_skip() {
 	echo "SKIP" >> "$STATUSFILE"
 }
 
+# first_error prints the first diagnostic line of a compiler log, skipping the
+# [mem] instrumentation and the per-package "# path" header, so a failure shows
+# the message that matters instead of the memory statistics.
+first_error() {
+	local log="$1"
+	grep -v '^\[mem\]' "$log" 2>/dev/null | grep -v '^# ' | head -1
+}
+
 tempdir() {
 	local name="$1"
 	mkdir -p "$TMPROOT/$name"

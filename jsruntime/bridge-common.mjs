@@ -94,6 +94,19 @@ export function sabRecv(sab, dstBuf) {
   }
 }
 
+// sabTryRecv is the non-blocking probe the toolchain runtime's select arm
+// needs: -2 empty and open, -1 closed, else the byte count. The app host is a
+// second implementation of the same bridge (jsruntime/host.mjs is the first),
+// so an import the runtime adds must exist here too or the app's module fails
+// to instantiate.
+export function sabTryRecv(sab, dst) {
+  const u32 = new Uint32Array(sab);
+  if (Atomics.load(u32, 0) === Atomics.load(u32, 1)) {
+    return (Atomics.load(u32, 4) & 1) ? -1 : -2;
+  }
+  return sabRecv(sab, dst);
+}
+
 export function sabClose(sab) {
   const u32 = new Uint32Array(sab);
   Atomics.or(u32, 4, 1);
@@ -348,6 +361,14 @@ export function makeCommonBridge(h, sabTable, sabSeqRef, wasmUrlRef, buildHashRe
         // set() writes the received bytes directly to that address.
         readBytes(dstPtr, n).set(dst.subarray(0, n));
       }
+      return n;
+    },
+    channel_try_recv(handle, dstPtr, dstCap, cap) {
+      const sab = sabTable.get(handle);
+      if (!sab) return -1;
+      const dst = new Uint8Array(dstCap);
+      const n = sabTryRecv(sab, dst);
+      if (n > 0) readBytes(dstPtr, n).set(dst.subarray(0, n));
       return n;
     },
     channel_close(handle) {
