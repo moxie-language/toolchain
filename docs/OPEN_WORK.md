@@ -10,30 +10,18 @@ Round 378 closed everything it listed, and round 379 closed the wasm panic gate
 and the wasm spawn defects that gate exposed. What is left is one pre-existing
 gap and one environment note.
 
-### 1. Legacy wasm: fmt's printer receiver is nil (the rest of the target works)
+### 1. Legacy wasm: a named residual set, not a wall
 
-`legacy/moxie build -target wasm` used to crash on ANY program at `e21b7be0`
-(placeholder builtin `String()` methods had no receiver and `ssa.MethodValue`
-dereferenced it). That, the linkname declarations, the missing
-`basic:<kind>.String$identity` thunks, the 64-bit index on the 32-bit target,
-and the missing `timezone_offset_minutes` bridge import are fixed. Measured:
-`hello` runs in Chromium, `close_breaker`'s spawn/close path works, and the wasm
-panic gate PASSes under `MOXIE=legacy/moxie`. `-target wasm` no longer crashes.
+`-target wasm` builds, runs `hello`, fmt-printing programs, spawn and the panic
+gate under `MOXIE=legacy/moxie`. Three 32-bit assumptions in `src/runtime/codec.mx`
+were the last wall: a 1 MiB bad-pointer floor (wasm keeps stack and data below
+it, so `newPrinter`'s return decoded as nil), an 8-byte stable pointer on a
+4-byte target, and an 8-byte interface typecode read.
 
-What is left is the fmt path: any fixture that prints through `fmt` dies with
-`panic: runtime error: sovereign: nil receiver` inside
-`runtime.codecSovereignArena`, called from `fmt.(*fmt.pp).doPrintln`. The `pp`
-receiver is nil by the time the method runs - newPrinter's pointer does not
-survive, or the method call drops it, in legacy's wasm codegen only. Repro:
-
-    rm -rf /tmp/cb && mkdir -p /tmp/cb/pkg
-    cp tests/regressions/should_compile/close_breaker.mx /tmp/cb/pkg/main.mx
-    LLVM_GLUE_PATH=$PWD/llvm-glue/libmoxie-llvm-glue.so MOXIEROOT=$PWD \
-        ./legacy/moxie build -target wasm -o /tmp/cb/app.wasm /tmp/cb
-    RUN_SETTLE_MS=1000 python3 tests/wasm/run.py -q /tmp/cb/app.wasm
-
-Stage4 is unaffected, so the gates are green; this is the remaining wood-law
-work on the wasm side.
+Legacy still differs on: `asn1_tag_mismatch` (arena region grow fails inside a
+codec decode in fmt), `bessel_large_x` (panic `Lgamma(3)`), `bzip2_gif_roundtrip`
+(output differs), `compress_roundtrip` (browser run fails). Stage4 passes all
+four. Each is its own codegen investigation.
 
 ### 2. This shell's GOROOT is not a Go tree
 
