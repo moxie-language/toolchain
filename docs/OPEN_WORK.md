@@ -117,6 +117,14 @@ once at creation so no emit site decides independently; keep the debug codec-id
 stamp that panics on a send/recv mismatch at the first delivery; and the named
 recv-dispatch test.
 
+The positive control this round earned: every probe or test run must print a
+known canary line at the start and the runner must assert it arrived. "No
+output" is never evidence - a dead sink (printFD=0) made a decoder rejecting
+every frame look like a decoder that was never entered for three rounds. The
+spawn-worker fixture prints `worker canary` as its first line and asserts the
+worker's own print descriptor; run it by hand when a domain diagnostic is in
+question, and treat a missing canary as a broken rig, not a result.
+
 ## ROUND 383: STDLIB NAMED TYPES, POP FORMS, IDLE GROWTH RATCHET
 
 - net.IP, net.IPMask, net.HardwareAddr are named slice types with methods
