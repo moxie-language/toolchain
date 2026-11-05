@@ -1,0 +1,36 @@
+// A spawned domain must be able to print. Runtime package variables are not
+// re-initialised through the package initialisers in a new domain, so their
+// static initialisers never fired: printFD stayed 0 and every println or
+// runtime print in a worker wrote to fd 0 (read-only) and vanished, which made
+// every domain-level diagnostic invisible. initDomain seeds it now; this pins
+// the seed by asking the worker for the descriptor it prints through.
+package main
+
+import "runtime"
+
+func worker(out chan int32) (closed chan struct{}) {
+	select {
+	case <-closed:
+		return closed
+	default:
+	}
+	println("worker print")
+	out <- runtime.PrintFDValue()
+	return closed
+}
+
+func main() {
+	select {
+	case <-sigint:
+		return
+	default:
+	}
+	out := chan int32{:2}
+	done := spawn(worker, out)
+	fd := <-out
+	if fd != 1 {
+		panic("worker print descriptor is not 1")
+	}
+	<-done
+	println("spawn print ok")
+}
