@@ -18,18 +18,23 @@ takes its fixed-width default).
 
 Three remain, each a distinct piece of work:
 
-1. `untyped_unsigned_float` - `uint64(0)-1` must come out 18446744073709551615
-   (the fixture, and stage4, wrap). go/types rejects a negative constant of
-   unsigned type. This is a LANGUAGE decision: Moxie constant arithmetic on
-   unsigned types wraps, or it is an error. Legacy follows the error today.
-2. `slice_alias_crosspkg` - `lib.Nat{:3}`, where `Nat = []Word`, is not
-   `[]T{:n}`: the text rewriter only matches a literal `[` and mangles the
-   named-slice form into `lib.__slicealloc(Nat, 3)`. The rewriter needs to take
-   any type expression before `{:`.
-3. `generic_field_read` - `func (e *node[T]) ...` with a pointer type parameter
-   as the receiver base: go/types says "receiver type parameter *node must be
-   an identifier"; stage4 supports it. A generics patch to the checker and the
-   SSA builder.
+1. `untyped_unsigned_float` - DECIDED: constant overflow is a compile error.
+   `uint64(0)-1` must be rejected (legacy/go/types already does; stage4's
+   constant folder wraps and must be taught to reject). The fixture becomes a
+   restrictions test once stage4 rejects it.
+2. `slice_alias_crosspkg` - DECIDED: a named slice does not exist in Moxie, so
+   `Nat{:3}` is not a construct. The fixture goes; a restrictions test asserts
+   the rejection. stage4 accepts it today (its rewriter understands the form);
+   legacy mangles it into `lib.__slicealloc(Nat, 3)` in the text pass. Both need
+   a clear diagnostic before the test can be added.
+3. `generic_field_read` - NOT the field-offset problem. The failing line is
+   `func (t *table[string, *node]) scan(...)`: a method on an INSTANTIATED
+   generic type, which Go forbids (methods go on the defined generic, not an
+   instantiation). Stage4 accepts it; go/types rejects it with "receiver type
+   parameter *node must be an identifier". So it is a third stage4 leniency,
+   not a lowering variant - decide whether Moxie allows instantiated receivers
+   (then legacy needs the feature) or not (then stage4 rejects and the fixture
+   goes).
 
 Box environment notes: `/etc/cron.d/idle-shutdown` powers the server off after
 30 minutes with no login session and load < 2 (it is disabled while working:
