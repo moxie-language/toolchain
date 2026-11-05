@@ -148,8 +148,8 @@ func (e *encoder) writeHeader() {
 	byteorder.LEPutUint16At(e.buf, 2, uint16(e.g.Config.Height))
 	e.write(e.buf[:4])
 
-	if gp, ok := e.g.Config.ColorModel.(*image.Palette); ok && len(gp.Element) > 0 {
-		p := gp.Element
+	if gp, ok := e.g.Config.ColorModel.(image.Palette); ok && len(gp) > 0 {
+		p := gp
 		paddedSize := log2(len(p)) // Size of Global Color Table: 2^(1+n).
 		e.buf[0] = fColorTable | uint8(paddedSize)
 		e.buf[1] = e.g.BackgroundIndex
@@ -236,7 +236,7 @@ func (e *encoder) writeImageBlock(pm *image.Paletted, delay int32, disposal byte
 		return
 	}
 
-	if len(pm.Palette.Element) == 0 {
+	if len(pm.Palette) == 0 {
 		e.err = errors.New("gif: cannot encode image block with empty palette")
 		return
 	}
@@ -252,7 +252,7 @@ func (e *encoder) writeImageBlock(pm *image.Paletted, delay int32, disposal byte
 	}
 
 	transparentIndex := -1
-	for i, c := range pm.Palette.Element {
+	for i, c := range pm.Palette {
 		if c == nil {
 			e.err = errors.New("gif: cannot encode color table with nil entries")
 			return
@@ -294,11 +294,11 @@ func (e *encoder) writeImageBlock(pm *image.Paletted, delay int32, disposal byte
 	// global palette, we can check a couple things. First, do they actually
 	// point to the same []color.Color? If so, they are equal so long as the
 	// frame's palette is not longer than the global palette...
-	paddedSize := log2(len(pm.Palette.Element)) // Size of Local Color Table: 2^(1+n).
-	if gp, ok := e.g.Config.ColorModel.(*image.Palette); ok && len(pm.Palette.Element) <= len(gp.Element) && &gp.Element[0] == &pm.Palette.Element[0] {
+	paddedSize := log2(len(pm.Palette)) // Size of Local Color Table: 2^(1+n).
+	if gp, ok := e.g.Config.ColorModel.(image.Palette); ok && len(pm.Palette) <= len(gp) && &gp[0] == &pm.Palette[0] {
 		e.writeByte(0) // Use the global color table.
 	} else {
-		ct, err := encodeColorTable(e.localColorTable[:], pm.Palette.Element, paddedSize)
+		ct, err := encodeColorTable(e.localColorTable[:], pm.Palette, paddedSize)
 		if err != nil {
 			if e.err == nil {
 				e.err = err
@@ -308,7 +308,7 @@ func (e *encoder) writeImageBlock(pm *image.Paletted, delay int32, disposal byte
 		// This frame's palette is not the very same slice as the global
 		// palette, but it might be a copy, possibly with one value turned into
 		// transparency by DecodeAll.
-		if ct <= e.globalCT && e.colorTablesMatch(len(pm.Palette.Element), transparentIndex) {
+		if ct <= e.globalCT && e.colorTablesMatch(len(pm.Palette), transparentIndex) {
 			e.writeByte(0) // Use the global color table.
 		} else {
 			// Use a local color table.
@@ -384,7 +384,7 @@ func EncodeAll(w io.Writer, g *GIF) (out error) {
 		e.g.Config.Width = p.X
 		e.g.Config.Height = p.Y
 	} else if e.g.Config.ColorModel != nil {
-		if _, ok := e.g.Config.ColorModel.(*image.Palette); !ok {
+		if _, ok := e.g.Config.ColorModel.(image.Palette); !ok {
 			return errors.New("gif: GIF color model must be an image.Palette")
 		}
 	}
@@ -435,14 +435,14 @@ func Encode(w io.Writer, m image.Image, o *Options) (out error) {
 	// slice type with a Convert method, and Moxie has neither, so a color.Model
 	// can never be a palette. A *image.Paletted is the only image whose pixels
 	// are already indices, and it is handled above.
-	if pm == nil || len(pm.Palette.Element) > opts.NumColors {
+	if pm == nil || len(pm.Palette) > opts.NumColors {
 		// Set pm to be a palettedized copy of m, including its bounds, which
 		// might not start at (0, 0).
 		//
 		// TODO: Pick a better sub-sample of the Plan 9 palette.
 		pm = image.NewPaletted(b, palette.Plan9()[:opts.NumColors])
 		if opts.Quantizer != nil {
-			pm.Palette.Element = opts.Quantizer.Quantize([]color.Color{:0:opts.NumColors}, m)
+			pm.Palette = opts.Quantizer.Quantize([]color.Color{:0:opts.NumColors}, m)
 		}
 		opts.Drawer.Draw(pm, b, m, b.Min)
 	}

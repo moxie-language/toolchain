@@ -1134,22 +1134,20 @@ func NewCMYK(r Rectangle) (out *CMYK) {
 	}
 }
 
-// Palette is a palette of colors. It is a struct wrapping the slice rather than
-// a named slice type, which Moxie forbids; the colors live in Element and the
-// three methods are what makes a Palette a [color.Model].
-type Palette struct {
-	Element []color.Color
-}
+// Palette is a palette of colors: a named slice, and the three methods are
+// what makes a Palette a [color.Model]. A value receiver is a reference
+// receiver for a named slice, so Convert and Index see the caller's colors.
+type Palette []color.Color
 
 // Len returns the number of colors in the palette.
-func (p *Palette) Len() (out int32) { return len(p.Element) }
+func (p Palette) Len() (out int32) { return len(p) }
 
 // Index returns the index of the palette color closest to c in Euclidean
 // R,G,B,A space.
-func (p *Palette) Index(c color.Color) (out int32) { return color.PaletteIndex(p.Element, c) }
+func (p Palette) Index(c color.Color) (out int32) { return color.PaletteIndex(p, c) }
 
 // Convert returns the palette color closest to c.
-func (p *Palette) Convert(c color.Color) (out color.Color) { return color.PaletteConvert(p.Element, c) }
+func (p Palette) Convert(c color.Color) (out color.Color) { return color.PaletteConvert(p, c) }
 
 // Paletted is an in-memory image of uint8 indices into a given palette.
 type Paletted struct {
@@ -1169,26 +1167,26 @@ func (p *Paletted) ColorModel() (out color.Model) { return &p.Palette }
 func (p *Paletted) Bounds() (out Rectangle) { return p.Rect }
 
 func (p *Paletted) At(x, y int32) (out color.Color) {
-	if len(p.Palette.Element) == 0 {
+	if len(p.Palette) == 0 {
 		return nil
 	}
 	if !(Point{x, y}.In(p.Rect)) {
-		return p.Palette.Element[0]
+		return p.Palette[0]
 	}
 	i := p.PixOffset(x, y)
-	return p.Palette.Element[p.Pix[i]]
+	return p.Palette[p.Pix[i]]
 }
 
 func (p *Paletted) RGBA64At(x, y int32) (out color.RGBA64) {
-	if len(p.Palette.Element) == 0 {
+	if len(p.Palette) == 0 {
 		return color.RGBA64{}
 	}
 	c := color.Color(nil)
 	if !(Point{x, y}.In(p.Rect)) {
-		c = p.Palette.Element[0]
+		c = p.Palette[0]
 	} else {
 		i := p.PixOffset(x, y)
-		c = p.Palette.Element[p.Pix[i]]
+		c = p.Palette[p.Pix[i]]
 	}
 	r, g, b, a := c.RGBA()
 	return color.RGBA64{
@@ -1210,7 +1208,7 @@ func (p *Paletted) Set(x, y int32, c color.Color) {
 		return
 	}
 	i := p.PixOffset(x, y)
-	p.Pix[i] = uint8(color.PaletteIndex(p.Palette.Element, c))
+	p.Pix[i] = uint8(color.PaletteIndex(p.Palette, c))
 }
 
 func (p *Paletted) SetRGBA64(x, y int32, c color.RGBA64) {
@@ -1218,7 +1216,7 @@ func (p *Paletted) SetRGBA64(x, y int32, c color.RGBA64) {
 		return
 	}
 	i := p.PixOffset(x, y)
-	p.Pix[i] = uint8(color.PaletteIndex(p.Palette.Element, c))
+	p.Pix[i] = uint8(color.PaletteIndex(p.Palette, c))
 }
 
 func (p *Paletted) ColorIndexAt(x, y int32) (out uint8) {
@@ -1269,7 +1267,7 @@ func (p *Paletted) Opaque() (out bool) {
 		i0 += p.Stride
 		i1 += p.Stride
 	}
-	for i, c := range p.Palette.Element {
+	for i, c := range p.Palette {
 		if !present[i] {
 			continue
 		}
@@ -1288,6 +1286,6 @@ func NewPaletted(r Rectangle, p []color.Color) (out *Paletted) {
 		Pix:     []uint8{:pixelBufferLength(1, r, "Paletted")},
 		Stride:  1 * r.Dx(),
 		Rect:    r,
-		Palette: Palette{Element: p},
+		Palette: Palette(p),
 	}
 }

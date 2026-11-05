@@ -395,7 +395,7 @@ func (d *decoder) readImageDescriptor(keepAllFrames bool) (out error) {
 	}
 	useLocalColorTable := d.imageFields&fColorTable != 0
 	if useLocalColorTable {
-		m.Palette.Element, err = d.readColorTable(d.imageFields)
+		m.Palette, err = d.readColorTable(d.imageFields)
 		if err != nil {
 			return err
 		}
@@ -403,26 +403,26 @@ func (d *decoder) readImageDescriptor(keepAllFrames bool) (out error) {
 		if d.globalColorTable == nil {
 			return errors.New("gif: no color table")
 		}
-		m.Palette.Element = d.globalColorTable
+		m.Palette = d.globalColorTable
 	}
 	if d.hasTransparentIndex {
 		if !useLocalColorTable {
 			// Clone the global color table.
-			m.Palette.Element = push([]color.Color(nil), d.globalColorTable...)
+			m.Palette = push([]color.Color(nil), d.globalColorTable...)
 		}
-		if ti := int32(d.transparentIndex); ti < len(m.Palette.Element) {
-			m.Palette.Element[ti] = &color.RGBA{}
+		if ti := int32(d.transparentIndex); ti < len(m.Palette) {
+			m.Palette[ti] = &color.RGBA{}
 		} else {
 			// The transparentIndex is out of range, which is an error
 			// according to the spec, but Firefox and Google Chrome
 			// seem OK with this, so we enlarge the palette with
 			// transparent colors. See golang.org/issue/15059.
 			p := []color.Color{:ti+1}
-			copy(p, m.Palette.Element)
-			for i := len(m.Palette.Element); i < len(p); i++ {
+			copy(p, m.Palette)
+			for i := len(m.Palette); i < len(p); i++ {
 				p[i] = &color.RGBA{}
 			}
-			m.Palette.Element = p
+			m.Palette = p
 		}
 	}
 	litWidth, err := readByte(d.r)
@@ -469,9 +469,9 @@ func (d *decoder) readImageDescriptor(keepAllFrames bool) (out error) {
 	}
 
 	// Check that the color indexes are inside the palette.
-	if len(m.Palette.Element) < 256 {
+	if len(m.Palette) < 256 {
 		for _, pixel := range m.Pix {
-			if int32(pixel) >= len(m.Palette.Element) {
+			if int32(pixel) >= len(m.Palette) {
 				return errBadPixel
 			}
 		}
@@ -621,7 +621,7 @@ func DecodeAll(r io.Reader) (out *GIF, derr error) {
 		Delay:     d.delay,
 		Disposal:  d.disposal,
 		Config: image.Config{
-			ColorModel: &image.Palette{Element: d.globalColorTable},
+			ColorModel: image.Palette(d.globalColorTable),
 			Width:      d.width,
 			Height:     d.height,
 		},
@@ -638,7 +638,7 @@ func DecodeConfig(r io.Reader) (cfg image.Config, derr error) {
 		return image.Config{}, err
 	}
 	return image.Config{
-		ColorModel: &image.Palette{Element: d.globalColorTable},
+		ColorModel: image.Palette(d.globalColorTable),
 		Width:      d.width,
 		Height:     d.height,
 	}, nil

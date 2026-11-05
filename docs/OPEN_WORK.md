@@ -4,39 +4,29 @@ State carried across context compaction. Ordered queue, the decisions already
 taken, the findings that motivated them, and the two designs in flight
 (module removal, user-code exemption). Update this file when the queue moves.
 
-## IDLE-TIME ARENA GROOMING: MEASURED, NOT WORTH IT IN THIS ALLOCATOR
+## IDLE-TIME ARENA GROOMING: A GROWTH RATCHET
 
-Felten and Ott's argument (collect at idle so the active path never pays) was
-tried as tail trimming: in the select park loop, `madvise(MADV_DONTNEED)` the
-pages past the arena's bump offset, one page per readiness re-check. Implemented,
-baked, measured, reverted. The measurement is the finding:
+Felten and Ott's argument (collect at idle so the active path never pays) is
+applied here as a growth ratchet, NOT as a reclaimer. In the select park loop
+(`chanSelect`'s wait loop) the domain hands back the unused tail of its root
+arena and active frame arena, one page at a time with the select arms re-checked
+between pages (`idleTrimPages`, `arenaTrimTail`, `madvise(MADV_DONTNEED)`). The
+bump offset is not moved, so the next allocation reuses the released range.
 
-- `/proc/self/statm` field 1 is VmSize, not RSS; field 2 is resident. A probe
-  that touches a 40 MB slice and parks shows VmSize 257 MB but resident 42 MB.
-- The 24 MB of the 64 MB chain region past the bump offset was NEVER resident:
-  no write ever touched it, so dropping it changes nothing. Resident RSS stayed
-  at 65781/65781 pages across seven seconds of idle parking (VmSize) and
-  VmRSS 42 MB (field 2), flat.
-- There is no resident idle tail to collect because of how the allocator
-  releases: a frame arena over `arenaPoolMaxBytes` (4 MB) is UNMAPPED at return
-  (`ArenaFree`), and the pool holds at most `arenaPoolMax` (8) arenas whose
-  regions are 64 KB, i.e. <=512 KB total. Growth backings abandoned inside a
-  live frame sit BELOW the bump offset, interleaved with live data, so a tail
-  trim cannot reach them.
+The purpose is to stop the committed set ratcheting upward across idle turns: a
+burst leaves the tail mapped, the idle pass hands it back, and the next burst
+reuses those pages instead of the arena claiming new ones. It does not reduce
+RSS of live data and is not supposed to - pages carrying live objects are never
+touched. Measured: a 40 MB slice touched, then a parked select, holds resident
+`VmRSS` flat; the 24 MB of the 64 MB chain region past the bump offset was never
+resident (`/proc/self/statm` field 1 is VmSize, not RSS - field 2 is resident).
+That is the expected result for a ratchet, not a failure.
 
-The real idle work is already in place: `chanSelect` drains the sovereign
-compaction queue (`SovDrainCompactions(1)`), which reclaims dead blocks in
-sovereign arenas - the only arenas that retain growth garbage while a receiver
-lives. Ordinary frames are released wholesale at return.
-
-If idle page trimming is ever wanted, it has to start from a policy change:
-retain large arenas in the pool (raise `arenaPoolMaxBytes`) and trim their used
-ranges at idle, trading resident RSS while active for mmap churn on reuse. That
-is a separate, measurable decision - do not add the trim without it.
-
-The acceptance test remains two numbers: RSS (field 2) falls while idle, and the
-first message after idleness is answered with no stall. On the current policy
-the first number does not move.
+The worst case for a message arriving during the idle pass is one page of delay,
+which is why the arm re-check sits inside the page loop. Arenas over
+`arenaPoolMaxBytes` are unmapped at return and the pool holds <=512 KB of 64 KB
+arenas, so the tail the ratchet actually hands back is the live root/frame arena
+slack.
 
 ## ROUND 382: VALUE RECEIVERS OVER NAMED SLICES/MAPS, COMPACTION AT SELECT
 

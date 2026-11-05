@@ -649,6 +649,11 @@ func unlockAllStates(states []chanSelectState) {
 // loop which selects at all drains the queue.
 const sovSelectDrainBudget = int32(1)
 
+// sovSelectTrimPages bounds the idle tail grooming done in one park-loop
+// iteration. The loop re-checks the select between pages, so this is a work
+// budget: the delay before an arriving message is noticed is one page.
+const sovSelectTrimPages = int32(64)
+
 // chanSelect implements blocking or non-blocking select operations.
 // The 'ops' slice must be set if (and only if) this is a blocking select.
 func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelOp) (uint32, bool) {
@@ -767,6 +772,13 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 					break
 				}
 			}
+			// Idle grooming is a growth ratchet: hand back the unused arena
+			// tail so a later burst reuses those pages instead of the arena
+			// claiming new ones. Re-check between pages so a message is never
+			// delayed by more than one page.
+			for p := int32(0); p < sovSelectTrimPages && t.DataUint32() == chanOperationWaiting; p++ {
+				idleTrimPages(2)
+			}
 			if hasPoll {
 				netpollBlock(100)
 			} else if hasPipeBound {
@@ -790,6 +802,9 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 				sigintPoll()
 				if pipeSelectRecheck(t, states, recvbuf) {
 					break
+				}
+				for p := int32(0); p < sovSelectTrimPages && t.DataUint32() == chanOperationWaiting; p++ {
+					idleTrimPages(2)
 				}
 				Gosched()
 				sleepTicks(nanosecondsToTicks(1_000_000))

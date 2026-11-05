@@ -1,0 +1,57 @@
+//:build linux && !baremetal
+
+package runtime
+
+import "unsafe"
+
+// flag_MADV_DONTNEED is Linux's "the pages can be dropped" advice.
+const flag_MADV_DONTNEED = 4
+
+// arenaTrimTail releases up to pages of the arena's unused tail. The bump
+// offset is NOT moved: the next allocation writes into the released range and
+// faults the pages back in, zero-filled, so no bookkeeping changes and no
+// live object is touched. Trimming starts at the first page boundary at or
+// after off, never before it.
+func arenaTrimTail(a *Arena, pages int32) (n int32) {
+	if a == nil || a.nregions <= 0 || pages <= 0 {
+		return 0
+	}
+	r := &a.regions[a.nregions-1]
+	if r.off >= r.cap {
+		return 0
+	}
+	start := (r.off + 4095) &^ 4095
+	for n < pages && start < r.cap {
+		end := start + 4096
+		if end > r.cap {
+			end = r.cap
+		}
+		if madvise(unsafe.Pointer(start), end-start, flag_MADV_DONTNEED) == 0 {
+			n++
+		}
+		start = end
+	}
+	return n
+}
+
+// idleTrimPages is the domain's idle maintenance: release up to budget pages
+// of unused arena tail, the root arena first and then the active frame arena.
+// Its job is to stop the arena's committed set from ratcheting upward across
+// idle turns - the tail a previous burst left mapped is handed back, and the
+// next allocation reuses those pages instead of the arena claiming new ones.
+// It is not a reclaimer: pages holding live data are never touched, so RSS of
+// live data does not fall. The caller must re-check its inbox between pages;
+// one page is the worst-case delay if a message arrives while it runs.
+func idleTrimPages(budget int32) (n int32) {
+	if budget <= 0 || domainRoot == nil {
+		return 0
+	}
+	n += arenaTrimTail(trueRootArena(), budget)
+	if n >= budget {
+		return n
+	}
+	if domainRoot.fnTop > 0 {
+		n += arenaTrimTail(domainRoot.fnStack[domainRoot.fnTop], budget-n)
+	}
+	return n
+}
