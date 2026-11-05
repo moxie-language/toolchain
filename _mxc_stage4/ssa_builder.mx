@@ -8036,13 +8036,28 @@ func (fb *ssaFuncBuilder) buildCompositeLitInto(dst SSAValue, e *syntax.Composit
 	}
 	if _, isStruct := SafeUnderlying(typ).(*TCStruct); isStruct {
 		posIdx := int32(0)
+		foreign := fb.isForeignNamed(typ)
 		for _, el := range e.ElemList {
 			expr := syntax.Expr(el)
 			idx := posIdx
 			if kv, ok := el.(*syntax.KeyValueExpr); ok {
 				expr = kv.Value
 				if nm, ok2 := kv.Key.(*syntax.Name); ok2 {
+					// An unexported field may only be named by the package
+					// that declares the type. `lib.Holder{tag: 7}` from main
+					// used to compile and write the field.
+					if foreign && !exportedFieldName(nm.Value) {
+						reportCompileError("cannot refer to unexported field " | nm.Value | " in struct literal of type " | typ.String())
+						continue
+					}
 					idx = fb.fieldIndex(typ, nm.Value)
+				}
+			} else if foreign {
+				// The unkeyed form has the same rule: positional assignment to
+				// a foreign struct may not target an unexported field.
+				if st, okS := SafeUnderlying(typ).(*TCStruct); okS && idx >= 0 && idx < st.NumFields() && !exportedFieldName(st.Field(idx).Name) {
+					reportCompileError("cannot refer to unexported field " | st.Field(idx).Name | " in struct literal of type " | typ.String())
+					continue
 				}
 			}
 			posIdx++
@@ -9794,6 +9809,25 @@ func (fb *ssaFuncBuilder) resolveFuncTypeAST(ft *syntax.FuncType) (s *Signature)
 		rTuple = NewTuple(results...)
 	}
 	return NewSignature(nil, pTuple, rTuple, false)
+}
+
+// exportedFieldName reports whether a struct field name is exported (its first
+// character is not a lower-case ASCII letter). Moxie keeps Go's rule.
+func exportedFieldName(name string) (ok bool) {
+	return len(name) > 0 && !(name[0] >= 'a' && name[0] <= 'z')
+}
+
+// isForeignNamed reports whether t is a named type declared in a package other
+// than the one being compiled.
+func (fb *ssaFuncBuilder) isForeignNamed(t Type) (ok bool) {
+	named, isN := t.(*Named)
+	if !isN || named.Obj == nil || named.Obj.Pkg == nil {
+		return false
+	}
+	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
+		return false
+	}
+	return named.Obj.Pkg.Path != fb.fn.Pkg.Pkg.Path
 }
 
 func (fb *ssaFuncBuilder) fieldIndex(t Type, name string) (n int32) {
