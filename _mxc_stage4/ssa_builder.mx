@@ -6294,6 +6294,17 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		push(cctx.compileErrors, "recover() is not available in Moxie: a panic is fatal")
 		return nil
 	case BuiltinSpawn:
+		// Wasm spawn is refused at the SSA gate, which is read after this pass;
+		// a refusal written during IR emission was recorded and then ignored
+		// (and the emitter crashed on the zero register it left behind). The
+		// child's channel handles are threaded but its `closed` breaker result
+		// is not bound, so the body would receive through a null channel -
+		// undefined behaviour that passes any test which never delivers.
+		if mxutil.HasPrefix(cctx.compileTargetTriple, "wasm32") {
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, "spawn: spawn is not supported on the wasm target yet - a spawned domain's breaker and channel handles are not threaded, so the child would receive through a null channel (native only)")
+			return nil
+		}
 		fb.checkSpawnSignature(args)
 		call7 := &SSACall{Call: SSACallCommon{Value: b, Args: args}}
 		// spawn returns the target's breaker channel, typed exactly as the

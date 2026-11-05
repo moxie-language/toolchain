@@ -37,6 +37,36 @@ or test run must print a canary line first and assert it arrived; "no output"
 means the rig is broken, never that the code is innocent. The canary is in
 `spawn_worker_print_fd`, and the domain init seeds the sink.
 
+### FIRST: wasm spawn hands the child no endpoint (correctness, not a slow path)
+
+`wasm_spawn_struct` (a struct with a []byte through a spawn channel, same
+package) runs natively but the wasm build emitted
+`call i1 @runtime.chanRecv(i32 undef, ptr null, ptr %chan.op, ptr undef)` and
+failed verification. The channel PARAMETERS are threaded correctly
+(`__spawn_entry` reloads each handle and calls `SpawnChannelWrap`); what is not
+threaded is the target's `closed` breaker, which is the target's named result.
+Nothing binds that result before the body runs on wasm, so the body's select on
+`<-closed` lowers to a receive through a null channel - undefined behaviour that
+passes any test which never delivers a message. This is the same defect shape as
+the print sink: a child operating on an endpoint it does not hold.
+
+Resolution (shipped): wasm spawn is a HARD COMPILE ERROR in both compilers,
+with one named message: "spawn: spawn is not supported on the wasm target yet -
+a spawned domain's breaker and channel handles are not threaded, so the child
+would receive through a null channel (native only)". Legacy refuses at
+createSpawn; stage4 refuses at the SSA gate. The refusal found a second defect:
+stage4 read compile errors only AFTER SSA build and BEFORE IR emission, so an
+error written by the emitter was recorded and ignored (and the emitter crashed
+on the half-emitted spawn). The IR-emit gate now fails the package the same way
+the SSA gate does. The real fix remains threading the breaker handle through
+`__spawn_entry`; then the refusal and the fixture's skip come out.
+
+Measurement integrity: verdicts are bound to the commit AND to a hash of the
+working-tree status, written by `unit_verdict`; `verdict_current` invalidates a
+mismatch, so a stale verdict is treated as never run and is automatically
+re-run (this is what stops the driver reporting a FAIL from before a fixture was
+repaired).
+
 ### Blast radius (widened after the wiring)
 
 - `spawn_crosspkg_struct`: `lib.Msg{N int32, Body []byte}` through a spawn
@@ -49,10 +79,18 @@ means the rig is broken, never that the code is innocent. The canary is in
   a spawn target's channel receive has no channel handle on wasm. This is a
   real defect found by running the program, not by compiling it; the fixture is
   kept as the reproduction with `//:wasmtest skip` until it is fixed.
-- morly (the relay, a real program) built with stage4: `mxc-s41` produced
-  an 8.2MB binary and it runs (`--help` prints the relay usage). No fixture-only
-  coverage for the offset frames; the real program's channels are covered by the
-  same dispatch.
+- morly (the relay, a real program) built with stage4: `mxc-s41` produced an
+  8.2MB binary and it runs (`--help` prints the relay usage). That proves the
+  binary links and starts, NOT that the spawn/channel path works under load: no
+  event was published through the relay because that needs a config, ports and a
+  client, which was not cheap here. Recorded as an open check, not as evidence.
+
+Measurement integrity: the driver printed a stale FAIL (http_header_api from
+before its fixture repair). A verdict that can outlive the tree it describes is
+the pass/fail version of a dead sink. Bind each verdict to the commit hash and
+invalidate on mismatch; make the refresh automatic. Also pending: the sizer
+equality test (compile-time budget print from both compilers on one type file,
+diffed), which is cheap and independent.
 
 Next for the endpoint tag, with its two acceptance requirements: it belongs in
 the channel identity so a send/recv tag mismatch is a creation-time error, and

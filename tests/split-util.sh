@@ -94,6 +94,13 @@ unit_verdict() {
 	local v="$1" reason="$2" dir="${UNIT_STATE:-$(dirname "$STATUSFILE")}"
 	printf '%s\n' "$v" >"$dir/verdict"
 	printf '%s\n' "$reason" | tr '\n\t' '  ' >"$dir/reason"
+	# Bind the verdict to the tree it describes. A verdict that can outlive its
+	# commit is the pass/fail version of a dead diagnostic sink: it made the
+	# driver report a FAIL from before the fixture was repaired.
+	local c st
+	c="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+	st="$(git -C "$ROOT" status --porcelain 2>/dev/null | sha256sum | cut -d' ' -f1)"
+	printf '%s %s\n' "$c" "$st" >"$dir/commit"
 }
 
 # unit_ok NAME REASON / unit_no NAME REASON / unit_skipped NAME REASON: the only

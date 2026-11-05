@@ -173,7 +173,26 @@ unit_rc() { cat "$(state_dir "$1")/rc" 2>/dev/null || echo ""; }
 # the moment it knows the outcome, while the exit status is whatever the script
 # returned after that. A unit killed between the two would otherwise be reported
 # by a status that no longer matches what it concluded.
+# A verdict is current only for the commit that produced it. Stale verdicts are
+# invalidated (treated as never run) so the driver re-runs them instead of
+# reporting pass or fail for a tree that no longer exists.
+verdict_current() {
+	local d
+	d="$(state_dir "$1")"
+	[ -f "$d/verdict" ] || return 1
+	local want have st
+	want="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+	st="$(git -C "$ROOT" status --porcelain 2>/dev/null | sha256sum | cut -d' ' -f1)"
+	want="$want $st"
+	have="$(cat "$d/commit" 2>/dev/null || true)"
+	[ -n "$want" ] && [ "$want" = "$have" ]
+}
+
 unit_verdict_of() {
+	if [ -f "$(state_dir "$1")/verdict" ] && ! verdict_current "$1"; then
+		echo ""
+		return
+	fi
 	local v
 	v="$(cat "$(state_dir "$1")/verdict" 2>/dev/null || echo "")"
 	case "$v" in
@@ -268,7 +287,13 @@ for i in "${!UNITS[@]}"; do
 		esac
 	fi
 	rc="$(unit_verdict_of "$u")"
-	[ -n "$rc" ] || rc="$(unit_rc "$u")"
+	if [ -f "$(state_dir "$u")/verdict" ] && ! verdict_current "$u"; then
+		# Stale: never fall back to the old rc file, or a verdict from another
+		# tree would decide this run.
+		rc=""
+	else
+		[ -n "$rc" ] || rc="$(unit_rc "$u")"
+	fi
 	if [ "$FAILED_ONLY" = 1 ]; then
 		# A unit never run is work not done, which is what --failed asks to
 		# make up, so it counts as failed here.

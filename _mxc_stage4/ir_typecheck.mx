@@ -1415,6 +1415,28 @@ func CompileToIR(src []byte, name string, triple string, pkgDir string) (s strin
 		emitter.outFile.Close()
 		emitter.outFile = nil
 	}
+	// Errors recorded DURING IR emission must fail the build too. The gate above
+	// runs after SSA build, so a refusal written by the emitter (a bad channel
+	// operand, an unsupported construct) was recorded and then ignored - the
+	// module was emitted and linked, which is how a wasm spawn target reached
+	// the verifier with chanRecv(null). Same contract as the SSA gate.
+	if len(cctx.compileErrors) > 0 {
+		var errSegs []string
+		for _, ce := range cctx.compileErrors {
+			errSegs = mxutil.Ensure(errSegs, 1)
+			push(errSegs, "; " | ce | "\n")
+		}
+		cctx.compileErrors = nil
+		res := joinStrs(errSegs)
+		runtime.ManualArenaExit(arena)
+		resCopy := []byte{:len(res)}
+		copy(resCopy, res)
+		runtime.ArenaFree(arena)
+		cctx.compileArena = nil
+		cctx.localTypeReg = nil
+		cctx.localTypeTag = nil
+		return string(resCopy)
+	}
 
 
 	// Copy IR to outer arena before inner arena dies.
