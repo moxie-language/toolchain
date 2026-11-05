@@ -1,5 +1,39 @@
 # Moxie Changelog
 
+## v1.0.0
+
+The first stable release, tagged on a full gate rather than a targeted set:
+
+- **Native phases: 214/214 units pass** (0a, 0b, 0c, 1, 1b, 1c, 2, 3, 4, 6, 7,
+  8), including the self-hosting fixpoint (stage2 == stage3), the cold package
+  cache, and the sibling app's 9 wasm bundles plus 11 browser smoke tests.
+- **Wasm phase: 124 pass, 0 fail, 2 declared native-only skips.**
+- **The relay check is real:** morly, built with this compiler, publishes an
+  event over WebSocket, stores it, and delivers it back to a query and to a live
+  subscription (its own integration suite, throwaway relay and store).
+
+Last fixes on the way to the tag:
+
+- **Unsigned constant ranges are judged on the exact value.** `uint64(1) << 63`
+  was rejected as an overflow because `ConstInt.V` holds the low 64 bits and
+  2^63 looks negative there; the range test now uses the exact value when it
+  has one, and a negative bit pattern from an unsigned shift is not an
+  overflow. `uint64(0) - 1` is refused again in the declaration form, in both
+  compilers.
+- **`crypto/ed25519.PublicKeyOf`** - the constructor the mls code calls.
+- **`jsruntime/bridge-common.mjs`** (the second, app-supplied host) provides
+  `channel_try_recv`; without it every app bundle failed to instantiate.
+- **`ip_api.mx`** calls the named-type methods (`ip.String()`, ...) instead of
+  the removed alias free functions.
+- **`first_error`** is back in `tests/util.sh` (phase 0b and 0c showed an empty
+  diagnostic without it).
+- **The test server never binds a port Chromium refuses** (ERR_UNSAFE_PORT took
+  one random wasm fixture down per sweep), and the wasm host page lets the hub's
+  log drain run before reporting done.
+
+Known next work is recorded in `docs/OPEN_WORK.md`: one domain-id space for
+`ch.childDomain` and the hub's lineage ids, and the lattice.
+
 ## v1.0.0-rc.4
 
 - **The native intermediate-spawn hang is fixed, with its mechanism.** Native

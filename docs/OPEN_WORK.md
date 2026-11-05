@@ -1,5 +1,54 @@
 # Open work
 
+## 1.0.0 GATE (2026-11-06): WHAT WAS RUN
+
+The release is tagged on this, not on a targeted set.
+
+Procedure (the details matter, two of them cost a run):
+
+- `./moxie` is the SELF-HOSTED stage4 binary (`build.sh` installs
+  `_mxc_stage4`'s build there). `legacy/moxie` is the bootstrap; the suite's
+  default `MOXIE=$ROOT/moxie` is the stage4 compiler. Installing the legacy
+  binary as `./moxie` makes phase 0b's diagnostics look different from the
+  fixtures - they are stage4 messages.
+- `GOROOT=/opt/go1.25.3 PATH=/opt/go1.25.3/bin:$PATH`: phase 6's reference
+  tool calls `go run`, and this host's default `go` resolves a stale GOROOT
+  (package strings is not in std). Without it phase 6 fails for a reason that
+  has nothing to do with the compiler.
+- `UNITRUN_TIMEOUT=3600` explicitly: the default is 1800s PER CORE (4h at 8
+  cores), so a hung unit costs four hours before the driver says so.
+- Native phases at `-j 2`, wasm (phase 5, chromium) at `-j 1`.
+
+Commands:
+
+    export GOROOT=/opt/go1.25.3 PATH=/opt/go1.25.3/bin:$PATH UNITRUN_TIMEOUT=3600
+    bash tests/unitrun.sh --phases 0a,0b,0c,1,1b,1c,2,3,4,6,7,8 --force -j 2
+    bash tests/unitrun.sh --phases 5 --force -j 1
+
+Results:
+
+- native phases: **214/214 passed**, tree-cleanliness passed.
+- wasm phase: **124 passed, 0 failed, 2 skipped** (the declared native-only
+  fixtures), tree-cleanliness passed.
+- morly (the relay, a real program) built with the same compiler
+  (8,230,144 bytes), then its own integration suite drove it over WebSocket:
+  `test/test_relay_roundtrip.py::TestWSRoundTrip::test_publish_and_receive`
+  and `test_live_subscription` both PASS - an event is published, stored,
+  filtered and delivered back to the client, on a throwaway relay with a
+  throwaway store (`/tmp/morly-test-data`).
+- the app gate (phase 7) built all 9 bundles of the sibling app and ran its
+  selenium smoke suite: 11 passed.
+
+Two harness defects the gate found, both fixed in the tree:
+
+- `run.py` could bind an ephemeral port on Chromium's restricted list and
+  `Page.goto` then failed with ERR_UNSAFE_PORT before the module ran - one
+  random fixture red per sweep, a different one each time. The test server now
+  rebinds until the port is navigable.
+- The hub drains logs on a task; the test host page now lets that task run
+  before reporting done, so a line produced just before main returned is not
+  read as missing.
+
 State carried across context compaction. Ordered queue, the decisions already
 taken, the findings that motivated them, and the two designs in flight
 (module removal, user-code exemption). Update this file when the queue moves.
@@ -107,12 +156,58 @@ domain created, whose handles the page moves without reading a byte.
   line at exit (`[hub] N log lines dropped for <id>`), bypassing the queue when
   it is still full. A silent drop would make "no output" ambiguous, which is
   the rule this file opens with. `stats().dropped` carries the number.
-- **The new tests can fail, and were seen to.** Adoption was disabled behind a
-  temporary mutation: `5/spawn_orphan` went red (browser run failed) and turned
-  green again when it was restored. The spawn request was queued on the
-  spawning domain's event loop instead of the hub:
-  `5/spawn_root_parked_parent` went red and turned green again. Both mutations
-  were reverted with `cmp` proving the file matches the good copy.
+- **The two mutations, exactly, so a reader can repeat them.** Both are manual
+  edits against the committed tree; there is deliberately no test-only hook in
+  production host code. To restore, `git checkout -- <file>` (the mutation is
+  the only working-tree change) and confirm `git status --porcelain` is empty.
+
+  1. **Adoption off** - `jsruntime/supervisor.mjs`, in `retire()`: replace the
+     opening of the adopt branch
+
+         if (adopt) {
+           for (const cid of kids) {
+
+     with
+
+         if (adopt) {
+           for (const cid of kids) stopSubtree(cid);
+         }
+         if (false) {
+           for (const cid of kids) {
+
+     i.e. a clean exit kills its subtree. Then
+
+         bash tests/unitrun.sh --units spawn_orphan -j 1 --force
+
+     Observed: `5/spawn_orphan FAIL (browser run failed)` after ~32 s - B's
+     lines never arrive and the root's receive never returns. Restore:
+     `git checkout -- jsruntime/supervisor.mjs`; green again.
+  2. **Spawn queued on the parent's event loop** - `jsruntime/host.mjs`, the
+     `spawn_domain` bridge in `buildBridge`: wrap the `supervisor.postMessage`
+     call in `setTimeout(..., 0)`:
+
+         setTimeout(() => supervisor.postMessage({
+           kind: 'spawn', id: domainId, parent: domainParent,
+           wasm, fnIdx, args, chans, breaker,
+         }), 0);
+
+     This is the pre-hub shape: the request needs the spawning domain's event
+     loop to run, which is exactly what a parked parent does not do. Then
+
+         bash tests/unitrun.sh --units spawn_root_parked_parent -j 1 --force
+
+     Observed: `5/spawn_root_parked_parent FAIL (browser run failed)` after
+     ~28 s. Restore: `git checkout -- jsruntime/host.mjs`; green again.
+
+- **Design note for the next spawn change: one id space.** Native's
+  `ch.childDomain` is the spawn handoff's address - a second id space next to
+  the hub's lineage id. They should be the SAME number: the child's DOMAIN id,
+  assigned at spawn, never reused. Concretely: the hub's lineage becomes the
+  chain of those ids (`1.4.7`, where 4 and 7 are global domain ids, not
+  per-parent child numbers), and the native runtime's `domainID` /
+  `ch.childDomain` is that number instead of the handoff address. A debugging
+  session then reads one number, not a mapping between two. Not applied yet:
+  it is the first spawn change after 1.0.0.
 - **Naming.** The root-level parked fixture is `spawn_root_parked_parent`, so
   its green cannot be read as covering the intermediate shape, which is
   `spawn_parked_intermediate`.
