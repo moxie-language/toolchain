@@ -772,6 +772,9 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 				}
 			}
 		case *syntax.FuncDecl:
+			if dd.Recv != nil && !recvIndexArgsAreTypeParams(dd.Recv.Type) {
+				reportCompileError("method receiver must name the type's type parameters: write *table[K, V], not an instantiation (*table[string, *node]); a generic type's field offsets are only known per instantiation")
+			}
 			if dd.Recv == nil && dd.Name.Value != "init" {
 				if len(dd.TParamList) > 0 {
 					// Generic functions are registered by ScanGenericDecls
@@ -1173,6 +1176,36 @@ func recvTypeHasIndex(t syntax.Expr) (ok bool) {
 		}
 	}
 	return false
+}
+
+// recvIndexArgsAreTypeParams reports whether every receiver index expression is
+// a plain identifier - the type parameter names declared on the type. A method
+// receiver is `*table[K, V]`, never an instantiation `*table[string, *node]`:
+// the latter has no field offsets the compiler could emit without knowing the
+// instantiation. go/types words it as "receiver type parameter *node must be an
+// identifier".
+func recvIndexArgsAreTypeParams(t syntax.Expr) (ok bool) {
+	switch tt := t.(type) {
+	case *syntax.Operation:
+		if tt.Y == nil {
+			return recvIndexArgsAreTypeParams(tt.X)
+		}
+	case *syntax.IndexExpr:
+		switch in := tt.Index.(type) {
+		case *syntax.ListExpr:
+			for _, a := range in.ElemList {
+				if _, isName := a.(*syntax.Name); !isName {
+					return false
+				}
+			}
+		default:
+			if _, isName := tt.Index.(*syntax.Name); !isName {
+				return false
+			}
+		}
+		return true
+	}
+	return true
 }
 
 // genericRecvTypeName extracts the base type name from a receiver type
