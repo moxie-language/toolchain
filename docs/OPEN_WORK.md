@@ -48,16 +48,21 @@ Three remain, each a distinct piece of work:
    imported concrete alias. Both rewriters are restored. The legacy mangling of
    the concrete alias form (`lib.__slicealloc(Nat, 3)`) remains a recorded
    defect; it needs a type-aware check, not a text one.
-3. `generic_field_read` - CLOSED: stage4 now rejects a receiver that carries an
-   instantiation (restrictions/reject_instantiated_receiver), and the fixture
-   is gone. It was NOT the field-offset problem. The failing line is
-   `func (t *table[string, *node]) scan(...)`: a method on an INSTANTIATED
-   generic type, which Go forbids (methods go on the defined generic, not an
-   instantiation). Stage4 accepts it; go/types rejects it with "receiver type
-   parameter *node must be an identifier". So it is a third stage4 leniency,
-   not a lowering variant - decide whether Moxie allows instantiated receivers
-   (then legacy needs the feature) or not (then stage4 rejects and the fixture
-   goes).
+3. `generic_field_read` - CLOSED: the failing line was a method on an
+   INSTANTIATED generic type (`func (t *table[string, *node]) scan(...)`), not a
+   field-offset variant. stage4 now rejects it
+   (restrictions/reject_instantiated_receiver) and the fixture is gone.
+
+Two stage4 checker leniencies are recorded but not fixed (fixtures were made
+valid instead): a composite literal may name UNEXPORTED fields of another
+package (`lib.Holder{tag: 7}`), and an untyped constant conversion may be
+folded without the fold running where errors survive (`uint64(0)-1`).
+Also recorded: the legacy build cache key does not include the compiler binary,
+so after a rebuild a stale object can fail with "init not found" or crash the
+compiler until `~/.cache/moxie` is cleared.
+
+Phases 1 and 1b (stdlib package compiles) were not re-run with `mxc-s12`; the
+round's gates were 0a, 0b, 1c, 2, 4, 5.
 
 Box environment notes: `/etc/cron.d/idle-shutdown` powers the server off after
 30 minutes with no login session and load < 2 (it is disabled while working:
