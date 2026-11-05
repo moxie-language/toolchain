@@ -427,6 +427,12 @@ func (p *Package) Check() error {
 	} else {
 		packageName = p.ImportPath
 	}
+	// Statement-position pop becomes an explicit resize assignment before the
+	// first type-check (pop(s) => s = resize(s, len(s)-1), pop(s, xs...) =>
+	// s = resize(s, len(s)-len(xs))). Stage4's front end shrinks in place; this
+	// keeps the legacy pipeline on the same semantics with no builtin special
+	// case in the checker or the SSA builder.
+	rewritePopStatements(p.Files)
 	typesPkg, err := checker.Check(packageName, p.program.fset, p.Files, &p.info)
 
 	// Filter Moxie-specific type errors from the first pass.

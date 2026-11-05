@@ -348,7 +348,10 @@ Moxie has no such bookkeeping to dodge.
   zero-capacity slice lazy-inits to the first batch (max(n, 4) elements), and
   overflow doubles. Presizing with `[]T{:n}` and writing through a cursor is
   still the fast shape when the size is known - one allocation, no abandoned
-  backing - but it is a discipline, not a requirement.
+  backing - but it is a discipline, not a requirement. `pop(s)` removes the
+  last element and `pop(s, xs...)` removes len(xs) elements, both as
+  statements; in expression position `pop(s)` returns the last element and
+  does not shrink.
 - **Slices compare with `==` / `!=`.** With no reflect and no empty interface,
   that is the comparison there is.
 - **`string` and `[]byte` are one type.** `len`, indexing, slicing and

@@ -1831,7 +1831,7 @@ func (fb *ssaFuncBuilder) buildStmt(s syntax.Stmt) {
 		// store-back below is gated on this flag, matching legacy's
 		// ExprStmt-only rewrite.
 		if call, ok := ss.X.(*syntax.CallExpr); ok {
-			if n, ok2 := call.Fun.(*syntax.Name); ok2 && (n.Value == "push" || n.Value == "resize") {
+			if n, ok2 := call.Fun.(*syntax.Name); ok2 && (n.Value == "push" || n.Value == "resize" || n.Value == "pop") {
 				fb.pushStmt = true
 			}
 		}
@@ -6396,6 +6396,26 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 				return nil
 			}
 		}
+		if len(args) > 1 {
+			// pop(s, xs...) removes len(xs) elements and returns no value: a
+			// statement-only form. It is the mirror of push(s, xs...), and it
+			// exists so a buffer can be rewound by as many elements as another
+			// slice holds without spelling out the length arithmetic.
+			if !e.HasDots {
+				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+				push(cctx.compileErrors, fb.errPos() | "pop of several elements takes a spread argument: pop(s, xs...)")
+				return nil
+			}
+			if !fb.pushStmt {
+				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+				push(cctx.compileErrors, fb.errPos() | "pop(s, xs...) is a statement: it removes len(xs) elements; use pop(s) for the last element")
+				return nil
+			}
+			if args[0] == nil || args[0].SSAType() == nil {
+				return nil
+			}
+			return fb.emitPopShrink(e.ArgList[0], args[0], args[1])
+		}
 		callPop := &SSACall{Call: SSACallCommon{Value: b, Args: args}}
 		if len(args) == 1 {
 			if sl, ok := SafeUnderlying(args[0].SSAType()).(*Slice); ok {
@@ -6406,12 +6426,47 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		}
 		callPop.name = fb.nextName()
 		fb.emit(callPop)
+		if fb.pushStmt && len(args) == 1 && args[0] != nil {
+			fb.emitPopShrink(e.ArgList[0], args[0], nil)
+		}
 		return callPop
 	}
 	call9 := &SSACall{Call: SSACallCommon{Value: b, Args: args}}
 	call9.name = fb.nextName()
 	fb.emit(call9)
 	return call9
+}
+
+// emitPopShrink emits s = resize(s, len(s) - count) and stores it back into
+// target. count is nil for a single-element pop; otherwise it is len(n), so
+// pop(s, xs...) removes exactly as many elements as xs holds.
+func (fb *ssaFuncBuilder) emitPopShrink(target syntax.Expr, sval SSAValue, n SSAValue) (out SSAValue) {
+	lc := &SSACall{Call: SSACallCommon{Value: &SSABuiltin{id: BuiltinLen, name: "len"}, Args: []SSAValue{sval}}}
+	lc.typ = Typ[Int32]
+	lc.name = fb.nextName()
+	fb.emit(lc)
+	var cnt SSAValue
+	if n == nil {
+		cnt = &SSAConst{typ: Typ[Int32], val: &ConstInt{V: 1}}
+	} else {
+		lc2 := &SSACall{Call: SSACallCommon{Value: &SSABuiltin{id: BuiltinLen, name: "len"}, Args: []SSAValue{n}}}
+		lc2.typ = Typ[Int32]
+		lc2.name = fb.nextName()
+		fb.emit(lc2)
+		cnt = lc2
+	}
+	sub := &SSABinOp{Op: OpSub, X: lc, Y: cnt}
+	sub.typ = Typ[Int32]
+	sub.name = fb.nextName()
+	fb.emit(sub)
+	rc := &SSACall{Call: SSACallCommon{Value: &SSABuiltin{id: BuiltinResize, name: "resize"}, Args: []SSAValue{sval, sub}}}
+	rc.typ = sval.SSAType()
+	rc.name = fb.nextName()
+	fb.emit(rc)
+	if addr := fb.buildPushTargetAddr(target); addr != nil {
+		fb.emit(&SSAStore{Addr: addr, Val: rc})
+	}
+	return rc
 }
 
 func (fb *ssaFuncBuilder) emitMake(typ Type, sizeArgs []SSAValue) (s SSAValue) {
