@@ -696,6 +696,9 @@ thread per domain, no shared mutable state) for the copy to protect. A slice
 or map is a pointer with metadata; a pointer receiver is exactly what it
 needs.
 
+An alias of such a type is the same type, method set included:
+`type A = Names` makes `A` another spelling of `Names`, not a new type.
+
 ### Variable Declarations
 
 At package scope, only zero-value declarations:

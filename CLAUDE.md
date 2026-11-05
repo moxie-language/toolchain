@@ -411,6 +411,10 @@ Go artifact of shared-memory caution; a domain has one thread and no shared
 mutable state, so the pointer is the whole story. Value receivers stay a
 compile error for every type, slice and map included.
 
+An ALIAS of a named slice or map type is that same type (`type A = Names` is
+`Names`), so it carries the same method set; an alias introduces no methods of
+its own and no new type identity.
+
 ## No Reflect, No Empty Interface (any)
 
 `reflect` and the empty interface (`any` / `interface{}`) are **removed** from
