@@ -43,6 +43,29 @@ means dropping emitted packages' ASTs/type scopes (safe only where generic
 bodies are never instantiated later) or compiling in separate processes. Both
 are real projects; no code change was made.
 
+### Offset frames: wiring back in with a codec sizer (round 384)
+
+Ring shape, the question that decided the budget fix: rings are NOT fixed slots.
+`ringSend` writes `align8(4+msgLen)` bytes at a running write index: a 4-byte
+big-endian length prefix followed by the payload, in a byte ring of pow2 size.
+So capacity is in bytes and any per-item header is a tax multiplied by the
+declared depth. The offset frame is now a 4-byte magic only - total is
+len(frame) and root is the fixed offset 4, so neither is transmitted.
+
+The budget change is a sizer, not a patched formula: `offsetFrameMax` lives next
+to `frameBudget` (stage4 `ir_chan.mx`, legacy `channel.go`) and is the largest
+offset frame for a type (4 + the value's in-memory extent + each bytes field's
+cap). `frameBudget` takes the max of the structural encoding and that number, so
+the ring fits whichever representation the element uses, and a third
+representation adds a sizer rather than editing two formulas.
+
+Why `size(T)` is 32 while the structural encoding of the same struct is 14: the
+offset frame carries the value's IN-MEMORY image (scalar, padding, and a 24-byte
+slice header), while the structural encoding is compact (tag + varint length +
+bytes). That is the trade - memcpy and rebase instead of a parse - not a
+descriptor written inline. The integers are in the descriptor; only offsets are
+written into pointer slots.
+
 ### Offset frames: LANDED (round 384 resolution)
 
 The in-process frame is implemented and verified with the wiring in place: a

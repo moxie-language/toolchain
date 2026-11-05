@@ -742,7 +742,107 @@ func (e *irEmitter) emitMakeChan(m *SSAMakeChan) {
 // ring a spawn channel carries, so a dimension that cannot be bounded at all
 // (channel, interface, function, type parameter) is an error, never a guess.
 func (e *irEmitter) frameBudget(t Type, dims []int64, di int32) (n int32) {
-	return e.frameBudgetDepth(t, dims, di, 0)
+	n = e.frameBudgetDepth(t, dims, di, 0)
+	// The ring must hold whichever representation the element uses: the
+	// compact structural encoding, or the offset frame (a memory image plus a
+	// 4-byte magic). The offset sizer is the codec's own; a new representation
+	// adds a sizer here rather than editing this formula twice.
+	if om := e.offsetFrameMax(t, dims); om > n {
+		n = om
+	}
+	return n
+}
+
+// offsetEligibleType reports whether a value of t can cross as an offset frame:
+// scalars and string/[]byte, or a struct of only those.
+// offsetScalarOrText reports a scalar (integer, float, bool) or text.
+func offsetScalarOrText(b *Basic) (ok bool) {
+	return b.Info&IsString != 0 || b.Info&IsInteger != 0 || b.Info&IsFloat != 0 || b.Kind == Bool
+}
+
+// offsetBytesType reports Moxie text. The type model spells string/[]byte as
+// either a Basic with IsString or a slice of byte, so both test the same way
+// the runtime's KindBytes does.
+func offsetBytesType(t Type) (ok bool) {
+	u := SafeUnderlying(t)
+	if b, isB := u.(*Basic); isB {
+		return b.Info&IsString != 0
+	}
+	if sl, isS := u.(*Slice); isS {
+		if eb, isE := SafeUnderlying(sl.Elem).(*Basic); isE {
+			return eb.Kind == Uint8
+		}
+	}
+	return false
+}
+
+func offsetIsStruct(u Type) (ok bool) {
+	_, ok = u.(*TCStruct)
+	return
+}
+
+func offsetEligibleType(t Type) (ok bool) {
+	u := SafeUnderlying(t)
+	switch tt := u.(type) {
+	case *Basic:
+		return offsetScalarOrText(tt)
+	case *Slice:
+		return offsetBytesType(tt)
+	case *TCStruct:
+		for i := int32(0); i < tt.NumFields(); i++ {
+			fu := SafeUnderlying(tt.Field(i).Typ)
+			fb, isB := fu.(*Basic)
+			if isB {
+				if !offsetScalarOrText(fb) {
+					return false
+				}
+				continue
+			}
+			if !offsetBytesType(fu) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// offsetFrameMax is the largest offset frame for one value of t: the 4-byte
+// magic, the value's in-memory extent, and every string/[]byte field's data at
+// its cap (4096 for an unstated dimension). Unknown values of the size walk
+// under-count, so this mirrors frameBudget's over-estimate policy.
+func (e *irEmitter) offsetFrameMax(t Type, dims []int64) (n int32) {
+	if !offsetEligibleType(t) {
+		return 0
+	}
+	n = 4 + typeDescSize(t)
+	u := SafeUnderlying(t)
+	if !offsetIsStruct(u) {
+		if offsetBytesType(u) {
+			c := budgetDim(dims, 0)
+			if c == 0 {
+				c = 4096
+			}
+			n += int32(c)
+		}
+		return n
+	}
+	st, isS := u.(*TCStruct)
+	if !isS {
+		return 0
+	}
+	for i := int32(0); i < st.NumFields(); i++ {
+		fu := SafeUnderlying(st.Field(i).Typ)
+		if !offsetBytesType(fu) {
+			continue
+		}
+		c := budgetDim(budgetTagCounts(st.Tag(i)), 0)
+		if c == 0 {
+			c = 4096
+		}
+		n += int32(c)
+	}
+	return n
 }
 
 // frameBudgetDepth is frameBudget with a recursion bound. A type graph with a

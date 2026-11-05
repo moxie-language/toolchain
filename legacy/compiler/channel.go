@@ -116,7 +116,107 @@ func capTagCounts(tag string) (dims []int64) {
 // ring a spawn channel carries, so a dimension that cannot be bounded at all
 // (channel, interface, function, type parameter) is an error, never a guess.
 func (b *builder) frameBudget(t types.Type, dims []int64, di int, pos token.Pos) (n int64) {
-	return b.frameBudgetDepth(t, dims, di, pos, 0)
+	n = b.frameBudgetDepth(t, dims, di, pos, 0)
+	// The ring must hold whichever representation the element uses: the
+	// compact structural encoding, or the offset frame (a memory image plus a
+	// 4-byte magic). The offset sizer is the codec's own; a new representation
+	// adds a sizer here rather than editing this formula twice.
+	if om := b.offsetFrameMax(t, dims, pos); om > n {
+		n = om
+	}
+	return n
+}
+
+// offsetEligibleType reports whether a value of t can cross as an offset frame:
+// scalars and string/[]byte, or a struct of only those. Mirrors stage4.
+// isBytesField reports whether t is Moxie text: go/types spells []byte as a
+// slice of byte (string and []byte are one type in Moxie), so the legacy model
+// needs this where stage4 sees TCString.
+func isBytesField(t types.Type) bool {
+	if named, ok := t.(*types.Named); ok {
+		t = named.Underlying()
+	}
+	if b, ok := t.Underlying().(*types.Basic); ok && b.Info()&types.IsString != 0 {
+		return true
+	}
+	sl, ok := t.Underlying().(*types.Slice)
+	if !ok {
+		return false
+	}
+	eb, ok := sl.Elem().Underlying().(*types.Basic)
+	return ok && eb.Kind() == types.Byte
+}
+
+func offsetEligibleType(t types.Type) bool {
+	if named, ok := t.(*types.Named); ok {
+		t = named.Underlying()
+	}
+	switch ut := t.Underlying().(type) {
+	case *types.Basic:
+		return ut.Info()&types.IsString != 0 || ut.Info()&types.IsInteger != 0 || ut.Info()&types.IsFloat != 0 || ut.Kind() == types.Bool
+	case *types.Struct:
+		for i := 0; i < ut.NumFields(); i++ {
+			fu := ut.Field(i).Type()
+			if named, ok := fu.(*types.Named); ok {
+				fu = named.Underlying()
+			}
+			if isBytesField(fu) {
+				continue
+			}
+			fb, ok := fu.Underlying().(*types.Basic)
+			if !ok {
+				return false
+			}
+			if fb.Info()&types.IsInteger == 0 && fb.Info()&types.IsFloat == 0 && fb.Kind() != types.Bool {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// offsetFrameMax is the largest offset frame for one value of t: the 4-byte
+// magic, the value's in-memory extent, and every string/[]byte field's data at
+// its cap (4096 for an unstated dimension). Mirrors stage4.
+func (b *builder) offsetFrameMax(t types.Type, dims []int64, pos token.Pos) (n int64) {
+	if !offsetEligibleType(t) {
+		return 0
+	}
+	n = 4 + int64(b.targetData.TypeAllocSize(b.getLLVMType(t)))
+	u := t
+	if named, ok := t.(*types.Named); ok {
+		u = named.Underlying()
+	}
+	if fb, ok := u.Underlying().(*types.Basic); ok {
+		if fb.Info()&types.IsString != 0 {
+			c := dimCount(dims, 0)
+			if c == 0 {
+				c = frameBudgetDefault
+			}
+			n += c
+		}
+		return n
+	}
+	st, ok := u.Underlying().(*types.Struct)
+	if !ok {
+		return 0
+	}
+	for i := 0; i < st.NumFields(); i++ {
+		fu := st.Field(i).Type()
+		if named, ok := fu.(*types.Named); ok {
+			fu = named.Underlying()
+		}
+		if !isBytesField(fu) {
+			continue
+		}
+		c := dimCount(capTagCounts(st.Tag(i)), 0)
+		if c == 0 {
+			c = frameBudgetDefault
+		}
+		n += c
+	}
+	return n
 }
 
 // frameBudgetDepth bounds the walk: a type graph with a cycle (a struct
