@@ -40,23 +40,27 @@ func HasMoxieSecallocRefs(files []*ast.File) bool {
 func InjectMoxieByteBuiltins(fset *token.FileSet, pkgName string) *ast.File {
 	src := fmt.Sprintf(`package %s
 
-func __moxie_concat(a, b []byte) (out []byte) {
+// Parameter names are prefixed because this file is parsed into the user's
+// package and the shadowing check runs over it: a package-level n in the
+// fixture made the injected __moxie_secalloc(n int32) fail with
+// 'n shadows declaration in enclosing scope'.
+func __moxie_concat(__a, __b []byte) (__out []byte) {
 	panic("__moxie_concat: compiler failed to intercept")
 }
 
-func __moxie_concat_move(a, b []byte) (out []byte) {
+func __moxie_concat_move(__a, __b []byte) (__out []byte) {
 	panic("__moxie_concat_move: compiler failed to intercept")
 }
 
-func __moxie_eq(a, b []byte) (eq bool) {
+func __moxie_eq(__a, __b []byte) (__eq bool) {
 	panic("__moxie_eq: compiler failed to intercept")
 }
 
-func __moxie_lt(a, b []byte) (lt bool) {
+func __moxie_lt(__a, __b []byte) (__lt bool) {
 	panic("__moxie_lt: compiler failed to intercept")
 }
 
-func __moxie_secalloc(n int32) (out []byte) {
+func __moxie_secalloc(__n int32) (__out []byte) {
 	panic("__moxie_secalloc: compiler failed to intercept")
 }
 `, pkgName)
