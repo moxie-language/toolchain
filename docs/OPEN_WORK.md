@@ -10,25 +10,38 @@ Round 378 closed everything it listed, and round 379 closed the wasm panic gate
 and the wasm spawn defects that gate exposed. What is left is one pre-existing
 gap and one environment note.
 
-### 1. Legacy cannot build for the wasm target (pre-existing)
+### 1. Legacy wasm: fmt's printer receiver is nil (the rest of the target works)
 
-`legacy/moxie build -target wasm` crashed on ANY program at `e21b7be0` (before
-the round's changes) inside `ssa.MethodValue`: `defBuiltinStringMethods` in
-`legacy/build/patch-gotypes.go` declared the placeholder builtin `String()`
-methods with no receiver, and MethodValue dereferences it on the first named
-type over a builtin (`interrupt.State`). That is fixed - the placeholders now
-carry a receiver - and legacy native spawn works again. The wasm target then
-reaches `internal/task: missing function body` and stops. This is a wood-law
-gap, not a regression: stage4 is the only compiler that has ever produced wasm.
-It needs its own round: start from the `internal/task` failure, then exercise
-the spawn ABI and the panic gate with `MOXIE=legacy/moxie`.
+`legacy/moxie build -target wasm` used to crash on ANY program at `e21b7be0`
+(placeholder builtin `String()` methods had no receiver and `ssa.MethodValue`
+dereferenced it). That, the linkname declarations, the missing
+`basic:<kind>.String$identity` thunks, the 64-bit index on the 32-bit target,
+and the missing `timezone_offset_minutes` bridge import are fixed. Measured:
+`hello` runs in Chromium, `close_breaker`'s spawn/close path works, and the wasm
+panic gate PASSes under `MOXIE=legacy/moxie`. `-target wasm` no longer crashes.
 
-### 2. The sweep needs a sane GOROOT on this host
+What is left is the fmt path: any fixture that prints through `fmt` dies with
+`panic: runtime error: sovereign: nil receiver` inside
+`runtime.codecSovereignArena`, called from `fmt.(*fmt.pp).doPrintln`. The `pp`
+receiver is nil by the time the method runs - newPrinter's pointer does not
+survive, or the method call drops it, in legacy's wasm codegen only. Repro:
 
-`tests/phase6_instrumentation.sh` builds a Go reference tool with the host's
-`go`, and this shell exports `GOROOT=/home/mleku/go`, an empty directory:
-`package strings is not in std`. With `GOROOT=/opt/go1.25.3` phase 6 is green.
-The repo needs no change; the host environment does.
+    rm -rf /tmp/cb && mkdir -p /tmp/cb/pkg
+    cp tests/regressions/should_compile/close_breaker.mx /tmp/cb/pkg/main.mx
+    LLVM_GLUE_PATH=$PWD/llvm-glue/libmoxie-llvm-glue.so MOXIEROOT=$PWD \
+        ./legacy/moxie build -target wasm -o /tmp/cb/app.wasm /tmp/cb
+    RUN_SETTLE_MS=1000 python3 tests/wasm/run.py -q /tmp/cb/app.wasm
+
+Stage4 is unaffected, so the gates are green; this is the remaining wood-law
+work on the wasm side.
+
+### 2. This shell's GOROOT is not a Go tree
+
+`GOROOT=/home/mleku/go` is exported in this environment, but that directory is
+deliberately empty: the source trees are `/home/mleku/src` and `/home/mleku/s`,
+and Moxie is organised under `/home/mleku/moxie`. `tests/phase6_instrumentation.sh`
+builds a Go reference tool and fails with `package strings is not in std` unless
+`GOROOT=/opt/go1.25.3` is set explicitly. The repo needs no change.
 
 ### 3. The Hetzner box went offline mid-run
 
@@ -113,6 +126,11 @@ from the frame ends the domains it started.
   phase 5 (Chromium fixtures) PASS, phase 7 (UI app + relay) PASS, phase 8
   (netsmoke, both dispatch modes) PASS, `tree-cleanliness` PASS. The skip is
   `spawn_closed_crosspkg`, declared native-only and exercised natively in 0a.
+- legacy wasm, after the round's fixes: `hello` PASSes in Chromium and
+  `MOXIE=legacy/moxie bash tests/wasm/panic_check.sh` PASSes (spawn + panic
+  action); phase 2 (selfhost) PASSes with the rebuilt legacy (200 s).
+- phase 5 after the host bridge gained `timezone_offset_minutes` (2026-11-05):
+  120 units, **119 passed, 0 failed, 1 skipped**, `tree-cleanliness` PASS.
 - full sweep on `1642902a` (the round's final commit, local, cold compiler):
   **324 units, 322 passed, 1 skipped, 1 failed** - the failure was phase 6's Go
   reference build under this host's stale `GOROOT`, and phase 6 PASSes in 179 s
