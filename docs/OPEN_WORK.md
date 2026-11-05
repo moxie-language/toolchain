@@ -40,17 +40,22 @@ over a slice or map could reach:
 
 Named types restored in the stdlib where the wrapper was only there for the
 ban: `crypto/ed25519.PublicKey`/`PrivateKey`, `asn1.ObjectIdentifier`,
-`asn1.RawContent`, `net.Buffers`, `bidi.bracketPairs`. Still struct-wrapped and
-worth converting when touched: `net.IP`/`IPMask`/`HardwareAddr` (currently
-aliases with free functions), `net/http.Header`, `net/url.Values`,
-`net/textproto.MIMEHeader` (aliases with free functions),
-`image.Palette` (the `&image.Palette{Element: ...}` sites need an addressable
-value), `archive/tar`'s format type, and flate's sort helpers.
+`asn1.RawContent`, `net.Buffers`, `bidi.bracketPairs` (and the sort.Interface
+type it was hiding). Still worth converting when touched, in value order:
+`net.IP`/`IPMask`/`HardwareAddr` and `net/http.Header`, `net/url.Values`,
+`net/textproto.MIMEHeader` (all aliases with free functions; converting them
+restores methods and removes the free-function layer at ~180 call sites), and
+`image.Palette` (its `&image.Palette{Element: ...}` construction sites need an
+addressable value first). The rest are internal one-field wrappers
+(dnsmessage's resource types, dwarf's valBytes/valStr, ...) and can follow
+when their package is next opened.
 
-Verification: phases 0a+0b 188/189 on mxc-s22 (the one failure is
-`tree-cleanliness`, expected with a dirty tree); `named_types_methods`,
-`net_buffers_api`, `asn1_oid_der`, `asn1_builder_der`, `ed25519_roundtrip`,
-plus a tls+x509+asn1+ed25519 smoke probe run on BOTH compilers.
+Verification on mxc-s22, tree committed: phases 0a+0b 188/189 (only
+`tree-cleanliness`, which passes on the committed tree), phase 2 selfhost +
+fixpoint PASS (197 s), and the six changed fixtures through
+`tests/wasm/validate.sh` under `legacy/moxie`: net_buffers_api, asn1_oid_der,
+asn1_builder_der, ed25519_roundtrip, ed25519_vectors, named_types_methods -
+6 passed, 0 failed. A tls+x509+asn1+ed25519 smoke probe runs on both compilers.
 
 ## ROUND 380 VERIFICATION
 
