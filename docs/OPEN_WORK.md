@@ -4,6 +4,38 @@ State carried across context compaction. Ordered queue, the decisions already
 taken, the findings that motivated them, and the two designs in flight
 (module removal, user-code exemption). Update this file when the queue moves.
 
+## STANDING ISSUES (round 380) - legacy/wood-law residuals
+
+The full legacy-wasm sweep on the box (117 fixtures, two at a time) closed the
+wasm-specific gaps. Five fixtures legacy could not compile are fixed:
+`import_in_comment` (the fixture's own comment contained a literal `*/`),
+`returned_object_identity` (it read unexported fields across packages; now via
+accessors), `gosym_pclntab` (int32/uint32 mixing stage4 tolerated),
+`nested_array_field_addr` (the injected `__moxie_*` declarations used a
+parameter name `n` that a package-level `n` shadowed), and
+`const_receiver_width` (an untyped constant in a selector and in codegen now
+takes its fixed-width default).
+
+Three remain, each a distinct piece of work:
+
+1. `untyped_unsigned_float` - `uint64(0)-1` must come out 18446744073709551615
+   (the fixture, and stage4, wrap). go/types rejects a negative constant of
+   unsigned type. This is a LANGUAGE decision: Moxie constant arithmetic on
+   unsigned types wraps, or it is an error. Legacy follows the error today.
+2. `slice_alias_crosspkg` - `lib.Nat{:3}`, where `Nat = []Word`, is not
+   `[]T{:n}`: the text rewriter only matches a literal `[` and mangles the
+   named-slice form into `lib.__slicealloc(Nat, 3)`. The rewriter needs to take
+   any type expression before `{:`.
+3. `generic_field_read` - `func (e *node[T]) ...` with a pointer type parameter
+   as the receiver base: go/types says "receiver type parameter *node must be
+   an identifier"; stage4 supports it. A generics patch to the checker and the
+   SSA builder.
+
+Box environment notes: `/etc/cron.d/idle-shutdown` powers the server off after
+30 minutes with no login session and load < 2 (it is disabled while working:
+the file is at /root/idle-shutdown.cron.disabled), and `binaryen` was missing -
+`wasm-opt` is required by the legacy wasm link and is now installed.
+
 ## STANDING ISSUES (round 379) - the current queue
 
 Round 378 closed everything it listed, and round 379 closed the wasm panic gate
