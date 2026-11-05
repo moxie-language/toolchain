@@ -2560,8 +2560,21 @@ func constReprError(cv ConstVal, T Type) (msg string) {
 	}
 	switch c := cv.(type) {
 	case *ConstInt:
-		if bt.Info&IsInteger != 0 && !intFitsKind(c.V, bt.Kind) {
-			return "overflows " | T.String()
+		if bt.Info&IsInteger != 0 {
+			// The exact value is authoritative when it is known: V holds the low
+			// 64 bits, so a legal uint64 constant such as 1<<63 looks negative
+			// there and was reported as an overflow. For an unsigned target a
+			// negative EXACT value is out of range (uint64(0) - 1); a
+			// non-negative one fits when its bit length fits the target.
+			if c.Exact != nil && bt.Info&IsUnsigned != 0 {
+				if c.Exact.Sign() < 0 || c.Exact.BitLen() > intTypeBits(T) {
+					return "overflows " | T.String()
+				}
+				return ""
+			}
+			if !intFitsKind(c.V, bt.Kind) {
+				return "overflows " | T.String()
+			}
 		}
 	case *ConstFloat:
 		if bt.Info&IsInteger != 0 {
@@ -5531,10 +5544,28 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 						if ci, isI := folded.(*ConstInt); isI {
 							under = op == OpSub && ci.V < 0 && !ci.Unsigned && ci.Exact == nil
 						}
+						// A shift of an UNSIGNED typed operand by less than its
+						// width is representable by construction, but its
+						// low-64-bit pattern can look negative: 1<<63 is uint64
+						// 2^63. Without an exact value the range test cannot tell
+						// that from a negative constant, so a negative pattern
+						// from a shift is left to the type's own width. The
+						// over-wide case (1<<64) has V == 0 and an exact value,
+						// so it is still rejected below.
+						shiftPattern := false
+						if op == OpShl || op == OpShr {
+							if cb, isCB := SafeUnderlying(ct).(*Basic); isCB && cb.Info&IsUnsigned != 0 {
+								if ci, isI := folded.(*ConstInt); isI && ci.V < 0 && ci.Exact == nil {
+									shiftPattern = true
+								}
+							}
+						}
 						if under {
 							reportCompileError(fb.errPos() | "constant subtraction underflows its unsigned type (overflows " | ct.String() | ")")
-						} else if msg := constReprError(folded, ct); msg != "" {
-							reportCompileError(fb.errPos() | "constant " | folded.String() | " " | msg)
+						} else if !shiftPattern {
+							if msg := constReprError(folded, ct); msg != "" {
+								reportCompileError(fb.errPos() | "constant " | folded.String() | " " | msg)
+							}
 						}
 					}
 					return &SSAConst{typ: ct, val: folded}
