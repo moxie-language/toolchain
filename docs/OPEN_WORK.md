@@ -117,6 +117,11 @@ from the frame ends the domains it started.
 - legacy wasm, after the round's fixes: `hello` PASSes in Chromium and
   `MOXIE=legacy/moxie bash tests/wasm/panic_check.sh` PASSes (spawn + panic
   action); phase 2 (selfhost) PASSes with the rebuilt legacy (200 s).
+- full sweep on the box at `35ef64d4` with `mxc-s3` (2026-11-05): **324 units,
+  322 passed, 1 skipped, 1 failed**. The failure was `1c/net/http` with
+  "mxc: object compile failed" under `-j 4`; the same unit PASSes in 3 s alone
+  with `-j 1`, so it was build contention, not the compiler. Fixpoint on the
+  same tree: `mxc-s2 == mxc-s3 == e0ad4581...`.
 - phase 5 after the host bridge gained `timezone_offset_minutes` (2026-11-05):
   120 units, **119 passed, 0 failed, 1 skipped**, `tree-cleanliness` PASS.
 - full sweep on `1642902a` (the round's final commit, local, cold compiler):
