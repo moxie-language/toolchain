@@ -12,17 +12,13 @@
 // Header behaviour natively is covered every run (phase 0), and net/http COMPILING for
 // wasm is covered every run (phase 1c).
 /*
-http.Header is an ALIAS with free functions, and the whole API works through it.
+http.Header is a named map type, and the whole API works through its methods.
 
-`type Header map[string][][]byte` became `type Header = map[string][][]byte`
-and its methods became free functions: HeaderAdd, HeaderSet, HeaderGet, HeaderValues, HeaderDel,
-HeaderClone, HeaderWrite, HeaderWriteSubset - plus the unexported helpers
-headerGet/headerHas/headerWrite/headerWriteSubset/headerSortedKeyValues that the
-package uses internally.
-
-The NAME survives (a Header is still written Header{...}, converted with
-Header(...) and read with h[key], and Request/Response fields are unchanged);
-what callers write changes from h.Get(k) to http.HeaderGet(h, k).
+`type Header map[string][][]byte` carries Add, Set, Get, Values, Del, Clone,
+Write and WriteSubset as methods. A value receiver over a named map is a
+reference receiver, so the mutations reach the caller. The NAME survives: a
+Header is written Header{...}, converted with Header(...) and read with
+h[key], and the Request/Response fields are unchanged.
 
 This is a MAIN-package fixture deliberately: an unresolved call inside a library
 package's body is dropped SILENTLY (round 99), so only a main package proves the
@@ -57,33 +53,33 @@ func main() {
 	}
 
 	h := http.Header{}
-	http.HeaderSet(h, "Content-Type", "text/plain")
-	http.HeaderAdd(h, "X-Multi", "one")
-	http.HeaderAdd(h, "X-Multi", "two")
-	if http.HeaderGet(h, "content-type") != "text/plain" {
+	h.Set("Content-Type", "text/plain")
+	h.Add("X-Multi", "one")
+	h.Add("X-Multi", "two")
+	if h.Get("content-type") != "text/plain" {
 		panic("get canonicalized key")
 	}
-	vs := http.HeaderValues(h, "x-multi")
+	vs := h.Values("x-multi")
 	if len(vs) != 2 || string(vs[1]) != "two" {
 		panic("values keeps every value in order")
 	}
-	c := http.HeaderClone(h)
-	http.HeaderDel(c, "X-Multi")
-	if http.HeaderGet(c, "x-multi") != "" {
+	c := h.Clone()
+	c.Del("X-Multi")
+	if c.Get("x-multi") != "" {
 		panic("del removes every value")
 	}
-	if http.HeaderGet(h, "x-multi") == "" {
+	if h.Get("x-multi") == "" {
 		panic("clone must be independent of the original")
 	}
 	var buf bytes.Buffer
-	if err := http.HeaderWrite(h, &buf); err != nil {
+	if err := h.Write(&buf); err != nil {
 		panic("write")
 	}
 	if buf.Len() == 0 {
 		panic("write produced nothing")
 	}
 	var buf2 bytes.Buffer
-	if err := http.HeaderWriteSubset(h, &buf2, map[string]bool{"X-Multi": true}); err != nil {
+	if err := h.WriteSubset(&buf2, map[string]bool{"X-Multi": true}); err != nil {
 		panic("writesubset")
 	}
 	println("header ok")
