@@ -3860,7 +3860,21 @@ func (c *compilerContext) createConst(expr *ssa.Const, pos token.Pos) llvm.Value
 		if typ.Kind() == types.UntypedNil {
 			return llvm.ConstNull(c.dataPtrType)
 		}
-		llvmType := c.getLLVMType(typ)
+		// An untyped constant has no LLVM type; it is materialised at its
+		// fixed-width default (int32/float64/string - int and uint are not in
+		// the universe). `(42).String()` reaches here with an untyped operand.
+		basic := typ
+		switch typ.Kind() {
+		case types.UntypedBool:
+			basic = types.Typ[types.Bool]
+		case types.UntypedInt, types.UntypedRune:
+			basic = types.Typ[types.Int32]
+		case types.UntypedFloat:
+			basic = types.Typ[types.Float64]
+		case types.UntypedString:
+			basic = types.Typ[types.String]
+		}
+		llvmType := c.getLLVMType(basic)
 		if typ.Info()&types.IsBoolean != 0 {
 			n := uint64(0)
 			if constant.BoolVal(expr.Value) {
