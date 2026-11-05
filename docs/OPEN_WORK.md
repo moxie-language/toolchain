@@ -67,9 +67,30 @@ blob's address. With both fixed the encoder is correct: a probe sending
 The receive side is where it still fails: the worker's receive never enters
 `codecFrameDecode` (a print at its entry never fires) and the arm delivers the
 zero value, while the same probe on the structural codec prints `msg 7 5 body
-104 111`. So the next step is not the frame layout but the dispatch: find which
-receive entry the compiler emits for `chan Msg` in a spawn target and why it
-bypasses `codecFrameDecode`. Reverted to keep the tree green.
+104 111`. Reverted to keep the tree green.
+
+Dispatch data (emit-time print in `emitSelectFrame`, later reverted): the
+worker's select receive arm is `type=main.Msg tag=named underlying=struct{N
+int32; Body []byte} reloc=yes`, so the arm DOES carry the structural descriptor
+and the named/parameter-tag hypothesis is ruled out at that site; the direct
+send is emitted by a different function and is not printed. A two-message probe
+(chan Msg{:2}, send N=7 "hello" and N=9 "world") receives both as N=0 len=0
+with the offset codec, and as N=7 / N=9 with the structural codec, so the
+failure is in the frame path, not in the channel's element stride - no
+consumption bug is visible. The next instrumentation is `tryPipeRecv`: print
+`rok`, `len(data)` and `ringIsClosed` on both paths; the zero arm looks like the
+`recvZero` branch taken when the ring reports closed/empty. The durable fixes
+from this round stay: resolve a named descriptor with `Underlying()`, read field
+offsets through `retFieldOffsetAt`, and assert the descriptor kind loudly
+(`offsetStruct`/`offsetBytes`) rather than reading garbage.
+
+Filed separately: `println` from a spawned domain is silently dropped (native),
+and on wasm worker output needs a channel to the main page script anyway. That
+makes every domain-level diagnostic invisible and is its own bug.
+
+The recv-dispatch test to add when the frame path is fixed: a spawn target with
+`chan Msg` that sends two messages and asserts both arrive with their bytes; it
+must fail if the recv path bypasses `codecFrameDecode`.
 
 The endianness point is the reason both formats exist: the offset frame is a
 memory copy and therefore host-endian, while the wire codec is one fixed
