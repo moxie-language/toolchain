@@ -320,6 +320,36 @@ func unsignedFold(x ConstVal, y ConstVal) (ok bool) {
 	return cvUnsigned(x) || cvUnsigned(y)
 }
 
+// overflowState carries the "left the type's range" message out of a fold.
+// Constant overflow is a compile error (the fixture that wanted wrapping is
+// now a restrictions test). The evaluator has no error channel and package
+// globals are immutable outside init, so the message is held in a
+// self-mutating type and read back by EvalBinaryChecked.
+type overflowState struct {
+	msg string
+}
+
+var overflow overflowState
+
+func (o *overflowState) hold(msg string) {
+	o.msg = msg
+}
+
+func (o *overflowState) take() (msg string) {
+	msg = o.msg
+	o.msg = ""
+	return
+}
+
+// EvalBinaryChecked evaluates a binary constant expression and returns the
+// overflow message, if the fold left its type's range.
+func EvalBinaryChecked(op token.Operator, x ConstVal, y ConstVal) (r ConstVal, err string) {
+	overflow.take()
+	r = EvalBinaryLocal(op, x, y)
+	err = overflow.take()
+	return
+}
+
 
 // floatExact returns a constant's exact value as a rational. Integer constants
 // are exact by construction; a float constant carries the rational its folds
