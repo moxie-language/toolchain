@@ -56,6 +56,9 @@ type linkDataInfo struct {
 type compileCtx struct {
 	parseErrors          []string
 	compileErrors        []string
+	constErrN            int32
+	constErrPkg          [8]string
+	constErrMsg          [8]string
 	constValMap          map[string]int64
 	embedVars            map[string]*embedInfo
 	linkDataVars         map[string]*linkDataInfo
@@ -178,6 +181,20 @@ func reportCompileError(msg string) {
 	initCompileCtx()
 	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 	push(cctx.compileErrors, msg)
+}
+
+// reportConstOverflow records an unsigned constant underflow found in the
+// typecheck-only pass. That pass has its own arena and drops its compile
+// errors on purpose (the slices would dangle), so the message is kept in a
+// fixed table with no allocation and CompileToIR fails the package from here.
+func reportConstOverflow(pkgName, msg string) {
+	if cctx.constErrN >= int32(len(cctx.constErrPkg)) {
+		return
+	}
+	i := cctx.constErrN
+	cctx.constErrPkg[i] = pkgName
+	cctx.constErrMsg[i] = msg
+	cctx.constErrN = i + 1
 }
 
 // compileErrorCount is the number of front-end errors recorded so far, used to
@@ -1276,6 +1293,11 @@ func TypeCheckOnly(src []byte, name string, mxhPath string, pkgDir string) {
 func CompileToIR(src []byte, name string, triple string, pkgDir string) (s string) {
 	cctx.compileTargetTriple = triple
 	cctx.curPkgPath = name
+	for i := int32(0); i < cctx.constErrN; i++ {
+		if cctx.constErrPkg[i] == name {
+			return ";" | "moxie: " | cctx.constErrMsg[i]
+		}
+	}
 	scanEmbedPragmas(src, cctx.compilePkgDir)
 	scanLinkdataPragmas(src)
 	cctx.linknameMap = scanLinknameMap(src)
@@ -1835,7 +1857,7 @@ func tcEvalConstExpr(e syntax.Expr, scope *Scope, iotaVal int64) (c ConstVal) {
 		}
 		br, cerr := EvalBinaryChecked(ex.Op, xr2, yr)
 		if cerr != "" {
-			reportCompileError(cerr)
+			reportConstOverflow(cctx.curPkgPath, cerr)
 		}
 		return br
 	case *syntax.ParenExpr:

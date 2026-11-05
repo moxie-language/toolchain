@@ -18,16 +18,23 @@ takes its fixed-width default).
 
 Three remain, each a distinct piece of work:
 
-1. `untyped_unsigned_float` - DECIDED: constant overflow is a compile error.
-   `uint64(0)-1` must be rejected (legacy/go/types already does; stage4's
-   constant folder wraps and must be taught to reject). The fixture becomes a
-   restrictions test once stage4 rejects it.
-2. `slice_alias_crosspkg` - DECIDED: a named slice does not exist in Moxie, so
-   `Nat{:3}` is not a construct. The fixture goes; a restrictions test asserts
-   the rejection. stage4 accepts it today (its rewriter understands the form);
-   legacy mangles it into `lib.__slicealloc(Nat, 3)` in the text pass. Both need
-   a clear diagnostic before the test can be added.
-3. `generic_field_read` - NOT the field-offset problem. The failing line is
+1. `untyped_unsigned_float` - DECIDED: constant overflow is a compile error,
+   and the wrap assertion is gone from the fixture. stage4 does NOT yet reject
+   `uint64(0)-1`: its const initialiser is not folded through the conversion
+   (the typecheck-only pass evaluates and drops errors by design, and the SSA
+   builder sees a runtime convert, not two constants). The underflow detection
+   is in place (EvalBinaryChecked + the unsigned mark on every unsigned
+   conversion) and fires when the fold runs; the restriction test needs the
+   const-initialiser fold to run in the compile pass first.
+2. `slice_alias_crosspkg` - REMOVED, and the rejection was reverted: the sized
+   literal form DOES exist for a slice-shaped TYPE PARAMETER (src/slices grows
+   through `S{:n+m-i}`), and a text-level rewriter cannot tell that from an
+   imported concrete alias. Both rewriters are restored. The legacy mangling of
+   the concrete alias form (`lib.__slicealloc(Nat, 3)`) remains a recorded
+   defect; it needs a type-aware check, not a text one.
+3. `generic_field_read` - CLOSED: stage4 now rejects a receiver that carries an
+   instantiation (restrictions/reject_instantiated_receiver), and the fixture
+   is gone. It was NOT the field-offset problem. The failing line is
    `func (t *table[string, *node]) scan(...)`: a method on an INSTANTIATED
    generic type, which Go forbids (methods go on the defined generic, not an
    instantiation). Stage4 accepts it; go/types rejects it with "receiver type
