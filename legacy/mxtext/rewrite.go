@@ -450,23 +450,18 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int
 	cumDelta := 0
 
 	for i := 0; i < len(toks); i++ {
-		// Look for slice literal with size: []Type{:expr} or Type{:expr}.
+		// Look for a slice literal with a size: []Type{:expr}. A named type
+		// does NOT take this form - Moxie has no named slice - so Nat{:3} is
+		// left to the parser, which rejects it.
 		if !(toks[i].tok == token.LBRACK && i+2 < len(toks) && toks[i+1].tok == token.RBRACK) {
-			// Also match named-type slice like nat{:expr} (IDENT LBRACE COLON).
-			if !(toks[i].tok == token.IDENT && i+2 < len(toks) && toks[i+1].tok == token.LBRACE && toks[i+2].tok == token.COLON) {
-				continue
-			}
+			continue
 		}
 
 		lbrackIdx := i
 
 		// Scan forward past the element type to find LBRACE.
 		braceIdx := -1
-		isNamed := toks[lbrackIdx].tok == token.IDENT
-		if isNamed {
-			// For Type{:expr}, the LBRACE is immediately after the IDENT.
-			braceIdx = lbrackIdx + 1
-		} else {
+		{
 			depth := 0
 			stop := false
 			for j := i + 2; j < len(toks) && !stop; j++ {
@@ -511,10 +506,7 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int
 		if braceIdx < 0 {
 			continue
 		}
-		if isNamed && braceIdx != lbrackIdx+1 {
-			continue // Type{:expr} must have { immediately after type name
-		}
-		if !isNamed && braceIdx <= lbrackIdx+2 {
+		if braceIdx <= lbrackIdx+2 {
 			continue // nothing between [] and {
 		}
 

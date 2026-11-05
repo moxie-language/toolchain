@@ -704,6 +704,17 @@ func rewriteSliceMakeLiterals(src []byte) (buf []byte) {
 		inner := src[start+2 : closeIdx]
 		colonIdx := lIndexByte(inner, ':')
 		typeText := src[lbrack:start]
+		// Only a slice LITERAL type takes the {:n} form. A named type does
+		// not: Moxie has no named slice, so `Nat{:3}` is not a construct and
+		// the type text must be []T (or []struct{...}). Without this the
+		// rewriter happily produced __slicealloc(lib.Nat, 3) and the named
+		// form compiled.
+		tt := lTrimSpace(typeText)
+		if len(tt) < 2 || tt[0] != '[' || tt[1] != ']' {
+			reportCompileError("named slice literals do not exist: write []T{:n} (the type of a slice literal must be []T)")
+			i = closeIdx + 1
+			continue
+		}
 		chunks = mxutil.Ensure(chunks, 1)
 		push(chunks, src[i:lbrack])
 		if colonIdx < 0 {
