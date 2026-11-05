@@ -40,8 +40,12 @@ Three remain, each a distinct piece of work:
    (the typecheck-only pass evaluates and drops errors by design, and the SSA
    builder sees a runtime convert, not two constants). The underflow detection
    is in place (EvalBinaryChecked + the unsigned mark on every unsigned
-   conversion) and fires when the fold runs; the restriction test needs the
-   const-initialiser fold to run in the compile pass first.
+   conversion + tcResolveNameInline now resolving predeclared type names, so a
+   conversion folds as a conversion), but stage4 emits `uint64(0)-1` as
+   runtime arithmetic: neither the checker nor the SSA builder constant-folds
+   a value-context expression, so there is no fold to reject. Measured with a
+   debug print on the unsigned-subtract branch: never reached. The rejection
+   needs expression-level constant folding (a checker feature), not wiring.
 2. `slice_alias_crosspkg` - REMOVED, and the rejection was reverted: the sized
    literal form DOES exist for a slice-shaped TYPE PARAMETER (src/slices grows
    through `S{:n+m-i}`), and a text-level rewriter cannot tell that from an
