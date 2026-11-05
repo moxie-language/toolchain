@@ -69,12 +69,13 @@ func (c *Config) BuildTags() []string {
 		// over its no-op counterpart; the compiler emits the matching hits.
 		tags = append(tags, "cover")
 	}
-	if c.Target.GOARCH != "wasm" {
-		// The builtin String() bodies (src/runtime/stringer.mx) are part of
-		// the native runtime. The wasm target has its own codec path and
-		// does not carry them, so the tag stays off there.
-		tags = append(tags, "moxie.stringer")
-	}
+	// The builtin String() bodies (src/runtime/stringer.mx) are part of the
+	// runtime on EVERY target. They used to be native-only, with wasm getting
+	// compiler-generated identity thunks whose only sound case is []byte:
+	// `int32(70).String()` then reinterpreted the int's bytes as a string
+	// header and the page died in fd_write ("Invalid typed array length").
+	// Stage4 made the same move already; this is the legacy mirror.
+	tags = append(tags, "moxie.stringer")
 	for i := 1; i <= c.GoMinorVersion; i++ {
 		tags = append(tags, fmt.Sprintf("go1.%d", i))
 	}

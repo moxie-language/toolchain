@@ -1049,7 +1049,11 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 			}
 			// Create the function definition.
 			b := newBuilder(c, irbuilder, member)
-			if _, ok := mathToLLVMMapping[member.RelString(nil)]; ok {
+			if _, ok := mathToLLVMMapping[member.RelString(nil)]; ok && !strings.HasPrefix(c.Triple, "wasm") {
+				// wasm has no libm: an LLVM math intrinsic LLVM cannot lower
+				// inline becomes an `env.log`/`env.exp` import that the page
+				// stubs to zero, so math.Lgamma(3) came out 0. Let the Moxie
+				// body compile there; keep the intrinsic on targets with libm.
 				// The body of this function (if there is one) is ignored and
 				// replaced with a LLVM intrinsic call.
 				b.defineMathOp()

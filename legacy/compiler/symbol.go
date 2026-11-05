@@ -280,17 +280,6 @@ func (c *compilerContext) maybeCreateSyntheticFunction(fn *ssa.Function, llvmFn 
 			if info := c.getFunctionInfo(fn); info.linkName != fn.RelString(nil) {
 				return
 			}
-			// The universe's builtin String() placeholders have no body on the
-			// wasm target - the runtime carries no moxie.stringer bodies there,
-			// and stage4 emits an identity thunk per builtin instead. Legacy
-			// needs the same, or every method-set global references a function
-			// that does not exist.
-			if c.isBuiltinStringPlaceholder(fn) {
-				c.createBuiltinStringIdentity(fn, llvmFn)
-				llvmFn.SetLinkage(llvm.LinkOnceODRLinkage)
-				llvmFn.SetUnnamedAddr(true)
-				return
-			}
 			c.addError(fn.Pos(), "missing function body")
 			return
 		}
@@ -301,35 +290,6 @@ func (c *compilerContext) maybeCreateSyntheticFunction(fn *ssa.Function, llvmFn 
 		llvmFn.SetLinkage(llvm.LinkOnceODRLinkage)
 		llvmFn.SetUnnamedAddr(true)
 	}
-}
-
-// isBuiltinStringPlaceholder reports whether fn is the universe's synthetic
-// String() on a builtin type (func (b *uint64) String() string).
-func (c *compilerContext) isBuiltinStringPlaceholder(fn *ssa.Function) bool {
-	if fn == nil || fn.Signature == nil || fn.Name() != "String" || fn.Signature.Recv() == nil {
-		return false
-	}
-	ptr, ok := fn.Signature.Recv().Type().(*types.Pointer)
-	if !ok {
-		return false
-	}
-	_, ok = ptr.Elem().(*types.Basic)
-	return ok
-}
-
-// createBuiltinStringIdentity defines the body of a builtin String()
-// placeholder: load the value out of the receiver and return it. Moxie's
-// string and the builtin scalar share their representation in the ABI, so this
-// is the identity - meaningful for bytes, and an arm that dispatches and
-// returns without trapping for every other builtin kind.
-func (c *compilerContext) createBuiltinStringIdentity(fn *ssa.Function, llvmFn llvm.Value) {
-	irbuilder := c.ctx.NewBuilder()
-	defer irbuilder.Dispose()
-	retType := c.getLLVMType(fn.Signature.Results().At(0).Type())
-	entry := c.ctx.AddBasicBlock(llvmFn, "entry")
-	irbuilder.SetInsertPointAtEnd(entry)
-	v := irbuilder.CreateLoad(retType, llvmFn.Param(0), "")
-	irbuilder.CreateRet(v)
 }
 
 // getFunctionInfo returns information about a function that is not directly
