@@ -6,6 +6,20 @@ The first release on the public toolchain repository (`moxielang.dev`, staged
 at `github.com/moxie-language/toolchain`). Everything below the tag is the
 compiler as it self-hosts to a reproducible binary.
 
+- **A missing diagnostic is not evidence** - three rounds read a decoder that
+  rejected every frame as one that was never entered, because `printFD` stayed 0
+  in a spawned domain and every worker `println` went to fd 0 and vanished.
+  `initDomain` seeds the print descriptor, a spawned worker prints a canary, and
+  every probe asserts its control line before its result counts.
+- **Spawn channel frames carry an offset representation for self-contained
+  elements** - a struct of scalars and `string`/`[]byte`, or a bare
+  `string`/`[]byte`, crosses as one memory image whose pointer slots are
+  `uintptr` offsets from the frame base (a 4-byte magic; total and root are
+  derived). Decode is one memcpy plus a rebase. It is LOCAL-ONLY by
+  construction (it carries the machine's slice header, padding and pointer
+  width); the structural codec remains the portable wire format for pipes and
+  sockets. Rings are sized by a sizer next to the codec - the max of the
+  structural and offset maxima - implemented once per compiler.
 - **The import root is `moxielang.dev`** - the toolchain's own packages import
   under the vanity domain, and the loader resolves it, so a toolchain module
   states its dependency by name rather than by checkout path.

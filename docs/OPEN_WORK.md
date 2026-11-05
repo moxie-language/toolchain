@@ -28,7 +28,43 @@ which is why the arm re-check sits inside the page loop. Arenas over
 arenas, so the tail the ratchet actually hands back is the live root/frame arena
 slack.
 
-## ROUND 384: OFFSET-FRAME PROTOTYPE AND COMPILER MEMORY
+## ROUND 384: OFFSET FRAMES, AND THE RULE THAT MADE THEM FINDABLE
+
+**THE RULE: a missing diagnostic is not evidence.** For three rounds a decoder
+that rejected every frame looked like a decoder that was never entered, because
+`printFD` stayed 0 in spawned domains and every worker print vanished. Any probe
+or test run must print a canary line first and assert it arrived; "no output"
+means the rig is broken, never that the code is innocent. The canary is in
+`spawn_worker_print_fd`, and the domain init seeds the sink.
+
+### Blast radius (widened after the wiring)
+
+- `spawn_crosspkg_struct`: `lib.Msg{N int32, Body []byte}` through a spawn
+  channel whose target lives in lib - passes on BOTH compilers
+  (`crosspkg spawn ok 12 14`), covering the cross-package descriptor, the sizer
+  and the offset codec.
+- `wasm_spawn_struct` (same package, same message): the native run passes
+  (`wasm spawn struct ok 12 14`), but the wasm build FAILS VERIFICATION:
+  `call i1 @runtime.chanRecv(i32 undef, ptr null, ptr %chan.op, ptr undef)` -
+  a spawn target's channel receive has no channel handle on wasm. This is a
+  real defect found by running the program, not by compiling it; the fixture is
+  kept as the reproduction with `//:wasmtest skip` until it is fixed.
+- morly (the relay, a real program) built with stage4: `mxc-s41` produced
+  an 8.2MB binary and it runs (`--help` prints the relay usage). No fixture-only
+  coverage for the offset frames; the real program's channels are covered by the
+  same dispatch.
+
+Next for the endpoint tag, with its two acceptance requirements: it belongs in
+the channel identity so a send/recv tag mismatch is a creation-time error, and
+it must retire the compile-time worst case - measure total ring bytes before
+and after and require the structural channels' reservations to drop. Then merge
+the debug codec-id stamp into the recv-dispatch test (one invariant: send tag
+equals recv tag on a delivered message; a debug-only stamp plus one assertion).
+Also pending: the sizer-equality test (compute `offsetFrameMax` from both
+compilers on the same type and assert equality; they already disagree on how
+`string`/`[]byte` is spelled). The offset frame is LOCAL-ONLY by construction;
+the structural codec is the portable wire format, and the magic byte can later
+collapse into the tag.
 
 ### Compiler memory (measured, not changed)
 
