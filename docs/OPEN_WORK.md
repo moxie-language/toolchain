@@ -4,6 +4,64 @@ State carried across context compaction. Ordered queue, the decisions already
 taken, the findings that motivated them, and the two designs in flight
 (module removal, user-code exemption). Update this file when the queue moves.
 
+## NEXT: IDLE-TIME ARENA GROOMING (designed, not built)
+
+Felten and Ott's 1995 argument: collect at idle so the active path never pays.
+Arenas make it cheaper than tracing: an idle domain can drop the tail of an
+arena and `madvise(MADV_DONTNEED)` the pages away, so the cost is proportional
+to pages returned, not to live data. That is the whole advantage of having no
+heap, and the same reason freeing is bulk here.
+
+The design constraint is that idle work must be incremental and abortable, or
+it lands on the message that wakes the domain:
+
+- one page at a time, yield between pages, and re-check the inbox/select arms
+  before each page;
+- then the worst case is a single page of delay, not a full compaction in the
+  middle of an arrival, and the page is refaulted (zero-filled) by the next
+  allocation with no bookkeeping change (`off` is not moved).
+
+The trigger already exists: `chanSelect` drains the sovereign compaction queue
+at every select (`SovDrainCompactions(1)`), and its blocking park loop is the
+domain's idle window. Tail trimming belongs in that loop, with a small budget
+per iteration and the arm re-check between pages. Arenas to trim: the domain's
+root arena and the arenas on its fn stack (a suspended frame's unused tail is
+safe to release; it refaults when the frame resumes). The arena pool's idle
+arenas are the other candidate and the place a big frame's RSS actually sits
+after it returns.
+
+The acceptance test is two numbers, as stated:
+
+1. RSS falls while the domain is idle (read /proc/self/statm from a probe).
+2. The first message after idleness is answered with no stall.
+
+If (1) holds and (2) fails, the grooming is running while the cat is trying to
+eat, and the budget/abort point is wrong.
+
+## ROUND 382: VALUE RECEIVERS OVER NAMED SLICES/MAPS, COMPACTION AT SELECT
+
+- A value receiver over a named slice/map is a REFERENCE receiver in both
+  compilers: stage4 binds the receiver variable to the caller's address and
+  takes it at the call site; legacy rewrites the method to a pointer receiver
+  with `(*name)` uses, using the first type-check's object info so shadowing is
+  exact. Struct value receivers remain a compile error.
+- `chanSelect` drains the sovereign compaction queue (one group per select), so
+  every event loop compacts when idle; a group whose arena is borrowed or
+  registered stable is rotated, never moved under a live frame. `SovDrainCompactions`
+  now also refuses a group whose data arena appears in the stable-arena stack.
+- `push` semantics are documented as they are implemented: nil/zero-cap first
+  push -> max(n,4), overflow doubles, garbage is reclaimed by the arena; the
+  only fixed-length panic is external storage (cap reads -1).
+- Verified on mxc-s25: targeted units 20/20 (named_*, reject_unexported*,
+  arena_deep_nest, sovereign_arena, sovereign_map_store, chan/select/spawn
+  fixtures); phase 2 selfhost+fixpoint PASS (180 s); the extended
+  named_types_methods fixture (both receiver spellings, interface String,
+  growth) passes native on both compilers and in Chromium via
+  tests/wasm/validate.sh.
+- The full 0a/0b sweep was started and then stopped: 190 units recompiling in
+  parallel saturated the 8-core box (load 8.5, swap already at 4 GB from
+  earlier builds) alongside the browser. Targeted serial runs are the rule.
+
 ## ROUND 381: NAMED TYPES OVER SLICES AND MAPS ARE ALLOWED
 
 The ban is gone. A type name over a slice or map is a normal Moxie type with a
