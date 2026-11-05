@@ -35,6 +35,12 @@ Box environment notes: `/etc/cron.d/idle-shutdown` powers the server off after
 30 minutes with no login session and load < 2 (it is disabled while working:
 the file is at /root/idle-shutdown.cron.disabled), and `binaryen` was missing -
 `wasm-opt` is required by the legacy wasm link and is now installed.
+`lib/compiler-rt-builtins` is an ABSOLUTE symlink into the local source tree
+(/home/mleku/src/srclib/llvm/compiler-rt/lib/builtins); on the box that tree was
+absent until it was copied, which only shows with a cleared build cache. And the
+legacy build cache is not keyed by the compiler binary: after rebuilding legacy,
+stale .bc objects survive and a fixture can fail with "init not found for
+internal/byteorder" (or crash the compiler) until ~/.cache/moxie is cleared.
 
 ## STANDING ISSUES (round 379) - the current queue
 
