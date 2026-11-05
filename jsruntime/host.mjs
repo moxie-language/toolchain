@@ -1225,7 +1225,8 @@ export function startDomain(boot, onSettled, relayUp, appPort) {
   // Resolve the module path here, against the realm creating the domain: a
   // spawned domain inherits this absolute URL through __moxie_wasm_url.
   if (boot.wasm) boot = { ...boot, wasm: new URL(boot.wasm, globalThis.location.href).href };
-  const msg = { ...boot, stubs: globalThis.__moxie_test_stubs === true, supervisorPort: sup.port2 };
+  const msg = { ...boot, stubs: globalThis.__moxie_test_stubs === true,
+    supervisorPort: sup.port2, relayPort, appPort };
   const ports = [sup.port2];
   if (relayPort) ports.push(relayPort);
   if (appPort) ports.push(appPort);
