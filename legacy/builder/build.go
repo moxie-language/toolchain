@@ -424,6 +424,7 @@ func Build(
 				if err := llvm.VerifyModule(
 					mod, llvm.PrintMessageAction,
 				); err != nil {
+					os.WriteFile("/tmp/legacy-bad-"+strings.ReplaceAll(pkg.ImportPath, "/", "_")+".ll", []byte(mod.String()), 0644)
 					return errors.New("verification error after compiling package " + pkg.ImportPath)
 				}
 

@@ -276,7 +276,9 @@ func (b *builder) createRuntimeAssert(assert llvm.Value, blockPrefix, assertFunc
 // extend. The resulting value is not truncated: it may still be bigger than
 // targetType.
 func (b *builder) extendInteger(value llvm.Value, valueType types.Type, targetType llvm.Type) llvm.Value {
-	if value.Type().IntTypeWidth() < targetType.IntTypeWidth() {
+	w := value.Type().IntTypeWidth()
+	tw := targetType.IntTypeWidth()
+	if w < tw {
 		if valueType.Underlying().(*types.Basic).Info()&types.IsUnsigned != 0 {
 			// Unsigned, so zero-extend to the target type.
 			value = b.CreateZExt(value, targetType, "")
@@ -284,6 +286,14 @@ func (b *builder) extendInteger(value llvm.Value, valueType types.Type, targetTy
 			// Signed, so sign-extend to the target type.
 			value = b.CreateSExt(value, targetType, "")
 		}
+	} else if w > tw {
+		// A 64-bit index on a 32-bit target. Truncating here, where the value
+		// is made the target's index width, is what keeps every later use
+		// (slice clamping in particular) in one type: a uint64 high bound used
+		// against a 32-bit length produced `icmp ult i32 ..., i64 ...` and a
+		// select with mismatched arms, which the LLVM verifier rejects - every
+		// wasm build that sliced with a uint64 index.
+		value = b.CreateTrunc(value, targetType, "")
 	}
 	return value
 }

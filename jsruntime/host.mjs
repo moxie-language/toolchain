@@ -206,6 +206,16 @@ export function buildBridge(opts = {}) {
   const D = opts.dom;
   if (!D) throw new Error('buildBridge: no DOM implementation; a module runs in a Worker, so pass the relay proxy from relay.mjs');
   return {
+    // --- time ---
+    // zoneinfo_js.mx imports this from the bridge; the factory in
+    // bridge-common.mjs defines it, but that module is not on the live import
+    // path (the page and the Worker import host.mjs), so a module built by the
+    // legacy compiler - which does not stub the symbol into the module the way
+    // stage4's wasi_stubs does - failed to instantiate here.
+    timezone_offset_minutes() {
+      return new Date().getTimezoneOffset();
+    },
+
     // --- localstorage ---
     localstorage_get_item(kp, kl, _kc, op, ol) {
       setOutStr(op, ol, localstorage.GetItem(readStr(kp, kl)));
