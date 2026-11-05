@@ -15,7 +15,7 @@ const (
 	codecTagStruct = 0x04  // struct: uint32 nf + field encodings
 	codecTagBackref = 0x05 // back-reference: uint32 index into seen set
 	codecTagNil    = 0x06  // nil pointer
-	codecTagStable   = 0x07 // stable pointer: 8 raw address bytes, identity preserved
+	codecTagStable   = 0x07 // stable pointer: raw target-word address, identity preserved
 	codecTagStableSlice = 0x08 // stable string/[]byte: raw target-word header (3 words), no copy
 )
 
@@ -44,6 +44,21 @@ func codecDataFloor() uintptr {
 		return 1024
 	}
 	return 0x1000
+}
+
+// codecBadPtrFloor is the lowest address a pointer held IN a value may have
+// before the codec calls it stale. Native keeps the 1 MiB heuristic it has
+// always used: no real object is mapped below it, and a pointer there is the
+// zeroed residue of a half-built frame. wasm32 cannot use it - wasm-ld places
+// the stack and first data below 1 MiB, so the address of a local slot is
+// routinely ~0x10000, and treating that as invalid made the encoder write
+// codecTagNil for every pointer-to-pointer it was handed: fmt's newPrinter
+// returned a valid *pp that the caller received as nil.
+func codecBadPtrFloor() uintptr {
+	if codecPtrSize() < 8 {
+		return codecDataFloor()
+	}
+	return 1048576
 }
 
 // codecVoidPtr reports an address no allocation can start at. The native floor
@@ -478,7 +493,7 @@ func codecRetStableInner(ptr unsafe.Pointer, tp uintptr) (ok bool) {
 		if p == nil {
 			return true
 		}
-		if uintptr(p) < 1048576 {
+		if uintptr(p) < codecBadPtrFloor() {
 			return false
 		}
 		if !codecIsStableAddr(uintptr(p)) {
@@ -562,7 +577,7 @@ func retPointeeDies(p unsafe.Pointer, tp uintptr) (ok bool) {
 	switch retKindOf(tp) {
 	case KindPointer, KindUnsafePointer:
 		q := *(*unsafe.Pointer)(p)
-		return q != nil && uintptr(q) >= 1048576 && !codecIsStableAddr(uintptr(q)) &&
+		return q != nil && uintptr(q) >= codecBadPtrFloor() && !codecIsStableAddr(uintptr(q)) &&
 			!codecSovDataLive(uintptr(q))
 	case KindBytes, KindSlice:
 		sv := *(*_string)(p)
@@ -612,7 +627,7 @@ func retPointeeDies(p unsafe.Pointer, tp uintptr) (ok bool) {
 		return false
 	case KindMap, KindChan, KindFunc:
 		q := *(*unsafe.Pointer)(p)
-		return q != nil && uintptr(q) >= 1048576 && !codecIsStableAddr(uintptr(q)) &&
+		return q != nil && uintptr(q) >= codecBadPtrFloor() && !codecIsStableAddr(uintptr(q)) &&
 			!codecSovDataLive(uintptr(q))
 	}
 	return false
@@ -873,7 +888,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 	if typ == nil {
 		runtimePanic("codecEncodeValue nil typ")
 	}
-	badPtr := ptr == nil || uintptr(ptr) < 1048576
+	badPtr := ptr == nil || uintptr(ptr) < codecBadPtrFloor()
 	k := typ.Kind()
 	if badPtr && k != KindStruct {
 		switch k {
@@ -983,7 +998,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 	case KindPointer:
 		// Bad pointer check: if ptr looks invalid (low address, nil, etc.)
 		// emit nil instead of dereferencing.
-		if ptr == nil || uintptr(ptr) < 1048576 {
+		if ptr == nil || uintptr(ptr) < codecBadPtrFloor() {
 			codecWriteVarint(cb, codecTagNil)
 			return
 		}
@@ -1013,11 +1028,11 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		// and reading them is the SIGSEGV (a zeroed pointer field of a partially
 		// built TLS state).
 		if codecIsStableAddr(uintptr(p)) &&
-			(uintptr(p) < 1048576 || !retPointeeDies(p, retElemAddr(uintptr(unsafe.Pointer(typ))))) {
+			(uintptr(p) < codecBadPtrFloor() || !retPointeeDies(p, retElemAddr(uintptr(unsafe.Pointer(typ))))) {
 			codecSeenAdd(ss, p, codecPointeeSize(typ))
 			codecNoteStable(uintptr(p))
 			codecWriteVarint(cb, codecTagStable)
-			codecWriteRaw(cb, unsafe.Pointer(&p), 8)
+			codecWriteRaw(cb, unsafe.Pointer(&p), codecPtrSize())
 			return
 		}
 		// Pointer into a transient fn arena whose pointee is a basic
@@ -1046,19 +1061,19 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 				codecSeenAdd(ss, p, codecPointeeSize(typ))
 				codecNoteStable(uintptr(p))
 				codecWriteVarint(cb, codecTagStable)
-				codecWriteRaw(cb, unsafe.Pointer(&p), 8)
+				codecWriteRaw(cb, unsafe.Pointer(&p), codecPtrSize())
 				return
 			}
 			codecSeenAdd(ss, p, codecPointeeSize(typ))
 			codecEscapeNote()
 			codecWriteVarint(cb, codecTagStable)
-			codecWriteRaw(cb, unsafe.Pointer(&p), 8)
+			codecWriteRaw(cb, unsafe.Pointer(&p), codecPtrSize())
 			return
 		}
 		if codecSovDataAlias(uintptr(p)) {
 			codecSeenAdd(ss, p, codecPointeeSize(typ))
 			codecWriteVarint(cb, codecTagStable)
-			codecWriteRaw(cb, unsafe.Pointer(&p), 8)
+			codecWriteRaw(cb, unsafe.Pointer(&p), codecPtrSize())
 			return
 		}
 		codecWriteVarint(cb, codecTagPtr)
@@ -1109,7 +1124,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		if codecMapValNeedsCopy(vt) { fixupFlags |= codecMapValDeep }
 		codecEncodeMap(hm, cb, ss, fixupFlags, vt)
 	case KindStruct:
-		if ptr == nil || uintptr(ptr) < 1048576 {
+		if ptr == nil || uintptr(ptr) < codecBadPtrFloor() {
 			codecWriteVarint(cb, codecTagStruct)
 			codecWriteVarint(cb, uint64(0))
 			return
@@ -1244,11 +1259,11 @@ func codecDecodeInto(cb *CodecBuf, ds *codecDecodeSeen, dst unsafe.Pointer, typ 
 			*(*unsafe.Pointer)(dst) = inner
 			return
 		case codecTagStable:
-			if cb.pos+8 > int32(len(cb.data)) {
+			if cb.pos+int32(codecPtrSize()) > int32(len(cb.data)) {
 				runtimePanic("codec stable underflow")
 			}
 			sp := *(*unsafe.Pointer)(unsafe.Pointer(&cb.data[cb.pos]))
-			cb.pos += 8
+			cb.pos += int32(codecPtrSize())
 			*(*unsafe.Pointer)(dst) = sp
 			codecDecodeSeenAdd(ds, sp)
 			return
@@ -1366,11 +1381,11 @@ func codecDecodeValue(cb *CodecBuf, ds *codecDecodeSeen, typ *RawType) unsafe.Po
 			*(*unsafe.Pointer)(buf) = inner
 			return buf
 		case codecTagStable:
-			if cb.pos+8 > int32(len(cb.data)) {
+			if cb.pos+int32(codecPtrSize()) > int32(len(cb.data)) {
 				runtimePanic("codec stable underflow")
 			}
 			sp := *(*unsafe.Pointer)(unsafe.Pointer(&cb.data[cb.pos]))
-			cb.pos += 8
+			cb.pos += int32(codecPtrSize())
 			buf := alloc(typ.Size(), unsafe.Pointer(typ))
 			*(*unsafe.Pointer)(buf) = sp
 			codecDecodeSeenAdd(ds, sp)
