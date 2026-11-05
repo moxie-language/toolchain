@@ -1,11 +1,8 @@
-//:wasmtest skip
-// Wasm spawn is REFUSED at build time (both compilers): a spawned domain's
-// `closed` breaker result is not threaded into the child, so the body's select
-// would receive through a null channel - undefined behaviour that passes any
-// test which never delivers, and it exhausted the child's root arena when it
-// did run. Natively this program passes: "wasm spawn struct ok 12 14".
-// The file stays as the native assertion and the reproduction; when the breaker
-// handle is threaded through __spawn_entry, remove the skip and make it run.
+// A struct with a []byte crosses a spawn boundary in both directions, and the
+// parent joins on the domain's breaker. Runs on every target: natively the
+// values travel the mmap ring, on wasm the SAB ring behind the Worker boundary
+// (the breaker handle is created by the parent and threaded into the child's
+// entry, so `<-done` returns when the child exits).
 package main
 
 type Msg struct {
@@ -45,7 +42,7 @@ func main() {
 	b := <-out
 	<-done
 	if a != 12 || b != 14 {
-		panic("wasm spawn struct values wrong")
+		panic("spawn struct values wrong")
 	}
-	println("wasm spawn struct ok", a, b)
+	println("spawn struct ok", a, b)
 }

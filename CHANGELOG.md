@@ -1,5 +1,38 @@
 # Moxie Changelog
 
+## v1.0.0-rc.2
+
+- **Wasm spawn works, and it is page-supervised.** A Worker started by a
+  Worker never runs while its creator is parked in `Atomics.wait` - the startup
+  task needs the creator's event loop - so a domain that spawned and then
+  waited for its child deadlocked with no diagnostic. Every domain now holds a
+  supervisor port to the page, `spawn_domain` posts a spawn request over it,
+  and the page starts the Worker and hands it the same SharedArrayBuffers. The
+  page is never parked in wasm.
+- **The breaker is threaded.** The parent creates the breaker ring before the
+  domain starts, `__spawn_entry` receives its handle and binds it as the
+  domain's `closed` (`WasmBreakerSet`), and the child's exit closes it
+  (`WasmBreakerClose`). `spawn` returns the parent's end of that ring, so
+  `close(done)` stops a worker parked on `<-closed` and `<-done` returns when
+  the child ends.
+- **`tryPipeRecv` no longer blocks.** A select over a spawn-bound arm runs on
+  the domain's only thread, so a blocking probe stopped every other arm: a
+  worker selecting on its breaker never looked at its inbox. `channel_try_recv`
+  reports empty (-2) versus closed (-1); the select path uses it and a direct
+  `<-ch` still blocks.
+- **The compiler no longer special-cases spawn-bound channels.** The
+  `sabChannels` bypass is gone from both compilers: the runtime routes a
+  spawn-bound channel, and the parent's channels are tagged at run time by
+  `MarkChannelSAB` (legacy now emits that call too).
+- **stage4: a nil `Signature.Params` is a function with no parameters.**
+  Treating it as "not a spawn target" made `spawn(worker)` with zero arguments
+  emit a nil result and start nothing. Fixed in the call emitter and in
+  `__spawn_entry`'s dispatch. Legacy was already correct (go/types returns an
+  empty tuple).
+- **The wasm spawn refusal is withdrawn** and the fixture's `//:wasmtest skip`
+  with it: `wasm_spawn_struct` runs in Chromium under both compilers and phase 5
+  reports "output matches native".
+
 ## v1.0.0-rc.0
 
 The first release on the public toolchain repository (`moxielang.dev`, staged

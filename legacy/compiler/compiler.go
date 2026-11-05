@@ -201,12 +201,6 @@ type builder struct {
 	runDefersBlock    []llvm.BasicBlock
 	afterDefersBlock  []llvm.BasicBlock
 
-	// sabChannels tracks SSA channel values that are SAB-backed (spawn boundary).
-	// Maps the SSA channel value to its int32 LLVM SAB handle value.
-	// Populated by createWasmSpawn (parent side) and setupWasmSpawnTargetChannels
-	// (child/spawn-target side).
-	sabChannels map[ssa.Value]llvm.Value
-
 	// pipeChannels tracks SSA channel values that route through a fork+
 	// socketpair pipe (native spawn boundary). Presence in the map means
 	// chan send/recv on this value should emit PipeChanSendCodec /
@@ -1599,7 +1593,6 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		b.locals[param] = b.collapseFormalParam(llvmType, fields)
 
 		// Add debug information to this parameter (if available)
-		// Note: setupWasmSpawnTargetChannels is called after all params are loaded.
 		if b.Debug && b.fn.Syntax() != nil {
 			dbgParam := b.getLocalVariable(param.Object().(*types.Var))
 			loc := b.GetCurrentDebugLocation()
@@ -1619,9 +1612,6 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 			}
 		}
 	}
-
-	// For wasm spawn targets, mark channel params as SAB-backed in b.sabChannels.
-	b.setupWasmSpawnTargetChannels()
 
 	// For native spawn targets, mark channel params as pipe-bound to ChildPipeFd.
 	b.setupNativeSpawnTargetChannels()

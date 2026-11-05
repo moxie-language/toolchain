@@ -2,7 +2,8 @@
 //
 // moxiejs path (JS compiled output): spawn() is a cooperative microtask domain.
 // wasm path: spawn() emits bridge.spawn_domain() which creates a real Worker
-//   via wasm-worker-host.mjs using SAB channels (see sab-channel.mjs).
+//   via worker-host.mjs, started by the page, using SAB channels
+//   (see sab-channel.mjs and host.mjs).
 //   The compiler assigns fnIdx at compile time; __spawn_entry in the Worker
 //   dispatches via __spawn_dispatch[fnIdx].
 //

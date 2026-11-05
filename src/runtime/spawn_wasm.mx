@@ -8,7 +8,8 @@ import (
 )
 
 // Bridge imports for spawn-boundary SAB channels and domain creation.
-// These are provided by wasm-worker-host.mjs in the JS host.
+// These are provided by jsruntime/host.mjs, which builds the bridge for the
+// page and for every domain Worker.
 
 //:wasmimport bridge channel_create
 func bridgeChannelCreate(slotSize, slotCount int32) int32
@@ -19,11 +20,14 @@ func bridgeChannelSend(handle int32, srcPtr *byte, srcLen int32)
 //:wasmimport bridge channel_recv
 func bridgeChannelRecv(handle int32, dstPtr *byte, dstCap int32) int32
 
+//:wasmimport bridge channel_try_recv
+func bridgeChannelTryRecv(handle int32, dstPtr *byte, dstCap int32) int32
+
 //:wasmimport bridge channel_close
 func bridgeChannelClose(handle int32)
 
 //:wasmimport bridge spawn_domain
-func bridgeSpawnDomain(fnIdx int32, argPtr *byte, argLen int32, chanHandlesPtr *byte, nChans int32)
+func bridgeSpawnDomain(fnIdx int32, argPtr *byte, argLen int32, chanHandlesPtr *byte, nChans int32, breakerHandle int32)
 
 //:wasmimport bridge is_worker_context
 func bridgeIsWorkerContext() int32
@@ -46,6 +50,13 @@ func SpawnChannelRecv(handle uintptr, dst unsafe.Pointer, nbytes int32) int32 {
 	return bridgeChannelRecv(int32(handle), (*byte)(dst), nbytes)
 }
 
+// SpawnChannelTryRecv is the non-blocking probe: -2 means nothing is queued,
+// -1 means closed. A select arm uses it, because a domain has one thread and
+// blocking on one arm would stop it from ever looking at the others.
+func SpawnChannelTryRecv(handle uintptr, dst unsafe.Pointer, nbytes int32) int32 {
+	return bridgeChannelTryRecv(int32(handle), (*byte)(dst), nbytes)
+}
+
 // SpawnChannelClose marks a SAB channel as closed.
 func SpawnChannelClose(handle uintptr) {
 	bridgeChannelClose(int32(handle))
@@ -57,11 +68,11 @@ func SpawnChannelClose(handle uintptr) {
 //
 // Panics if not running inside a Web Worker: channel_recv uses Atomics.wait
 // which is forbidden on the main browser thread. See moxie/wasm deployment docs.
-func SpawnDomain(fnIdx int32, argPtr unsafe.Pointer, argLen int32, chanHandlesPtr unsafe.Pointer, nChans int32) {
+func SpawnDomain(fnIdx int32, argPtr unsafe.Pointer, argLen int32, chanHandlesPtr unsafe.Pointer, nChans int32, breakerHandle int32) {
 	if bridgeIsWorkerContext() == 0 {
 		runtimePanic("moxie/spawn: wasm binary must be loaded inside a Web Worker - channel_recv uses Atomics.wait which is blocked on the main thread")
 	}
-	bridgeSpawnDomain(fnIdx, (*byte)(argPtr), argLen, (*byte)(chanHandlesPtr), nChans)
+	bridgeSpawnDomain(fnIdx, (*byte)(argPtr), argLen, (*byte)(chanHandlesPtr), nChans, breakerHandle)
 }
 
 // --- spawn-boundary channel behaviour ---
@@ -126,6 +137,34 @@ func SpawnChannelWrap(handle uintptr, elementSize uintptr) (ch *channel) {
 	return ch
 }
 
+// The domain's breaker crosses the same SAB boundary as its channels: the
+// parent creates the ring and keeps the handle spawn returns, and the handle
+// travels in the spawn arguments, so the child's `closed` is the SAME ring
+// rather than a local channel nobody else can close. That is what makes
+// close(done) stop a worker, and what makes `<-done` return when it exits.
+var wasmBreakerHandle uintptr
+
+// WasmBreakerSet binds this domain's breaker to the parent's ring. Called by
+// __spawn_entry before the target runs, so the target's `closed` result is the
+// shared ring from its first instruction.
+func WasmBreakerSet(handle uintptr) {
+	if handle == 0 {
+		return
+	}
+	wasmBreakerHandle = handle
+	DomainClosed = SpawnChannelWrap(handle, 0)
+}
+
+// WasmBreakerClose reports the domain finished: closing the ring wakes the
+// parent's `<-done` and every other holder of the breaker. Idempotent, because
+// the target may already have closed it with close(closed).
+func WasmBreakerClose() {
+	if wasmBreakerHandle == 0 {
+		return
+	}
+	SpawnChannelClose(wasmBreakerHandle)
+}
+
 // tryPipeSend writes one value to the boundary ring, encoding it when the
 // element holds references: the frame must be the one the peer's direct receive
 // decodes. Both encode and decode live in chan.mx (codecFrameEncode /
@@ -162,14 +201,16 @@ func (ch *channel) tryPipeRecv(value unsafe.Pointer, c moxie.Codec, td *RawType)
 	if c == nil && td == nil {
 		// `got`, not `n`: the no-shadowing rule takes a name for the whole
 		// block, so a nested `n` here would shadow the function-body `n` below.
-		got := SpawnChannelRecv(h, value, int32(ch.elementSize))
+		// Non-blocking: this is the select path. A direct receive goes through
+		// PipeChanRecvRaw, which waits.
+		got := SpawnChannelTryRecv(h, value, int32(ch.elementSize))
 		if got < 0 {
 			return false, false
 		}
 		return true, true
 	}
 	buf := []byte{:sabFrameMax}
-	n := SpawnChannelRecv(h, unsafe.Pointer(&buf[0]), int32(len(buf)))
+	n := SpawnChannelTryRecv(h, unsafe.Pointer(&buf[0]), int32(len(buf)))
 	if n < 0 {
 		return false, false
 	}
@@ -224,8 +265,14 @@ func PipeChanRecvRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
 	if ch == nil || !ch.spawnBound {
 		return false
 	}
-	received, ok := ch.tryPipeRecv(ptr, nil, nil)
-	return received && ok
+	// The direct receive waits: the ring blocks in Atomics.wait until a frame
+	// arrives or the peer closes, which is what `<-ch` means. The select path
+	// uses tryPipeRecv, which never waits.
+	h := sabHandleOf(ch)
+	if h == 0 {
+		return false
+	}
+	return SpawnChannelRecv(h, ptr, int32(ch.elementSize)) >= 0
 }
 
 // SharedBuffer is native-only. WASM has no anonymous shared mapping it can hand

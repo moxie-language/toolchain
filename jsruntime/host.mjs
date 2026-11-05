@@ -201,8 +201,14 @@ idb_kv_get_all(sp, sl, _sc, fnID, doneID) {
 //   rather than as a TypeError per call.
 export function buildBridge(opts = {}) {
   const handles = opts.channels || new Map();
+  // A domain inherits its parent's handle numbers; a channel it creates itself
+  // must not land on one of them or it would overwrite a live ring.
   let next = 1;
+  for (const k of handles.keys()) {
+    if (k >= next) next = k + 1;
+  }
   const isWorker = opts.isWorker ? 1 : 0;
+  const supervisor = opts.supervisor || null;
   const D = opts.dom;
   if (!D) throw new Error('buildBridge: no DOM implementation; a module runs in a Worker, so pass the relay proxy from relay.mjs');
   return {
@@ -856,20 +862,23 @@ export function buildBridge(opts = {}) {
       const dst = new Uint8Array(memory.buffer, ptr, cap);
       return sabChannel.recv(sab, dst);
     },
+    channel_try_recv(h, ptr, cap) {
+      const sab = handles.get(h);
+      if (!sab) return -1;
+      const dst = new Uint8Array(memory.buffer, ptr, cap);
+      return sabChannel.tryRecv(sab, dst);
+    },
     channel_close(h) {
       const sab = handles.get(h);
       if (sab) { sabChannel.close(sab); handles.delete(h); }
     },
     is_worker_context() { return isWorker; },
-    spawn_domain(fnIdx, argPtr, argLen, chanHandlesPtr, nChans) {
-      // Workers are started from the host: the module cannot create one. The
-      // entry index and the bound channel handles are handed to the child over
-      // its own message port so it can bind the same rings from the far end.
-      //
-      // Every domain runs in a Worker, root and child alike, so being a worker
-      // is not a reason to refuse: the runtime only requires that spawn is
-      // reached from a worker context (channel receives block in Atomics.wait,
-      // which the page thread forbids), and a Worker may start another Worker.
+    spawn_domain(fnIdx, argPtr, argLen, chanHandlesPtr, nChans, breakerHandle) {
+      // The module cannot create a Worker itself, and must not try: a Worker
+      // started by a parked domain never runs (its startup task needs the
+      // creator's event loop). The request goes to the page over the supervisor
+      // port; the page starts the domain and hands it the same rings, which are
+      // SharedArrayBuffers and therefore already shared.
       const args = readBytes(argPtr, argLen);
       const chans = [];
       const dv = new DataView(memory.buffer);
@@ -877,7 +886,20 @@ export function buildBridge(opts = {}) {
         const h = dv.getInt32(chanHandlesPtr + i * 4, true);
         if (handles.has(h)) chans.push({ handle: h, sab: handles.get(h) });
       }
-      spawnWorker(fnIdx, args, chans);
+      // The Worker is created by the PAGE, not here. A Worker made by a Worker
+      // does not start while its creator is parked in Atomics.wait - the
+      // startup task needs the creator's event loop - and a domain that spawns
+      // and then waits for the child is exactly that shape. The page is never
+      // parked in wasm, so it starts the domain; the rings stay shared.
+      const wasm = globalThis.__moxie_wasm_url;
+      // The breaker ring travels with the channels but outside the parameter
+      // list: it is not an argument, it is the domain's termination signal.
+      const breaker = breakerHandle && handles.has(breakerHandle)
+        ? { handle: breakerHandle, sab: handles.get(breakerHandle) } : null;
+      if (!supervisor) {
+        throw new Error('spawn: no supervisor port to the page; a wasm domain cannot start a Worker itself, so spawn needs the page-supervised host (jsruntime/host.mjs)')
+      }
+      supervisor.postMessage({ kind: 'spawn', fnIdx, args, chans, wasm, breaker });
     },
   };
 }
@@ -886,8 +908,8 @@ export function buildBridge(opts = {}) {
 // functions as the page, over the channel rings the parent handed over. dom is
 // the relay proxy when the domain holds a port to the page's document, and null
 // for a spawned domain, which has no page connection of its own.
-export function buildWorkerBridge(channels, dom) {
-  return buildBridge({ channels, isWorker: true, dom });
+export function buildWorkerBridge(channels, dom, supervisor) {
+  return buildBridge({ channels, isWorker: true, dom, supervisor });
 }
 
 // buildHostImports returns the non-bridge import object every Moxie wasm
@@ -1049,13 +1071,14 @@ export function buildHostImports(mem) {
 // module in a dedicated Worker; the module cannot create one itself, and the
 // bound channel rings travel to the child as SharedArrayBuffers, which is the
 // only inter-domain state there is.
-function spawnWorker(fnIdx, argBytes, chans) {
+function spawnWorker(fnIdx, argBytes, chans, wasm, breaker) {
   startDomain({
     kind: 'entry',
-    wasm: globalThis.__moxie_wasm_url,
+    wasm: wasm || globalThis.__moxie_wasm_url,
     fnIdx,
     args: argBytes,
     chans: chans.map(c => ({ handle: c.handle, sab: c.sab })),
+    breaker: breaker || null,
   }, null, true);
 }
 
@@ -1123,6 +1146,17 @@ function stopAllDomains(reason) {
 
 export function startDomain(boot, onSettled, relayUp, appPort) {
   const w = new Worker(new URL('./worker-host.mjs', import.meta.url), { type: 'module' });
+  // The supervisor link: this realm starts the domain and every domain the
+  // domain asks for. It is the only way a spawn completes while the spawning
+  // thread is parked in Atomics.wait, and this realm is the page, which is
+  // never parked in wasm.
+  const sup = new MessageChannel();
+  sup.port1.onmessage = (e) => {
+    const m = e.data;
+    if (!m) return;
+    if (m.kind === 'spawn') spawnWorker(m.fnIdx, m.args || new Uint8Array(0), m.chans || [], m.wasm, m.breaker || null);
+  };
+  sup.port1.start();
   liveDomains.add(w);
   // The document is here; the module is in that Worker. A root domain gets one
   // end of a MessageChannel to ask this thread for DOM work, and this thread
@@ -1188,11 +1222,14 @@ export function startDomain(boot, onSettled, relayUp, appPort) {
     up('panic', msg);
     if (onSettled) onSettled(new Error(msg));
   });
-  const msg = { ...boot, stubs: globalThis.__moxie_test_stubs === true };
-  if (relayPort && appPort) w.postMessage({ ...msg, relayPort, appPort }, [relayPort, appPort]);
-  else if (relayPort) w.postMessage({ ...msg, relayPort }, [relayPort]);
-  else if (appPort) w.postMessage({ ...msg, appPort }, [appPort]);
-  else w.postMessage(msg);
+  // Resolve the module path here, against the realm creating the domain: a
+  // spawned domain inherits this absolute URL through __moxie_wasm_url.
+  if (boot.wasm) boot = { ...boot, wasm: new URL(boot.wasm, globalThis.location.href).href };
+  const msg = { ...boot, stubs: globalThis.__moxie_test_stubs === true, supervisorPort: sup.port2 };
+  const ports = [sup.port2];
+  if (relayPort) ports.push(relayPort);
+  if (appPort) ports.push(appPort);
+  w.postMessage(msg, ports);
   return w;
 }
 

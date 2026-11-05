@@ -22,32 +22,6 @@ import (
 // The enumeration of targets and their indices lives in cctx and is filled by
 // scanWasmSpawnTargets, so both halves agree on the numbering.
 
-// setupWasmSpawnTargetChannels records the SAB handle each channel parameter
-// of the current spawn target carries. __spawn_entry delivered it as an int32
-// inttoptr'd into the parameter, so ptrtoint recovers it. Every send, receive
-// and close on that parameter then goes through the bridge instead of the
-// runtime's channel object, which the child does not have.
-func (e *irEmitter) setupWasmSpawnTargetChannels() {
-	if e.ptrBits != 32 || e.curFunc == nil {
-		return
-	}
-	t := e.wasmSpawnTargetForFunc(e.curFunc)
-	if t == nil {
-		return
-	}
-	mxutil.WriteStr(2, "  wasm-spawn: target-channels\n")
-	ipt := e.intptrType()
-	for _, pi := range t.chanParamIdx {
-		if pi < 0 || pi >= int32(len(e.curFunc.Params)) {
-			continue
-		}
-		p := e.curFunc.Params[pi]
-		e.nextReg++
-		h := "%sabh" | irItoa(e.nextReg)
-		e.w("  ") ; e.w(h) ; e.w(" = ptrtoint ptr ") ; e.w(e.regName(p)) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
-	}
-}
-
 // emitWasmSpawnCall emits spawn(fn, args...) for the wasm target.
 func (e *irEmitter) emitWasmSpawnCall(c *SSACall) {
 	mxutil.WriteStr(2, "  wasm-spawn: call\n")
@@ -81,11 +55,17 @@ func (e *irEmitter) emitWasmSpawnCall(c *SSACall) {
 		return
 	}
 	mxutil.WriteStr(2, "    call: target=" | targetFn.name | "\n")
-	if targetFn.Signature == nil || targetFn.Signature.Params == nil {
+	if targetFn.Signature == nil {
 		e.emitZeroReg(reg, c.SSAType())
 		return
 	}
-	nParams := targetFn.Signature.Params.Len()
+	// A function with no parameters has a NIL Params list, not an empty one.
+	// Treating nil as "not a target" made spawn(worker) with zero arguments
+	// emit a nil result and start nothing - silently.
+	nParams := int32(0)
+	if targetFn.Signature.Params != nil {
+		nParams = targetFn.Signature.Params.Len()
+	}
 	if len(c.Call.Args)-1 != nParams {
 		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 		push(cctx.compileErrors, "spawn: " | targetFn.name | " argument count does not match its parameters")
@@ -201,16 +181,27 @@ func (e *irEmitter) emitWasmSpawnCall(c *SSACall) {
 		chanPtr = hp
 	}
 
+	// The breaker ring, created by the parent BEFORE the domain starts: spawn
+	// returns the parent's end and the child binds the same ring as its
+	// `closed`. Without it the child's breaker would be a local channel the
+	// parent cannot close, and close(done) - the way a worker is stopped -
+	// would reach nothing.
+	e.nextReg++
+	brk := "%sabbrk" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(brk) ; e.w(" = call ") ; e.w(ipt) ; e.w(" @runtime.SpawnChannelCreate(") ; e.w(i32) ; e.w(" 64, ") ; e.w(i32) ; e.w(" 16, ptr null)\n")
+	e.declareRuntime("runtime.SpawnChannelCreate", ipt, i32 | ", " | i32)
+	e.declareRuntime("runtime.SpawnChannelWrap", "ptr", ipt | ", " | ipt)
+
 	mxutil.WriteStr(2, "    call: emitting spawn_domain\n")
 	e.w("  call void @runtime.SpawnDomain(") ; e.w(i32) ; e.w(" ") ; e.w(irItoa(fnIdx))
 	e.w(", ptr ") ; e.w(argPtr) ; e.w(", ") ; e.w(i32) ; e.w(" ") ; e.w(argLen)
-	e.w(", ptr ") ; e.w(chanPtr) ; e.w(", ") ; e.w(i32) ; e.w(" ") ; e.w(irItoa(nChans)) ; e.w(", ptr null)\n")
-	e.declareRuntime("runtime.SpawnDomain", "void", i32 | ", ptr, " | i32 | ", ptr, " | i32)
+	e.w(", ptr ") ; e.w(chanPtr) ; e.w(", ") ; e.w(i32) ; e.w(" ") ; e.w(irItoa(nChans))
+	e.w(", ") ; e.w(i32) ; e.w(" ") ; e.w(brk) ; e.w(", ptr null)\n")
+	e.declareRuntime("runtime.SpawnDomain", "void", i32 | ", ptr, " | i32 | ", ptr, " | i32 | ", " | i32)
 
-	// spawn() yields the domain's lifecycle channel on native. A wasm domain
-	// has no such channel, and the legacy compiler returns an undefined value
-	// here too, so keep the two compilers agreeing on that.
-	e.emitZeroReg(reg, c.SSAType())
+	// spawn() yields the domain's lifecycle channel: the parent's end of the
+	// breaker ring, marked spawn-bound so close() and <- reach the child.
+	e.w("  ") ; e.w(e.regName(c)) ; e.w(" = call ptr @runtime.SpawnChannelWrap(") ; e.w(ipt) ; e.w(" ") ; e.w(brk) ; e.w(", ") ; e.w(ipt) ; e.w(" 0, ptr null)\n")
 }
 
 // emitWasmSpawnEntry emits the child-side dispatch the Worker calls instead of
@@ -232,12 +223,17 @@ func (e *irEmitter) emitWasmSpawnEntry() {
 	// is emitted before this runs, so anything registered now would be dropped.
 	e.w("\ndeclare ptr @runtime.SpawnChannelWrap(") ; e.w(ipt) ; e.w(", ") ; e.w(ipt) ; e.w(", ptr)\n")
 	e.w("declare void @runtime.WasmSpawnInit(ptr)\n")
+	e.w("declare void @runtime.WasmBreakerSet(") ; e.w(i32) ; e.w(", ptr)\n")
+	e.w("declare void @runtime.WasmBreakerClose(ptr)\n")
 	e.w("declare void @llvm.trap()\n")
-	e.w("\ndefine void @__spawn_entry(") ; e.w(i32) ; e.w(" %fnIdx, ptr %argPtr, ") ; e.w(i32) ; e.w(" %argLen, ptr %chanHandlesPtr, ") ; e.w(i32) ; e.w(" %nChans) {\nentry:\n")
+	e.w("\ndefine void @__spawn_entry(") ; e.w(i32) ; e.w(" %fnIdx, ptr %argPtr, ") ; e.w(i32) ; e.w(" %argLen, ptr %chanHandlesPtr, ") ; e.w(i32) ; e.w(" %nChans, ") ; e.w(i32) ; e.w(" %breaker) {\nentry:\n")
 	// A spawned domain never runs _start: this call is its runtime
 	// initialization (root arena, package initialisers) before any target code
 	// or argument decode can allocate.
 	e.w("  call void @runtime.WasmSpawnInit(ptr null)\n")
+	// The parent's breaker ring becomes this domain's `closed` before any
+	// target code runs, so a worker parked on it can be stopped.
+	e.w("  call void @runtime.WasmBreakerSet(") ; e.w(i32) ; e.w(" %breaker, ptr null)\n")
 	e.w("  switch ") ; e.w(i32) ; e.w(" %fnIdx, label %spawn.bad [\n")
 	for _, t := range e.wasmSpawnTargets {
 		e.w("    ") ; e.w(i32) ; e.w(" ") ; e.w(irItoa(t.fnIdx)) ; e.w(", label %spawn.case") ; e.w(irItoa(t.fnIdx)) ; e.w("\n")
@@ -248,17 +244,23 @@ func (e *irEmitter) emitWasmSpawnEntry() {
 	for _, t := range e.wasmSpawnTargets {
 		e.w("\nspawn.case") ; e.w(irItoa(t.fnIdx)) ; e.w(":\n")
 		sig := t.fn.Signature
-		if sig == nil || sig.Params == nil {
+		if sig == nil {
 			e.w("  ret void\n")
 			continue
+		}
+		// Nil Params is a function with no parameters, not a broken target: it
+		// still has to be called (with just the context pointer).
+		nP := int32(0)
+		if sig.Params != nil {
+			nP = sig.Params.Len()
 		}
 		// Scalars arrive in parameter order at the offsets the parent used;
 		// channel parameters take the next handle from the handle array.
 		scalarOff := int32(0)
 		chanN := int32(0)
 		var callArgs []string
-		callArgs = []string{:0:sig.Params.Len()}
-		for i := int32(0); i < sig.Params.Len(); i++ {
+		callArgs = []string{:0:nP}
+		for i := int32(0); i < nP; i++ {
 			pt := sig.Params.At(i).Typ
 			if _, isChan := SafeUnderlying(pt).(*TCChan); isChan {
 				e.nextReg++
@@ -309,20 +311,11 @@ func (e *irEmitter) emitWasmSpawnEntry() {
 			e.w(", ")
 		}
 		e.w("ptr null)\n")
+		// The domain is finished: closing the breaker wakes the parent's
+		// `<-done` (and any other holder) the way a native domain's exit does.
+		e.w("  call void @runtime.WasmBreakerClose(ptr null)\n")
 		e.w("  ret void\n")
 	}
 	e.w("}\n")
 }
 
-// wasmSpawnTargetForFunc returns the dispatch entry for a function, or nil.
-func (e *irEmitter) wasmSpawnTargetForFunc(f *SSAFunction) (t *wasmSpawnTarget) {
-	if f == nil {
-		return nil
-	}
-	for _, t2 := range e.wasmSpawnTargets {
-		if t2.fn == f {
-			return t2
-		}
-	}
-	return nil
-}

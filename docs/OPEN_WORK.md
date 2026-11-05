@@ -37,60 +37,46 @@ or test run must print a canary line first and assert it arrived; "no output"
 means the rig is broken, never that the code is innocent. The canary is in
 `spawn_worker_print_fd`, and the domain init seeds the sink.
 
-### FIRST: wasm spawn hands the child no endpoint (correctness, not a slow path)
+## ROUND 385: WASM SPAWN - THE DEADLOCK, THE BREAKER, AND THE BLOCKING SELECT
 
-`wasm_spawn_struct` (a struct with a []byte through a spawn channel, same
-package) runs natively but the wasm build emitted
-`call i1 @runtime.chanRecv(i32 undef, ptr null, ptr %chan.op, ptr undef)` and
-failed verification. The channel PARAMETERS are threaded correctly
-(`__spawn_entry` reloads each handle and calls `SpawnChannelWrap`); what is not
-threaded is the target's `closed` breaker, which is the target's named result.
-Nothing binds that result before the body runs on wasm, so the body's select on
-`<-closed` lowers to a receive through a null channel - undefined behaviour that
-passes any test which never delivers a message. This is the same defect shape as
-the print sink: a child operating on an endpoint it does not hold.
+### RESOLVED: wasm spawn (three defects, not one)
 
-Resolution (shipped): wasm spawn is a HARD COMPILE ERROR in both compilers,
-with one named message: "spawn: spawn is not supported on the wasm target yet -
-a spawned domain's breaker and channel handles are not threaded, so the child
-would receive through a null channel (native only)". Legacy refuses at
-createSpawn; stage4 refuses at the SSA gate. The refusal found a second defect:
-stage4 read compile errors only AFTER SSA build and BEFORE IR emission, so an
-error written by the emitter was recorded and ignored (and the emitter crashed
-on the half-emitted spawn). The IR-emit gate now fails the package the same way
-the SSA gate does. The real fix remains threading the breaker handle through
-`__spawn_entry`; then the refusal and the fixture's skip come out.
+The refusal is withdrawn. `wasm_spawn_struct` builds and runs in Chromium under
+BOTH compilers, and the phase 5 unit compares its stdout against the native run
+("output matches native"). It took three separate defects, each of which only
+appears when the program actually runs:
 
-Measurement integrity: verdicts are bound to the commit AND to a hash of the
-working-tree status, written by `unit_verdict`; `verdict_current` invalidates a
-mismatch, so a stale verdict is treated as never run and is automatically
-re-run (this is what stops the driver reporting a FAIL from before a fixture was
-repaired).
+1. **A Worker started by a Worker never starts while its creator is parked in
+   `Atomics.wait`.** The startup task needs the creator's event loop, and a
+   domain that spawns and then waits for its child is exactly that shape - so
+   the child never ran and the parent never woke: a deadlock with no
+   diagnostic. Measured in raw JS: a nested module Worker stays unexecuted
+   while its creator waits; the same child under an unblocked creator runs.
+   **Fix:** the PAGE creates every domain. Each domain holds a supervisor port
+   to the page, `spawn_domain` posts a spawn request over it, and the page
+   starts the Worker and hands it the same SharedArrayBuffers. The page is
+   never parked in wasm, so the child starts while the parent waits.
+2. **The child's breaker was local.** `WasmBreakerSet`/`WasmBreakerClose` now
+   bind the domain's `closed` to the parent's ring, created before the domain
+   starts and threaded through `__spawn_entry`; `spawn` returns the parent's end
+   of that ring, so `close(done)` stops the worker and the child's exit wakes
+   `<-done`. A `close(done)` that stops nothing was the same shape as the
+   missing print sink: an endpoint the child never held.
+3. **`tryPipeRecv` blocked.** A select over a spawn-bound arm is evaluated on
+   the domain's only thread, so blocking there stops every other arm - a worker
+   selecting on its breaker never looked at its inbox. The bridge now has
+   `channel_try_recv` (-2 empty, -1 closed), the select path uses it, and a
+   direct `<-ch` still blocks in `channel_recv`.
 
-### Blast radius (widened after the wiring)
-
-- `spawn_crosspkg_struct`: `lib.Msg{N int32, Body []byte}` through a spawn
-  channel whose target lives in lib - passes on BOTH compilers
-  (`crosspkg spawn ok 12 14`), covering the cross-package descriptor, the sizer
-  and the offset codec.
-- `wasm_spawn_struct` (same package, same message): the native run passes
-  (`wasm spawn struct ok 12 14`), but the wasm build FAILS VERIFICATION:
-  `call i1 @runtime.chanRecv(i32 undef, ptr null, ptr %chan.op, ptr undef)` -
-  a spawn target's channel receive has no channel handle on wasm. This is a
-  real defect found by running the program, not by compiling it; the fixture is
-  kept as the reproduction with `//:wasmtest skip` until it is fixed.
-- morly (the relay, a real program) built with stage4: `mxc-s41` produced an
-  8.2MB binary and it runs (`--help` prints the relay usage). That proves the
-  binary links and starts, NOT that the spawn/channel path works under load: no
-  event was published through the relay because that needs a config, ports and a
-  client, which was not cheap here. Recorded as an open check, not as evidence.
-
-Measurement integrity: the driver printed a stale FAIL (http_header_api from
-before its fixture repair). A verdict that can outlive the tree it describes is
-the pass/fail version of a dead sink. Bind each verdict to the commit hash and
-invalidate on mismatch; make the refresh automatic. Also pending: the sizer
-equality test (compile-time budget print from both compilers on one type file,
-diffed), which is cheap and independent.
+Two compiler defects fell out of it. Both compilers carried a spawn-bound
+channel bypass (`b.sabChannels` in legacy) that used the handle directly and
+skipped the runtime; it is REMOVED on both sides - the runtime routes a
+spawn-bound channel, and the parent's channels are tagged at run time by
+`MarkChannelSAB` (legacy now emits that call too, which is what made its
+zero-arg sends work again). And stage4 treated a NIL `Signature.Params` as "not
+a target": a function with no parameters has a nil list, so `spawn(worker)` with
+zero arguments emitted a nil result and started nothing. Fixed in the call
+emitter and in `__spawn_entry`'s dispatch.
 
 Next for the endpoint tag, with its two acceptance requirements: it belongs in
 the channel identity so a send/recv tag mismatch is a creation-time error, and

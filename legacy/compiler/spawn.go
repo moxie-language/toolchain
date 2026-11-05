@@ -33,14 +33,11 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		return llvm.Value{}, nil
 	}
 
-	// Wasm spawn is refused, not emitted. The parent threads channel handles,
-	// but the target's `closed` breaker result is never bound in the child, so
-	// its select lowers to a receive through a null channel - invalid IR, and
-	// undefined behaviour even if it linked. A named compile error is the
-	// honest state until the breaker handle is threaded through the wasm entry.
+	// Wasm target uses a different mechanism: Workers plus SAB channels, with
+	// the brittle breaker ring created by the parent and threaded through the
+	// child's entry (see wasmspawn.go).
 	if b.isWasmTarget() {
-		b.addError(instr.Pos(), "spawn: spawn is not supported on the wasm target yet - a spawned domain's breaker and channel handles are not threaded, so the child would receive through a null channel (native only)")
-		return llvm.Value{}, nil
+		return b.createWasmSpawn(instr)
 	}
 	// Check if the first argument is a transport string constant.
 	transport := "local"

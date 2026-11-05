@@ -154,6 +154,22 @@ export function recv(sab, dstBuf) {
   }
 }
 
+// tryRecv is the non-blocking probe a select arm needs: -2 when the ring is
+// empty and the channel is open, -1 when it is closed, else the byte count.
+// It must NEVER wait - a select over a spawn-bound arm is evaluated on the
+// domain's only thread, and blocking there would stop every other arm (a
+// worker selecting on its breaker would never look at its inbox).
+export function tryRecv(sab, dstBuf) {
+  const u32 = new Int32Array(sab);
+  if (Atomics.load(u32, 0) === Atomics.load(u32, 1)) {
+    return (Atomics.load(u32, 4) & 1) ? -1 : -2;
+  }
+  // A message is present, so recv cannot wait for one; it can still wait for
+  // the remaining chunks of a multi-slot message, which the sender has already
+  // committed to writing.
+  return recv(sab, dstBuf);
+}
+
 // close sets the closed flag, writes a sentinel zero-len slot, notifies receiver.
 // Use when the sender side closes cleanly (knows the ring is not full).
 export function close(sab) {

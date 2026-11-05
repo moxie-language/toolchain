@@ -379,13 +379,6 @@ func elemIsByte(t types.Type) bool {
 // createChanSend emits a pseudo chan send operation. It is lowered to the
 // actual channel send operation during goroutine lowering.
 func (b *builder) createChanSend(instr *ssa.Send) {
-	// Wasm spawn-boundary SAB channel: bypass runtime, call bridge directly.
-	if b.isWasmTarget() {
-		if handle, ok := b.sabChannels[instr.Chan]; ok {
-			b.createWasmSABChanSend(instr, handle)
-			return
-		}
-	}
 	// A send's X is the VALUE being sent, so its type IS the element type -
 	// unwrapping it as a chan panics on every send whose value is not itself a
 	// channel (types.Basic for a []byte). The recv hook below reads
@@ -470,12 +463,6 @@ func (b *builder) chanOperandValue(v ssa.Value) llvm.Value {
 // createChanRecv emits a pseudo chan receive operation. It is lowered to the
 // actual channel receive operation during goroutine lowering.
 func (b *builder) createChanRecv(unop *ssa.UnOp) llvm.Value {
-	// Wasm spawn-boundary SAB channel.
-	if b.isWasmTarget() {
-		if handle, ok := b.sabChannels[unop.X]; ok {
-			return b.createWasmSABChanRecv(unop, handle)
-		}
-	}
 	chanType := unop.X.Type().Underlying().(*types.Chan)
 	// A self-contained element is copied straight into the receiver's slot;
 	// an element that holds references is decoded, which is its relocation.
@@ -535,63 +522,6 @@ func (b *builder) createExtentChanRecv(unop *ssa.UnOp) llvm.Value {
 // createChanClose closes the given channel.
 func (b *builder) createChanClose(ch llvm.Value) {
 	b.createRuntimeCall("chanClose", []llvm.Value{ch}, "")
-}
-
-// createWasmSABChanSend emits a bridge.channel_send call for spawn-boundary channels.
-func (b *builder) createWasmSABChanSend(instr *ssa.Send, handle llvm.Value) {
-	chanValue := b.getValue(instr.X, getPos(instr))
-	valueType := b.getLLVMType(instr.X.Type())
-	sz := b.targetData.TypeAllocSize(valueType)
-	i32 := b.ctx.Int32Type()
-
-	if sz == 0 {
-		b.emitBridgeCall("channel_send", []llvm.Value{
-			handle,
-			llvm.ConstNull(b.dataPtrType),
-			llvm.ConstInt(i32, 0, false),
-		}, b.ctx.VoidType())
-		return
-	}
-	alloca, allocaSize := b.createTemporaryAlloca(valueType, "sab.send.val")
-	b.CreateStore(chanValue, alloca)
-	b.emitBridgeCall("channel_send", []llvm.Value{
-		handle,
-		alloca,
-		llvm.ConstInt(i32, sz, false),
-	}, b.ctx.VoidType())
-	b.emitLifetimeEnd(alloca, allocaSize)
-}
-
-// createWasmSABChanRecv emits a bridge.channel_recv call for spawn-boundary channels.
-func (b *builder) createWasmSABChanRecv(unop *ssa.UnOp, handle llvm.Value) llvm.Value {
-	valueType := b.getLLVMType(unop.X.Type().Underlying().(*types.Chan).Elem())
-	sz := b.targetData.TypeAllocSize(valueType)
-	i32 := b.ctx.Int32Type()
-
-	alloca, allocaSize := b.createTemporaryAlloca(valueType, "sab.recv.val")
-	result := b.emitBridgeCall("channel_recv", []llvm.Value{
-		handle,
-		alloca,
-		llvm.ConstInt(i32, sz, false),
-	}, i32)
-
-	var received llvm.Value
-	if sz == 0 {
-		received = llvm.ConstNull(valueType)
-	} else {
-		received = b.CreateLoad(valueType, alloca, "sab.received")
-		b.emitLifetimeEnd(alloca, allocaSize)
-	}
-
-	if unop.CommaOk {
-		// result == -1 (all bits set as int32) means closed.
-		isOpen := b.CreateICmp(llvm.IntNE, result, llvm.ConstInt(i32, ^uint64(0), true), "sab.ok")
-		tuple := llvm.Undef(b.ctx.StructType([]llvm.Type{valueType, b.ctx.Int1Type()}, false))
-		tuple = b.CreateInsertValue(tuple, received, 0, "")
-		tuple = b.CreateInsertValue(tuple, isOpen, 1, "")
-		return tuple
-	}
-	return received
 }
 
 // createSelect emits all IR necessary for a select statements. That's a

@@ -43,7 +43,7 @@ function bindChannels(list) {
   return channels;
 }
 
-async function instantiate(wasmPath, channels, relayPort, appBridgeUrl, appPort) {
+async function instantiate(wasmPath, channels, relayPort, appBridgeUrl, appPort, supervisor) {
   const response = await fetch(wasmPath);
   const bytes = await response.arrayBuffer();
   // The application's own bridge entries, imported here because a function
@@ -60,7 +60,7 @@ async function instantiate(wasmPath, channels, relayPort, appBridgeUrl, appPort)
   }
   const result = await WebAssembly.instantiate(bytes, {
     ...buildHostImports(() => memory),
-    bridge: { ...buildWorkerBridge(channels, makeDomProxy(relayPort)), ...appBridge },
+    bridge: { ...buildWorkerBridge(channels, makeDomProxy(relayPort), supervisor), ...appBridge },
   });
   memory = result.instance.exports.memory;
   return result.instance;
@@ -80,13 +80,13 @@ function serveCallbacks(port) {
   port.start();
 }
 
-function runRoot(wasmPath, relayPort, appBridgeUrl, appPort) {
+function runRoot(wasmPath, relayPort, appBridgeUrl, appPort, supervisor) {
   // A spawned domain is started from THIS realm (spawnWorker reads
   // globalThis.__moxie_wasm_url), and the page's loader set that only in the
   // page's own realm. Without this the child's boot message carried
   // `wasm: undefined`, it fetched a 404 page and instantiated HTML.
   globalThis.__moxie_wasm_url = wasmPath;
-  instantiate(wasmPath, new Map(), relayPort, appBridgeUrl, appPort).then((inst) => {
+  instantiate(wasmPath, new Map(), relayPort, appBridgeUrl, appPort, supervisor).then((inst) => {
     setHostModule(inst);
     serveCallbacks(relayPort);
     inst.exports._start();
@@ -96,13 +96,17 @@ function runRoot(wasmPath, relayPort, appBridgeUrl, appPort) {
   });
 }
 
-function runEntry(wasmPath, fnIdx, args, chanList) {
+function runEntry(wasmPath, fnIdx, args, chanList, supervisor, breaker) {
   // A spawned domain that spawns again reads this in spawnWorker, exactly as
   // the root does.
   globalThis.__moxie_wasm_url = wasmPath;
   // A spawned domain holds no page connection: the document is reachable only
   // from the domain the page handed a relay port to.
-  instantiate(wasmPath, bindChannels(chanList), null, null, null).then((inst) => {
+  // The breaker is a channel the child must be able to receive on and close,
+  // so it is bound into the same table the parameters use.
+  const bound = (chanList || []).slice();
+  if (breaker) bound.push(breaker);
+  instantiate(wasmPath, bindChannels(bound), null, null, null, supervisor).then((inst) => {
     setHostModule(inst);
     if (typeof inst.exports.__spawn_entry !== 'function') {
       throw new Error('module has no __spawn_entry export; it was not built with spawn support');
@@ -123,7 +127,7 @@ function runEntry(wasmPath, fnIdx, args, chanList) {
     const hptr = ptr + ((args.length + 3) & ~3);
     const dv = new DataView(memory.buffer);
     handles.forEach((h, i) => dv.setInt32(hptr + i * 4, h, true));
-    inst.exports.__spawn_entry(fnIdx, ptr, args.length, hptr, handles.length);
+    inst.exports.__spawn_entry(fnIdx, ptr, args.length, hptr, handles.length, breaker ? breaker.handle : 0);
     globalThis.postMessage({ kind: 'done' });
   }).catch((e) => {
     settled(e, () => globalThis.postMessage({ kind: 'error', error: String((e && e.stack) || e) }));
@@ -137,6 +141,6 @@ globalThis.addEventListener('message', (e) => {
   // page never sets this, so a module that needs the real bridge still fails
   // loudly there.
   globalThis.__moxie_test_stubs = m.stubs === true;
-  if (m.kind === 'root') runRoot(m.wasm, m.relayPort || null, m.appBridge || null, m.appPort || null);
-  else if (m.kind === 'entry') runEntry(m.wasm, m.fnIdx, m.args || new Uint8Array(0), m.chans);
+  if (m.kind === 'root') runRoot(m.wasm, m.relayPort || null, m.appBridge || null, m.appPort || null, m.supervisorPort || null);
+  else if (m.kind === 'entry') runEntry(m.wasm, m.fnIdx, m.args || new Uint8Array(0), m.chans, m.supervisorPort || null, m.breaker || null);
 });

@@ -9,19 +9,20 @@ package compiler
 //
 // Architecture:
 //  Parent side (createWasmSpawn):
-//    1. For each chan arg: bridge.channel_create → int32 SAB handle stored in
-//       b.sabChannels keyed by the SSA channel value.
+//    1. For each chan arg: bridge.channel_create → int32 SAB handle.
 //    2. Pack scalar args into a stack alloca.
 //    3. Pack SAB handles into a second alloca.
-//    4. Call bridge.spawn_domain(fnIdx, argPtr, argLen, chanHandlesPtr, nChans).
+//    4. Create the breaker ring and call
+//       bridge.spawn_domain(fnIdx, argPtr, argLen, chanHandlesPtr, nChans, breaker).
 //
 //  Child side (__spawn_entry, emitted at link time by emitWasmSpawnEntry):
 //    A switch over fnIdx dispatches to a per-target case that:
-//    1. Deserializes scalars from argPtr.
-//    2. Loads int32 handles from chanHandlesPtr, inttoptr → dataPtrType.
-//    3. Calls the target function directly.
-//    The target function's channel params are added to sabChannels in its
-//    builder (via setupWasmSpawnTargetChannels) so send/recv/close use bridge.
+//    1. Binds the domain's breaker to the parent's ring (WasmBreakerSet).
+//    2. Deserializes scalars from argPtr.
+//    3. Wraps each int32 handle into a channel (SpawnChannelWrap) so the
+//       target's send/recv/close reach the parent's ring through the runtime's
+//       spawn-bound channel path - the compilers do not special-case them.
+//    4. Calls the target function directly, then closes the breaker.
 
 import (
 	"fmt"
@@ -164,10 +165,10 @@ func validateWasmSpawnElem(t types.Type, argIdx int) error {
 }
 
 // createWasmSpawn handles spawn() in the wasm target. It emits:
-//   1. bridge.channel_create for each channel arg → SAB handle in b.sabChannels.
+//   1. bridge.channel_create for each channel arg → SAB handle.
 //   2. A packed scalar arg buffer.
 //   3. A packed chan handle array.
-//   4. bridge.spawn_domain(fnIdx, argPtr, argLen, chanHandlesPtr, nChans).
+//   4. bridge.spawn_domain(fnIdx, argPtr, argLen, chanHandlesPtr, nChans, breaker).
 func (b *builder) createWasmSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	argStart := 0
 	if len(instr.Args) > 0 {
@@ -256,10 +257,15 @@ func (b *builder) createWasmSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 			llvm.ConstInt(i32, uint64(slotCount), false),
 		}, i32)
 		chanHandles = append(chanHandles, handle)
-		if b.sabChannels == nil {
-			b.sabChannels = make(map[ssa.Value]llvm.Value)
-		}
-		b.sabChannels[arg] = handle
+		// Tag the parent's channel so its sends and receives reach the ring.
+		// Marking at run time keeps this correct through the copies and reloads
+		// SSA introduces: the same source variable is a different SSA value at
+		// the spawn and at the send, so tracking SSA values misses it (the bug
+		// stage4 fixed, and the reason this compiler no longer keeps a map).
+		b.createRuntimeCall("MarkChannelSAB", []llvm.Value{
+			b.getValue(arg, instr.Pos()),
+			handle,
+		}, "")
 	}
 
 	// --- scalar args: pack into a stack buffer ---
@@ -319,14 +325,29 @@ func (b *builder) createWasmSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		}, "spawn.chanptr")
 	}
 
-	// bridge.spawn_domain(fnIdx, argPtr, argLen, chanPtr, nChans)
+	// The breaker ring is created by the parent BEFORE the domain starts: spawn
+	// returns the parent's end and the child binds the same ring as its
+	// `closed`. Without it the child's breaker would be a local channel the
+	// parent cannot close, so close(done) would stop nothing.
+	breakerHandle := b.emitBridgeCall("channel_create", []llvm.Value{
+		llvm.ConstInt(i32, 64, false),
+		llvm.ConstInt(i32, 16, false),
+	}, i32)
+
+	// bridge.spawn_domain(fnIdx, argPtr, argLen, chanPtr, nChans, breaker)
 	b.emitBridgeCall("spawn_domain", []llvm.Value{
 		llvm.ConstInt(i32, uint64(fnIdx), false),
 		argPtr, argLen,
 		chanPtr, nChansVal,
+		breakerHandle,
 	}, b.ctx.VoidType())
 
-	return llvm.Undef(b.uintptrType), nil
+	// spawn() yields the domain's lifecycle channel: the parent's end of the
+	// breaker ring, marked spawn-bound so close() and <- reach the child.
+	return b.createRuntimeCall("SpawnChannelWrap", []llvm.Value{
+		breakerHandle,
+		llvm.ConstInt(i32, 0, false),
+	}, "spawn.breaker"), nil
 }
 
 // emitBridgeCall emits a call to a wasm import from the "bridge" module.
@@ -356,37 +377,6 @@ func emitBridgeCallCtx(c *compilerContext, builder llvm.Builder, name string, ar
 	return builder.CreateCall(fnType, fn, args, "bridge."+name)
 }
 
-// setupWasmSpawnTargetChannels pre-populates b.sabChannels for channel
-// parameters of spawn target functions. Called at the start of createFunction
-// for every function in wasm mode.
-func (b *builder) setupWasmSpawnTargetChannels() {
-	if !b.isWasmTarget() || b.fn == nil {
-		return
-	}
-	target := b.wasmSpawnTargetFor(b.fn)
-	if target == nil {
-		return
-	}
-	if b.sabChannels == nil {
-		b.sabChannels = make(map[ssa.Value]llvm.Value)
-	}
-	i32 := b.ctx.Int32Type()
-	for _, paramIdx := range target.chanParamIdxs {
-		if paramIdx >= len(b.fn.Params) {
-			continue
-		}
-		param := b.fn.Params[paramIdx]
-		llvmParam, ok := b.locals[param]
-		if !ok {
-			continue
-		}
-		// The param holds the int32 SAB handle stored as a pointer (inttoptr in __spawn_entry).
-		// ptrtoint recovers the int32 handle.
-		handle := b.CreatePtrToInt(llvmParam, i32, "sab.handle")
-		b.sabChannels[param] = handle
-	}
-}
-
 // wasmSpawnTargetFor returns the wasmSpawnTarget descriptor if fn is a spawn
 // target in the current program, nil otherwise.
 func (b *builder) wasmSpawnTargetFor(fn *ssa.Function) *wasmSpawnTarget {
@@ -403,9 +393,9 @@ func (b *builder) wasmSpawnTargetFor(fn *ssa.Function) *wasmSpawnTarget {
 
 // emitWasmSpawnEntry emits the __spawn_entry export after all package
 // functions have been compiled. This function is the Worker entry point
-// called by wasm-worker-host.mjs instead of _start.
+// called by jsruntime/worker-host.mjs instead of _start.
 //
-// Signature: void __spawn_entry(fnIdx i32, argPtr ptr, argLen i32, chanHandlesPtr ptr, nChans i32)
+// Signature: void __spawn_entry(fnIdx i32, argPtr ptr, argLen i32, chanHandlesPtr ptr, nChans i32, breaker i32)
 func (c *compilerContext) emitWasmSpawnEntry(irbuilder llvm.Builder) {
 	if !strings.HasPrefix(c.Triple, "wasm") || c.GOOS != "js" {
 		return
@@ -419,7 +409,7 @@ func (c *compilerContext) emitWasmSpawnEntry(irbuilder llvm.Builder) {
 
 	i32 := c.ctx.Int32Type()
 	ptrType := c.dataPtrType
-	fnType := llvm.FunctionType(c.ctx.VoidType(), []llvm.Type{i32, ptrType, i32, ptrType, i32}, false)
+	fnType := llvm.FunctionType(c.ctx.VoidType(), []llvm.Type{i32, ptrType, i32, ptrType, i32, i32}, false)
 
 	entryFn := llvm.AddFunction(c.mod, "__spawn_entry", fnType)
 	entryFn.AddFunctionAttr(c.ctx.CreateStringAttribute("wasm-export-name", "__spawn_entry"))
@@ -434,6 +424,7 @@ func (c *compilerContext) emitWasmSpawnEntry(irbuilder llvm.Builder) {
 	argLen := entryFn.Param(2)
 	chanHandlesPtr := entryFn.Param(3)
 	nChans := entryFn.Param(4)
+	breaker := entryFn.Param(5)
 	_, _ = argLen, nChans // used indirectly through GEPs
 
 	defaultBlock := c.ctx.AddBasicBlock(entryFn, "default")
@@ -448,6 +439,12 @@ func (c *compilerContext) emitWasmSpawnEntry(irbuilder llvm.Builder) {
 		if member, ok := rtPkg.Members["WasmSpawnInit"].(*ssa.Function); ok {
 			initType, initFn := c.getFunction(member)
 			irbuilder.CreateCall(initType, initFn, []llvm.Value{llvm.Undef(c.dataPtrType)}, "")
+		}
+		// The parent's breaker ring becomes this domain's `closed` before any
+		// target code runs, so a worker parked on it can be stopped.
+		if member, ok := rtPkg.Members["WasmBreakerSet"].(*ssa.Function); ok {
+			setType, setFn := c.getFunction(member)
+			irbuilder.CreateCall(setType, setFn, []llvm.Value{breaker, llvm.Undef(c.dataPtrType)}, "")
 		}
 	}
 
@@ -511,6 +508,14 @@ func (c *compilerContext) emitWasmSpawnEntry(irbuilder llvm.Builder) {
 		}
 
 		irbuilder.CreateCall(targetFnType, targetLLVM, callArgs, "")
+		// The domain is finished: closing the breaker wakes the parent's
+		// `<-done` (and any other holder) the way a native domain's exit does.
+		if rtPkg := c.program.ImportedPackage("runtime"); rtPkg != nil {
+			if member, ok := rtPkg.Members["WasmBreakerClose"].(*ssa.Function); ok {
+				closeType, closeFn := c.getFunction(member)
+				irbuilder.CreateCall(closeType, closeFn, []llvm.Value{llvm.Undef(c.dataPtrType)}, "")
+			}
+		}
 		irbuilder.CreateRetVoid()
 
 		sw.AddCase(llvm.ConstInt(i32, uint64(target.fnIdx), false), caseBlock)
