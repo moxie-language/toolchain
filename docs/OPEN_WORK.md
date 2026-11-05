@@ -43,7 +43,7 @@ means dropping emitted packages' ASTs/type scopes (safe only where generic
 bodies are never instantiated later) or compiling in separate processes. Both
 are real projects; no code change was made.
 
-### Offset frames (prototype, reverted)
+### Offset frames (prototype, reverted; diagnosis refined)
 
 The design: a self-contained in-process frame with magic/total/root header, the
 value's bytes, then each string/[]byte field's data, and pointer slots holding
@@ -55,8 +55,21 @@ worked end to end (encode n=36, size=24, kind=17). The struct case
 the frame carried only the scalar and the receive produced a zero-length Body
 (index panic) or garbage. The walk needs codec.mx's flexible-array pattern
 (`nf := int32(st.numField)` + `unsafe.Add(&st.fields[0], i*sizeof(rtStructFieldDesc))`),
-and that alone did not make a field appear; the next step is a print at the top
-of encode plus a two-case probe. Reverted to keep the tree green.
+and that alone did not make a field appear.
+
+A later pass found the two real causes of the garbage: a named struct's
+descriptor must be resolved through `td.Underlying()` before the cast (reading
+`st.size`/`st.numField` off the named descriptor returned garbage), and a field
+offset is the uvarint inside the field's data blob (`retFieldOffsetAt`), not the
+blob's address. With both fixed the encoder is correct: a probe sending
+`Msg{N: 7, Body: []byte("hello")}` logs `n=45 N=7 blen=5` from the send side.
+
+The receive side is where it still fails: the worker's receive never enters
+`codecFrameDecode` (a print at its entry never fires) and the arm delivers the
+zero value, while the same probe on the structural codec prints `msg 7 5 body
+104 111`. So the next step is not the frame layout but the dispatch: find which
+receive entry the compiler emits for `chan Msg` in a spawn target and why it
+bypasses `codecFrameDecode`. Reverted to keep the tree green.
 
 The endianness point is the reason both formats exist: the offset frame is a
 memory copy and therefore host-endian, while the wire codec is one fixed
