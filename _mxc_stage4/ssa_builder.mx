@@ -7347,6 +7347,15 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue)
 	if fieldIdx < 0 {
 		_ = structType
 	}
+	// A struct field is reachable only inside the package that declares the
+	// type. An alias does not launder it: `type H = lib.Holder` names the same
+	// type, and `h.tag` from another package still reads or writes a field the
+	// package never exported. This covers reads, writes and &x.field, because
+	// all three address the field here.
+	if fieldIdx >= 0 && fb.isForeignNamed(structType) && !exportedFieldName(e.Sel.Value) {
+		reportCompileError("cannot refer to unexported field " | e.Sel.Value | " of type " | structType.String())
+		return nil
+	}
 	if fieldIdx >= 0 {
 		fa := &SSAFieldAddr{X: addr, Field: fieldIdx}
 		fa.typ = NewPointer(fb.fieldType(structType, fieldIdx))
@@ -7355,6 +7364,10 @@ func (fb *ssaFuncBuilder) buildSelectorAddr(e *syntax.SelectorExpr) (s SSAValue)
 		return fa
 	}
 	path := fb.findEmbeddedFieldPath(structType, e.Sel.Value)
+	if len(path) >= 2 && fb.isForeignNamed(structType) && !exportedFieldName(e.Sel.Value) {
+		reportCompileError("cannot refer to unexported field " | e.Sel.Value | " of type " | structType.String())
+		return nil
+	}
 	if len(path) >= 2 {
 		cur := addr
 		curType := structType

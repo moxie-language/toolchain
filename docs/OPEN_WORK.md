@@ -96,16 +96,22 @@ unsigned-subtract branch: never reached; the built program prints
 the checker (a feature, not wiring). Then the restriction test can be added:
 `// expected: constant subtraction underflows its unsigned type`.
 
-TWO RECORDED DEFECTS (no gate depends on them)
+DEFECTS CLOSED IN ROUND 381 (kept here so the record does not reopen them)
 
-- stage4 does not check UNEXPORTED field access from another package: a
-  composite literal `lib.Holder{tag: 7}` in main compiles. The fixtures were
-  made valid instead (accessors). Needs an export check in the checker.
-- legacy mangles `lib.Nat{:3}` (a concrete alias) into
-  `lib.__slicealloc(Nat, 3)`. It cannot be fixed in the text rewriter: the same
-  `S{:n}` form is legitimate for a slice-shaped type parameter (src/slices
-  grows through `S{:n+m-i}`), so the check must be type-aware. The stage4
-  rejection attempted this round was reverted for exactly that reason.
+- stage4 unexported-field access outside the declaring package: the composite
+  literal was closed earlier (`lib.Holder{tag: 7}` is rejected); the SELECTOR
+  form was still open - `h.tag` on a foreign value compiled in stage4 while
+  legacy rejected it. stage4's `buildSelectorAddr` now rejects a foreign
+  unexported field for reads, writes and `&x.field` alike (the same check also
+  covers a promoted field). Pinned by
+  `tests/restrictions/reject_unexported_field_selector`.
+- legacy mangled `lib.Nat{:3}` into `lib.__slicealloc(Nat, 3)`: the text
+  rewriter matched the named type at the IDENT and left the qualifier in front,
+  and the type text handed to `__slicealloc` had lost `lib.`. The rewriter now
+  starts the replacement at the qualifier and keeps `lib.Nat` as the type.
+  Pinned by `tests/regressions/should_compile/named_slice_sized_literal`
+  (both `T{:n}` and `T{:n:n}` forms, cross-package). The type-parameter
+  `S{:n+m-i}` form is unaffected: the change is within the named-type branch.
 
 VERIFICATION MATRIX (local, serial for anything with a browser)
 

@@ -562,8 +562,18 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int
 			continue
 		}
 
+		// A named type may be qualified: `lib.Nat{:3}`. The qualifier is part
+		// of the type expression handed to __slicealloc; starting the
+		// replacement at the type name left the `lib.` in front and produced
+		// `lib.__slicealloc(Nat, 3)`, where Nat is undefined.
+		typeStartIdx := lbrackIdx
+		if isNamed && lbrackIdx >= 2 && toks[lbrackIdx-1].tok == token.PERIOD &&
+			toks[lbrackIdx-2].tok == token.IDENT {
+			typeStartIdx = lbrackIdx - 2
+		}
+
 		// Extract the type text (between [ and {, inclusive of []).
-		typeText := string(src[toks[lbrackIdx].pos:toks[braceIdx].pos])
+		typeText := string(src[toks[typeStartIdx].pos:toks[braceIdx].pos])
 		typeText = strings.TrimSpace(typeText)
 
 		// Detect the secure-allocator marker: a trailing `, secure` IDENT
@@ -582,7 +592,7 @@ func RewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int
 			}
 		}
 
-		replInputStart := toks[lbrackIdx].pos
+		replInputStart := toks[typeStartIdx].pos
 
 		if secureMarker {
 			if typeText != "[]byte" {
