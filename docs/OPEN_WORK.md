@@ -20,66 +20,61 @@ the round's changes):
   just those two with the machine idle (a cold-Chromium start under load, not a
   codegen defect).
 
-## STANDING ISSUES (round 380) - legacy/wood-law residuals
+## STANDING ISSUES (round 380) - what is left
 
-The full legacy-wasm sweep on the box (117 fixtures, two at a time) closed the
-wasm-specific gaps. Five fixtures legacy could not compile are fixed:
-`import_in_comment` (the fixture's own comment contained a literal `*/`),
-`returned_object_identity` (it read unexported fields across packages; now via
-accessors), `gosym_pclntab` (int32/uint32 mixing stage4 tolerated),
-`nested_array_field_addr` (the injected `__moxie_*` declarations used a
-parameter name `n` that a package-level `n` shadowed), and
-`const_receiver_width` (an untyped constant in a selector and in codegen now
-takes its fixed-width default).
+The wasm-specific gaps are closed. Five fixtures legacy could not compile are
+fixed: `import_in_comment` (its own comment contained a literal `*/`),
+`returned_object_identity` (cross-package unexported fields; accessors added),
+`gosym_pclntab` (int32/uint32 mixing), `nested_array_field_addr` (injected
+`__moxie_*` parameters shadowed by a package `n`), and `const_receiver_width`
+(untyped constants in a selector and in codegen take their fixed-width default;
+patched go/types + createConst).
 
-Three remain, each a distinct piece of work:
+ONE PENDING CODE ITEM
 
-1. `untyped_unsigned_float` - DECIDED: constant overflow is a compile error,
-   and the wrap assertion is gone from the fixture. stage4 does NOT yet reject
-   `uint64(0)-1`: its const initialiser is not folded through the conversion
-   (the typecheck-only pass evaluates and drops errors by design, and the SSA
-   builder sees a runtime convert, not two constants). The underflow detection
-   is in place (EvalBinaryChecked + the unsigned mark on every unsigned
-   conversion + tcResolveNameInline now resolving predeclared type names, so a
-   conversion folds as a conversion), but stage4 emits `uint64(0)-1` as
-   runtime arithmetic: neither the checker nor the SSA builder constant-folds
-   a value-context expression, so there is no fold to reject. Measured with a
-   debug print on the unsigned-subtract branch: never reached. The rejection
-   needs expression-level constant folding (a checker feature), not wiring.
-2. `slice_alias_crosspkg` - REMOVED, and the rejection was reverted: the sized
-   literal form DOES exist for a slice-shaped TYPE PARAMETER (src/slices grows
-   through `S{:n+m-i}`), and a text-level rewriter cannot tell that from an
-   imported concrete alias. Both rewriters are restored. The legacy mangling of
-   the concrete alias form (`lib.__slicealloc(Nat, 3)`) remains a recorded
-   defect; it needs a type-aware check, not a text one.
-3. `generic_field_read` - CLOSED: the failing line was a method on an
-   INSTANTIATED generic type (`func (t *table[string, *node]) scan(...)`), not a
-   field-offset variant. stage4 now rejects it
-   (restrictions/reject_instantiated_receiver) and the fixture is gone.
+`untyped_unsigned_float` - DECIDED: constant overflow is a compile error. The
+fixture's wrap assertion is gone. The detection is implemented
+(EvalBinaryChecked, the unsigned mark on every unsigned conversion,
+tcResolveNameInline resolving predeclared type names, a persistent error table
+that survives the typecheck-only pass), but it never runs: stage4 emits
+`uint64(0)-1` as RUNTIME arithmetic. Measured with a debug print on the
+unsigned-subtract branch: never reached; the built program prints
+18446744073709551615. Rejecting it needs expression-level constant folding in
+the checker (a feature, not wiring). Then the restriction test can be added:
+`// expected: constant subtraction underflows its unsigned type`.
 
-Two stage4 checker leniencies are recorded but not fixed (fixtures were made
-valid instead): a composite literal may name UNEXPORTED fields of another
-package (`lib.Holder{tag: 7}`), and an untyped constant conversion may be
-folded without the fold running where errors survive (`uint64(0)-1`).
-Also recorded: the legacy build cache key does not include the compiler binary,
-so after a rebuild a stale object can fail with "init not found" or crash the
-compiler until `~/.cache/moxie` is cleared.
+TWO RECORDED DEFECTS (no gate depends on them)
 
-Phases 1 and 1b (stdlib package compiles) were not re-run with `mxc-s12`; the
-round's gates were 0a, 0b, 1c, 2, 4, 5.
+- stage4 does not check UNEXPORTED field access from another package: a
+  composite literal `lib.Holder{tag: 7}` in main compiles. The fixtures were
+  made valid instead (accessors). Needs an export check in the checker.
+- legacy mangles `lib.Nat{:3}` (a concrete alias) into
+  `lib.__slicealloc(Nat, 3)`. It cannot be fixed in the text rewriter: the same
+  `S{:n}` form is legitimate for a slice-shaped type parameter (src/slices
+  grows through `S{:n+m-i}`), so the check must be type-aware. The stage4
+  rejection attempted this round was reverted for exactly that reason.
 
-Box environment notes: `/etc/cron.d/idle-shutdown` powers the server off after
-30 minutes with no login session and load < 2 (it is disabled while working:
-the file is at /root/idle-shutdown.cron.disabled), and `binaryen` was missing -
-`wasm-opt` is required by the legacy wasm link and is now installed.
-`lib/compiler-rt-builtins` is an ABSOLUTE symlink into the local source tree
-(/home/mleku/src/srclib/llvm/compiler-rt/lib/builtins); on the box that tree was
-absent until it was copied, which only shows with a cleared build cache. And the
-legacy build cache is not keyed by the compiler binary: after rebuilding legacy,
-stale .bc objects survive and a fixture can fail with "init not found for
-internal/byteorder" (or crash the compiler) until ~/.cache/moxie is cleared.
+VERIFICATION MATRIX (local, serial for anything with a browser)
 
-## STANDING ISSUES (round 379) - the current queue
+- `mxc-s15` (the final sources): phase 2 selfhost + fixpoint PASS; phases
+  1, 1b, 3, 6 = 8/8; phase 7 = 2/2; phase 8 = 2/2.
+- `mxc-s12` (same tree except the predeclared-conversion fold and a debug
+  print removal): 0a+0b+4+1c = 192/192; phase 5 = 117 units, 116 passed, 1
+  skipped (declared native-only).
+- legacy-built wasm sweep: 113 fixtures, 111 passed, 0 real failures (two
+  cold-Chromium "did not finish loading" flakes, both PASS on retry).
+- Phase 5 was not re-run on `mxc-s15`; the only delta is the conversion fold,
+  and phase 2 rebuilt the whole compiler from legacy with it.
+
+BOX NOTES (off now): `/etc/cron.d/idle-shutdown` powered it off after 30 min
+with no login session and load < 2 (disabled at
+`/root/idle-shutdown.cron.disabled`); `binaryen` was installed (`wasm-opt` is
+required by the legacy wasm link); `lib/compiler-rt-builtins` is an ABSOLUTE
+symlink into `/home/mleku/src/srclib/llvm/compiler-rt/lib/builtins` (copied);
+and the legacy build cache key does not include the compiler binary, so clear
+`~/.cache/moxie` after rebuilding legacy.
+
+## STANDING ISSUES (round 379)## STANDING ISSUES (round 379) - the current queue
 
 Round 378 closed everything it listed, and round 379 closed the wasm panic gate
 and the wasm spawn defects that gate exposed. What is left is one pre-existing
