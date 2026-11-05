@@ -264,12 +264,12 @@ func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, c
 		req.Header = Header{}
 	}
 
-	if u := req.URL.User; u != nil && HeaderGet(req.Header, "Authorization") == "" {
+	if u := req.URL.User; u != nil && req.Header.Get("Authorization") == "" {
 		username := u.Username()
 		password, _ := u.Password()
 		forkRequest(&req, ireq)
 		req.Header = cloneOrMakeHeader(ireq.Header)
-		HeaderSet(req.Header, "Authorization", "Basic "+basicAuth(username, password))
+		req.Header.Set("Authorization", "Basic "+basicAuth(username, password))
 	}
 
 	if !deadline.IsZero() {
@@ -671,7 +671,7 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 		// For all but the first request, create the next
 		// request hop and replace req.
 		if len(reqs) > 0 {
-			loc := HeaderGet(resp.Header, "Location")
+			loc := resp.Header.Get("Location")
 			if loc == "" {
 				// While most 3xx responses include a Location, it is not
 				// required and 3xx responses without a Location have been
@@ -725,8 +725,8 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 
 			// Add the Referer header from the most recent
 			// request URL to the new one, if it's not https->http:
-			if ref := refererForURL(reqs[len(reqs)-1].URL, req.URL, HeaderGet(req.Header, "Referer")); ref != "" {
-				HeaderSet(req.Header, "Referer", ref)
+			if ref := refererForURL(reqs[len(reqs)-1].URL, req.URL, req.Header.Get("Referer")); ref != "" {
+				req.Header.Set("Referer", ref)
 			}
 			er2 = c.checkRedirect(req, reqs)
 
@@ -822,7 +822,7 @@ type headersCopier struct {
 func (c *Client) makeHeadersCopier(ireq *Request) (rhc *headersCopier) {
 	// The headers to copy are from the very initial request.
 	hc := &headersCopier{cl: c, ireqhdr: cloneOrMakeHeader(ireq.Header)}
-	if c.Jar != nil && HeaderGet(ireq.Header, "Cookie") != "" {
+	if c.Jar != nil && ireq.Header.Get("Cookie") != "" {
 		hc.icookies = map[string][]*Cookie{}
 		for _, ck := range ireq.Cookies() {
 			hc.icookies[ck.Name] = push(hc.icookies[ck.Name], ck)
@@ -853,7 +853,7 @@ func (hc *headersCopier) copyHeaders(req *Request, stripSensitiveHeaders bool) {
 			}
 		}
 		if changed {
-			HeaderDel(hc.ireqhdr, "Cookie")
+			hc.ireqhdr.Del("Cookie")
 			var ss [][]byte
 			for _, cs := range hc.icookies {
 				for _, ck := range cs {
@@ -862,7 +862,7 @@ func (hc *headersCopier) copyHeaders(req *Request, stripSensitiveHeaders bool) {
 				}
 			}
 			slices.Sort(ss) // Ensure deterministic headers
-			HeaderSet(hc.ireqhdr, "Cookie", bytes.Join(ss, "; "))
+			hc.ireqhdr.Set("Cookie", bytes.Join(ss, "; "))
 		}
 	}
 
@@ -927,7 +927,7 @@ func (c *Client) Post(urlStr, contentType string, bodyReader io.Reader) (resp *R
 	if err != nil {
 		return nil, err
 	}
-	HeaderSet(req.Header, "Content-Type", contentType)
+	req.Header.Set("Content-Type", contentType)
 	return c.Do(req)
 }
 
@@ -966,7 +966,7 @@ func PostForm(urlStr string, data url.Values) (resp *Response, err error) {
 // To make a request with a specified context.Context, use [NewRequestWithContext]
 // and Client.Do.
 func (c *Client) PostForm(urlStr string, data url.Values) (resp *Response, err error) {
-	return c.Post(urlStr, "application/x-www-form-urlencoded", bytes.NewReader(url.ValuesEncode(data)))
+	return c.Post(urlStr, "application/x-www-form-urlencoded", bytes.NewReader(data.Encode()))
 }
 
 // Head issues a HEAD to the specified URL. If the response is one of

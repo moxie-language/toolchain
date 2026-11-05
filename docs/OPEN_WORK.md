@@ -28,6 +28,39 @@ which is why the arm re-check sits inside the page loop. Arenas over
 arenas, so the tail the ratchet actually hands back is the live root/frame arena
 slack.
 
+## ROUND 383: STDLIB NAMED TYPES, POP FORMS, IDLE GROWTH RATCHET
+
+- net.IP, net.IPMask, net.HardwareAddr are named slice types with methods
+  (String, To4, To16, Equal, Is*, ApplyMask, DefaultMask, AppendText,
+  MarshalText, UnmarshalText; Size/String on IPMask) and every call site uses
+  the method form.
+- image.Palette is a named []color.Color with Len/Index/Convert value receivers;
+  Config.ColorModel carries a Palette value, the Element struct wrapper is gone.
+- http.Header, url.Values and textproto.MIMEHeader are named map types with
+  their Add/Set/Get/Values/Del/Write/WriteSubset/Clone/Has/Encode methods.
+  Verified with a probe on both compilers (header values ok) and the chanpool
+  uintptr-to-pointer conversion fixed to unsafe.Pointer on the way.
+- pop statement forms: pop(s) removes the last element, pop(s, xs...) removes
+  len(xs); expression pop returns the element without shrinking. Pinned by
+  slice_pop_forms.mx on both compilers.
+- Idle arena grooming restored as a growth ratchet: the select park loop hands
+  back the unused arena tail a page at a time, re-checking the arms between
+  pages, so a resumed burst reuses released pages instead of claiming new ones.
+
+### Open: unsigned constant underflow in DECLARATIONS
+
+The runtime-expression form is now rejected: `x := uint64(0) - 1` fails with
+"constant 18446744073709551615 overflows uint64" (ssa_builder's constant-fold
+range check). The DECLARATION form still wraps: `const c = uint64(0) - 1` and
+`const c uint64 = 0 - 1` compile and print the wrapped maximum. Diagnosis:
+declared constants are applied through ConvertConstLocal in the typecheck-only
+pass, whose compile errors are dropped by design; reportConstOverflow's table is
+read at the START of CompileToIR, before that pass records the message, so the
+table never carries it for the package being compiled. The fix is to surface the
+declaration-pass const errors at the point they are recorded (or fold constant
+conversions in tcEvalConstExpr so the existing binary check sees a typed
+operand). No fixture ships until the rejection is real.
+
 ## ROUND 382: VALUE RECEIVERS OVER NAMED SLICES/MAPS, COMPACTION AT SELECT
 
 - A value receiver over a named slice/map is a REFERENCE receiver in both

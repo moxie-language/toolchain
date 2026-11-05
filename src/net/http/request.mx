@@ -469,8 +469,8 @@ func (r *Request) Clone(ctx context.Context) (rrequest *Request) {
 	*r2 = *r
 	r2.ctx = ctx
 	r2.URL = cloneURL(r.URL)
-	r2.Header = HeaderClone(r.Header, )
-	r2.Trailer = HeaderClone(r.Trailer)
+	r2.Header = r.Header.Clone()
+	r2.Trailer = r.Trailer.Clone()
 	if s := r.TransferEncoding; s != nil {
 		s2 := [][]byte{:len(s)}
 		copy(s2, s)
@@ -499,7 +499,7 @@ func (r *Request) ProtoAtLeast(major, minor int32) (rok bool) {
 
 // UserAgent returns the client's User-Agent, if sent in the request.
 func (r *Request) UserAgent() (rs string) {
-	return HeaderGet(r.Header, "User-Agent")
+	return r.Header.Get("User-Agent")
 }
 
 // Cookies parses and returns the HTTP cookies sent with the request.
@@ -541,10 +541,10 @@ func (r *Request) Cookie(name string) (rcookie *Cookie, rerr error) {
 // a Cookie header already present in the request.
 func (r *Request) AddCookie(c *Cookie) {
 	s := fmt.Sprintf("%s=%s", sanitizeCookieName(c.Name), sanitizeCookieValue(c.Value, c.Quoted))
-	if a := HeaderGet(r.Header, "Cookie"); a != "" {
-		HeaderSet(r.Header, "Cookie", a+"; "+s)
+	if a := r.Header.Get("Cookie"); a != "" {
+		r.Header.Set("Cookie", a+"; "+s)
 	} else {
-		HeaderSet(r.Header, "Cookie", s)
+		r.Header.Set("Cookie", s)
 	}
 }
 
@@ -557,7 +557,7 @@ func (r *Request) AddCookie(c *Cookie) {
 // alternate (correct English) spelling req.Referrer() but cannot
 // diagnose programs that use Header["Referrer"].
 func (r *Request) Referer() (rs string) {
-	return HeaderGet(r.Header, "Referer")
+	return r.Header.Get("Referer")
 }
 
 // multipartByReader is a sentinel value.
@@ -582,7 +582,7 @@ func (r *Request) MultipartReader() (rreader *multipart.Reader, rerr error) {
 }
 
 func (r *Request) multipartReader(allowMixed bool) (rreader *multipart.Reader, rerr error) {
-	v := HeaderGet(r.Header, "Content-Type")
+	v := r.Header.Get("Content-Type")
 	if v == "" {
 		return nil, ErrNotMultipart()
 	}
@@ -784,7 +784,7 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 	// may be blank to not send the header.
 	userAgent := defaultUserAgent
 	if headerHas(r.Header, "User-Agent") {
-		userAgent = HeaderGet(r.Header, "User-Agent")
+		userAgent = r.Header.Get("User-Agent")
 	}
 	if userAgent != "" {
 		userAgent = newlineToSpace().Replace(userAgent)
@@ -1086,7 +1086,7 @@ func NewRequestWithContext(ctx context.Context, method, ur3 string, bod3 io.Read
 // Authorization header, if the request uses HTTP Basic Authentication.
 // See RFC 2617, Section 2.
 func (r *Request) BasicAuth() (username, password string, ok bool) {
-	auth := HeaderGet(r.Header, "Authorization")
+	auth := r.Header.Get("Authorization")
 	if auth == "" {
 		return "", "", false
 	}
@@ -1135,7 +1135,7 @@ func parseBasicAuth(auth string) (username, password string, ok bool) {
 // password. For instance, when used with OAuth2, both arguments must
 // be URL encoded first with [url.QueryEscape].
 func (r *Request) SetBasicAuth(username, password string) {
-	HeaderSet(r.Header, "Authorization", "Basic "+basicAuth(username, password))
+	r.Header.Set("Authorization", "Basic "+basicAuth(username, password))
 }
 
 // parseRequestLine parses "GET /foo HTTP/1.1" into its three parts.
@@ -1370,7 +1370,7 @@ func parsePostForm(r *Request) (vs url.Values, err error) {
 		err = errors.New("missing form body")
 		return
 	}
-	ct := HeaderGet(r.Header, "Content-Type")
+	ct := r.Header.Get("Content-Type")
 	// RFC 7231, section 3.1.1.5 - empty type
 	//   MAY be treated as application/octet-stream
 	if ct == "" {
@@ -1684,6 +1684,6 @@ func requestMethodUsuallyLacksBody(method string) (rok bool) {
 // requiresHTTP1 reports whether this request requires being sent on
 // an HTTP/1 connection.
 func (r *Request) requiresHTTP1() (rok bool) {
-	return hasToken(HeaderGet(r.Header, "Connection"), "upgrade") &&
-		ascii.EqualFold(HeaderGet(r.Header, "Upgrade"), "websocket")
+	return hasToken(r.Header.Get("Connection"), "upgrade") &&
+		ascii.EqualFold(r.Header.Get("Upgrade"), "websocket")
 }

@@ -5520,6 +5520,23 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 					if _, isBool := folded.(*ConstBool); isBool {
 						ct = Typ[Bool]
 					}
+					// A typed constant fold must stay inside its type's range.
+					// EvalBinaryChecked never learnt to report (its overflow
+					// state has no writer), so `uint64(0) - 1` folded to -1 and
+					// was then materialised as the wrapped maximum. Go rejects
+					// both directions; name the unsigned subtraction case so
+					// the restriction fixture can assert the message.
+					if ct != nil && !isUntypedBasicType(ct) {
+						under := false
+						if ci, isI := folded.(*ConstInt); isI {
+							under = op == OpSub && ci.V < 0 && !ci.Unsigned && ci.Exact == nil
+						}
+						if under {
+							reportCompileError(fb.errPos() | "constant subtraction underflows its unsigned type (overflows " | ct.String() | ")")
+						} else if msg := constReprError(folded, ct); msg != "" {
+							reportCompileError(fb.errPos() | "constant " | folded.String() | " " | msg)
+						}
+					}
 					return &SSAConst{typ: ct, val: folded}
 				}
 			}
