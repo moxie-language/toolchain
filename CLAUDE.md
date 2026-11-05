@@ -132,9 +132,10 @@ Choose by how the final size is known:
   `b[:i]`. No capacity checks in the loop, no guards, no dead buffers.
 - **Grow inside a free function.** A free function gets its own frame arena, so
   every intermediate a growth step abandons is reclaimed when it returns, and
-  the value returned is relocated into the caller at exactly its length. Never
-  let a buffer enter the doubling regime in an arena that outlives the call - in
-  a sovereign arena keeps every abandoned backing until compaction reclaims it.
+  the value returned is relocated into the caller at exactly its length. Do
+  not let a buffer enter the doubling regime in an arena that outlives the
+  call - a sovereign arena keeps every abandoned backing until compaction
+  reclaims it.
 - **Never hand-write the capacity guard.** `if len(x) >= cap(x) { x = GrowCap(x) }`
   reserves ONE element and is a latent panic before a spread push, because
   `push(x, src...)` needs `len(src)`. Use `mxutil.Ensure(x, len(src))` for a
