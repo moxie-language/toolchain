@@ -94,14 +94,35 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+# Chromium refuses to navigate to some ports whatever the server is: its
+# restricted list (net/base/port_util.cc) covers 1-1023 plus a handful of
+# well-known service ports. The kernel handed one of those out on an ephemeral
+# bind in a phase-5 run (2049), and `Page.goto` failed with ERR_UNSAFE_PORT -
+# one random fixture red per sweep, different each time. Rebind until the port
+# is navigable; the list is fixed, so this terminates.
+CHROMIUM_UNSAFE_PORTS = frozenset(
+    list(range(1, 1024)) + [2049, 3659, 4045, 4190, 5060, 5061, 6000,
+                            6566, 6679, 6697, 10080] + list(range(6665, 6670)))
+
+
+def bind_test_server():
+    for _ in range(32):
+        srv = socketserver.TCPServer(
+            ("127.0.0.1", 0), functools.partial(Handler, directory=str(ROOT)))
+        srv.allow_reuse_address = True
+        if srv.server_address[1] not in CHROMIUM_UNSAFE_PORTS:
+            return srv
+        srv.server_close()
+    raise SystemExit("run.py: could not bind a port Chromium will navigate to")
+
+
 def main():
     # The default host page loads /app.wasm; an emitted bundle host carries its
     # own module URL, so with --host nothing needs staging. Nothing is copied in
     # either case: translate_path serves /app.wasm from the module this process
     # was given, which is what keeps concurrent runs independent.
 
-    srv = socketserver.TCPServer(("127.0.0.1", 0), functools.partial(Handler, directory=str(ROOT)))
-    srv.allow_reuse_address = True
+    srv = bind_test_server()
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
 
