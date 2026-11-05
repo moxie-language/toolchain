@@ -1,0 +1,211 @@
+package runtime
+
+// Offset frames: a self-contained copy of a value in one buffer where every
+// pointer is an offset from the frame base instead of an address. Host-endian
+// by construction; the wire codec stays the fixed little-endian format for
+// pipes and sockets. Eligible values hold no pointers/maps/interfaces of their
+// own: a struct of scalars and string/[]byte fields, or a bare string/[]byte.
+//
+// This module is not yet wired into the channel dispatch: the encoder is
+// verified (a probe logs n=45 N=7 blen=5 for Msg{N:7, Body:[]byte("hello")}),
+// the receive side is waiting on the endpoint-resolution question recorded in
+// docs/OPEN_WORK.md round 384. The guards below are the durable part: a
+// descriptor of the wrong kind is a loud error, never a garbage read.
+
+import "unsafe"
+
+const offsetFrameMagic = uint32(0x4d584f46)
+
+// offsetDbgEncode/Decode count calls so a log can tell "never entered" from
+// "entered and rejected" without a rebuild.
+var offsetDbgEncode uint64
+var offsetDbgDecode uint64
+var offsetDbgReject uint64
+
+// OffsetDebugReport prints the counters (called by a probe on either side).
+func OffsetDebugReport() {
+	printstring("offset: encode=")
+	printuint64(offsetDbgEncode)
+	printstring(" decode=")
+	printuint64(offsetDbgDecode)
+	printstring(" reject=")
+	printuint64(offsetDbgReject)
+	printstring("\n")
+}
+
+func offsetBasicKind(k Kind) (ok bool) {
+	switch k {
+	case Bool, Int, Int8, Int16, Int32, Int64, Uint, Uint8, Uint16, Uint32,
+		Uint64, Uintptr, Float32, Float64, Complex64, Complex128:
+		return true
+	}
+	return false
+}
+
+// offsetStruct resolves a struct descriptor and asserts its kind. A named
+// descriptor cast directly gave numField=0 and a random size; the guard makes
+// that a loud error on both the encode and the decode path.
+func offsetStruct(td *RawType, what string) (st *rtStructType) {
+	u := td.Underlying()
+	if u == nil || u.Kind() != KindStruct {
+		offsetDbgReject++
+		printstring("offset frame: ")
+		printstring(what)
+		printstring(" is not a struct descriptor\n")
+		runtimePanic("offset frame: wrong descriptor kind")
+	}
+	return (*rtStructType)(unsafe.Pointer(u))
+}
+
+func offsetBytes(td *RawType, what string) {
+	if td.Kind() != KindBytes {
+		offsetDbgReject++
+		printstring("offset frame: ")
+		printstring(what)
+		printstring(" is not a bytes descriptor\n")
+		runtimePanic("offset frame: wrong descriptor kind")
+	}
+}
+
+// offsetField returns field i's type and byte offset. The offset is a uvarint
+// in the field's data blob (retFieldOffsetAt decodes it), never the blob
+// pointer.
+func offsetField(st *rtStructType, i int32) (ft *RawType, off uintptr) {
+	fd := (*rtStructFieldDesc)(unsafe.Add(unsafe.Pointer(&st.fields[0]), uintptr(i)*unsafe.Sizeof(rtStructFieldDesc{})))
+	return fd.fieldType, retFieldOffsetAt(st, i)
+}
+
+func offsetFrameEligible(td *RawType) (ok bool) {
+	if td == nil {
+		return false
+	}
+	switch td.Kind() {
+	case KindBytes:
+		return true
+	case KindStruct:
+		st := offsetStruct(td, "element")
+		for i := int32(0); i < int32(st.numField); i++ {
+			ft, _ := offsetField(st, i)
+			k := ft.Kind()
+			if k != KindBytes && !offsetBasicKind(k) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func offsetPut32(b []byte, off uintptr, v uint32) {
+	*(*uint32)(unsafe.Pointer(&b[off])) = v
+}
+
+func offsetGet32(b []byte, off uintptr) (v uint32) {
+	return *(*uint32)(unsafe.Pointer(&b[off]))
+}
+
+func offsetFrameSize(v unsafe.Pointer, td *RawType) (n uintptr) {
+	n = 8 + td.Size()
+	switch td.Kind() {
+	case KindBytes:
+		offsetBytes(td, "element")
+		n += (*[3]uintptr)(v)[1]
+	case KindStruct:
+		st := offsetStruct(td, "element")
+		for i := int32(0); i < int32(st.numField); i++ {
+			ft, off := offsetField(st, i)
+			if ft.Kind() != KindBytes {
+				continue
+			}
+			n += (*[3]uintptr)(unsafe.Pointer(uintptr(v) + off))[1]
+		}
+	}
+	return n
+}
+
+func offsetFrameEncode(v unsafe.Pointer, td *RawType) (frame []byte, ok bool) {
+	offsetDbgEncode++
+	if !offsetFrameEligible(td) || v == nil {
+		offsetDbgReject++
+		return nil, false
+	}
+	n := offsetFrameSize(v, td)
+	if n == 0 || n > 0xffffffff {
+		offsetDbgReject++
+		return nil, false
+	}
+	bp := alloc(n, nil)
+	memzero(bp, n)
+	frame = unsafe.Slice((*byte)(bp), n)
+	offsetPut32(frame, 0, offsetFrameMagic)
+	offsetPut32(frame, 4, uint32(n))
+	offsetPut32(frame, 8, uint32(8))
+	memcpy(unsafe.Pointer(&frame[8]), v, td.Size())
+	data := uintptr(8) + td.Size()
+	switch td.Kind() {
+	case KindBytes:
+		srch := (*[3]uintptr)(v)
+		(*[3]uintptr)(unsafe.Pointer(&frame[8]))[0] = data
+		if srch[1] > 0 {
+			memcpy(unsafe.Pointer(&frame[data]), unsafe.Pointer(srch[0]), srch[1])
+		}
+	case KindStruct:
+		st := offsetStruct(td, "element")
+		for i := int32(0); i < int32(st.numField); i++ {
+			ft, off := offsetField(st, i)
+			if ft.Kind() != KindBytes {
+				continue
+			}
+			hdr := (*[3]uintptr)(unsafe.Pointer(&frame[8+off]))
+			srch := (*[3]uintptr)(unsafe.Pointer(uintptr(v) + off))
+			hdr[0] = data
+			if srch[1] > 0 {
+				memcpy(unsafe.Pointer(&frame[data]), unsafe.Pointer(srch[0]), srch[1])
+			}
+			data += srch[1]
+		}
+	}
+	return frame, true
+}
+
+func offsetFrameDecode(frame []byte, td *RawType, value unsafe.Pointer) (ok bool) {
+	offsetDbgDecode++
+	if !offsetFrameEligible(td) || len(frame) < 12 {
+		offsetDbgReject++
+		return false
+	}
+	if offsetGet32(frame, 0) != offsetFrameMagic {
+		offsetDbgReject++
+		return false
+	}
+	total := offsetGet32(frame, 4)
+	if uintptr(total) != uintptr(len(frame)) || offsetGet32(frame, 8) != 8 {
+		offsetDbgReject++
+		return false
+	}
+	bp := alloc(uintptr(total), nil)
+	memcpy(bp, unsafe.Pointer(&frame[0]), uintptr(total))
+	base := uintptr(bp)
+	root := base + 8
+	switch td.Kind() {
+	case KindBytes:
+		hdr := (*[3]uintptr)(unsafe.Pointer(root))
+		if hdr[1] > 0 {
+			hdr[0] = base + hdr[0]
+		}
+	case KindStruct:
+		st := offsetStruct(td, "element")
+		for i := int32(0); i < int32(st.numField); i++ {
+			ft, off := offsetField(st, i)
+			if ft.Kind() != KindBytes {
+				continue
+			}
+			hdr := (*[3]uintptr)(unsafe.Pointer(root + off))
+			if hdr[1] > 0 {
+				hdr[0] = base + hdr[0]
+			}
+		}
+	}
+	memcpy(value, unsafe.Pointer(root), td.Size())
+	return true
+}
