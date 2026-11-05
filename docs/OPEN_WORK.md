@@ -13,8 +13,12 @@ the round's changes):
 - phase 5 (wasm fixtures): **117 units, 116 passed, 0 failed, 1 skipped** (the
   declared native-only crosspkg).
 - phases 0a + 0b + 4 + 1c: **192 units, 192 passed, 0 failed**.
-- `tests/wasm/validate.sh` under `legacy/moxie` (the legacy-built wasm sweep):
-  see the run recorded below.
+- `tests/wasm/validate.sh` under `legacy/moxie` (the legacy-built wasm sweep,
+  113 fixtures): **111 passed, 0 real failures**. The first pass reported
+  `rand_fill` and `recursive_local_type` as "browser run failed" with empty
+  stderr and "TIMEOUT: module did not finish loading"; both PASS on a re-run of
+  just those two with the machine idle (a cold-Chromium start under load, not a
+  codegen defect).
 
 ## STANDING ISSUES (round 380) - legacy/wood-law residuals
 
