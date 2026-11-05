@@ -148,6 +148,9 @@ func PipeChanSend(ch *channel, encoded []byte) bool {
 	// dies naming the actual size, the budget and the fields to fix. The budget
 	// is checked before the ring size so the declaration-level message is the
 	// one a programmer sees.
+	chanDbgSent++
+	chanDbgSendCh = uintptr(unsafe.Pointer(ch))
+	chanDbgLastLen = uintptr(len(encoded))
 	if uintptr(len(encoded)) > ch.frameBudget {
 		pipeBudgetPanic(ch, uintptr(len(encoded)))
 	}
@@ -395,11 +398,41 @@ func (ch *channel) tryPipeSend(value unsafe.Pointer, c moxie.Codec, td *RawType)
 //   (true, true)  : data received into value
 //   (true, false) : channel closed
 //   (false, _)    : no data right now, would block; caller should retry
+// Channel plumbing counters, written by the send/recv entry points so a report
+// can tell "the consumer never saw a frame" from "the decoder rejected one"
+// without a rebuild. The last channel handle on each side is the identity: if
+// the send and recv handles differ, the arm holds a different pipe.
+var chanDbgSent, chanDbgRecv, chanDbgZero, chanDbgClosed uint64
+var chanDbgSendCh, chanDbgRecvCh uintptr
+var chanDbgLastLen uintptr
+
+// ChanDebugReport prints the counters and the last handles for this domain.
+func ChanDebugReport() {
+	printstring("chan: sent=")
+	printuint64(chanDbgSent)
+	printstring(" recv=")
+	printuint64(chanDbgRecv)
+	printstring(" zero=")
+	printuint64(chanDbgZero)
+	printstring(" closed=")
+	printuint64(chanDbgClosed)
+	printstring(" sendCh=")
+	printuint64(uint64(chanDbgSendCh))
+	printstring(" recvCh=")
+	printuint64(uint64(chanDbgRecvCh))
+	printstring(" lastLen=")
+	printuint64(uint64(chanDbgLastLen))
+	printstring("\n")
+}
+
 func (ch *channel) tryPipeRecv(value unsafe.Pointer, c moxie.Codec, td *RawType) (received, ok bool) {
 	if chRecvRing(ch) == 0 {
 		return false, false
 	}
 	data, rok := ringRecv(chRecvRing(ch))
+	chanDbgRecv++
+	chanDbgRecvCh = uintptr(unsafe.Pointer(ch))
+	chanDbgLastLen = uintptr(len(data))
 	if rok {
 		// value is nil for a select case that binds nothing
 		// (`case <-closed:`), so there is nowhere to put the payload.
@@ -412,7 +445,9 @@ func (ch *channel) tryPipeRecv(value unsafe.Pointer, c moxie.Codec, td *RawType)
 		return true, true
 	}
 	if ringIsClosed(chRecvRing(ch)) {
+		chanDbgClosed++
 		if value != nil {
+			chanDbgZero++
 			recvZero(value, ch.elementSize)
 		}
 		return true, false
