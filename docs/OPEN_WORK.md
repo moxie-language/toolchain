@@ -92,45 +92,42 @@ The recv-dispatch test to add when the frame path is fixed: a spawn target with
 `chan Msg` that sends two messages and asserts both arrive with their bytes; it
 must fail if the recv path bypasses `codecFrameDecode`.
 
-### The 2x2 matrix (round 384, done)
+### The 2x2 matrix is VOID (round 384)
 
-    structural + select recv : works  (N=7, N=9)
-    structural + direct recv : works  (N=7, N=9)
+    structural + select recv : values correct, but recvStruct=0 / frames-seen=0
+    structural + direct recv : values correct, but recvStruct=0 / frames-seen=0
     offset     + select recv : zeros
     offset     + direct recv : zeros
 
-So endpoint resolution is innocent for the select arm - the same channel and the
-same endpoints work with the structural codec - and the failure follows the
-FRAME, not the arm. The plumbing counters that were shipped to main showed the
-worker calling tryPipeRecv once with `lastLen=8`, but that is the entry's
-`<-closed` arm check, not the payload: tryPipeRecv is the select path, while a
-direct receive goes through PipeChanRecv. The counters therefore measured the
-wrong receive; the next instrumentation belongs in PipeChanRecv/ringRecv, and
-the worker must ship its numbers over a channel because runtime prints are lost
-in a spawned domain.
+A cell whose send counter fires and whose receive counter stays at zero is not a
+working codec; it is two sides disagreeing about representation with the value
+happening to survive. The earlier note that this was "pipe resolution inside
+the offset path" is RETRACTED: it points the next reader at the wrong layer.
+The correct reading is the original hypothesis - the send encodes one way and
+the receive consumes another - now supported by the counters rather than
+suggested by them.
 
-Practical lesson: a 45-byte offset frame fails while a 14-byte structural frame
-succeeds on the same ring and depth. The next question is whether ringSend
-accepted 45 bytes at all (PipeChanSend counts the send before its budget and
-space checks), so print `ringSend`'s return and the ring's `writeIdx`/`readIdx`
-on both sides.
+The emit-time entry print (the one build) then showed BOTH sides emitting
+`structural` for `main.Msg` (`CHANENTRY send=structural` x2, `CHANENTRY
+recv=structural` x2), which contradicts the counters. So the next question is
+not which entry the compiler emits (it emits the same pair on both sides) but
+whether the runtime dispatch actually takes the structural branch in the child:
+i.e. `ch.spawnBound` in the receiving domain, and whether the counters are
+reading the domain that executed the receive. Print/ship `ch.spawnBound` and a
+per-domain marker (domain id) with the counters before drawing any further
+conclusion.
 
-Entry counters shipped from the worker changed the picture again: on the
-STRUCTURAL direct-recv cell the values arrive correctly while
-`recvStruct=0` and `codecFrameDecode` frames-seen `=0`. So the working receive
-never touches `PipeChanRecvStructural` or the frame decoder at all - the direct
-receive for a `chan Msg` element is emitted through a different entry (the
-codec-interface or extent dispatch), and the structural cell only proves that
-entry works. The offset cells fail because the offset frame is written by
-`PipeChanSendStructural`, which the other receive entry does not read back the
-same way. Next: identify the receive function the compiler actually emits for
-the direct case (grep the emitted IR for the recv call) and route the offset
-frame through the same send/receive pair instead of the structural one.
+Longer term, the class should be unrepresentable rather than findable: derive
+the codec tag from the channel endpoint once at creation (both sides read it
+there, not at each emit site), keep ring items self-delimiting (the 4-byte
+length prefix already does this; the missing piece is that every reader must
+honour it and reject a length it cannot handle loudly), and in debug builds
+stamp the codec id on each item and panic on a send/recv id mismatch at the
+first delivery.
 
-The endianness point is the reason both formats exist: the offset frame is a
-memory copy and therefore host-endian, while the wire codec is one fixed
-little-endian format for pipes and sockets. Same walk, different byte order and
-a formal parse only on the wire side.
+`println` is the other thing that made this invisible: it is silent in spawned
+domains (native) and needs a channel to the main page script on wasm. It is now
+the first open todo, not a probe caveat.
 
 ## ROUND 383: STDLIB NAMED TYPES, POP FORMS, IDLE GROWTH RATCHET
 
