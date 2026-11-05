@@ -134,7 +134,7 @@ Choose by how the final size is known:
   every intermediate a growth step abandons is reclaimed when it returns, and
   the value returned is relocated into the caller at exactly its length. Never
   let a buffer enter the doubling regime in an arena that outlives the call - in
-  a sovereign arena every doubling step is permanent.
+  a sovereign arena keeps every abandoned backing until compaction reclaims it.
 - **Never hand-write the capacity guard.** `if len(x) >= cap(x) { x = GrowCap(x) }`
   reserves ONE element and is a latent panic before a spread push, because
   `push(x, src...)` needs `len(src)`. Use `mxutil.Ensure(x, len(src))` for a
@@ -425,8 +425,14 @@ receiver is a pointer like every Moxie receiver, so a method that reslices or
 pushes writes the caller's variable - there is no Go-style "value receiver
 copy" where element writes survive and a rebinding does not. That fork is a
 Go artifact of shared-memory caution; a domain has one thread and no shared
-mutable state, so the pointer is the whole story. Value receivers stay a
-compile error for every type, slice and map included.
+mutable state, so the pointer is the whole story. Both receiver spellings
+work: a POINTER receiver writes the caller's variable, and a VALUE receiver on
+a named slice or map is a REFERENCE receiver - the value is a header for
+storage the caller owns, so `func (n Names) Add(s string) { n = push(n, s) }`
+writes the caller's header, len and cap. That is not Go's value copy (element
+writes survive, a rebinding does not); a domain has one thread and no shared
+mutable state to guard against. A VALUE receiver on a STRUCT remains a compile
+error: a struct value is a copy, so mutations would be lost.
 
 An ALIAS of a named slice or map type is that same type (`type A = Names` is
 `Names`), so it carries the same method set; an alias introduces no methods of
