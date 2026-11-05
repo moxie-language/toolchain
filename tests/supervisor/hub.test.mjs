@@ -9,9 +9,10 @@ function fakePort() {
   return { sent, postMessage: (m) => sent.push(m), start() {} };
 }
 
-function makeHub() {
+function makeHub(opts = {}) {
   const state = { started: [], stopped: [], logs: [], faults: [], exits: [], clock: 1000 };
   const hub = createHub({
+    queueMax: opts.queueMax,
     start: (boot) => {
       const port = fakePort();
       const handle = 'w-' + boot.id;
@@ -226,6 +227,21 @@ test('lines are assembled per domain, so two domains cannot splice one another',
   hub.handle(child, { kind: 'exit', id: '1.1' });
   hub.drain();
   assert.deepEqual(logs.at(-1), { id: '1.1', fd: 1, text: 'unterminated' });
+});
+
+test('an overflowing queue drops with a per-domain count, reported at exit', () => {
+  const { hub, logs } = makeHub({ queueMax: 3 });
+  const root = fakePort();
+  hub.attachRoot({ port: root, handle: 'w-1' });
+  for (let i = 0; i < 5; i++) hub.handle(root, { kind: 'log', id: '1', fd: 1, text: 'line ' + i + '\n' });
+  assert.equal(hub.pending(), 3);
+  assert.equal(hub.stats().dropped, 2);
+  hub.handle(root, { kind: 'exit', id: '1' });
+  hub.drain();
+  // The summary must survive the full queue: a lost drop report would make
+  // "no output" ambiguous.
+  assert.ok(logs.some((l) => l.id === '1' && l.fd === 2 && l.text.includes('2 log lines dropped for 1')),
+    JSON.stringify(logs));
 });
 
 test('the log queue drains in order and in bounded batches', () => {

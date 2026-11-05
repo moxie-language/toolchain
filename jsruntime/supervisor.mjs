@@ -22,6 +22,11 @@ export function createHub(opts = {}) {
   const exited = opts.exited || (() => {});
   const now = opts.now || (() => 0);
   const schedule = opts.schedule || null;
+  // The log queue is bounded: a domain that prints without a reader (a trace
+  // loop) must not grow the page without limit. Dropping is allowed only
+  // because the drop is itself reported - a silent drop would make "no output"
+  // ambiguous, which is the one thing this system may not do.
+  const queueMax = opts.queueMax || 4096;
 
   const nodes = new Map();
   const roots = [];
@@ -30,7 +35,7 @@ export function createHub(opts = {}) {
     spawned: 0, exited: 0, panics: 0, rebinds: 0,
     refusedSpawn: 0, portMismatch: 0, parentMismatch: 0, unknownKind: 0,
     unknownExit: 0, unknownPanic: 0, unknownHeartbeat: 0, unknownRebind: 0,
-    unattributedLog: 0, drained: 0,
+    unattributedLog: 0, drained: 0, dropped: 0, unattributedDropped: 0,
   };
 
   let queue = [];
@@ -41,12 +46,25 @@ export function createHub(opts = {}) {
   // the ids, so it is where a line becomes whole.
   const partials = new Map();   // "<id>|<fd>" -> unterminated text
 
-  function enqueue(entry) {
-    queue.push(entry);
-    if (!scheduled && schedule) {
-      scheduled = true;
-      schedule(() => { scheduled = false; drain(); });
+  function scheduleDrain() {
+    if (scheduled || !schedule) return;
+    scheduled = true;
+    schedule(() => {
+      scheduled = false;
+      if (drain() > 0) scheduleDrain();
+    });
+  }
+
+  function enqueue(entry, node) {
+    if (queue.length >= queueMax) {
+      stats.dropped++;
+      if (node) node.dropped++;
+      else stats.unattributedDropped++;
+      return false;
     }
+    queue.push(entry);
+    scheduleDrain();
+    return true;
   }
 
   // drain hands queued log lines to the page, in arrival order. Bounded so one
@@ -61,12 +79,12 @@ export function createHub(opts = {}) {
     return queue.length;
   }
 
-  function emitLines(id, fd, text) {
+  function emitLines(id, fd, text, node) {
     const key = id + '|' + fd;
     let buf = (partials.get(key) || '') + text;
     let nl;
     while ((nl = buf.indexOf('\n')) >= 0) {
-      enqueue({ id, fd, text: buf.slice(0, nl + 1) });
+      enqueue({ id, fd, text: buf.slice(0, nl + 1) }, node);
       buf = buf.slice(nl + 1);
     }
     if (buf.length > 0) partials.set(key, buf);
@@ -74,13 +92,13 @@ export function createHub(opts = {}) {
   }
 
   // A domain that is done writing must not lose its last, unterminated line.
-  function flushPartials(id) {
+  function flushPartials(id, node) {
     for (const key of [...partials.keys()]) {
       const sep = key.indexOf('|');
       if (key.slice(0, sep) !== id) continue;
       const text = partials.get(key);
       partials.delete(key);
-      enqueue({ id, fd: Number(key.slice(sep + 1)), text });
+      enqueue({ id, fd: Number(key.slice(sep + 1)), text }, node);
     }
   }
 
@@ -104,7 +122,15 @@ export function createHub(opts = {}) {
     // The host decides what stopping means: a page host keeps a root's Worker
     // alive for callbacks and terminates every other domain.
     stopDomain(node.handle, node);
-    flushPartials(node.id);
+    flushPartials(node.id, node);
+    // The drop report is the last line a domain says. It goes through the queue
+    // when there is room and straight to the page when there is not: a summary
+    // of lost diagnostics is the one line that may not be lost.
+    if (node.dropped > 0) {
+      const text = '[hub] ' + node.dropped + ' log line' + (node.dropped === 1 ? '' : 's')
+        + ' dropped for ' + node.id + '\n';
+      if (!enqueue({ id: node.id, fd: 2, text }, null)) logLine({ id: node.id, fd: 2, text });
+    }
     if (node.root) {
       const at = roots.indexOf(node.id);
       if (at >= 0) roots.splice(at, 1);
@@ -148,7 +174,7 @@ export function createHub(opts = {}) {
     if (nodes.has(id)) throw new Error('supervisor.attach: duplicate id ' + id);
     const node = {
       id, parent: parent || '0', port, handle: handle || null,
-      children: [], spawned: 0, lastSeen: now(), gone: false, root: root === true,
+      children: [], spawned: 0, dropped: 0, lastSeen: now(), gone: false, root: root === true,
     };
     nodes.set(id, node);
     const p = nodes.get(node.parent);
@@ -210,7 +236,7 @@ export function createHub(opts = {}) {
         const node = nodeOf(msg.id);
         if (!node) stats.unattributedLog++;
         else if (node.port !== port) stats.portMismatch++;
-        emitLines(node ? node.id : '?', msg.fd === 2 ? 2 : 1, String(msg.text == null ? '' : msg.text));
+        emitLines(node ? node.id : '?', msg.fd === 2 ? 2 : 1, String(msg.text == null ? '' : msg.text), node);
         return;
       }
       case 'spawn': onSpawn(port, msg); return;

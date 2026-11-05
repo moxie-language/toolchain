@@ -41,12 +41,30 @@ place a log queue may sit.
 the spawning domain. The hub forwards the handles (and the SABs) into the
 child's boot message and never reads or writes a byte of the ring.
 
+**The log queue is bounded, and a drop is reported.** A domain that prints
+without a reader (a trace loop, a busy worker) must not grow the page without
+limit, so the hub keeps at most `queueMax` entries (4096 by default). A log
+line that arrives with the queue full is dropped, counted on that domain, and
+the count is flushed when the domain exits as one stderr line:
+`[hub] N log lines dropped for <id>`. The summary itself bypasses the queue if
+it is still full - a summary of lost diagnostics is the one line that may not
+be lost, or "no output" would be ambiguous again. The hub's `stats().dropped`
+and `stats().unattributedDropped` carry the same numbers.
+
 A channel that already sits on a boundary keeps its ring when it crosses
-another spawn: `runtime.SpawnChannelHandle` reuses the existing handle and only
-creates a ring for a channel that has never crossed one. Creating a second ring
-for the same channel detaches it from the holder that passed it on - the
+another spawn, on both targets: wasm's `runtime.SpawnChannelHandle` reuses the
+existing SAB handle, and native's `spawnDomain` reuses the channel's existing
+ring pair instead of creating a new one. Creating a second ring for the same
+channel detaches it from the holder that passed it on - the
 manager-hands-a-worker's-pipe-on case - and the two ends then wait on different
 rings.
+
+Native's direction is decided **per channel**, by the child-domain token in the
+channel (`ch.childDomain`), not by a per-domain flag. Both domains hold the same
+channel struct (they are threads), and a domain can be a child of one spawn and
+the parent of another: a single "am I a child" flag picks the wrong ring for one
+of the two, which is exactly how a spawned domain that spawns and then receives
+used to hang.
 
 ## Addressing
 

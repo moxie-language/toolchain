@@ -101,6 +101,16 @@ func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
 			// One channel belongs to the child it was handed to; the parent's
 			// waits consult that child's breaker for liveness.
 			ch.ownerBreaker = spawnBreaker
+			// A channel that already sits on a boundary KEEPS its rings, the
+			// same rule the wasm side learns per channel (SpawnChannelHandle).
+			// Both domains hold this struct, so "re-ringed" would mean every
+			// holder silently follows the newest pair: a manager passing a
+			// worker's channel on would detach the worker it came from.
+			if ch.spawnBound && ch.ringA != 0 && ch.ringB != 0 {
+				spawnRingSet[i][0] = ch.ringA
+				spawnRingSet[i][1] = ch.ringB
+				continue
+			}
 			if ch.frameBudget > 0 {
 				budget = ch.frameBudget
 			}
@@ -124,6 +134,9 @@ func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
 	SetCurrentArena(trueRootArena())
 	h := (*spawnHandoff)(alloc(unsafe.Sizeof(spawnHandoff{}), nil))
 	SetCurrentArena(save)
+	// The handoff's address is this child's token, and the parent needs it now:
+	// its channel markers run as soon as spawnDomain returns.
+	lastChildDomain = uintptr(unsafe.Pointer(h))
 	h.fn = fn
 	h.argp = argp
 	h.breaker = spawnBreaker
@@ -147,6 +160,7 @@ func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
 //export moxie_runtime_thread_entry
 func moxie_runtime_thread_entry(arg unsafe.Pointer) {
 	h := (*spawnHandoff)(arg)
+	domainID = uintptr(arg)
 	childSpawnTarget = true
 	DomainClosed = h.breaker
 	spawnBreaker = h.breaker
@@ -193,6 +207,17 @@ var childSpawnTarget bool
 // recent one): what spawn returns to the parent and DomainClosed names in the
 // child. Root-arena object, TLS pointer.
 var spawnBreaker *channel
+
+// domainID names THIS domain in a channel's role test: 0 for the root, and the
+// spawn handoff's address for a spawned domain (unique, never freed). A domain
+// that spawns a child is still a child of its own parent, so the role of a
+// channel is decided per channel by comparing this token with the channel's
+// childDomain - not by a per-domain flag, which cannot express both roles.
+var domainID uintptr
+
+// lastChildDomain is the handoff token of the spawn just started: the parent's
+// channel markers record it as their channels' childDomain.
+var lastChildDomain uintptr
 
 func spawnCtlCreate() uintptr {
 	p := sysMapShared(unsafe.Sizeof(spawnCtl{}))

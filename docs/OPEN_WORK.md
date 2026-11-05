@@ -76,20 +76,46 @@ domain created, whose handles the page moves without reading a byte.
   never crossed one. Before this, a manager passing a worker's channel on to a
   sibling created a second ring, and the two ends waited on different rings
   (found by `spawn_orphan`: A spawns B with the channel main created).
-- **Two new browser units.** `spawn_orphan` (A spawns B, A exits, B keeps
-  logging and exits cleanly) and `spawn_parked_parent` (the parent spawns and
-  immediately parks in a receive only the child can wake) pass in phase 5 as
-  output-matches-native.
+- **Three new browser units.** `spawn_orphan` (A spawns B, A exits, B keeps
+  logging and exits cleanly), `spawn_root_parked_parent` (the ROOT spawns and
+  immediately parks in a receive only the child can wake - the root-level shape,
+  named so the green cannot be read as covering the intermediate one) and
+  `spawn_parked_intermediate` (a spawned domain spawns and then parks) pass in
+  phase 5 as output-matches-native.
 - **Init-time supervisor check.** A module built with spawn support
   (`__spawn_entry` present) that boots without a supervisor port now fails at
   boot with a named message; `sw-host.mjs`, the one host with no page, refuses
   it there. Native needs no broker (a fork is its own tree); the divergence is
   recorded in the protocol doc.
-- **Found, not fixed: native intermediate spawn + receive hangs.** A spawned
-  domain that spawns a child and then blocks in a receive on the channel the
-  child writes never wakes natively (the root-level shape works, and so does a
-  spawned domain receiving from the root). The parked-parent fixture therefore
-  tests the root-level shape; the intermediate case is open.
+- **The native intermediate hang: mechanism, not hope.** A spawned domain that
+  spawns a child and then received on the channel the child wrote used to hang
+  because native chose a channel's ring DIRECTION from `childSpawnTarget`, a
+  per-domain flag. The domain A in that shape is both a child (of the root) and
+  a parent (of B), and both ends hold one channel struct, so the flag picked
+  the wrong ring for one of the two - A waited on the ring B did not write. The
+  direction is now keyed on the channel: `ch.childDomain` holds B's domain
+  token (the spawn handoff's address, unique and never freed) and this domain's
+  token decides which side it is. It is the same defect class the wasm side
+  fixed, on the side that was cheap to debug.
+- **Rings are reused natively too.** `spawnDomain` now keeps a channel's
+  existing ring pair when it already sits on a boundary, instead of creating a
+  new pair per spawn slot. The shared struct meant a re-bound channel made
+  every holder silently follow the newest rings, which split a channel that a
+  manager passed on. Wasm already did this with `SpawnChannelHandle`.
+- **The log queue has an overflow policy.** Bounded at 4096 entries by default;
+  a full queue drops the line, counts it per domain, and flushes one stderr
+  line at exit (`[hub] N log lines dropped for <id>`), bypassing the queue when
+  it is still full. A silent drop would make "no output" ambiguous, which is
+  the rule this file opens with. `stats().dropped` carries the number.
+- **The new tests can fail, and were seen to.** Adoption was disabled behind a
+  temporary mutation: `5/spawn_orphan` went red (browser run failed) and turned
+  green again when it was restored. The spawn request was queued on the
+  spawning domain's event loop instead of the hub:
+  `5/spawn_root_parked_parent` went red and turned green again. Both mutations
+  were reverted with `cmp` proving the file matches the good copy.
+- **Naming.** The root-level parked fixture is `spawn_root_parked_parent`, so
+  its green cannot be read as covering the intermediate shape, which is
+  `spawn_parked_intermediate`.
 
 Next: the lattice (a hub per arena / per bundle with subtree survival policy),
 once 1-3 have run for a while.

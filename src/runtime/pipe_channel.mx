@@ -33,14 +33,14 @@ const ringMaxMsg = 32 << 20
 // The parent sends on the parent->child ring and receives on the other; a spawn
 // target does the reverse. One shared object, role-based direction.
 func chSendRing(ch *channel) uintptr {
-	if childSpawnTarget {
+	if ch.childDomain != 0 && domainID == ch.childDomain {
 		return ch.ringB
 	}
 	return ch.ringA
 }
 
 func chRecvRing(ch *channel) uintptr {
-	if childSpawnTarget {
+	if ch.childDomain != 0 && domainID == ch.childDomain {
 		return ch.ringA
 	}
 	return ch.ringB
@@ -73,6 +73,10 @@ func MarkChildPipeChannel(ch *channel, chanID uint16) {
 		return
 	}
 	MarkChannelPipeBound(ch, chanID)
+	// This domain is the child of the spawn: its token is the channel's
+	// childDomain, so both this domain and its parent resolve the direction
+	// from the same shared struct.
+	ch.childDomain = domainID
 	// One pair, bound identically from either side: chSendRing/chRecvRing pick
 	// the direction by role, because both domains hold this same object.
 	idx := int32(chanID) - 1
@@ -88,6 +92,7 @@ func MarkChildPipeChannel(ch *channel, chanID uint16) {
 // No-op if no spawn has occurred (defensive - should not happen).
 func MarkParentPipeChannel(ch *channel, chanID uint16) {
 	MarkChannelPipeBound(ch, chanID)
+	ch.childDomain = lastChildDomain
 	idx := int32(chanID) - 1
 	if idx >= 0 && idx < spawnRingCount {
 		ch.ringA = spawnRingSet[idx][0] // parent->child

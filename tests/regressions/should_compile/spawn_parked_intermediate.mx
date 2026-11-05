@@ -1,0 +1,44 @@
+// A spawned domain (A) spawns a child (B) and then parks in a receive that only
+// B can wake. The shape is the parked-parent one, one level deeper: A is a
+// child of the root AND the parent of B, so the channel's direction has to be
+// decided per channel, not by the domain's own role. Natively this hung until
+// the direction was keyed on the channel's child-domain token; on wasm the page
+// starts B, so A may be parked while B starts.
+package main
+
+func b(c chan int32) (closed chan struct{}) {
+	select {
+	case <-closed:
+		return closed
+	default:
+	}
+	c <- 7
+	return closed
+}
+
+func a() (closed chan struct{}) {
+	select {
+	case <-closed:
+		return closed
+	default:
+	}
+	c := chan int32{:1}
+	bDone := spawn(b, c)
+	v := <-c
+	println("a got", v)
+	<-bDone
+	println("a saw b done")
+	return closed
+}
+
+func main() {
+	select {
+	case <-sigint:
+		return
+	default:
+	}
+	done := spawn(a)
+	println("root spawned a")
+	<-done
+	println("done")
+}

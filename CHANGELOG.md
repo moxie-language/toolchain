@@ -1,5 +1,29 @@
 # Moxie Changelog
 
+## v1.0.0-rc.4
+
+- **The native intermediate-spawn hang is fixed, with its mechanism.** Native
+  chose a spawn channel's ring direction from the per-domain
+  `childSpawnTarget` flag; a domain that is both a child (of the root) and a
+  parent (of its own child) picked the wrong ring for one of the two and waited
+  on a ring nobody wrote. Direction is now keyed on the channel
+  (`ch.childDomain`, the spawn handoff's unique token), so each domain resolves
+  its side from the same shared struct.
+- **Native reuses a channel's rings on re-spawn**, as wasm already did:
+  `spawnDomain` keeps the existing pair instead of creating one per spawn slot.
+  The struct is shared, so a fresh pair made every holder silently follow the
+  newest rings and split a channel a manager passed on.
+- **The hub log queue is bounded with a reported drop.** 4096 entries by
+  default; overflow drops the line, counts it per domain, and flushes
+  `[hub] N log lines dropped for <id>` at exit (bypassing the queue if it is
+  still full). `stats().dropped` and `stats().unattributedDropped` expose the
+  same numbers.
+- **The new tests were seen to fail.** Adoption disabled -> `spawn_orphan` red;
+  the spawn request queued on the spawning domain's event loop ->
+  `spawn_root_parked_parent` red. Both mutations reverted.
+- **Fixture renamed:** `spawn_root_parked_parent` says root-level, and the
+  intermediate shape is its own fixture `spawn_parked_intermediate`.
+
 ## v1.0.0-rc.3
 
 - **One hub, two planes on wasm.** Control (spawn, exit, panic, rebind,
@@ -33,8 +57,9 @@
   without a supervisor now fails at boot, not at its first `spawn()`; the
   service-worker host refuses it with a named message.
 - **New fixtures:** `spawn_orphan` (A spawns B, A exits, B keeps logging and
-  exits cleanly) and `spawn_parked_parent` (the parent parks in a receive right
-  after spawning), both green as wasm-output-matches-native.
+  exits cleanly), `spawn_root_parked_parent` (the ROOT parks in a receive right
+  after spawning) and `spawn_parked_intermediate` (a spawned domain does), all
+  green as wasm-output-matches-native.
 - **Recorded, open:** natively, a spawned domain that spawns a child and then
   blocks in a receive on that child's channel never wakes.
 
