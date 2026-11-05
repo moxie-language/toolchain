@@ -67,6 +67,25 @@ func (e *irEmitter) funcNeedsCodec(f *SSAFunction) (ok bool) {
 	return false
 }
 
+// recvNamedType returns the named type a method's receiver denotes. The
+// declared receiver may be a value (a named slice/map, passed as a reference),
+// while Params[0] is always *T; unwrapping the PARAM keeps the sovereign
+// classification identical for both receiver spellings.
+func (e *irEmitter) recvNamedType() (named *Named) {
+	if e.curFunc == nil || e.curFunc.Signature == nil || e.curFunc.Signature.Recv == nil || len(e.curFunc.Params) == 0 {
+		return nil
+	}
+	t := e.curFunc.Signature.Recv.Typ
+	if p, isP := SafeUnderlying(t).(*Pointer); isP {
+		t = p.Base
+	}
+	n, isN := t.(*Named)
+	if !isN {
+		return nil
+	}
+	return n
+}
+
 func (e *irEmitter) isSovereignNamedType(named *Named) (ok bool) {
 	return ssaIsSovereignNamedType(e.pkg, named)
 }
@@ -236,54 +255,52 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 	// return.
 	if e.curFunc.Signature != nil && e.curFunc.Signature.Recv != nil && len(e.curFunc.Params) > 0 &&
 		ssaFuncHasReceiverWrite(e.curFunc) {
-		recvTyp := e.curFunc.Signature.Recv.Typ
-		if ptr, ok2 := SafeUnderlying(recvTyp).(*Pointer); ok2 {
-			if named, ok3 := ptr.Base.(*Named); ok3 {
-				if e.isSovereignNamedType(named) {
-					recvName := e.operand(e.curFunc.Params[0])
-					// Acquire the receiver's sovereign group (root-arena
-					// hashmap keyed by receiver address), register its data
-					// arena as stable, open an allocation batch, and borrow the
-					// data arena as this method's working arena. Allocations
-					// land there and are recorded; codecSovereignEndCall at
-					// return reclaims the batch.
-					// The receiver's own type descriptor is required by the
-					// runtime: sovFullMark and sovRebaseRoots walk the
-					// receiver's fields (or the receiver value itself when the
-					// descriptor is not a struct - an alias of a slice) as the
-					// compaction roots, and without the descriptor every block
-					// is unreachable, so compaction empties the arena and the
-					// receiver's fields keep pointing into the unmapped old
-					// region.
-					e.collectTypeDesc(named)
-					e.nextReg++
-					group := "%sov_group"
-					group = group | irItoa(e.nextReg)
-					e.w("  ") ; e.w(group) ; e.w(" = call ptr @runtime.codecSovereignArena(ptr ") ; e.w(recvName) ; e.w(", ptr ") ; e.w(irQuoteName(e.reflectTypeName(named))) ; e.w(", ptr null)\n")
-					e.declareRuntime("runtime.codecSovereignArena", "ptr", "ptr, ptr")
-					e.nextReg++
-					parentArena := "%sov_parent"
-					parentArena = parentArena | irItoa(e.nextReg)
-					e.w("  ") ; e.w(parentArena) ; e.w(" = call ptr @runtime.CurrentArena(ptr null)\n")
-					e.declareRuntime("runtime.CurrentArena", "ptr", "")
-					e.nextReg++
-					dataArena := "%sov_data"
-					dataArena = dataArena | irItoa(e.nextReg)
-					e.w("  ") ; e.w(dataArena) ; e.w(" = call ptr @runtime.sovDataArena(ptr ") ; e.w(group) ; e.w(", ptr null)\n")
-					e.declareRuntime("runtime.sovDataArena", "ptr", "ptr")
-					e.w("  call void @runtime.SovereignRegStable(ptr ") ; e.w(dataArena) ; e.w(", ptr null)\n")
-					e.declareRuntime("runtime.SovereignRegStable", "void", "ptr")
-					e.w("  call void @runtime.codecSovereignEnter(ptr ") ; e.w(group) ; e.w(", ptr null)\n")
-					e.declareRuntime("runtime.codecSovereignEnter", "void", "ptr")
-					e.w("  call void @runtime.SovereignSetArena(ptr ") ; e.w(dataArena) ; e.w(", ptr null)\n")
-					e.declareRuntime("runtime.SovereignSetArena", "void", "ptr")
-					e.sovereignGroupReg = group
-					e.parentArenaReg = parentArena
-					e.arenaActive = true
-					e.arenaBorrowed = true
-					e.stableReg = true
-					return true
-				}
+		named := e.recvNamedType()
+		if named != nil {
+			if e.isSovereignNamedType(named) {
+				recvName := e.operand(e.curFunc.Params[0])
+				// Acquire the receiver's sovereign group (root-arena
+				// hashmap keyed by receiver address), register its data
+				// arena as stable, open an allocation batch, and borrow the
+				// data arena as this method's working arena. Allocations
+				// land there and are recorded; codecSovereignEndCall at
+				// return reclaims the batch.
+				// The receiver's own type descriptor is required by the
+				// runtime: sovFullMark and sovRebaseRoots walk the
+				// receiver's fields (or the receiver value itself when the
+				// descriptor is not a struct - an alias of a slice) as the
+				// compaction roots, and without the descriptor every block
+				// is unreachable, so compaction empties the arena and the
+				// receiver's fields keep pointing into the unmapped old
+				// region.
+				e.collectTypeDesc(named)
+				e.nextReg++
+				group := "%sov_group"
+				group = group | irItoa(e.nextReg)
+				e.w("  ") ; e.w(group) ; e.w(" = call ptr @runtime.codecSovereignArena(ptr ") ; e.w(recvName) ; e.w(", ptr ") ; e.w(irQuoteName(e.reflectTypeName(named))) ; e.w(", ptr null)\n")
+				e.declareRuntime("runtime.codecSovereignArena", "ptr", "ptr, ptr")
+				e.nextReg++
+				parentArena := "%sov_parent"
+				parentArena = parentArena | irItoa(e.nextReg)
+				e.w("  ") ; e.w(parentArena) ; e.w(" = call ptr @runtime.CurrentArena(ptr null)\n")
+				e.declareRuntime("runtime.CurrentArena", "ptr", "")
+				e.nextReg++
+				dataArena := "%sov_data"
+				dataArena = dataArena | irItoa(e.nextReg)
+				e.w("  ") ; e.w(dataArena) ; e.w(" = call ptr @runtime.sovDataArena(ptr ") ; e.w(group) ; e.w(", ptr null)\n")
+				e.declareRuntime("runtime.sovDataArena", "ptr", "ptr")
+				e.w("  call void @runtime.SovereignRegStable(ptr ") ; e.w(dataArena) ; e.w(", ptr null)\n")
+				e.declareRuntime("runtime.SovereignRegStable", "void", "ptr")
+				e.w("  call void @runtime.codecSovereignEnter(ptr ") ; e.w(group) ; e.w(", ptr null)\n")
+				e.declareRuntime("runtime.codecSovereignEnter", "void", "ptr")
+				e.w("  call void @runtime.SovereignSetArena(ptr ") ; e.w(dataArena) ; e.w(", ptr null)\n")
+				e.declareRuntime("runtime.SovereignSetArena", "void", "ptr")
+				e.sovereignGroupReg = group
+				e.parentArenaReg = parentArena
+				e.arenaActive = true
+				e.arenaBorrowed = true
+				e.stableReg = true
+				return true
 			}
 		}
 	}
@@ -296,16 +313,11 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 		// Read-only method of a sovereign type: register the receiver's arena
 		// as stable so returned views into receiver data stay views, while the
 		// method's own scratch lives in this fn arena and is freed at return.
-		if e.curFunc.Signature != nil && e.curFunc.Signature.Recv != nil && len(e.curFunc.Params) > 0 {
-			recvTyp := e.curFunc.Signature.Recv.Typ
-			if ptr, ok2 := SafeUnderlying(recvTyp).(*Pointer); ok2 {
-				if named, ok3 := ptr.Base.(*Named); ok3 && e.isSovereignNamedType(named) && !ssaFuncHasReceiverWrite(e.curFunc) {
-					recvName := e.operand(e.curFunc.Params[0])
-					e.w("  call void @runtime.codecRegStable(ptr ") ; e.w(recvName) ; e.w(", ptr null)\n")
-					e.declareRuntime("runtime.codecRegStable", "void", "ptr")
-					e.stableReg = true
-				}
-			}
+		if named := e.recvNamedType(); named != nil && e.isSovereignNamedType(named) && !ssaFuncHasReceiverWrite(e.curFunc) {
+			recvName := e.operand(e.curFunc.Params[0])
+			e.w("  call void @runtime.codecRegStable(ptr ") ; e.w(recvName) ; e.w(", ptr null)\n")
+			e.declareRuntime("runtime.codecRegStable", "void", "ptr")
+			e.stableReg = true
 		}
 		e.arenaActive = true
 	}

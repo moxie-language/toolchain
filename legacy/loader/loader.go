@@ -439,8 +439,14 @@ func (p *Package) Check() error {
 		err = nil
 	}
 
+	// A value receiver over a named slice/map is a reference receiver: rewrite
+	// it to a pointer receiver with (*name) uses, exactly as stage4 treats it.
+	// This runs on the FIRST type-check's object info, so shadowing is exact;
+	// the recheck below rebuilds that info for the rewritten AST.
+	recvRewrites := rewriteValueReceiverRefs(p.Files, &p.info)
+
 	// Two-pass Moxie rewrite: pipe concat (|), byte comparisons, switches.
-	needsRecheck := false
+	needsRecheck := recvRewrites > 0
 	if isMoxieStringTarget(p.ImportPath) {
 		if p.Module.Main && p.Module.Path != "moxielang.dev" {
 			if plusErrs := checkPlusOnText(p.Files, &p.info, p.program.fset); len(plusErrs) > 0 {

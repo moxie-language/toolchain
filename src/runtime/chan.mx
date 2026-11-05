@@ -644,9 +644,21 @@ func lockAllStates(states []chanSelectState) {
 func unlockAllStates(states []chanSelectState) {
 }
 
+// sovSelectDrainBudget is how many queued sovereign groups one select
+// compacts. One per select keeps the pause bounded while guaranteeing that a
+// loop which selects at all drains the queue.
+const sovSelectDrainBudget = int32(1)
+
 // chanSelect implements blocking or non-blocking select operations.
 // The 'ops' slice must be set if (and only if) this is a blocking select.
 func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelOp) (uint32, bool) {
+	// Every select is an idle boundary: a loop that waits on channels is not
+	// holding a receiver's arena while it computes, so the pending
+	// sovereign-compaction queue is drained here instead of requiring every
+	// event loop to call runtime.SovDrainCompactions itself. A group whose
+	// arena is borrowed by a live frame, or registered stable by a read-only
+	// method frame, is rotated rather than compacted - see SovDrainCompactions.
+	SovDrainCompactions(sovSelectDrainBudget)
 	mask := interrupt.Disable()
 
 	// Lock everything.

@@ -2,14 +2,17 @@
 Named types over slices and maps carry methods, and their mutations persist.
 
 A name over []T or map[K]V is allowed; its purpose is the METHOD SET an
-unnamed type cannot have. The receiver is a pointer like every Moxie receiver,
-so `*n = push(*n, x)` and `(*c)[k] = v` write the CALLER's variable. Go's
-value receiver copies the slice/map header and only element writes survive -
-that split does not exist here because value receivers are refused outright.
+unnamed type cannot have. Both receiver spellings work and both persist: a
+pointer receiver writes through the address, and a VALUE receiver over a named
+slice/map is a REFERENCE receiver - the value is a header for storage the
+caller owns, so `n = push(n, x)` writes the caller's header, len and cap. Go's
+value copy, where element writes survive and a rebinding does not, is not the
+model here.
 
 The fixture is end-to-end: it checks that push and reslicing inside a method
-reach the caller, that slicing and push keep the named type, and that map
-writes through a *named map* receiver are visible after the call.
+reach the caller with BOTH receiver spellings, that slicing and push keep the
+named type, that a value receiver's String() satisfies an interface, and that
+map writes through a named-map receiver are visible after the call.
 */
 package main
 
@@ -31,6 +34,38 @@ type Counts map[string]int32
 
 func (c *Counts) Inc(k string) {
 	(*c)[k] = (*c)[k] + 1
+}
+
+// A value receiver over a named slice is a reference receiver: the header,
+// len and cap it writes are the caller's.
+type VNames []string
+
+func (n VNames) Add(s string) {
+	n = push(n, s)
+}
+
+func (n VNames) Set(i int32, s string) {
+	n[i] = s
+}
+
+func (n VNames) String() (s string) {
+	for i, v := range n {
+		if i > 0 {
+			s = s | ","
+		}
+		s = s | v
+	}
+	return
+}
+
+type Stringer interface {
+	String() (s string)
+}
+
+type VCounts map[string]int32
+
+func (c VCounts) Inc(k string) {
+	c[k] = c[k] + 1
 }
 
 // An alias of a named slice or map is the same type, methods included.
@@ -96,6 +131,31 @@ func main() {
 	var cd Counts = ca
 	if cd["z"] != 1 {
 		panic("an alias of a named map lost its method set")
+	}
+	var vn VNames
+	vn.Add("p")
+	vn.Add("q")
+	vn.Add("r")
+	if len(vn) != 3 || vn[2] != "r" {
+		panic("value-receiver Add did not reach the caller")
+	}
+	vn.Set(0, "P")
+	if vn[0] != "P" {
+		panic("value-receiver element write did not reach the caller")
+	}
+	var st Stringer = vn
+	if st.String() != "P,q,r" {
+		panic("value-receiver String: " | st.String())
+	}
+	vn.Add("s")
+	if st.String() != "P,q,r" {
+		panic("boxed value aliased the caller")
+	}
+	var vc VCounts = VCounts{}
+	vc.Inc("m")
+	vc.Inc("m")
+	if vc["m"] != 2 {
+		panic("value-receiver map write did not reach the caller")
 	}
 	println("named types ok")
 }

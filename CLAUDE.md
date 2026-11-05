@@ -45,6 +45,14 @@ Runtime entries: `codecSovereignArena(recv)` lazily acquires/registers,
 `codecRegStable(recv)` registers a read-only frame's stable arena,
 `SovereignRegStable`/`SovereignRegRestore` manage the stable-arena LIFO.
 
+**Compaction is drained at every select.** `chanSelect` calls
+`SovDrainCompactions(1)` before it looks at the arms, so a loop that selects at
+all cleans the queue without calling the runtime itself. A group with a live
+frame - its arena borrowed by a mutating method, or registered stable by a
+read-only method - is rotated to the tail and retried, never moved under that
+frame. A group whose data escaped (a pointer into it crossed a codec boundary)
+is not compacted at all.
+
 ### Codec Dispatch Policy
 
 A value crosses a spawn channel by one of three routes, and the element type
@@ -100,11 +108,16 @@ intermediate, not the last one. Doubling to N costs roughly 2-3x N of arena;
 allocating N costs N. Growth is the exception, and where it is unavoidable it
 belongs somewhere its garbage dies early.
 
-`push` does not grow. From a zero-capacity slice it lazy-inits to exactly the
-first batch (floor 4) in one allocation, so that first push already *is* "one
-buffer, sized once". Once cap is non-zero it is a bounded store that fails loud
-with "push past end of slice capacity". The growth regime is **entered**, not
-inherent, and the goal is never to enter it.
+`push` grows. From a zero-capacity slice it lazy-inits to exactly the first
+batch (max(n, 4) elements) in one allocation; past capacity it doubles,
+memmoves the live elements, and the abandoned backing stays in the arena that
+allocated it. That garbage is reclaimed by the arena, not refused: a function
+frame releases it at return, a sovereign arena records it dead and compaction
+reclaims it, and only init code can grow in the root arena (once). The ONE
+exception is storage the program does not own: a `//:linkdata` binding carries
+the all-ones capacity (cap reads -1) and push/pop/resize panic there, because
+writing past the external symbol is corruption. Growth is always available;
+what growth costs is peak arena until the arena is released or compacted.
 
 Choose by how the final size is known:
 
@@ -331,10 +344,11 @@ its own length and there is no heap, so an array buys no stack layout and no
 speed - it exists in Go only to dodge the runtime's slice bookkeeping, and
 Moxie has no such bookkeeping to dodge.
 
-- **No `append`.** `push` and `pop` are the slice mutators. `push` is bounded:
-  from a zero-capacity slice it lazy-inits to the first batch (floor 4), and
-  past the end of capacity it fails loud. Presize with `[]T{:n}` and write
-  through a cursor.
+- **No `append`.** `push` and `pop` are the slice mutators. `push` grows: a
+  zero-capacity slice lazy-inits to the first batch (max(n, 4) elements), and
+  overflow doubles. Presizing with `[]T{:n}` and writing through a cursor is
+  still the fast shape when the size is known - one allocation, no abandoned
+  backing - but it is a discipline, not a requirement.
 - **Slices compare with `==` / `!=`.** With no reflect and no empty interface,
   that is the comparison there is.
 - **`string` and `[]byte` are one type.** `len`, indexing, slicing and

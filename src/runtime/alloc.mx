@@ -846,7 +846,7 @@ func SovDrainCompactions(budget int32) (n int32) {
 		if g.released || g.compacting || g.data == nil {
 			continue
 		}
-		if sovArenaBorrowed(g.data) || sovBorrowedReceiverIn(g) {
+		if sovGroupHeld(g) {
 			sovQueueCompact(g)
 			continue
 		}
@@ -1677,6 +1677,32 @@ func sovRekeyRelocated(g *sovGroup, oldData *Arena, oldAddr, newAddr uintptr, nd
 
 // sovBorrowedReceiverIn reports whether a receiver living in g's data arena
 // belongs to a group whose arena is currently a live frame's working arena.
+// sovGroupHeld reports whether a live frame can still see the group's data:
+// its arena is borrowed (a mutating method), a receiver nested in it belongs to
+// a borrowed group, or a frame registered it as its stable arena (a read-only
+// method on the receiver). Rotating those keeps a select-time drain from
+// moving memory under a frame that is using it.
+func sovGroupHeld(g *sovGroup) (ok bool) {
+	if g == nil || g.data == nil {
+		return false
+	}
+	if sovArenaBorrowed(g.data) || sovBorrowedReceiverIn(g) {
+		return true
+	}
+	if domainRoot == nil {
+		return false
+	}
+	if domainRoot.stableArena == g.data {
+		return true
+	}
+	for i := int32(0); i < domainRoot.stableTop; i++ {
+		if domainRoot.stableStack[i] == g.data {
+			return true
+		}
+	}
+	return false
+}
+
 func sovBorrowedReceiverIn(g *sovGroup) (ok bool) {
 	if g == nil || g.data == nil || domainRoot == nil {
 		return false

@@ -916,9 +916,17 @@ func isNoContextExtern(pkg, name string) (ok bool) {
 
 func (pb *ssaPkgBuilder) registerMethod(d *syntax.FuncDecl) {
 	if !ssaRecvIsPtr(d.Recv) && isUserPackagePath(restrictPath(pb.pkg.Pkg.Path)) {
-		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-		push(cctx.compileErrors, "value receiver is not allowed: use pointer receiver (*" | ssaRecvTypeName(d.Recv) | ")")
-		return
+		// A value receiver is a COPY for every type - except a named slice or
+		// map, whose value is a header for storage the caller owns. The header
+		// and its len/cap are pointed-to state just like a pointer's target, so
+		// a value receiver over one is handed the caller's variable and its
+		// writes persist. A struct value receiver stays a copy and stays
+		// refused.
+		if !pb.recvValueAggregate(d.Recv) {
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, "value receiver is not allowed: use pointer receiver (*" | ssaRecvTypeName(d.Recv) | ")")
+			return
+		}
 	}
 	recvTypeName := ssaRecvTypeName(d.Recv)
 	if recvTypeName == "" {
@@ -993,6 +1001,40 @@ func ssaRecvIsPtr(recv *syntax.Field) (ok bool) {
 	}
 	if op, ok2 := recv.Type.(*syntax.Operation); ok2 {
 		return op.Y == nil && op.Op == token.Mul
+	}
+	return false
+}
+
+// recvValueAggregate reports whether the declared receiver type is a NAMED
+// slice or map. Such a value receiver behaves as a reference to the caller's
+// variable (see buildBody), which is why it is allowed where a struct value
+// receiver is not.
+func (pb *ssaPkgBuilder) recvValueAggregate(recv *syntax.Field) (ok bool) {
+	name := ssaRecvTypeName(recv)
+	if name == "" {
+		return false
+	}
+	obj := pb.pkg.Pkg.Scope.Lookup(name)
+	if obj == nil && Universe != nil {
+		obj = Universe.Lookup(name)
+	}
+	tn, isTN := obj.(*TypeName)
+	if !isTN || tn.Typ == nil {
+		return false
+	}
+	return isNamedAggregate(tn.Typ)
+}
+
+// isNamedAggregate reports whether t is a named type whose underlying type is
+// a slice or a map.
+func isNamedAggregate(t Type) (ok bool) {
+	named, isN := t.(*Named)
+	if !isN || named == nil {
+		return false
+	}
+	switch SafeUnderlying(named).(type) {
+	case *Slice, *TCMap:
+		return true
 	}
 	return false
 }
@@ -1305,7 +1347,7 @@ type ssaFuncBuilder struct {
 	info         *Info
 	parent       *ssaFuncBuilder
 	currentBlock *SSABasicBlock
-	vars         map[Object]*SSAAlloc
+	vars         map[Object]SSAValue
 	varScope     map[Object]int32
 	localTypes   map[string]Type
 	localConsts  map[string]*SSAConst
@@ -1350,7 +1392,7 @@ func newSSAFuncBuilder(fn *SSAFunction, info *Info) (p *ssaFuncBuilder) {
 	return &ssaFuncBuilder{
 		fn:         fn,
 		info:       info,
-		vars:       map[Object]*SSAAlloc{},
+		vars:       map[Object]SSAValue{},
 		varScope:    map[Object]int32{},
 		localTypes:  map[string]Type{},
 		scopeParent: map[int32]int32{},
@@ -1494,20 +1536,30 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 			if recvName != "" && recvName != "_" {
 				recvObj := NewTCVar(fb.fn.Pkg.Pkg, recvName, recv.Typ)
 				p.object = recvObj
-				alloc := fb.emitAlloc(recv.Typ, 0)
-				fb.vars[recvObj] = alloc
-				fb.paramAllocas = mxutil.Ensure(fb.paramAllocas, 1)
-				push(fb.paramAllocas, alloc)
-				if isValRecv {
-					// p is *T; load the value T from the pointer, then store.
-					deref := &SSAUnOp{Op: OpMul, X: p}
-					deref.typ = recv.Typ
-					fb.fn.Blocks = mxutil.Ensure(fb.fn.Blocks, 1)
-					fb.fn.Blocks[0].Instrs = mxutil.Ensure(fb.fn.Blocks[0].Instrs, 1)
-					push(fb.fn.Blocks[0].Instrs, deref)
-					fb.emitStore(alloc, deref)
+				if isValRecv && isNamedAggregate(recv.Typ) {
+					// A named slice/map value receiver is a reference, not a
+					// copy: p is *T and the receiver variable IS the caller's
+					// variable, so a store of a resliced header (n = push(n, x))
+					// lands in the caller and the len/cap written are the
+					// caller's. The value's identity lives in the header, not
+					// in the descriptor, so nothing needs copying.
+					fb.vars[recvObj] = p
 				} else {
-					fb.emitStore(alloc, p)
+					alloc := fb.emitAlloc(recv.Typ, 0)
+					fb.vars[recvObj] = alloc
+					fb.paramAllocas = mxutil.Ensure(fb.paramAllocas, 1)
+					push(fb.paramAllocas, alloc)
+					if isValRecv {
+						// p is *T; load the value T from the pointer, then store.
+						deref := &SSAUnOp{Op: OpMul, X: p}
+						deref.typ = recv.Typ
+						fb.fn.Blocks = mxutil.Ensure(fb.fn.Blocks, 1)
+						fb.fn.Blocks[0].Instrs = mxutil.Ensure(fb.fn.Blocks[0].Instrs, 1)
+						push(fb.fn.Blocks[0].Instrs, deref)
+						fb.emitStore(alloc, deref)
+					} else {
+						fb.emitStore(alloc, p)
+					}
 				}
 			}
 		}
@@ -4077,7 +4129,7 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.TypeSwitchGuard, doneBlock *SSABasicBlock) {
 	x := fb.buildExpr(tsg.X)
 	var savedObj Object
-	var savedAlloc *SSAAlloc
+	var savedAlloc SSAValue
 	if tsg.Lhs != nil {
 		for obj, alloc := range fb.vars {
 			if ObjectName(obj) == tsg.Lhs.Value {
@@ -5172,9 +5224,11 @@ func (fb *ssaFuncBuilder) buildOperandAddr(e syntax.Expr) (s SSAValue) {
 	case *syntax.Name:
 		obj := fb.lookupObject(x.Value)
 		if obj != nil {
-			if alloc, ok := fb.vars[obj]; ok {
-				alloc.Heap = true
-				return alloc
+			if addr, ok := fb.vars[obj]; ok {
+				if alloc, isA := addr.(*SSAAlloc); isA {
+					alloc.Heap = true
+				}
+				return addr
 			}
 			if g, ok := fb.fn.Pkg.Members[x.Value].(*SSAGlobal); ok {
 				return g
@@ -8390,9 +8444,11 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *syntax.FuncLit) (s SSAValue) {
 	for _, fv := range anon.FreeVars {
 		obj := fb.lookupObject(fv.name)
 		if obj != nil {
-			if alloc, ok := fb.vars[obj]; ok {
-				alloc.Heap = true
-				push(bindings, alloc)
+			if addr, ok := fb.vars[obj]; ok {
+				if alloc, isA := addr.(*SSAAlloc); isA {
+					alloc.Heap = true
+				}
+				push(bindings, addr)
 			} else if pfv2, ok28 := fb.freeVarPtrs[fv.name]; ok28 {
 				push(bindings, pfv2)
 			} else {
@@ -8420,8 +8476,8 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *syntax.FuncLit) (s SSAValue) {
 	return mc
 }
 
-func (fb *ssaFuncBuilder) saveVars() (m map[Object]*SSAAlloc) {
-	saved := map[Object]*SSAAlloc{}
+func (fb *ssaFuncBuilder) saveVars() (m map[Object]SSAValue) {
+	saved := map[Object]SSAValue{}
 	for k, v := range fb.vars {
 		saved[k] = v
 	}
@@ -8439,7 +8495,7 @@ func (fb *ssaFuncBuilder) saveVarScopes() (m map[Object]int32) {
 // scopeVars is the binding snapshot taken when a block is entered.
 type scopeVars struct {
 	prev  int32
-	vars  map[Object]*SSAAlloc
+	vars  map[Object]SSAValue
 	scope map[Object]int32
 }
 
@@ -8866,7 +8922,12 @@ func (fb *ssaFuncBuilder) methodNeedsAddr(fn *SSAFunction, recv SSAValue) (ok bo
 		return false
 	}
 	if _, recvIsPtr := SafeUnderlying(fn.Signature.Recv.Typ).(*Pointer); !recvIsPtr {
-		return false
+		// A value receiver over a named slice or map is a reference to the
+		// caller's variable, so the callee must receive that variable's
+		// address; a struct value receiver remains a copy.
+		if !isNamedAggregate(fn.Signature.Recv.Typ) {
+			return false
+		}
 	}
 	if _, haveIsPtr := SafeUnderlying(recv.SSAType()).(*Pointer); haveIsPtr {
 		return false
@@ -9187,9 +9248,11 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 			if nameExpr, ok41 := sel.X.(*syntax.Name); ok41 {
 				obj := fb.lookupObject(nameExpr.Value)
 				if obj != nil {
-					if alloc, ok3 := fb.vars[obj]; ok3 {
-						alloc.Heap = true
-						recv = alloc
+					if addr, ok3 := fb.vars[obj]; ok3 {
+						if alloc, isA := addr.(*SSAAlloc); isA {
+							alloc.Heap = true
+						}
+						recv = addr
 					}
 				}
 				// Receiver is a package-level global: pass its address.
@@ -9231,9 +9294,11 @@ func (fb *ssaFuncBuilder) resolveMethodCallWithRecv(sel *syntax.SelectorExpr, re
 			if nameExpr, ok3 := sel.X.(*syntax.Name); ok3 {
 				obj := fb.lookupObject(nameExpr.Value)
 				if obj != nil {
-					if a, ok4 := fb.vars[obj]; ok4 {
-						a.Heap = true
-						recv = a
+					if addr, ok4 := fb.vars[obj]; ok4 {
+						if alloc, isA := addr.(*SSAAlloc); isA {
+							alloc.Heap = true
+						}
+						recv = addr
 						fixed = true
 					}
 				}
