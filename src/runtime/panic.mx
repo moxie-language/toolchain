@@ -54,6 +54,25 @@ func _panic(message string) {
 	panicOrGoexit(message, panicTrue)
 }
 
+// _panicIface raises a panic whose operand the type checker boxed into the
+// empty interface. A deferred builtin call is checked against panic's
+// signature `func(any)`, so `defer panic("literal")` reaches the compiler as
+// an interface value and the defer record stores the box; replaying
+// `_panic(typecode, value)` then hands two pointers to a function that takes a
+// string, which the verifier rejects. The only operand that can arrive here is
+// a string (the language has no other printable panic reason), so unwrap it;
+// anything else is named as a non-string panic rather than reported as the
+// wrong text.
+func _panicIface(typecode, value unsafe.Pointer) {
+	if typecode != nil && value != nil {
+		if (*RawType)(typecode).Kind() == KindBytes {
+			_panic(*(*string)(value))
+			return
+		}
+	}
+	_panic("panic: non-string value")
+}
+
 func panicOrGoexit(message string, panicking panicState) {
 	if panicStrategy() == moxie.PanicStrategyTrap {
 		trap()

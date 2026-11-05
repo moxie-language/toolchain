@@ -2049,7 +2049,16 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 		b.createMapUpdate(mapType.Key(), m, key, value, instr.Pos())
 	case *ssa.Panic:
 		value := b.getValue(instr.X, getPos(instr))
-		b.createRuntimeInvoke("_panic", []llvm.Value{value}, "")
+		if types.IsInterface(instr.X.Type()) {
+			// A panic operand the checker boxed into the empty interface (it
+			// does that for a deferred builtin call, whose arguments are
+			// checked against `func(any)`) is two pointers, not a string.
+			tc := b.CreateExtractValue(value, 0, "panic.typecode")
+			v := b.CreateExtractValue(value, 1, "panic.value")
+			b.createRuntimeInvoke("_panicIface", []llvm.Value{tc, v}, "")
+		} else {
+			b.createRuntimeInvoke("_panic", []llvm.Value{value}, "")
+		}
 		b.CreateUnreachable()
 	case *ssa.Return:
 		if b.hasDeferFrame() {
@@ -2324,8 +2333,21 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		numElems := llvm.ConstInt(b.uintptrType, uint64(len(argValues)-1), false)
 
 		var sliceElemGoType types.Type
-		if sl, ok := argTypes[0].Underlying().(*types.Slice); ok {
-			sliceElemGoType = sl.Elem()
+		switch ut := argTypes[0].Underlying().(type) {
+		case *types.Slice:
+			sliceElemGoType = ut.Elem()
+		case *types.Basic:
+			// A string IS a []byte (Moxie unifies them), and the type checker
+			// types `[]byte("")` as the basic string. Its element type is the
+			// byte, which is what makes a spread into it append semantics; with
+			// this left nil the call below took the single-element path, stored
+			// the whole 12-byte string header into a ONE-byte allocation, and
+			// `push([]byte(""), s...)` handed back len 1 of garbage
+			// (bytes.ToLower([]byte("text/plain")) returned "\xef\xbf\xbd",
+			// so mime.ParseMediaType rejected every media type).
+			if ut.Info()&types.IsString != 0 {
+				sliceElemGoType = types.Typ[types.Byte]
+			}
 		}
 
 		// Spread form: push(s, elems...) where elems is a slice whose
@@ -2448,7 +2470,14 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		result := b.CreateInsertValue(src, newLen, 1, "resize.result")
 		return result, nil
 	case "panic":
-		// This is rare, but happens in "defer panic()".
+		// This is rare, but happens in "defer panic()", where the operand is
+		// boxed into the empty interface (see the ssa.Panic case).
+		if len(argTypes) == 1 && types.IsInterface(argTypes[0]) && len(argValues) == 1 {
+			tc := b.CreateExtractValue(argValues[0], 0, "panic.typecode")
+			v := b.CreateExtractValue(argValues[0], 1, "panic.value")
+			b.createRuntimeInvoke("_panicIface", []llvm.Value{tc, v}, "")
+			return llvm.Value{}, nil
+		}
 		b.createRuntimeInvoke("_panic", argValues, "")
 		return llvm.Value{}, nil
 	case "print", "println":
