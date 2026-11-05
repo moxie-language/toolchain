@@ -1,0 +1,53 @@
+//:wasmtest skip
+// REPRODUCTION for a wasm defect found by running this fixture, not a pass:
+// a spawn target that receives from a channel compiles to invalid IR on wasm
+//   call i1 @runtime.chanRecv(i32 undef, ptr null, ptr %chan.op, ptr undef)
+// (the child's channel handle is undef/null), so the wasm build fails
+// verification. Native passes: "wasm spawn struct ok 12 14". Remove this skip
+// when the wasm spawn receive is fixed; the program is the assertion.
+// A struct with a []byte through a spawn channel, same package so the wasm
+// target accepts the spawn. The worker reports through a channel; the main
+// domain does all the printing.
+package main
+
+type Msg struct {
+	N    int32
+	Body []byte
+}
+
+func worker(in chan Msg, out chan int32) (closed chan struct{}) {
+	select {
+	case <-closed:
+		return closed
+	default:
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-closed:
+			return closed
+		case m := <-in:
+			out <- m.N + int32(len(m.Body))
+		}
+	}
+	return closed
+}
+
+func main() {
+	select {
+	case <-sigint:
+		return
+	default:
+	}
+	in := chan Msg{:2}
+	out := chan int32{:2}
+	done := spawn(worker, in, out)
+	in <- Msg{N: 7, Body: []byte("hello")}
+	in <- Msg{N: 9, Body: []byte("world")}
+	a := <-out
+	b := <-out
+	<-done
+	if a != 12 || b != 14 {
+		panic("wasm spawn struct values wrong")
+	}
+	println("wasm spawn struct ok", a, b)
+}

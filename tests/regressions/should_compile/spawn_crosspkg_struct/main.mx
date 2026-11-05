@@ -1,0 +1,34 @@
+//:wasmtest skip
+// Native-only: the wasm target requires a spawn target to be in the same
+// package as the caller, and this fixture's Worker lives in lib. The
+// same-package wasm coverage is wasm_spawn_struct.mx.
+// A struct with a []byte crosses a spawn channel whose target lives in another
+// package. The element is offset-frame eligible; both sides build and decode
+// the frame from lib.Msg's descriptor, so this covers the cross-package
+// descriptor, the sizer and the codec in one program. Native and wasm: the
+// worker reports through a channel, so the main domain does all the printing.
+package main
+
+import (
+	"tests/regressions/should_compile/spawn_crosspkg_struct/lib"
+)
+
+func main() {
+	select {
+	case <-sigint:
+		return
+	default:
+	}
+	in := chan lib.Msg{:2}
+	out := chan int32{:2}
+	done := spawn(lib.Worker, in, out)
+	in <- lib.Msg{N: 7, Body: []byte("hello")}
+	in <- lib.Msg{N: 9, Body: []byte("world")}
+	a := <-out
+	b := <-out
+	<-done
+	if a != 12 || b != 14 {
+		panic("cross-package spawn values wrong")
+	}
+	println("crosspkg spawn ok", a, b)
+}

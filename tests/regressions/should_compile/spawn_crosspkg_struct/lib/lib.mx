@@ -1,0 +1,29 @@
+package lib
+
+// Msg crosses a spawn boundary from main: a named struct in ANOTHER package
+// whose only variable-length field is a []byte. It is offset-frame eligible,
+// so its frame is built by lib's type descriptor on the receiving side and by
+// main's on the sending side - the cross-package case for the sizer and the
+// codec.
+type Msg struct {
+	N    int32
+	Body []byte
+}
+
+// Worker is a spawn target in a library package.
+func Worker(in chan Msg, out chan int32) (closed chan struct{}) {
+	select {
+	case <-closed:
+		return closed
+	default:
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-closed:
+			return closed
+		case m := <-in:
+			out <- m.N + int32(len(m.Body))
+		}
+	}
+	return closed
+}
