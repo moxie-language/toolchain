@@ -92,6 +92,29 @@ The recv-dispatch test to add when the frame path is fixed: a spawn target with
 `chan Msg` that sends two messages and asserts both arrive with their bytes; it
 must fail if the recv path bypasses `codecFrameDecode`.
 
+### The 2x2 matrix (round 384, done)
+
+    structural + select recv : works  (N=7, N=9)
+    structural + direct recv : works  (N=7, N=9)
+    offset     + select recv : zeros
+    offset     + direct recv : zeros
+
+So endpoint resolution is innocent for the select arm - the same channel and the
+same endpoints work with the structural codec - and the failure follows the
+FRAME, not the arm. The plumbing counters that were shipped to main showed the
+worker calling tryPipeRecv once with `lastLen=8`, but that is the entry's
+`<-closed` arm check, not the payload: tryPipeRecv is the select path, while a
+direct receive goes through PipeChanRecv. The counters therefore measured the
+wrong receive; the next instrumentation belongs in PipeChanRecv/ringRecv, and
+the worker must ship its numbers over a channel because runtime prints are lost
+in a spawned domain.
+
+Practical lesson: a 45-byte offset frame fails while a 14-byte structural frame
+succeeds on the same ring and depth. The next question is whether ringSend
+accepted 45 bytes at all (PipeChanSend counts the send before its budget and
+space checks), so print `ringSend`'s return and the ring's `writeIdx`/`readIdx`
+on both sides.
+
 The endianness point is the reason both formats exist: the offset frame is a
 memory copy and therefore host-endian, while the wire codec is one fixed
 little-endian format for pipes and sockets. Same walk, different byte order and
