@@ -50,12 +50,16 @@ addressable value first). The rest are internal one-field wrappers
 (dnsmessage's resource types, dwarf's valBytes/valStr, ...) and can follow
 when their package is next opened.
 
-Verification on mxc-s22, tree committed: phases 0a+0b 188/189 (only
-`tree-cleanliness`, which passes on the committed tree), phase 2 selfhost +
-fixpoint PASS (197 s), and the six changed fixtures through
-`tests/wasm/validate.sh` under `legacy/moxie`: net_buffers_api, asn1_oid_der,
-asn1_builder_der, ed25519_roundtrip, ed25519_vectors, named_types_methods -
-6 passed, 0 failed. A tls+x509+asn1+ed25519 smoke probe runs on both compilers.
+Verification: on mxc-s22, phases 0a+0b 188/189 (only `tree-cleanliness`, which
+passes on the committed tree), phase 2 selfhost + fixpoint PASS (197 s), and
+the six changed fixtures through `tests/wasm/validate.sh` under `legacy/moxie`:
+net_buffers_api, asn1_oid_der, asn1_builder_der, ed25519_roundtrip,
+ed25519_vectors, named_types_methods - 6 passed, 0 failed. A
+tls+x509+asn1+ed25519 smoke probe runs on both compilers. On mxc-s23 (the
+unexported-field selector check and the qualified-literal rewrite): phase 2
+selfhost + fixpoint PASS (172 s); `reject_unexported_field_selector` and
+`reject_unexported_field_literal` PASS; `named_types_methods` and
+`named_slice_sized_literal` PASS; the tls+x509 probe still builds and runs.
 
 ## ROUND 380 VERIFICATION
 
