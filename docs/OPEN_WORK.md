@@ -28,6 +28,41 @@ which is why the arm re-check sits inside the page loop. Arenas over
 arenas, so the tail the ratchet actually hands back is the live root/frame arena
 slack.
 
+## ROUND 384: OFFSET-FRAME PROTOTYPE AND COMPILER MEMORY
+
+### Compiler memory (measured, not changed)
+
+Cold build of the http_header_api fixture with mxc-s32: resident steady at
+~1.6GB, root arena 1355MB over 19 regions. The 4.3GB peak seen earlier was two
+compiler processes plus the browser, not one build. `CompileToIR` already frees
+each package's compile arena when its object is emitted (the `ci-free` line and
+the mapping count dropping prove it). What remains is the ROOT arena: scopes,
+type objects, ASTs and export tables for the whole import closure. So "free a
+package's arena when its object is emitted" is already true; reducing the peak
+means dropping emitted packages' ASTs/type scopes (safe only where generic
+bodies are never instantiated later) or compiling in separate processes. Both
+are real projects; no code change was made.
+
+### Offset frames (prototype, reverted)
+
+The design: a self-contained in-process frame with magic/total/root header, the
+value's bytes, then each string/[]byte field's data, and pointer slots holding
+uintptr offsets (64-bit native, 32-bit on wasm, where uintptr is the address
+integer). Encode is one walk plus a copy; decode is one memcpy into the
+receiver's arena plus a rebase of every pointer field. The bare []byte element
+worked end to end (encode n=36, size=24, kind=17). The struct case
+(`Msg{N int32; Body []byte}`) did not: the field walk found no bytes fields, so
+the frame carried only the scalar and the receive produced a zero-length Body
+(index panic) or garbage. The walk needs codec.mx's flexible-array pattern
+(`nf := int32(st.numField)` + `unsafe.Add(&st.fields[0], i*sizeof(rtStructFieldDesc))`),
+and that alone did not make a field appear; the next step is a print at the top
+of encode plus a two-case probe. Reverted to keep the tree green.
+
+The endianness point is the reason both formats exist: the offset frame is a
+memory copy and therefore host-endian, while the wire codec is one fixed
+little-endian format for pipes and sockets. Same walk, different byte order and
+a formal parse only on the wire side.
+
 ## ROUND 383: STDLIB NAMED TYPES, POP FORMS, IDLE GROWTH RATCHET
 
 - net.IP, net.IPMask, net.HardwareAddr are named slice types with methods
