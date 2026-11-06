@@ -124,31 +124,34 @@ func parseRFC3339[bytes []byte](s bytes, local *Location) (rtime Time, rok bool)
 	if !ok || !(s[4] == '-' && s[7] == '-' && s[10] == 'T' && s[13] == ':' && s[16] == ':') {
 		return Time{}, false
 	}
-	s = s[19:]
+	// Consume with a cursor, never by reslicing: s = s[19:] copies the whole
+	// remainder, and every later s = s[n:] copied it again. A format parser is
+	// a reader, and the reader shape is an index.
+	pos := int32(19)
 
 	// Parse the fractional second.
 	var nsec int32
-	if len(s) >= 2 && s[0] == '.' && isDigit(s, 1) {
-		n := 2
+	if len(s)-pos >= 2 && s[pos] == '.' && isDigit(s, pos+1) {
+		n := pos + 2
 		for ; n < len(s) && isDigit(s, n); n++ {
 		}
-		nsec, _, _ = parseNanoseconds(s, n)
-		s = s[n:]
+		nsec, _, _ = parseNanoseconds(s[pos:n], n-pos)
+		pos = n
 	}
 
 	// Parse the time zone.
 	t := Date(year, Month(month), day, hour, minute, sec, nsec, UTC())
-	if len(s) != 1 || s[0] != 'Z' {
-		if len(s) != len("-07:00") {
+	if len(s)-pos != 1 || s[pos] != 'Z' {
+		if len(s)-pos != len("-07:00") {
 			return Time{}, false
 		}
-		hr := parseUint(s[1:3], 0, 23) // e.g., 07
-		mm := parseUint(s[4:6], 0, 59) // e.g., 00
-		if !ok || !((s[0] == '-' || s[0] == '+') && s[3] == ':') {
+		hr := parseUint(s[pos+1:pos+3], 0, 23) // e.g., 07
+		mm := parseUint(s[pos+4:pos+6], 0, 59) // e.g., 00
+		if !ok || !((s[pos] == '-' || s[pos] == '+') && s[pos+3] == ':') {
 			return Time{}, false
 		}
 		zoneOffset := (hr*60 + mm) * 60
-		if s[0] == '-' {
+		if s[pos] == '-' {
 			zoneOffset *= -1
 		}
 		t.addSec(-int64(zoneOffset))

@@ -405,9 +405,9 @@ func (b *Reader) ReadSlice(delim byte) (line []byte, err error) {
 // If the line was too long for the buffer then isPrefix is set and the
 // beginning of the line is returned. The rest of the line will be returned
 // from future calls. isPrefix will be false when returning the last fragment
-// of the line. The returned buffer is only valid until the next call to
-// ReadLine. ReadLine either returns a non-nil line or it returns an error,
-// never both.
+// of the line. The returned line is a COPY (subslicing is a copy), so it stays
+// valid after later reads. ReadLine either returns a non-nil line or it
+// returns an error, never both.
 //
 // The text returned from ReadLine does not include the line end ("\r\n" or "\n").
 // No indication or error is given if the input ends without a final line end.
@@ -680,14 +680,6 @@ func (b *Writer) Flush() (rerr error) {
 // Available returns how many bytes are unused in the buffer.
 func (b *Writer) Available() (n int32) { return len(b.buf) - b.n }
 
-// AvailableBuffer returns an empty buffer with b.Available() capacity.
-// This buffer is intended to be appended to and
-// passed to an immediately succeeding [Writer.Write] call.
-// The buffer is only valid until the next write operation on b.
-func (b *Writer) AvailableBuffer() (buf []byte) {
-	return b.buf[b.n:][:0]
-}
-
 // Buffered returns the number of bytes that have been written into the current buffer.
 func (b *Writer) Buffered() (n int32) { return b.n }
 
@@ -696,24 +688,33 @@ func (b *Writer) Buffered() (n int32) { return b.n }
 // If nn < len(p), it also returns an error explaining
 // why the write is short.
 func (b *Writer) Write(p []byte) (nn int32, err error) {
+	// Consume p through an OFFSET, never by reslicing it: s = s[n:] copies the
+	// whole remainder on every step (subslicing is a copy), which made a large
+	// write through a small buffer O(n^2). CopyRange takes the source offset,
+	// so each byte is copied once.
 	var n int32
-	for len(p) > b.Available() && b.err == nil {
+	off := int32(0)
+	for len(p)-off > b.Available() && b.err == nil {
 		if b.Buffered() == 0 {
-			// Large write, empty buffer.
-			// Write directly from p to avoid copy.
-			n, b.err = b.wr.Write(p)
+			// Large write, empty buffer: write the rest directly, no buffer copy.
+			// The first pass passes p itself, so the common case copies nothing.
+			if off == 0 {
+				n, b.err = b.wr.Write(p)
+			} else {
+				n, b.err = b.wr.Write(p[off:])
+			}
 		} else {
-			n = mxutil.CopyAt(b.buf, b.n, p)
+			n = mxutil.CopyRange(b.buf, b.n, p, off, len(p)-off)
 			b.n += n
 			b.Flush()
 		}
 		nn += n
-		p = p[n:]
+		off += n
 	}
 	if b.err != nil {
 		return nn, b.err
 	}
-	n = mxutil.CopyAt(b.buf, b.n, p)
+	n = mxutil.CopyRange(b.buf, b.n, p, off, len(p)-off)
 	b.n += n
 	nn += n
 	return nn, nil
@@ -772,28 +773,33 @@ func (b *Writer) WriteString(s []byte) (written int32, rerr error) {
 
 	nn := 0
 	var n int32
-	for len(s) > b.Available() && b.err == nil {
+	off := int32(0)
+	for len(s)-off > b.Available() && b.err == nil {
 		if b.Buffered() == 0 && sw == nil && tryStringWriter {
 			// Check at most once whether b.wr is a StringWriter.
 			sw, tryStringWriter = b.wr.(io.StringWriter)
 		}
 		if b.Buffered() == 0 && tryStringWriter {
 			// Large write, empty buffer, and the underlying writer supports
-			// WriteString: forward the write to the underlying StringWriter.
-			// This avoids an extra copy.
-			n, b.err = sw.WriteString(s)
+			// WriteString: forward the rest to it. The first pass passes s
+			// itself, so the common case copies nothing.
+			if off == 0 {
+				n, b.err = sw.WriteString(s)
+			} else {
+				n, b.err = sw.WriteString(s[off:])
+			}
 		} else {
-			n = mxutil.CopyAt(b.buf, b.n, s)
+			n = mxutil.CopyRange(b.buf, b.n, s, off, len(s)-off)
 			b.n += n
 			b.Flush()
 		}
 		nn += n
-		s = s[n:]
+		off += n
 	}
 	if b.err != nil {
 		return nn, b.err
 	}
-	n = mxutil.CopyAt(b.buf, b.n, s)
+	n = mxutil.CopyRange(b.buf, b.n, s, off, len(s)-off)
 	b.n += n
 	nn += n
 	return nn, nil
