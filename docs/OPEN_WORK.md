@@ -1,5 +1,23 @@
 # Open work
 
+## NEXT (from the slice): the wake path, 7.25 ms per round trip
+
+`tests/slice` ran a 32-domain chain, 32 synchronous rounds, 1,984 edges / 4,032
+messages in 20.9 s: **95 edges/s, 2 edges/s/domain**. The frame is 8 bytes
+(4-byte element), allocation churn is 455 allocations per round, and the
+distributed decode equals the serial reference. None of those is the
+constraint: `tests/slice/waitbench` measures one select-parked worker round
+trip at **7.25 ms** (2,000 round trips, 14.5 s). The round loop is 32 waits
+long, so the number is the park path, not the machine - and the 200 us slow
+neighbour is invisible under it.
+
+That is the input to the chip, and it says wait: a 4x4 node at 50 MHz cannot be
+sized from edges/s until the wake is microseconds. The next runtime issue is
+where a select park fails to be woken by the sender's `ringWakeReaders` (the
+arm registration, or the futex expectation), measured with `waitbench` before
+and after. Only then does the slice's edges/s/domain mean anything about
+silicon, and only then is the endpoint ring-byte reduction worth deciding.
+
 ## 1.0.0 GATE (2026-11-06): WHAT WAS RUN
 
 The release is tagged on this, not on a targeted set.
