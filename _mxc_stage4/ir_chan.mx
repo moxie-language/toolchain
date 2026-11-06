@@ -609,6 +609,53 @@ func (e *irEmitter) emitSelect(s *SSASelect) {
 		e.w("  ") ; e.w(opsSlice) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" zeroinitializer, ptr null, 0\n")
 	}
 
+	// Frame root map: the compiler-built array and the call that publishes it
+	// for the whole park, so a compaction can see and rewrite this frame's
+	// pointer slots.
+	if nRoots := int32(len(s.Roots)); nRoots > 0 {
+		total := int32(1) + 3*nRoots
+		for _, r := range s.Roots {
+			total += r.Words
+		}
+		arr := "%selroot" | irItoa(e.nextReg)
+		arrType := "[" | irItoa(total) | " x " | ipt | "]"
+		e.w("  ") ; e.w(arr) ; e.w(" = alloca ") ; e.w(arrType) ; e.w("\n")
+		e.emitRootStore(arr, arrType, 0, ipt, irItoa(nRoots))
+		base := int32(1) + 3*nRoots
+		for i, r := range s.Roots {
+			e.emitRootStore(arr, arrType, 1+3*int32(i), ipt, irItoa(r.Kind))
+			e.emitRootStore(arr, arrType, 2+3*int32(i), ipt, irItoa(r.Off))
+			e.emitRootStore(arr, arrType, 3+3*int32(i), ipt, irItoa(r.Words))
+			if r.Words == 0 {
+				continue
+			}
+			sv := e.nextReg2("selv")
+			e.w("  ") ; e.w(sv) ; e.w(" = load ") ; e.w(e.llvmType(r.Typ)) ; e.w(", ptr ") ; e.w(e.operand(r.Val)) ; e.w("\n")
+			if r.Kind == 1 {
+				st := e.llvmType(r.Typ)
+				f0 := e.nextReg2("self")
+				e.w("  ") ; e.w(f0) ; e.w(" = extractvalue ") ; e.w(st) ; e.w(" ") ; e.w(sv) ; e.w(", 0\n")
+				i0 := e.nextReg2("seli")
+				e.w("  ") ; e.w(i0) ; e.w(" = ptrtoint ptr ") ; e.w(f0) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+				f1 := e.nextReg2("self")
+				e.w("  ") ; e.w(f1) ; e.w(" = extractvalue ") ; e.w(st) ; e.w(" ") ; e.w(sv) ; e.w(", 1\n")
+				f2 := e.nextReg2("self")
+				e.w("  ") ; e.w(f2) ; e.w(" = extractvalue ") ; e.w(st) ; e.w(" ") ; e.w(sv) ; e.w(", 2\n")
+				e.emitRootStore(arr, arrType, base+r.Off, ipt, i0)
+				e.emitRootStore(arr, arrType, base+r.Off+1, ipt, f1)
+				e.emitRootStore(arr, arrType, base+r.Off+2, ipt, f2)
+			} else {
+				i0 := e.nextReg2("seli")
+				e.w("  ") ; e.w(i0) ; e.w(" = ptrtoint ptr ") ; e.w(sv) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
+				e.emitRootStore(arr, arrType, base+r.Off, ipt, i0)
+			}
+		}
+		e.w("  call void @runtime.RootMapEnter(ptr ") ; e.w(arr) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.RootMapEnter", "void", "ptr")
+		s.RootArr = arr
+		s.RootTotal = total
+	}
+
 	// Call runtime.chanSelect(recvbuf ptr, states slice, ops slice) -> {i32, i1}.
 	e.nextReg++
 	selResult := "%selres" | irItoa(e.nextReg)
@@ -616,6 +663,10 @@ func (e *irEmitter) emitSelect(s *SSASelect) {
 	e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(ss3)
 	e.w(", ") ; e.w(sty) ; e.w(" ") ; e.w(opsSlice) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.chanSelect", "{i32, i1}", "ptr, " | sty | ", " | sty)
+	if len(s.Roots) > 0 {
+		e.w("  call void @runtime.RootMapLeave(ptr null)\n")
+		e.declareRuntime("runtime.RootMapLeave", "void", "")
+	}
 
 	// Extract index and ok from runtime result.
 	e.nextReg++
@@ -666,6 +717,57 @@ func (e *irEmitter) emitSelect(s *SSASelect) {
 	// Map the select SSA value to the final tuple register.
 	e.allocTypes[s] = tupType
 	e.valName[s] = prev
+}
+
+// emitRootStore stores one word of the frame root array.
+func (e *irEmitter) emitRootStore(arr, arrType string, idx int32, ipt, val string) {
+	e.nextReg++
+	gep := "%selrg" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(gep) ; e.w(" = getelementptr inbounds ") ; e.w(arrType)
+	e.w(", ptr ") ; e.w(arr) ; e.w(", i32 0, i32 ") ; e.w(irItoa(idx)) ; e.w("\n")
+	e.w("  store ") ; e.w(ipt) ; e.w(" ") ; e.w(val) ; e.w(", ptr ") ; e.w(gep) ; e.w("\n")
+}
+
+// emitRootLoadWord loads one word of the frame root array into a register.
+func (e *irEmitter) emitRootLoadWord(arr, arrType string, idx int32, ipt string) (reg string) {
+	gep := e.nextReg2("selrl")
+	e.w("  ") ; e.w(gep) ; e.w(" = getelementptr inbounds ") ; e.w(arrType)
+	e.w(", ptr ") ; e.w(arr) ; e.w(", i32 0, i32 ") ; e.w(irItoa(idx)) ; e.w("\n")
+	reg = e.nextReg2("selrw")
+	e.w("  ") ; e.w(reg) ; e.w(" = load ") ; e.w(ipt) ; e.w(", ptr ") ; e.w(gep) ; e.w("\n")
+	return reg
+}
+
+// emitRootLoad rebuilds a variable's value from its select root slot, after a
+// compaction may have rewritten it.
+func (e *irEmitter) emitRootLoad(r *SSARootLoad) {
+	if r.Sel == nil || r.Sel.RootArr == "" || r.Idx < 0 || r.Idx >= int32(len(r.Sel.Roots)) {
+		return
+	}
+	reg := e.regName(r)
+	t := e.llvmType(r.SSAType())
+	ipt := e.intptrType()
+	root := r.Sel.Roots[r.Idx]
+	base := int32(1) + 3*int32(len(r.Sel.Roots)) + root.Off
+	arr := r.Sel.RootArr
+	arrType := "[" | irItoa(r.Sel.RootTotal) | " x " | ipt | "]"
+	if root.Kind == 1 {
+		s0 := e.emitRootLoadWord(arr, arrType, base, ipt)
+		p0 := e.nextReg2("selrp")
+		e.w("  ") ; e.w(p0) ; e.w(" = inttoptr ") ; e.w(ipt) ; e.w(" ") ; e.w(s0) ; e.w(" to ptr\n")
+		w1 := e.emitRootLoadWord(arr, arrType, base+1, ipt)
+		w2 := e.emitRootLoadWord(arr, arrType, base+2, ipt)
+		r1 := e.nextReg2("selrv")
+		e.w("  ") ; e.w(r1) ; e.w(" = insertvalue ") ; e.w(t) ; e.w(" undef, ptr ") ; e.w(p0) ; e.w(", 0\n")
+		r2 := e.nextReg2("selrv")
+		e.w("  ") ; e.w(r2) ; e.w(" = insertvalue ") ; e.w(t) ; e.w(" ") ; e.w(r1) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(w1) ; e.w(", 1\n")
+		e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(t) ; e.w(" ") ; e.w(r2) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(w2) ; e.w(", 2\n")
+		e.w("  store ") ; e.w(t) ; e.w(" ") ; e.w(reg) ; e.w(", ptr ") ; e.w(e.operand(root.Val)) ; e.w("\n")
+		return
+	}
+	pw0 := e.emitRootLoadWord(arr, arrType, base, ipt)
+	e.w("  ") ; e.w(reg) ; e.w(" = inttoptr ") ; e.w(ipt) ; e.w(" ") ; e.w(pw0) ; e.w(" to ptr\n")
+	e.w("  store ") ; e.w(t) ; e.w(" ") ; e.w(reg) ; e.w(", ptr ") ; e.w(e.operand(root.Val)) ; e.w("\n")
 }
 
 func (e *irEmitter) emitMakeChan(m *SSAMakeChan) {

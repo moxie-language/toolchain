@@ -8,12 +8,13 @@ import (
 	"go/token"
 	"go/types"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
+	"golang.org/x/tools/go/ssa"
 	"moxie/compiler/llvmutil"
 	"moxie/loader"
-	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -649,6 +650,10 @@ func (b *builder) createSelect(expr *ssa.Select) llvm.Value {
 	}, "select.states")
 	statesLen := llvm.ConstInt(b.uintptrType, uint64(len(selectStates)), false)
 
+	// Frame root map: the compiler-built array of this frame's pointer slots,
+	// so a compaction can see and rewrite them for the whole park.
+	rootMap := b.buildSelectRootMap(expr)
+
 	// Do the select in the runtime.
 	var results llvm.Value
 	if expr.Blocking {
@@ -678,6 +683,11 @@ func (b *builder) createSelect(expr *ssa.Select) llvm.Value {
 			statesPtr, statesLen, statesLen, // []chanSelectState
 			opsPtr, opsLen, opsLen, // []channelOp (nil slice)
 		}, "select.result")
+	}
+
+	if len(rootMap.roots) > 0 {
+		b.createRuntimeCall("RootMapLeave", nil, "")
+		b.reloadSelectRoots(rootMap)
 	}
 
 	// Terminate the lifetime of the states alloca.
@@ -712,6 +722,150 @@ func (b *builder) storeSelectFrame(state llvm.Value, ch ssa.Value, dest llvm.Val
 		return b.CreateInsertValue(state, codec, 2, "")
 	}
 	return b.CreateInsertValue(state, b.getTypeCode(elemType), 3, "")
+}
+
+// selectRoot is one pointer-typed variable in scope at a select: the roots a
+// frame compaction may relocate. elem is the variable's type; kind 1 is a
+// slice/string (three words), 2 a pointer (one word), 9 an unsupported
+// pointer-shaped value (no words; the frame is refused by the compactor).
+type selectRoot struct {
+	alloc llvm.Value
+	elem  types.Type
+	kind  int32
+	words int64
+	off   int64
+	pos   token.Pos
+}
+
+// selectRootMap is the published root array and enough of its layout to read
+// the values back after the park.
+type selectRootMap struct {
+	roots []selectRoot
+	arr   llvm.Value
+	base  int64
+	total int64
+}
+
+func selectRootKind(t types.Type) (kind int32, words int64) {
+	switch t.Underlying().(type) {
+	case *types.Slice:
+		return 1, 3
+	case *types.Pointer:
+		return 2, 1
+	case *types.Map, *types.Chan, *types.Interface, *types.Signature:
+		return 9, 0
+	}
+	if b, ok := t.Underlying().(*types.Basic); ok && b.Info()&types.IsString != 0 {
+		return 1, 3
+	}
+	return 0, 0
+}
+
+// buildSelectRootMap emits the compiler-built root array for a select and
+// publishes it. The array embeds its map: [count][kind,off,words]*[values].
+//
+// This is why the loader keeps local slots in a function that selects: the map
+// records an address per root, and a lifted register has none. A heap alloca is
+// not a variable slot (it is an anonymous object) and is skipped.
+func (b *builder) buildSelectRootMap(expr *ssa.Select) (m selectRootMap) {
+	pos := expr.Pos()
+	for _, blk := range b.fn.Blocks {
+		for _, instr := range blk.Instrs {
+			alloc, ok := instr.(*ssa.Alloc)
+			if !ok {
+				continue
+			}
+			if alloc.Heap || alloc.Pos() > pos {
+				continue
+			}
+			alloca, ok := b.locals[alloc]
+			if !ok || alloca.IsNil() {
+				continue
+			}
+			pt, ok := alloc.Type().(*types.Pointer)
+			if !ok || pt.Elem() == nil {
+				continue
+			}
+			elem := pt.Elem()
+			kind, words := selectRootKind(elem)
+			if kind == 0 {
+				continue
+			}
+			m.roots = append(m.roots, selectRoot{alloc: alloca, elem: elem, kind: kind, words: words, pos: alloc.Pos()})
+		}
+	}
+	if len(m.roots) == 0 {
+		return m
+	}
+	sort.Slice(m.roots, func(i, j int) bool { return m.roots[i].pos < m.roots[j].pos })
+	m.base = int64(1 + 3*len(m.roots))
+	m.total = m.base
+	for i := range m.roots {
+		m.roots[i].off = m.total - m.base
+		m.total += m.roots[i].words
+	}
+	arrType := llvm.ArrayType(b.uintptrType, int(m.total))
+	m.arr, _ = b.createTemporaryAlloca(arrType, "select.roots.alloca")
+	b.CreateStore(llvm.ConstNull(arrType), m.arr)
+	store := func(i int64, v llvm.Value) {
+		gep := b.CreateGEP(arrType, m.arr, []llvm.Value{
+			llvm.ConstInt(b.ctx.Int32Type(), 0, false),
+			llvm.ConstInt(b.ctx.Int32Type(), uint64(i), false),
+		}, "")
+		b.CreateStore(v, gep)
+	}
+	store(0, llvm.ConstInt(b.uintptrType, uint64(len(m.roots)), false))
+	for i, r := range m.roots {
+		store(1+3*int64(i), llvm.ConstInt(b.uintptrType, uint64(r.kind), false))
+		store(2+3*int64(i), llvm.ConstInt(b.uintptrType, uint64(r.off), false))
+		store(3+3*int64(i), llvm.ConstInt(b.uintptrType, uint64(r.words), false))
+		if r.words == 0 {
+			continue
+		}
+		val := b.CreateLoad(b.getLLVMType(r.elem), r.alloc, "root.val")
+		if r.kind == 1 {
+			p0 := b.CreateExtractValue(val, 0, "")
+			store(m.base+r.off, b.CreatePtrToInt(p0, b.uintptrType, "root.ptr"))
+			store(m.base+r.off+1, b.CreateExtractValue(val, 1, "root.len"))
+			store(m.base+r.off+2, b.CreateExtractValue(val, 2, "root.cap"))
+		} else {
+			store(m.base+r.off, b.CreatePtrToInt(val, b.uintptrType, "root.ptr"))
+		}
+	}
+	b.createRuntimeCall("RootMapEnter", []llvm.Value{m.arr}, "")
+	return m
+}
+
+// reloadSelectRoots reads the values back after the select: the runtime may
+// have rewritten a slot, and the variable must see the new location.
+func (b *builder) reloadSelectRoots(m selectRootMap) {
+	if len(m.roots) == 0 {
+		return
+	}
+	arrType := llvm.ArrayType(b.uintptrType, int(m.total))
+	load := func(i int64) llvm.Value {
+		gep := b.CreateGEP(arrType, m.arr, []llvm.Value{
+			llvm.ConstInt(b.ctx.Int32Type(), 0, false),
+			llvm.ConstInt(b.ctx.Int32Type(), uint64(i), false),
+		}, "")
+		return b.CreateLoad(b.uintptrType, gep, "root.reload")
+	}
+	for _, r := range m.roots {
+		if r.words == 0 {
+			continue
+		}
+		elemType := b.getLLVMType(r.elem)
+		if r.kind == 1 {
+			p0 := b.CreateIntToPtr(load(m.base+r.off), b.dataPtrType, "")
+			sl := llvm.Undef(elemType)
+			sl = b.CreateInsertValue(sl, p0, 0, "")
+			sl = b.CreateInsertValue(sl, load(m.base+r.off+1), 1, "")
+			sl = b.CreateInsertValue(sl, load(m.base+r.off+2), 2, "")
+			b.CreateStore(sl, r.alloc)
+		} else if r.kind == 2 {
+			b.CreateStore(b.CreateIntToPtr(load(m.base+r.off), elemType, ""), r.alloc)
+		}
+	}
 }
 
 // getChanSelectResult returns the special values from a *ssa.Extract expression
@@ -760,10 +914,11 @@ func (b *builder) getChanSelectResult(expr *ssa.Extract) llvm.Value {
 // local, the existing chanSend in-runtime queue path.
 //
 // Compile-time emission shape:
-//   alloca v: T            // store the value-to-send
-//   alloca op: channelOp   // for local-queue path
-//   codec := iface{*T, &v}
-//   ChanSendDual(ch, codec, &v, &op)
+//
+//	alloca v: T            // store the value-to-send
+//	alloca op: channelOp   // for local-queue path
+//	codec := iface{*T, &v}
+//	ChanSendDual(ch, codec, &v, &op)
 func (b *builder) createCodecChanSend(instr *ssa.Send) {
 	ch := b.getValue(instr.Chan, getPos(instr))
 	chanValue := b.getValue(instr.X, getPos(instr))

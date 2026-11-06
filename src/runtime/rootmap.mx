@@ -1,0 +1,134 @@
+package runtime
+
+import "unsafe"
+
+// Frame root maps.
+//
+// At every select the compiler stores the current value of each pointer-typed
+// variable in scope into a compiler-built array and passes that array here. The
+// array embeds its own map, so the runtime needs exactly one pointer:
+//
+//	word 0            count n
+//	word 1 + 3*i      kind of root i
+//	word 2 + 3*i      value offset of root i (from the value base)
+//	word 3 + 3*i      value width in words
+//	value base        the values (1 + 3*n)
+//
+// The compiler reloads the values after the select returns, so a relocation the
+// runtime performs during the park reaches the program. Slices and pointers are
+// traced; any other pointer-shaped variable is recorded as kind 9 so a
+// compaction refuses the frame instead of moving something it cannot see.
+//
+// The registry is a small TLS stack because selects nest: an arm's body may
+// select again, and the inner map must not be visible to the outer one.
+const (
+	rootKindSlice       = 1
+	rootKindPtr         = 2
+	rootKindUnsupported = 9
+
+	rootStackMax = 8
+)
+
+var (
+	rootDepth int32
+	rootStack [rootStackMax]uintptr
+
+	// The most recent map is kept after it leaves: the frame that built it is
+	// still alive, and a report or a test can read it.
+	lastRoots uintptr
+)
+
+// RootMapEnter publishes the roots of the select about to run.
+func RootMapEnter(roots unsafe.Pointer) {
+	p := uintptr(roots)
+	if p == 0 {
+		return
+	}
+	if rootDepth >= rootStackMax {
+		runtimePanic("select: root map nesting deeper than 8")
+	}
+	rootStack[rootDepth] = p
+	rootDepth++
+	lastRoots = p
+}
+
+// RootMapLeave retires the innermost map.
+func RootMapLeave() {
+	if rootDepth > 0 {
+		rootDepth--
+	}
+}
+
+// RootMapCurrent returns the roots of the running select, or zero when no
+// select's park is the current context.
+func RootMapCurrent() (roots unsafe.Pointer) {
+	if rootDepth == 0 {
+		return nil
+	}
+	return unsafe.Pointer(rootStack[rootDepth-1])
+}
+
+func rootWord(p uintptr, i int32) (v uintptr) {
+	return *(*uintptr)(unsafe.Pointer(p + uintptr(i)*unsafe.Sizeof(uintptr(0))))
+}
+
+func rootSetWord(p uintptr, i int32, v uintptr) {
+	*(*uintptr)(unsafe.Pointer(p + uintptr(i)*unsafe.Sizeof(uintptr(0)))) = v
+}
+
+// RootCount is the number of roots in the last map.
+func RootCount() (n int32) {
+	if lastRoots == 0 {
+		return 0
+	}
+	return int32(rootWord(lastRoots, 0))
+}
+
+// RootKind is the kind of root i in the last map.
+func RootKind(i int32) (k int32) {
+	if lastRoots == 0 || i < 0 || i >= RootCount() {
+		return 0
+	}
+	return int32(rootWord(lastRoots, 1+3*i))
+}
+
+// RootIndex returns the value word at position w of root i.
+func RootIndex(i, w int32) (v uintptr) {
+	n := RootCount()
+	if lastRoots == 0 || i < 0 || i >= n {
+		return 0
+	}
+	if w < 0 || w >= int32(rootWord(lastRoots, 3+3*i)) {
+		return 0
+	}
+	// The offset is from the value base, not from the array start.
+	base := int32(1) + 3*n
+	return rootWord(lastRoots, base+int32(rootWord(lastRoots, 2+3*i))+w)
+}
+
+// RootSetIndex writes the value word at position w of root i. The compiler's
+// reload after the select makes it visible to the program.
+func RootSetIndex(i, w int32, v uintptr) {
+	n := RootCount()
+	if lastRoots == 0 || i < 0 || i >= n {
+		return
+	}
+	if w < 0 || w >= int32(rootWord(lastRoots, 3+3*i)) {
+		return
+	}
+	base := int32(1) + 3*n
+	rootSetWord(lastRoots, base+int32(rootWord(lastRoots, 2+3*i))+w, v)
+}
+
+// RootsCompactable reports whether every root is a kind the compactor can
+// trace: only slices and pointers in this version.
+func RootsCompactable() (ok bool) {
+	n := RootCount()
+	for i := int32(0); i < n; i++ {
+		k := RootKind(i)
+		if k != rootKindSlice && k != rootKindPtr {
+			return false
+		}
+	}
+	return n > 0
+}

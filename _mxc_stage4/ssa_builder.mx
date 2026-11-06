@@ -4311,6 +4311,27 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.Type
 	}
 }
 
+// rootMapKind classifies a variable for the frame root map: 1 slice/string
+// (three words), 2 pointer (one word), 9 unsupported-but-pointer-shaped (no
+// words; the frame is refused by the compactor), 0 not a pointer.
+func rootMapKind(t Type) (kind, words int32) {
+	if t == nil {
+		return 0, 0
+	}
+	if TextType(t) {
+		return 1, 3
+	}
+	switch SafeUnderlying(t).(type) {
+	case *Slice:
+		return 1, 3
+	case *Pointer:
+		return 2, 1
+	case *TCMap, *TCChan, *TCInterface, *Signature:
+		return 9, 0
+	}
+	return 0, 0
+}
+
 func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 	doneBlock := fb.newBlock("select.done")
 
@@ -4380,10 +4401,53 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 			break
 		}
 	}
-	sel := &SSASelect{States: states, Blocking: !hasDefault}
+	// Frame pointer map: every in-scope pointer-typed variable, as the roots a
+	// compaction may relocate. Slices and pointers are traced; any other
+	// pointer-shaped variable is recorded as kind 9 so the compactor refuses
+	// this frame rather than moving something it cannot see.
+	var roots []*SSARoot
+	for obj, v := range fb.vars {
+		if v == nil {
+			continue
+		}
+		pt, isPtr := v.SSAType().(*Pointer)
+		if !isPtr || pt.Base == nil {
+			continue
+		}
+		kind, words := rootMapKind(pt.Base)
+		if kind == 0 {
+			continue
+		}
+		roots = mxutil.Ensure(roots, 1)
+		push(roots, &SSARoot{Obj: obj, Val: v, Typ: pt.Base, Kind: kind, Words: words})
+	}
+	// Deterministic layout: map iteration is unordered and the compiler must
+	// reproduce its own output (stage2 == stage3).
+	for i := int32(1); i < int32(len(roots)); i++ {
+		for j := i; j > 0 && roots[j].Val.SSAName() < roots[j-1].Val.SSAName(); j-- {
+			roots[j], roots[j-1] = roots[j-1], roots[j]
+		}
+	}
+	off := int32(0)
+	for _, r := range roots {
+		r.Off = off
+		off += r.Words
+	}
+	sel := &SSASelect{States: states, Blocking: !hasDefault, Roots: roots}
 	sel.typ = &Tuple{Vars: tupleVars}
 	sel.name = fb.nextName()
 	fb.emit(sel)
+	// The runtime may have rewritten a root during the park; read it back into
+	// the variable so the rest of the frame sees the new location.
+	for i, r := range sel.Roots {
+		if r.Words == 0 {
+			continue
+		}
+		rl := &SSARootLoad{Sel: sel, Idx: int32(i)}
+		rl.typ = r.Typ
+		rl.name = fb.nextName()
+		fb.emit(rl)
+	}
 
 	// A select with no clauses needs no dispatch, and its block still needs a
 	// terminator: without the jump the emitted block fell through into the next

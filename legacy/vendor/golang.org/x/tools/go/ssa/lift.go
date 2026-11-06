@@ -41,6 +41,7 @@ package ssa
 import (
 	"fmt"
 	"go/token"
+	"go/types"
 	"math/big"
 	"os"
 	"slices"
@@ -109,6 +110,28 @@ func removeInstr(refs []Instruction, instr Instruction) []Instruction {
 	return slices.DeleteFunc(refs, func(i Instruction) bool { return i == instr })
 }
 
+// keepRootSlot reports whether alloc is a local slot the Moxie frame root map
+// must be able to address: a variable whose own value contains references.
+// Such a slot is never lifted, because the map records an address per root.
+func keepRootSlot(alloc *Alloc) bool {
+	ptr, ok := alloc.Type().Underlying().(*types.Pointer)
+	if !ok || ptr.Elem() == nil {
+		return false
+	}
+	switch elem := ptr.Elem().Underlying().(type) {
+	case *types.Slice, *types.Map, *types.Chan, *types.Interface, *types.Signature:
+		return true
+	case *types.Pointer:
+		// A pointer to an SSA opaque type is the defer stack pseudo-variable,
+		// which has no runtime representation and must be lifted away.
+		_, opaque := elem.Elem().Underlying().(*opaqueType)
+		return !opaque
+	case *types.Basic:
+		return elem.Info()&types.IsString != 0
+	}
+	return false
+}
+
 // lift replaces local and new Allocs accessed only with
 // load/store by SSA registers, inserting φ-nodes where necessary.
 // The result is a program in classical pruned SSA form.
@@ -118,6 +141,25 @@ func removeInstr(refs []Instruction, instr Instruction) []Instruction {
 // - Def/use info (Operands and Referrers) is up-to-date.
 // - The dominator tree is up-to-date.
 func lift(fn *Function) {
+	// Moxie: a pointer-typed local in a function that selects keeps its slot.
+	// The compiler publishes a frame root map built from those allocas around
+	// every select, so the runtime can relocate what the frame points at. A
+	// lifted register has no address to publish, and rebinding the value after
+	// the select is unsound at a merge whose other edge did not pass through
+	// it. Everything else in the function still lifts.
+	selecting := false
+	for _, b := range fn.Blocks {
+		for _, instr := range b.Instrs {
+			if _, ok := instr.(*Select); ok {
+				selecting = true
+				break
+			}
+		}
+		if selecting {
+			break
+		}
+	}
+
 	// TODO(adonovan): opt: lots of little optimizations may be
 	// worthwhile here, especially if they cause us to avoid
 	// buildDomFrontier.  For example:
@@ -186,7 +228,7 @@ func lift(fn *Function) {
 			switch instr := instr.(type) {
 			case *Alloc:
 				index := -1
-				if liftAlloc(df, instr, newPhis, &fresh) {
+				if !(selecting && keepRootSlot(instr)) && liftAlloc(df, instr, newPhis, &fresh) {
 					index = numAllocs
 					numAllocs++
 				}

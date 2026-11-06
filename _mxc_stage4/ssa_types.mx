@@ -794,11 +794,39 @@ type SSASelectState struct {
 	Send SSAValue
 }
 
+// SSARoot is one pointer value of the frame at a select: the runtime's map
+// carries it so a compaction can find and relocate what the frame reaches.
+// Kind 1 is a slice/string (three words), 2 a pointer (one word), 9 a
+// pointer-shaped value this version does not trace (map, channel, interface,
+// function) - the frame is then not compactable.
+type SSARoot struct {
+	Obj   Object
+	Val   SSAValue // the variable's alloca
+	Typ   Type     // the variable's type (the alloca's element)
+	Kind  int32
+	Off   int32
+	Words int32
+}
+
+// SSARootLoad is the value of a variable after a select: the runtime may have
+// rewritten its slot in the select's root array, so the compiler loads it back.
+type SSARootLoad struct {
+	ssaRegister
+	Sel *SSASelect
+	Idx int32
+}
+
+func (s *SSARootLoad) InstrPos() (n int32) { return s.pos }
+func (s *SSARootLoad) InstrString() (sv string) { return "rootload" }
+
 // Select instruction.
 type SSASelect struct {
 	ssaRegister
-	States   []*SSASelectState
-	Blocking bool
+	States    []*SSASelectState
+	Blocking  bool
+	Roots     []*SSARoot
+	RootArr   string
+	RootTotal int32
 }
 
 func (s *SSASelect) InstrPos() (n int32) { return s.pos }

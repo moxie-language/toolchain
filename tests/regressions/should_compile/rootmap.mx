@@ -1,0 +1,71 @@
+// A select publishes the frame's pointer roots for the whole park: a slice is
+// three words (data, len, cap), a pointer one word, and any other
+// pointer-shaped local (map, channel, interface, function) is recorded as kind
+// 9 so a compaction refuses the frame instead of moving memory it cannot see.
+// The legacy loader keeps those slots (lift is skipped for them) and the
+// stage4 builder has them already; both publish the same map.
+package main
+
+import (
+	"runtime"
+	"unsafe"
+)
+
+var ch chan int32
+
+// refuseFrame selects with a map local in scope: its kind-9 root makes the
+// frame un-compactable, and the runtime must report that.
+func refuseFrame() (ok bool) {
+	m := map[int32]int32{}
+	m[1] = 2
+	select {
+	case <-ch:
+	default:
+	}
+	return runtime.RootCount() > 0 && !runtime.RootsCompactable()
+}
+
+func main() {
+	select {
+	case <-shutdown:
+		return
+	default:
+	}
+	b := []int32{10, 20, 30}
+	q := &b[1]
+	select {
+	case v := <-ch:
+		println(v)
+	default:
+	}
+	if runtime.RootCount() != 2 || !runtime.RootsCompactable() {
+		panic("frame roots not compactable")
+	}
+	seenSlice := false
+	seenPtr := false
+	for i := int32(0); i < runtime.RootCount(); i++ {
+		k := runtime.RootKind(i)
+		if k == 1 {
+			seenSlice = true
+			if runtime.RootIndex(i, 0) != uintptr(unsafe.Pointer(&b[0])) {
+				panic("slice data pointer mismatch")
+			}
+			if int32(runtime.RootIndex(i, 1)) != len(b) {
+				panic("slice length mismatch")
+			}
+		}
+		if k == 2 {
+			seenPtr = true
+			if runtime.RootIndex(i, 0) != uintptr(unsafe.Pointer(q)) {
+				panic("pointer root mismatch")
+			}
+		}
+	}
+	if !seenSlice || !seenPtr {
+		panic("missing roots")
+	}
+	if !refuseFrame() {
+		panic("kind-9 root not refused")
+	}
+	println("rootmap ok")
+}
