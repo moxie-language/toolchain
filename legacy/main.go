@@ -630,6 +630,11 @@ func main() {
 		exitNow(0)
 	}
 
+	if command == "typedb" {
+		typedbCmd(os.Args[2:])
+		return
+	}
+
 	flag.CommandLine.Parse(os.Args[2:])
 	globalVarValues, extLDFlags, err := parseGoLinkFlag(*ldflags)
 	if err != nil {
