@@ -2148,7 +2148,7 @@ func (b *builder) makeDefaultSlice(sl *types.Slice, pos token.Pos) llvm.Value {
 	elemSize := b.targetData.TypeAllocSize(et)
 	sizeVal := llvm.ConstInt(b.uintptrType, capVal*elemSize, false)
 	layoutVal := b.createObjectLayout(et, pos)
-	dataBuf := b.createRuntimeCall("alloc", []llvm.Value{sizeVal, layoutVal}, "slice.cap4k")
+	dataBuf := b.createRuntimeCall("alloc", []llvm.Value{sizeVal, layoutVal, llvm.ConstNull(b.dataPtrType)}, "slice.cap4k")
 	typ := b.getLLVMType(sl)
 	sliceVal := llvm.Undef(typ)
 	sliceVal = b.CreateInsertValue(sliceVal, dataBuf, 0, "")
@@ -2161,7 +2161,7 @@ func (b *builder) makeDefaultStringSlice(pos token.Pos) llvm.Value {
 	capVal := uint64(4096)
 	sizeVal := llvm.ConstInt(b.uintptrType, capVal, false)
 	layoutVal := llvm.ConstNull(b.dataPtrType)
-	dataBuf := b.createRuntimeCall("alloc", []llvm.Value{sizeVal, layoutVal}, "str.cap4k")
+	dataBuf := b.createRuntimeCall("alloc", []llvm.Value{sizeVal, layoutVal, llvm.ConstNull(b.dataPtrType)}, "str.cap4k")
 	typ := b.getLLVMRuntimeType("_string")
 	sliceVal := llvm.Undef(typ)
 	sliceVal = b.CreateInsertValue(sliceVal, dataBuf, 0, "")
@@ -2882,8 +2882,16 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 				return llvm.Value{}, b.makeError(expr.Pos(), fmt.Sprintf("value is too big (%v bytes)", size))
 			}
 			sizeValue := llvm.ConstInt(b.uintptrType, size, false)
+			// Two descriptors, two consumers. The layout is what the compile-time
+			// interpreter uses to type its shadow copy; the runtime never reads it.
+			// The type descriptor is recorded with the block so a sovereign
+			// compaction can walk its interior - stage4 passes the same one
+			// (allocBlockTypeDesc), and passing the layout here instead left
+			// legacy-built groups with a descriptor the walker could not read.
+			elemType := expr.Type().Underlying().(*types.Pointer).Elem()
 			layoutValue := b.createObjectLayout(typ, expr.Pos())
-			buf := b.createRuntimeCall("alloc", []llvm.Value{sizeValue, layoutValue}, expr.Comment)
+			typeCodeValue := b.getTypeCode(elemType)
+			buf := b.createRuntimeCall("alloc", []llvm.Value{sizeValue, layoutValue, typeCodeValue}, expr.Comment)
 			align := b.targetData.ABITypeAlignment(typ)
 			buf.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(align)))
 			if b.PrintAllocs != nil {
@@ -3142,7 +3150,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		}
 		sliceSize := b.CreateBinOp(llvm.Mul, elemSizeValue, sliceCapCast, "makeslice.cap")
 		layoutValue := b.createObjectLayout(llvmElemType, expr.Pos())
-		slicePtr := b.createRuntimeCall("alloc", []llvm.Value{sliceSize, layoutValue}, "makeslice.buf")
+		slicePtr := b.createRuntimeCall("alloc", []llvm.Value{sliceSize, layoutValue, llvm.ConstNull(b.dataPtrType)}, "makeslice.buf")
 		slicePtr.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(elemAlign)))
 		if b.PrintAllocs != nil {
 			b.emitLogAlloc(expr.Pos(), sliceSize)
@@ -3307,7 +3315,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			elemSize := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(ptrElemType), false)
 			byteLen := b.CreateMul(newLen, elemSize, "slice.bytes")
 			layoutValue := llvm.ConstNull(b.dataPtrType)
-			newPtr := b.createRuntimeCall("alloc", []llvm.Value{byteLen, layoutValue}, "slice.copy.buf")
+			newPtr := b.createRuntimeCall("alloc", []llvm.Value{byteLen, layoutValue, llvm.ConstNull(b.dataPtrType)}, "slice.copy.buf")
 			b.createRuntimeCall("memcpy", []llvm.Value{newPtr, srcPtr, byteLen}, "")
 			isEmpty := b.CreateICmp(llvm.IntEQ, newLen, llvm.ConstInt(b.uintptrType, 0, false), "slice.empty")
 			buf := b.CreateSelect(isEmpty, llvm.ConstNull(b.dataPtrType), newPtr, "")
@@ -3349,7 +3357,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			newLen := b.CreateSub(high, low, "")
 			// Moxie: subslice copies to break aliasing.
 			layoutValue := llvm.ConstNull(b.dataPtrType)
-			newPtr := b.createRuntimeCall("alloc", []llvm.Value{newLen, layoutValue}, "str.copy.buf")
+			newPtr := b.createRuntimeCall("alloc", []llvm.Value{newLen, layoutValue, llvm.ConstNull(b.dataPtrType)}, "str.copy.buf")
 			b.createRuntimeCall("memcpy", []llvm.Value{newPtr, srcPtr, newLen}, "")
 			str := llvm.Undef(b.getLLVMRuntimeType("_string"))
 			str = b.CreateInsertValue(str, newPtr, 0, "")

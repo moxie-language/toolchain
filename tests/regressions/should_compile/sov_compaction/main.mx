@@ -1,0 +1,56 @@
+// A sovereign receiver's arena is copy-compacted under pressure, and the
+// compacted blocks must keep their descriptors on BOTH compilers. The legacy
+// compiler passed the TinyGo object-layout bitmap as the allocation's type
+// descriptor while stage4 passed a RawType; the runtime then walked live nodes
+// as if a bitmap were a descriptor, dropped every block nested under a
+// receiver root, and the next method call faulted on the unmapped old arena.
+//
+// The cycle the fixture forces: 40000 Add calls grow the receiver's data arena
+// past a region boundary. Add leaves one dead Named per overwritten key and the
+// push growth leaves dead item backings, so the method-boundary ratchet queues
+// a compaction; the select then drains the queue. Sum counts both the linked
+// chain and the items slice, so the expected value is 2*sum.
+package main
+
+import "tests/regressions/should_compile/sovereign_arena/lib"
+
+func main() {
+	// Termination: a batch program must still be stoppable.
+	select {
+	case <-shutdown:
+		return
+	default:
+	}
+
+	var s lib.Store
+	n := int32(40000)
+	sum := int32(0)
+	for i := int32(0); i < n; i++ {
+		s.Add("k", i)
+		sum += i
+	}
+	before := s.Sum()
+	if before != 2*sum {
+		panic("live data wrong before compaction")
+	}
+
+	// Every select is the idle boundary: it drains the sovereign compaction
+	// queue with no receiver borrowed.
+	select {
+	case <-shutdown:
+		return
+	default:
+	}
+
+	got := s.Sum()
+	println("want:", 2*sum, "got:", got, "key:", s.KeyName("k"))
+	if got != 2*sum {
+		panic("live data lost across compaction")
+	}
+	// The map entry overwritten 39999 times must still resolve to its last
+	// value through the compacted bucket array.
+	if s.KeyName("k") != "k" {
+		panic("map value lost across compaction")
+	}
+	println("sov compaction ok")
+}

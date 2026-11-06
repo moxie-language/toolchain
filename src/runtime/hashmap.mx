@@ -66,7 +66,7 @@ func hashmapMake(keySize, valueSize uintptr, sizeHint uintptr, alg uint8) *hashm
 	}
 
 	bucketBufSize := unsafe.Sizeof(hashmapBucket{}) + keySize*8 + valueSize*8
-	buckets := alloc(bucketBufSize*(1<<bucketBits), nil)
+	buckets := alloc(bucketBufSize*(1<<bucketBits), nil, nil)
 
 	keyHash := hashmapKeyHashAlg(moxie.HashmapAlgorithm(alg))
 	keyEqual := hashmapKeyEqualAlg(moxie.HashmapAlgorithm(alg))
@@ -367,7 +367,7 @@ func hashmapInsertIntoNewBucket(m *hashmap, key, value unsafe.Pointer, tophash u
 	bucketBufSize := hashmapBucketSize(m)
 	saved := CurrentArena()
 	SetCurrentArena(hashmapOwner(m))
-	bucketBuf := alloc(bucketBufSize, nil)
+	bucketBuf := alloc(bucketBufSize, nil, nil)
 	SetCurrentArena(saved)
 	bucket := (*hashmapBucket)(bucketBuf)
 
@@ -396,7 +396,7 @@ func hashmapGrow(m *hashmap) {
 	m.bucketBits = oldBits + 1
 	m.count = 0
 	m.seed = uintptr(fastrand())
-	m.buckets = alloc(bucketSize*(uintptr(1)<<m.bucketBits), nil)
+	m.buckets = alloc(bucketSize*(uintptr(1)<<m.bucketBits), nil, nil)
 
 	// Re-insert all entries from old buckets into the new array.
 	numOldBuckets := uintptr(1) << oldBits
@@ -426,7 +426,7 @@ func hashmapClone(intf _interface) _interface {
 	typ, val := decomposeInterface(intf)
 	m := (*hashmap)(val)
 	// Heap-allocate destination so the interface value doesn't point to stack.
-	dst := (*hashmap)(alloc(unsafe.Sizeof(hashmap{}), nil))
+	dst := (*hashmap)(alloc(unsafe.Sizeof(hashmap{}), nil, nil))
 	hashmapCopyTo(m, dst, m.bucketBits)
 	return composeInterface(typ, unsafe.Pointer(dst))
 }
@@ -438,7 +438,7 @@ func hashmapCopy(src unsafe.Pointer) unsafe.Pointer {
 	if m == nil {
 		return nil
 	}
-	dst := (*hashmap)(alloc(unsafe.Sizeof(hashmap{}), nil))
+	dst := (*hashmap)(alloc(unsafe.Sizeof(hashmap{}), nil, nil))
 	hashmapCopyTo(m, dst, m.bucketBits)
 	return unsafe.Pointer(dst)
 }
@@ -459,11 +459,11 @@ func hashmapCopyTo(src, dst *hashmap, sizeBits uint8) {
 
 	numBuckets := uintptr(1) << sizeBits
 	bucketBufSize := hashmapBucketSize(src)
-	dst.buckets = alloc(bucketBufSize*numBuckets, nil)
+	dst.buckets = alloc(bucketBufSize*numBuckets, nil, nil)
 
 	var it hashmapIterator
-	var key = alloc(src.keySize, nil)
-	var value = alloc(src.valueSize, nil)
+	var key = alloc(src.keySize, nil, nil)
+	var value = alloc(src.valueSize, nil, nil)
 
 	for hashmapNext(src, &it, key, value) {
 		h := dst.keyHash(key, uintptr(dst.keySize), dst.seed)
@@ -562,7 +562,7 @@ func hashmapNext(m *hashmap, it *hashmapIterator, key, value unsafe.Pointer) boo
 		it.count = n
 		it.index = 0
 
-		buf := alloc(m.keySize*n, nil)
+		buf := alloc(m.keySize*n, nil, nil)
 		it.sortedKeys = buf
 
 		// Walk all buckets and collect keys.
@@ -589,7 +589,7 @@ func hashmapNext(m *hashmap, it *hashmapIterator, key, value unsafe.Pointer) boo
 		// tracks a group is released: a few thousand entries cost hundreds of
 		// milliseconds per iteration, on a path that runs per method call.
 		ks := m.keySize
-		tmp := alloc(ks, nil)
+		tmp := alloc(ks, nil, nil)
 		hashmapSortKeys(buf, pos, ks, m.keyLess, tmp)
 	}
 
@@ -710,7 +710,7 @@ func hashmapContentSet(m *hashmap, key string, value unsafe.Pointer) {
 	if _s.length > 0 {
 		saved := CurrentArena()
 		SetCurrentArena(hashmapOwner(m))
-		kb := alloc(uintptr(_s.length), nil)
+		kb := alloc(uintptr(_s.length), nil, nil)
 		memcpy(kb, unsafe.Pointer(_s.ptr), uintptr(_s.length))
 		SetCurrentArena(saved)
 		st.ptr = (*uint8)(kb)
