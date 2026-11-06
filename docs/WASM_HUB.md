@@ -68,9 +68,14 @@ used to hang.
 
 ## Addressing
 
-- A domain's id is its **lineage**: `1` is a root, `1.1` its first child,
-  `1.3.2` the second child of `1.3`. Ids are assigned by the hub and are never
-  reused; a domain cannot choose or change its own id.
+- A domain's id is the **domain id**: one page-wide sequence, assigned at spawn,
+  never reused. The root takes 1; its first child takes 2 and its lineage is
+  `1.2`; that child's first child takes 3 and is `1.2.3`. The LAST component is
+  the domain id itself - the same number the native runtime's `ch.childDomain`
+  carries - so a log line, a hub node and a channel's role all name one number,
+  and a debugging session never has to map one id scheme onto another.
+- The lineage is the chain of those ids, which is what the hub builds from
+  `parent`. A domain cannot choose or change its own id.
 - **parent** is the id of the domain that started it; a root's parent is `0`,
   the hub.
 - The hub builds the tree from `parent` alone. It does not parse `args`,

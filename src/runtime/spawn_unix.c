@@ -95,3 +95,9 @@ uint32_t moxie_atomic_load_u32(volatile uint32_t *p) {
 void moxie_atomic_store_u32(volatile uint32_t *p, uint32_t val) {
     __atomic_store_n(p, val, __ATOMIC_RELEASE);
 }
+
+// Returns the NEW value: the first add to a counter holding 1 yields 2, which is
+// the first spawned domain's id (the root is 1).
+uint32_t moxie_atomic_add_u32(volatile uint32_t *p, uint32_t v) {
+    return __atomic_add_fetch(p, v, __ATOMIC_ACQ_REL);
+}

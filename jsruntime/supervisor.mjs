@@ -30,7 +30,12 @@ export function createHub(opts = {}) {
 
   const nodes = new Map();
   const roots = [];
-  let rootSeq = 0;
+  // ONE id space: a domain's id is taken from a single page-wide sequence at
+  // spawn and never reused. The lineage is the chain of those ids (root 1,
+  // its child 2 is "1.2", that child's child 3 is "1.2.3"), so the last
+  // component IS the domain id - the same number the native runtime's
+  // ch.childDomain carries.
+  let domainSeq = 0;
   const stats = {
     spawned: 0, exited: 0, panics: 0, rebinds: 0,
     refusedSpawn: 0, portMismatch: 0, parentMismatch: 0, unknownKind: 0,
@@ -186,7 +191,7 @@ export function createHub(opts = {}) {
   // attachRoot gives a module's root domain the next root id. Ids are never
   // reused, so the counter is monotonic even after a root exits.
   function attachRoot({ port, handle }) {
-    const id = String(++rootSeq);
+    const id = String(++domainSeq);
     attach({ id, parent: '0', port, handle, root: true });
     return id;
   }
@@ -208,8 +213,7 @@ export function createHub(opts = {}) {
     if (node.port !== port) { stats.portMismatch++; refuse(port, node.id, 'port-mismatch'); return; }
     if (typeof msg.parent === 'string' && msg.parent !== node.parent) stats.parentMismatch++;
     if (!startDomain) { refuse(port, node.id, 'no-start'); return; }
-    node.spawned++;
-    const childId = node.id + '.' + node.spawned;
+    const childId = node.id + '.' + (++domainSeq);
     const boot = {
       kind: 'entry',
       id: childId,

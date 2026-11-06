@@ -308,6 +308,34 @@ for i in "${!UNITS[@]}"; do
 	SELECTED+=("$i")
 done
 
+# Preflight: two traps the 1.0.0 sweep proved cost a whole run. Both are checked
+# here, before any unit runs, with a message that names the trap rather than the
+# symptom it produces later.
+banner="$("$MOXIE" version 2>&1 | head -1)"
+case "$banner" in
+mxc\ *) ;;
+*)
+	echo "unitrun: MOXIE ($MOXIE) reports '$banner', which is the legacy bootstrap." >&2
+	echo "         ./moxie must be the self-hosted stage4 build (build.sh installs it;" >&2
+	echo "         legacy/moxie is only the bootstrap)." >&2
+	exit 1
+	;;
+esac
+need_go=0
+for i in "${SELECTED[@]}"; do
+	case "${UNITS[$i]}" in 6/*) need_go=1 ;; esac
+done
+if [ "$need_go" = 1 ]; then
+	goroot="$(go env GOROOT 2>/dev/null || true)"
+	if [ -z "$goroot" ] || [ ! -f "$goroot/src/strings/strings.go" ]; then
+		echo "unitrun: phase 6 needs a Go toolchain whose GOROOT has src/strings (got '${goroot:-none}')." >&2
+		echo "         export GOROOT=/opt/go1.25.3 PATH=/opt/go1.25.3/bin:\$PATH" >&2
+		echo "         Phase 6's regexp reference calls 'go run'; a stale GOROOT reports" >&2
+		echo "         'package strings is not in std' and fails a phase the compiler passed." >&2
+		exit 1
+	fi
+fi
+
 if [ "${#SELECTED[@]}" -eq 0 ]; then
 	echo "unitrun: nothing to do (${#UNITS[@]} units, all done; --force to re-run)"
 	exit 0

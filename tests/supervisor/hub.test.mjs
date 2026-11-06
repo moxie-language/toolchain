@@ -45,14 +45,14 @@ test('lineage ids and parents are assigned by the hub', () => {
   const root = fakePort();
   assert.equal(hub.attachRoot({ port: root, handle: 'w-1' }), '1');
   spawn(hub, root, '1');
-  assert.equal(started[0].boot.id, '1.1');
+  assert.equal(started[0].boot.id, '1.2');
   assert.equal(started[0].boot.parent, '1');
-  spawn(hub, started[0].port, '1.1', '1');
-  assert.equal(started[1].boot.id, '1.1.1');
-  assert.equal(started[1].boot.parent, '1.1');
+  spawn(hub, started[0].port, '1.2', '1');
+  assert.equal(started[1].boot.id, '1.2.3');
+  assert.equal(started[1].boot.parent, '1.2');
   const t = hub.tree();
-  assert.equal(t['1.1.1'].parent, '1.1');
-  assert.deepEqual(t['1'].children, ['1.1']);
+  assert.equal(t['1.2.3'].parent, '1.2');
+  assert.deepEqual(t['1'].children, ['1.2']);
 });
 
 test('the boot payload crosses untouched', () => {
@@ -105,22 +105,22 @@ test('the orphan invariant: A exits, B keeps logging and exits cleanly', () => {
   const root = fakePort();
   hub.attachRoot({ port: root, handle: 'w-1' });
   spawn(hub, root, '1');                       // A = 1.1
-  const a = bootOf({ started }, '1.1');
-  spawn(hub, a.port, '1.1', '1');              // B = 1.1.1
-  const b = bootOf({ started }, '1.1.1');
+  const a = bootOf({ started }, '1.2');
+  spawn(hub, a.port, '1.2', '1');              // B = 1.1.1
+  const b = bootOf({ started }, '1.2.3');
 
-  hub.handle(a.port, { kind: 'exit', id: '1.1' });
-  assert.ok(handles({ stopped }).includes('w-1.1'), 'A was stopped');
-  assert.equal(hub.tree()['1.1'], undefined);
-  assert.equal(hub.tree()['1.1.1'].parent, '1', 'B was adopted by the root');
+  hub.handle(a.port, { kind: 'exit', id: '1.2' });
+  assert.ok(handles({ stopped }).includes('w-1.2'), 'A was stopped');
+  assert.equal(hub.tree()['1.2'], undefined);
+  assert.equal(hub.tree()['1.2.3'].parent, '1', 'B was adopted by the root');
   assert.ok(b.port.sent.some((m) => m.kind === 'rebind' && m.parent === '1'), 'B was told');
 
-  hub.handle(b.port, { kind: 'log', id: '1.1.1', fd: 1, text: 'b alive\n' });
+  hub.handle(b.port, { kind: 'log', id: '1.2.3', fd: 1, text: 'b alive\n' });
   hub.drain();
-  assert.deepEqual(logs.at(-1), { id: '1.1.1', fd: 1, text: 'b alive\n' });
+  assert.deepEqual(logs.at(-1), { id: '1.2.3', fd: 1, text: 'b alive\n' });
 
-  hub.handle(b.port, { kind: 'exit', id: '1.1.1' });
-  assert.equal(hub.tree()['1.1.1'], undefined);
+  hub.handle(b.port, { kind: 'exit', id: '1.2.3' });
+  assert.equal(hub.tree()['1.2.3'], undefined);
   assert.equal(hub.stats().exited, 2);
 });
 
@@ -129,16 +129,16 @@ test('a parent parked in a receive does not block its child', () => {
   const root = fakePort();
   hub.attachRoot({ port: root, handle: 'w-1' });
   spawn(hub, root, '1');                       // A = 1.1
-  const a = bootOf({ started }, '1.1');
+  const a = bootOf({ started }, '1.2');
   // A sends one spawn and then nothing else - it is parked inside the wasm
   // receive its child will wake. The hub must start the child and carry its
   // messages without A pumping anything.
-  spawn(hub, a.port, '1.1', '1');              // B = 1.1.1
-  const b = bootOf({ started }, '1.1.1');
-  hub.handle(b.port, { kind: 'log', id: '1.1.1', fd: 1, text: 'b up\n' });
+  spawn(hub, a.port, '1.2', '1');              // B = 1.1.1
+  const b = bootOf({ started }, '1.2.3');
+  hub.handle(b.port, { kind: 'log', id: '1.2.3', fd: 1, text: 'b up\n' });
   hub.drain();
   assert.equal(started.length, 2);
-  assert.deepEqual(logs.at(-1), { id: '1.1.1', fd: 1, text: 'b up\n' });
+  assert.deepEqual(logs.at(-1), { id: '1.2.3', fd: 1, text: 'b up\n' });
   assert.equal(a.port.sent.length, 0, 'nothing was required of the parked parent');
 });
 
@@ -147,13 +147,13 @@ test('a panic stops every domain and reports one fault', () => {
   const root = fakePort();
   hub.attachRoot({ port: root, handle: 'w-1' });
   spawn(hub, root, '1');
-  const a = bootOf({ started }, '1.1');
-  spawn(hub, a.port, '1.1', '1');
-  const b = bootOf({ started }, '1.1.1');
-  hub.handle(b.port, { kind: 'panic', id: '1.1.1', text: 'boom' });
+  const a = bootOf({ started }, '1.2');
+  spawn(hub, a.port, '1.2', '1');
+  const b = bootOf({ started }, '1.2.3');
+  hub.handle(b.port, { kind: 'panic', id: '1.2.3', text: 'boom' });
   assert.equal(faults.length, 1);
-  assert.equal(faults[0].id, '1.1.1');
-  assert.deepEqual(handles({ stopped }).sort(), ['w-1', 'w-1.1', 'w-1.1.1']);
+  assert.equal(faults[0].id, '1.2.3');
+  assert.deepEqual(handles({ stopped }).sort(), ['w-1', 'w-1.2', 'w-1.2.3']);
   assert.deepEqual(hub.tree(), {});
 });
 
@@ -164,25 +164,25 @@ test('a root exit keeps its live children; a new root never reuses an id', () =>
   const oneId = hub.attachRoot({ port: one, handle: 'w-1' });
   const twoId = hub.attachRoot({ port: two, handle: 'w-2' });
   assert.deepEqual([oneId, twoId], ['1', '2']);
-  spawn(hub, one, '1');
-  spawn(hub, two, '2');
+  spawn(hub, one, '1');                        // child 3 -> 1.3
+  spawn(hub, two, '2');                        // child 4 -> 2.4
   hub.handle(one, { kind: 'exit', id: '1' });
   // The page keeps the root Worker for callbacks, so a clean root exit is not a
   // tree kill: its child is adopted by the hub and keeps running.
   assert.equal(hub.tree()['1'], undefined);
-  assert.equal(hub.tree()['1.1'].parent, '0');
-  assert.ok(!handles({ stopped }).includes('w-1.1'));
+  assert.equal(hub.tree()['1.3'].parent, '0');
+  assert.ok(!handles({ stopped }).includes('w-1.3'));
   const three = fakePort();
-  assert.equal(hub.attachRoot({ port: three, handle: 'w-3' }), '3');
+  assert.equal(hub.attachRoot({ port: three, handle: 'w-5' }), '5');
   hub.stopAll();
   // The hub ASKS for every node to stop, and tells the host whether it is a
   // root: a page host keeps the root's Worker alive for callbacks and stops
   // every other domain.
   assert.deepEqual(stopped.find((s) => s.handle === 'w-1'), { handle: 'w-1', root: true });
   assert.deepEqual(stopped.find((s) => s.handle === 'w-2'), { handle: 'w-2', root: true });
-  assert.deepEqual(stopped.find((s) => s.handle === 'w-3'), { handle: 'w-3', root: true });
-  assert.deepEqual(stopped.filter((s) => s.handle === 'w-1.1'), [{ handle: 'w-1.1', root: false }]);
-  assert.deepEqual(handles({ stopped }).sort(), ['w-1', 'w-1.1', 'w-2', 'w-2.1', 'w-3']);
+  assert.deepEqual(stopped.find((s) => s.handle === 'w-5'), { handle: 'w-5', root: true });
+  assert.deepEqual(stopped.filter((s) => s.handle === 'w-1.3'), [{ handle: 'w-1.3', root: false }]);
+  assert.deepEqual(handles({ stopped }).sort(), ['w-1', 'w-1.3', 'w-2', 'w-2.4', 'w-5']);
 });
 
 test('heartbeat updates lastSeen; an unknown heartbeat is counted only', () => {
@@ -213,20 +213,20 @@ test('lines are assembled per domain, so two domains cannot splice one another',
   const child = started[0].port;
   // Interleave the two domains' pieces; each line must stay whole.
   hub.handle(root, { kind: 'log', id: '1', fd: 1, text: 'root got' });
-  hub.handle(child, { kind: 'log', id: '1.1', fd: 1, text: 'b got' });
+  hub.handle(child, { kind: 'log', id: '1.2', fd: 1, text: 'b got' });
   assert.equal(hub.drain(), 0, 'no line is complete yet');
   hub.handle(root, { kind: 'log', id: '1', fd: 1, text: ' 10\n' });
-  hub.handle(child, { kind: 'log', id: '1.1', fd: 1, text: ' 7\n' });
+  hub.handle(child, { kind: 'log', id: '1.2', fd: 1, text: ' 7\n' });
   hub.drain();
   assert.deepEqual(logs.slice(-2), [
     { id: '1', fd: 1, text: 'root got 10\n' },
-    { id: '1.1', fd: 1, text: 'b got 7\n' },
+    { id: '1.2', fd: 1, text: 'b got 7\n' },
   ]);
   // A domain that exits with an unterminated line still gets it printed.
-  hub.handle(child, { kind: 'log', id: '1.1', fd: 1, text: 'unterminated' });
-  hub.handle(child, { kind: 'exit', id: '1.1' });
+  hub.handle(child, { kind: 'log', id: '1.2', fd: 1, text: 'unterminated' });
+  hub.handle(child, { kind: 'exit', id: '1.2' });
   hub.drain();
-  assert.deepEqual(logs.at(-1), { id: '1.1', fd: 1, text: 'unterminated' });
+  assert.deepEqual(logs.at(-1), { id: '1.2', fd: 1, text: 'unterminated' });
 });
 
 test('an overflowing queue drops with a per-domain count, reported at exit', () => {
