@@ -4314,6 +4314,32 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.Type
 // rootMapKind classifies a variable for the frame root map: 1 slice/string
 // (three words), 2 pointer (one word), 9 unsupported-but-pointer-shaped (no
 // words; the frame is refused by the compactor), 0 not a pointer.
+// rootElemCompactable reports whether a slice's backing array can move with
+// nothing inside it needing a rewrite: every element pointer-free. A slice of
+// strings, pointers, maps, channels, interfaces or functions needs its elements
+// rewritten and the root map carries no element descriptor, so such a slice
+// refuses the frame (kind 9).
+func rootElemCompactable(t Type) (ok bool) {
+	if t == nil {
+		return false
+	}
+	switch u := SafeUnderlying(t).(type) {
+	case *Basic:
+		return u.Kind != UnsafePointer && u.Info&IsString == 0
+	case *Array:
+		return rootElemCompactable(u.Elem)
+	case *TCStruct:
+		for i := int32(0); i < u.NumFields(); i++ {
+			f := u.Field(i)
+			if f == nil || !rootElemCompactable(f.Typ) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 func rootMapKind(t Type) (kind, words int32) {
 	if t == nil {
 		return 0, 0
@@ -4321,13 +4347,20 @@ func rootMapKind(t Type) (kind, words int32) {
 	if TextType(t) {
 		return 1, 3
 	}
-	switch SafeUnderlying(t).(type) {
+	switch u := SafeUnderlying(t).(type) {
 	case *Slice:
+		if !rootElemCompactable(u.Elem) {
+			return 9, 0
+		}
 		return 1, 3
 	case *Pointer:
 		return 2, 1
 	case *TCMap, *TCChan, *TCInterface, *Signature:
 		return 9, 0
+	case *Basic:
+		if u.Kind == UnsafePointer {
+			return 2, 1
+		}
 	}
 	return 0, 0
 }

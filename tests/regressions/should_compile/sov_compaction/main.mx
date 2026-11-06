@@ -5,14 +5,31 @@
 // as if a bitmap were a descriptor, dropped every block nested under a
 // receiver root, and the next method call faulted on the unmapped old arena.
 //
-// The cycle the fixture forces: 40000 Add calls grow the receiver's data arena
-// past a region boundary. Add leaves one dead Named per overwritten key and the
-// push growth leaves dead item backings, so the method-boundary ratchet queues
-// a compaction; the select then drains the queue. Sum counts both the linked
-// chain and the items slice, so the expected value is 2*sum.
+// Four things are pinned here:
+//   (a) live data intact across a compaction (chain, items slice, map value);
+//   (b) the live set is relocated (FirstAddr changes);
+//   (c) a frame holding a kind-9 root (a map) refuses the whole drain, and the
+//       refusal is counted instead of being silent;
+//   (d) an allocation between two copy steps cancels the paused cycle rather
+//       than letting it finish over a stale forwarding map.
 package main
 
-import "tests/regressions/should_compile/sovereign_arena/lib"
+import (
+	"runtime"
+	"tests/regressions/should_compile/sovereign_arena/lib"
+)
+
+// refuseFrame has a map local before its select, so the frame's root map holds
+// a kind-9 root and the drain must decline to compact anything at that point.
+func refuseFrame() (ok bool) {
+	m := map[int32]int32{}
+	m[1] = 2
+	select {
+	case <-shutdown:
+	default:
+	}
+	return runtime.SovRefusals() > 0 && runtime.SovCompactions() == 0
+}
 
 func main() {
 	// Termination: a batch program must still be stoppable.
@@ -29,28 +46,68 @@ func main() {
 		s.Add("k", i)
 		sum += i
 	}
-	before := s.Sum()
-	if before != 2*sum {
+	// Sum counts the linked chain and the items slice, so 2*sum.
+	if s.Sum() != 2*sum {
 		panic("live data wrong before compaction")
 	}
+	before := s.FirstAddr()
 
-	// Every select is the idle boundary: it drains the sovereign compaction
-	// queue with no receiver borrowed.
+	// (c) A kind-9 frame refuses the drain; the queued group must stay queued.
+	if !refuseFrame() {
+		panic("kind-9 frame did not refuse compaction")
+	}
+
+	// (d) A one-byte budget starts a cycle and pauses it after one move.
+	runtime.SovSetCopyBudget(1)
 	select {
 	case <-shutdown:
 		return
 	default:
 	}
+	if runtime.SovCompactions() != 0 {
+		panic("cycle finished under a one-byte budget")
+	}
+	if runtime.SovPendingCompactions() == 0 {
+		panic("no cycle left queued")
+	}
 
+	// An allocation lands in the old arena between steps. The forwarding map
+	// does not contain it, so the next drain must cancel the cycle.
+	s.Add("k", 7)
+	sum += 7
+	select {
+	case <-shutdown:
+		return
+	default:
+	}
+	if runtime.SovCancels() == 0 {
+		panic("allocation between steps did not cancel the cycle")
+	}
+	if s.Sum() != 2*sum {
+		panic("live data lost when the cycle was cancelled")
+	}
+
+	// (a) and (b): with no budget the queued group compacts to completion.
+	runtime.SovSetCopyBudget(0)
+	select {
+	case <-shutdown:
+		return
+	default:
+	}
+	if runtime.SovCompactions() == 0 {
+		panic("compaction did not complete")
+	}
 	got := s.Sum()
 	println("want:", 2*sum, "got:", got, "key:", s.KeyName("k"))
 	if got != 2*sum {
 		panic("live data lost across compaction")
 	}
-	// The map entry overwritten 39999 times must still resolve to its last
-	// value through the compacted bucket array.
 	if s.KeyName("k") != "k" {
 		panic("map value lost across compaction")
+	}
+	after := s.FirstAddr()
+	if after == 0 || after == before {
+		panic("live data was not relocated")
 	}
 	println("sov compaction ok")
 }

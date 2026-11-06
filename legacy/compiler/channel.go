@@ -746,17 +746,46 @@ type selectRootMap struct {
 	total int64
 }
 
+// sliceElemCompactable reports whether a slice's backing array can move with
+// nothing inside it needing a rewrite: every element is pointer-free. A slice
+// of strings, pointers, maps, channels, interfaces or functions needs its
+// elements rewritten, and the root map does not carry an element descriptor,
+// so such a slice refuses the frame (kind 9) instead.
+func sliceElemCompactable(t types.Type) bool {
+	switch u := t.Underlying().(type) {
+	case *types.Basic:
+		return u.Kind() != types.UnsafePointer && u.Info()&types.IsString == 0
+	case *types.Array:
+		return sliceElemCompactable(u.Elem())
+	case *types.Struct:
+		for i := 0; i < u.NumFields(); i++ {
+			if !sliceElemCompactable(u.Field(i).Type()) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 func selectRootKind(t types.Type) (kind int32, words int64) {
-	switch t.Underlying().(type) {
+	switch u := t.Underlying().(type) {
 	case *types.Slice:
+		if !sliceElemCompactable(u.Elem()) {
+			return 9, 0
+		}
 		return 1, 3
 	case *types.Pointer:
 		return 2, 1
 	case *types.Map, *types.Chan, *types.Interface, *types.Signature:
 		return 9, 0
-	}
-	if b, ok := t.Underlying().(*types.Basic); ok && b.Info()&types.IsString != 0 {
-		return 1, 3
+	case *types.Basic:
+		if u.Info()&types.IsString != 0 {
+			return 1, 3
+		}
+		if u.Kind() == types.UnsafePointer {
+			return 2, 1
+		}
 	}
 	return 0, 0
 }

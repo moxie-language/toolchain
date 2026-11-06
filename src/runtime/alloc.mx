@@ -102,6 +102,7 @@ const arenaDefaultRegion = uintptr(64) * 1024 * 1024 // 64MB chain regions
 type Arena struct {
 	nregions  int32
 	sovereign int32 // nonzero: sovereign data arena (records allocations)
+	compacting int32 // nonzero while a compaction owns this arena's space
 	// growDouble chains overflow regions at twice the active region's capacity
 	// (capped at arenaDefaultRegion) instead of a fixed 64MB. Sovereign group
 	// arenas are created in the hundreds of thousands at a few KB each, and a
@@ -442,6 +443,16 @@ type sovGroup struct {
 	escaped  bool // an exterior holder was handed a stable pointer: never compact
 	released bool // group's arenas are freed; skip it in every scan
 	compacting bool // set during copy-compact: ArenaAlloc skips auto-record
+	// A cycle paused between copy steps. The group's data still lives in
+	// `data`; cycleData holds only copies, and an allocation into `data`
+	// (visible as a longer recs slice) invalidates the forwarding map and
+	// cancels the cycle.
+	cycleActive bool
+	cycleStart  int32
+	cycleNext   int32
+	cycleData   *Arena
+	cycleTbl    *Arena
+	cycleOrder  []*sovRecord // live records in the order the plan copied them
 	recs  []*sovRecord // records in allocation order
 	recsSorted bool     // true when recs are sorted by dataAddr
 	batchStart []int32  // per-batch first-rec index stack (root lifetime)
@@ -524,10 +535,12 @@ func sovRecycleGroup(g *sovGroup) {
 	}
 	sovParkRecs(g)
 	recs := resize(g.recs, 0)
+	order := resize(g.cycleOrder, 0)
 	batches := resize(g.batchStart, 0)
 	slots := resize(g.slots, 0)
 	memzero(unsafe.Pointer(g), unsafe.Sizeof(sovGroup{}))
 	g.recs = recs
+	g.cycleOrder = order
 	g.batchStart = batches
 	g.slots = slots
 	g.pendingNext = sovGroupFreeHead
@@ -808,6 +821,44 @@ func sovGrowSlots(g *sovGroup) {
 var sovPendingHead *sovGroup
 var sovPendingTail *sovGroup
 
+// sovCopyBudgetBytes bounds one copy step. Zero copies the whole live set in
+// one step; a page-scale budget lets a long-lived group's cycle span several
+// selects, which is what makes an allocation between steps possible (and
+// cancellable).
+var sovCopyBudgetBytes uintptr = 1 << 20
+
+var sovCompactions uint64
+var sovRefusals uint64
+var sovCancels uint64
+
+// SovCompactions is how many sovereign groups completed a compaction.
+func SovCompactions() (n uint64) { return sovCompactions }
+
+// SovRefusals is how many drains declined to compact because the selecting
+// frame held a kind-9 root: a pointer-shaped value (map, channel, interface,
+// function) the root map does not trace.
+func SovRefusals() (n uint64) { return sovRefusals }
+
+// SovCancels is how many paused cycles were abandoned because an allocation
+// landed in the arena after the forwarding map was built.
+func SovCancels() (n uint64) { return sovCancels }
+
+// SovPendingCompactions is the number of groups waiting for a safe point.
+func SovPendingCompactions() (n int32) {
+	for g := sovPendingHead; g != nil; g = g.pendingNext {
+		n++
+	}
+	return n
+}
+
+// SovSetCopyBudget sets the bytes one copy step may move. 0 means no limit.
+func SovSetCopyBudget(n int64) {
+	if n < 0 {
+		n = 0
+	}
+	sovCopyBudgetBytes = uintptr(n)
+}
+
 // sovQueueCompact records that g has reached its pressure ratchet and should be
 // compacted at the next safe point. It deliberately does NOT test whether the
 // group is borrowed: the only caller is codecSovereignEndCall, which runs in
@@ -836,21 +887,40 @@ func sovQueueCompact(g *sovGroup) {
 // sovereign arena, or the group belonging to that frame can never be reached.
 // Never mid-allocation.
 //
-// A group whose arena turns out to be borrowed is rotated to the tail rather
-// than dropped: it stays queued, so the next drain retries it, and the groups
-// behind it still make progress.
+// The selecting frame's root map decides whether the frame is compactable at
+// all: a kind-9 root (map, channel, interface, function) is a pointer the map
+// does not trace, so it could name any group's data, and the whole drain is
+// refused and counted. A group whose arena is borrowed is rotated to the tail
+// rather than dropped, so the groups behind it still make progress. A paused
+// cycle resumes here, one copy step per call.
 func SovDrainCompactions(budget int32) (n int32) {
+	if RootMapRefuses() {
+		sovRefusals++
+		return 0
+	}
 	for n < budget {
 		g := sovPendingHead
 		if g == nil {
 			break
 		}
-		sovPendingHead = g.pendingNext
-		if sovPendingHead == nil {
-			sovPendingTail = nil
+		if g.cycleActive {
+			if sovGroupHeld(g) {
+				sovRotatePending(g)
+				break
+			}
+			state := sovCompactStep(g)
+			n++
+			if state == sovCyclePaused {
+				sovRotatePending(g)
+				break
+			}
+			sovDequeuePending(g)
+			if state == sovCycleCancelled {
+				sovQueueCompact(g)
+			}
+			continue
 		}
-		g.pendingNext = nil
-		g.queued = false
+		sovDequeuePending(g)
 		n++
 		if g.released || g.compacting || g.data == nil {
 			continue
@@ -860,8 +930,43 @@ func SovDrainCompactions(budget int32) (n int32) {
 			continue
 		}
 		codecSovereignCompact(g, 0)
+		if g.cycleActive {
+			// The copy step hit its budget; keep the group queued so the next
+			// safe point resumes it.
+			sovQueueCompact(g)
+		}
 	}
 	return
+}
+
+// sovDequeuePending unlinks the head group.
+func sovDequeuePending(g *sovGroup) {
+	if g == nil {
+		return
+	}
+	sovPendingHead = g.pendingNext
+	if sovPendingHead == nil {
+		sovPendingTail = nil
+	}
+	g.pendingNext = nil
+	g.queued = false
+}
+
+// sovRotatePending moves the head group to the tail. Used for a group that
+// cannot be compacted right now, so the groups behind it still progress.
+func sovRotatePending(g *sovGroup) {
+	if g == nil || sovPendingHead != g {
+		return
+	}
+	sovPendingHead = g.pendingNext
+	if sovPendingHead == nil {
+		sovPendingTail = nil
+		g.pendingNext = nil
+		return
+	}
+	sovPendingTail.pendingNext = g
+	sovPendingTail = g
+	g.pendingNext = nil
 }
 
 // Sovereign data arena pool. A sovereign arena is created per group and freed
@@ -1539,6 +1644,50 @@ func sovFullMark(g *sovGroup) {
 	// its memory behind, and the invalidation walk then freed the group whose
 	// data arena the running frame was still allocating into.
 	sovMarkBorrowedReceivers(g)
+	// The frame that is parked in the select published its pointer slots; they
+	// are roots even when only the frame names the block.
+	sovMarkFrameRoots(g)
+}
+
+// sovMarkFrameRoots marks what the selecting frame's root map names. A slice
+// root contributes its backing block (the map publishes a slice root only when
+// its element type holds no pointers); a pointer root contributes the block it
+// points at, which the record walker then follows.
+func sovMarkFrameRoots(g *sovGroup) {
+	p := uintptr(RootMapCurrent())
+	if p == 0 {
+		return
+	}
+	n := int32(rootWord(p, 0))
+	base := int32(1) + 3*n
+	for i := int32(0); i < n; i++ {
+		k := int32(rootWord(p, 1+3*i))
+		if k != rootKindSlice && k != rootKindPtr {
+			continue
+		}
+		off := int32(rootWord(p, 2+3*i))
+		sovMarkBlock(g, unsafe.Pointer(rootWord(p, base+off)))
+	}
+}
+
+// sovRebaseFrameRoots writes the relocated value of every root back into the
+// map array; the compiler reloads those slots after the select returns.
+func sovRebaseFrameRoots(g *sovGroup, nd *Arena) {
+	p := uintptr(RootMapCurrent())
+	if p == 0 {
+		return
+	}
+	n := int32(rootWord(p, 0))
+	base := int32(1) + 3*n
+	for i := int32(0); i < n; i++ {
+		k := int32(rootWord(p, 1+3*i))
+		if k != rootKindSlice && k != rootKindPtr {
+			continue
+		}
+		off := int32(rootWord(p, 2+3*i))
+		v := rootWord(p, base+off)
+		rootSetWord(p, base+off, uintptr(sovRebasePtr(g, v, nd)))
+	}
 }
 
 // sovMarkReceiverRoots marks everything reachable from one sovereign receiver.
@@ -1737,28 +1886,97 @@ func sovBorrowedReceiverIn(g *sovGroup) (ok bool) {
 	return false
 }
 
-// codecSovereignCompact copy-compacts the group's live data into a fresh
-// arena (live data shifted together at the front; tail becomes free),
-// rebuilding the allocation map and rewriting interior pointers.
+// Sovereign compaction is copy-compaction into a fresh arena: the live set is
+// shifted together at the front of a new, smaller arena, the records and
+// interior pointers are rebuilt, and the old arena is released. The cycle can
+// pause between copy steps so an event loop keeps dispatching (the forwarding
+// map is complete before any byte moves, and the old arena stays authoritative
+// until the switch), but the copy itself writes only the new arena, so a pause
+// never leaves a half-rewired graph.
+//
+// An allocation into the old arena between steps makes the forwarding map
+// stale: the new block is not in it, so finishing would leave it behind and
+// free the arena it lives in. The first step after such an allocation cancels
+// the cycle instead, and the group is queued for a fresh mark later.
+
+const (
+	sovCyclePaused    = int32(0)
+	sovCycleDone      = int32(1)
+	sovCycleCancelled = int32(2)
+)
+
+// sovCycleAbort drops a paused cycle's copies. Nothing the receiver can see
+// lives in cycleData yet, so the group is exactly where it was.
+func sovCycleAbort(g *sovGroup) {
+	if g == nil || !g.cycleActive {
+		return
+	}
+	if g.cycleData != nil {
+		ArenaFree(g.cycleData)
+		g.cycleData = nil
+	}
+	if g.cycleTbl != nil {
+		sovReleaseArena(g.cycleTbl)
+		g.cycleTbl = nil
+	}
+	if g.data != nil {
+		g.data.compacting = 0
+	}
+	g.cycleOrder = resize(g.cycleOrder, 0)
+	g.cycleActive = false
+	g.cycleStart = 0
+	g.cycleNext = 0
+}
+
+// sovCycleOrder records the live records in one pass, using the root-backed
+// backing the group keeps between cycles.
+func sovCycleOrder(g *sovGroup) {
+	g.cycleOrder = resize(g.cycleOrder, 0)
+	n := int32(len(g.recs))
+	if cap(g.cycleOrder) < n {
+		nc := int32(cap(g.cycleOrder)) * 2
+		if nc < n {
+			nc = n
+		}
+		if nc < 4 {
+			nc = 4
+		}
+		nb := unsafe.Slice((**sovRecord)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(&sovRecord{}))), nc)
+		copy(nb, g.cycleOrder)
+		g.cycleOrder = resize(nb, len(g.cycleOrder))
+	}
+	for i := int32(0); i < n; i++ {
+		if g.recs[i].live {
+			g.cycleOrder = push(g.cycleOrder, g.recs[i])
+		}
+	}
+}
+
+// codecSovereignCompact starts a cycle when none is active, or continues one.
 func codecSovereignCompact(g *sovGroup, needed uintptr) {
 	if g == nil || g.data == nil || g.escaped || g.compacting {
+		return
+	}
+	if g.cycleActive {
+		sovCompactStep(g)
 		return
 	}
 	// A receiver inside this arena whose method is currently executing cannot be
 	// relocated: the running frame holds its address in a register or a local,
 	// and the rebuild pass only rewrites references it can see (this group's
-	// records, the receiver's roots, the fn/stable/manual arena slots). Moving
-	// such a block would leave that frame on retired memory - the crash seen in
-	// the store's WAL replay. SovDrainCompactions tests for this before calling
-	// and leaves the group queued, so returning here means the caller skipped
-	// the test; it is not a permanent opt-out the way `escaped` is.
+	// records, the receiver's roots, the fn/stable/manual arena slots, and the
+	// selecting frame's root map). Moving such a block would leave that frame on
+	// retired memory - the crash seen in the store's WAL replay.
+	// SovDrainCompactions tests for this before calling and leaves the group
+	// queued, so returning here means the caller skipped the test; it is not a
+	// permanent opt-out the way `escaped` is.
 	if sovArenaBorrowed(g.data) || sovBorrowedReceiverIn(g) {
 		return
 	}
 	g.compacting = true
-	// Liveness was deferred by codecSovereignEndCall: recompute the full
-	// live set from the receiver's root fields now that no batch is in
-	// flight.
+	// Liveness was deferred by codecSovereignEndCall: recompute the full live
+	// set from the receiver's root fields and the selecting frame's roots now
+	// that no batch is in flight.
 	sovFullMark(g)
 	live := g.liveBytes
 	newCap := live + g.batchMax + needed + 65536
@@ -1767,8 +1985,7 @@ func codecSovereignCompact(g *sovGroup, needed uintptr) {
 	sovRangeRegister(nd.regions[0].base, nd.regions[0].cap, g)
 	nd.owner = g
 	nt := sovNewArena(65536)
-
-	// Copy pass: relocate live blocks into nd, remember new addresses.
+	// Forward pass: the complete old -> new map, before any byte moves.
 	for i := int32(0); i < int32(len(g.recs)); i++ {
 		rec := g.recs[i]
 		if !rec.live {
@@ -1776,8 +1993,62 @@ func codecSovereignCompact(g *sovGroup, needed uintptr) {
 			continue
 		}
 		np := arenaAllocRaw(nd, align(rec.size))
-		memmove(np, unsafe.Pointer(rec.dataAddr), rec.size)
 		rec.newAddr = uintptr(np)
+	}
+	// The order list holds record identities, so a lookup that sorts g.recs
+	// between steps cannot make the cursor skip or repeat a record.
+	sovCycleOrder(g)
+	g.cycleActive = true
+	g.cycleStart = int32(len(g.recs))
+	g.cycleNext = 0
+	g.cycleData = nd
+	g.cycleTbl = nt
+	g.data.compacting = 1
+	g.compacting = false
+	sovCompactStep(g)
+}
+
+// sovCompactStep copies at most sovCopyBudgetBytes of the live set. It returns
+// sovCyclePaused when there is more to copy, so the caller can dispatch and
+// come back.
+func sovCompactStep(g *sovGroup) (state int32) {
+	if g == nil || !g.cycleActive {
+		return sovCycleDone
+	}
+	if int32(len(g.recs)) != g.cycleStart {
+		// An allocation happened after the forwarding map was built. It is not
+		// in the map, so completing the cycle would leave it in the arena that
+		// is about to be freed.
+		sovCycleAbort(g)
+		sovCancels++
+		return sovCycleCancelled
+	}
+	budget := sovCopyBudgetBytes
+	moved := uintptr(0)
+	for g.cycleNext < int32(len(g.cycleOrder)) {
+		rec := g.cycleOrder[g.cycleNext]
+		g.cycleNext++
+		if !rec.live || rec.newAddr == 0 || rec.newAddr == rec.dataAddr {
+			continue
+		}
+		memmove(unsafe.Pointer(rec.newAddr), unsafe.Pointer(rec.dataAddr), rec.size)
+		moved += rec.size
+		if budget != 0 && moved >= budget {
+			return sovCyclePaused
+		}
+	}
+	sovFinishCompact(g)
+	return sovCycleDone
+}
+
+// sovFinishCompact rewires the group onto the copies and releases the old
+// arena. It must not pause: everything it changes is visible to the receiver.
+func sovFinishCompact(g *sovGroup) {
+	nd := g.cycleData
+	nt := g.cycleTbl
+	if nd == nil || nt == nil {
+		sovCycleAbort(g)
+		return
 	}
 	// Rebase pass: rewrite interior pointers of live blocks (walking the
 	// new copies, translating old addresses via the record table).
@@ -1799,8 +2070,9 @@ func codecSovereignCompact(g *sovGroup, needed uintptr) {
 			sl.dataPtr = sovRebasePtr(g, uintptr(sl.dataPtr), nd)
 		}
 	}
-	// Rewrite the receiver's root fields.
+	// Rewrite the receiver's root fields and the selecting frame's root slots.
 	sovRebaseRoots(g, nd)
+	sovRebaseFrameRoots(g, nd)
 	// Rebuild the record table in the backing it already has. The recs
 	// backing array is root-lifetime: it must never live in g.data, which is
 	// munmapped below, and it must not be reallocated per compaction - a receiver that lives as long as a
@@ -1871,8 +2143,15 @@ func codecSovereignCompact(g *sovGroup, needed uintptr) {
 		}
 	}
 	sovReleaseArena(oldTbl)
+	oldData.compacting = 0
 	ArenaFree(oldData)
-	g.compacting = false
+	g.cycleOrder = resize(g.cycleOrder, 0)
+	g.cycleActive = false
+	g.cycleData = nil
+	g.cycleTbl = nil
+	g.cycleNext = 0
+	g.cycleStart = 0
+	sovCompactions++
 }
 
 // sovRebasePtr rebases a pointer that targeted the old data arena into the
@@ -2039,6 +2318,7 @@ func codecSovereignFree(recv unsafe.Pointer) {
 		g.ctxArena.sovGroups--
 	}
 	g.ctxArena = nil
+	sovCycleAbort(g)
 	if g.data != nil {
 		sovReleaseArena(g.data)
 	}
