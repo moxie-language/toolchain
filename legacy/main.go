@@ -574,7 +574,13 @@ func main() {
 	printAllocsString := flag.String("print-allocs", "", "regular expression of functions for which arena allocations should be printed (needs -tags alloc_trace for the runtime to count them)")
 	printCommands := flag.Bool("x", false, "Print commands")
 	flagJSON := flag.Bool("json", false, "print output in JSON format")
-	parallelism := flag.Int("p", runtime.GOMAXPROCS(0), "the number of build jobs that can run in parallel")
+	defaultParallelism := runtime.GOMAXPROCS(0)
+	if v := os.Getenv("MOXIE_JOBS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 64 {
+			defaultParallelism = n
+		}
+	}
+	parallelism := flag.Int("p", defaultParallelism, "the number of build jobs that can run in parallel")
 	nodebug := flag.Bool("no-debug", false, "strip debug information")
 	nobounds := flag.Bool("nobounds", false, "do not emit bounds checks")
 	cover := flag.Bool("cover", false, "record per-block test coverage (writes <output>.cover_sites.json and dumps counters at exit)")

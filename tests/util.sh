@@ -24,6 +24,10 @@ NC='\033[0m'
 
 # Same policy as run.sh: artifacts in the tree's ./tmp, never /tmp, which is
 # wiped between sessions here.
+# Serial LLVM codegen unless the caller says otherwise: each build is one
+# llc-per-package pool, so parallel test jobs multiply the load.
+export MOXIE_JOBS="${MOXIE_JOBS:-1}"
+
 STATUSFILE="${STATUSFILE:-$MOXIEROOT/tmp/moxie-test-status-$$}"
 # Outside the tree on purpose: a fixture inside the tree is not a user package,
 # so the restriction rules would not fire (see run.sh).

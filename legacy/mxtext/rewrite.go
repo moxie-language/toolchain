@@ -370,6 +370,10 @@ func RewriteShutdown(src []byte, fset *token.FileSet) RewriteResult {
 			switch toks[i-1].tok {
 			case token.PERIOD, token.VAR, token.TYPE, token.FUNC:
 				continue
+			// A method declaration - `func (r T) shutdown(...)` - ends its
+			// receiver with ')'. A value use never follows ')' directly.
+			case token.RPAREN:
+				continue
 			}
 		}
 		if i+1 < len(toks) {

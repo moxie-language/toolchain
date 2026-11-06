@@ -186,6 +186,16 @@ const workerMemBudget = int64(4 * 1024 * 1024 * 1024)
 // uses at most half of the currently available physical memory. The -j flag
 // overrides; the TLS probe may force it down to 1.
 func adaptiveJobs() (n int32) {
+	// MOXIE_JOBS pins the codegen pool. One llc per package is the load unit,
+	// and a test suite that runs two builds at once multiplies it; the
+	// environment lever keeps that decision in one place instead of at every
+	// call site.
+	if v := getenv("MOXIE_JOBS"); v != "" {
+		n = parseJobsEnv(v)
+		if n > 0 {
+			return n
+		}
+	}
 	nproc := cNproc()
 	if nproc < 1 {
 		nproc = 1
@@ -205,6 +215,25 @@ func adaptiveJobs() (n int32) {
 		}
 	}
 	return jobs
+}
+
+// parseJobsEnv reads MOXIE_JOBS: digits only, 1..64, zero means "not a
+// usable value" so the caller falls back to the heuristic.
+func parseJobsEnv(v string) (n int32) {
+	for i := int32(0); i < int32(len(v)); i++ {
+		c := v[i]
+		if c < '0' || c > '9' {
+			return 0
+		}
+		n = n*10 + int32(c-'0')
+		if n > 64 {
+			n = 64
+		}
+	}
+	if n < 1 {
+		return 0
+	}
+	return n
 }
 
 // llcMemBudget is the memory one object compile is allowed: measured peak RSS

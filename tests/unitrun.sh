@@ -49,7 +49,7 @@ RUNDIR="${UNITRUN_DIR:-$ROOT/tmp/unitrun}"
 # driver's own results stay in the tree (they are what a later reader wants);
 # only the throwaway build dirs go outside it.
 WORKROOT="${UNITRUN_WORKROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/moxie-unitrun}"
-JOBS="${UNITRUN_JOBS:-4}"
+JOBS="${UNITRUN_JOBS:-1}"
 # The default is per CORE, not a flat wall-clock number: a unit's wall time is
 # what it costs divided by how many other units are competing for the CPU with
 # it, so the same fixture needs several times as long at -j 4 as at -j 1, and a
