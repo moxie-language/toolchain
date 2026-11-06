@@ -20,17 +20,22 @@ run_one() {
 	unit_begin
 	td="$UNIT_WORK/pkg"
 	mkdir -p "$td"
+	hdr="$fixture"
 	if [ -f "$fixture" ]; then
 		cp "$fixture" "$td/main.mx"
 	else
 		cp "$fixture"/*.mx "$td/" 2>/dev/null
+		hdr="$fixture/main.mx"
 	fi
-	browser_only "$fixture" && skip_run=1
+	browser_only "$hdr" && skip_run=1
 	# A fixture that must die with a named panic: `//:expect-panic <text>` at the
 	# top. A panic cannot be caught inside a fixture (there is no recover), so
 	# the only way to pin the guard is to run it and assert the text - which is
 	# the point: a later simplification cannot drop the check quietly.
-	panic_text="$(sed -n 's|^//:expect-panic ||p' "$fixture" 2>/dev/null | head -1)"
+	# Header lines live on the main file for a directory fixture; sed on the
+	# directory itself exits 4, and util.sh's set -e turned that into "the phase
+	# script died" for every directory fixture.
+	panic_text="$(sed -n 's|^//:expect-panic ||p' "$hdr" 2>/dev/null | head -1)"
 	if [ -n "$panic_text" ]; then
 		if ! MOXIEROOT="$ROOT" "$MOXIE" build -o "$UNIT_WORK/testbin" "$td" >"$UNIT_WORK/build.log" 2>&1; then
 			unit_no "$UNIT_NAME" "build: $(first_error "$UNIT_WORK/build.log")"
