@@ -625,12 +625,12 @@ status 134.
 
 ### 2. The breaker is a signal: `chan struct{}` - CLOSED
 
-- runtime: `spawnBreakerMake` and `SigintChan` make an empty-struct breaker
+- runtime: `spawnBreakerMake` and `ShutdownChan` make an empty-struct breaker
   (`chanMake(0, 1, 0, ...)`); `breakerSendReason`, `breakerReasonMax`,
   `DomainClosed`'s reason frame and both `spawn_wasm`/`pipe_channel` copies are
   gone; `breakerFallback` is one empty slot.
 - both compilers: `isSpawnTargetSig` requires an empty-struct element, the
-  `spawn` default result and `__sigint` are `chan struct{}` (stage4
+  `spawn` default result and `__shutdown` are `chan struct{}` (stage4
   `ssa_builder.mx`, legacy `patch-gotypes.go`), and the error text says so.
 - every target signature in `src/`, `tests/` and `morly` is
   `(closed chan struct{})`; `CLAUDE.md`, `docs/spawn.md` and `CHANGELOG.md`
@@ -24544,13 +24544,13 @@ not re-derived:
 - stage4: the same store into `NamedResults[0]` in the function prologue.
 - both: the spawn rule becomes "the target's signature is exactly
   `(closed chan struct{})`", replacing the no-results check, plus the select
-  requirements - `main` selects on `sigint`, a target selects on `closed`.
+  requirements - `main` selects on `shutdown`, a target selects on `closed`.
 - SIGINT delivery: the handler in `signal.c` currently `_exit`s. It must set a
   flag and wake a futex word the domain parks on (the single-threaded wake
-  word), and `sigint` must be a special word lowering to that wait; then the
+  word), and `shutdown` must be a special word lowering to that wait; then the
   main select can observe it.
 - migration: every spawn target gains `(closed chan struct{})` and its select
-  case, and every `main` gains the `sigint` select (about 120 fixtures in this
+  case, and every `main` gains the `shutdown` select (about 120 fixtures in this
   tree, morly's six targets and its main).
 
 **The breaker is bound, asserted and closed (round 346, second half).**
@@ -24581,7 +24581,7 @@ as a print). Targets migrated: moxie's seven (chanpath, futexpark x2,
 tls_handshake, spawn_frame_budget, spawncost, spawnbytes) and morly's five
 (Broadcast/Proxy/Ingest/Blossom workers, dbengine.Run).
 
-**Still open, unchanged:** `sigint` (main's select) needs the signal handler to
+**Still open, unchanged:** `shutdown` (main's select) needs the signal handler to
 stop `_exit`ing and wake a domain park word; then every main gains the select
 and both compilers enforce it. The value-parameter budget encode is also still
 unwired (the tag walk exists, the pack is a pointer array).
@@ -24607,7 +24607,7 @@ the same class of hang and may share the cause. The full sweep has not been run
 on this compiler.
 
 **Still unimplemented, in order:** the reason-on-close (panic message sent over
-the breaker before the close), the `sigint` half (handler must stop `_exit`ing
+the breaker before the close), the `shutdown` half (handler must stop `_exit`ing
 and wake the domain; every `main` gains the select; both compilers enforce it),
 the select checks for spawn targets, and the value-parameter budget encode.
 
@@ -24670,7 +24670,7 @@ decode of the runtime-encoded `[]byte` does not produce a value. Next probe:
 print the first bytes of the frame at `PipeChanRecvStructural` and the `td`
 kind it decodes with; the likely mismatch is the hand-built
 `RawType{meta: KindBytes}` descriptor versus the compiler's descriptor for
-`[]byte` (which carries `Elem`). Value-parameter budgets, `sigint`, and the full
+`[]byte` (which carries `Elem`). Value-parameter budgets, `shutdown`, and the full
 sweep remain after it.
 
 **The reason arrives, and the exit code leads it.** The last piece was the
@@ -24693,21 +24693,21 @@ prints `len(reason)` instead. That conversion is used all over the tree on
 parameters and fields, so the failing shape is narrower than the operation -
 recorded for a dedicated look.
 
-### Round 348: the sigint attempt, withdrawn
+### Round 348: the shutdown attempt, withdrawn
 
 What was built: a graceful SIGINT in `signal.c` (a handler that only sets a
 `sig_atomic_t`, never `_exit`s), a static termination channel in the runtime
-(`sigintChanStorage`, so no allocation and no global chan store), a
-`SigintChan()` accessor the loader's rewrite could name, and the predeclared
-word `sigint` -> `runtime.SigintChan()` in both rewriters (identifier-only,
+(`shutdownChanStorage`, so no allocation and no global chan store), a
+`ShutdownChan()` accessor the loader's rewrite could name, and the predeclared
+word `shutdown` -> `runtime.ShutdownChan()` in both rewriters (identifier-only,
 skipping strings, backtick raw strings and comments), with the receive path
 special-cased to poll the flag.
 
 What failed: the bootstrap's stage4 self-compile died with "arena: region table
-full" before any sigint code could run - and it kept dying after the
+full" before any shutdown code could run - and it kept dying after the
 `initDomain` hook was removed and after the global chan store was replaced by
 the static-struct accessor. That means the crash is in the *interaction* the
-rewrite introduces (the stage4 compiler's own source contains the word `sigint`
+rewrite introduces (the stage4 compiler's own source contains the word `shutdown`
 in comments and in the new rewrite helper), not in the signal plumbing, and it
 was not diagnosed before the context budget ran out. The whole attempt was
 withdrawn rather than committed: `git checkout` of the six touched files, a
@@ -24715,7 +24715,7 @@ legacy rebuild and a fresh bootstrap put the tree back at fixpoint `88429764`
 with nothing uncommitted.
 
 Next attempt should reproduce it small: compile a one-file program containing
-only `<-sigint` with a legacy-built stage4, and gdb the crash - the region-table
+only `<-shutdown` with a legacy-built stage4, and gdb the crash - the region-table
 panic names the allocation site's return address, which resolves through the
 compiler's own symbol table. The mechanism (flag + poll + static channel + the
 rewrite) is otherwise straightforward and worth keeping in this shape.
@@ -24754,31 +24754,31 @@ declares the breaker result but its body ended in `ln.Close()` with no
 `quickcheck` fails while a change is uncommitted, which is why it reported on
 this round's run before the commit.
 
-Still open, unchanged: `sigint` (main's select) and the value-parameter budget
+Still open, unchanged: `shutdown` (main's select) and the value-parameter budget
 encode, both as described in round 348.
 
-### Round 350: sigint lands (the word, the flag, the poll)
+### Round 350: shutdown lands (the word, the flag, the poll)
 
 Round 348's attempt is not what landed. The failure there was the *rewrite*
 shape, not the signal plumbing, so this round changed the shape:
 
-- `sigint` is lowered to a predeclared **builtin call**, `__sigint()`, and the
+- `shutdown` is lowered to a predeclared **builtin call**, `__shutdown()`, and the
   call is typed `chan []byte` by the same mechanism `__slicealloc` uses. In
-  legacy that is a patched GOROOT (`_Sigint` id in `universe.go`, a case in
-  `builtins.go`'s `check.builtin`); in stage4 it is `BuiltinSigint` in the
+  legacy that is a patched GOROOT (`_Shutdown` id in `universe.go`, a case in
+  `builtins.go`'s `check.builtin`); in stage4 it is `BuiltinShutdown` in the
   universe plus a `buildBuiltinCall` case. The compiler emits
-  `runtime.SigintChan()`, so the word names the domain's channel and nothing
+  `runtime.ShutdownChan()`, so the word names the domain's channel and nothing
   else.
 - The rewrite runs **first**, on the source as written: legacy's
-  `mxtext.RewriteSigint` and stage4's `rewriteSigintWord` scan tokens/bytes,
+  `mxtext.RewriteShutdown` and stage4's `rewriteShutdownWord` scan tokens/bytes,
   skip comments, quoted strings, raw strings and rune literals, match the
-  identifier as a whole word, and leave `x.sigint` and a declaration of the
+  identifier as a whole word, and leave `x.shutdown` and a declaration of the
   name alone. Both later passes (channel literals, slice literals) parse the
   rewritten source as their input, so no offset compensation is needed - which
   is where round 348 went wrong.
 - The runtime creates the channel lazily in the **root arena**
-  (`SigintChan`), so it outlives every frame that selects on it. The C handler
-  does one thing: raise `sig_atomic_t`. `sigintPoll()` closes the channel once,
+  (`ShutdownChan`), so it outlives every frame that selects on it. The C handler
+  does one thing: raise `sig_atomic_t`. `shutdownPoll()` closes the channel once,
   from normal context, and it is called in every point where the domain waits:
   the send loop, the receive loop, and both branches of `chanSelect`'s wait.
   The handler itself never allocates, closes or locks.
@@ -24786,17 +24786,17 @@ shape, not the signal plumbing, so this round changed the shape:
   (`moxie_install_interrupt_handler`, used by the compiler to clean its scratch
   dirs); installing it replaces the graceful disposition. The runtime installs
   the flag handler at startup.
-- wasm defines `sigintPending() = false`: a browser domain is stopped by the
+- wasm defines `shutdownPending() = false`: a browser domain is stopped by the
   host tearing down the Worker, so the channel simply never closes there.
 
-Evidence: a one-file program that parks in `select { case <-sigint: }` prints
-`waiting`, then `sigint`, then `done` when sent SIGINT - compiled by the
+Evidence: a one-file program that parks in `select { case <-shutdown: }` prints
+`waiting`, then `shutdown`, then `done` when sent SIGINT - compiled by the
 legacy-built stage4 AND by the bootstrapped `./moxie`. The self-compile that
 died in round 348 ("arena: region table full") now completes, and the bootstrap
 reaches fixpoint `dd4a0c92` (s2 == s3). `tests/restrictions` is 63/63.
 
 Not yet done: the compilers do not yet *enforce* the select (every `main`
-selecting on `sigint`, every spawn target on `closed`), and the tree's mains are
+selecting on `shutdown`, every spawn target on `closed`), and the tree's mains are
 not migrated to it, so the word is available but unused. Enforcing before the
 migration would break every fixture, so enforcement and migration are one
 change. The value-parameter budget encode is still unwired.
@@ -24823,7 +24823,7 @@ are re-run separately rather than as part of one timed run.
 
 ### Round 352: phase sweep findings
 
-Phase 2 (selfhost), 3 (IR validate) and 4 (binary smoke) pass on the sigint
+Phase 2 (selfhost), 3 (IR validate) and 4 (binary smoke) pass on the shutdown
 compiler. Two fixture faults surfaced and are fixed:
 
 - `tests/data/futexpark/main.mx`'s `deadWorker` declares the breaker result and
@@ -24841,7 +24841,7 @@ Phase 1c (wasm package builds) is green after round 351's `ptrSize` fix -
 
 ### Round 353: gate state at v1.0.0-rc.0
 
-Green on the sigint compiler (fixpoint `dd4a0c92`, plus the two native-neutral
+Green on the shutdown compiler (fixpoint `dd4a0c92`, plus the two native-neutral
 commits after it - a wasm-only runtime file and a test fixture):
 
     0a  124/124      0b  64/64       1   4/4        1b  1/1
@@ -24986,7 +24986,7 @@ codegen rule.
 Both compilers now refuse a program that cannot be stopped:
 
 - **the program entry** (the `main` function of the package named `main`, not
-  the runtime's `runtime.main`) must select on `sigint`;
+  the runtime's `runtime.main`) must select on `shutdown`;
 - **every spawn target** must select on its own `closed` breaker.
 
 Legacy checks both in `createFunction`/`createSpawn`. Stage4 checks them in a
@@ -25015,7 +25015,7 @@ Two limits, both deliberate and recorded:
   not migrated: they are expected to fail, and the gate pins the message each
   one must fail with. The sweep checks that the pinned messages still win.
 
-Evidence: `mxc-sel3` refuses a plain `main` ("main must select on sigint") and a
+Evidence: `mxc-sel3` refuses a plain `main` ("main must select on shutdown") and a
 target whose loop only receives ("spawn: worker never selects on its closed
 breaker"), accepts the migrated pair (which runs and prints `handled 5`), and
 builds both the compiler itself and morly.
@@ -25150,13 +25150,13 @@ the `closed` result at all - so `createFunction`'s binding (which looks for an
 nothing, and a legacy-built child's `<-closed` arm is dead. stage4's
 `bindSpawnClosed` binds the named-result alloca and is correct; the shipping
 compiler is stage4, and the bootstrap only uses legacy to build it (whose own
-entry point reads `sigint`, not `closed`), so the impact is a legacy-built
+entry point reads `shutdown`, not `closed`), so the impact is a legacy-built
 application, not the toolchain.
 
 The legacy check does not judge what it cannot see (a result the builder never
 materialized), and the defect is recorded here as the next legacy task: either
 materialize the result alloca for a named result the body reads, or bind the
-breaker by a builtin like `__sigint()` instead of by an alloca comment.
+breaker by a builtin like `__shutdown()` instead of by an alloca comment.
 
 ### Round 364: the narrow `string([]byte)` cast bug does not reproduce
 

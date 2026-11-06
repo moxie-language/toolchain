@@ -1,6 +1,6 @@
 #include <signal.h>
 
-int siginterrupt(int sig, int flag)
+int shutdownerrupt(int sig, int flag)
 {
 	struct sigaction sa;
 

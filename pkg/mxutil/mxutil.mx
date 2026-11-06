@@ -638,17 +638,18 @@ func IsRemotePath(path string) (ok bool) {
 // loud, so a spread push needs Ensure(s, len(src)): the older
 // `if len(s) >= cap(s) { GrowCap(s) }` idiom only reserves ONE element and
 // panics for any longer spread.
-// headerForeign reports whether a slice header names //:linkdata storage, whose
-// length is fixed at build time. cap() reports len for such a slice (the
-// 0 <= len <= cap invariant holds), so the sentinel lives only in the raw
-// capacity word, and the growth helpers check it there before doing arithmetic
-// that would allocate over a symbol the program does not own.
-func headerForeign(hdr unsafe.Pointer) (ok bool) {
+// Growable reports whether a slice's storage may be grown. It is the ONE
+// predicate that reads the raw capacity word: cap() reports len for a
+// //:linkdata slice (the 0 <= len <= cap invariant holds), so the sentinel is
+// invisible to generic code, and a growth path that invented its own test would
+// make the storage classes uncountable. Every growth helper calls this.
+func Growable[T comparable](s []T) (ok bool) {
+	hdr := unsafe.Pointer(&s)
 	if hdr == nil {
 		return false
 	}
 	capWord := (*uintptr)(unsafe.Pointer(uintptr(hdr) + 2*unsafe.Sizeof(uintptr(0))))
-	return *capWord == ^uintptr(0)
+	return *capWord != ^uintptr(0)
 }
 
 func sliceFixedPanic() {
@@ -656,7 +657,7 @@ func sliceFixedPanic() {
 }
 
 func Ensure[T comparable](s []T, n int32) (r0 []T) {
-	if headerForeign(unsafe.Pointer(&s)) {
+	if !Growable(s) {
 		sliceFixedPanic()
 	}
 	if n <= 0 || cap(s)-len(s) >= n {
@@ -681,7 +682,7 @@ func Ensure[T comparable](s []T, n int32) (r0 []T) {
 // unlike Ensure it leaves no doubling slack, and an arena is never reused
 // within a frame, so slack is spent space rather than spare space.
 func Reserve[T comparable](s []T, total int32) (r0 []T) {
-	if headerForeign(unsafe.Pointer(&s)) {
+	if !Growable(s) {
 		sliceFixedPanic()
 	}
 	if total <= cap(s) {
@@ -693,7 +694,7 @@ func Reserve[T comparable](s []T, total int32) (r0 []T) {
 }
 
 func GrowCap[T comparable](s []T) (r0 []T) {
-	if headerForeign(unsafe.Pointer(&s)) {
+	if !Growable(s) {
 		sliceFixedPanic()
 	}
 	if len(s) < cap(s) {

@@ -81,7 +81,7 @@ func main() {
 	patchPtrRecvMethodSet(dstDir)
 	patchArrayCapNegative(dstDir)
 	patchChanFrameBudget(dstDir)
-	patchSigintBuiltin(dstDir)
+	patchShutdownBuiltin(dstDir)
 
 	fmt.Fprintf(os.Stderr, "patched go/types in %s\n", dstDir)
 }
@@ -811,21 +811,21 @@ func patchChanFrameBudget(dir string) {
 	mustWrite(f, src)
 }
 
-// patchSigintBuiltin adds the __sigint builtin: the call that names the
-// domain's termination channel, which the predeclared word `sigint` is lowered
+// patchShutdownBuiltin adds the __shutdown builtin: the call that names the
+// domain's termination channel, which the predeclared word `shutdown` is lowered
 // to. It is a zero-argument expression returning chan struct{} - the same handle
 // on both sides, so a select arm and a direct receive see the same close.
-func patchSigintBuiltin(dir string) {
+func patchShutdownBuiltin(dir string) {
 	f := filepath.Join(dir, "universe.go")
 	src := mustRead(f)
 
 	src = mustReplace(f, src,
 		"\t_Resize\n\n\t// package unsafe",
-		"\t_Resize\n\t_Sigint\n\n\t// package unsafe")
+		"\t_Resize\n\t_Shutdown\n\n\t// package unsafe")
 
 	src = mustReplace(f, src,
 		"\t_Resize:  {\"resize\", 2, false, statement},",
-		"\t_Resize:  {\"resize\", 2, false, statement},\n\t_Sigint:  {\"__sigint\", 0, false, expression},")
+		"\t_Resize:  {\"resize\", 2, false, statement},\n\t_Shutdown:  {\"__shutdown\", 0, false, expression},")
 
 	mustWrite(f, src)
 
@@ -834,13 +834,13 @@ func patchSigintBuiltin(dir string) {
 
 	src = mustReplace(f, src,
 		"\tcase _Recover:\n\t\t// recover() string",
-		`	case _Sigint:
-		// __sigint() chan struct{}: the domain's termination channel, closed
+		`	case _Shutdown:
+		// __shutdown() chan struct{}: the domain's termination channel, closed
 		// when the process is told to stop. The handle is the runtime's, so
 		// every call names the same channel; the element is the empty struct
 		// because the close is the whole message.
 		if nargs != 0 {
-			check.errorf(call, WrongArgCount, invalidOp+"__sigint takes no arguments")
+			check.errorf(call, WrongArgCount, invalidOp+"__shutdown takes no arguments")
 			return
 		}
 		x.mode = value

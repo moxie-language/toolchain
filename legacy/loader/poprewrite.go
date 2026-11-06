@@ -17,9 +17,16 @@ import (
 // type-check, so the checker and the SSA builder only ever see the resize
 // builtin, which already has the statement store-back. Stage4's front end
 // implements the same shrink directly (emitPopShrink).
-func rewritePopStatements(files []*ast.File) (n int) {
+func rewritePopStatements(files []*ast.File) (n int, remaining []token.Pos) {
 	for _, f := range files {
 		ast.Inspect(f, func(node ast.Node) bool {
+			// Any pop call still in the tree after the statement rewrite is an
+			// expression pop, which no longer exists: pop is a statement.
+			if call, isCall := node.(*ast.CallExpr); isCall {
+				if fun, isIdent := call.Fun.(*ast.Ident); isIdent && fun.Name == "pop" {
+					remaining = append(remaining, call.Pos())
+				}
+			}
 			blk, ok := node.(*ast.BlockStmt)
 			if !ok {
 				return true
@@ -61,7 +68,7 @@ func rewritePopStatements(files []*ast.File) (n int) {
 			return true
 		})
 	}
-	return n
+	return n, remaining
 }
 
 // assignableExpr reports whether e can appear on the left of an assignment,

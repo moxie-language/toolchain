@@ -115,8 +115,9 @@ allocated it. That garbage is reclaimed by the arena, not refused: a function
 frame releases it at return, a sovereign arena records it dead and compaction
 reclaims it, and only init code can grow in the root arena (once). The ONE
 exception is storage the program does not own: a `//:linkdata` binding carries
-the all-ones capacity (cap reads -1) and push/pop/resize panic there, because
-writing past the external symbol is corruption. Growth is always available;
+the all-ones sentinel in the raw capacity word (`cap` reports its length, so
+0 <= len <= cap holds; use `slices.Growable`), and push/pop/resize panic there,
+because writing past the external symbol is corruption. Growth is always available;
 what growth costs is peak arena until the arena is released or compacted.
 
 Choose by how the final size is known:
@@ -351,8 +352,8 @@ Moxie has no such bookkeeping to dodge.
   still the fast shape when the size is known - one allocation, no abandoned
   backing - but it is a discipline, not a requirement. `pop(s)` removes the
   last element and `pop(s, xs...)` removes len(xs) elements, both as
-  statements; in expression position `pop(s)` returns the last element and
-  does not shrink.
+  statements. There is no expression form: `s[len(s)-1]` is the read and
+  `s[len(s)-1:]` is the copy.
 - **Slices compare with `==` / `!=`.** With no reflect and no empty interface,
   that is the comparison there is.
 - **`string` and `[]byte` are one type.** `len`, indexing, slicing and
@@ -579,18 +580,21 @@ target writes its breaker as a special word:
         }
     }
 
-**`sigint` is the other entry point's channel.** `main` selects on `sigint`
+**`shutdown` is the other entry point's channel.** `main` selects on `shutdown`
 (SIGINT from the shell, SIGTERM from a supervisor); a spawn target selects on
 `closed` (the parent's close, which also happens when the parent's process
-ends, because a domain thread cannot outlive it). Both are predeclared words, and neither is `close`: `close(ch)` stays the
-builtin. `sigint` is a `chan struct{}` the runtime owns, one per domain: it is
-created on first use in the root arena (`SigintChan`), so it outlives every
+ends, because a domain thread cannot outlive it). The close is a platform hook:
+the hosted runtime calls `RequestShutdown` when the stop signal's flag is seen,
+a kernel module calls it from module_exit, a wasm worker from its teardown
+message - the channel is the same primitive as the domain breaker. Both are predeclared words, and neither is `close`: `close(ch)` stays the
+builtin. `shutdown` is a `chan struct{}` the runtime owns, one per domain: it is
+created on first use in the root arena (`ShutdownChan`), so it outlives every
 frame that selects on it. Like `closed`, it is a signal and is only ever closed.
 
 The signal handler does ONE thing - raise a flag. It may interrupt an
 allocation, a channel operation or a held lock, so it must not allocate, close
 a channel or take a lock. Every point where the domain waits (the send, receive
-and select park loops) polls the flag and closes `sigint` there, in normal
+and select park loops) polls the flag and closes `shutdown` there, in normal
 context; a select arm on it then fires like an arm on any closed channel, and a
 direct receive returns. A program that wants its own cleanup on the way out can
 still ask for the immediate path (`moxie_install_interrupt_handler`), which

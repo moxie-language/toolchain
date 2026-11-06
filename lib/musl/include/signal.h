@@ -240,7 +240,7 @@ int killpg(pid_t, int);
 int sigaltstack(const stack_t *__restrict, stack_t *__restrict);
 int sighold(int);
 int sigignore(int);
-int siginterrupt(int, int);
+int shutdownerrupt(int, int);
 int sigpause(int);
 int sigrelse(int);
 void (*sigset(int, void (*)(int)))(int);

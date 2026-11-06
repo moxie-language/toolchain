@@ -324,17 +324,17 @@ func RewriteChanLiterals(src []byte, fset *token.FileSet) RewriteResult {
 // 1a. Termination word rewrite (text-level, before parsing)
 // ---------------------------------------------------------------------------
 
-// RewriteSigint lowers the predeclared word sigint - the domain's termination
-// channel - to the call that names it, __sigint(). It runs FIRST, on the source
+// RewriteShutdown lowers the predeclared word shutdown - the domain's termination
+// channel - to the call that names it, __shutdown(). It runs FIRST, on the source
 // as written, so the channel and slice passes that follow parse its output and
 // need no offset compensation.
 //
 // The scan is token-aware: a scanner yields an IDENT only for real code, so the
 // word inside a string, a rune literal or a comment is never touched, and a
-// field named sigint (x.sigint) is left alone. A declaration of the name is
+// field named shutdown (x.shutdown) is left alone. A declaration of the name is
 // left alone too (the next token is a type), because the word is predeclared
 // and a shadowing declaration is a source error the parser reports.
-func RewriteSigint(src []byte, fset *token.FileSet) RewriteResult {
+func RewriteShutdown(src []byte, fset *token.FileSet) RewriteResult {
 	type tok struct {
 		pos, end int
 		tok      token.Token
@@ -363,7 +363,7 @@ func RewriteSigint(src []byte, fset *token.FileSet) RewriteResult {
 	var result bytes.Buffer
 	lastEnd := 0
 	for i, t := range toks {
-		if t.tok != token.IDENT || t.lit != "sigint" {
+		if t.tok != token.IDENT || t.lit != "shutdown" {
 			continue
 		}
 		if i > 0 {
@@ -379,7 +379,7 @@ func RewriteSigint(src []byte, fset *token.FileSet) RewriteResult {
 			}
 		}
 		result.Write(src[lastEnd:t.pos])
-		result.WriteString("__sigint()")
+		result.WriteString("__shutdown()")
 		lastEnd = t.end
 	}
 	if lastEnd == 0 {

@@ -14,7 +14,7 @@ These are the contract. Changing one of them is a major release, not a minor.
   `select` semantics, package variables immutable outside `init()`.
 - **The spawn contract.** A spawn target returns exactly one named
   `closed chan struct{}`; the breaker is a signal and a close is the whole
-  event; `sigint` is the domain's termination channel; a channel is a mailbox
+  event; `shutdown` is the domain's termination channel; a channel is a mailbox
   with the depth its declaration states; a channel declaration's `cap` tags are
   the frame budget; `spawn` passes values copied and channels shared.
 - **The wire formats.** The structural codec is the portable format for pipes,

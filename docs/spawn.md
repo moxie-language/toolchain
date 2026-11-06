@@ -72,7 +72,7 @@ func worker(n moxie.Int32, scale moxie.Float64) (closed chan struct{}) {
 
 func main() {
     select {
-    case <-sigint:
+    case <-shutdown:
         return
     default:
     }
@@ -114,4 +114,4 @@ Each domain has its own arena stack. There is no GC; a domain's arenas are relea
 
 ## JS Implementation
 
-Each domain is a dedicated Worker driving a WebAssembly instance, with spawn channels carried on SharedArrayBuffer-backed rings. `sigint` never fires in a Worker; a browser module is stopped by the host tearing down the Worker. A panic posts its message to the page as stderr, and the page stops every domain it spawned - the browser counterpart of one process aborting.
+Each domain is a dedicated Worker driving a WebAssembly instance, with spawn channels carried on SharedArrayBuffer-backed rings. `shutdown` never fires in a Worker; a browser module is stopped by the host tearing down the Worker. A panic posts its message to the page as stderr, and the page stops every domain it spawned - the browser counterpart of one process aborting.

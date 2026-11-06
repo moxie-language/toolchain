@@ -124,8 +124,8 @@ func hasMoxieSecallocRefs(files []*ast.File) bool {
 	return mxtext.HasMoxieSecallocRefs(files)
 }
 
-func rewriteSigintWord(src []byte, fset *token.FileSet) mxtext.RewriteResult {
-	return mxtext.RewriteSigint(src, fset)
+func rewriteShutdownWord(src []byte, fset *token.FileSet) mxtext.RewriteResult {
+	return mxtext.RewriteShutdown(src, fset)
 }
 
 func rewriteChanLiterals(src []byte, fset *token.FileSet) mxtext.RewriteResult {

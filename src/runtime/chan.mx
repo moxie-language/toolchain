@@ -456,7 +456,7 @@ func chanSend(ch *channel, value unsafe.Pointer, op *channelOp) {
 	// Wait until a receiver picks up the value.
 	if !hasScheduler {
 		for t.DataUint32() == chanOperationWaiting {
-			sigintPoll()
+			shutdownPoll()
 			if hasPoll {
 				netpollBlock(100)
 			} else {
@@ -465,7 +465,7 @@ func chanSend(ch *channel, value unsafe.Pointer, op *channelOp) {
 			fireTimers()
 		}
 	} else {
-		sigintPoll()
+		shutdownPoll()
 		task.Pause()
 	}
 
@@ -550,7 +550,7 @@ func chanRecv(ch *channel, value unsafe.Pointer, op *channelOp) bool {
 	// Wait until a sender provides a value.
 	if !hasScheduler {
 		for t.DataUint32() == chanOperationWaiting {
-			sigintPoll()
+			shutdownPoll()
 			if hasPoll {
 				netpollBlock(100)
 			} else {
@@ -559,7 +559,7 @@ func chanRecv(ch *channel, value unsafe.Pointer, op *channelOp) bool {
 			fireTimers()
 		}
 	} else {
-		sigintPoll()
+		shutdownPoll()
 		task.Pause()
 	}
 
@@ -580,43 +580,56 @@ var DomainClosed *channel
 // result in the function prologue.
 func ClosedBreakerChan() *channel { return DomainClosed }
 
-// sigintChan is the domain's termination channel. The predeclared word `sigint`
+// shutdownChan is the domain's termination channel. The predeclared word `shutdown`
 // names it, so it must outlive every frame that selects on it: it is created on
 // first use in the root arena.
-var sigintChan *channel
+var shutdownChan *channel
 
-// sigintFired records that the termination channel has been closed, so a flag
+// shutdownFired records that the termination channel has been closed, so a flag
 // observed at two poll sites closes once.
-var sigintFired bool
+var shutdownFired bool
 
-// SigintChan is the termination channel; the compiler lowers `sigint` to this
+// ShutdownChan is the termination channel; the compiler lowers `shutdown` to this
 // call. A receive on it fires when the process is told to stop, and a select
 // arm on it runs then like any arm on a closed channel.
-func SigintChan() (ch *channel) {
-	if sigintChan != nil {
-		return sigintChan
+func ShutdownChan() (ch *channel) {
+	if shutdownChan != nil {
+		return shutdownChan
 	}
 	save := CurrentArena()
 	SetCurrentArena(trueRootArena())
-	sigintChan = chanMake(0, 1, 0, nil, 0)
+	shutdownChan = chanMake(0, 1, 0, nil, 0)
 	SetCurrentArena(save)
-	return sigintChan
+	return shutdownChan
 }
 
-// sigintPoll closes the termination channel once the signal handler has raised
+// shutdownPoll closes the termination channel once the signal handler has raised
 // the flag. The handler itself cannot: it may interrupt an allocation, a
 // channel operation or a held lock. Every point where the domain waits calls
 // this, so the close happens in normal context and receivers wake through the
 // ordinary closed-channel path.
-func sigintPoll() {
-	if sigintChan == nil || sigintFired {
+func shutdownPoll() {
+	if shutdownChan == nil || shutdownFired {
 		return
 	}
-	if !sigintPending() {
+	if !shutdownPending() {
 		return
 	}
-	sigintFired = true
-	chanClose(sigintChan)
+	RequestShutdown()
+}
+
+// RequestShutdown closes the termination channel in normal context. It is the
+// other half of the platform hook: the hosted runtime calls it when its stop
+// signal has been raised (shutdownPoll), a kernel module calls it from
+// module_exit, and a wasm worker from its teardown message. The channel exists
+// only if the program asked for it by selecting on `shutdown`; a program that
+// never did has nothing to close.
+func RequestShutdown() {
+	if shutdownChan == nil || shutdownFired {
+		return
+	}
+	shutdownFired = true
+	chanClose(shutdownChan)
 }
 
 // AssertBreaker binds a spawn target's closed result and fails loud when the
@@ -833,7 +846,7 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 			// The termination channel is one of the arms only if the program
 			// selected on it; closing it otherwise is harmless and leaves this
 			// select waiting on the channels it actually named.
-			sigintPoll()
+			shutdownPoll()
 			if hasPipeBound {
 				if pipeSelectRecheck(t, states, recvbuf) {
 					break
@@ -866,7 +879,7 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 			// Same recheck loop for the scheduler.tasks variant. Yields
 			// between checks via Gosched to share the CPU.
 			for t.DataUint32() == chanOperationWaiting {
-				sigintPoll()
+				shutdownPoll()
 				if pipeSelectRecheck(t, states, recvbuf) {
 					break
 				}
@@ -877,7 +890,7 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 				sleepTicks(nanosecondsToTicks(1_000_000))
 			}
 		} else {
-			sigintPoll()
+			shutdownPoll()
 			task.Pause()
 		}
 	}

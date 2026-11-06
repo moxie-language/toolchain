@@ -318,14 +318,14 @@ func (p *Package) parseFile(path string, data []byte, mode parser.Mode) (*ast.Fi
 	data = rewriteMoxiePragmas(data)
 	data = rewritePkgMainToInit(data)
 
-	// The termination word goes first: sigint becomes __sigint(), and the
+	// The termination word goes first: shutdown becomes __shutdown(), and the
 	// channel/slice passes below parse that output as their input.
-	sigintResult := rewriteSigintWord(data, p.program.fset)
-	if sigintResult.Err != nil {
-		return nil, sigintResult.Err
+	shutdownResult := rewriteShutdownWord(data, p.program.fset)
+	if shutdownResult.Err != nil {
+		return nil, shutdownResult.Err
 	}
 
-	chanResult := rewriteChanLiterals(sigintResult.Src, p.program.fset)
+	chanResult := rewriteChanLiterals(shutdownResult.Src, p.program.fset)
 	if chanResult.Err != nil {
 		return nil, chanResult.Err
 	}
@@ -432,7 +432,10 @@ func (p *Package) Check() error {
 	// s = resize(s, len(s)-len(xs))). Stage4's front end shrinks in place; this
 	// keeps the legacy pipeline on the same semantics with no builtin special
 	// case in the checker or the SSA builder.
-	rewritePopStatements(p.Files)
+	_, expressionPops := rewritePopStatements(p.Files)
+	if len(expressionPops) > 0 {
+		return fmt.Errorf("%s: pop is a statement: it removes the last element; read it with s[len(s)-1]", p.program.fset.Position(expressionPops[0]))
+	}
 	typesPkg, err := checker.Check(packageName, p.program.fset, p.Files, &p.info)
 
 	// Filter Moxie-specific type errors from the first pass.

@@ -982,11 +982,11 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 	} else if name == "spawn" {
 		e.emitSpawnCall(c)
 		return
-	} else if name == "__sigint" {
+	} else if name == "__shutdown" {
 		// The termination channel belongs to the runtime, created in the root
 		// arena at startup; the word only names it.
-		e.w("  ") ; e.w(reg) ; e.w(" = call ptr @runtime.SigintChan(ptr null)\n")
-		e.declareRuntime("runtime.SigintChan", "ptr", "")
+		e.w("  ") ; e.w(reg) ; e.w(" = call ptr @runtime.ShutdownChan(ptr null)\n")
+		e.declareRuntime("runtime.ShutdownChan", "ptr", "")
 		return
 	} else if name == "pop" {
 		if len(c.Call.Args) == 1 {
@@ -1162,13 +1162,13 @@ func isSpawnTargetSig(sig *Signature) (ok bool) {
 }
 
 // terminationConsumed reports whether fn consumes a termination signal from
-// chanVal, or - when wantSigint is set - from the sigint builtin's channel.
+// chanVal, or - when wantShutdown is set - from the shutdown builtin's channel.
 //
 // A select arm is the intended shape, but a SINGLE-ARM select is lowered by the
 // builder into a plain receive, so requiring an SSASelect instruction would
 // refuse correct code that this compiler itself produced. The rule is about the
 // signal being consumed, and either shape satisfies it.
-func terminationConsumed(fn *SSAFunction, chanVal SSAValue, wantSigint bool) (ok bool) {
+func terminationConsumed(fn *SSAFunction, chanVal SSAValue, wantShutdown bool) (ok bool) {
 	if fn == nil || len(fn.Blocks) == 0 {
 		return true
 	}
@@ -1177,12 +1177,12 @@ func terminationConsumed(fn *SSAFunction, chanVal SSAValue, wantSigint bool) (ok
 			switch in := instr.(type) {
 			case *SSASelect:
 				for _, st := range in.States {
-					if termChannelMatches(st.Chan, chanVal, wantSigint) {
+					if termChannelMatches(st.Chan, chanVal, wantShutdown) {
 						return true
 					}
 				}
 			case *SSAUnOp:
-				if in.Op == OpArrow && termChannelMatches(in.X, chanVal, wantSigint) {
+				if in.Op == OpArrow && termChannelMatches(in.X, chanVal, wantShutdown) {
 					return true
 				}
 			}
@@ -1192,14 +1192,14 @@ func terminationConsumed(fn *SSAFunction, chanVal SSAValue, wantSigint bool) (ok
 }
 
 // termChannelMatches reports whether ch names the termination channel.
-func termChannelMatches(ch, chanVal SSAValue, wantSigint bool) (ok bool) {
-	if wantSigint {
+func termChannelMatches(ch, chanVal SSAValue, wantShutdown bool) (ok bool) {
+	if wantShutdown {
 		c, isCall := ch.(*SSACall)
 		if !isCall {
 			return false
 		}
 		bi, isBuiltin := c.Call.Value.(*SSABuiltin)
-		return isBuiltin && bi.SSAName() == "__sigint"
+		return isBuiltin && bi.SSAName() == "__shutdown"
 	}
 	if ch == chanVal {
 		return true
@@ -1227,7 +1227,7 @@ func targetSelectsOnClosed(fn *SSAFunction) (ok bool) {
 // SSA, after the whole package has been built and before the emission gate:
 //
 //   - the PROGRAM entry (the main function of the package named main) selects
-//     on sigint, because a program that cannot be told to stop has to be killed;
+//     on shutdown, because a program that cannot be told to stop has to be killed;
 //   - every function passed to spawn selects on its closed breaker, because a
 //     spawned domain must stop when its parent closes the breaker, not when its
 //     next message happens to arrive.
@@ -1245,7 +1245,7 @@ func checkTerminationSelects(pkg *SSAPackage) {
 			continue
 		}
 		if fn.name == "main" && pkg.Pkg != nil && pkg.Pkg.Name == "main" && !terminationConsumed(fn, nil, true) {
-			reportCompileError("main must select on sigint: add a `case <-sigint:` arm to its select (or a non-blocking one at entry for a batch program), because a program that cannot be told to stop has to be killed")
+			reportCompileError("main must select on shutdown: add a `case <-shutdown:` arm to its select (or a non-blocking one at entry for a batch program), because a program that cannot be told to stop has to be killed")
 		}
 		checkSpawnCalls(fn)
 	}

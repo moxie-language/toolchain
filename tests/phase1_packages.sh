@@ -26,7 +26,7 @@ run_one() {
 		echo ""
 		echo "func main() {"
 		echo "	select {"
-		echo "	case <-sigint:"
+		echo "	case <-shutdown:"
 		echo "		return"
 		echo "	default:"
 		echo "	}"

@@ -6342,14 +6342,14 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		call7.name = fb.nextName()
 		fb.emit(call7)
 		return call7
-	case BuiltinSigint:
-		// __sigint() chan struct{}: the domain's termination channel, the
-		// lowering of the predeclared word sigint. The handle is the
+	case BuiltinShutdown:
+		// __shutdown() chan struct{}: the domain's termination channel, the
+		// lowering of the predeclared word shutdown. The handle is the
 		// runtime's, so every call names the same channel; the element is the
 		// empty struct because the close is the whole message.
 		if len(args) != 0 {
 			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-			push(cctx.compileErrors, fb.errPos() | "__sigint takes no arguments")
+			push(cctx.compileErrors, fb.errPos() | "__shutdown takes no arguments")
 			return nil
 		}
 		callS := &SSACall{Call: SSACallCommon{Value: b}}
@@ -6464,6 +6464,15 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 			}
 			return fb.emitPopShrink(e.ArgList[0], args[0], args[1])
 		}
+		// pop is a STATEMENT: it removes the last element. There is no read
+		// form - s[len(s)-1] is the read and s[len(s)-1:] the copy - because
+		// "returns the value but does not shrink" was a footgun that meant two
+		// different things depending on whether the value was used.
+		if len(args) == 1 && !fb.pushStmt {
+			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+			push(cctx.compileErrors, fb.errPos() | "pop is a statement: it removes the last element; read it with s[len(s)-1]")
+			return nil
+		}
 		callPop := &SSACall{Call: SSACallCommon{Value: b, Args: args}}
 		if len(args) == 1 {
 			if sl, ok := SafeUnderlying(args[0].SSAType()).(*Slice); ok {
@@ -6474,7 +6483,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		}
 		callPop.name = fb.nextName()
 		fb.emit(callPop)
-		if fb.pushStmt && len(args) == 1 && args[0] != nil {
+		if len(args) == 1 && args[0] != nil {
 			fb.emitPopShrink(e.ArgList[0], args[0], nil)
 		}
 		return callPop

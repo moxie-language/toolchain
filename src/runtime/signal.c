@@ -59,29 +59,29 @@ void moxie_signal_enable(uint32_t sig) {
 // interrupt an allocation, a channel operation or a held lock, so it must not
 // allocate, close a channel, or call anything that does. The domain polls the
 // flag at every point where it waits, closes its termination channel there
-// (normal context, its own state), and its select on `sigint` fires like a
+// (normal context, its own state), and its select on `shutdown` fires like a
 // receive on any closed channel.
-static volatile sig_atomic_t sigint_pending = 0;
+static volatile sig_atomic_t shutdown_pending = 0;
 
-static void sigint_flag_handler(int sig) {
+static void shutdown_flag_handler(int sig) {
     (void)sig;
-    sigint_pending = 1;
+    shutdown_pending = 1;
 }
 
-// moxie_sigint_install routes the signals that mean "stop" to the flag:
+// moxie_shutdown_install routes the signals that mean "stop" to the flag:
 // SIGINT from the terminal and SIGTERM from a supervisor. SA_RESTART keeps an
 // interrupted syscall resuming normally, so the flag stays the only change.
-void moxie_sigint_install(void) {
+void moxie_shutdown_install(void) {
     struct sigaction act = { 0 };
-    act.sa_handler = &sigint_flag_handler;
+    act.sa_handler = &shutdown_flag_handler;
     act.sa_flags = SA_RESTART;
     sigaction(SIGINT, &act, NULL);
     sigaction(SIGTERM, &act, NULL);
 }
 
-// moxie_sigint_pending reports whether a stop signal has arrived.
-int32_t moxie_sigint_pending(void) {
-    return (int32_t)sigint_pending;
+// moxie_shutdown_pending reports whether a stop signal has arrived.
+int32_t moxie_shutdown_pending(void) {
+    return (int32_t)shutdown_pending;
 }
 
 // A program that owns resources it must release before dying can ask for the

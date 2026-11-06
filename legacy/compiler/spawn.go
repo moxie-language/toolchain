@@ -238,7 +238,7 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 }
 
 // terminationConsumed reports whether fn consumes a termination signal from
-// chanVal (or, when wantSigint is set, from the sigint builtin's channel).
+// chanVal (or, when wantShutdown is set, from the shutdown builtin's channel).
 //
 // A select arm is the intended shape, but a SINGLE-ARM select is lowered by the
 // SSA builder into a plain receive - `select { case <-closed: ...; default: }`
@@ -246,18 +246,18 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 // one - so requiring a Select instruction would refuse correct code that this
 // compiler itself produced. The rule is therefore about the signal being
 // consumed, and either shape satisfies it.
-func terminationConsumed(fn *ssa.Function, chanVal ssa.Value, wantSigint bool) bool {
+func terminationConsumed(fn *ssa.Function, chanVal ssa.Value, wantShutdown bool) bool {
 	if fn == nil || len(fn.Blocks) == 0 {
 		return true
 	}
 	match := func(ch ssa.Value) bool {
-		if wantSigint {
+		if wantShutdown {
 			call, ok := ch.(*ssa.Call)
 			if !ok {
 				return false
 			}
 			bi, ok := call.Call.Value.(*ssa.Builtin)
-			return ok && bi.Name() == "__sigint"
+			return ok && bi.Name() == "__shutdown"
 		}
 		if ch == chanVal {
 			return true
@@ -352,8 +352,8 @@ func closedConsumedAsNil(fn *ssa.Function) bool {
 	return false
 }
 
-// sigintSelectPresent reports whether fn consumes the termination channel.
-func sigintSelectPresent(fn *ssa.Function) bool {
+// shutdownSelectPresent reports whether fn consumes the termination channel.
+func shutdownSelectPresent(fn *ssa.Function) bool {
 	return terminationConsumed(fn, nil, true)
 }
 
@@ -371,10 +371,10 @@ func (b *builder) checkEntrySelect() {
 	if b.fn.Pkg == nil || b.fn.Pkg.Pkg == nil || b.fn.Pkg.Pkg.Name() != "main" {
 		return
 	}
-	if sigintSelectPresent(b.fn) {
+	if shutdownSelectPresent(b.fn) {
 		return
 	}
-	b.addError(b.fn.Pos(), "main must select on sigint: add a `case <-sigint:` arm to its select (or a non-blocking one at entry for a batch program), because a program that cannot be told to stop has to be killed")
+	b.addError(b.fn.Pos(), "main must select on shutdown: add a `case <-shutdown:` arm to its select (or a non-blocking one at entry for a batch program), because a program that cannot be told to stop has to be killed")
 }
 
 // breakerElem reports whether T is the element of a breaker channel: the empty

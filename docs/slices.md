@@ -317,7 +317,7 @@ disabled is Go's **push-iterator spelling** (`bytes.Lines`, `slices.All`,
 2. **There are no coroutines.** `iter.Pull` inverts push to pull, and that needs
    a second stack to suspend the producer mid-loop (`runtime.coroswitch`,
    `runtime.newcoro` — deliberately absent). A domain has one stack, the arena
-   stack assumes one execution point, and `sigint`/`closed` polling is written
+   stack assumes one execution point, and `shutdown`/`closed` polling is written
    against it.
 
 Neither blocker is about streams, and neither has to be solved to get streaming
@@ -611,3 +611,87 @@ The two sites this survey fixed were write loops over unbounded input, which is
 precisely the shape the lint targets. Reader code is not excluded as a
 category; it is excluded by *shape* (single cuts pass, remainder-copy loops
 fail, and a documented suppression exists).
+
+## 13. Storage classes: five regions, one growable
+
+Five kinds of storage reach a Moxie slice. Count them; the count is what keeps
+the model honest.
+
+| region | allocation, provenance | lifetime | growth | write | ordering |
+|---|---|---|---|---|---|
+| arena | arena allocator, frame or sovereign | the frame / the receiver | **growable** | writable | normal |
+| static | a `//:linkdata` symbol | the binary's | fixed length | only if declared `rw` | normal |
+| foreign | a runtime pointer + length | the caller's scope | fixed | by declaration | normal |
+| device | a symbol or pointer at a physical address | the process / the hardware | fixed | writable | ordered access required |
+| shared | a spawn ring or an mmap | the peer's | fixed | writable | atomicity required across the boundary |
+
+The axes that decide behaviour are **growth, write permission, lifetime and
+ordering** - not where the bytes came from. Two rules follow:
+
+1. **The class lives in the declaration.** Three header words cannot hold a
+   lifetime, so the declaration (the `//:linkdata` directive, the constructor,
+   the physical address binding, the ring) carries the class. The header carries
+   only a discriminator where a runtime check must happen - the all-ones
+   capacity for static storage.
+2. **One predicate, used by every growth path.** Because `cap()` reports `len`
+   for static storage, the class is invisible to generic code *deliberately*;
+   `slices.Growable(s)` (implemented by `mxutil.Growable`, which reads the raw
+   capacity word) is the only test that answers "may this be grown". A helper
+   that invents its own test splits the count, and a count that splits is not a
+   count.
+
+`mxutil.Ensure`, `Reserve` and `GrowCap` all call `Growable` and panic with
+"linkdata slice: cap is foreign (copy it first)". `push`/`pop`/`resize` check the
+raw word in the builtins for the same reason.
+
+### The three gaps before systems work is real
+
+- **static needs `ro`/`rw` in the directive.** `//:linkdata ro 16 sym` or `rw`:
+  a write to `ro` must be a compile error, not a page fault with a confusing
+  signature. Today the binding is read-only by convention and the compiler
+  rejects a store to the package global, but a copy of the header written
+  through a local is not checked.
+- **foreign needs a scoped constructor.** A builtin legal only in a function the
+  compiler can prove does not let the slice escape - the same escape analysis
+  return relocation already needs. Without it you can read C tables and cannot
+  write a driver: the slice has to be able to travel as a parameter without
+  being captured or returned.
+- **device needs `volatile` on the element type.** Without it the compiler may
+  cache a status-register read (or drop a write), and the class is a fiction.
+
+DMA publish/flush is a **fence primitive**, not a slice property; it stays out of
+the slice model.
+
+## 14. Modules and the kernel: the same model, one missing feature
+
+`shutdown` is misnamed if it is read as "SIGINT". What it is: the entry point's
+termination channel, closed by a platform-specific source - a signal on hosted
+targets, `module_exit` in a kernel module, worker teardown on wasm. That is the
+same primitive as the domain breaker, which is why the shape repeats:
+`select { case <-shutdown: ... }` in `main`, `select { case <-closed: ... }` in
+a worker. The close is a runtime hook (`RequestShutdown`), so a module's port
+layer closes the thing the kernel closes when it unloads - strictly better than
+a signal, which can be ignored.
+
+What a module needs beyond that is short, and mostly the wasm port already
+solved it:
+
+- **an allocation hook**, because there is no `mmap`: a fixed region carved at
+  init, one arena per module, bulk release, no per-object free - exactly what
+  the arena model wants anyway;
+- **a port layer for print, time and atomics**, the same shape as the wasm one;
+- **panic semantics that mean "refuse to load" or "kill the thread"**, never
+  `BUG()`: a panic in a module must not take the kernel down with it;
+- **a stack-depth check**, because the kernel stack is 16 KB while the arenas
+  sit on the heap; the machine stack has to stay shallow, and the frame-budget
+  machinery is already half of that check;
+- **no floating point without save/restore**, which for a driver is nothing and
+  for the lattice will be a real decision.
+
+The comparison worth making: Moxie's no-alloc, no-unwind, arena-lifetime model
+is close to the subset kernel Rust is allowed to use. The one thing Rust gives
+that Moxie does not is the borrow checker; the substitute is the **scoped
+foreign view** - a slice into caller memory that the compiler proves cannot
+escape - which is the same work item as the DMA buffer. So the kernel story and
+the driver story are one feature, not two: the scoped foreign view is what makes
+both real, and it is the next systems item after the storage classes.

@@ -158,8 +158,8 @@ compiler as it self-hosts to a reproducible binary.
   message: nothing is ever sent on it, and a close is the whole event. A panic
   does not send a reason through it - the process aborting is the message, and
   the diagnostic is on stderr (see below).
-- **`sigint` is the domain's termination channel** - `main` selects on
-  `sigint`, a spawn target on `closed`. The word lowers to `__sigint()`, a
+- **`shutdown` is the domain's termination channel** - `main` selects on
+  `shutdown`, a spawn target on `closed`. The word lowers to `__shutdown()`, a
   builtin typed `chan struct{}`; the runtime creates the channel once, in the
   root arena, and the signal handler only raises a flag. Every point where the
   domain waits closes it from normal context, so a select arm on it fires like
@@ -200,7 +200,7 @@ compiler as it self-hosts to a reproducible binary.
   owner with `close(breaker)`; `main` returning ends every domain with the
   process.
 - **The termination select is enforced** - both compilers refuse a `main` that
-  does not consume `sigint` and a spawn target that does not consume its
+  does not consume `shutdown` and a spawn target that does not consume its
   `closed` breaker, so a program that cannot be told to stop is a compile
   error rather than a kill. A receive counts as well as a select arm, because
   a single-arm select is lowered into one.

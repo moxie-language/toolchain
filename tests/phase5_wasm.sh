@@ -38,7 +38,9 @@ with sync_playwright() as p:
 UNITS=()
 while IFS= read -r f; do
 	grep -q 'func main' "$f" || continue
-	grep -q '//:wasmtest skip' "$f" && continue
+	# A skip-tagged fixture stays in the list: validate.sh reports it as a
+	# declared SKIP, so the missing wasm guard is visible in the summary
+	# instead of being absent from it.
 	UNITS+=("$(basename "$f" .mx)")
 done < <(ls "$ROOT"/tests/regressions/should_compile/*.mx 2>/dev/null | sort)
 while IFS= read -r d; do
