@@ -147,6 +147,32 @@ silently dispatches through a missing arm. The compiler must record sites at
 the SSA builder (which sees the operands and the declared types), not from a
 text scan.
 
+## What the fixture already shows
+
+The cold `typedb_nominal` build records **201 conversion sites** and collapses
+them to **48 distinct `(interface, type)` edges**, with 3 actual `fmt.Stringer`
+implementations. The old method-name potential set for the same link is the
+whole closure. This is a fixture, so it is a ratio rather than a scale, but it
+is the empirical answer to the objection that traffic and potential are the
+same thing: they are not, and the site-based population is what makes the
+counter small.
+
+## Mirror scope: emitted code, not layout
+
+The bilateral rule is about **emitted code**. A compiler-internal change that
+produces byte-identical output - arena scoping, releasing a graph at last use,
+building/emitting/dropping one function body at a time - is stage4-only: the
+legacy compiler is a reference for what the program means, not for how the
+stage4 process arranges its memory. Mirror when the arms, the codegen or the
+language behaviour change; until then the population hook can wait.
+
+The scope needs an assertion, because nothing stops the next feature from
+accumulating on the build arena under a different name. `mxc build` with
+`MOXIE_ARENA_CHECK=1` fails loudly when one package leaves more than 32 MB on the build arena
+(the observed baseline is a few MB per package); the build arena is
+build-lifetime, not per-package. Run it on a cold bulky link (the `http_header_api` build) when
+touching the loader or the fingerprint pass.
+
 ## How the compiler uses it
 
 1. **Prepass**: build the fact index from the `.mxh` files (no type graphs).

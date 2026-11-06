@@ -10,6 +10,8 @@ Every compiler feature change — arena relocation, type system, code generation
 
 A feature implemented in only one compiler is a lie waiting to surface at bootstrap. The legacy compiler IS the bootstrap path — it produces every first binary. Changing stage4 without the legacy mirror means the next bootstrap from legacy will lose the change, silently corrupting the binary.
 
+**Scope: mirror when emitted code changes.** The law is about what the program compiles to, not how the compiler arranges its own memory. A stage4-internal change that produces byte-identical output — arena scoping, releasing a package graph at last use, building/emitting/dropping one function body at a time — is stage4-only and correct without a legacy mirror. Mirror when the arms, the codegen, the runtime ABI or the language behaviour change. Until then the legacy side is a reference for meaning, not for the stage4 process layout.
+
 Never merge a stage4 change without checking: "does legacy/compiler/compiler.go implement this same behavior?" If not, the merge is incomplete.
 
 ### Runtime Codec is Part of the Stack

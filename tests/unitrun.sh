@@ -378,6 +378,18 @@ report_unit() {
 			head -1 | cut -c1-200)"
 	fi
 	[ -n "$reason" ] || reason="(no output)"
+	if [ "$status" != PASS ]; then
+		# Keep the failing run's own out/err. "Passed on rerun" is a
+		# diagnostic that dies with the rerun; the archive keeps the diff
+		# that explains a log-order race, and a later rerun cannot overwrite
+		# it.
+		local arch="$RUNDIR/failures/${unit//\//_}_$(cat "$d/start" 2>/dev/null || echo 0)"
+		if [ -d "$d" ] && [ ! -d "$arch" ]; then
+			mkdir -p "$RUNDIR/failures"
+			cp -a "$d" "$arch"
+			printf '  archived: %s\n' "$arch"
+		fi
+	fi
 	if [ "$status" = PASS ]; then
 		printf '%-8s %-46s %6sms\n' "$status" "$unit" "$ms"
 	else

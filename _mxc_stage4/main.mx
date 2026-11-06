@@ -8427,6 +8427,9 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 	if cctx.dispTier2Arena == nil {
 		cctx.dispTier2Arena = map[string]*runtime.Arena{}
 	}
+	// The base is after the one-time build maps (needs, last-use, path index);
+	// only per-package growth from here is a leak.
+	cctx.arenaCheckBase = runtime.ArenaUsed(cctx.buildArena)
 	byPathT2 := map[string]*pkgInfo{}
 	for _, tp := range pkgs {
 		byPathT2[tp.path] = tp
@@ -8434,6 +8437,13 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 	}
 	for pi, pkg := range pkgs {
 		memLine(pkg.path)
+		// The build arena is build-lifetime, not per-package: a package that
+		// leaves its working set there turns the arena back into the tower the
+		// scoped measurements removed. MOXIE_ARENA_CHECK makes that loud.
+		if getenv("MOXIE_ARENA_CHECK") != "" && cctx.buildArena != nil {
+			used := runtime.ArenaUsed(cctx.buildArena)
+			mxutil.WriteStr(2, "  arena pkg=" | pkg.path | " used=" | simpleItoa(int32(used/(1024*1024))) | "MB\n")
+		}
 		// Release every transient tier-2 graph whose last transitive user has
 		// already been emitted. Releasing here (rather than at the loop's many
 		// exit points) keeps every path covered.
