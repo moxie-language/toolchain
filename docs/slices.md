@@ -498,27 +498,41 @@ bound while keeping O(pages) release at frame exit unchanged.
 
 ### Per-frame pointer maps (the prerequisite)
 
-Two facts make this implementable without LLVM's stackmap machinery:
+Because an arena is closed, the map only has to name the pointers of ONE frame:
+the frame that owns the arena being compacted, which is by construction the
+frame running the select. No stack walk is needed.
 
-- the compiler already knows, at the select, which pointer-typed variables are
-  live and their types (the same liveness that drives return relocation);
-- the select is a call, so live values are already forced to stack slots across
-  it. If the compiler additionally **spills every live pointer variable to its
-  slot before the call** (a "pointer barrier" at the safepoint), the map is
-  exact without any backend work.
+The mechanism that needs no LLVM stackmap support is a compiler-owned **root
+array** in that frame:
 
-The emitter then writes, per function and per safepoint, a table of
-`{frame offset, type descriptor}` for the live pointer slots, plus the function's
-frame size. The runtime's select entry receives the map (an extra argument, or a
-pointer in the call's shadow), so the park loop can hand it to the compactor.
-Package-variable maps are static and emitted once per package.
+- at each select, the compiler stores the current value of every pointer-typed
+  variable in scope (slice header, string header, `*T`, map pointer) into a
+  fixed-size array it allocates for that select, and passes `(arrayPtr,
+  mapPtr)` to the runtime select entry;
+- after the select returns, it loads the values back into the variables, so a
+  pointer the runtime rewrote takes effect for the rest of the frame;
+- the map is a static table emitted per function and per select: `count`, then
+  for each root its kind (slice / string / pointer / map / interface / handle)
+  and the type descriptor the compactor needs to follow it.
 
-Work items, in order: (1) the pointer barrier and the per-safepoint map in both
-compilers (wood law); (2) the object table and the type "visit pointers"
-function in the runtime; (3) Variant A compaction at the select, with the
+Two choices are open and cheap to change:
+
+- **Root set**: all pointer-typed variables in scope (assigned at least once) is
+  the conservative choice and needs no liveness analysis; a precise live set is
+  smaller and cheaper per select but needs the liveness the compiler already
+  computes for return relocation. Start conservative, tighten later.
+- **Interface-typed roots**: an interface value's data pointer has a dynamic
+  type, so following it needs the itab's type descriptor. The first version can
+  refuse to compact a frame that has an interface root (the map says so); the
+  alternative is to teach the walker to descend through the itab.
+
+Work items, in order: (1) the root array + map at the select in both compilers
+(wood law), with the runtime entry taking the pair and keeping it in TLS for
+the duration of the park; (2) the object table and the type "visit pointers"
+function in the runtime; (3) Variant B compaction at the select, with the
 tracker and the page budget; (4) the frame arena and the domain root arena as
-the first targets (sovereign already works); (5) Variant B only if measured
-latency demands it.
+the first targets (sovereign already has its own path); (5) the dead-marking
+hints from relocation and overwrite.
 
 ## 11. Streaming: channels, comma-ok, and the cursor
 
