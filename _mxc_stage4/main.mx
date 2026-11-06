@@ -4881,10 +4881,101 @@ func loadMxhData(data []byte) (ok bool) {
 // exists so a package no dispatch can reach can be released after its last
 // user instead of living as long as the link.
 func loadMxhInto(data []byte) (ok bool) {
-	if cctx.loadArena != nil {
-		return loadMxhDataIn(data, cctx.loadArena)
+	key := mxhPkgKey(data)
+	if key == "" {
+		return loadMxhData(data)
 	}
-	return loadMxhData(data)
+	return loadMxhDataIn(data, graphArenaFor(key))
+}
+
+// mxhPkgKey returns the package path from an mxh text header ("package <path>
+// <name>"). Only the path bytes are copied.
+func mxhPkgKey(data []byte) (key string) {
+	n := int32(len(data))
+	if n < 9 {
+		return ""
+	}
+	if data[0] != 'p' || data[1] != 'a' || data[2] != 'c' || data[3] != 'k' ||
+		data[4] != 'a' || data[5] != 'g' || data[6] != 'e' || data[7] != ' ' {
+		return ""
+	}
+	i := int32(8)
+	for i < n && data[i] == ' ' {
+		i++
+	}
+	start := i
+	for i < n && data[i] != ' ' && data[i] != '\n' && data[i] != '\r' {
+		i++
+	}
+	if i == start {
+		return ""
+	}
+	return string(data[start:i])
+}
+
+// graphArenaFor is the arena a package's materialised type graph lives in. It
+// is per package and released once the last package that can reference it has
+// been emitted; the root arena never holds an export graph.
+func graphArenaFor(key string) (a *runtime.Arena) {
+	if key == "" {
+		return runtime.RootArena()
+	}
+	if cctx.dispTier2Arena == nil {
+		cctx.dispTier2Arena = map[string]*runtime.Arena{}
+	}
+	a = cctx.dispTier2Arena[key]
+	if a == nil {
+		a = runtime.ArenaNew(4 * 1024 * 1024)
+		save := runtime.CurrentArena()
+		if cctx.buildArena != nil {
+			runtime.SetCurrentArena(cctx.buildArena)
+		}
+		cctx.dispTier2Arena[key] = a
+		runtime.SetCurrentArena(save)
+	}
+	return a
+}
+
+// ensurePkgLoaded materialises one package graph if it is not in the registry.
+func ensurePkgLoaded(key string, byPath map[string]*pkgInfo, cacheBase string) {
+	if key == "" || cctx.universe == nil || cctx.universe.Registry == nil {
+		return
+	}
+	if cctx.universe.Registry[key] != nil {
+		return
+	}
+	pi := byPath[key]
+	if pi == nil {
+		return
+	}
+	data, ok := mxutil.ReadFile(cachedMxhPath(cacheBase, pi))
+	if !ok {
+		return
+	}
+	loadMxhDataIn(data, graphArenaFor(key))
+}
+
+// rootCopyStr copies v into the root arena, so a map key that came from a
+// graph's text outlives the graph.
+func rootCopyStr(v string) (out string) {
+	if v == "" {
+		return ""
+	}
+	b := []byte{:len(v)}
+	copy(b, v)
+	return string(b)
+}
+
+// clearGraphCaches drops caches that hold pointers into package graphs. The
+// registry maps themselves are root-backed by construction: loadMxhDataIn
+// writes them with a root-copied key and a root current arena, so a graph arena
+// can be freed without touching them. ByName/DirectImports are plain caches of
+// graph pointers and are emptied before a free; every package rescans its own
+// generics before compiling.
+func clearGraphCaches() {
+	cctx.universe.ByName = map[string]*TCPackage{}
+	cctx.universe.DirectImports = map[string][]string{}
+	cctx.parseTypePkgScope = nil
 }
 
 func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
@@ -4947,7 +5038,11 @@ func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
 		cctx.mxhGenerics = map[string]map[string]bool{}
 	}
 	if cctx.mxhGenerics[pkgPath] == nil {
-		cctx.mxhGenerics[pkgPath] = map[string]bool{}
+		saveArena3 := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
+	rootKey3 := rootCopyStr(pkgPath)
+	cctx.mxhGenerics[rootKey3] = map[string]bool{}
+	runtime.SetCurrentArena(saveArena3)
 	}
 	{
 		gpos := pos
@@ -4971,7 +5066,11 @@ func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
 		}
 		scanPos = next2
 	}
-	cctx.universe.DirectImports[pkgPath] = dimps
+	saveArena := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
+	rootKey := rootCopyStr(pkgPath)
+	cctx.universe.DirectImports[rootKey] = dimps
+	runtime.SetCurrentArena(saveArena)
 
 	oldScope := cctx.parseTypePkgScope
 	cctx.parseTypePkgScope = pkg.Scope
@@ -5245,8 +5344,16 @@ func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
 	}
 
 	cctx.parseTypePkgScope = oldScope
-	cctx.universe.Registry[pkgPath] = pkg
-	cctx.mxhLoaded[pkgPath] = true
+	saveArena2 := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
+	rootKey2 := rootCopyStr(pkgPath)
+	cctx.universe.Registry[rootKey2] = pkg
+	runtime.SetCurrentArena(saveArena2)
+	saveArena4 := runtime.CurrentArena()
+	runtime.SetCurrentArena(runtime.RootArena())
+	rootKey4 := rootCopyStr(pkgPath)
+	cctx.mxhLoaded[rootKey4] = true
+	runtime.SetCurrentArena(saveArena4)
 	return true
 }
 
@@ -7036,6 +7143,17 @@ func applyTargetFlag(flag string) {
 // Write". skip is the root package a caller type-checks itself (the test
 // package, under its generated main), nil otherwise.
 func prepareDispatchIndex(pkgs []*pkgInfo, cacheBase string, skip *pkgInfo) {
+	// These two maps are read and grown while a graph arena is the current
+	// manual arena. Create their headers HERE, on the build frame, and every
+	// later write switches to the root arena for the buckets; otherwise the
+	// header and the first bucket array live in the first graph arena and die
+	// with it.
+	if cctx.mxhLoaded == nil {
+		cctx.mxhLoaded = map[string]bool{}
+	}
+	if cctx.mxhGenerics == nil {
+		cctx.mxhGenerics = map[string]map[string]bool{}
+	}
 	for _, pkg := range pkgs {
 		if pkg.baked || pkg == skip {
 			continue
@@ -7079,6 +7197,114 @@ func prepareDispatchIndex(pkgs []*pkgInfo, cacheBase string, skip *pkgInfo) {
 		}
 	}
 	typeDBCheck(cctx.typeDB)
+	cctx.dispProviders = map[string][]string{}
+	for key, methods := range cctx.dispMethodsByPkg {
+		for name := range methods {
+			ps := cctx.dispProviders[name]
+			ps = mxutil.Ensure(ps, 1)
+			ps = push(ps, key)
+			cctx.dispProviders[name] = ps
+		}
+	}
+	for name := range cctx.dispProviders {
+		ps := cctx.dispProviders[name]
+		for i := 1; i < len(ps); i++ {
+			for j := i; j > 0 && ps[j] < ps[j-1]; j-- {
+				ps[j], ps[j-1] = ps[j-1], ps[j]
+			}
+		}
+	}
+}
+
+// pkgClosure adds key and its transitive imports to out.
+func pkgClosure(key string, byPath map[string]*pkgInfo, out map[string]bool) {
+	if key == "" || out[key] {
+		return
+	}
+	out[key] = true
+	p := byPath[key]
+	if p == nil {
+		return
+	}
+	for _, imp := range p.imports {
+		pkgClosure(imp, byPath, out)
+	}
+}
+
+// ensurePkgClosure materialises a dispatch provider and its imports for the
+// package currently being emitted. The graphs are freed by the normal
+// last-use rule once this package is done (dispLastUse is raised to its index),
+// so a provider needed again is reloaded by the next package that dispatches
+// to it.
+func ensurePkgClosure(key string) {
+	if key == "" || cctx.pkgByPath == nil {
+		return
+	}
+	set := map[string]bool{}
+	pkgClosure(key, cctx.pkgByPath, set)
+	ks := []string{:0}
+	for k := range set {
+		ks = mxutil.Ensure(ks, 1)
+		ks = push(ks, k)
+	}
+	ord := cctx.pkgOrder
+	for a := 1; a < len(ks); a++ {
+		for b := a; b > 0 && ord[ks[b]] < ord[ks[b-1]]; b-- {
+			ks[b], ks[b-1] = ks[b-1], ks[b]
+		}
+	}
+	for _, k := range ks {
+		ensurePkgLoaded(k, cctx.pkgByPath, cctx.graphCacheBase)
+		if l, ok := cctx.dispLastUse[k]; !ok || l < cctx.curPkgIdx {
+			cctx.dispLastUse[k] = cctx.curPkgIdx
+		}
+	}
+}
+
+// computeGraphNeeds fills pkgNeeds and dispLastUse. A graph is needed by its own
+// compile, by every package whose transitive imports reach it, and by every
+// package that can dispatch to one of its methods (its provider plus that
+// provider's imports, because emitting an arm reads the provider's signature
+// types). Needs are in dependency order so an mxh resolves its imports' names
+// while it parses.
+func computeGraphNeeds(pkgs []*pkgInfo) {
+	byPath := map[string]*pkgInfo{}
+	order := map[string]int32{}
+	for i, p := range pkgs {
+		byPath[p.path] = p
+		byPath[dispPkgKey(p)] = p
+		order[p.path] = int32(i)
+		order[dispPkgKey(p)] = int32(i)
+	}
+	if cctx.pkgNeeds == nil {
+		cctx.pkgNeeds = map[string][]string{}
+	}
+	cctx.pkgByPath = byPath
+	cctx.pkgOrder = order
+	cctx.dispLastUse = map[string]int32{}
+	for i, p := range pkgs {
+		key := dispPkgKey(p)
+		// Typecheck needs the import closure only. Dispatch providers are
+		// materialised at the call site (ensurePkgClosure), so a package that
+		// merely mentions String does not pin every String impl for its whole
+		// compile.
+		set := map[string]bool{}
+		pkgClosure(key, byPath, set)
+		ks := []string{:0}
+		for k := range set {
+			ks = mxutil.Ensure(ks, 1)
+			ks = push(ks, k)
+		}
+		for a := 1; a < len(ks); a++ {
+			for b := a; b > 0 && order[ks[b]] < order[ks[b-1]]; b-- {
+				ks[b], ks[b-1] = ks[b-1], ks[b]
+			}
+		}
+		cctx.pkgNeeds[key] = ks
+		for _, k := range ks {
+			cctx.dispLastUse[k] = int32(i)
+		}
+	}
 }
 
 // measureDispFingerprints fills the dispatch fingerprint for every package in
@@ -7144,16 +7370,19 @@ func measureDispFingerprint(dp *pkgInfo) {
 	if len(src) == 0 {
 		return
 	}
-	// No arena of its own. An earlier version pushed a measurement arena and
-	// exited it afterwards, and every build after the first measurement died
-	// with "alloc: nil arena" - the traceback ended in runtime.hashmapMake from
-	// scanSelectorCalls below. The reason is in the runtime: ManualArenaExit
-	// sets the global `manualArena` to whatever was saved before the push (nil,
-	// when there was nothing), and allocation consults that, so popping a
-	// manually entered arena leaves the compiler with no arena at all for
-	// everything that follows. The measurement runs in whatever arena the build
-	// already has; its allocations are small and the build's own cleanup
-	// reclaims them.
+	// The measurement's own working set dies here. It was left on the build
+	// arena, and across a whole link that was ~1.7GB of arm lists and type
+	// strings that no later phase reads - the root arena's tower.
+	save := runtime.CurrentArena()
+	mArena := runtime.ArenaNew(16 * 1024 * 1024)
+	runtime.SetCurrentArena(mArena)
+	// The measurement's working set (arm lists, type strings, the emitter)
+	// dies with this arena. It used to run on the build arena, and across a
+	// whole link that was ~1.5GB of arm lists no later phase reads - the root
+	// arena's tower. SetCurrentArena is the plain save/restore; the earlier
+	// attempt used ManualArenaEnter/Exit, and ManualArenaExit sets the global
+	// manualArena to nil when there was none before, leaving later passes with
+	// no arena at all.
 	methods := scanSelectorCalls(src)
 	fp := ""
 	if len(methods) > 0 {
@@ -7161,7 +7390,17 @@ func measureDispFingerprint(dp *pkgInfo) {
 		e.fingerprintOnly = true
 		fp = e.dispFingerprintForMethods(methods)
 	}
+	runtime.SetCurrentArena(save)
+	// The map and its value outlive the measurement arena.
+	if len(fp) > 0 {
+		fb := []byte{:len(fp)}
+		for i := int32(0); i < int32(len(fp)); i++ {
+			fb[i] = fp[i]
+		}
+		fp = string(fb)
+	}
 	bst.pkgDispFingerprint[dp.path] = fp
+	runtime.ArenaFree(mArena)
 }
 
 // scanSelectorCalls returns the distinct method names a source calls through a
@@ -7711,12 +7950,6 @@ func main() {
 	prepareDispatchIndex(pkgs, cacheBase, nil)
 	memLine("  dispindex")
 
-	// With the index built, every package's dispatch arms can be measured - and
-	// the measurement has to happen before the first pkgHash, because that is
-	// the key the build is about to look up.
-	measureDispFingerprints(pkgs)
-	memLine("  fingerprints")
-
 	// Whole-link registry pre-pass: interface dispatch emits a typeID switch
 	// over impls found in cctx.universe.Registry, which is populated in
 	// dependency order. A type defined in a downstream package (main) passed
@@ -7788,6 +8021,11 @@ func main() {
 			" convs=" | simpleItoa(typeDBConvCount(cctx.typeDB)) |
 			" ifaces=" | simpleItoa(typeDBEdgeCount(cctx.typeDB, EdgeImplements, "") ) | "\n")
 	}
+	// With the site pass complete, every package's dispatch arms can be
+	// measured - and the measurement must happen before the first pkgHash.
+	measureDispFingerprints(pkgs)
+	memLine("  fingerprints")
+
 	var allBcFiles []string
 	var hasRuntimePkg bool
 	if bst.buildJobs > 1 {
@@ -8156,21 +8394,35 @@ func memLine(tag string) {
 func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, forceRebuild, printIR bool) (bcs []string, hasRT bool) {
 	var deferredClang [][]string
 	isWasmTarget := mxutil.TargetArch() == "wasm"
-	if cctx.dispLastUse == nil {
-		cctx.dispLastUse = map[string]int32{}
-		byPathL := map[string]*pkgInfo{}
-		for _, lp := range pkgs {
-			byPathL[lp.path] = lp
-			byPathL[dispPkgKey(lp)] = lp
+	// Each package's graph lives in its own arena, loaded up front by the
+	// dispatch pre-pass and released when the last package that can reference
+	// it has been emitted. The whole-link graph is no longer root-lifetime.
+	if cctx.pkgNeeds == nil {
+		cctx.buildArena = runtime.CurrentArena()
+		cctx.graphCacheBase = cacheBase
+		computeGraphNeeds(pkgs)
+		// Release every graph materialised by the pre-pass; the loop below
+		// loads exactly what each package typechecks against.
+		clearGraphCaches()
+		var dropKeys []string
+		for k := range cctx.dispTier2Arena {
+			dropKeys = mxutil.Ensure(dropKeys, 1)
+			dropKeys = push(dropKeys, k)
 		}
-		for li, lp := range pkgs {
-			seenL := map[string]bool{}
-			outL := map[string]bool{}
-			dispTier2Closure(lp, byPathL, cctx.dispIfaceMethods, cctx.dispMethodsByPkg, seenL, outL)
-			for k := range outL {
-				cctx.dispLastUse[k] = int32(li)
-			}
+		for _, k := range dropKeys {
+			copyGenericsToRoot(k)
+			delete(cctx.universe.Registry, k)
+			delete(cctx.mxhLoaded, k)
+			runtime.ArenaFree(cctx.dispTier2Arena[k])
+			delete(cctx.dispTier2Arena, k)
 		}
+		cctx.genericMethodInsts = nil
+		cctx.genericPkgScopes = nil
+		cctx.genericFuncDecls = nil
+		cctx.genericMethodDecls = nil
+		cctx.genericPkgLocalDecls = nil
+		cctx.scannedGeneric = nil
+		cctx.sigDeclPkgImports = nil
 	}
 	if cctx.dispTier2Arena == nil {
 		cctx.dispTier2Arena = map[string]*runtime.Arena{}
@@ -8185,9 +8437,10 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		// Release every transient tier-2 graph whose last transitive user has
 		// already been emitted. Releasing here (rather than at the loop's many
 		// exit points) keeps every path covered.
+		clearGraphCaches()
 		var doneT2 []string
 		for k := range cctx.dispTier2Arena {
-			if cctx.dispLastUse[k] < pi {
+			if l, ok := cctx.dispLastUse[k]; ok && l < pi {
 				doneT2 = mxutil.Ensure(doneT2, 1)
 				doneT2 = push(doneT2, k)
 			}
@@ -8200,6 +8453,12 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			delete(cctx.dispTier2Arena, k)
 		}
 		pkgKey := dispPkgKey(pkg)
+		cctx.curPkgIdx = int32(pi)
+		if needs := cctx.pkgNeeds[pkgKey]; needs != nil {
+			for _, nk := range needs {
+				ensurePkgLoaded(nk, byPathT2, cacheBase)
+			}
+		}
 		isTier2 := !tier1(pkgKey, cctx.dispIfaceMethods, cctx.dispMethodsByPkg)
 		// Lazily materialise the tier-2 packages this one names, each in its own
 		// arena, and give this package's own graph a transient arena too if it

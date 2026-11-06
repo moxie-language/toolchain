@@ -51,6 +51,7 @@ type TypeDB struct {
 	pkgFacts map[string][]string   // package -> fact keys
 	byHash   map[string][]string   // structural hash -> fact keys (interning only)
 	pkgIface map[string][]string   // package -> iface|type contributions (release)
+	ifaceMethods map[string][]string // iface key -> method names, from actual conversion sites
 	arena    *runtime.Arena        // ownership of every string the DB retains
 }
 
@@ -62,6 +63,7 @@ func typeDBNew() (db *TypeDB) {
 	db.pkgFacts = map[string][]string{}
 	db.byHash = map[string][]string{}
 	db.pkgIface = map[string][]string{}
+	db.ifaceMethods = map[string][]string{}
 	for i := int32(0); i < edgeKindCount; i++ {
 		db.fwd = push(db.fwd, map[string][]string{})
 		db.rev = push(db.rev, map[string][]string{})
@@ -428,6 +430,64 @@ func typeDBLoadMxhInner(db *TypeDB, data []byte) (n int32) {
 	return n
 }
 
+// typeDBTypePkg returns the declaring package of a type key, or "" for a
+// structural key with no package (a builtin).
+func typeDBTypePkg(k string) (pkg string) {
+	bar := int32(-1)
+	for i := int32(0); i < int32(len(k)); i++ {
+		if k[i] == '|' {
+			bar = i
+			break
+		}
+	}
+	if bar < 0 {
+		return ""
+	}
+	head := k[:bar]
+	if !mxutil.HasPrefix(head, "desc:") {
+		return head
+	}
+	colon := int32(-1)
+	for i := int32(len(head)) - 1; i >= 5; i-- {
+		if head[i] == ':' {
+			colon = i
+			break
+		}
+	}
+	if colon < 0 || colon+1 >= int32(len(head)) {
+		return ""
+	}
+	return head[colon+1:]
+}
+
+// typeDBActualPkgsForMethod is the traffic query: the packages of the concrete
+// types actually converted to an interface that declares method. It is computed
+// from the conversion edges, never stored as a method->types index.
+func typeDBActualPkgsForMethod(db *TypeDB, method string) (pkgs []string) {
+	if db == nil || method == "" {
+		return nil
+	}
+	for iface, ms := range db.ifaceMethods {
+		has := false
+		for _, m := range ms {
+			if m == method {
+				has = true
+				break
+			}
+		}
+		if !has {
+			continue
+		}
+		for _, tkey := range db.fwd[EdgeImplements][iface] {
+			p := typeDBTypePkg(tkey)
+			if p != "" {
+				pkgs = typeDBStrAddUnique(pkgs, p)
+			}
+		}
+	}
+	return pkgs
+}
+
 // typeDBTypeKey names a type for the conversion relation. A declared type is
 // nominal; a pointer/slice/basic is a structural node derived from its element,
 // because the dynamic type of `&T{}` stored in an interface is *T.
@@ -454,6 +514,42 @@ func typeDBTypeKey(t Type) (k string) {
 		return typeDBDescKey("basic:" | b.Name)
 	}
 	return typeDBDescKey("other")
+}
+
+// typeDBIfaceAddMethod records the interface's method set. It is taken from the
+// conversion's target type, the only place the compiler has both the interface
+// and the concrete value; the mxh fact format does not export iface lines.
+func typeDBIfaceAddMethod(db *TypeDB, iface, method string) {
+	if iface == "" || method == "" {
+		return
+	}
+	save := runtime.CurrentArena()
+	if db.arena != nil {
+		runtime.SetCurrentArena(db.arena)
+	}
+	iface = typeDBCopy(db, iface)
+	method = typeDBCopy(db, method)
+	db.ifaceMethods[iface] = typeDBStrAddUnique(db.ifaceMethods[iface], method)
+	runtime.SetCurrentArena(save)
+}
+
+// typeDBRecordIface records one conversion site together with the target
+// interface's method set.
+func typeDBRecordIface(db *TypeDB, iface Type, typeKey, sitePkg string) {
+	if db == nil || iface == nil {
+		return
+	}
+	ik := typeDBTypeKey(iface)
+	if u := SafeUnderlying(iface); u != nil {
+		if ci, ok := u.(*TCInterface); ok && ci != nil {
+			for i := int32(0); i < ci.NumMethods(); i++ {
+				if m := ci.Method(i); m != nil {
+					typeDBIfaceAddMethod(db, ik, m.Name)
+				}
+			}
+		}
+	}
+	typeDBAddConversion(db, ik, typeKey, sitePkg)
 }
 
 // typeDBAddConversion records one actual conversion site (docs/type-db.md has
