@@ -1,6 +1,10 @@
 package main
 
-import "moxielang.dev/pkg/mxutil"
+import (
+	"runtime"
+	"moxielang.dev/pkg/mxutil"
+	. "moxielang.dev/pkg/types"
+)
 
 // The type-resolution database.
 //
@@ -19,12 +23,12 @@ import "moxielang.dev/pkg/mxutil"
 // compiler.
 
 const (
-	EdgeDeclares   = int32(0) // type -> method
-	EdgeImplements = int32(1) // interface -> concrete type, actual conversion sites only
-	EdgeFieldOf    = int32(2) // type -> field type
-	EdgeAlias      = int32(3) // alias -> target
-	EdgeEmbed      = int32(4) // type -> embedded type
-	edgeKindCount  = int32(5)
+	EdgeDeclares   = 0 // type -> method
+	EdgeImplements = 1 // interface -> concrete type, actual conversion sites only
+	EdgeFieldOf    = 2 // type -> field type
+	EdgeAlias      = 3 // alias -> target
+	EdgeEmbed      = 4 // type -> embedded type
+	edgeKindCount  = 5
 )
 
 type TypeFact struct {
@@ -47,10 +51,12 @@ type TypeDB struct {
 	pkgFacts map[string][]string   // package -> fact keys
 	byHash   map[string][]string   // structural hash -> fact keys (interning only)
 	pkgIface map[string][]string   // package -> iface|type contributions (release)
+	arena    *runtime.Arena        // ownership of every string the DB retains
 }
 
 func typeDBNew() (db *TypeDB) {
 	db = &TypeDB{}
+	db.arena = runtime.RootArena()
 	db.facts = map[string]*TypeFact{}
 	db.versions = map[string]string{}
 	db.pkgFacts = map[string][]string{}
@@ -74,6 +80,35 @@ func typeDBKey(pkg, name string) (k string) {
 // nominal key; the `desc:` prefix cannot collide with one.
 func typeDBDescKey(text string) (k string) {
 	return "desc:" | text
+}
+
+// typeDBCopy owns a string for the life of the build. The SSA builder records
+// conversion keys in a package arena that is freed at the end of that package's
+// typecheck, so a DB that kept the caller's string would compare against freed
+// memory in the next package's insert.
+func typeDBCopy(db *TypeDB, v string) (out string) {
+	if db == nil || v == "" || db.arena == nil {
+		return v
+	}
+	save := runtime.CurrentArena()
+	runtime.SetCurrentArena(db.arena)
+	b := []byte{:len(v)}
+	for i := int32(0); i < int32(len(v)); i++ {
+		b[i] = v[i]
+	}
+	out = string(b)
+	runtime.SetCurrentArena(save)
+	return out
+}
+
+func typeDBOwnFact(db *TypeDB, f *TypeFact) {
+	f.Key = typeDBCopy(db, f.Key)
+	f.Pkg = typeDBCopy(db, f.Pkg)
+	f.Name = typeDBCopy(db, f.Name)
+	f.Under = typeDBCopy(db, f.Under)
+	f.Sig = typeDBCopy(db, f.Sig)
+	f.Hash = typeDBCopy(db, f.Hash)
+	f.Version = typeDBCopy(db, f.Version)
 }
 
 func typeDBStrAddUnique(xs []string, v string) (out []string) {
@@ -157,12 +192,19 @@ func typeDBEdgeAdd(db *TypeDB, kind int32, from, to string) {
 	if db == nil || kind < 0 || kind >= edgeKindCount || from == "" || to == "" {
 		return
 	}
+	from = typeDBCopy(db, from)
+	to = typeDBCopy(db, to)
+	save := runtime.CurrentArena()
+	if db.arena != nil {
+		runtime.SetCurrentArena(db.arena)
+	}
 	db.fwd[kind][from] = typeDBStrAddUnique(db.fwd[kind][from], to)
 	if kind != EdgeDeclares {
 		db.rev[kind][to] = typeDBStrAddUnique(db.rev[kind][to], from)
 	}
 	k := from | "|" | to
 	db.cnt[kind][k] = db.cnt[kind][k] + 1
+	runtime.SetCurrentArena(save)
 }
 
 // typeDBEdgeExists answers membership without returning the set.
@@ -255,6 +297,15 @@ func typeDBRemoveEdge(db *TypeDB, kind int32, from, to string) {
 // every edge incident to those facts. O(that package's own entries), never a
 // scan of the store.
 func typeDBDeletePkg(db *TypeDB, pkg string) {
+	save := runtime.CurrentArena()
+	if db != nil && db.arena != nil {
+		runtime.SetCurrentArena(db.arena)
+	}
+	typeDBDeletePkgInner(db, pkg)
+	runtime.SetCurrentArena(save)
+}
+
+func typeDBDeletePkgInner(db *TypeDB, pkg string) {
 	if db == nil {
 		return
 	}
@@ -286,6 +337,16 @@ func typeDBDeletePkg(db *TypeDB, pkg string) {
 // typeDBLoadMxh indexes one package's serialized facts. It never builds a
 // TCPackage: the text is the storage and the facts are the index.
 func typeDBLoadMxh(db *TypeDB, data []byte) (n int32) {
+	save := runtime.CurrentArena()
+	if db != nil && db.arena != nil {
+		runtime.SetCurrentArena(db.arena)
+	}
+	n = typeDBLoadMxhInner(db, data)
+	runtime.SetCurrentArena(save)
+	return n
+}
+
+func typeDBLoadMxhInner(db *TypeDB, data []byte) (n int32) {
 	if db == nil || len(data) == 0 {
 		return 0
 	}
@@ -300,7 +361,7 @@ func typeDBLoadMxh(db *TypeDB, data []byte) (n int32) {
 	}
 	pkg := string(d[ws:we])
 	ver := typeDBHash(d)
-	db.versions[pkg] = ver
+	db.versions[typeDBCopy(db, pkg)] = typeDBCopy(db, ver)
 	pos = 0
 	for pos < int32(len(d)) {
 		ls2, le2, next := mxhNextLine(d, pos)
@@ -314,6 +375,7 @@ func typeDBLoadMxh(db *TypeDB, data []byte) (n int32) {
 			name := string(d[ns:ne])
 			f := &TypeFact{Key: typeDBKey(pkg, name), Pkg: pkg, Name: name, Kind: "type", Under: typeDBTrimLeft(d[ne:le2]), Version: ver}
 			f.Hash = typeDBHash(f.Kind | "|" | f.Under)
+			typeDBOwnFact(db, f)
 			db.facts[f.Key] = f
 			typeDBIndexFact(db, f)
 			n++
@@ -336,6 +398,7 @@ func typeDBLoadMxh(db *TypeDB, data []byte) (n int32) {
 			name := string(d[ns:ne])
 			f := &TypeFact{Key: typeDBKey(pkg, name), Pkg: pkg, Name: name, Kind: "iface", Sig: typeDBTrimLeft(d[ne:le2]), Version: ver}
 			f.Hash = typeDBHash(f.Kind | "|" | f.Sig)
+			typeDBOwnFact(db, f)
 			db.facts[f.Key] = f
 			typeDBIndexFact(db, f)
 			n++
@@ -355,6 +418,7 @@ func typeDBLoadMxh(db *TypeDB, data []byte) (n int32) {
 			if db.facts[tkey] == nil {
 				f := &TypeFact{Key: tkey, Pkg: pkg, Name: recv, Kind: "methodrecv", Version: ver}
 				f.Hash = typeDBHash(f.Kind | "|" | recv)
+				typeDBOwnFact(db, f)
 				db.facts[tkey] = f
 				typeDBIndexFact(db, f)
 			}
@@ -364,12 +428,49 @@ func typeDBLoadMxh(db *TypeDB, data []byte) (n int32) {
 	return n
 }
 
+// typeDBTypeKey names a type for the conversion relation. A declared type is
+// nominal; a pointer/slice/basic is a structural node derived from its element,
+// because the dynamic type of `&T{}` stored in an interface is *T.
+func typeDBTypeKey(t Type) (k string) {
+	if t == nil {
+		return typeDBDescKey("invalid")
+	}
+	if n, ok := t.(*Named); ok {
+		if n != nil && n.Obj != nil && n.Obj.Pkg != nil && n.Obj.Pkg.Path != "" {
+			return typeDBKey(n.Obj.Pkg.Path, n.Obj.Name)
+		}
+		if n != nil && n.Obj != nil {
+			return typeDBDescKey("named:" | n.Obj.Name)
+		}
+		return typeDBDescKey("named:?")
+	}
+	if p, ok := t.(*Pointer); ok {
+		return typeDBDescKey("pointer:" | typeDBTypeKey(p.Base))
+	}
+	if s, ok := t.(*Slice); ok {
+		return typeDBDescKey("slice:" | typeDBTypeKey(s.Elem))
+	}
+	if b, ok := t.(*Basic); ok {
+		return typeDBDescKey("basic:" | b.Name)
+	}
+	return typeDBDescKey("other")
+}
+
 // typeDBAddConversion records one actual conversion site (docs/type-db.md has
 // the exhaustive context list). Count is traffic, not potential.
 func typeDBAddConversion(db *TypeDB, iface, typeKey, sitePkg string) {
+	iface = typeDBCopy(db, iface)
+	typeKey = typeDBCopy(db, typeKey)
+	sitePkg = typeDBCopy(db, sitePkg)
 	typeDBEdgeAdd(db, EdgeImplements, iface, typeKey)
 	if sitePkg != "" {
-		db.pkgIface[sitePkg] = typeDBStrAddUnique(db.pkgIface[sitePkg], iface | "|" | typeKey)
+		k := typeDBCopy(db, iface | "|" | typeKey)
+		save := runtime.CurrentArena()
+		if db.arena != nil {
+			runtime.SetCurrentArena(db.arena)
+		}
+		db.pkgIface[sitePkg] = typeDBStrAddUnique(db.pkgIface[sitePkg], k)
+		runtime.SetCurrentArena(save)
 	}
 }
 
@@ -436,7 +537,7 @@ func typeDBItoa(n int32) (s string) {
 	if n == 0 {
 		return "0"
 	}
-	b := []byte{:0:12}
+	b := []byte{:12}
 	i := int32(12)
 	neg := n < 0
 	if neg {
