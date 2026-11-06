@@ -1,0 +1,527 @@
+package main
+
+import "moxielang.dev/pkg/mxutil"
+
+// The type-resolution database.
+//
+// A type is a value, so its fact is immutable and content-addressed; identity
+// is nominal (declaring package + name), and the structural hash is only a
+// secondary index for sharing bodies. The facts are the `.mxh` export files the
+// compiler already writes: this module indexes them so a question about a type
+// or a method is answered from facts, not by materialising a package's graph.
+//
+// Edges are typed, and every kind has its own forward and reverse table (the
+// morly store's ppg/gpp shape): declares, implements, field-of, alias, embed.
+// A list is a diagnostic; the release test uses exists/count/intersects so it
+// never re-materialises the closure. The index is per build and non-durable -
+// the fact files on disk are the durable layer - and it is namespaced away
+// from the relay's event log, whose retention and fsync policy are wrong for a
+// compiler.
+
+const (
+	EdgeDeclares   = int32(0) // type -> method
+	EdgeImplements = int32(1) // interface -> concrete type, actual conversion sites only
+	EdgeFieldOf    = int32(2) // type -> field type
+	EdgeAlias      = int32(3) // alias -> target
+	EdgeEmbed      = int32(4) // type -> embedded type
+	edgeKindCount  = int32(5)
+)
+
+type TypeFact struct {
+	Key     string // nominal identity: pkg|name (or desc:<structural text>)
+	Pkg     string
+	Name    string
+	Kind    string // "type", "alias", "iface", "methodrecv"
+	Under   string // underlying declaration text
+	Sig     string // interface method text (Kind == iface)
+	Hash    string // structural hash of this fact's body
+	Version string // package fact-set hash
+}
+
+type TypeDB struct {
+	facts    map[string]*TypeFact
+	fwd      []map[string][]string // per kind: from -> tos (declares has no reverse)
+	rev      []map[string][]string // per kind: to -> froms (not used for declares)
+	cnt      []map[string]int32    // per kind: from|to -> site count
+	versions map[string]string     // package -> fact-set version
+	pkgFacts map[string][]string   // package -> fact keys
+	byHash   map[string][]string   // structural hash -> fact keys (interning only)
+	pkgIface map[string][]string   // package -> iface|type contributions (release)
+}
+
+func typeDBNew() (db *TypeDB) {
+	db = &TypeDB{}
+	db.facts = map[string]*TypeFact{}
+	db.versions = map[string]string{}
+	db.pkgFacts = map[string][]string{}
+	db.byHash = map[string][]string{}
+	db.pkgIface = map[string][]string{}
+	db.fwd = []map[string][]string{:edgeKindCount}
+	db.rev = []map[string][]string{:edgeKindCount}
+	db.cnt = []map[string]int32{:edgeKindCount}
+	for i := int32(0); i < edgeKindCount; i++ {
+		db.fwd[i] = map[string][]string{}
+		db.rev[i] = map[string][]string{}
+		db.cnt[i] = map[string]int32{}
+	}
+	return db
+}
+
+// typeDBKey is the nominal identity. A structural hash is never a key.
+func typeDBKey(pkg, name string) (k string) {
+	return pkg | "|" | name
+}
+
+// typeDBDescKey identifies a type node with no declaration of its own (a
+// slice, pointer, builtin or composite descriptor). Declared types keep their
+// nominal key; the `desc:` prefix cannot collide with one.
+func typeDBDescKey(text string) (k string) {
+	return "desc:" | text
+}
+
+func typeDBStrAddUnique(xs []string, v string) (out []string) {
+	for _, x := range xs {
+		if x == v {
+			return xs
+		}
+	}
+	out = mxutil.Ensure(xs, 1)
+	return push(out, v)
+}
+
+func typeDBTrimLeft(s string) (out string) {
+	i := int32(0)
+	for i < int32(len(s)) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r') {
+		i++
+	}
+	return s[i:]
+}
+
+func typeDBHash(s string) (h string) {
+	var x uint64 = 14695981039346656037
+	for i := int32(0); i < int32(len(s)); i++ {
+		x ^= uint64(s[i])
+		x *= 1099511628211
+	}
+	return typeDBHex64(x)
+}
+
+func typeDBHex64(v uint64) (s string) {
+	const hex = "0123456789abcdef"
+	b := []byte{:16}
+	for i := int32(15); i >= 0; i-- {
+		b[i] = hex[v&0xf]
+		v >>= 4
+	}
+	return string(b)
+}
+
+func typeDBRecvName(r string) (s string) {
+	r = typeDBTrimLeft(r)
+	if len(r) >= 2 && r[0] == '(' && r[len(r)-1] == ')' {
+		r = r[1 : len(r)-1]
+	}
+	if len(r) > 0 && r[0] == '*' {
+		r = r[1:]
+	}
+	return r
+}
+
+// typeDBTypeRef resolves a type descriptor text to a node key: a qualified
+// named type keeps its declaration path; anything else is structural.
+func typeDBTypeRef(selfPkg, text string) (k string) {
+	text = typeDBTrimLeft(text)
+	if text == "" {
+		return typeDBDescKey(text)
+	}
+	base := text
+	for len(base) > 0 && (base[0] == '*' || base[0] == '[' || base[0] == ']' || base[0] == '(' || base[0] == ')') {
+		base = base[1:]
+	}
+	dot := int32(-1)
+	for i := int32(0); i < int32(len(base)); i++ {
+		if base[i] == '.' {
+			dot = i
+			break
+		}
+	}
+	if dot > 0 {
+		return typeDBKey(string(base[:dot]), string(base[dot+1:]))
+	}
+	if base != text || text[0] == '*' || text[0] == '[' {
+		return typeDBDescKey(text)
+	}
+	return typeDBKey(selfPkg, base)
+}
+
+// typeDBEdgeAdd records one directed edge of the given kind. Both directions
+// are materialised; a query scans only its own kind.
+func typeDBEdgeAdd(db *TypeDB, kind int32, from, to string) {
+	if db == nil || kind < 0 || kind >= edgeKindCount || from == "" || to == "" {
+		return
+	}
+	db.fwd[kind][from] = typeDBStrAddUnique(db.fwd[kind][from], to)
+	if kind != EdgeDeclares {
+		db.rev[kind][to] = typeDBStrAddUnique(db.rev[kind][to], from)
+	}
+	k := from | "|" | to
+	db.cnt[kind][k] = db.cnt[kind][k] + 1
+}
+
+// typeDBEdgeExists answers membership without returning the set.
+func typeDBEdgeExists(db *TypeDB, kind int32, from, to string) (ok bool) {
+	if db == nil || kind < 0 || kind >= edgeKindCount {
+		return false
+	}
+	for _, t := range db.fwd[kind][from] {
+		if t == to {
+			return true
+		}
+	}
+	return false
+}
+
+func typeDBEdgeCount(db *TypeDB, kind int32, from string) (n int32) {
+	if db == nil || kind < 0 || kind >= edgeKindCount {
+		return 0
+	}
+	return int32(len(db.fwd[kind][from]))
+}
+
+func typeDBEdgeCountTo(db *TypeDB, kind int32, to string) (n int32) {
+	if db == nil || kind < 0 || kind >= edgeKindCount {
+		return 0
+	}
+	return int32(len(db.rev[kind][to]))
+}
+
+// typeDBIntersects is the release test: does the edge set out of `from` meet
+// the supplied set? It scans the edges internally and returns one bit; the
+// caller never receives the list.
+func typeDBIntersects(db *TypeDB, kind int32, from string, set map[string]bool) (ok bool) {
+	if db == nil || kind < 0 || kind >= edgeKindCount || set == nil {
+		return false
+	}
+	for _, t := range db.fwd[kind][from] {
+		if set[t] {
+			return true
+		}
+	}
+	return false
+}
+
+// typeDBIndexFact adds a fact to the (package,name), hash and package indexes.
+func typeDBIndexFact(db *TypeDB, f *TypeFact) {
+	if db == nil || f == nil {
+		return
+	}
+	db.pkgFacts[f.Pkg] = typeDBStrAddUnique(db.pkgFacts[f.Pkg], f.Key)
+	if f.Hash != "" {
+		db.byHash[f.Hash] = typeDBStrAddUnique(db.byHash[f.Hash], f.Key)
+	}
+}
+
+// typeDBRemoveStr removes v from xs, preserving order. Release is delete, so
+// every list index needs this cheaply proportional to its own entries.
+func typeDBRemoveStr(xs []string, v string) (out []string) {
+	for i := int32(0); i < int32(len(xs)); i++ {
+		if xs[i] == v {
+			out = []string{:len(xs) - 1}
+			j := int32(0)
+			for a := int32(0); a < int32(len(xs)); a++ {
+				if xs[a] == v {
+					continue
+				}
+				out[j] = xs[a]
+				j++
+			}
+			return out
+		}
+	}
+	return xs
+}
+
+func typeDBRemoveEdge(db *TypeDB, kind int32, from, to string) {
+	db.fwd[kind][from] = typeDBRemoveStr(db.fwd[kind][from], to)
+	if kind != EdgeDeclares {
+		db.rev[kind][to] = typeDBRemoveStr(db.rev[kind][to], from)
+	}
+	k := from | "|" | to
+	if c := db.cnt[kind][k]; c > 1 {
+		db.cnt[kind][k] = c - 1
+	} else {
+		delete(db.cnt[kind], k)
+	}
+}
+
+// typeDBDeletePkg removes one package's facts, its interface contributions and
+// every edge incident to those facts. O(that package's own entries), never a
+// scan of the store.
+func typeDBDeletePkg(db *TypeDB, pkg string) {
+	if db == nil {
+		return
+	}
+	keys := db.pkgFacts[pkg]
+	for _, key := range keys {
+		f := db.facts[key]
+		if f != nil && f.Hash != "" {
+			db.byHash[f.Hash] = typeDBRemoveStr(db.byHash[f.Hash], key)
+		}
+		delete(db.facts, key)
+		for kind := int32(0); kind < edgeKindCount; kind++ {
+			// outgoing edges of this key
+			tos := db.fwd[kind][key]
+			for _, to := range tos {
+				typeDBRemoveEdge(db, kind, key, to)
+			}
+			// incoming edges to this key
+			froms := db.rev[kind][key]
+			for _, from := range froms {
+				typeDBRemoveEdge(db, kind, from, key)
+			}
+		}
+	}
+	delete(db.pkgFacts, pkg)
+	delete(db.versions, pkg)
+	delete(db.pkgIface, pkg)
+}
+
+// typeDBLoadMxh indexes one package's serialized facts. It never builds a
+// TCPackage: the text is the storage and the facts are the index.
+func typeDBLoadMxh(db *TypeDB, data []byte) (n int32) {
+	if db == nil || len(data) == 0 {
+		return 0
+	}
+	d := string(data)
+	ls, le, pos := mxhNextLine(d, 0)
+	if !mxhHasPrefix(d, ls, le, "package ") {
+		return 0
+	}
+	ws, we := mxhNextWord(d, ls+8, le)
+	if ws == we {
+		return 0
+	}
+	pkg := string(d[ws:we])
+	ver := typeDBHash(d)
+	db.versions[pkg] = ver
+	pos = 0
+	for pos < int32(len(d)) {
+		ls2, le2, next := mxhNextLine(d, pos)
+		pos = next
+		switch {
+		case mxhHasPrefix(d, ls2, le2, "type "):
+			ns, ne := mxhNextWord(d, ls2+5, le2)
+			if ns == ne {
+				continue
+			}
+			name := string(d[ns:ne])
+			f := &TypeFact{Key: typeDBKey(pkg, name), Pkg: pkg, Name: name, Kind: "type", Under: typeDBTrimLeft(d[ne:le2]), Version: ver}
+			f.Hash = typeDBHash(f.Kind | "|" | f.Under)
+			db.facts[f.Key] = f
+			typeDBIndexFact(db, f)
+			n++
+		case mxhHasPrefix(d, ls2, le2, "alias "):
+			ns, ne := mxhNextWord(d, ls2+6, le2)
+			if ns == ne {
+				continue
+			}
+			name := string(d[ns:ne])
+			f := &TypeFact{Key: typeDBKey(pkg, name), Pkg: pkg, Name: name, Kind: "alias", Under: typeDBTrimLeft(d[ne:le2]), Version: ver}
+			f.Hash = typeDBHash(f.Kind | "|" | f.Under)
+			db.facts[f.Key] = f
+			typeDBEdgeAdd(db, EdgeAlias, f.Key, typeDBTypeRef(pkg, f.Under))
+			n++
+		case mxhHasPrefix(d, ls2, le2, "iface "):
+			ns, ne := mxhNextWord(d, ls2+6, le2)
+			if ns == ne {
+				continue
+			}
+			name := string(d[ns:ne])
+			f := &TypeFact{Key: typeDBKey(pkg, name), Pkg: pkg, Name: name, Kind: "iface", Sig: typeDBTrimLeft(d[ne:le2]), Version: ver}
+			f.Hash = typeDBHash(f.Kind | "|" | f.Sig)
+			db.facts[f.Key] = f
+			typeDBIndexFact(db, f)
+			n++
+		case mxhHasPrefix(d, ls2, le2, "method "):
+			rs, re := mxhNextWord(d, ls2+7, le2)
+			if rs == re {
+				continue
+			}
+			ms, me := mxhNextWord(d, re, le2)
+			if ms == me {
+				continue
+			}
+			recv := typeDBRecvName(string(d[rs:re]))
+			mname := string(d[ms:me])
+			tkey := typeDBKey(pkg, recv)
+			typeDBEdgeAdd(db, EdgeDeclares, tkey, mname)
+			if db.facts[tkey] == nil {
+				f := &TypeFact{Key: tkey, Pkg: pkg, Name: recv, Kind: "methodrecv", Version: ver}
+				f.Hash = typeDBHash(f.Kind | "|" | recv)
+				db.facts[tkey] = f
+				typeDBIndexFact(db, f)
+			}
+			n++
+		}
+	}
+	return n
+}
+
+// typeDBAddConversion records one actual conversion site (docs/type-db.md has
+// the exhaustive context list). Count is traffic, not potential.
+func typeDBAddConversion(db *TypeDB, iface, typeKey, sitePkg string) {
+	typeDBEdgeAdd(db, EdgeImplements, iface, typeKey)
+	if sitePkg != "" {
+		db.pkgIface[sitePkg] = typeDBStrAddUnique(db.pkgIface[sitePkg], iface | "|" | typeKey)
+	}
+}
+
+// typeDBActualImpls is a diagnostic only; the release path uses intersects.
+func typeDBActualImpls(db *TypeDB, iface string) (ts []string) {
+	if db == nil {
+		return nil
+	}
+	return db.fwd[EdgeImplements][iface]
+}
+
+func typeDBImplCount(db *TypeDB, iface string) (n int32) {
+	return typeDBEdgeCount(db, EdgeImplements, iface)
+}
+
+func typeDBImplIntersects(db *TypeDB, iface string, set map[string]bool) (ok bool) {
+	return typeDBIntersects(db, EdgeImplements, iface, set)
+}
+
+func typeDBMethodsOf(db *TypeDB, pkg, name string) (ms []string) {
+	if db == nil {
+		return nil
+	}
+	return db.fwd[EdgeDeclares][typeDBKey(pkg, name)]
+}
+
+// typeDBCheck verifies every relation is symmetric and identity is nominal.
+// It runs after every load; a broken index is a compiler bug and must be loud.
+func typeDBCheck(db *TypeDB) (shared int32) {
+	for kind := int32(0); kind < edgeKindCount; kind++ {
+		if kind == EdgeDeclares {
+			continue // deliberately no method-name reverse index
+		}
+		for from, tos := range db.fwd[kind] {
+			for _, to := range tos {
+				ok := false
+				for _, f := range db.rev[kind][to] {
+					if f == from {
+						ok = true
+						break
+					}
+				}
+				if !ok {
+					panic("typedb: reverse edge missing for kind " | typeDBItoa(kind) | " " | from | " -> " | to)
+				}
+			}
+		}
+	}
+	seen := map[string]string{}
+	for k, f := range db.facts {
+		if k != typeDBKey(f.Pkg, f.Name) {
+			panic("typedb: nominal key does not match its fact: " | k)
+		}
+		if prev, ok := seen[f.Hash]; ok && prev != k {
+			shared++
+		} else {
+			seen[f.Hash] = k
+		}
+	}
+	return shared
+}
+
+func typeDBItoa(n int32) (s string) {
+	if n == 0 {
+		return "0"
+	}
+	b := []byte{:0:12}
+	i := int32(12)
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	for n > 0 && i > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg && i > 0 {
+		i--
+		b[i] = '-'
+	}
+	return string(b[i:])
+}
+
+func typeDBFactCount(db *TypeDB) (n int32) {
+	if db == nil {
+		return 0
+	}
+	return int32(len(db.facts))
+}
+
+func typeDBMethodCount(db *TypeDB) (n int32) {
+	if db == nil {
+		return 0
+	}
+	seen := map[string]bool{}
+	for _, ms := range db.fwd[EdgeDeclares] {
+		for _, m := range ms {
+			seen[m] = true
+		}
+	}
+	return int32(len(seen))
+}
+
+func typeDBConvCount(db *TypeDB) (n int32) {
+	if db == nil {
+		return 0
+	}
+	return int32(len(db.cnt[EdgeImplements]))
+}
+
+// cmdTypeDB indexes explicit .mxh fact files and prints the store's shape.
+// It is the diagnostic that proves the facts and both edge directions without
+// involving a link, and the place to check nominal identity by hand:
+//
+//	mxc typedb pkg/a/<hash>.mxh pkg/b/<hash>.mxh
+//
+// Two packages declaring the same layout under the same name report a shared
+// structural hash but keep distinct fact keys.
+func cmdTypeDB(fs []string) {
+	if len(fs) < 1 {
+		mxutil.WriteStr(2, "usage: mxc typedb <file.mxh>...\n")
+		return
+	}
+	db := typeDBNew()
+	for i := 0; i < len(fs); i++ {
+		data, ok := mxutil.ReadFile(fs[i])
+		if !ok {
+			mxutil.WriteStr(2, "typedb: cannot read " | fs[i] | "\n")
+			continue
+		}
+		typeDBLoadMxh(db, data)
+	}
+	shared := typeDBCheck(db)
+	mxutil.WriteStr(1, "typedb: facts=" | simpleItoa(typeDBFactCount(db)) |
+		" methods=" | simpleItoa(typeDBMethodCount(db)) |
+		" versions=" | simpleItoa(int32(len(db.versions))) |
+		" shared=" | simpleItoa(shared) | "\n")
+	// Release is delete: prove the six indexes can drop one package in
+	// proportion to its own entries.
+	delPkg := ""
+	for _, f := range db.facts {
+		delPkg = f.Pkg
+		break
+	}
+	if delPkg != "" {
+		typeDBDeletePkg(db, delPkg)
+		typeDBCheck(db)
+		mxutil.WriteStr(1, "typedb: after delete " | delPkg | ": facts=" |
+			simpleItoa(typeDBFactCount(db)) | " methods=" | simpleItoa(typeDBMethodCount(db)) | "\n")
+	}
+}
