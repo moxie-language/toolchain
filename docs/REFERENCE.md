@@ -162,7 +162,7 @@ Functions:
 ```
 cap     clear   close   copy    delete  len
 max     min     panic   pop     print   println
-push    recover resize  spawn
+push    resize  spawn
 ```
 
 #### No Scope Shadowing
@@ -1236,11 +1236,11 @@ cleanup:
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `push` | `push(s []T, elems ...T)` | Appends elements to a slice in place. Panics if len+n exceeds cap. Lazy-inits nil slices. Store-back is implicit. |
+| `push` | `push(s []T, elems ...T)` | Appends elements; grows when capacity is short (lazy-init floor 4, then doubling). The abandoned backing stays in the arena that allocated it. Store-back is implicit. |
 | `pop` | `pop(s []T) T` | Removes and returns the last element. Panics if len == 0. Store-back is implicit. |
 | `resize` | `resize(s []T, n int32)` | Sets the slice length to n. Panics if n > cap or n < 0. Store-back is implicit. |
 | `cap` | `cap(v) int32` | Capacity of a slice, channel, or array |
-| `clear` | `clear(m)` | Clears a map or zeroes a slice |
+| `clear` | `clear(m)` | Clears a map, or zeroes a slice's elements in place (length unchanged) |
 | `close` | `close(ch)` | Closes a channel |
 | `copy` | `copy(dst, src []T) int32` | Copies elements between slices |
 | `delete` | `delete(m, key)` | Deletes a map entry by key |
@@ -1253,6 +1253,8 @@ cleanup:
 | `spawn` | `spawn(fn, args...) chan struct{}` | Creates a new isolated domain |
 
 `len` and `cap` return `int32`, not a platform-dependent integer.
+`recover` is not callable - a panic is fatal - and no longer appears above.
+The full slice survey, including the reader costs, is [docs/slices.md](slices.md).
 
 ### push/pop/resize vs append
 
