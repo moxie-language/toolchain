@@ -463,10 +463,32 @@ is aborted in the read-only phases costs nothing; the copy phase cannot be
 aborted partway (it either has not started or runs to the root fixup), which is
 why A and B differ in what "returning to the select" may do.
 
-**Pinning and the floor.** An object whose address escaped cannot move. A
-pinned object is a floor the compaction cannot pass: pages above it can be
-emptied, pages below it cannot be reclaimed. The sovereign `escaped` flag is the
-same idea; the per-object `pinned` flag generalises it.
+**No pinning: the arena is closed.** The scope that owns a reference lives
+*outside* the arena being written to. A function's arena is that function's
+working space; a self-mutating type's sovereign arena belongs to the receiver;
+anything that must outlive the scope crosses the boundary by the call protocol -
+parameters are copied in, return values are relocated out, and a store into a
+receiver relocates into the receiver's arena. So an arena's objects are pointed
+at only by (a) pointer slots in the executing frame, (b) other objects in the
+same arena, and (c) the receiver's own fields for a sovereign group. There is no
+external interior reference to pin, and the compactor needs no `pinned` flag.
+The one fixed floor is the package-variable block: package variables are
+allocated once at init into a flattened block that is the arena's first
+allocation, and since the slide starts above it, it never moves - it is the
+base, not a pin.
+
+**Dead space is produced by relocation, and by overwrite as a hint.** When the
+return protocol (or a receiver store) copies a value out of an arena, the source
+object's bytes are dead as soon as the copy completes; the object table marks
+them dead and the next idle compaction reclaims them. The same is true of a
+variable overwrite: `s = s[n:]` stores a new header into the slot, and the old
+backing may have lost its last reference. The compiler can emit that store as a
+*dead hint*, but the authoritative decision is the mark from the roots, because
+a copied header (`x := s`) still references the old backing. That distinction
+also bounds the damage of an unwitting reslice loop: the O(n^2) *copying* remains,
+but the *live* set is only the current remainder, not every abandoned tail,
+because each abandoned tail is unreachable as soon as the only header that named
+it is overwritten.
 
 **Cost, honestly.** The object table costs bytes per allocation (an 8-byte header
 plus a type pointer, or a side entry); the mark is O(live objects + edges); the
