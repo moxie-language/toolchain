@@ -175,7 +175,8 @@ are gone:
 
 The correct stdlib counterpart already exists: `bytes.Index*From`,
 `encoding/binary.UvarintFrom`, and `bufio.Reader`'s `r`/`w` cursor. The rule is:
-**advance an index, never reslice to consume.**
+**advance an index; reslice only to cut one segment you mean to copy** - and
+never reslice to consume inside a loop (§12).
 
 The segment-extraction API is `bytes.Split`/`Fields`/`Cut`, and all of them
 copy: `Split` returns `[][]byte` whose elements are independent copies, `Cut`
@@ -343,3 +344,229 @@ capability is already here.
   `CopyFrom`/`CopyAt`/`CopyRange`;
 - `src/bytes/iter_wasm.mx`, `src/slices/iter_wasm.mx` — the disabled iterator
   layer and its reason.
+
+## 10. Planned: compaction of long-lived arenas (sovereign, main, spawn)
+
+Status: design, not implemented. The prerequisite - per-frame pointer maps - does
+not exist yet. This section is the specification to build against, and it
+separates the two areas the problem really has: **the data** (bytes in the
+arena) and **the metadata** (what is where, what is live, and who points at it).
+
+**Why it is needed.** A frame arena is released when its frame returns. The
+`main` and spawn bodies are event loops that never return, so everything the
+loop body itself allocates (not a callee's frame, which does die) accumulates in
+that one arena for the process lifetime: the classic event-loop ratchet. The
+same is true of a sovereign receiver's arena, except that one already has a
+precise model and a compaction queue. The fix is the same mechanism for all
+three, run **during idle**, which for a Moxie domain means "inside the select
+park loop", next to `idleTrimPages` and `SovDrainCompactions`.
+
+**The parameters, as specified:**
+
+- work **in reverse from the end**, so the pages freed are the last ones; each
+  page that empties is `madvise`d away and the region's allocated length
+  shrinks - the arena ratchets *down*, page at a time;
+- a **progress tracker**: the offset from the end that the scan reached last
+  time, so a cycle continues across idle turns instead of restarting;
+- a **flag** that records "an allocation happened since the last select". An
+  allocation invalidates the plan (it may have taken a hole the compactor
+  intended to use, or extended the region), so the tracker resets - the user's
+  rule is "reset to zero at every allocation after a select is exited to run a
+  branch", i.e. an allocation cancels the cycle and the next park starts a fresh
+  one;
+- every time the scan **crosses a page boundary** it returns to the select to
+  check channel events;
+- when data is squashed downwards, **reference pointers are rewritten**.
+
+**The two areas.**
+
+*Data*: the arena's bytes, in regions of pages, with a bump offset. Nothing new
+is needed here beyond the move itself.
+
+*Metadata*, per region: an **object table** of
+`{start, size, typeDesc, flags}` written at allocation time (the object header,
+or a side array in the metadata area), where `typeDesc` is the type's pointer
+map - the same information the compiler already emits for return relocation
+(`RelocMark`/`RelocFixup` walk a value's pointers; a per-type "visit every
+pointer field" function is the reusable form). Liveness is not stored in the
+table; it is computed by a mark from the roots. `flags` carries at least
+`pinned` (the address escaped: a codec boundary, a registered stable pointer, a
+package variable we choose not to fix) - a pinned object does not move and
+nothing can be compacted past it.
+
+**The roots.** Three sources, all needed together:
+
+1. **Package variables**: every package variable is a TLS slot, and its type is
+   known statically, so each package can emit a static root map (offset in the
+   TLS block, type descriptor). This is much easier than frames because it is
+   compile-time constant.
+2. **The current frame**: a per-safepoint map of live pointer slots and their
+   types (the next section). Compaction happens in the frame that is running
+   the select, so one frame's map is enough - no stack walk, provided we compact
+   only that frame's arena (and the domain's root arena when that frame is the
+   top one).
+3. **The sovereign registry**: already precise (`sovGroup`), and its compaction
+   already exists.
+
+**The cycle, in phases.**
+
+1. **Mark** (read-only, resumable at any boundary): walk from the roots, mark
+   live objects in the object table, and record the pointer edges if the
+   dispatch-safe variant is chosen (see below).
+2. **Forward** (read-only): assign every live object a new address by sliding
+   live objects down in address order. The forwarding map is `old -> new`,
+   complete before any byte moves.
+3. **Copy + fixup** (page-bounded): process pages from the **top down**. For
+   each live object in the page, copy its bytes to its destination and rewrite
+   its outbound pointer fields through the forwarding map as they are copied,
+   then mark the vacated range dead. When every live object in a page has
+   moved, `madvise` the page and shrink the region's allocated length. Every
+   page boundary saves the tracker and returns to the select to poll.
+4. **Root fixup** (small): rewrite the roots (frame slots, package variables)
+   through the forwarding map.
+
+**The consistency question - the one real design choice.** Between the first
+copy and the root fixup, a root still points at an object's *old* address, and
+the old bytes are still intact (that is why the copy happens before the
+overwrite). So a root fixup at the end is safe **as long as no program code
+runs in between**. Returning to the select to *poll* is fine; returning to
+dispatch a branch is not, unless every pointer is always valid:
+
+- **Variant A - poll only, no dispatch.** The copy phase runs to completion
+  inside one park loop, polling between pages. Latency is one full cycle, not one
+  page, but no extra metadata is needed. A pending message is noticed and served
+  immediately after the cycle.
+- **Variant B - dispatch-safe, with a pointer graph.** The mark phase records,
+  for each live object, the list of inbound edges as `(source object, field
+  index) -> target object` (not as raw addresses, because a source object's
+  fields move when *it* moves). Then an object can be moved and every inbound
+  pointer rewritten by object identity, making the heap consistent after every
+  single move. This is what allows the select to actually dispatch between
+  pages. The price is the edge list in the metadata area: one record per
+  pointer, which for a pointer-dense arena is proportional to the pointer
+  count, not the byte count. A cheaper middle ground is to rebuild the inbound
+  set by scanning the live set once per page group - no persistent metadata,
+  but O(live) per page group.
+
+Variant A is the honest first implementation: it needs only the object table
+and the type maps, and it finishes the job. Variant B is the upgrade if a
+process with a very large live set cannot tolerate a full-cycle latency; it is
+also the only variant that can dispatch mid-cycle, so if "check for channel
+events" means "and handle them", the pointer graph is mandatory.
+
+**What the tracker means here.** `compactRemaining` is the scan cursor as an
+offset from the end of the region, set to the region's allocated length when a
+cycle starts and saved at every page crossing. `allocatedSinceSelect` is the
+cancellation flag: any allocation after the select returns clears
+`compactRemaining` (the plan is stale) and the next park re-marks. A cycle that
+is aborted in the read-only phases costs nothing; the copy phase cannot be
+aborted partway (it either has not started or runs to the root fixup), which is
+why A and B differ in what "returning to the select" may do.
+
+**Pinning and the floor.** An object whose address escaped cannot move. A
+pinned object is a floor the compaction cannot pass: pages above it can be
+emptied, pages below it cannot be reclaimed. The sovereign `escaped` flag is the
+same idea; the per-object `pinned` flag generalises it.
+
+**Cost, honestly.** The object table costs bytes per allocation (an 8-byte header
+plus a type pointer, or a side entry); the mark is O(live objects + edges); the
+copy is O(live bytes); the fixup is O(edges + roots); Variant B adds the edge
+list to peak memory. The payoff is that a long-lived arena stops growing without
+bound while keeping O(pages) release at frame exit unchanged.
+
+### Per-frame pointer maps (the prerequisite)
+
+Two facts make this implementable without LLVM's stackmap machinery:
+
+- the compiler already knows, at the select, which pointer-typed variables are
+  live and their types (the same liveness that drives return relocation);
+- the select is a call, so live values are already forced to stack slots across
+  it. If the compiler additionally **spills every live pointer variable to its
+  slot before the call** (a "pointer barrier" at the safepoint), the map is
+  exact without any backend work.
+
+The emitter then writes, per function and per safepoint, a table of
+`{frame offset, type descriptor}` for the live pointer slots, plus the function's
+frame size. The runtime's select entry receives the map (an extra argument, or a
+pointer in the call's shadow), so the park loop can hand it to the compactor.
+Package-variable maps are static and emitted once per package.
+
+Work items, in order: (1) the pointer barrier and the per-safepoint map in both
+compilers (wood law); (2) the object table and the type "visit pointers"
+function in the runtime; (3) Variant A compaction at the select, with the
+tracker and the page budget; (4) the frame arena and the domain root arena as
+the first targets (sovereign already works); (5) Variant B only if measured
+latency demands it.
+
+## 11. Streaming: channels, comma-ok, and the cursor
+
+The missing streaming layer is not the *concept*; it is the Go spelling. A FIFO
+stream is already expressible with a channel and comma-ok:
+
+```moxie
+for {
+    buf, ok := <-in          // FIFO: the ring is a queue
+    if !ok {
+        return closed        // closed channel: the stream ended
+    }
+    for len(buf) > 0 {       // parse the buffer with a cursor
+        seg, rest, found := cut(buf)
+        ...
+        buf = rest           // one cut, not a loop of reslices
+    }
+}
+```
+
+What a channel gives, and what it does not:
+
+- **FIFO**: yes, per channel. The ring is a queue; the depth is the declared
+  outstanding count, and the sender parks when it is full. That is backpressure
+  for free - the producer cannot outrun the consumer by more than the declared
+  depth.
+- **Close as end-of-stream**: yes, comma-ok is exactly the `ok == false` that
+  says "no more".
+- **Ordering across producers**: per channel, not global. Two producers
+  interleave; a total order needs one producer or a sequence number in the
+  element.
+- **Peeking**: no. A receive consumes. This is why `slices.Reader[T]` matters:
+  a parser needs to look at the next N bytes before deciding to consume them.
+  The workable composition is *buffer at a time*: pull a buffer from the
+  channel, wrap it in a `Reader` (or `bytes.Reader`/`bufio.Reader`), parse with
+  `Peek`/`Next` inside it, and pull the next buffer when it is exhausted. That
+  is exactly what `bufio.Scanner` does for byte streams, and it is the shape the
+  lattice's framing wants.
+- **Copy cost**: crossing a channel copies the message into the ring, and the
+  receiver gets its own copy in its arena (or a raw memcpy when the element
+  holds no references). That copy is the contract for cross-domain data. Within
+  one domain, a cursor over one buffer copies only the segments that are
+  retained. So: cross-domain stream = channel; in-buffer parsing = cursor;
+  usually both, as above.
+
+This is why "streaming back" does not need `iter.Seq` or coroutines: the
+channel is the FIFO and the close signal, the cursor is the lookahead, and
+`bufio.Scanner` is the existing byte-stream segmenter. The only thing missing
+from the language surface is the generic `slices.Reader[T]`.
+
+## 12. The reslice lint (proposed)
+
+"Never reslice to consume" is too broad: a reader that takes one segment from
+the front *must* cut the slice, and the cut is a copy of that segment (plus the
+remainder, in the `s = s[n:]` spelling) - that is the model working, not a bug.
+
+The cost only turns quadratic when the same variable is resliced **in a loop**,
+each iteration copying what is left. So the lint should target the shape, not
+the operation:
+
+- fire when a slice variable is rebound by a reslice inside a loop (the message:
+  "reslice in a loop copies the remainder every iteration; advance an index
+  instead");
+- do **not** fire on a single cut (`seg := s[n:]`, `buf = rest` where the loop
+  then parses with a cursor), which is how a reader takes a segment;
+- for the genuine case of a loop over a small bounded buffer where the copy is
+  deliberate, a `//:nolint reslice` directive with the reason - documented, not
+  silent.
+
+The two sites this survey fixed were write loops over unbounded input, which is
+precisely the shape the lint targets. Reader code is not excluded as a
+category; it is excluded by *shape* (single cuts pass, remainder-copy loops
+fail, and a documented suppression exists).
