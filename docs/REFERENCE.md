@@ -893,6 +893,104 @@ package mypackage
 A `package main` declaration defines an executable program. The entry point is
 `func main()`.
 
+### The Entry Point: main, spawn targets and shutdown
+
+Two functions in a process are special, and the compiler enforces both shapes.
+
+**`main`.** A main package cannot declare `init()`. The shape is:
+
+```moxie
+func main() {
+	select {
+	case <-shutdown:
+		return
+	default:
+	}
+
+	// setup ...
+
+	for {
+		select {
+		case <-shutdown:
+			cleanup()
+			return
+		case msg := <-in:
+			handle(msg)
+		}
+	}
+}
+```
+
+The first select satisfies the check for a batch program that runs straight
+through; the loop's arm is what makes the program stoppable while it runs. The
+check is mandatory - a `main` without a `case <-shutdown:` arm is a compile
+error:
+
+    main must select on shutdown: add a `case <-shutdown:` arm to its select
+    (or a non-blocking one at entry for a batch program), because a program
+    that cannot be told to stop has to be killed
+
+`shutdown` is a predeclared word, not `close`: `close(ch)` remains the builtin.
+The channel is created on first use in the root arena, so it outlives every
+frame that selects on it, and it is only ever closed.
+
+**Spawn targets.** A function is a spawn target when its ONE result is named
+`closed` and typed `chan struct{}`:
+
+```moxie
+func worker(in chan Request, out chan Response) (closed chan struct{}) {
+	for {
+		select {
+		case <-closed:
+			return closed
+		case req := <-in:
+			out <- handle(req)
+		}
+	}
+}
+```
+
+The compiler enforces that shape too: a target must select on its `closed`
+breaker and return it. A target that never selects on it is rejected:
+
+    spawn: node never selects on its closed breaker; a spawned domain must
+    handle termination, so its loop selects on <-closed and returns the breaker
+
+The breaker is a SIGNAL, not a message: nothing is ever sent on it, `close` is
+the whole event, and a parent stops a child with `close(done)`. A nil breaker
+means never canceled. `shutdown` for the entry point and `closed` for a spawned
+domain are the same primitive, which is why the shapes repeat.
+
+**Graceful shutdown.** The close of `shutdown` is cooperative: the platform's
+stop source raises it (SIGINT/SIGTERM hosted, `module_exit` in a module, the
+host's teardown on wasm, where the channel never fires), and the runtime closes
+the channel in normal context at the next wait - a signal handler only raises a
+flag, it cannot allocate or close a channel. "Graceful" means:
+
+- **reach a wait.** A domain parked in a select wakes; a domain in a tight
+  compute loop does not see the close until it waits, so long tasks are broken
+  into units that let the loop come back around.
+- **finish the current unit, then leave.** The arm runs between units, never
+  mid-store - the same rule a worker follows for its `closed` breaker.
+- **close children first, then flush, then return.** A parent closes each
+  child's breaker (the close propagates through the pipe-bound channels), then
+  releases what it owns. There is no join primitive: if a parent must know a
+  child has finished, the child sends on a completion channel before returning;
+  the breaker itself only signals.
+- **the breaker carries no payload and no acknowledgement.** Correctness cannot
+  depend on the parent hearing back.
+
+**The involuntary exit.** `panic` is death: there is no `recover`, deferred
+calls do not run on the way out, and an involuntary stop - SIGKILL, OOM, power
+loss, a crashed module unloaded by the kernel, a Worker torn down by the page -
+runs neither the shutdown arm nor any deferred code. The shutdown path is an
+optimization for a clean exit, never the mechanism that makes state correct.
+State that must survive an involuntary exit has to be recoverable without it:
+write the new file and `rename` it into place; append a commit record and treat
+the last complete record as the state; make replay idempotent; checksum what is
+persisted so a torn tail is detected rather than adopted. A program whose state
+is only consistent if the shutdown arm ran was not graceful - it was lucky.
+
 ### Import Declarations
 
 ```moxie
