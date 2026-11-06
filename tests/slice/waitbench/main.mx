@@ -1,0 +1,43 @@
+// How long does one wake-up cost? The lattice's synchronous rounds are exactly
+// this: a manager sends, a worker parked in select wakes, processes, replies.
+// Ten thousand round trips say whether that is microseconds (a futex wake) or
+// the park bound (20ms) - the difference decides whether the slice measures the
+// machine or the wait.
+package main
+
+import (
+	"time"
+)
+
+const iters = int32(2000)
+
+func worker(in chan int32, out chan int32) (closed chan struct{}) {
+	for {
+		select {
+		case <-closed:
+			return closed
+		case v := <-in:
+			out <- v
+		}
+	}
+}
+
+func main() {
+	select {
+	case <-sigint:
+		return
+	default:
+	}
+	in := chan int32{}
+	out := chan int32{}
+	b := spawn(worker, in, out)
+	start := time.Now()
+	for i := int32(0); i < iters; i++ {
+		in <- 1
+		<-out
+	}
+	d := time.Since(start)
+	us := d.Microseconds()
+	println("roundtrips=", iters, "total_us=", us, "us_per_rt=", us/int64(iters))
+	close(b)
+}

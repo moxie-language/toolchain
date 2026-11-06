@@ -1,0 +1,226 @@
+// The slice: one domain per variable node of a repetition code's chain, a
+// synchronous round per belief-propagation step, and a manager that drives the
+// barrier. The graph is a fixed chain (a tree, so BP is exact); the answer is
+// the all-zero codeword, and the manager also runs the same BP serially as the
+// reference. The point is the number, not the demo: edges/s/domain, the frame
+// bytes per message, the allocation churn, and how a slow neighbour stalls a
+// round.
+//
+// Edges: node i owns the edge to i+1, and the same channel is both ends' view of
+// it. One round: every node sends its belief left and right, receives the
+// peer's, adds its prior, and reports to the manager. The manager's barrier is
+// what makes the rounds synchronous - it sends every node a go and waits for
+// every node's done.
+package main
+
+import (
+	"runtime"
+	"time"
+)
+
+type breaker = chan struct{}
+type ch32 = chan int32
+
+const (
+	nodes       = int32(32)
+	rounds      = int32(32)
+	slowNode    = int32(13)
+	slowMicros  = int32(200)
+	elementSize = int32(4)
+	// A ring frame is a 4-byte big-endian length and the payload, aligned to 8.
+	frameBytes = int32((4 + elementSize + 7) & 0xFFFFFFF8)
+)
+
+// priorAt is the LLR of the received word: mostly the all-zero codeword, with
+// three flipped bits. Both the serial reference and the nodes read it.
+func priorAt(i int32) (p int32) {
+	if i == 3 || i == 11 || i == 24 {
+		return -8
+	}
+	return 8
+}
+
+// node is one variable node. It sends its belief on both incident edges, takes
+// the peer's, adds its prior, and reports the result on done. The boundary
+// nodes simply skip the edge they do not have.
+func node(i int32, goCh chan int32, doneCh chan int32, left chan int32, right chan int32, stats chan int32, slow int32) (closed chan struct{}) {
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	// mL/mR are the messages this node has received from its two checks; the
+	// posterior is prior + both, and what it SENDS is the extrinsic (prior plus
+	// the other side). Sending the posterior double-counts and diverges.
+	mL := int32(0)
+	mR := int32(0)
+	belief := priorAt(i)
+	for {
+		select {
+		case <-closed:
+			var after runtime.MemStats
+			runtime.ReadMemStats(&after)
+			stats <- int32(after.Allocs - before.Allocs)
+			return closed
+		case <-goCh:
+			{
+			eL := priorAt(i) + mR
+			eR := priorAt(i) + mL
+			if i > 0 {
+				left <- eL
+			}
+			if i < nodes-1 {
+				right <- eR
+			}
+			if i > 0 {
+				mL = <-left
+			}
+			if i < nodes-1 {
+				mR = <-right
+			}
+			belief = priorAt(i) + mL + mR
+			if slow > 0 && i == slowNode {
+				deadline := time.Now().Add(time.Duration(slow) * time.Microsecond)
+				for time.Now().Before(deadline) {
+				}
+			}
+			doneCh <- belief
+			}
+		}
+	}
+}
+
+// serial is the reference: the same BP, one thread, no channels.
+func serial(r int32) (bits []int32) {
+	mL := []int32{:nodes}
+	mR := []int32{:nodes}
+	nL := []int32{:nodes}
+	nR := []int32{:nodes}
+	for round := int32(0); round < r; round++ {
+		for i := int32(0); i < nodes; i++ {
+			nL[i] = priorAt(i) + mR[i]
+			nR[i] = priorAt(i) + mL[i]
+		}
+		for i := int32(0); i < nodes; i++ {
+			mL[i] = 0
+			mR[i] = 0
+			if i > 0 {
+				mL[i] = nR[i-1]
+			}
+			if i < nodes-1 {
+				mR[i] = nL[i+1]
+			}
+		}
+	}
+	bits = []int32{:nodes}
+	for i := int32(0); i < nodes; i++ {
+		belief := priorAt(i) + mL[i] + mR[i]
+		if belief < 0 {
+			bits[i] = 1
+		}
+	}
+	return bits
+}
+
+// run builds the bundle, drives r rounds, and returns the round time, the
+// decoded bits, the allocation count across root and nodes, and the belief
+// vector the manager saw last.
+func run(r int32, slow int32) (us int64, bits []int32, allocs int64) {
+	goCh := []ch32{:nodes}
+	doneCh := []ch32{:nodes}
+	statsCh := []ch32{:nodes}
+	for i := int32(0); i < nodes; i++ {
+		goCh[i] = chan int32{}
+		doneCh[i] = chan int32{}
+		statsCh[i] = chan int32{}
+	}
+	edges := []ch32{:(nodes - 1)}
+	for i := int32(0); i < nodes-1; i++ {
+		edges[i] = chan int32{}
+	}
+	dummyL := chan int32{}
+	dummyR := chan int32{}
+	breakers := []breaker{:nodes}
+	for i := int32(0); i < nodes; i++ {
+		left := dummyL
+		right := dummyR
+		if i > 0 {
+			left = edges[i-1]
+		}
+		if i < nodes-1 {
+			right = edges[i]
+		}
+		breakers[i] = spawn(node, i, goCh[i], doneCh[i], left, right, statsCh[i], slow)
+	}
+	var rootBefore runtime.MemStats
+	runtime.ReadMemStats(&rootBefore)
+	beliefs := []int32{:nodes}
+	start := time.Now()
+	for round := int32(0); round < r; round++ {
+		for i := int32(0); i < nodes; i++ {
+			goCh[i] <- 1
+		}
+		for i := int32(0); i < nodes; i++ {
+			beliefs[i] = <-doneCh[i]
+		}
+	}
+	elapsed := time.Since(start)
+	us = elapsed.Microseconds()
+	var rootAfter runtime.MemStats
+	runtime.ReadMemStats(&rootAfter)
+	allocs = int64(rootAfter.Allocs - rootBefore.Allocs)
+	for i := int32(0); i < nodes; i++ {
+		close(breakers[i])
+	}
+	for i := int32(0); i < nodes; i++ {
+		allocs += int64(<-statsCh[i])
+	}
+	bits = []int32{:nodes}
+	for i := int32(0); i < nodes; i++ {
+		if beliefs[i] < 0 {
+			bits[i] = 1
+		}
+	}
+	return us, bits, allocs
+}
+
+func main() {
+	select {
+	case <-sigint:
+		return
+	default:
+	}
+
+	ref := serial(rounds)
+	us, bits, allocs := run(rounds, 0)
+	usSlow, _, _ := run(rounds, slowMicros)
+
+	edges := int64(2*(nodes-1)) * int64(rounds)
+	msgs := edges + int64(2*nodes)*int64(rounds)
+	perSec := int64(0)
+	if us > 0 {
+		perSec = edges * 1000000 / us
+	}
+	msgPerSec := int64(0)
+	if us > 0 {
+		msgPerSec = msgs * 1000000 / us
+	}
+	allocsPerRound := allocs / int64(rounds)
+	bytesPerRound := allocsPerRound * 64 // an arena allocation is at least a cache line
+	println("slice nodes=", nodes, "rounds=", rounds, "edges=", edges, "msgs=", msgs)
+	println("baseline_us=", us, "edges_per_sec=", perSec, "edges_per_sec_domain=", perSec/int64(nodes))
+	println("msgs_per_sec=", msgPerSec, "frame_bytes=", frameBytes, "element_bytes=", elementSize)
+	println("allocs_total=", allocs, "allocs_per_round=", allocsPerRound, "bytes_per_round_est=", bytesPerRound)
+	println("slow_node=", slowNode, "slow_us=", slowMicros, "slow_round_us=", usSlow, "stall_us=", usSlow-us)
+
+	// The reference and the distributed run must agree, and the answer must be
+	// the all-zero codeword: the graph is a tree, so BP is exact.
+	for i := int32(0); i < nodes; i++ {
+		if bits[i] != ref[i] {
+			println("mismatch at", i, "distributed=", bits[i], "reference=", ref[i])
+			panic("distributed BP disagrees with the serial reference")
+		}
+		if bits[i] != 0 {
+			println("nonzero at", i, "distributed=", bits[i], "reference=", ref[i])
+			panic("BP did not decode to the all-zero codeword")
+		}
+	}
+	println("decode ok: distributed == reference, all-zero codeword")
+}
