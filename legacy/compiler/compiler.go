@@ -2181,7 +2181,15 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		case *types.Chan:
 			llvmCap = b.createRuntimeCall("chanCap", []llvm.Value{value}, "cap")
 		case *types.Slice:
+			// cap() must never show the linkdata sentinel: every consumer
+			// assumes 0 <= len <= cap, and s[:cap(s)] on a -1 capacity traps
+			// like corruption. push/pop/resize still read the raw capacity
+			// word and refuse the binding.
+			llvmLen := b.CreateExtractValue(value, 1, "cap.len")
 			llvmCap = b.CreateExtractValue(value, 2, "cap")
+			ext := b.CreateICmp(llvm.IntEQ, llvmCap,
+				llvm.ConstInt(llvmCap.Type(), ^uint64(0), false), "cap.external")
+			llvmCap = b.CreateSelect(ext, llvmLen, llvmCap, "cap.visible")
 		default:
 			return llvm.Value{}, b.makeError(pos, "todo: cap: unknown type")
 		}

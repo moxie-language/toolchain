@@ -26,6 +26,27 @@ run_one() {
 		cp "$fixture"/*.mx "$td/" 2>/dev/null
 	fi
 	browser_only "$fixture" && skip_run=1
+	# A fixture that must die with a named panic: `//:expect-panic <text>` at the
+	# top. A panic cannot be caught inside a fixture (there is no recover), so
+	# the only way to pin the guard is to run it and assert the text - which is
+	# the point: a later simplification cannot drop the check quietly.
+	panic_text="$(sed -n 's|^//:expect-panic ||p' "$fixture" 2>/dev/null | head -1)"
+	if [ -n "$panic_text" ]; then
+		if ! MOXIEROOT="$ROOT" "$MOXIE" build -o "$UNIT_WORK/testbin" "$td" >"$UNIT_WORK/build.log" 2>&1; then
+			unit_no "$UNIT_NAME" "build: $(first_error "$UNIT_WORK/build.log")"
+			return
+		fi
+		rc=0
+		"$UNIT_WORK/testbin" >"$UNIT_WORK/run.log" 2>&1 || rc=$?
+		if [ "$rc" -eq 0 ]; then
+			unit_no "$UNIT_NAME" "expected the named panic, exited 0"
+		elif ! grep -qF "$panic_text" "$UNIT_WORK/run.log"; then
+			unit_no "$UNIT_NAME" "panic text missing: $(head -2 "$UNIT_WORK/run.log" | tr '\n' ' ')"
+		else
+			unit_ok "$UNIT_NAME" "panic: $panic_text"
+		fi
+		return
+	fi
 	# A directory fixture with a lib/ subpackage: the library must compile on
 	# its own too, so a cross-package break names the library rather than only
 	# the main package that calls it.

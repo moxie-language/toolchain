@@ -638,24 +638,25 @@ func IsRemotePath(path string) (ok bool) {
 // loud, so a spread push needs Ensure(s, len(src)): the older
 // `if len(s) >= cap(s) { GrowCap(s) }` idiom only reserves ONE element and
 // panics for any longer spread.
-// capFixed reports whether a slice's capacity is the sentinel for storage the
-// program does not own: a //:linkdata binding, whose length is fixed at build
-// time. cap() reads the all-ones capacity as -1.
-//
-// The growth helpers must refuse it before doing arithmetic: cap(s)*2 is -2,
-// which the "at least 16" floor turns into a 16-element allocation that the
-// caller's length then overruns - a silent buffer overflow rather than a
-// failed push.
-func capFixed(c int32) (ok bool) {
-	return c < 0
+// headerForeign reports whether a slice header names //:linkdata storage, whose
+// length is fixed at build time. cap() reports len for such a slice (the
+// 0 <= len <= cap invariant holds), so the sentinel lives only in the raw
+// capacity word, and the growth helpers check it there before doing arithmetic
+// that would allocate over a symbol the program does not own.
+func headerForeign(hdr unsafe.Pointer) (ok bool) {
+	if hdr == nil {
+		return false
+	}
+	capWord := (*uintptr)(unsafe.Pointer(uintptr(hdr) + 2*unsafe.Sizeof(uintptr(0))))
+	return *capWord == ^uintptr(0)
 }
 
 func sliceFixedPanic() {
-	panic("slice length is fixed: the storage is not ours")
+	panic("linkdata slice: cap is foreign (copy it first)")
 }
 
 func Ensure[T comparable](s []T, n int32) (r0 []T) {
-	if capFixed(cap(s)) {
+	if headerForeign(unsafe.Pointer(&s)) {
 		sliceFixedPanic()
 	}
 	if n <= 0 || cap(s)-len(s) >= n {
@@ -680,7 +681,7 @@ func Ensure[T comparable](s []T, n int32) (r0 []T) {
 // unlike Ensure it leaves no doubling slack, and an arena is never reused
 // within a frame, so slack is spent space rather than spare space.
 func Reserve[T comparable](s []T, total int32) (r0 []T) {
-	if capFixed(cap(s)) {
+	if headerForeign(unsafe.Pointer(&s)) {
 		sliceFixedPanic()
 	}
 	if total <= cap(s) {
@@ -692,7 +693,7 @@ func Reserve[T comparable](s []T, total int32) (r0 []T) {
 }
 
 func GrowCap[T comparable](s []T) (r0 []T) {
-	if capFixed(cap(s)) {
+	if headerForeign(unsafe.Pointer(&s)) {
 		sliceFixedPanic()
 	}
 	if len(s) < cap(s) {

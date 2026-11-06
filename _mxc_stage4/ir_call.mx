@@ -556,13 +556,27 @@ func (e *irEmitter) emitBuiltinCall(c *SSACall, b *SSABuiltin) {
 			isStr := e.isStringLike(c.Call.Args[0].SSAType())
 			if isSlice || isStr {
 				rt7 := e.llvmType(c.SSAType())
+				// cap must never show the linkdata sentinel: a caller doing
+				// s[:cap(s)] or cap-len arithmetic assumes 0 <= len <= cap.
+				// The all-ones capacity means "foreign, fixed length", so cap
+				// reports len there; push/pop/resize still see the sentinel and
+				// panic. One compare and one select, no call.
+				e.nextReg++
+				lenReg := "%cl" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(lenReg) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(", 1\n")
+				e.nextReg++
+				capReg := "%cc" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(capReg) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(", 2\n")
+				e.nextReg++
+				extReg := "%ce" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(extReg) ; e.w(" = icmp eq ") ; e.w(ipt) ; e.w(" ") ; e.w(capReg) ; e.w(", -1\n")
+				e.nextReg++
+				capVal := "%cv" | irItoa(e.nextReg)
+				e.w("  ") ; e.w(capVal) ; e.w(" = select i1 ") ; e.w(extReg) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(lenReg) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(capReg) ; e.w("\n")
 				if rt7 != ipt {
-					e.nextReg++
-					tmp := "%bl" | irItoa(e.nextReg)
-					e.w("  ") ; e.w(tmp) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(", 2\n")
-					e.w("  ") ; e.w(reg) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(tmp) ; e.w(" to ") ; e.w(rt7) ; e.w("\n")
+					e.w("  ") ; e.w(reg) ; e.w(" = trunc ") ; e.w(ipt) ; e.w(" ") ; e.w(capVal) ; e.w(" to ") ; e.w(rt7) ; e.w("\n")
 				} else {
-					e.w("  ") ; e.w(reg) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(arg) ; e.w(", 2\n")
+					e.w("  ") ; e.w(reg) ; e.w(" = add ") ; e.w(ipt) ; e.w(" ") ; e.w(capVal) ; e.w(", 0\n")
 				}
 				return
 			}

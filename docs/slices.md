@@ -48,7 +48,7 @@ names.
 | `cap` | `cap(s) int32` | capacity | O(1) |
 | `s[i]` | read/write | bounds-checked element access | O(1) |
 | `push` | `push(s, v...)` | appends; grows when capacity is short (lazy-init floor 4, then doubling); store-back to `s` is implicit | amortized O(1) per element |
-| `pop` | `pop(s)` | statement: removes and returns the last element; expression: returns it without shrinking | O(1) |
+| `pop` | `pop(s)` | statement: removes and returns the last element; expression: returns it without shrinking (the two behaviours are a footgun; the decided change is two names - `pop` always removes, `top` reads the last element - pending implementation) | O(1) |
 | `resize` | `resize(s, n)` | sets the length; panics if `n > cap(s)` or `n < 0` | O(1) |
 | `copy` | `copy(dst, src) int32` | element copy; the destination may not be a subslice | O(k) |
 | `clear` | `clear(s)` | zeroes the elements, **length unchanged** | O(len) |
@@ -65,10 +65,18 @@ Two restrictions enforce the copy model:
   `tests/restrictions/reject_copy_into_subslice.mx`. The fix is always
   `resize`/`push`, never a view.
 
-A slice bound with `//:linkdata` (the all-ones capacity, `cap` reads -1) has
-foreign length: `push`, `pop` and `resize` all **panic** with "slice length is
-fixed: the storage is not ours" (`sliceFixedPanic`). Reading, indexing and
-copying out of it are unaffected.
+A slice bound with `//:linkdata` has foreign storage. `cap` reports its `len`,
+so `0 <= len <= cap` holds for every consumer - `s[:cap(s)]`, `cap-len`
+arithmetic and any library that assumes the invariant. The fixed-length
+sentinel is internal to the length-changing builtins: `push`, `pop` and `resize`
+all **panic** with "linkdata slice: cap is foreign (copy it first)"
+(`sliceFixedPanic`). Reading, indexing and copying out are unaffected.
+Subslicing or cloning a binding copies it out into normal storage whose cap is
+its length, so the copy is an ordinary slice and push/pop work on it. A
+linkdata slice is for reading and copying out, not for streaming: do not hand it
+to a reader (a cursor or `bufio.Reader`), which is built to advance over storage
+it may re-slice and retain - the fixed extent and foreign ownership are the
+wrong contract for a reader.
 
 ### Named slices
 
@@ -116,8 +124,10 @@ receiver). The consequences that shape every slice API:
   loops that select. It is a tail trim (`madvise(MADV_DONTNEED)` beyond the bump
   offset): it stops the committed set ratcheting up across idle turns, and it
   never touches live data, so it does not lower the RSS of live data. A tight
-  compute loop that never selects does not groom - by construction it is not
-  idle.
+compute loop that never selects does not groom - by construction it is not
+  idle. While a compaction cycle owns the region's tail, the trim is suspended
+  (§10): the compactor releases the pages itself as they empty, and a trim over
+  the same tail would be a use-after-madvise.
 - **Why subslicing must copy: reclamation.** If `s[a:b]` were a view, any frame,
   receiver or arena could hold a pointer into storage it does not own. Then an
   arena could not be released at frame exit (something outside might still point
@@ -272,8 +282,10 @@ What follows from the evaluation, none of it requiring a language change:
 
 1. **Name the reader.** Add one documented cursor type to `slices` (or make
    `bytes.Reader`/`bufio.Reader` the canonical pair and say so): `off int32`
-   over a slice, `Next(n) []T` (a copy), `Skip(n)` (no copy), `Remaining()`.
-   That is a stdlib addition, not a builtin.
+   over a slice, `Next(n) []T` (a copy), `Skip(n)` (no copy), `Remaining()`,
+   `Peek(n)`. It must be a **pointer-receiver** type - a value receiver on a
+   struct is a compile error - so callers pass `*Reader`; passing it by value
+   would fork the offset. That is a stdlib addition, not a builtin.
 2. **Keep the reslice rule.** `s = s[n:]` inside a loop is a bug; the compiler
    could warn on a reslice whose result immediately rebinds the same variable,
    as a lint rather than a semantic rule.
@@ -312,10 +324,12 @@ Neither blocker is about streams, and neither has to be solved to get streaming
 back:
 
 - **The first-class piece is a cursor, a data type rather than syntax:**
-  `slices.Reader[T] { buf []T; off int32 }` with `Next(n)` (copy), `Skip(n)`
-  (no copy), `Peek`, `Remaining`. `bytes.Reader` and `bufio.Reader` are already
-  the byte and stream versions; the gap is the generic slice one and a line in
-  the docs saying "this is the reader".
+`slices.Reader[T] { buf []T; off int32 }` with `Next(n)` (copy), `Skip(n)`
+  (no copy), `Peek`, `Remaining`. It is pointer-receiver (a struct value
+  receiver is a compile error), so pass `*Reader` or the offset forks.
+  `bytes.Reader` and `bufio.Reader` are already the byte and stream versions;
+  the gap is the generic slice one and a line in the docs saying "this is the
+  reader"
 - **Segmenters stay as they are:** `bufio.Scanner` copies each token,
   `bytes.Split` copies each field. A lattice node's inbound stream is frames
   over a channel plus a cursor over the frame body — both exist.
@@ -375,7 +389,13 @@ park loop", next to `idleTrimPages` and `SovDrainCompactions`.
   branch", i.e. an allocation cancels the cycle and the next park starts a fresh
   one;
 - every time the scan **crosses a page boundary** it returns to the select to
-  check channel events;
+  dispatch channel events (Variant B, below);
+- **the trim yields to the compactor.** `idleTrimPages` and the copy phase both
+  own the region's tail, so while `compactRemaining` is set the trim is
+  suspended (its budget belongs to the compactor). A trim's `madvise` beyond the
+  bump offset could free a page the compactor has not copied from yet; the
+  compactor releases the pages itself as they empty, and only then does the trim
+  resume.
 - when data is squashed downwards, **reference pointers are rewritten**.
 
 **The two areas.**
@@ -389,17 +409,19 @@ or a side array in the metadata area), where `typeDesc` is the type's pointer
 map - the same information the compiler already emits for return relocation
 (`RelocMark`/`RelocFixup` walk a value's pointers; a per-type "visit every
 pointer field" function is the reusable form). Liveness is not stored in the
-table; it is computed by a mark from the roots. `flags` carries at least
-`pinned` (the address escaped: a codec boundary, a registered stable pointer, a
-package variable we choose not to fix) - a pinned object does not move and
-nothing can be compacted past it.
+table; it is computed by a mark from the roots. `flags` carries `dead` (a
+relocation or an overwrite left this object without a reachable reference - a
+hint the mark confirms) and the Variant B edge records. **Nothing is pinned**:
+an arena is closed (below), so every object in it can move.
 
 **The roots.** Three sources, all needed together:
 
-1. **Package variables**: every package variable is a TLS slot, and its type is
-   known statically, so each package can emit a static root map (offset in the
-   TLS block, type descriptor). This is much easier than frames because it is
-   compile-time constant.
+1. **Package variables**: every package variable is a TLS slot whose type is
+   known statically, so each package emits a static root map (TLS offset, type
+   descriptor). The flattened package block is the arena's first allocation and
+   never moves - the slide starts above it - but the pointers *inside* the block
+   must still be rewritten when the objects they point to move. The map is there
+   for that fixup, not to relocate the block.
 2. **The current frame**: a per-safepoint map of live pointer slots and their
    types (the next section). Compaction happens in the frame that is running
    the select, so one frame's map is enough - no stack walk, provided we compact
@@ -425,34 +447,17 @@ nothing can be compacted past it.
 4. **Root fixup** (small): rewrite the roots (frame slots, package variables)
    through the forwarding map.
 
-**The consistency question - the one real design choice.** Between the first
-copy and the root fixup, a root still points at an object's *old* address, and
-the old bytes are still intact (that is why the copy happens before the
-overwrite). So a root fixup at the end is safe **as long as no program code
-runs in between**. Returning to the select to *poll* is fine; returning to
-dispatch a branch is not, unless every pointer is always valid:
-
-- **Variant A - poll only, no dispatch.** The copy phase runs to completion
-  inside one park loop, polling between pages. Latency is one full cycle, not one
-  page, but no extra metadata is needed. A pending message is noticed and served
-  immediately after the cycle.
-- **Variant B - dispatch-safe, with a pointer graph.** The mark phase records,
-  for each live object, the list of inbound edges as `(source object, field
-  index) -> target object` (not as raw addresses, because a source object's
-  fields move when *it* moves). Then an object can be moved and every inbound
-  pointer rewritten by object identity, making the heap consistent after every
-  single move. This is what allows the select to actually dispatch between
-  pages. The price is the edge list in the metadata area: one record per
-  pointer, which for a pointer-dense arena is proportional to the pointer
-  count, not the byte count. A cheaper middle ground is to rebuild the inbound
-  set by scanning the live set once per page group - no persistent metadata,
-  but O(live) per page group.
-
-Variant A is the honest first implementation: it needs only the object table
-and the type maps, and it finishes the job. Variant B is the upgrade if a
-process with a very large live set cannot tolerate a full-cycle latency; it is
-also the only variant that can dispatch mid-cycle, so if "check for channel
-events" means "and handle them", the pointer graph is mandatory.
+**The consistency rule (Variant B, the design).** Idle grooming must be able to
+dispatch between pages, so every pointer must be valid at every instant. The
+mark phase therefore records the arena's internal edge set as
+`(source object, field index) -> target object` - object identity, not raw
+addresses, because a source's field address changes when the source moves. A
+move is then atomic: copy the object, rewrite every inbound edge through the
+graph, mark the old range dead; only then may the select dispatch. The price is
+the edge list in the metadata area, one record per pointer in the arena. Without
+it the copy phase would have to run to completion before any branch - the
+poll-only fallback - which is kept in reserve if the graph's memory proves
+unacceptable, not as the plan.
 
 **What the tracker means here.** `compactRemaining` is the scan cursor as an
 offset from the end of the region, set to the region's allocated length when a

@@ -743,11 +743,12 @@ struct whose field layout has to match a foreign writer. A slice header is the
 one shape the compiler can construct for data it does not define, so the layout
 question never reaches a type.
 
-`cap` is `-1`, not the length: that is the sentinel for storage that is not ours
-to resize. The usual `len <= cap` invariant is deliberately violated, and every
+The capacity word is the all-ones sentinel internally, but `cap()` reports the
+length, so `0 <= len <= cap` holds for every consumer; the sentinel is what the
+length-changing builtins check. The usual `len <= cap` invariant is deliberately violated, and every
 builtin that would change the length refuses it:
 
-- `push` dies with "slice length is fixed: the storage is not ours" instead of
+- `push` dies with "linkdata slice: cap is foreign (copy it first)" instead of
   writing past the imported symbol - an all-ones capacity would otherwise look
   large enough and the store would silently run off the end of the blob;
 - `pop` refuses, because shortening the slice is still a change of length;
