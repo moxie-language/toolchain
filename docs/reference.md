@@ -1437,9 +1437,11 @@ Arena layout:
     regions[2]: [data....]
 ```
 
-Each arena has a flat registry of up to 256 regions. No linked lists. When a
-region fills, a new 1MB region is mmap'd and added to the table. `alloc(size)`
-bumps the active region's offset and returns zeroed memory.
+Each arena has a flat registry of chained regions (a slice, no linked list).
+When the active region fills, a chained region is mmap'd and appended: 64MB by
+default, or twice the active region's capacity (capped at 64MB) for a sovereign
+group arena, so a few-KB group does not reserve a whole 64MB region.
+`alloc(size)` bumps the active region's offset and returns zeroed memory.
 
 ### Per-Function Arena Lifecycle
 
@@ -1471,8 +1473,8 @@ is full.
 
 ### Arena Pool
 
-A bounded freelist (8 entries) of reset arenas eliminates mmap/munmap syscalls
-for short-lived function arenas. `ArenaAcquire` checks the pool first;
+A bounded freelist of reset arenas (capped by both count and bytes) eliminates
+mmap/munmap syscalls for short-lived function arenas. `ArenaAcquire` checks the pool first;
 `ArenaRelease` resets and returns the arena to the pool if there's room.
 
 ### Ownership Boundaries
