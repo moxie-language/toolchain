@@ -19,7 +19,7 @@ moxie/
   skill.md                       # top-level: compile errors, core rules, quick ref
   references/
     type-system.md               # numeric types, string=[]byte, builtin stringers, interfaces
-    execution-model.md           # domains, spawn, IPC channels, Codec, fan-out pattern
+    execution-model.md           # domains, spawn, shared channel rings, fan-out pattern
     memory-management.md         # per-function arena ownership, FnArenaPush/Pop, relocate on return
     syntax-quick-ref.md          # operators, literals, keywords, removed constructs
     build-and-modules.md         # build commands, targets, moxie.mod, cache, .mxh headers

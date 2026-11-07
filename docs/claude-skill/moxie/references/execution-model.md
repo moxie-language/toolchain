@@ -76,7 +76,7 @@ type Codec interface {
 |------|-----------|
 | Types implementing `moxie.Codec` | Serialized |
 | `*T` where `T` implements `Codec` | Copy semantics (pointer dissolves) |
-| Channels (element type implements Codec) | IPC channels |
+| Channels | Shared channel handles: the same ring object is in the child |
 
 ### Rejected (compile error)
 

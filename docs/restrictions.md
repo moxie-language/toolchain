@@ -100,7 +100,7 @@ All data arguments and channel element types must implement `moxie.Codec` (see `
 | Allowed | Treatment |
 |---------|-----------|
 | Types implementing `moxie.Codec` | Serialized via EncodeTo/DecodeFrom |
-| Channels (element type must implement Codec) | Become IPC channels |
+| Channels | Shared channel handles; the element's codec encodes the frame |
 | Structs with Codec methods | User-defined serialization |
 
 | Rejected (compile error) | Reason |

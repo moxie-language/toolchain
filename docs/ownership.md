@@ -101,32 +101,33 @@ function scale.
 
 ## Domain-Scoped Isolation
 
-Each domain is a process with its own arena. Domains communicate exclusively
-through serialized IPC channels. The spawn boundary is a hard serialization
-point - `moxie.Codec` enforces that everything crossing the boundary is
-explicitly encoded and decoded. The child gets fresh allocations in its own
-arena populated from the wire format.
+Each domain is a thread with its own arena tree. Domains communicate through
+channel handles: the rings are in shared memory, values are copied (or
+codec-relocated when they carry references) into the receiving arena, and a
+channel handle is the only shared capability. The spawn boundary is a
+copy/relocation point, not a shared-pointer boundary.
 
 ### Why Not Shared Memory
 
-Shared memory between processes is shared ownership of address space. Two
-claimants, zero owners. Every shared-memory system requires synchronization
-primitives (mutexes, atomics, memory fences) which are the runtime admission
-that the ownership question was not resolved at compile time.
+Shared addressable state between domains is shared ownership of memory. Two
+claimants, zero owners. A general shared heap would require synchronization
+primitives (mutexes, atomics, fences) - the runtime admission that the
+ownership question was not resolved at compile time.
 
-Moxie resolves it at compile time by forbidding it. A domain's memory is
-sovereign. Nothing outside the domain can read or write it. Communication
-happens by message, which means by copy, which means the sender and receiver
-each own their own copy. Two owners of two copies is not shared ownership -
-it is bilateral exchange (wood).
+Moxie resolves it at compile time by confining the shared window to the channel
+rings: one writer and one reader per direction, a depth fixed by the
+declaration, and no addressable object graph crossing. A domain's arena memory
+is sovereign; nothing outside the domain can read or write it. Communication
+happens by copy (or codec relocation), so the sender and receiver each own
+their copy - bilateral exchange (wood), not shared ownership.
 
 ### Domain Death
 
-When a domain exits - whether normally, by panic, or by signal - `munmap`
-releases its entire arena to the kernel. No finalizers, no cleanup callbacks,
-no reference counting, no grace period. The parent is notified on the control
-channel (death is reported, not hidden - earth). The parent decides what the
-death means.
+When a domain exits - whether normally, by panic, or by signal - its arena tree
+is released. No finalizers, no cleanup callbacks, no reference counting, no
+grace period. The parent observes the domain breaker (death is reported, not
+hidden - earth) and the ring liveness bits. The parent decides what the death
+means.
 
 ---
 

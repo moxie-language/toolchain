@@ -129,7 +129,7 @@ Targets: `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, `js/wasm`
 For detailed information, consult:
 
 - **references/type-system.md** - Numeric types, string=[]byte, builtin stringers, slice equality, comparable, named slice/map types
-- **references/execution-model.md** - Domains, spawn, IPC channels, Codec types, move semantics, cooperative scheduler
+- **references/execution-model.md** - Domains, spawn, shared channel rings, frame budgets, no scheduler
 - **references/memory-management.md** - Per-function arena stack, FnArenaPush/Pop, relocate on return, domain isolation
 - **references/syntax-quick-ref.md** - Operators, literals, statements, keywords, control flow, all removed constructs
 - **references/build-and-modules.md** - Build commands, module file, targets, cache, dependencies, .mxh headers
