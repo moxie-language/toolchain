@@ -14,7 +14,7 @@
 
 A compiled systems language for domain-isolated event-driven programs. Each program is a tree of **domains** - threads in one process, each with its own arena tree and event loop, communicating through channel handles whose single-producer single-consumer rings live in shared memory. No goroutines, no shared mutable state, no data races.
 
-Moxie descends from [TinyGo](https://tinygo.org/). All embedded targets and threading infrastructure have been stripped. What remains is a compilation pipeline for Linux, Darwin, and browser JS, rewired for single-threaded domains with process-level isolation via `spawn`.
+Moxie descends from [TinyGo](https://tinygo.org/). All embedded targets and threading infrastructure have been stripped. What remains is a compilation pipeline for Linux, Darwin, and browser JS, rewired for single-threaded domains with contractual isolation via `spawn`.
 
 ## Axioms
 
@@ -214,7 +214,7 @@ chanID 0 = control (close signals), chanID 1 = first spawn channel arg, chanID 2
 | linux/arm64 | Static ELF | Arena allocator |
 | darwin/amd64 | Mach-O | Arena allocator |
 | darwin/arm64 | Mach-O | Arena allocator |
-| js/wasm | JavaScript + runtime | Bump allocator |
+| js/wasm | JavaScript + runtime | Arena allocator |
 
 All native binaries are fully statically linked.
 
@@ -226,6 +226,7 @@ All native binaries are fully statically linked.
 
 - **[docs/axioms.md](docs/axioms.md)** - The three axioms, their justification, and the derived lemmas (normative)
 - **[reference.md](reference.md)** - Complete language specification
+- **[docs/type-db.md](docs/type-db.md)** - The compiler type-resolution database and build-memory scope
 - **[tutorial.md](tutorial.md)** - Learn Moxie from scratch
 - **[example-claude.md](example-claude.md)** - AI coding assistant configuration
 - **[Architecture Patterns](docs/moxie-architecture-patterns.md)** - CSP/Actor/DDD design patterns and worked examples
@@ -258,8 +259,8 @@ moxie/
 ├── jsruntime/               # JS host shims for WASM target
 ├── sysroot/                 # Precompiled runtime bitcode, musl, compiler-rt
 ├── src/                     # Target-side sources (compiled INTO programs)
-│   ├── runtime/             # Runtime: scheduler, channels, arena, spawn, stringers
-│   ├── internal/task/       # Cooperative task system, context switching
+│   ├── runtime/             # Runtime: arenas, channels, spawn, stringers
+│   ├── internal/task/       # Task surface (no scheduler; Pause is a deadlock error)
 │   ├── moxie/               # Codec interface, built-in codec types
 │   └── ...                  # Stdlib (.mx files)
 └── docs/                    # Language reference, porting guide, architecture

@@ -152,10 +152,10 @@ Moxie supports exactly 4 native targets plus JS:
 
 | GOOS/GOARCH | Scheduler | Memory | Libc | Linker |
 |-------------|-----------|--------|------|--------|
-| linux/amd64 | tasks | arena | musl | ld.lld |
-| linux/arm64 | tasks | arena | musl | ld.lld |
-| darwin/amd64 | tasks | arena | darwin-libSystem | ld.lld |
-| darwin/arm64 | tasks | arena | darwin-libSystem | ld.lld |
-| js | tasks | bump | - | - |
+| linux/amd64 | none | arena | musl | ld.lld |
+| linux/arm64 | none | arena | musl | ld.lld |
+| darwin/amd64 | none | arena | darwin-libSystem | ld.lld |
+| darwin/arm64 | none | arena | darwin-libSystem | ld.lld |
+| js | none | arena | - | - |
 
 No embedded targets. No WASI. No Windows.
