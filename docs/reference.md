@@ -8,7 +8,7 @@ This document specifies the Moxie language. Familiarity with C-family syntax is
 assumed.
 
 For canonical formatting rules and the `moxiefmt` tool, see
-[FORMAT.md](FORMAT.md).
+[format.md](format.md).
 
 ---
 
@@ -809,7 +809,7 @@ conversion pass first - there is no `_be` variant.
 `//go:embed`). `//moxie:embed_le` is implemented in stage4 only: the loader
 rewrites `//:` pragmas, not `//moxie:` ones, so a legacy build of a package
 using it sees a zero-valued global. Recorded as a bilateral gap in
-`docs/OPEN_WORK.md`.
+`docs/open-work.md`.
 
 ### Short Variable Declarations
 

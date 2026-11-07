@@ -107,7 +107,7 @@ means the rig is broken, never that the code is innocent. The canary is in
 ## ROUND 386: ONE HUB, TWO PLANES
 
 The page is a switchboard already, so control and logs now share one protocol
-there and the data plane still bypasses it. `docs/WASM_HUB.md` is the contract:
+there and the data plane still bypasses it. `docs/wasm-hub.md` is the contract:
 five control kinds (spawn, exit, panic, rebind, heartbeat) with a lineage id
 (`1.3.2`) and a parent id, hub-assigned and never reused; logs are the second
 plane on the same port and the same id; a spawn channel is a ring the spawning
@@ -633,7 +633,7 @@ status 134.
   `spawn` default result and `__shutdown` are `chan struct{}` (stage4
   `ssa_builder.mx`, legacy `patch-gotypes.go`), and the error text says so.
 - every target signature in `src/`, `tests/` and `morly` is
-  `(closed chan struct{})`; `CLAUDE.md`, `docs/spawn.md` and `CHANGELOG.md`
+  `(closed chan struct{})`; `claude.md`, `docs/spawn.md` and `changelog.md`
   state the ABI.
 
 Evidence: the cross-package fixture spawns `lib.Worker` `(closed chan
@@ -4108,7 +4108,7 @@ with 69 global stores outside `init()` — `spawnDomain` (7), `sovQueueCompact`,
 `ManualArenaExit`, `alloc`, `semacquire1`/`semrelease1`, `fastrand`,
 `poll_runtime_pollServerInit`, `coverHit`. That is the arena/spawn/timer
 machinery itself: the layer that *constructs* sovereign arenas cannot route
-every one of its own globals through a sovereign type. CLAUDE.md already
+every one of its own globals through a sovereign type. claude.md already
 carves this out ("Runtime and unsafe packages are exempt — they implement the
 arena system"), so the runtime exemption is principled, not a shortcut.
 
@@ -5885,7 +5885,7 @@ bootstrap, or the compiler closure. Under `-target js/wasm` they have ~80 sites:
 ~30 value receivers, ~25 unnamed returns, `any` in `ValueOf`/`Set`/`SetIndex`/
 `FuncOf`/the funcs map, package globals mutated by `jsInit`/`funcsInit`/
 `ensureEventHandler`, and capturing closures in `FuncOf`. The only caller is
-`net/http/roundtrip_js.mx`. CLAUDE.md puts Moxie's browser surface in `jsruntime/`,
+`net/http/roundtrip_js.mx`. claude.md puts Moxie's browser surface in `jsruntime/`,
 so these are Go-compat shims with no Moxie-native consumer: the eventual move is
 to delete both or rebuild the wasm RoundTripper on `jsruntime/`, not to redesign
 Go's API. Recognising a pointer-method chain on a temporary (see above) is now a
@@ -6872,7 +6872,7 @@ the loop scratch into a helper function"`. That is a real source refactor, not a
 compiler defect, and it is delegated (agent `f5ead72f`): for each self-mutating
 method with a `:=`/`var` inside a loop, move the loop's scratch into a free
 function with its own freed-at-return arena and keep only the receiver write in
-the method. Rationale in CLAUDE.md's Sovereign Arena section - a mutating
+the method. Rationale in claude.md's Sovereign Arena section - a mutating
 method's allocations persist for the life of the receiver, so loop scratch in
 such a method leaks one allocation per iteration.
 
@@ -7646,7 +7646,7 @@ next build will always try to re-clone.
 
 ## The documented subslice rule does not match the compiler
 
-CLAUDE.md states, and the porting method depends on: "There is no aliasing: a
+claude.md states, and the porting method depends on: "There is no aliasing: a
 subslice is a copy. `s[a:b]` allocates and copies. A write through a subslice
 does NOT reach the parent, so Go code that relied on overlapping views - in-place
 XOR, 'read src fully before writing dst', `copy` overlap reasoning - is wrong
@@ -8037,7 +8037,7 @@ that produced that run.
 8. **`x509.ParseCertificateRequest`** `[][]ATV` SET and the slice-of-slice SIGSEGV.
 9. **`fmt` numeric verbs on a Named-over-basic** (`%d` on `time.Duration` is `?`);
    `%v` and `%s` are fixed.
-10. **The documented subslice rule does not match the compiler.** CLAUDE.md says a
+10. **The documented subslice rule does not match the compiler.** claude.md says a
     subslice is a copy; measurement in round 51 shows every form ALIASES within a
     frame, while escaping subslices are relocated at the return boundary. Neither
     the rule nor the implementation was changed. This is a decision the project
@@ -8616,7 +8616,7 @@ which have a `main()` and never import it. `moxie build -target wasm ./src/sysca
 reported ten uses of **`any`** - a type Moxie does not have - plus a
 `Value as Pointer` mismatch, and the resulting `rhs=nil` cascade.
 
-The port, which is what CLAUDE.md's "stdlib still contains `any`" note asks for:
+The port, which is what claude.md's "stdlib still contains `any`" note asks for:
 
 - `ValueOf(x any) Value` was a type switch over every Go kind, which cannot exist
   without an empty interface or reflection. It is replaced by one constructor per
@@ -9443,7 +9443,7 @@ is pre-existing, not a regression. It is fixed the same way: the local
 declaration is checked (with the local types visible so far PLUS the type's own
 name in scope, so an earlier local type and a recursive field are not called
 undefined), and a type whose field did not resolve is NOT registered. That is
-the refusal shape from CLAUDE.md's guard rules: the error is recorded, and the
+the refusal shape from claude.md's guard rules: the error is recorded, and the
 body must not build a value of a type that has a nil field. The probe now fails
 with `undefined: Undefined` and no signal.
 
@@ -9938,8 +9938,8 @@ package sweep compiles AND runs.
 
 ## RE-MEASURED in round 102: closure captures WORK - the "13 mis-compiled files" item is stale
 
-OPEN_WORK item 11 has said for many rounds that "stdlib capturing deferred
-closures are mis-compiled (13 files)", and CLAUDE.md states as architecture that
+open-work.md item 11 has said for many rounds that "stdlib capturing deferred
+closures are mis-compiled (13 files)", and claude.md states as architecture that
 a closure "does NOT capture variables from the enclosing function scope" - a
 function value carries only a code pointer. Both are contradicted by running the
 compiler. With `-allow-closure-captures` (the escape hatch the app repos use),
@@ -17316,7 +17316,7 @@ allocations land in the store's arena, but the *data* it is handed still belongs
 to the caller's frame: `mime.setExtensionType` is called with subslices of the
 loader's `bytes.Split` result, and `mime.setTypes` with a map built in
 `_builtinTypesLower`'s caller. Storing those headers is a cross-arena reference,
-which `docs/OWNERSHIP.md` says must not happen: "a pointer into one function's
+which `docs/ownership.md` says must not happen: "a pointer into one function's
 arena must not be stored in another function's arena without going through
 return". There is no automatic relocation for a store through a pointer, so the
 store performs the transfer itself - `ownBytes` in `src/mime/type.mx` copies
@@ -17995,7 +17995,7 @@ makes any `push` onto the binding fail loud instead of running past the symbol.
 The binding is read-only by construction: a package-level var cannot be assigned
 outside `init`, and a store through it is a package-global mutation. Writable
 storage belongs to the application - created in `main` or by an initializer
-function `main` calls, then copied into from the bound slice. `docs/REFERENCE.md`
+function `main` calls, then copied into from the bound slice. `docs/reference.md`
 has the directive documented in full.
 
 `crypto/internal/fips140/check` is converted: `Linkinfo` was
@@ -18054,7 +18054,7 @@ check (both sides of the check come from the same code):
 not `//moxie:` ones, so a legacy build of `src/unicode/tables.mx` sees
 zero-valued tables. Nothing in the legacy bootstrap's closure reads them, which
 is why it has never surfaced; recorded here as a bilateral gap, and
-`docs/REFERENCE.md` documents `//:embed` as the portable spelling.
+`docs/reference.md` documents `//:embed` as the portable spelling.
 
 ## Round 221: ML-KEM was returning the wrong shared key, and it was two slice bugs
 
@@ -18257,7 +18257,7 @@ Verified on both compilers:
     slice operations still work - a panic itself cannot be asserted in a fixture
     because Moxie has no `recover`.
 
-`docs/REFERENCE.md` now describes the three refusals instead of the wrong
+`docs/reference.md` now describes the three refusals instead of the wrong
 `push` explanation.
 
 The growth helpers had the same hole from a third side: `mxutil.Ensure`,
@@ -18406,7 +18406,7 @@ Two documentation claims fell over while writing the reference section:
     into `[]byte{:0:2}` twice gives len 2, then a third push gives len 3
     cap 4); it only refuses fixed-length storage (`cap == -1`). The reference
     said overflow was a panic and the lazy-init floor was 32; the runtime
-    uses 4. Both corrected in `docs/REFERENCE.md`.
+    uses 4. Both corrected in `docs/reference.md`.
   * **A sub-slice is documented as a copy and implemented as a view.**
     Measured against the current compiler:
 
@@ -19817,7 +19817,7 @@ that listed `iter`, `weak`, `fips140cache`, `maps`, `slices`, `bytes` and
 `internal/trace` as still carrying `any` is corrected in place - all of those
 compile and are green sweep entries; `ring` was the last one.
 
-    docs/STDLIB_DEPS.md   container/ring removed from tier 0; 305 sub-packages
+    docs/stdlib-deps.md   container/ring removed from tier 0; 305 sub-packages
 
 That file is a generated snapshot and its count is now hand-maintained; it was
 already one package behind before this round, so treat the list as a guide to
@@ -19999,7 +19999,7 @@ own probe: `bytes.Reader.Read` and `io.ReadIntoN` (3 ms and 8 ms for 512 KB in
 store-back and a function-value call through a struct field (4 ms each), and the
 scanner buffer size (128 bytes against 4096: no change). That leaves the
 sovereign-arena acquire and the store-back walk inside `Scan` itself, which is
-W3b in docs/PLAN_REMAINING.md: the acceptance this item set (< 50 ms) is not met,
+W3b in docs/plan-remaining.md: the acceptance this item set (< 50 ms) is not met,
 the copies that caused the memory churn are gone, and the remaining factor is a
 runtime cost with a benchmark to chase it.
 
@@ -20353,7 +20353,7 @@ that is a sub-slice - so the carve-out that remains is the array base itself.)
 ### What this changes
 
 The defect is not the array type, it is the view. W7 is rewritten in
-docs/PLAN_REMAINING.md:
+docs/plan-remaining.md:
 
 - **W7b** converts only pure data holders (coverage counters, code tables,
   metadata) that are never sliced as a view and never part of a wire or ABI
@@ -20693,7 +20693,7 @@ Two consequences:
   Scanner still stands.
 - **Any timing code in this tree is paying this**: a server that stamps a
   request or an event with `time.Now()` pays 4.3 us per stamp, which is more
-  than most of the work it is timing. That is docs/PLAN_REMAINING.md W13.
+  than most of the work it is timing. That is docs/plan-remaining.md W13.
 
 ## Round 270: compiling net/http as a library hits the root arena's 8 GB cap
 
@@ -21759,7 +21759,7 @@ Three measurements taken while closing out W5/W22, each of which changes what a
 plan item should say.
 
 **A pointer parameter can be written through, in both compilers.** The memory
-model in CLAUDE.md says parameters are immutable borrows and that writing
+model in claude.md says parameters are immutable borrows and that writing
 through a parameter pointer is a compile-time error, enforced by the compiler
 rather than by page protection, and that this is why parameters never need deep
 copying across arena boundaries. It is not enforced:
@@ -21892,7 +21892,7 @@ The campaign's inventory, counted from the tree rather than estimated: **82
 types carry 184 inline array fields** - ~25 kernel mirrors (148 fields, the
 `ztypes` layer), ~12 on-disk/format descriptions (coverage defs, xcoff/ar), and
 ~45 ordinary-code buffers (gzip's [512]byte window, rc4's [256]byte sbox, bzip2,
-gif, ...). The order and the per-family plan are in `docs/PLAN_REMAINING.md`
+gif, ...). The order and the per-family plan are in `docs/plan-remaining.md`
 W7a; the next families are sockaddr (phase 8 exercises it end to end), then
 termios/ioctl, then file/stat, then the on-disk formats, then the representation
 switch together with the ordinary-code conversions, then A3 (the type becomes a
@@ -21910,7 +21910,7 @@ justification - there is one thread of execution per domain, so there is no
 concurrent mutation for an immutable borrow to prevent. The rule bought nothing
 and cost a false premise that arena arguments were being built on.
 
-What the model now says, in CLAUDE.md, docs/REFERENCE.md and the skill's
+What the model now says, in claude.md, docs/reference.md and the skill's
 memory-management page:
 
 - a callee may write through a parameter pointer and may assign to a parameter,
@@ -22119,7 +22119,7 @@ memset + one memcpy + a load. The per-element path is still there for
 non-constant or non-integer elements, and legacy keeps it for everything: go/ssa
 does not present a composite literal as one foldable value, so the reference
 compiler emits per-element stores. The IR differs in size, not in meaning, and
-that asymmetry is recorded in `docs/PLAN_REMAINING.md` W7a.
+that asymmetry is recorded in `docs/plan-remaining.md` W7a.
 
 What is left on this path is the *array value* itself: `_idnaValues()[i]` copies
 the whole table into memory to read one element, at IR level and at run time.
@@ -24317,7 +24317,7 @@ compilers refuse the two shapes decidable from one expression (`copy(x[a:b], …
 and `x[a:b][i] = v`) and cannot refuse the third cheaply: `f(x[a:b])` is a lost
 write only if `f` writes through that parameter, which needs a parameter-write
 set per function and a call-graph walk at every call site - multi-level
-inference, not a local rule. Recorded in CLAUDE.md next to the subslice rule,
+inference, not a local rule. Recorded in claude.md next to the subslice rule,
 with the corollary that a static analysis tool can do it offline, and with the
 authoring rule it implies: never pass a parameter as a return value.
 
@@ -24346,7 +24346,7 @@ which reads as "the stream is empty" and hides that there is no stream at all.
 filesystem)", and both hosts answer EBADF for fd 0 instead of a successful
 zero-byte read. EOF on a descriptor that DOES exist is still just EOF.
 
-**5. CLAUDE.md drift.** It claimed the compiler skips any file importing
+**5. claude.md drift.** It claimed the compiler skips any file importing
 `iter`/`weak`/`crypto/internal/fips140cache` (discoverPkg, "~line 1722"). There
 is no such skip-list, and there has not been one since the `any` refactor; the
 paragraph now says so.
@@ -24934,7 +24934,7 @@ the first reload. Configs, page and verification commands live in
 two site blocks in `/etc/caddy/Caddyfile` (backed up first, style
 `Caddyfile.bak-before-moxielang-git3-*`).
 
-Two honest limits, both recorded in `site/vanity/README.md`: the repository is
+Two honest limits, both recorded in `site/vanity/readme.md`: the repository is
 Moxie source, so `go get` of a *package* resolves the module root and stops at
 "no Go files" (no `go.mod`, no Go packages - not a gap the tag can close), and
 Moxie's own fetcher does not read the `go-import` tag (`moxie get` takes a git
@@ -24945,7 +24945,7 @@ README: it said "two axioms" while `docs/axioms.md` states three. A3 (closure -
 every capability and input is declared, anything undeclared is unreachable, the
 default is deny) is now in the README with the reason the three are
 load-bearing together, and `docs/architecture.md` and
-`docs/MOXIE_ARCHITECTURE_PATTERNS.md` no longer say "two". The README also
+`docs/moxie-architecture-patterns.md` no longer say "two". The README also
 gains an "Address" section stating the canonical import root and what the
 domain answers.
 
@@ -25376,7 +25376,7 @@ was watching:
   no impl for Read (16 impl(s), none matches)`. A bootstrap that reproduces the
   bug it exists to replace. The script now passes `MOXIE=legacy/moxie`.
 - **Convergence took the extra generation.** s2 != s3, s3 == s4, which is the
-  documented arrival (CLAUDE.md, Convergence: the legacy pipeline differs and
+  documented arrival (claude.md, Convergence: the legacy pipeline differs and
   the first bootstrap inherits that). The script demanded s2 == s3 and reported
   a convergence failure at the exact point where the compiler had converged. It
   now accepts s2 == s3 or s3 == s4, refuses only "no generation reproduces

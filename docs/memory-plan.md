@@ -251,7 +251,7 @@ if b.arenaBorrowed {
 The `SetCurrentArena` save/restore pattern is the same pattern hashmap
 already uses for owner-arena switching (`src/runtime/hashmap.mx:323-328`).
 Arena switching is distinct from arena lifetime management (the Reloc*
-domain). See CLAUDE.md line 32-33.
+domain). See claude.md line 32-33.
 
 ### 7. Delete entire receiver write tracking infrastructure
 

@@ -228,7 +228,7 @@ if [ "$RUN_BOOTSTRAP" = 1 ]; then
 	# Convergence may take one generation longer than the minimum: the legacy
 	# pipeline differs (interp + LowerInterfaces + globaldce) and the first
 	# bootstrap inherits that, so s1 != s2 is expected and s2 == s3 is not the
-	# only acceptable arrival - s3 == s4 is the other (CLAUDE.md, Convergence).
+	# only acceptable arrival - s3 == s4 is the other (claude.md, Convergence).
 	# What is never acceptable is no generation reproducing itself at all.
 	# Measured on the box: this tree took the extra generation, s3 == s4.
 	if [ "$s2" = "$s3" ]; then

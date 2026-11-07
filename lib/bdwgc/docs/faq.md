@@ -100,4 +100,4 @@ ignore some or all pointers to object interiors.
 
 If you cannot find the answer in the [GC overview](overview.md) and the linked
 files, please see "Feedback, Contribution, Questions and Notifications" section of
-the main [README](../README.md).
+the main [README](../readme.md).

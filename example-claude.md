@@ -1,11 +1,11 @@
-# EXAMPLE_CLAUDE.md — Moxie Project Template
+# example-claude.md — Moxie Project Template
 
-Drop this into your project's `CLAUDE.md` (or `.claude/CLAUDE.md`) so that Claude writes correct Moxie code. Adjust the project-specific sections to match your codebase.
+Drop this into your project's `claude.md` (or `.claude/claude.md`) so that Claude writes correct Moxie code. Adjust the project-specific sections to match your codebase.
 
 ---
 
 ````markdown
-# CLAUDE.md
+# claude.md
 
 ## Language: Moxie
 

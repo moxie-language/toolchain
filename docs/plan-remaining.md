@@ -11,7 +11,7 @@ Repository: `/home/mleku/moxie/moxielang.dev`, branch `dev`, level with
 `git rev-list --left-right --count origin/dev...HEAD` (`0 0`).
 
 The compiler is release-candidate. The browser of record is
-`docs/OPEN_WORK.md`; rounds 239-251 are the copy rule and its bill.
+`docs/open-work.md`; rounds 239-251 are the copy rule and its bill.
 
 **The gate is `tests/quickcheck.sh`, not the full sweep.**
 
@@ -24,13 +24,13 @@ bash tests/unitrun.sh --phases 0a,0b,2 --force   the full sweep, 170 units, ~2.5
 Run quickcheck after each batch of commits. Run the full sweep once, at the end
 of the array campaign (item W7) and before any release tag.
 
-### Process rules (from CLAUDE.md, non-negotiable)
+### Process rules (from claude.md, non-negotiable)
 
 - **Wood law**: a compiler change lands in `legacy/` first, then
   `_mxc_stage4/`, in the same or immediately adjacent commit. `legacy/` is the
   bootstrap path.
 - **One logical change per commit.** Docs go in the same commit (a paragraph in
-  `docs/OPEN_WORK.md`, numbered round) or in an adjacent docs commit.
+  `docs/open-work.md`, numbered round) or in an adjacent docs commit.
 - Never weaken, skip or delete a test to make a change pass; adapt plumbing only.
 - Push with `git push origin HEAD:dev` after each commit that passes quickcheck.
 - **Batch by class**: make every edit a class needs, then test once, then fix.
@@ -81,7 +81,7 @@ The fixture exists (`tests/regressions/should_compile/tls_handshake.mx`), is in
 found five bugs on the way - cryptobyte's cursor handing back dead frames, the
 asn1 tagged encoder pointing into itself, nine slices written by index with no
 length, and two record-cipher type switches that could never match. All five are
-fixed; `docs/OPEN_WORK.md` round 253 has the detail. One bug is left: the
+fixed; `docs/open-work.md` round 253 has the detail. One bug is left: the
 X25519MLKEM768 share (W9), which the fixture pins X25519 to route around.
 
 The original brief, for the record:
@@ -256,7 +256,7 @@ bytes (write the corpus to a file, scan it in both, checksum the lines).
 Moxie has no `any`: the package failed with `undefined: any`. Nothing in the
 tree imported it (`grep -rn "container/ring" src/ pkg/ tests/` found only
 itself), and it is deleted - a heterogeneous container has no shape in a
-language without an empty interface. OPEN_WORK records it as the tree's last
+language without an empty interface. open-work.md records it as the tree's last
 `any`.
 
 ---
@@ -532,7 +532,7 @@ parameter rule at all. The tree depends on the current behaviour - W10 records
 **DECIDED (round 296): parameters are mutable, the docs were wrong.** With one
 thread per domain there is no concurrent mutation for immutability to prevent,
 so the rule bought nothing and cost a lie: the compiler never enforced it and
-570 sites already wrote through parameters. CLAUDE.md, docs/REFERENCE.md and the
+570 sites already wrote through parameters. claude.md, docs/reference.md and the
 skill's memory-management page now say: a callee may write through a parameter
 and may assign to a parameter; a write is visible to the caller afterwards.
 
@@ -590,7 +590,7 @@ it, so the sret step is cancelled rather than deferred:
 string constant, so one literal occurrence was five objects - `p := b` did not
 alias and a parameter assigned into a result came back detached. Both compilers
 now key one object per constant VALUE, and two occurrences of the same text stay
-two objects. Rule recorded in `CLAUDE.md`.
+two objects. Rule recorded in `claude.md`.
 
 **Accept (met):** fixture passes under both compilers, bootstrap fixpoint, phase
 8 and the sweep unchanged.
@@ -639,7 +639,7 @@ flag set, and bootstrap reproduces.
 - Re-run phase 8 (`tests/unitrun.sh -j 1 --phases 8 --force`, ~1.5 h of builds):
   it found the RFC 6724 literal bug in round 248, which is fixed, so it should
   now pass and becomes a regression net for the socket/spawn path.
-- `docs/OPEN_WORK.md` still says the `any` campaign covers `iter`, `weak`,
+- `docs/open-work.md` still says the `any` campaign covers `iter`, `weak`,
   `fips140cache`, `maps`, `slices`, `bytes`, `strings`, `trace`. Measured: all of
   them compile; the only real remaining `any` is `container/ring` (W4). Correct
   that page.

@@ -712,7 +712,7 @@ func patchArrayCapNegative(dir string) {
 	// answers "no room" instead of allocating, and cap(arr[:]) is the same
 	// storage with the sign flipped - a slice of an array stays
 	// length-changeable. len() keeps the type's length: only cap carries the
-	// sentinel. See W7 in docs/PLAN_REMAINING.md.
+	// sentinel. See W7 in docs/plan-remaining.md.
 	//
 	// This has to happen here rather than in the compiler: Go makes
 	// cap(anArrayVar) a CONSTANT, so go/types folds it and no lowering pass ever

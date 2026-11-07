@@ -707,5 +707,5 @@ The compiler automatically marks functions as `async` when they contain channel 
 - [REFERENCE.md](REFERENCE.md) — Complete language specification
 - [docs/spawn.md](docs/spawn.md) — Spawn quick reference
 - [docs/architecture.md](docs/architecture.md) — Compiler pipeline and runtime internals
-- [docs/PORTING.md](docs/PORTING.md) — Migrating existing code to Moxie
-- [EXAMPLE_CLAUDE.md](EXAMPLE_CLAUDE.md) — CLAUDE.md template for AI-assisted Moxie development
+- [docs/porting.md](docs/porting.md) — Migrating existing code to Moxie
+- [example-claude.md](example-claude.md) — claude.md template for AI-assisted Moxie development

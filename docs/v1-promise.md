@@ -22,7 +22,7 @@ These are the contract. Changing one of them is a major release, not a minor.
   release may add a new frame kind, never change what an existing byte sequence
   means.
 - **The wasm host protocol.** The five control kinds, the lineage id and parent
-  id, the missing-id table, and the two planes (`docs/WASM_HUB.md`). A change
+  id, the missing-id table, and the two planes (`docs/wasm-hub.md`). A change
   here is a change to every host and every deployed page; it is a major.
 - **The CLI and the package surface.** `moxie build`, `run`, `test`, `version`,
   `update`, `build-runtime` keep their names and flags; the import paths of

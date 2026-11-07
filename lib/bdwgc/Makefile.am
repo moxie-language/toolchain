@@ -203,7 +203,7 @@ dist_doc_DATA = \
     AUTHORS \
     ChangeLog \
     LICENSE \
-    README.md
+    readme.md
 
 docdocsdir = $(docdir)/docs
 dist_docdocs_DATA = \

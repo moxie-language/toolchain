@@ -1,5 +1,5 @@
 // The hub protocol, with no browser and no Worker: fake ports in, messages
-// out. docs/WASM_HUB.md is the contract these tests assert.
+// out. docs/wasm-hub.md is the contract these tests assert.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHub } from '../../jsruntime/supervisor.mjs';

@@ -209,20 +209,20 @@ All native binaries are fully statically linked.
 
 ## AI-Assisted Development
 
-[EXAMPLE_CLAUDE.md](EXAMPLE_CLAUDE.md) is a CLAUDE.md template that teaches Claude (or other AI coding assistants) how to write correct Moxie code. Drop it into your project's CLAUDE.md to get accurate code generation that respects Moxie's restrictions and patterns.
+[example-claude.md](example-claude.md) is a claude.md template that teaches Claude (or other AI coding assistants) how to write correct Moxie code. Drop it into your project's claude.md to get accurate code generation that respects Moxie's restrictions and patterns.
 
 ## Documentation
 
 - **[docs/axioms.md](docs/axioms.md)** - The three axioms, their justification, and the derived lemmas (normative)
 - **[REFERENCE.md](REFERENCE.md)** - Complete language specification
-- **[TUTORIAL.md](TUTORIAL.md)** - Learn Moxie from scratch
-- **[EXAMPLE_CLAUDE.md](EXAMPLE_CLAUDE.md)** - AI coding assistant configuration
-- **[Architecture Patterns](docs/MOXIE_ARCHITECTURE_PATTERNS.md)** - CSP/Actor/DDD design patterns and worked examples
-- **[Ownership](docs/OWNERSHIP.md)** - Memory ownership model and design principles
+- **[tutorial.md](tutorial.md)** - Learn Moxie from scratch
+- **[example-claude.md](example-claude.md)** - AI coding assistant configuration
+- **[Architecture Patterns](docs/moxie-architecture-patterns.md)** - CSP/Actor/DDD design patterns and worked examples
+- **[Ownership](docs/ownership.md)** - Memory ownership model and design principles
 - [docs/spawn.md](docs/spawn.md) - Spawn quick reference
 - [docs/architecture.md](docs/architecture.md) - Compiler pipeline and runtime internals
 - [docs/restrictions.md](docs/restrictions.md) - Active restrictions and exemptions
-- [docs/PORTING.md](docs/PORTING.md) - Migrating existing code to Moxie
+- [docs/porting.md](docs/porting.md) - Migrating existing code to Moxie
 - [docs/building.md](docs/building.md) - Build instructions and flags
 
 ## Actor Libraries

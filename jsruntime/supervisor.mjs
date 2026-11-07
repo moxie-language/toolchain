@@ -8,7 +8,7 @@
 //
 // No DOM, no Worker, no page: the host passes in `start` (create a domain),
 // `stop` (kill one), `log`, `fault` and `exited`, so the whole protocol can be
-// driven from Node with fake ports. See docs/WASM_HUB.md for the contract.
+// driven from Node with fake ports. See docs/wasm-hub.md for the contract.
 //
 // The data plane does not come through here. A spawn channel is a ring the
 // spawning domain created; its handles ride in the boot payload, which the hub

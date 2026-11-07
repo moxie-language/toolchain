@@ -16,7 +16,7 @@ This installs system-wide for your user. The skill activates automatically when 
 
 ```
 moxie/
-  SKILL.md                       # top-level: compile errors, core rules, quick ref
+  skill.md                       # top-level: compile errors, core rules, quick ref
   references/
     type-system.md               # numeric types, string=[]byte, builtin stringers, interfaces
     execution-model.md           # domains, spawn, IPC channels, Codec, fan-out pattern

@@ -344,7 +344,7 @@ capability is already here.
 
 ## 9. Where the rules live
 
-- `docs/REFERENCE.md` — the builtin table and the push/pop/resize rationale
+- `docs/reference.md` — the builtin table and the push/pop/resize rationale
   (corrected by this survey: `push` grows, `recover` is not callable);
 - `tests/restrictions/reject_subslice_write.mx`,
   `tests/restrictions/reject_copy_into_subslice.mx` — the two copy rules;

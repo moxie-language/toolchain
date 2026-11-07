@@ -10,7 +10,7 @@
 // Either way the module is instantiated with is_worker_context() = 1 and one
 // supervisor port to the page's hub. Control (spawn/exit/panic/heartbeat) and
 // logs go over that port; the channel rings do not - they are the data plane
-// and never pass through the page. See docs/WASM_HUB.md.
+// and never pass through the page. See docs/wasm-hub.md.
 import { buildHostImports, buildWorkerBridge, setHostModule, dispatchCallback } from './host.mjs';
 import { makeDomProxy } from './relay.mjs';
 

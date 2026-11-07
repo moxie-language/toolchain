@@ -967,7 +967,7 @@ if (build_tests)
 endif(build_tests)
 
 if (enable_docs)
-  install(FILES AUTHORS ChangeLog LICENSE README.md
+  install(FILES AUTHORS ChangeLog LICENSE readme.md
           DESTINATION "${CMAKE_INSTALL_DOCDIR}")
   install(FILES
             docs/autoconf.md

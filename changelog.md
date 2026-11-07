@@ -31,7 +31,7 @@ Last fixes on the way to the tag:
   one random wasm fixture down per sweep), and the wasm host page lets the hub's
   log drain run before reporting done.
 
-Known next work is recorded in `docs/OPEN_WORK.md`: one domain-id space for
+Known next work is recorded in `docs/open-work.md`: one domain-id space for
 `ch.childDomain` and the hub's lineage ids, and the lattice.
 
 ## v1.0.0-rc.4
@@ -64,7 +64,7 @@ Known next work is recorded in `docs/OPEN_WORK.md`: one domain-id space for
   heartbeat) and logs share one port and one lineage id (`1.3.2`, hub-assigned,
   never reused); the data plane does not go through the page - a spawn channel
   is a ring the spawning domain created, whose handles the page moves without
-  reading a byte. The contract is `docs/WASM_HUB.md`.
+  reading a byte. The contract is `docs/wasm-hub.md`.
 - **The hub is its own module with a Node test.** `jsruntime/supervisor.mjs`
   has no DOM, no Worker and no page, so the protocol runs under `node --test`
   (`5/hub-protocol`, 13 cases): lineage, refused spawns, missing ids, the
@@ -344,8 +344,8 @@ work; the headline of each entry matches the tag's commit subject.
   5. `CheckPlusOnText` and `FindPipeConcat` now handle `[]byte(...)`
      wraps correctly — skip pure-literal chains (Go folds them);
      descend into mixed chains (rewrite to `__moxie_concat`).
-- **Docs**: CHANGELOG.md added; REFERENCE.md v1.2.0 stdlib / JS runtime
-  shim entries; `CLAUDE.md` WASM directive narrowed (native targets
+- **Docs**: changelog.md added; REFERENCE.md v1.2.0 stdlib / JS runtime
+  shim entries; `claude.md` WASM directive narrowed (native targets
   remain first-class).
 
 ## v1.2.0

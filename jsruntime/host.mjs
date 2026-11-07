@@ -1083,7 +1083,7 @@ export function buildHostImports(mem, hooks = {}) {
 
 // The hub. One per page: every domain is started by this realm, every domain
 // holds one port to it, and control and logs are addressed by lineage id. See
-// docs/WASM_HUB.md. The data plane (SharedArrayBuffers) never enters this file.
+// docs/wasm-hub.md. The data plane (SharedArrayBuffers) never enters this file.
 let hub = null;
 const settles = new Map();   // root id -> the promise resolver its loader holds
 
