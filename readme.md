@@ -127,8 +127,8 @@ The tree of domains is the consequence of A2 (total isolation) and A1 (just the 
 
 | Construct | Behavior |
 |-----------|----------|
-| Unbuffered channel send | Execution jumps to the waiting `select` case |
-| Buffered channel send | Message queued for the next `select` iteration |
+| Send to `chan T{}` | Queued in the one-slot mailbox; a second send parks until the receiver takes the first |
+| Send to `chan T{:N}` | Queued while fewer than N messages are outstanding; the sender parks beyond that |
 | `select` | Event handler - blocks until a channel, I/O event, or timer fires |
 | `spawn` | Creates a child domain (a thread with its own TLS, root arena and event loop) and shares the channel handles it is given |
 
@@ -178,7 +178,6 @@ func worker(in chan Request, out chan Response) (closed chan struct{}) {
 | `+` on text | `\|` pipe operator |
 | `fallthrough` | `case A, B:` |
 | `complex64/128` | Not supported |
-| `uintptr` | Explicit pointer types |
 | `import "strings"` | `import "bytes"` |
 
 ## Spawn Channel Model: Shared Rings, One Writer per Direction

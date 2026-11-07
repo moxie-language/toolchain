@@ -2107,7 +2107,7 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 			// handle comes back nil). Name the instruction and stop building
 			// this function: a diagnostic the caller can act on beats a crash,
 			// and the underlying missing createExpr case is recorded in
-			// docs/open-work.md.
+			// the work log.
 			b.addError(instr.Pos(), "internal: no LLVM value for this store (value type "+instr.Val.Type().String()+", address type "+instr.Addr.Type().String()+")")
 			return
 		}

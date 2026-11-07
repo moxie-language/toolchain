@@ -1,5 +1,24 @@
 # Moxie Changelog
 
+## v1.0.1-rc.1
+
+The memory and type-resolution release candidate. No language changes.
+
+- **Compiler build memory.** The dispatch fingerprint measurement now runs in
+  its own freed arena, and package type graphs live in per-package arenas
+  released at their last-need index. Cold serial `http_header_api` peaks at
+  ~2.4 GB (was ~7.8 GB); the compiler self-build peaks at 964 MB.
+- **Type-resolution database.** Nominal facts, six indexes, actual interface
+  conversion sites recorded at the three `MakeInterface` sites (201 sites to
+  48 distinct edges on the nominal fixture), `mxc typedb` diagnostic and a
+  legacy mirror of the engine.
+- **Build-arena assertion.** `MOXIE_ARENA_CHECK=1` fails loudly when one
+  package leaves more than 32 MB on the build arena.
+- **Documentation.** Lowercase-hyphen filenames, the thread/domain model
+  corrected throughout, the outdated plan documents removed, and the version
+  series unified: 1.9.x was the legacy TinyGo compiler version, not a Moxie
+  release.
+
 ## v1.0.0
 
 The first stable release, tagged on a full gate rather than a targeted set:
@@ -31,8 +50,8 @@ Last fixes on the way to the tag:
   one random wasm fixture down per sweep), and the wasm host page lets the hub's
   log drain run before reporting done.
 
-Known next work is recorded in `docs/open-work.md`: one domain-id space for
-`ch.childDomain` and the hub's lineage ids, and the lattice.
+The historical work log that recorded the next work has been removed from the
+tree; the remaining work is summarized in the release notes above.
 
 ## v1.0.0-rc.4
 

@@ -187,7 +187,7 @@ hello path=/two"
 			if [ "$growth" -lt 2048 ]; then
 				log_pass "netsmoke:no-accumulation-$mode" "400 exchanges in 2 runs: rss ${mid_rss}kB -> ${post_rss}kB (+${growth}kB)"
 			else
-				log_fail "netsmoke:no-accumulation-$mode" "requests retain memory: steady-state rss +${growth}kB over 400 exchanges (${mid_rss} -> ${post_rss}kB, ~$((growth * 1024 / 400))B/request) - the request arena is entered and reset per request, so this is the runtime's retention, not the shell's (docs/open-work.md)"
+				log_fail "netsmoke:no-accumulation-$mode" "requests retain memory: steady-state rss +${growth}kB over 400 exchanges (${mid_rss} -> ${post_rss}kB, ~$((growth * 1024 / 400))B/request) - the request arena is entered and reset per request, so this is the runtime's retention, not the shell's (the work log)"
 			fi
 		fi
 	fi

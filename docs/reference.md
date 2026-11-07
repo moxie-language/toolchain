@@ -302,8 +302,8 @@ This is the only way to allocate a slice by size.
 ### Channel Literals
 
 ```moxie
-ch := chan int32{}             // unbuffered channel
-ch := chan int32{10}           // buffered channel, capacity 10
+ch := chan int32{}             // one-slot mailbox
+ch := chan int32{10}           // 10 outstanding messages
 ```
 
 This is the only way to create channels.
@@ -349,8 +349,8 @@ Values: `true`, `false`.
 explicit widths (`int32`, `int64`, `uint32`, `uint64`). Slice/array indexes and
 `len()`/`cap()` return `int32`.
 
-`uintptr` is available only in packages that `import "unsafe"`. It is an alias
-for `uint64`.
+`uintptr` is a predeclared pointer-sized integer, the type used for pointer
+arithmetic with `unsafe.Pointer`; it is not a replacement for a typed pointer.
 
 Complex number types do not exist.
 
@@ -809,7 +809,7 @@ conversion pass first - there is no `_be` variant.
 `//go:embed`). `//moxie:embed_le` is implemented in stage4 only: the loader
 rewrites `//:` pragmas, not `//moxie:` ones, so a legacy build of a package
 using it sees a zero-valued global. Recorded as a bilateral gap in
-`docs/open-work.md`.
+`the work log`.
 
 ### Short Variable Declarations
 
@@ -1437,7 +1437,8 @@ Arena layout:
     regions[2]: [data....]
 ```
 
-Each arena has a flat registry of chained regions (a slice, no linked list).
+Each arena has a flat registry of chained regions (a slice, no linked list, up
+to 128 regions).
 When the active region fills, a chained region is mmap'd and appended: 64MB by
 default, or twice the active region's capacity (capped at 64MB) for a sovereign
 group arena, so a few-KB group does not reserve a whole 64MB region.
@@ -1700,8 +1701,8 @@ Execution flow within a domain is controlled by three constructs:
 
 | Construct | Behavior |
 |-----------|----------|
-| Unbuffered channel send | Execution transfers to the waiting `select` case. Like a function call via the channel. |
-| Buffered channel send | Message queued for the next `select` iteration. |
+| Send to `chan T{}` | Queued in the one-slot mailbox; a second send parks until the receiver takes the first. |
+| Send to `chan T{:N}` | Queued while fewer than N are outstanding; the sender parks beyond that. |
 | `select` | Event handler - blocks until a channel message, I/O event, or timer fires. |
 
 Because there is exactly one thread per domain, there are no data races.
@@ -1719,9 +1720,10 @@ value on a channel and A receives it - not through shared addressable state.
 
 ### I/O Model
 
-All I/O is non-blocking and buffered. Each domain uses `epoll` (Linux) or
-`kqueue` (Darwin) for I/O readiness notification. No I/O operation blocks the
-domain's thread - all I/O is dispatched through the event loop via `select`.
+All I/O is non-blocking and buffered. The readiness backend in the tree is
+`epoll` (`src/runtime/poll.mx`); there is no `kqueue` implementation. No I/O
+operation blocks the domain's thread - all I/O is dispatched through the event
+loop via `select`.
 
 ---
 
@@ -1734,7 +1736,7 @@ The runtime provides:
 - **Channel dispatch**: Lock-free select with atomic CAS for fairness.
   Unbuffered channels transfer execution directly. Buffered channels use a
   circular ring buffer.
-- **I/O polling**: `epoll`/`kqueue` integration. I/O waits yield to the event
+- **I/O polling**: `epoll` integration. I/O waits yield to the event
   loop, not blocking the domain.
 - **Context switching**: Cooperative stack switching via saved register sets.
   Stack overflow detected via canary values.
@@ -1897,7 +1899,7 @@ and are mutually assignable. The spelling is a hint to the code generator only.
 | Domain memory | One address space, no addressable cross-domain state; channel rings are shared |
 | Slice equality | `==` for any comparable element type |
 | Slice literals | `[]T{:n}`, `[]T{:n:c}` |
-| Channel literals | `chan T{}` (unbuffered), `chan T{n}` (buffered) |
+| Channel literals | `chan T{}` (one slot), `chan T{n}` (n outstanding messages) |
 | Named slice/map types | Compile error |
 | Value receivers | Compile error; pointer receivers only |
 | Unnamed return values | Compile error; all returns must be named |

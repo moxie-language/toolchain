@@ -125,8 +125,11 @@ fixture the cold build records 201 sites and collapses them to 48 distinct
 
 ## Build Tags
 
-Per-file build constraints in Moxie source use the `//:build` directive, and they
-are platform constraints only:
+Per-file build constraints in Moxie source use the `//:build` directive. The
+tags select source files for the target; the compiler also accepts a small set
+of compatibility tags (`moxie`, `moxie.stringer`, `moxie.linux`, `moxie.unicore`,
+`purego`, `osusergo`, `math_big_pure_go`, `go1.x`). `//:build ignore` excludes a
+file from every build.
 
 ```
 //:build linux
@@ -141,10 +144,11 @@ are platform constraints only:
 A file whose name carries a platform part that does not match the target is
 skipped, so `foo_arm64.mx` is compiled only for arm64.
 
-The `moxie.*`, `gc.dealloc`, `scheduler.tasks`, `scheduler.cores` and
-`scheduler.asyncify` pseudo-tags inherited from TinyGo appear as constraints in
-no source file. They are inert and select nothing. The single-thread, no-scheduler
-model they used to gate is now the only model (see the execution model above).
+The TinyGo scheduler pseudo-tags (`gc.dealloc`, `scheduler.tasks`,
+`scheduler.cores`, `scheduler.asyncify`) select no file in this tree: the
+single-thread, no-scheduler model they used to gate is now the only model (see
+the execution model above). `moxie.stringer` is not inert - it selects the real
+builtin Stringer bodies on every target.
 
 ## Target Configuration
 

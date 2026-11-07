@@ -53,7 +53,6 @@ you hit the cap, the allocation site is wrong - fix it there, not at the push.
 |------|------------|
 | `complex64` | Not supported. |
 | `complex128` | Not supported. |
-| `uintptr` | Use explicit pointer types. Allowed in packages that import `unsafe`. |
 
 ### Removed Statements
 
