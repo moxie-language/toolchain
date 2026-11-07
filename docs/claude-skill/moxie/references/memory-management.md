@@ -108,9 +108,13 @@ Package-level variables are allocated in the root arena at domain init. They per
 
 ## Domain Isolation
 
-Each domain (spawned process) has its own `DomainRoot` and arena tree. When a domain exits, `munmap` releases all its address space to the kernel in one operation. There is no shared memory between domains.
+Each domain (a thread in one process) has its own `DomainRoot` and arena tree.
+When the thread ends, its arenas are released. Domains share an address space
+but not access: there is no API that reaches another domain's memory.
 
-Values crossing the spawn boundary are serialized via `moxie.Codec`. The child receives an independent copy in its own arena.
+Values crossing the spawn boundary are copied (codec-relocated when they carry
+references) into the child's arena; a channel handle is the only shared
+capability.
 
 ## Long-Running Event Loops
 

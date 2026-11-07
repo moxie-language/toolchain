@@ -8,7 +8,7 @@ The rules in this document are applications of the three axioms in [axioms.md](a
 
 ## 1. The Model
 
-A Moxie program is a **tree of domains**. Each domain is an isolated OS process with a single thread of execution. Domains communicate exclusively through serialized IPC channels created by `spawn`. There is no shared memory anywhere in the system. There are no goroutines, no scheduler, no locks, and no atomics - these are not omissions, they are the design.
+A Moxie program is a **tree of domains**. Each domain is a thread in one process with its own arena tree and a single event loop. Domains communicate through channel handles created by `spawn`: the rings are shared memory, values cross copied (or codec-relocated), and nothing addressable crosses. There are no goroutines, no scheduler, and no locks - single-threaded domains have no data races to guard against.
 
 Three traditions converge here:
 

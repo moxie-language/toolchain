@@ -1,8 +1,11 @@
 # The type-resolution database
 
-Status: design and first implementation. This is the fix for the compiler's
-whole-link residency: the cold `http_header_api` build held the whole closure's
-type graphs at once (root arena ~3.1GB at `objs-pre`, ~7GB peak RSS).
+Status: the engine and the site population are implemented and committed; the
+loader uses the engine for release, and the emitter still dispatches on the
+method-name potential set. This is the fix for the compiler's whole-link
+residency: the cold `http_header_api` build held the whole closure's type graphs
+at once (root arena ~3.1GB at `objs-pre`, ~7GB peak RSS); after the release
+work the same build peaks at ~2.4GB and the compiler self-build at 964MB.
 
 ## Why this is the final boss, and why it is structural
 
@@ -173,23 +176,39 @@ accumulating on the build arena under a different name. `mxc build` with
 build-lifetime, not per-package. Run it on a cold bulky link (the `http_header_api` build) when
 touching the loader or the fingerprint pass.
 
-## How the compiler uses it
+## What is implemented
 
-1. **Prepass**: build the fact index from the `.mxh` files (no type graphs).
-   This replaces `dispParseMethods`/`dispMethodsByPkg` as the source of the
-   method relation.
-2. **Typecheck**: a package's graph is materialised from facts on demand, into
-   a per-package arena. The graph is a cache of the facts, not the storage.
-   Cross-package type references are fact keys until a `Type` object is needed.
-3. **SSA**: every conversion site is recorded into the association tables.
-4. **Emission**: dispatch arms for an interface ask the DB for the actual
-   implementers of that interface (or, at minimum, for the methods the package
-   actually converts to), not for every package that declares the method name.
-5. **Release**: after a package is emitted, any fact set whose path-index
-   version is no longer referenced by a live package is released; the fact
-   files stay on disk and are re-read lazily if a later package needs them.
+- **Engine**: nominal fact keys, structural hash as a secondary index, the six
+  indexes, `exists`/`count`/`intersects`, and `typeDBDeletePkg` (release is
+  delete). `mxc typedb <file.mxh>...` prints the shape; the legacy compiler has
+  the same engine and diagnostic.
+- **Prepass**: the fact index is built from the `.mxh` files without
+  materialising a `TCPackage`.
+- **SSA**: the three `MakeInterface` sites (assignment/coercion, return,
+  argument) record the implements edge, the package contribution, and the
+  target interface's method set. The nominal fixture records 201 sites and 48
+  distinct edges.
+- **Release**: a package's graph lives in a per-package arena and is freed at
+  its last-need index; the dispatch pre-pass's whole-link graphs are dropped
+  before the per-package compile loop; the fingerprint measurement has its own
+  freed arena.
+- **Assertion**: `MOXIE_ARENA_CHECK=1` fails loudly when one package leaves
+  more than 32MB on the build arena.
 
-Until steps 2-4 land, the release rule must remain conservative: keep the
-imports a package typechecks against, and load a dispatch provider only when a
-site asks for it. That is still a win over the whole link, but it is not the
-bound "largest package, not the closure" - that bound is the DB's end state.
+## What is not implemented yet
+
+- **Typecheck from facts**: the typechecker still materialises each package's
+  graph whole, into its arena. The facts are the index, not yet the lazy
+  resolution path.
+- **Arm narrowing**: `findIfaceImpls` still enumerates the method-name potential
+  set. Using the actual implementer set for arms requires the arm facts (type
+  IDs, symbols, signatures) to be frozen, and the site pass to run before the
+  fingerprints so the cache key and the arms agree.
+- **Persisted sites**: a warm build reuses object files and has no site data
+  for untouched packages, so the potential set remains the fallback.
+- **Per-function phase**: the peak is still the package's `ci-tc` SSA body set,
+  not the largest single function.
+
+The next bound is therefore "largest function, not package": typecheck the
+declarations once, keep a compact per-function summary, and build/emit/drop one
+body at a time.

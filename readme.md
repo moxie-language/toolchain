@@ -12,7 +12,7 @@
 
 -----
 
-A compiled systems language for domain-isolated event-driven programs. Each program is a tree of **domains** - isolated OS processes communicating through serialized IPC channels. No goroutines, no shared memory, no data races.
+A compiled systems language for domain-isolated event-driven programs. Each program is a tree of **domains** - threads in one process, each with its own arena tree and event loop, communicating through channel handles whose single-producer single-consumer rings live in shared memory. No goroutines, no shared mutable state, no data races.
 
 Moxie descends from [TinyGo](https://tinygo.org/). All embedded targets and threading infrastructure have been stripped. What remains is a compilation pipeline for Linux, Darwin, and browser JS, rewired for single-threaded domains with process-level isolation via `spawn`.
 
@@ -130,9 +130,9 @@ The tree of domains is the consequence of A2 (total isolation) and A1 (just the 
 | Unbuffered channel send | Execution jumps to the waiting `select` case |
 | Buffered channel send | Message queued for the next `select` iteration |
 | `select` | Event handler - blocks until a channel, I/O event, or timer fires |
-| `spawn` | Creates a child domain (OS process) with IPC channels |
+| `spawn` | Creates a child domain (a thread with its own TLS, root arena and event loop) and shares the channel handles it is given |
 
-Within a domain, channels and `select` are the event dispatch system. Between domains, `spawn` and IPC channels provide concurrent execution with complete memory isolation.
+Within a domain, channels and `select` are the event dispatch system. Between domains, `spawn` and channel handles provide concurrent execution; isolation is the contract (there is no API to reach another domain's memory) and values cross copied, while channel handles are shared.
 
 ## Type Unification
 
@@ -143,18 +143,31 @@ Within a domain, channels and `select` are the event dispatch system. Between do
 
 ## Spawn Boundary
 
-`spawn` is a language builtin. All data arguments must implement `moxie.Codec` for serialization. No pointers, functions, or interfaces cross the boundary. Non-constant values are moved (ownership transfer).
+`spawn` is a language builtin. The target must be a static function whose single
+result is named `closed` and typed `chan struct{}`; the runtime binds the
+domain's breaker into it. Value arguments are copied and frozen at the call;
+channel arguments are shared handles, not payloads.
+
+Every variable-length dimension of a value parameter declares its size in a
+`cap` struct tag, because the ring is sized before the thread starts (an
+unstated dimension is one page). A channel, interface, function value or type
+parameter in the frame path is a compile error: no count can bound it. A value
+with references is encoded by its codec (its own `EncodeTo`/`DecodeFrom` when it
+has one, the structural codec otherwise); a pointer-free value moves as raw
+bytes.
 
 ```moxie
-import "moxie"
-
-type Codec interface {
-    EncodeTo(w io.Writer) error
-    DecodeFrom(r io.Reader) error
+func worker(in chan Request, out chan Response) (closed chan struct{}) {
+    for {
+        select {
+        case <-closed:
+            return closed
+        case req := <-in:
+            out <- handle(req)
+        }
+    }
 }
 ```
-
-Built-in codec types: `Bool`, `Int8`, `Uint8`, `Int16`, `Uint16`, `Int32`, `Uint32`, `Int64`, `Uint64`, `Float32`, `Float64`, `Bytes`. Little-endian default. Big-endian aliases (`BigInt32`, `BigUint64`, etc.) for network protocols.
 
 ## Removed Features
 
@@ -168,19 +181,17 @@ Built-in codec types: `Bool`, `Int8`, `Uint8`, `Int16`, `Uint16`, `Int32`, `Uint
 | `uintptr` | Explicit pointer types |
 | `import "strings"` | `import "bytes"` |
 
-## Spawn Channel Model: Shared Rings, Non-blocking Duplex
+## Spawn Channel Model: Shared Rings, One Writer per Direction
 
-A spawn-bound channel is a pair of shared single-producer single-consumer ring buffers, one per direction, created with `mmap(MAP_SHARED)` before `fork` so both processes map the same physical memory. There is no socketpair and no pipe in the channel transport. Each direction has exactly one writer and one reader (lemma L12), which is what makes the ring sound without locks.
-
-The ring is a 32MB data area per direction, lazily faulted, so the virtual reservation is cheap and no frame within `ringMaxMsg` can silently truncate.
-
-Both directions always exist. The two sides are symmetric concurrent peers, and neither can freeze the other. Backpressure is expressed by ring occupancy, never by a sender blocking in a syscall (lemma L21: the index word is both the state and the notification).
-
-Control rides the same shared memory rather than a separate channel:
-
-- **channel close** - the ring header's closed flag (`ringClose`)
-- **child readiness** - a shared control block's ready atomic, which the parent spins on for the synchronous spawn rendezvous
-- **child death** - `waitpid` on the parent side, `getppid` on the child side (an orphaned child observes the change and exits)
+A spawn-bound channel is a pair of single-producer single-consumer byte rings,
+one per direction, allocated when the channel is created. There is no
+socketpair and no pipe in the channel transport. Both domains are threads in one
+address space and hold the same channel object, so each direction has exactly
+one writer and one reader. The depth is a declared message count
+(`chan T{:N}`); a send returns once its frame is in the ring and parks on the
+ring's read index via a futex when that many are already outstanding. The
+receiver advancing the index is the wake. Close is a flag on the ring; a dead
+peer is observed through the ring state and the domain's breaker, not `waitpid`.
 
 ### ChanID convention
 
@@ -190,10 +201,10 @@ chanID 0 = control (close signals), chanID 1 = first spawn channel arg, chanID 2
 
 | Operation | Behavior |
 |-----------|----------|
-| `ch <- v` | Encode, `ringSend`, retry-and-yield on backpressure. Returns false on close or peer death. |
-| `v := <-ch` | `ringRecv`, retry-and-yield while empty. Returns `ok = false` on close or peer death. |
-| `select { case v := <-ch: }` | Non-blocking poll via `tryPipeRecv`/`tryPipeSend`, which must never block. |
-| `close(ch)` | `ringClose` on both rings; the peer observes the closed flag on recv and on send. |
+| `ch <- v` | Encode the frame, ring send; returns false on close or dead peer. |
+| `v := <-ch` | Ring receive; returns `ok = false` on close or dead peer. |
+| `select { case v := <-ch: }` | Non-blocking poll; the runtime encodes when the arm fires. |
+| `close(ch)` | Sets the ring's closed flag; the peer observes it on recv and send. |
 
 ## Targets
 
@@ -214,7 +225,7 @@ All native binaries are fully statically linked.
 ## Documentation
 
 - **[docs/axioms.md](docs/axioms.md)** - The three axioms, their justification, and the derived lemmas (normative)
-- **[REFERENCE.md](REFERENCE.md)** - Complete language specification
+- **[reference.md](reference.md)** - Complete language specification
 - **[tutorial.md](tutorial.md)** - Learn Moxie from scratch
 - **[example-claude.md](example-claude.md)** - AI coding assistant configuration
 - **[Architecture Patterns](docs/moxie-architecture-patterns.md)** - CSP/Actor/DDD design patterns and worked examples

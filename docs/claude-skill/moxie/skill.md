@@ -44,11 +44,13 @@ Activate when:
 
 ## Execution Model
 
-- Each program is a tree of **domains** (OS processes / WASM Workers).
+- Each program is a tree of **domains** (threads in one process / WASM Workers).
 - One thread per domain. No data races possible.
 - **Within domain**: channels + `select` for event dispatch.
-- **Between domains**: `spawn(fn, args...)` creates child with IPC channels.
-- No shared memory between domains. All cross-domain data serialized via `moxie.Codec`.
+- **Between domains**: `spawn(fn, args...)` creates a domain thread; channel
+  handles are shared, values are copied (or codec-relocated) into the child.
+- No addressable cross-domain state. There is no API that reaches another
+  domain's memory; a channel handle is the only shared capability.
 
 ## The Pipe Operator `|`
 

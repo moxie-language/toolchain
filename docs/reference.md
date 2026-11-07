@@ -1349,7 +1349,7 @@ cleanup:
 | `panic` | `panic(v error)` | Stops execution with an error value - FATAL, no recover |
 | `print` | `print(args...)` | Prints to stderr (no newline) |
 | `println` | `println(args...)` | Prints to stderr (with newline) |
-| `spawn` | `spawn(fn, args...) chan struct{}` | Creates a new isolated domain |
+| `spawn` | `spawn(fn, args...) chan struct{}` (target result named `closed`) | Creates a new isolated domain thread |
 
 `len` and `cap` return `int32`, not a platform-dependent integer.
 `recover` is not callable - a panic is fatal - and no longer appears above.
@@ -1491,7 +1491,7 @@ Three boundaries exist where memory changes hands:
 | Boundary | Mechanism | Direction |
 |----------|-----------|-----------|
 | Function return | Relocate into caller's arena | Callee -> Caller |
-| Spawn | Codec serialization over IPC | Parent -> Child |
+| Spawn | value copy (or codec relocation) into the child arena | Parent -> Child |
 | Domain exit | munmap (bulk release) | Domain -> Kernel |
 
 ### Parameters
@@ -1510,16 +1510,17 @@ return values and receiver store-backs.
 Named return values are required (`func f() (n int32)`, never `func f() int32`),
 and a named result is assignable like any local.
 
-Package-scoped variables are immutable outside `init()`: domains are forked
-processes sharing pages, so two domains reading the same global must see the
-same value.
+Package-scoped variables are immutable outside `init()`: every package variable
+is thread-local, so a write after init would change one domain's copy while the
+other domains keep the value they were born with.
 
 ### Between Domains
 
-Each domain has its own arena tree. There is no shared memory between domains.
-Values crossing the spawn boundary are serialized via `moxie.Codec` - the
-child receives an independent copy in its own arena. When a domain exits,
-`munmap` releases all its address space to the kernel in one operation.
+Each domain has its own arena tree. Domains are threads in one address space,
+but there is no API that reaches another domain's memory: values crossing the
+spawn boundary are copied (codec-relocated when they carry references) into the
+child's arena, and a channel handle is the only shared capability. A domain's
+arenas are released when its thread ends.
 
 ### Long-Running Event Loops
 
@@ -1553,31 +1554,35 @@ done := spawn(fn, arg1, arg2, ...)
 ```
 
 `spawn` creates a new **domain** - an isolated execution context with its own
-single-threaded event loop and memory space. On native targets, the domain is
-an OS process created via `fork()`. On the WASM target, the domain is a Web
-Worker.
+single-threaded event loop, TLS and arena tree. On native targets the domain is
+a thread in the same process; on the WASM target it is a Web Worker.
 
-`spawn` is a language builtin. No import is required.
-
-`spawn` must not appear inside `init()` functions. Domains can only be created
-after all packages are initialized and `main()` starts.
+`spawn` is a language builtin. No import is required. It must not appear inside
+`init()` functions.
 
 ### Arguments
 
 The first argument must be a **static function name** (not a variable, not a
-closure). Remaining arguments are passed to that function in the child domain.
-The return value is `chan struct{}` - a lifecycle channel that closes when the
-child exits.
+closure). The target's single result must be named `closed` and typed
+`chan struct{}`; the runtime binds the domain's breaker into it and the target
+selects on it to observe shutdown.
 
 ```moxie
-import "moxie"
-
-func worker(id moxie.Int32, scale moxie.Float64) {
-    println(float64(id) * float64(scale))
+func worker(in chan Request, out chan Response) (closed chan struct{}) {
+    for {
+        select {
+        case <-closed:
+            return closed
+        case req := <-in:
+            out <- handle(req)
+        }
+    }
 }
 
 func main() {
-    done := spawn(worker, moxie.Int32(1), moxie.Float64(2.5))
+    in := chan Request{}
+    out := chan Response{}
+    done := spawn(worker, in, out)
     _ = done
 }
 ```
@@ -1586,110 +1591,73 @@ The compiler verifies at compile time:
 
 - Argument count matches the function's parameter count exactly.
 - Each argument type matches the corresponding parameter type exactly.
-- Every argument type is serializable across the spawn boundary.
+- The target has the spawn shape (one result, named `closed`, typed
+  `chan struct{}`).
+- The target does not capture closures.
+- Every channel argument's ring can be sized from its declaration and the
+  frame budget (`cap` tags).
 
 ### Spawn Boundary Rules
 
-The spawn boundary is a serialization boundary. Every argument is serialized
-into the child's address space via `moxie.Codec`. There is no shared memory
-between domains.
+Value arguments are **copied and frozen** at the call; channel arguments are
+**shared handles** (both domains hold the same channel object). There is no
+move: the parent may keep using a value after `spawn`.
 
-All data arguments and channel element types must implement `moxie.Codec`:
+Every variable-length dimension of a value type declares its size in a `cap`
+struct tag, one number per dimension, outermost first, counted in elements of
+that dimension (bytes for `string`/`[]byte`). An unstated dimension is one page
+(4096 bytes).
 
 ```moxie
-type Codec interface {
-    EncodeTo(w io.Writer) (err error)
-    DecodeFrom(r io.Reader) (err error)
+type Request struct {
+    ID   int64
+    Tags []string `cap:"32,64"`   // 32 tags, 64 bytes each
+    Body []byte   `cap:"65536"`   // 65536 bytes
 }
 ```
 
-#### Built-in Codec Types
-
-The `moxie` package provides codec wrappers for all primitive types. Default
-encoding is little-endian. Big-endian aliases exist for network protocols:
-
-| Default (LE) | Big-endian (BE) | Size |
-|-------------|-----------------|------|
-| `moxie.Bool`, `moxie.Int8`, `moxie.Uint8` | - | 1 byte |
-| `moxie.Int16`, `moxie.Uint16` | `moxie.BigInt16`, `moxie.BigUint16` | 2 bytes |
-| `moxie.Int32`, `moxie.Uint32` | `moxie.BigInt32`, `moxie.BigUint32` | 4 bytes |
-| `moxie.Int64`, `moxie.Uint64` | `moxie.BigInt64`, `moxie.BigUint64` | 8 bytes |
-| `moxie.Float32` | `moxie.BigFloat32` | 4 bytes |
-| `moxie.Float64` | `moxie.BigFloat64` | 8 bytes |
-| `moxie.Bytes` | - | 4-byte LE length prefix + data |
-
-User-defined structs implement `Codec` by defining `EncodeTo`/`DecodeFrom`
-methods that serialize each field.
-
-#### Allowed Types at the Boundary
-
-| Type | Treatment |
-|------|-----------|
-| Types implementing `moxie.Codec` | Serialized via EncodeTo/DecodeFrom |
-| `*T` where `T` implements `Codec` | Copy semantics - pointer dissolves at the wire, receiver gets a fresh allocation |
-| Channels (element type must implement Codec) | Become IPC channels over socketpair (native) or MessagePort (WASM) |
-
-#### Rejected Types (compile error)
-
-| Type | Reason |
-|------|--------|
-| Raw built-in types (`int32`, `bool`, etc.) | Use `moxie.Int32`, `moxie.Bool`, etc. |
-| `func(...)` | Cannot serialize code |
-| Interface types | Interfaces cannot cross the spawn boundary; use concrete Codec types |
-| Raw pointers to non-Codec types | Cannot share memory across domain boundary |
-
-### Move Semantics
-
-Non-constant values passed to `spawn` are **moved** to the child domain. Using
-the variable after `spawn` is a compile error:
-
-```moxie
-x := compute()
-spawn(worker, x)
-println(x)            // compile error: variable used after spawn
-```
-
-Exceptions:
-
-- Constants and constant-foldable expressions are exempt (immutable).
-- Channels are exempt (both parent and child hold IPC endpoints).
+A value that carries references is encoded by its codec: its own
+`EncodeTo`/`DecodeFrom` when it defines them, the structural codec otherwise.
+A pointer-free value moves as raw bytes. A channel, interface, function value or
+type parameter in the frame path is a compile error: no count can bound it.
 
 ### Channel Completeness
 
 Every channel created in a function must have both a sender and a listener
-(receive or `select` case). Channels that escape the function (passed to calls,
-returned, stored in structs) are exempt.
+(receive or `select` case). Channels that escape the function are exempt.
 
 ```moxie
 ch := chan int32{}
 ch <- 42              // compile error: channel has no listener
 ```
 
-### IPC Channels
+### Channels at the Boundary
 
-Channels passed to `spawn` become IPC channels. The runtime multiplexes them
-over a single socketpair with length-prefixed messages. All spawn channel
-operations are non-blocking with retry-and-yield (1ms sleep, indefinite retry
-until success or pipe close). Both sides of the socketpair are symmetric peers.
-Backpressure is expressed by pipe buffer fullness, not by blocking.
+Channels passed to `spawn` are the same channel objects in the child; their
+rings are already in shared memory. A channel is a mailbox with the depth its
+declaration gives it: `chan T{}` is one slot, `chan T{:N}` is N. A send returns
+once its frame is in the ring and parks on the ring's read index (a futex wake
+on the receiver's advance) when the declared depth is outstanding. Close is a
+flag on the ring; a dead peer is observed through the ring state and the
+domain's breaker.
 
 ### Native Implementation
 
-1. `socketpair(AF_UNIX, SOCK_STREAM)` creates a bidirectional IPC pipe.
-2. `fork()` creates the child process (copy-on-write memory).
-3. Child closes parent's socket end, runs the function directly, exits on
-   completion.
-4. Parent closes child's socket end, registers domain (pid + fd), continues.
-
-Each domain has its own single-threaded event loop and memory space. A child
-that exits unexpectedly is reaped on the next scheduler tick.
+1. The channel object and its SPSC rings exist in the shared address space.
+2. `pthread_create` starts the domain thread (64 MB stack) with a fresh
+   `DomainRoot`/TLS and root arena.
+3. The child marks the child-side ring halves for each channel argument, runs
+   the target directly, and closes its breaker when it returns.
+4. The parent registers the channel handles and returns the lifecycle channel.
+5. A dead peer is detected through the breaker and the ring liveness bits; there
+   is no `waitpid` and no socketpair.
 
 ### WASM Implementation
 
-1. A new Worker is created with an isolated microtask context.
-2. Slices are element-copied, maps are shallow-copied.
-3. Each domain gets its own event loop.
-4. IPC uses `BroadcastChannel` for inter-domain messaging.
+1. A new Worker is created; the domain gets its own event loop.
+2. Values are copied across the worker boundary through the host shims;
+   channels are the host's message ports.
+3. Channel close and worker death are signalled through the same breaker.
 
 ---
 
@@ -1705,16 +1673,16 @@ that exits unexpectedly is reaped on the next scheduler tick.
 
 ### Domains
 
-A Moxie program is a tree of **domains**. Each domain is an OS process
-(native) or Worker (WASM) running a single thread.
+A Moxie program is a tree of **domains**. Each domain is a thread in one
+process (native) or Worker (WASM) running a single event loop.
 
 ```
 +-------------------------------------+
 |              Program                |
 |  +----------+     +----------+     |
 |  | Domain 0  |----| Domain 1  |     |
-|  | (parent)  | IPC| (child)   |     |
-|  |           |sock|           |     |
+|  | (parent)  |ring| (child)   |     |
+|  |           |    |           |     |
 |  |  select   |pair|  select   |     |
 |  |  +- ch1   |    |  +- ch3   |     |
 |  |  +- ch2   |    |  +- timer |     |
@@ -1739,13 +1707,13 @@ Mutexes are no-ops. Atomics are plain loads and stores.
 
 ### Concurrency Between Domains
 
-`spawn` creates child domains. Communication happens exclusively through IPC
-channels. Values are deep-copied across the boundary via Codec serialization.
-The parent and child cannot observe each other's memory.
+`spawn` creates child domains. Communication happens through channel handles
+whose rings are in shared memory; values are copied (codec-relocated when they
+carry references) into the receiver's arena, and there is no API that lets one
+domain address another's memory.
 
-This is not a relaxed memory model - it is **no shared memory**. The answer to
-"when does domain A see domain B's write?" is: when B sends it on a channel
-and A receives it.
+The answer to "when does domain A see domain B's write?" is: when B sends the
+value on a channel and A receives it - not through shared addressable state.
 
 ### I/O Model
 
@@ -1882,7 +1850,9 @@ mismatch means the installed binary is stale - run `moxie install` again.
 1. **Single-threaded per domain.** No preemption.
 2. **No data races.** Single-threaded execution makes races structurally
    impossible.
-3. **Complete domain isolation.** `fork()` provides OS-level memory isolation.
+3. **Domain isolation is the contract.** Threads share one address space, but no
+   API reaches another domain's memory; values cross only as copies (or
+   codec-relocated frames) and a channel handle is the only shared capability.
 4. **Deterministic execution.** Given the same inputs, execution follows one
    path.
 5. **Static binaries.** No dynamic dependencies. Ship one file.
@@ -1919,10 +1889,10 @@ and are mutually assignable. The spelling is a hint to the code generator only.
 | Text concatenation | `\|` operator |
 | Integer sizes | Explicit widths only; `int`/`uint` are illegal |
 | Concurrency | Channels + `select` within a domain, `spawn` for new domains |
-| Process isolation | `spawn(fn, args...)` via `fork()` + socketpair |
-| Serialization | `moxie.Codec` interface at spawn boundary |
+| Domain isolation | `spawn(fn, args...)` creates a thread with its own TLS/arena tree; channel handles are the only shared capability |
+| Serialization | a value's own codec or the structural codec; pointer-free values move as bytes |
 | Memory model | Per-function arena (push/pop stack), relocate on return, bulk release at domain exit |
-| Domain memory | No shared memory between domains |
+| Domain memory | One address space, no addressable cross-domain state; channel rings are shared |
 | Slice equality | `==` for any comparable element type |
 | Slice literals | `[]T{:n}`, `[]T{:n:c}` |
 | Channel literals | `chan T{}` (unbuffered), `chan T{n}` (buffered) |

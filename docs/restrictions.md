@@ -59,7 +59,7 @@ you hit the cap, the allocation site is wrong - fix it there, not at the push.
 
 | Statement | Alternative |
 |-----------|------------|
-| `go f()` | **Compile error.** There are no goroutines. Use channels + `select` for event dispatch, `spawn` for process-level parallelism. |
+| `go f()` | **Compile error.** There are no goroutines. Use channels + `select` for event dispatch, `spawn` for domain-level parallelism. |
 | `fallthrough` | Comma-separated case expressions, or call a shared function. |
 
 ### Slice Concatenation (`|` operator)

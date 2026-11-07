@@ -1,5 +1,10 @@
 # Open work
 
+> Historical work log. It records rounds as they happened and is not the
+> current state of the compiler or language; for that see
+> [architecture.md](architecture.md), [reference.md](reference.md) and
+> [type-db.md](type-db.md). The newest entry is not necessarily open work.
+
 ## NEXT (from the slice): the wake path, 7.25 ms per round trip
 
 `tests/slice` ran a 32-domain chain, 32 synchronous rounds, 1,984 edges / 4,032

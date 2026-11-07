@@ -4,47 +4,45 @@
 
 The server is dumb. The client is smart. Each domain is sovereign.
 
-Moxie enforces isolation at the language level. Domains are OS processes. There is no shared memory. Communication is serialized across each domain boundary. Each domain runs a single thread with channels and select for event dispatch.
+Moxie enforces isolation at the language level. A domain is a thread in one process with its own TLS, root arena and event loop; domains share an address space but not access - the only handles between them are channels, and there is no API that reaches another domain's memory. Each domain runs a single thread with channels and select for event dispatch.
 
 Everything in this document is the mechanical realization of the three axioms in [axioms.md](axioms.md), with the lemma ids given where a claim is a consequence of one. Where this document and the axioms disagree, the axioms are correct.
 
 ## Compilation Pipeline
 
+The stage4 compiler is written in Moxie (`_mxc_stage4`). Its pipeline:
+
 ```
 Moxie source (.mx files)
     │
     ▼
-loader (package loading, MOXIEROOT overlays)
+resolveAll: discover packages, read sources, build the package graph
     │
     ▼
-cgo (libclang processing for C interop)
+prepareDispatchIndex: export facts (.mxh), dispatch index, type database
     │
     ▼
-SSA construction (via golang.org/x/tools/go/ssa)
+whole-link typecheck: every package typed into the registry, conversion
+    sites recorded, export data written
     │
     ▼
-compiler (Moxie SSA → LLVM IR)
-    ├── spawn builtin → runtime.spawnDomain (Codec validation)
-    ├── restriction checking: reject new, complex, etc.
-    ├── channel/select lowering
-    └── syscall intrinsics: inline assembly
+per-package compile (dependency order): typecheck/SSA, then IR emit
+    ├── function arenas, relocation, receiver store-back
+    ├── channel/select lowering and frame budgets (cap tags)
+    ├── interface dispatch arms (type-ID switch)
+    └── restriction checking
     │
     ▼
-transform (LLVM IR optimization passes)
+clang/llc: .ll -> .bc -> .o
     │
     ▼
-interp (compile-time partial evaluation)
-    │
-    ▼
-builder (orchestration)
-    ├── compile musl, compiler-rt
-    ├── compile extra .c files (signal.c, spawn_unix.c)
-    └── link with ld.lld
-    │
-    ▼
-Static ELF/Mach-O binary
+ld.lld: static ELF/Mach-O (musl + compiler-rt)
 ```
 
+The legacy Go compiler (`legacy/`) is the bootstrap mirror and the reference
+implementation. It performs the same language semantics with go/types and an
+SSA/interpreter path for the runtime; it is not the primary pipeline. Both
+compilers must agree on emitted behaviour (the wood law in claude.md).
 
 ## Execution Model: one thread, no scheduler
 
@@ -57,50 +55,73 @@ Each domain runs a single thread with no scheduler and no task switching. `hasSc
 
 ## Spawn: Domain Creation
 
-`spawn` is a language builtin (like `copy`, `push`). The type checker validates
-argument count and types. The SSA validator enforces `moxie.Codec` on all data
-arguments and channel element types, and rejects pointers, interfaces, and
-nested channels.
+`spawn` is a language builtin. The target must be a static function whose single
+result is named `closed` and typed `chan struct{}`; the runtime binds the
+domain's breaker into it. Value arguments are copied and frozen at the call;
+channel arguments are shared handles.
 
 ```
 spawn(fn, args...)
     │
     ▼ (compile time)
-spawn handling in the compiler
-    │ validate all args implement moxie.Codec
-    │ reject pointers, interfaces, functions, channels
+    │ verify the target shape (named closed chan struct{})
+    │ reject closure captures
+    │ size each channel ring from its declaration and frame budget (cap tags)
     │ emit: runtime.spawnDomain(fn, packedArgs, nChans)
     │
     ▼ (runtime, src/runtime/spawn.mx)
-    ├── ringCreate(32MB) x2 per channel   (mmap MAP_SHARED, parent→child and child→parent)
-    ├── spawnCtlCreate()                  (shared ready flag for the spawn rendezvous)
-    ├── pipe()                            (lockdown pipe: guard-page fault notification only)
-    ├── fork()
+    ├── the channel object already exists in the address space; its rings are
+    │   mapped and shared by both domains
+    ├── pthread_create(domain thread, 64 MB stack)
     │
-    ├── child (pid == 0):
-    │   ├── childSpawnTarget = true, childParentPid = getppid()
-    │   ├── route fault notifications to the lockdown write end
-    │   ├── spawnCall(wrapper, buf): unpack args, mark child-side ring halves,
-    │   │   signal ready, call the target (no scheduler, no run queue)
-    │   └── exit(0)
+    ├── child thread:
+    │   ├── new DomainRoot/TLS, root arena
+    │   ├── mark the child-side ring halves for each channel argument
+    │   ├── run the target (no scheduler, no run queue)
+    │   └── close its breaker; the thread ends
     │
     └── parent:
-        ├── lastSpawnPid = pid
-        ├── domainRegister(pid, lockdownReadFd)
-        ├── MarkParentPipeChannel per channel arg (binds its ring halves)
-        ├── PipeWaitChildReady()              (bounded spin on the shared ready flag)
-        └── return the lifecycle channel
+        ├── register the channel handles with the child domain
+        ├── return the lifecycle channel
+        └── a dead peer is observed through the ring state and the breaker
 ```
 
-The child reverses the ring mapping: what the parent calls the send ring is the child's recv ring, and the reverse. Death detection is asymmetric on purpose - the parent reaps with `waitpid(WNOHANG)`, and the child detects its own orphaning when `getppid()` stops returning the pid it captured at spawn (lemma L22).
+There is no `fork`, no socketpair and no pipe in the spawn path. The child is a
+thread in the same process, so ring frames are shared memory; what is isolated is
+the domain's capability set, not an MMU mapping. The parent detects a dead peer
+through the domain breaker and the ring's liveness bits, not `waitpid`.
 
 ## Memory Model
 
 - **Within a domain**: single-threaded, no races possible. No mutexes needed. Channels are the synchronization primitive.
-- **Between domains**: complete isolation. No shared pointers. Channel data is encoded into the shared rings; nothing addressable crosses (lemma L15).
-- **Allocation**: bump-pointer arena per domain. `alloc()` bumps within the current arena. No GC, no free lists, no individual free. See [OWNERSHIP.md](OWNERSHIP.md) for the ownership model and lemma L19 for why this is the only allocation model the axioms admit.
+- **Between domains**: contractual isolation in one address space. No pointer is handed across; values are copied (or codec-relocated) through the shared rings, and a channel handle is the only shared capability (lemma L15).
+- **Allocation**: bump-pointer arena per domain. `alloc()` bumps within the current arena. No GC, no free lists, no individual free. See [ownership.md](ownership.md) for the ownership model and lemma L19 for why this is the only allocation model the axioms admit.
 - **Per-function ownership**: the compiler emits FnArenaPush/Pop around each function. Return values are relocated into the caller's arena before the function's arena is released.
-- **Domain exit**: `munmap` releases all arena pages in one operation.
+- **Domain exit**: the domain's arenas are released when its thread ends; the process address space is not shared with another process to unmap.
+
+## Compiler Type Database
+
+The compiler keeps a per-build type-resolution database (`docs/type-db.md`).
+Facts are keyed nominally (package + declaration name); the structural hash is
+a secondary index only. Six indexes answer the questions the build needs: type
+to methods (sorted), package to interface contributions, (package, name),
+hash, package to types, and alias/underlying to named types. There is
+deliberately no method-to-types index: conversion sites are recorded at the
+three `MakeInterface` sites (assignment/coercion, return, argument), so the
+actual implementer set is traffic, not the whole closure. On the nominal
+fixture the cold build records 201 sites and collapses them to 48 distinct
+(interface, type) edges.
+
+## Compiler Build Memory
+
+- The dispatch fingerprint measurement runs in its own arena, freed per
+  package; its arm lists used to accumulate on the build arena.
+- A package's type graph lives in a per-package arena and is released at its
+  last-need index; the whole-link graphs are not root-lifetime.
+- `MOXIE_ARENA_CHECK=1` fails loudly if one package leaves more than 32 MB on
+  the build arena, because the build arena is build-lifetime, not per-package.
+- Measured cold serial `http_header_api`: ~2.4 GB peak (was ~7.8 GB), root
+  high-water 1662 MB; the compiler self-build peaks at 964 MB.
 
 ## Build Tags
 

@@ -3,7 +3,7 @@
 ## Domains
 
 A Moxie program is a tree of **domains**. Each domain is:
-- **Native**: an OS process (created via `fork()`)
+- **Native**: a thread in the same process (its own TLS, root arena and event loop)
 - **WASM**: a Web Worker
 
 Each domain has exactly one thread. No data races possible. No `sync` package - mutexes and atomics are meaningless in a single-threaded domain.
@@ -87,29 +87,35 @@ type Codec interface {
 | Interface types | Cannot cross spawn boundary |
 | `*T` where T is non-Codec | Cannot share memory |
 
-### IPC Channels
+### Channels at the Boundary
 
-Channels passed to `spawn` become IPC channels. Two-layer transport on native:
+Channels passed to `spawn` are the same channel objects in both domains; their
+single-producer single-consumer rings are in shared memory. Each direction has
+one writer and one reader, so no lock is needed. The ring is sized from the
+declaration and the frame budget (`chan T{:N}` gives N outstanding messages; one
+unstated dimension is one page).
 
-1. **MAP_SHARED SPSC ring buffers** (fast data path) - one pair per channel (parent->child, child->parent). Allocated via `mmap(MAP_SHARED|MAP_ANONYMOUS)` before `fork()`, so both processes share the same physical memory. 64KB data area per ring. Lock-free: producer writes `writeIdx` with release semantics, consumer reads with acquire semantics. Messages are length-prefixed `[len:4][payload][pad-to-align-8]`.
+A send returns once its frame is in the ring and parks on the ring's read index
+(futex wake on the receiver's advance) when the declared depth is outstanding.
+Close is a flag on the ring; a dead peer is observed through the ring state and
+the domain's breaker, not `waitpid`.
 
-2. **Unix socketpair** (control channel) - lifecycle detection, close signals, child-ready handshake, and fallback for oversized messages that exceed the ring buffer.
+### Native: threads + rings
 
-Operations are non-blocking with retry-and-yield (1ms sleep, indefinite retry until success or ring/pipe close). Backpressure expressed by ring buffer fullness, not blocking.
-
-### Native: ring buffers + fork
-
-1. `mmap(MAP_SHARED)` ring buffer pairs created for each channel (before fork)
-2. `socketpair(AF_UNIX, SOCK_STREAM)` for control
-3. `fork()` - child is a new process but **not** an independent program. It inherits the parent's entire address space: all package globals already initialized by `init()`, all heap state. Pages are shared (COW on write) but the child typically only runs `fn(args)` and exits, so most pages are never written. The MAP_SHARED ring buffer mappings are explicitly shared physical memory (not COW) - both processes read/write the same pages.
-4. Child closes parent's socket fd, runs `fn(args)`, exits
-5. Parent closes child's socket fd, registers domain, continues
+1. The channel object and its rings already exist in the shared address space.
+2. `pthread_create` starts the domain thread (64 MB stack) with a fresh
+   `DomainRoot`/TLS and root arena.
+3. The child marks the child-side ring halves for each channel argument, runs
+   the target, and closes its breaker when it returns.
+4. The parent registers the handles and returns the lifecycle channel.
+5. The target's result is named `closed chan struct{}`; the parent observes the
+   breaker.
 
 ### WASM: Worker
 
-1. New Worker with isolated microtask context
-2. Slices element-copied, maps shallow-copied
-3. IPC via `BroadcastChannel`
+1. New Worker with an isolated microtask context
+2. Values are copied across the worker boundary through the host shims
+3. Channels are host message ports; close and worker death use the same breaker
 
 ## Fan-Out Pattern
 
