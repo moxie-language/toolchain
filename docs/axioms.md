@@ -1,8 +1,8 @@
 # Axioms of Moxie
 
-Three axioms generate this language. Everything else in it is a derivative, not a decision. Nothing in Moxie is a preference, a convention, or a matter of taste, and the reason there is nothing to argue about is that the axioms are strong enough and few enough that the design closes.
+Three axioms generate everything in this language that a compiler can check. Everything else in it is a derivative, not a decision. Nothing in Moxie is a preference, a convention, or a matter of taste, and the reason there is nothing to argue about is that the axioms are strong enough and few enough that the design closes. The five structural laws of the pentalogue are the larger set the axioms project from; the law a type system cannot enforce is named there, and it is residue, not licence.
 
-The operational test that keeps this honest: a proposed feature must name the axiom that forces it. If no axiom forces it, it is an opinion, and it is deleted.
+The operational test that keeps this checkable: a proposed feature must name the axiom that forces it. If no axiom forces it, it is an opinion, and it is deleted. A feature forced only by a pentalogue law that is not an axiom is doctrine, not language, and it belongs in the deployment rather than in the type system.
 
 ---
 
@@ -48,6 +48,28 @@ A3 is the authority requirement. It says what cannot be reached even though it i
 
 ---
 
+## The pentalogue
+
+Three axioms are what a compiler can enforce. Five structural laws govern coherent systems, and the axioms are the static projection of them. The axioms are not a reduction of the pentalogue; they are its enforceable image. The gap between the two is the point of this section, because one of the five cannot be checked by a type system, and a design that pretends otherwise is coherent on paper and incoherent in use.
+
+| law | element | requirement | projection |
+|---|---|---|---|
+| sovereignty | earth | what you control is yours; what crosses the border is hostile until proven otherwise | A2, A3 |
+| bilateralism | wood | no contract is signed by one hand; change both sides or change nothing | none |
+| precision | metal | give the stranger a key, not the house | A3 |
+| measurement | fire | weigh it, count it, time it; the crowd's opinion fits no scale | A1 |
+| resolution | water | what two claim to own, no man owns; the first to act on the lie destroys it for both | A2 |
+
+The sheng and ke relations are consistency conditions between the laws, not additional laws. Sheng is the productive direction, and it runs wood to fire to earth to metal to water and back: bilateral change fuels measurement, measurement establishes sovereignty, sovereignty refines into precise access, precise access resolves ownership, resolution enables new bilateral change. Ke is the destructive direction, and each edge names a way a coherent system dies: bilateral demands without boundaries disrupt sovereignty, territorial hoarding blocks resolution, ownership ambiguity obscures measurement, raw truth without restraint destroys refined interfaces, restricted access kills bilateral growth.
+
+The ke cycle is therefore the review checklist for everything the compiler cannot see. A design that hoards what it cannot hold, restricts access until nothing can pass, leaves ownership ambiguous, negotiates without standing, or exposes everything without granting anything has violated one of the five, and no static check will catch it, because none of those failures is a property of the code.
+
+The repo's change discipline is the wood law applied to time: legacy first, stage4 second, because a change to one side alone is a contract signed by one hand.
+
+The enforceable claim is narrower than "three axioms generate everything": the axioms generate everything the compiler can check. Bilateralism is the law the language serves and cannot enforce, because it is a property of how peers behave across a boundary, not of the boundary's type. That is the pentalogue's residue, and it is listed with the others.
+
+---
+
 ## Justification
 
 ### Why A1
@@ -90,7 +112,28 @@ The cost is expressiveness. No ambient clock, no ambient I/O, no ambient identit
 
 - **Independent.** A1 does not imply A2: a fully declared shared-memory language is possible. A1 does not imply A3: a declared topology with an ambient clock is possible. A2 does not imply A1: an isolated system with runtime negotiation is possible. A2 does not imply A3: per-domain memory with a global file is possible. A3 does not imply A1: a closed capability set with undeclared topology is possible. A3 does not imply A2: a closed capability set over shared memory is possible.
 - **Auditable.** Three axioms still fit in a head, which means they can be checked for consistency and redundancy. Every other language also has an axiom set; it is unwritten, larger, partly contradictory, and owned by nobody. Anything unauditable survives by default as an opinion, because you cannot delete what has never been stated.
-- **Absorbing.** Three strong axioms with a triple intersection close the design. A1 closes inference, A2 closes sharing, A3 closes ambient authority. What looks like freedom in other languages is the gap an axiom failed to close. The residue is what physics and the wire format refuse to close.
+- **Absorbing.** Three strong axioms with a triple intersection close the design. A1 closes inference, A2 closes sharing, A3 closes ambient authority. What looks like freedom in other languages is the gap an axiom failed to close. The residue is what physics and the wire format refuse to close. The pentalogue's wood law sits outside the intersection by construction, which is why it appears in the residue rather than in the lemmas.
+
+---
+
+## The octalogue
+
+Eight operational principles govern use of the system against a centralised adversary. They are not language semantics; they are the doctrine the semantics are built to survive. Some are forced by the axioms, and some are deployment discipline the axioms merely permit.
+
+| principle | trigram | design consequence | status |
+|---|---|---|---|
+| flow around the centre | Kan, water | no runtime arbiter; make the centre irrelevant rather than capture it | forced by A2 |
+| withdrawal as sovereignty | Gen, mountain | every capability is revocable by refusal; default deny is the exit | forced by A3 |
+| invisible penetration | Xun, wind | do not announce until it works | doctrine |
+| sovereign nodes | Qian, heaven | every node runs cut off; no coordination is required to survive | forced by L27, L28 |
+| speed of small exchange | Zhen, thunder | binary sessions, small messages, no third-party gate | forced by L6, L23 |
+| new ground | Kun, earth | build where the adversary has no claim | doctrine |
+| bounded exchange | Dui, lake | every interface has a shore and a walk-away position | forced by L8, L26 |
+| sovereign measurement | Li, fire | the operator defines the metric; the adversary's statistics are not evidence | forced by A1, C4 |
+
+The two that are not enforceable are not optional. They are the parts of the doctrine that live in deployment and in the operator's discipline, and the language's contribution is to make the enforceable six cheap and the unenforceable two visible. A system that announces before it works, or that fights for ground the adversary already holds, has not violated a type rule; it has violated the doctrine, and no compiler will say so.
+
+The anti-centralisation claim is structural rather than rhetorical. Centralisation is expensive here for three reasons the axioms supply. The topology declaration is a canon, not an authority (L20), so the one global artifact grants no runtime power. Every hop is priced (L26), so a centre that everything must cross pays the sovereignty budget on every message. A fact that sits too low is promoted rather than replicated (L24), so the repair for coupling is derivation, not a new hub. What the language cannot do is stop an operator from building a star. It can only make the star cost more than the mesh, which is the same thing the pentalogue says about hoarding.
 
 ---
 
@@ -115,7 +158,7 @@ The set of raise points and the set of handlers is a dynamic property. Failure i
 Reach must be checkable, and an unbounded reach graph is not. The maximum legal path is up two and down one (see L23, L24 for the tree semantics).
 
 **L5. No channel mobility.**
-A channel inside a message is a dynamically created role, which is not checkable in the local fragment. A channel capability is non-delegable by construction.
+A channel inside a message is a dynamically created role, which is not checkable in the local fragment. A channel capability is non-delegable by construction. Corollary: new peers are created by the parent, never by a peer. A delegated channel would be a contract signed by one hand, so bilateralism is preserved by the tree rather than by the channel.
 
 **L6. Binary sessions only.**
 Multiparty sessions require a global type held by a choreography authority, and projections into local types can deadlock even when the global type is well formed. The binary fragment is the one where liveness is local and decidable per pair.
@@ -163,8 +206,8 @@ For a product, the owner is the lowest node that is within reach of, and outlive
 **L19. The arena is the only allocation model.**
 A2 forces per-component memory; A1 forces the release point to be structural. The intersection admits exactly one possibility: a per-function arena released at return, with relocation and pointer rewriting at the boundary. There is no startup bump allocator and no heap, because either would reintroduce a release point that structure does not determine.
 
-**L20. The topology declaration is the only global artifact.**
-A1 needs exactly one thing to check, and A2 guarantees nothing else is global. It therefore plays three roles at once: the intent record, the compiler input, and the review surface. It should diff as a shape rather than as control flow, because it is the only place a non-local bug can live.
+**L20. The topology declaration is the only global artifact, and it is a canon, not an authority.**
+A1 needs exactly one thing to check, and A2 guarantees nothing else is global. It therefore plays three roles at once: the intent record, the compiler input, and the review surface. It should diff as a shape rather than as control flow, because it is the only place a non-local bug can live. It is global because it is the measurement of the whole (fire), not because it holds power (earth). It grants nothing at runtime; the moment it becomes a runtime lookup it has become a service locator, which A3 forbids.
 
 **L21. Signal is the operation.**
 The index word is simultaneously the state and the notification. Advancing the write index is both the data-availability state and the wake for a parked reader; advancing the read index is both the space-availability state and the wake for a parked writer. There is no separate control message and no notification ordering question, because there is only one write. The parking primitive is a futex on that word, and the expected-value check in FUTEX_WAIT is what makes the check-then-sleep sequence atomic in the kernel.
@@ -173,7 +216,7 @@ The index word is simultaneously the state and the notification. Advancing the w
 A worker's death is an event delivered to its supervisor. It is never silent, never auto-recovered, and never inferred from a timeout alone.
 
 **L23. Depth is bought only by throughput.**
-A low-labour task is a leaf and costs zero extra depth. A high-labour, throughput-bound task gets one manager owning a queue and N workers, which is exactly one level. Fan-out never reduces single-item latency; it increases it. So the pool is justified only by item rate, and the expected rate is a declaration. Corollary: no nesting of pools. Nesting puts consumers at cousin distance and interposes a manager that owns nothing relevant. Granularity is set at the worker.
+A low-labour task is a leaf and costs zero extra depth. A high-labour, throughput-bound task gets one manager owning a queue and N workers, which is exactly one level. Fan-out never reduces single-item latency; it increases it. So the pool is justified only by item rate, and the expected rate is a declaration. Corollary: no nesting of pools. Nesting puts consumers at cousin distance and interposes a manager that owns nothing relevant. Granularity is set at the worker. The pool manager is a declared sovereign, not an ambient one: it owns the queue because the declaration says so, and its authority is bounded by the queue's capacity and the worker contract.
 
 **L24. The uncle path is the shape of consuming a pooled product.**
 A worker two levels below the shared ancestor consuming the parallelised result of its parent's sibling is three hops, terminating at the pool manager, which answers from the aggregate it owns. Depth 3 is the maximum and it is exactly one level of fan-out. Cousin distance (four or more) does not indicate a routing problem; it indicates that the shared fact is owned one level too low. The repair is promotion to the shared ancestor, and promotion must be derivation rather than relocation: relocating an existing fact creates a second authority, while a derived fact has exactly one owner and carries its own invalidation obligation. Derivation permanently adds an owner, so it is a cost, not a free repair.
@@ -185,7 +228,7 @@ A worker is short-lived and owns no state, so it can be re-parented freely. A ma
 The cost of a boundary is the price of non-interference, paid per hop, visibly, on the profiler. A boundary that costs more than the isolation it buys is a merge candidate. This makes componentisation economically self-correcting rather than stylistically policed, and it makes minimality an economic property rather than a guideline.
 
 **L27. Resilience by respawn and replay.**
-Because a leaf is a function of its declared inputs, a dead worker restarts cold. Because the manager owns the queue, in-flight work survives the worker's death and can be re-dispatched. The queue is the recovery log. No checkpointing is required, and recovery needs no protocol beyond respawn and replay. Corollary: the escalation path for an orphaned child (parent died mid-fan-out) is a declared property, and the adopting ancestor takes on the dead child's queue.
+Because a leaf is a function of its declared inputs, a dead worker restarts cold. Because the manager owns the queue, in-flight work survives the worker's death and can be re-dispatched. The queue is the recovery log. No checkpointing is required, and recovery needs no protocol beyond respawn and replay. Corollary: the escalation path for an orphaned child (parent died mid-fan-out) is a declared property, and the adopting ancestor takes on the dead child's queue. The manager's queue is the recovery log, and the manager is the declared owner of that log. Respawn is not a central service; it is the manager exercising the ownership the declaration gave it.
 
 **L28. Topology is semantic; transport is mechanical.**
 Because the channel is an entity, the same declared tree lowers to in-process rings, to hardware queues on a network-on-chip, or to sockets across machines, without the topology changing. Topology is invariant across deployment scale, and transport is a lowering decision.
@@ -225,7 +268,7 @@ The component that owns the OS interface is the one place where ambient authorit
 Fine-grained purity is given up (a leaf mutates its own arena) in exchange for a component whose observable behaviour is fully determined by its declared inputs. A2 supplies the private arena; A3 supplies the closure of the declared inputs; A1 supplies the static check. This is the purity that a type system can enforce at this granularity, and the only kind that makes replacement and cold restart sound.
 
 **L30. The axioms in silicon delete coherence and the memory model.**
-A hardware architecture that enforces A2 has no shared address space and therefore no coherence protocol, no directories, no invalidation traffic, and no memory consistency model. The interconnect becomes point-to-point channels with buffering, which removes snoop traffic and scales where a bus does not. Fault containment is by construction. Historical instances of this architecture class (the transputer, the Cell BE local stores) were simpler and more robust than their coherent contemporaries and lost commercially because no compiler made the topology a first-class reviewable artifact, not because of the silicon. The safety-critical domain, where certification demands provable isolation, independently converged on these axioms (ARINC 653 partitioned domains with no shared memory). A3 extends the same deletion to ambient authority: a component with no ambient input cannot be perturbed by a device it did not declare. What hardware cannot remove is the cost of the transfer itself, and the one place the axiom is violated by physics is DMA and MMIO, where the correct response is to minimise the shared window, which is what an IOMMU and SR-IOV already are. The shell is the software analogue of that window.
+A hardware architecture that enforces A2 has no shared address space and therefore no coherence protocol, no directories, no invalidation traffic, and no memory consistency model. The interconnect becomes point-to-point channels with buffering, which removes snoop traffic and scales where a bus does not. Fault containment is by construction. Historical instances of this architecture class (the transputer, the Cell BE local stores) were simpler and more robust than their coherent contemporaries and lost commercially because no compiler made the topology a first-class reviewable artifact, not because of the silicon. The safety-critical domain, where certification demands provable isolation, independently converged on these axioms (ARINC 653 partitioned domains with no shared memory). A3 extends the same deletion to ambient authority: a component with no ambient input cannot be perturbed by a device it did not declare. What hardware cannot remove is the cost of the transfer itself, and the one place the axiom is violated by physics is DMA and MMIO, where the correct response is to minimise the shared window, which is what an IOMMU and SR-IOV already are. The shell is the software analogue of that window. The pentalogue states the same deletion socially: sovereignty is what remains when nothing is shared, and resolution is what remains when no fact has two owners.
 
 **L40. The capability graph is the topology.**
 A1 declares the topology; A3 declares the capabilities. The two graphs must coincide. A capability that crosses a boundary the topology does not declare is an undeclared edge; a declared edge with no capability is a dead channel. Corollary: capability placement is checkable by the same syntactic diff as topology placement, and the review surface is the pair of declarations.
@@ -251,17 +294,25 @@ A random source is a declared capability, not an ambient rand(). Corollary: a co
 **L47. Configuration is an input, not an environment.**
 Deployment configuration is a declared value, not an environment variable, a global file, or a command-line default. Corollary: the same binary runs in any deployment by changing the input, not the environment. A1's declaration supplies the shape; A3's closure supplies the fact that no other configuration is reachable.
 
+**L48. The pentalogue is the closure condition the compiler cannot check.**
+A design that satisfies A1, A2 and A3 can still violate a ke relation, and when it does it is coherent in the type system and incoherent as a system. Corollary: the ke cycle is the review checklist for what the compiler cannot see, and a violation is a design defect even when every test passes.
+
+**L49. The octalogue is doctrine, not semantics.**
+Six of its eight principles are forced by the axioms; two are deployment discipline. Corollary: the language can make centralisation expensive, not impossible. The residue is the operator's discipline, and no type system supplies it.
+
 ---
 
 ## The residue
 
-Three things none of the axioms settles. They are acknowledged costs, not derived decisions, and denying them would make the axiom claim brittle.
+Four things none of the axioms settles. They are acknowledged costs, not derived decisions, and denying them would make the axiom claim brittle.
 
 **The spin-versus-futex boundary.** A hardware tradeoff present in any design. It is the single place where the language's latency characteristics rest on kernel API semantics rather than on its own type system, which is why it is a tuning parameter and cannot be ruled on by the compiler.
 
 **The universal wire format.** A chosen tax. A bespoke per-pair encoding would be cheaper per byte. Universality of interface is bought against O(n squared) protocol-pair coupling. Note that universality does not require runtime reflection, because the schema is declared once and known statically: the tax is a fixed-rate copy, not a negotiation or a discovery.
 
 **The syscall boundary.** A3 closes the component, not the machine. The shell must call the OS, and the OS is ambient by physics. The correct response is to minimise the window and audit the list, the same way L30 treats DMA and MMIO. This is a residue, not a violation: the axiom applies to components, and the shell is the designated exception.
+
+**Bilateralism.** The language cannot enforce that both sides of a contract agree, only that both sides are declared. A peer can sign and then refuse, and the refusal is a declared message, not a type error. The pentalogue's wood law is therefore a residue: the tree supplies the two hands, but it cannot supply good faith. The repair is not a type; it is the operator's choice of peers, which is why the doctrine in the octalogue exists at all.
 
 Also acknowledged, from A2: the expressiveness that is given up. No in-place mutation of a shared structure, so no lock-free algorithms, no zero-copy shared buffers, no DMA-style sharing, and no cross-component in-place numerics. The single escape is at the physical edge, where the hardware itself shares memory. From A3: the ambient world is given up. No ambient clock, no ambient I/O, no ambient identity, no ambient randomness, no ambient configuration. The single escape is the shell, which owns the world and exposes it as declared capabilities.
 
@@ -325,3 +376,11 @@ Slogans are useful only if each names something refutable. Mapped, so they can b
 | Policy and configuration are inputs. | L37, L47 |
 | Randomness is an input. | L46 |
 | The capability graph is the topology. | L40 |
+| What you control is yours. | A2, L10 |
+| Give the stranger a key, not the house. | A3, L15 |
+| What two claim, no one owns. | L17 |
+| No contract is signed by one hand. | L5, L6 |
+| Weigh it, count it, time it. | A1, C4 |
+| Flow around the centre. | A2, L28 |
+| Every node runs cut off. | L27 |
+| The lake has shores. | L8, L26 |
