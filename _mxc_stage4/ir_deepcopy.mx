@@ -54,8 +54,9 @@ func (e *irEmitter) funcNeedsCodec(f *SSAFunction) (ok bool) {
 		// code lives in "main", and a main function that builds a
 		// pointer-containing value needs the same arena and return encode as
 		// any other or the caller reads the popped frame it was built in.
-		// The compiler's own bootstrap passes -tags no_main_arena instead,
-		// because the path cannot tell the two mains apart.
+		// The compiler's own bootstrap passes -no-main-arena instead, because
+		// the path cannot tell the two mains apart. Every other build - user
+		// programs and test binaries alike - includes main.
 		if path == "runtime" || path == "unsafe" || path == "syscall" || path == "os" ||
 			mxutil.HasPrefix(path, "moxielang.dev/pkg/") {
 			return false
@@ -113,7 +114,18 @@ func ssaIsSovereignNamedType(p *SSAPackage, named *Named) (ok bool) {
 	}
 	if named.Obj.Pkg != nil {
 		pp := named.Obj.Pkg.Path
-		if pp == "main" || pp == "moxielang.dev/pkg/syntax" || pp == "syntax" {
+		// -no-main-arena excludes package main here too: the compiler's own
+		// main accumulates transient IR/SSA scratch that must live in the
+		// compile arena, not in a per-receiver sovereign data arena. Every
+		// other build - user programs and test binaries (which compile the
+		// package under test as "main") - owns its types like any other
+		// package. Without this, a *big.Int compiled into main lost its
+		// sovereign arena, filled its fields in the frame arena that the
+		// store-back then popped, and read back zeroed.
+		if bst != nil && bst.noMainArena && pp == "main" {
+			return false
+		}
+		if pp == "moxielang.dev/pkg/syntax" || pp == "syntax" {
 			return false
 		}
 	}

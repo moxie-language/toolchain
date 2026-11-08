@@ -41,6 +41,7 @@ type Options struct {
 	ExtLDFlags         []string
 	StandaloneRuntime  bool // skip internalization, keep runtime symbols external
 	RebuildAll         bool // if true, rebuild all packages from scratch (ignore cache)
+	NoMainArena        bool // package main gets no function arena or return encode (bootstrap only)
 }
 
 // Verify performs validation on the given options.

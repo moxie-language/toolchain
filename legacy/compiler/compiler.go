@@ -65,7 +65,7 @@ type Config struct {
 	Cover              bool // Whether to emit per-block coverage hits (-cover)
 	PanicStrategy      string
 	StandaloneRuntime  bool // keep symbols external for cross-module linking
-	NoMainArena        bool // -tags no_main_arena: package main gets no arena or return encode
+	NoMainArena        bool // -no-main-arena: package main gets no arena or return encode
 }
 
 // compilerContext contains function-independent data that should still be
@@ -4350,7 +4350,16 @@ func (c *compilerContext) isSovereignNamedType(t types.Type) bool {
 	// package and dead groups die with their arena - no exemption needed.
 	if obj := named.Obj(); obj != nil && obj.Pkg() != nil {
 		p := obj.Pkg().Path()
-		if p == "main" || p == "moxielang.dev/pkg/syntax" || p == "syntax" {
+		// -no-main-arena excludes package main here too: the compiler's own
+		// main accumulates transient IR/SSA scratch that must live in the
+		// compile arena, not in a per-receiver sovereign data arena. Every
+		// other build - user programs and test binaries (which compile the
+		// package under test as "main") - owns its types like any other
+		// package.
+		if c.NoMainArena && p == "main" {
+			return false
+		}
+		if p == "moxielang.dev/pkg/syntax" || p == "syntax" {
 			return false
 		}
 	}
@@ -4631,9 +4640,9 @@ func funcNeedsArenaCopy(fn *ssa.Function, excludeMain bool) bool {
 	// the caller reads a popped frame (measured - an asn1-parsed *big.Int read
 	// `bits 0` in the caller and 73 inside the parser). The compiler's own
 	// main is not exempt either; when it cannot afford the cost, the bootstrap
-	// passes -tags no_main_arena and this flag does what the path check used
-	// to do. The path cannot tell the two mains apart, which is why the
-	// decision is a flag.
+	// passes -no-main-arena and this flag does what the path check used to do.
+	// The path cannot tell the two mains apart, which is why the decision is a
+	// flag defaulting to inclusion for every program the compiler builds.
 	if path == "runtime" || path == "unsafe" || path == "syscall" || path == "os" ||
 		strings.HasPrefix(path, "moxielang.dev/pkg/") {
 		return false

@@ -86,9 +86,10 @@ type buildState struct {
 	pkgDispFingerprint map[string]string
 	tlsProbeVar     int32
 
-	// noMainArena mirrors legacy Config.NoMainArena: -tags no_main_arena gives
+	// noMainArena mirrors legacy Config.NoMainArena: -no-main-arena gives
 	// package main no function arena and no return encode. The compiler's own
-	// bootstrap passes it.
+	// bootstrap passes it; every other build includes main, test builds
+	// included.
 	noMainArena bool
 
 	// extraTags are the -tags values, on top of the target and release tags
@@ -2506,6 +2507,13 @@ func pkgHash(p *pkgInfo) (s string) {
 	// widths differ), and reusing one for the other yields a wasm module
 	// with 64-bit signatures that wasm-ld warns about or miscompiles.
 	acc := []byte(mxutil.TargetOS() | "/" | mxutil.TargetArch() | "|")
+	// -no-main-arena changes the code generated for package main, and only for
+	// package main, so it is part of the key: without it a package main built
+	// by the bootstrap and one built for a user program would share a cached
+	// object, and one of the two would link the other's arena decision.
+	if bst.noMainArena {
+		acc = acc | []byte("nm1|")
+	}
 	acc = acc | []byte(pkgCacheKey(p.dir, p.files))
 	for _, imp := range sorted {
 		if dh, ok := bst.pkgKeyMemo[imp]; ok {
@@ -3366,14 +3374,6 @@ func hasBuildLine(data []byte) (ok bool) {
 	return false
 }
 
-// noteExtraTag records the tags funcNeedsCodec consults. Mirrors legacy
-// compileopts.Config.NoMainArena.
-func noteExtraTag(t []byte) {
-	if t == "no_main_arena" {
-		bst.noMainArena = true
-	}
-}
-
 func evalBuildLine(line string) (ok bool) {
 	v, _ := evalBuildOr(line, 0)
 	return v
@@ -3466,7 +3466,6 @@ func appendBuildTags(v string) {
 			if len(t) > 0 {
 				bst.extraTags = mxutil.Ensure(bst.extraTags, 1)
 				push(bst.extraTags, t)
-				noteExtraTag(t)
 			}
 		}
 		return
@@ -3480,7 +3479,6 @@ func appendBuildTags(v string) {
 		if len(t) > 0 {
 			bst.extraTags = mxutil.Ensure(bst.extraTags, 1)
 			push(bst.extraTags, t)
-			noteExtraTag(t)
 		}
 		start = j + 1
 	}
@@ -6412,6 +6410,9 @@ func cmdTest(args []string) {
 			}
 			appendBuildTags(args[i+1])
 			i += 2
+		} else if args[i] == "-no-main-arena" {
+			bst.noMainArena = true
+			i++
 		} else if args[i] == "-print-allocs" {
 			if i+1 >= int32(len(args)) {
 				fatal("flag needs an argument: -print-allocs")
@@ -6685,9 +6686,23 @@ func cmdTest(args []string) {
 			src = concatSources(dp.dir, dp.files)
 		}
 		ir := compileSource(src, compilePath, triple, dp.dir)
-		llFile := stableLlPath(tmpdir, dp.path)
+		// The package under test is also an ordinary dependency of its own
+		// test binary: other packages in the link import it, so the resolver
+		// walks it too. Both variants have the same PATH, and naming their
+		// scratch files from that path alone made the second compile overwrite
+		// the first's object and push the SAME file twice. The test variant
+		// gets its own name; both objects are then linked once each - the
+		// plain one for the package's real symbols and the test one, compiled
+		// as "main", for the tests.
+		objSuffix := ""
+		llName := dp.path
+		if dp == pkg {
+			objSuffix = ".test"
+			llName = dp.path | ".test"
+		}
+		llFile := stableLlPath(tmpdir, llName)
 		writeFile(llFile, []byte(ir), 0644)
-		bcFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | ".bc")
+		bcFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | objSuffix | ".bc")
 		drc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", "-Wno-everything", "-Xclang", "-disable-O0-optnone", llFile, "-o", bcFile})
 		if drc != 0 {
 			fatal("clang failed for " | dp.path)
@@ -7744,6 +7759,9 @@ func main() {
 			}
 			appendBuildTags(args[i+1])
 			i += 2
+		} else if args[i] == "-no-main-arena" {
+			bst.noMainArena = true
+			i++
 		} else if args[i] == "-print-allocs" {
 			if i+1 >= int32(len(args)) {
 				fatal("flag needs an argument: -print-allocs")

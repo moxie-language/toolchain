@@ -594,6 +594,7 @@ func main() {
 	dumpSSA := flag.Bool("internal-dumpssa", false, "dump internal Moxie SSA")
 	verifyIR := flag.Bool("internal-verifyir", false, "run extra verification steps on LLVM IR")
 	standaloneRuntime := flag.Bool("standalone-runtime", false, "keep runtime symbols external (for build-runtime)")
+	noMainArena := flag.Bool("no-main-arena", false, "package main gets no function arena or return encode (bootstrap only)")
 	rebuildAll := flag.Bool("a", false, "rebuild all packages from scratch (ignore build cache; required for bootstrap)")
 
 	var flagDeps, flagTest bool
@@ -684,6 +685,7 @@ func main() {
 		LLVMFeatures:       *llvmFeatures,
 		StandaloneRuntime:  *standaloneRuntime,
 		RebuildAll:         *rebuildAll,
+		NoMainArena:        *noMainArena,
 	}
 	if *printCommands {
 		options.PrintCommands = printCommand
