@@ -4394,15 +4394,77 @@ func (c *compilerContext) receiverMatches(rt types.Type, named *types.Named) boo
 	return rt == types.Type(named)
 }
 
-// ssaFuncWritesReceiver reports whether fn stores into a field of its own
-// receiver parameter (through any pointer/field chain rooted at the receiver),
-// or updates a map reached through the receiver.
+// ssaFuncWritesReceiver reports whether fn mutates its own receiver: a field
+// store, a map update reached through it, or a call to a method on it that
+// does either. It decides whether the method borrows the receiver's arena and
+// stores back at return.
 func ssaFuncWritesReceiver(fn *ssa.Function) bool {
-	if fn.Signature == nil || fn.Signature.Recv() == nil || len(fn.Params) == 0 {
+	return ssaFuncWritesReceiverSeen(fn, map[*ssa.Function]bool{}, 0)
+}
+
+// ssaFuncWritesReceiverDirectly is the direct-only query: field stores and map
+// updates, with no look through method calls.
+//
+// The loop-scratch restriction still asks THIS question, not the transitive one
+// the prologue asks. Seeing delegation would put every method that mutates by
+// calling g.advance(...) under the restriction, and each one then has to be
+// rewritten to move its loop scratch into a helper. That port is a pass of its
+// own: the sites found so far are bufio's collectFragments, cryptobyte's
+// readBase128Int, dnsmessage's four All* readers, net.Buffers, x509's
+// AppendCertsFromPEM, tls's writeRecordLocked and loadSession, filter.F.Marshal
+// and store/sorted's File.Get/GetPrefix/Last/lowerBound, which index and
+// subslice records inside their loops (a subslice is a copy, so each one is a
+// per-iteration allocation). Those are fixed; the port continues from there.
+func ssaFuncWritesReceiverDirectly(fn *ssa.Function) bool {
+	return ssaFuncWritesReceiverDirect(fn)
+}
+
+// ssaFuncWritesReceiverDirect is the direct-only scan ssaFuncWritesReceiverSeen
+// performs at each level.
+func ssaFuncWritesReceiverDirect(fn *ssa.Function) bool {
+	if fn == nil || fn.Signature == nil || fn.Signature.Recv() == nil || len(fn.Params) == 0 {
 		return false
 	}
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
+			if mu, okMU := instr.(*ssa.MapUpdate); okMU {
+				if mu.Map != nil && ssaValueRootedIn(mu.Map, fn.Params[0]) {
+					return true
+				}
+				continue
+			}
+			store, ok := instr.(*ssa.Store)
+			if !ok {
+				continue
+			}
+			if ssaValueRootedIn(store.Addr, fn.Params[0]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ssaFuncWritesReceiverSeen is ssaFuncWritesReceiver with the call chain that
+// reached fn. A cycle (a method calling another method of the same type that
+// calls back) is cut by the seen set: the inner visit answers false, which is
+// conservative for the cycle and exact for every acyclic path.
+func ssaFuncWritesReceiverSeen(fn *ssa.Function, seen map[*ssa.Function]bool, depth int) bool {
+	if fn == nil || fn.Signature == nil || fn.Signature.Recv() == nil || len(fn.Params) == 0 || depth > 8 {
+		return false
+	}
+	if seen[fn] {
+		return false
+	}
+	seen[fn] = true
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if call, okC := instr.(*ssa.Call); okC {
+				if ssaCallWritesReceiver(call, fn, seen, depth) {
+					return true
+				}
+				continue
+			}
 			// A map update through the receiver mutates the map's storage and
 			// can reallocate the backing of one of its values, so it is a
 			// receiver write even though no Store instruction carries it.
@@ -4426,6 +4488,50 @@ func ssaFuncWritesReceiver(fn *ssa.Function) bool {
 		}
 	}
 	return false
+}
+
+// ssaCallWritesReceiver reports whether a call in fn mutates fn's receiver by
+// calling a method on it. A call `g.advance(...)` writes exactly what a field
+// store writes: the callee borrows the same object and stores through it.
+//
+// Missing this classified a method whose only mutation is such a call as
+// READ-ONLY, so it got a regular frame arena instead of borrowing the
+// receiver's, and the callee's store-back left the receiver's fields pointing
+// into the caller's frame. Measured on mls.(*Group).CreateWelcome, whose only
+// mutation is g.advanceAfterOwnCommit: the group context hash and confirmed
+// transcript hash dangled as soon as it returned, and the next Marshal
+// dereferenced a released arena.
+func ssaCallWritesReceiver(call *ssa.Call, fn *ssa.Function, seen map[*ssa.Function]bool, depth int) bool {
+	if call == nil || fn == nil {
+		return false
+	}
+	common := call.Common()
+	if common == nil || len(common.Args) == 0 {
+		return false
+	}
+	if !ssaValueRootedIn(common.Args[0], fn.Params[0]) {
+		return false
+	}
+	callee := common.StaticCallee()
+	if callee == nil || callee.Signature == nil || callee.Signature.Recv() == nil {
+		return false
+	}
+	if !sameReceiverType(fn.Signature.Recv().Type(), callee.Signature.Recv().Type()) {
+		return false
+	}
+	return ssaFuncWritesReceiverSeen(callee, seen, depth+1)
+}
+
+// sameReceiverType reports whether two receiver types name the same object type,
+// ignoring the pointer.
+func sameReceiverType(a, b types.Type) bool {
+	if pa, ok := a.(*types.Pointer); ok {
+		a = pa.Elem()
+	}
+	if pb, ok := b.(*types.Pointer); ok {
+		b = pb.Elem()
+	}
+	return a == b
 }
 
 // ssaValueRootedIn reports whether the SSA value v derives from target

@@ -1519,6 +1519,17 @@ func (e *irEmitter) emitSpawnWrapper(targetFn *SSAFunction, argTypes []string, s
 	e.segs = nil
 	e.buf = nil
 
+	// The wrapper is a different function, so the caller's defer checkpoint
+	// policy must not reach it. e.w() injects a checkpoint before every call
+	// when the enclosing function has a defer frame, and the wrapper is
+	// written while that function is mid-emission: every call below then
+	// branched to the CALLER's %defer_landingN, a block that lives in another
+	// function's body (or, once the wrapper is moved to the package tail,
+	// nowhere at all) - clang rejected the module with "use of undefined value
+	// '%defer_landing2'". Measured on a main with a spawn and a defer.
+	savedCheckpoint := e.deferCheckpointOn
+	e.deferCheckpointOn = false
+
 	e.w("\ndefine linkonce_odr void ") ; e.w(sym) ; e.w("(ptr %args) {\nentry:\n")
 	var loaded []string
 	for i, lt := range argTypes {
@@ -1564,6 +1575,7 @@ func (e *irEmitter) emitSpawnWrapper(targetFn *SSAFunction, argTypes []string, s
 	push(e.pendSpawnWrappers, string(e.buf))
 	e.buf = savedBuf
 	e.segs = savedSegs
+	e.deferCheckpointOn = savedCheckpoint
 	return sym
 }
 

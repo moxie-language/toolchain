@@ -202,10 +202,23 @@ func (hc *halfConn) setErrorLocked(err error) (rerr error) {
 
 // prepareCipherSpec sets the encryption and MAC states
 // that a subsequent changeCipherSpec will use.
-func (hc *halfConn) prepareCipherSpec(version uint16, c recordCipher, mac hash.Hash) {
+//
+// The record cipher and MAC are built HERE, in the halfConn's sovereign arena,
+// never by the caller. hc points into the Conn, which outlives the handshake: a
+// cipher built in the handshake frame and stored through this receiver would be
+// left pointing into an arena the handshake releases at return (a store through
+// a parameter is not a relocation boundary), so the record layer would dispatch
+// on a recycled frame. Building it here puts it in the receiver's arena, where
+// the borrow keeps it alive as long as the connection.
+func (hc *halfConn) prepareCipherSpec(version uint16, suite *cipherSuite, key, iv, macKey []byte, isRead bool) {
 	hc.version = version
-	hc.nextCipher = c
-	hc.nextMac = mac
+	if suite.aead != nil {
+		hc.nextCipher = &aeadCipher{a: suite.aead(key, iv)}
+		hc.nextMac = nil
+		return
+	}
+	hc.nextCipher = suite.cipher(key, iv, isRead)
+	hc.nextMac = suite.mac(macKey)
 }
 
 // changeCipherSpec changes the encryption and MAC states
@@ -1036,16 +1049,23 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte) (rn int32, rerr er
 
 	outBuf := []byte{:0}
 
+	// Scalars loop temporaries: declared once, no allocation either way.
 	var n int32
+	var m int32
+	var maxPayload int32
+	var err4 error
+	var err3 error
+	var vers uint16
 	for len(data) > 0 {
-		m := len(data)
-		if maxPayload := c.maxPayloadSizeForWrite(typ); m > maxPayload {
+		m = len(data)
+		maxPayload = c.maxPayloadSizeForWrite(typ)
+		if m > maxPayload {
 			m = maxPayload
 		}
 
 		outBuf, _ = sliceForAppend(resize(outBuf, 0), recordHeaderLen)
 		outBuf[0] = byte(typ)
-		vers := c.vers
+		vers = c.vers
 		if vers == 0 {
 			// Some TLS servers fail if the record version is
 			// greater than TLS 1.0 for the initial ClientHello.
@@ -1060,12 +1080,12 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte) (rn int32, rerr er
 		outBuf[3] = byte(m >> 8)
 		outBuf[4] = byte(m)
 
-		var err4 error
 		outBuf, err4 = c.out.encrypt(outBuf, data[:m], c.config.rand())
 		if err4 != nil {
 			return n, err4
 		}
-		if _, err3 := c.write(outBuf); err3 != nil {
+		_, err3 = c.write(outBuf)
+		if err3 != nil {
 			return n, err3
 		}
 		n += m

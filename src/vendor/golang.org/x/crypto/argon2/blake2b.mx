@@ -5,6 +5,8 @@
 package argon2
 
 import (
+	"moxielang.dev/pkg/mxutil"
+
 	"encoding/binary"
 	"hash"
 
@@ -32,13 +34,17 @@ func blake2bHash(out []byte, in []byte) {
 	outLen := len(out)
 	b2.Sum(resize(buffer, 0))
 	b2.Reset()
-	copy(out, buffer[:32])
-	out = out[32:]
-	for len(out) > blake2b.Size {
+	mxutil.CopyAt(out, 0, buffer[:32])
+	// Write through a cursor: `out = out[32:]` is a COPY in Moxie, so the loop
+	// below would fill 32 bytes per pass into a slice that dies with the frame
+	// and leave the rest of the block zeroed. The block is 1 KiB, so that
+	// zeroed tail is what every Argon2 mode hashed.
+	written := int32(32)
+	for outLen-written > blake2b.Size {
 		b2.Write(buffer)
 		b2.Sum(resize(buffer, 0))
-		copy(out, buffer[:32])
-		out = out[32:]
+		mxutil.CopyAt(out, written, buffer[:32])
+		written += 32
 		b2.Reset()
 	}
 
@@ -47,5 +53,5 @@ func blake2bHash(out []byte, in []byte) {
 		b2, _ = blake2b.New(int32(outLen-32*r), nil)
 	}
 	b2.Write(buffer)
-	b2.Sum(resize(out, 0))
+	b2.Sum(resize(out, written))
 }

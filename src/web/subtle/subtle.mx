@@ -1,16 +1,108 @@
-//:build !wasm
-
 package subtle
 
-func RandomBytes(dst []byte)                                              { panic("jsbridge") }
-func AESCBCEncrypt(key, iv, plaintext []byte) (buf []byte) { panic("jsbridge") }
-func AESCBCDecrypt(key, iv, ciphertext []byte) (buf []byte) { panic("jsbridge") }
-func AESGCMEncrypt(key, iv, plaintext []byte) (buf []byte) { panic("jsbridge") }
-func AESGCMDecrypt(key, iv, ciphertext []byte) (buf []byte) { panic("jsbridge") }
-func PBKDF2DeriveKey(password string, salt []byte, iterations int32) (buf []byte) { panic("jsbridge") }
-func Argon2idDeriveKey(password string, salt []byte, t, m, p, dkLen int32) (buf []byte) {
-	panic("jsbridge")
+// The Web Crypto surface, implemented on the stdlib's own primitives. Every
+// one of these operations is arithmetic, not a host capability: the same
+// crypto/aes, crypto/hmac, crypto/pbkdf2 and crypto/sha* code runs on the
+// native and the wasm target, and only randomness has a target-specific
+// source (crypto/rand provides it). A per-target stub file meant the native
+// build could not do any of it, which is why nothing that touched a cipher
+// could be tested without a browser.
+
+import (
+	"crypto/aes"
+	"crypto/aes256gcm"
+	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/pbkdf2"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/sha512"
+	"vendor/golang.org/x/crypto/argon2"
+)
+
+func RandomBytes(dst []byte) {
+	rand.Read(dst)
 }
-func SHA256Hex(data []byte) (s string) { panic("jsbridge") }
-func HMACSHA512(key, data []byte) (buf []byte) { panic("jsbridge") }
-func PBKDF2SHA512(password string, salt []byte, iterations, dkLen int32) (buf []byte) { panic("jsbridge") }
+
+func AESCBCEncrypt(key, iv, plaintext []byte) (buf []byte) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil
+	}
+	padded := pkcs7Pad(plaintext, aes.BlockSize)
+	ct := []byte{:len(padded)}
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ct, padded)
+	return ct
+}
+
+func AESCBCDecrypt(key, iv, ciphertext []byte) (buf []byte) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil
+	}
+	pt := []byte{:len(ciphertext)}
+	cipher.NewCBCDecrypter(block, iv).CryptBlocks(pt, ciphertext)
+	return pkcs7Unpad(pt, aes.BlockSize)
+}
+
+func AESGCMEncrypt(key, iv, plaintext []byte) (buf []byte) {
+	return aes256gcm.Seal(key, iv, plaintext, nil)
+}
+
+func AESGCMDecrypt(key, iv, ciphertext []byte) (buf []byte) {
+	pt, ok := aes256gcm.Open(key, iv, ciphertext, nil)
+	if !ok {
+		return nil
+	}
+	return pt
+}
+
+func PBKDF2DeriveKey(password string, salt []byte, iterations int32) (buf []byte) {
+	dk, _ := pbkdf2.Key(sha256.New, []byte(password), salt, iterations, 32)
+	return dk
+}
+
+func Argon2idDeriveKey(password string, salt []byte, t, m, p, dkLen int32) (buf []byte) {
+	return argon2.IDKey([]byte(password), salt, uint32(t), uint32(m), uint8(p), uint32(dkLen))
+}
+
+func SHA256Hex(data []byte) (s string) {
+	return sha256.SumHex(data)
+}
+
+func HMACSHA512(key, data []byte) (buf []byte) {
+	mac := hmac.New(sha512.New, key)
+	mac.Write(data)
+	return mac.Sum(nil)
+}
+
+func PBKDF2SHA512(password string, salt []byte, iterations, dkLen int32) (buf []byte) {
+	dk, _ := pbkdf2.Key(sha512.New, []byte(password), salt, iterations, dkLen)
+	return dk
+}
+
+func pkcs7Pad(data []byte, blockSize int32) (buf []byte) {
+	pad := blockSize - len(data)%blockSize
+	out := []byte{:0:len(data) + pad}
+	out = out | data
+	for i := 0; i < pad; i++ {
+		out = push(out, byte(pad))
+	}
+	return out
+}
+
+func pkcs7Unpad(data []byte, blockSize int32) (buf []byte) {
+	if len(data) == 0 {
+		return nil
+	}
+	pad := int32(data[len(data)-1])
+	if pad > blockSize || pad == 0 || pad > len(data) {
+		return nil
+	}
+	for i := len(data) - pad; i < len(data); i++ {
+		if int32(data[i]) != pad {
+			return nil
+		}
+	}
+	return data[:len(data)-pad]
+}

@@ -780,6 +780,60 @@ func euclidUpdate(A, B, Ua, Ub, q, r *Int, extended bool) (nA, nB, nr, nUa, nUb 
 	return B, r, A, Ua, Ub
 }
 
+// wordGcd is the single-word Euclidean algorithm.
+func wordGcd(a, b Word) (v Word) {
+	for b != 0 {
+		q := a / b
+		a, b = b, a-q*b
+	}
+	return a
+}
+
+// wordCosequences runs the single-word Euclidean algorithm and returns the
+// cosequences it accumulated. It is a free function so the loop's scratch dies
+// with the call rather than landing in the caller's sovereign arena.
+func wordCosequences(a, b Word) (ua, ub, va, vb Word, even bool, gcd Word) {
+	ua, ub = 1, 0
+	va, vb = 0, 1
+	even = true
+	for b != 0 {
+		q := a / b
+		a, b = b, a-q*b
+		ua, ub = ub, ua+q*ub
+		va, vb = vb, va+q*vb
+		even = !even
+	}
+	return ua, ub, va, vb, even, a
+}
+
+// lehmerGcdStep is one iteration of lehmerGCD's main loop. It is a free
+// function so the single-precision scratch (lehmerSimulate's five results) is
+// released when it returns instead of accumulating in the caller's sovereign
+// arena on every pass.
+func lehmerGcdStep(A, B, Ua, Ub, q, r *Int, extended bool) (nA, nB, nUa, nUb *Int) {
+	// Attempt to calculate in single-precision using leading words of A and B.
+	u0, u1, v0, v1, even := lehmerSimulate(A, B)
+
+	// multiprecision Step
+	if v0 != 0 {
+		// Simulate the effect of the single-precision steps using the cosequences.
+		// A = u0*A + v0*B
+		// B = u1*A + v1*B
+		lehmerUpdate(A, B, q, r, u0, u1, v0, v1, even)
+
+		if extended {
+			// Ua = u0*Ua + v0*Ub
+			// Ub = u1*Ua + v1*Ub
+			lehmerUpdate(Ua, Ub, q, r, u0, u1, v0, v1, even)
+		}
+		return A, B, Ua, Ub
+	}
+	// Single-digit calculations failed to simulate any quotients.
+	// Do a standard Euclidean step.
+	nA, nB, _, nUa, nUb = euclidUpdate(A, B, Ua, Ub, q, r, extended)
+	return nA, nB, nUa, nUb
+}
+
 // lehmerGCD sets z to the greatest common divisor of a and b,
 // which both must be != 0, and returns z.
 // If x or y are not nil, their values are set such that z = a*x + b*y.
@@ -816,27 +870,7 @@ func (z *Int) lehmerGCD(x, y, a, b *Int) (rint *Int) {
 
 	// loop invariant A >= B
 	for len(B.abs) > 1 {
-		// Attempt to calculate in single-precision using leading words of A and B.
-		u0, u1, v0, v1, even := lehmerSimulate(A, B)
-
-		// multiprecision Step
-		if v0 != 0 {
-			// Simulate the effect of the single-precision steps using the cosequences.
-			// A = u0*A + v0*B
-			// B = u1*A + v1*B
-			lehmerUpdate(A, B, q, r, u0, u1, v0, v1, even)
-
-			if extended {
-				// Ua = u0*Ua + v0*Ub
-				// Ub = u1*Ua + v1*Ub
-				lehmerUpdate(Ua, Ub, q, r, u0, u1, v0, v1, even)
-			}
-
-		} else {
-			// Single-digit calculations failed to simulate any quotients.
-			// Do a standard Euclidean step.
-			A, B, r, Ua, Ub = euclidUpdate(A, B, Ua, Ub, q, r, extended)
-		}
+		A, B, Ua, Ub = lehmerGcdStep(A, B, Ua, Ub, q, r, extended)
 	}
 
 	if len(B.abs) > 0 {
@@ -849,25 +883,13 @@ func (z *Int) lehmerGCD(x, y, a, b *Int) (rint *Int) {
 			// A and B are both a single Word.
 			aWord, bWord := A.abs[0], B.abs[0]
 			if extended {
-				var ua, ub, va, vb Word
-				ua, ub = 1, 0
-				va, vb = 0, 1
-				even := true
-				for bWord != 0 {
-					qw, rw := aWord/bWord, aWord%bWord
-					aWord, bWord = bWord, rw
-					ua, ub = ub, ua+qw*ub
-					va, vb = vb, va+qw*vb
-					even = !even
-				}
-
+				ua, ub, va, vb, even, gcd := wordCosequences(aWord, bWord)
 				mulW(Ua, Ua, !even, ua)
 				mulW(Ub, Ub, even, va)
 				Ua.Add(Ua, Ub)
+				aWord = gcd
 			} else {
-				for bWord != 0 {
-					aWord, bWord = bWord, aWord%bWord
-				}
+				aWord = wordGcd(aWord, bWord)
 			}
 			A.abs[0] = aWord
 		}
@@ -1050,6 +1072,18 @@ func (z *Int) modSqrt5Mod8Prime(x, p *Int) (rint *Int) {
 	return z
 }
 
+// orderPowerOfTwo sets t = b and returns the m with ord_p(b) = 2^m. It is a
+// free function so the search's scratch is released per iteration instead of
+// accumulating in modSqrtTonelliShanks's sovereign arena.
+func orderPowerOfTwo(t, b, p *Int) (m uint32) {
+	t.Set(b)
+	for t.Cmp(_intOne()) != 0 {
+		t.Mul(t, t).Mod(t, p)
+		m++
+	}
+	return m
+}
+
 // modSqrtTonelliShanks uses the Tonelli-Shanks algorithm to find the square
 // root of a quadratic residue modulo any prime.
 func (z *Int) modSqrtTonelliShanks(x, p *Int) (rint *Int) {
@@ -1077,15 +1111,10 @@ func (z *Int) modSqrtTonelliShanks(x, p *Int) (rint *Int) {
 	b.Exp(x, &s, p)  // b = x^s
 	g.Exp(&n, &s, p) // g = n^s
 	r := e
+	var m uint32
 	for {
 		// find the least m such that ord_p(b) = 2^m
-		var m uint32
-		t.Set(&b)
-		for t.Cmp(_intOne()) != 0 {
-			t.Mul(&t, &t).Mod(&t, p)
-			m++
-		}
-
+		m = orderPowerOfTwo(&t, &b, p)
 		if m == 0 {
 			return z.Set(&y)
 		}

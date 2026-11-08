@@ -8,11 +8,9 @@ import (
 	"moxielang.dev/pkg/mxutil"
 	"context"
 	"errors"
-	"internal/singleflight"
 	"internal/stringslite"
 	"net/netip"
 	"runtime"
-	"unsafe"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -181,24 +179,12 @@ type Resolver struct {
 	// If nil, the default dialer is used.
 	Dial func(ctx context.Context, network, address string) (Conn, error)
 
-	// lookupGroup merges LookupIPAddr calls together for lookups for the same
-	// host. The lookupGroup key is the LookupIPAddr.host argument.
-	// The return values are ([]IPAddr, error).
-	lookupGroup singleflight.Group
-
 	// TODO(bradfitz): optional interface impl override hook
 	// TODO(bradfitz): Timeout time.Duration?
 }
 
 func (r *Resolver) preferGo() (rok bool) { return r != nil && r.PreferGo }
 func (r *Resolver) strictErrors() (rok bool) { return r != nil && r.StrictErrors }
-
-func (r *Resolver) getLookupGroup() (rgroup *singleflight.Group) {
-	if r == nil {
-		return &DefaultResolver().lookupGroup
-	}
-	return &r.lookupGroup
-}
 
 // LookupHost looks up the given host using the local resolver.
 // It returns a slice of that host's addresses.
@@ -296,15 +282,17 @@ func (r *Resolver) LookupNetIP(ctx context.Context, network, host string) (raddr
 	return ret, nil
 }
 
-// withUnexpiredValuesPreserved returns a context.Context that is never
-// canceled and has no deadline, isolating the lookup group from the calling
-// context's cancellation. Context values are not supported in Moxie.
-func withUnexpiredValuesPreserved(ctx context.Context) (rcontext context.Context) {
-	return context.Background()
-}
-
 // lookupIPAddr looks up host using the local resolver and particular network.
 // It returns a slice of that host's IPv4 and IPv6 addresses.
+//
+// The lookup runs in this frame. It used to go through a singleflight group,
+// which is a concurrency device for goroutines sharing a resolver: a domain is
+// one thread with no shared mutable state, so the group never merged anything
+// here, and its call record - a map value, which is not a relocation boundary -
+// held the error past the frame that built it. That record is how a failed
+// lookup handed its caller a DNSError whose Name pointed into a released frame,
+// and formatting it later killed the relay (SIGSEGV in runtime[sliceConcat]
+// under mediaproxy[fetchOnce]).
 func (r *Resolver) lookupIPAddr(ctx context.Context, network, host string) (riPAddr []IPAddr, rerr error) {
 	// Make sure that no matter what we do later, host=="" is rejected.
 	if host == "" {
@@ -313,93 +301,12 @@ func (r *Resolver) lookupIPAddr(ctx context.Context, network, host string) (riPA
 	if ip, err := netip.ParseAddr(host); err == nil {
 		return []IPAddr{{IP: IP(ip.AsSlice()).To16(), Zone: ip.Zone()}}, nil
 	}
-	// We don't want a cancellation of ctx to affect the
-	// lookupGroup operation. Otherwise if our context gets
-	// canceled it might cause an error to be returned to a lookup
-	// using a completely different context. However we need to preserve
-	// only the values in context. See Issue 28600.
-	lookupGroupCtx, lookupGroupCancel := context.WithCancel(withUnexpiredValuesPreserved(ctx))
-
-	lookupKey := network + "\000" + host
-	ch := r.getLookupGroup().DoChan(lookupKey, &lookupIPCall{r: r, ctx: lookupGroupCtx, network: network, host: host})
-
-	select {
-	case <-ctx.Done():
-		if r.getLookupGroup().ForgetUnshared(lookupKey) {
-			lookupGroupCancel.Cancel()
-			<-ch
-		} else {
-			<-ch
-			lookupGroupCancel.Cancel()
+	addrs, lerr := r.lookupIP(ctx, network, host)
+	if lerr != nil {
+		if _, ok := lerr.(*DNSError); !ok {
+			return nil, newDNSError(mapErr(lerr), host, "")
 		}
-		err := newDNSError(mapErr(ctx.Err()), host, "")
-		return nil, err
-	case r1 := <-ch:
-		lookupGroupCancel.Cancel()
-		err := r1.Err
-		if err != nil {
-			if _, ok := err.(*DNSError); !ok {
-				err = newDNSError(mapErr(err), host, "")
-			}
-		}
-		return lookupIPReturn(r1.Val, err, r1.Shared)
-	}
-}
-
-// lookupIPCall runs the resolver's IP lookup for one singleflight key. The
-// resolver is carried rather than its method value, which would bind the
-// receiver into a function value.
-type lookupIPCall struct {
-	r       *Resolver
-	ctx     context.Context
-	network string
-	host    string
-}
-
-func (l *lookupIPCall) Call() (rval unsafe.Pointer, rerr error) {
-	addrs, err := l.r.lookupIP(l.ctx, l.network, l.host)
-	if err != nil {
-		return nil, err
-	}
-	// The pointer leaves this frame: singleflight stores it in the call record
-	// and the collector dereferences it from a different (or later) call. A
-	// pointer to a local lives in THIS frame's arena, which is released at
-	// return, so lookupIPReturn's *(*[]IPAddr)(val) read a released header -
-	// the SIGSEGV in net[lookupIPReturn] behind Dial("tcp", "example.com:80")
-	// (round 278). Publish the header and every address in the root arena,
-	// which is the only arena that outlives both frames.
-	//
-	// The cost is that a resolved name's addresses are never reclaimed. Go
-	// drops the equivalent data when the singleflight call is collected; with
-	// no heap there is nowhere to put it that the collector could free from
-	// another frame.
-	saved := runtime.CurrentArena()
-	runtime.SetCurrentArena(runtime.RootArena())
-	cp := []IPAddr{:len(addrs)}
-	for i := int32(0); i < int32(len(addrs)); i++ {
-		ip := []byte{:len(addrs[i].IP)}
-		copy(ip, addrs[i].IP)
-		zone := []byte{:len(addrs[i].Zone)}
-		copy(zone, addrs[i].Zone)
-		cp[i] = IPAddr{IP: ip, Zone: zone}
-	}
-	hp := (*[]IPAddr)(runtime.ArenaAlloc(runtime.RootArena(), unsafe.Sizeof(cp)))
-	*hp = cp
-	runtime.SetCurrentArena(saved)
-	return unsafe.Pointer(hp), nil
-}
-
-// lookupIPReturn turns the return values from singleflight.Do into
-// the return values from LookupIP.
-func lookupIPReturn(val unsafe.Pointer, err error, shared bool) (riPAddr []IPAddr, rerr error) {
-	if err != nil {
-		return nil, err
-	}
-	addrs := *(*[]IPAddr)(val)
-	if shared {
-		clone := []IPAddr{:len(addrs)}
-		copy(clone, addrs)
-		addrs = clone
+		return nil, lerr
 	}
 	return addrs, nil
 }

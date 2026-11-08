@@ -215,6 +215,10 @@ func (b *builder) checkSovereignLoopDecls() {
 	if !ok || !b.isSovereignNamedType(named) {
 		return
 	}
+	// The predicate is the one the sovereign prologue uses, not the direct scan:
+	// a method whose only mutation is a call on the receiver (g.advance(...))
+	// still runs with the receiver's arena borrowed, so its loop scratch lands
+	// in the sovereign arena and persists just the same.
 	if !ssaFuncWritesReceiver(b.fn) {
 		return
 	}

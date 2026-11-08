@@ -32,13 +32,16 @@ func pHash[H hash.Hash](newHash func() H, result, secret, seed []byte) {
 	h.Write(seed)
 	a := h.Sum(nil)
 
-	for len(result) > 0 {
+	// Write through a cursor. `result = result[n:]` is a COPY in Moxie, so
+	// only the first block would reach the caller's buffer and every later
+	// block would land in a slice that dies with the frame.
+	j := int32(0)
+	for j < len(result) {
 		h.Reset()
 		h.Write(a)
 		h.Write(seed)
 		b := h.Sum(nil)
-		n := copy(result, b)
-		result = result[n:]
+		j += mxutil.CopyAt(result, j, b)
 
 		h.Reset()
 		h.Write(a)

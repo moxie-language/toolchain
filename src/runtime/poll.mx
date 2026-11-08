@@ -173,6 +173,12 @@ func poll_runtime_pollWait(ctx uintptr, mode int32) int32 {
 		libc_epoll_ctl(epfd, int32(_EPOLL_CTL_MOD), pd.fd, &modEv)
 	}
 
+	// One event buffer for the whole wait. Declaring it inside the loop
+	// allocated 768 bytes on every epoll round, and the rounds ARE the wait:
+	// a read that had to wait filled the arena with dead buffers until the
+	// region table was full (round 34: "arena: region table full", size=768,
+	// 8.5 GB of 64 MB regions, every byte of it unread).
+	events := []epollEvent{:64}
 	for {
 		// Compute timeout from deadline.
 		timeoutMs := int32(-1) // infinite
@@ -195,7 +201,6 @@ func poll_runtime_pollWait(ctx uintptr, mode int32) int32 {
 			timeoutMs = 100
 		}
 
-		events := []epollEvent{:64}
 		n := libc_epoll_wait(epfd, &events[0], 64, timeoutMs)
 		netpollProcess(events, int32(n))
 		fireTimers()

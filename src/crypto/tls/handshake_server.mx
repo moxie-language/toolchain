@@ -16,7 +16,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"time"
 )
@@ -807,21 +806,8 @@ func (hs *serverHandshakeState) establishKeys() (rerr error) {
 	clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV :=
 		keysFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.clientHello.random, hs.hello.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
 
-	var clientCipher, serverCipher recordCipher
-	var clientHash, serverHash hash.Hash
-
-	if hs.suite.aead == nil {
-		clientCipher = hs.suite.cipher(clientKey, clientIV, true /* for reading */)
-		clientHash = hs.suite.mac(clientMAC)
-		serverCipher = hs.suite.cipher(serverKey, serverIV, false /* not for reading */)
-		serverHash = hs.suite.mac(serverMAC)
-	} else {
-		clientCipher = &aeadCipher{a: hs.suite.aead(clientKey, clientIV)}
-		serverCipher = &aeadCipher{a: hs.suite.aead(serverKey, serverIV)}
-	}
-
-	c.in.prepareCipherSpec(c.vers, clientCipher, clientHash)
-	c.out.prepareCipherSpec(c.vers, serverCipher, serverHash)
+	c.in.prepareCipherSpec(c.vers, hs.suite, clientKey, clientIV, clientMAC, true /* for reading */)
+	c.out.prepareCipherSpec(c.vers, hs.suite, serverKey, serverIV, serverMAC, false /* not for reading */)
 
 	return nil
 }

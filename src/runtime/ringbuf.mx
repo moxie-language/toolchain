@@ -150,12 +150,21 @@ func ringParkWrite(ring uintptr) {
 }
 
 // ringParkRead parks the calling writer on the read index until the consumer
-// frees need bytes, the ring closes, or the bounded timeout elapses.
-func ringParkRead(ring uintptr, need uint32) {
+// frees need bytes AND takes a frame, the ring closes, or the bounded timeout
+// elapses.
+//
+// The slot count belongs in the park condition. A writer blocked because the
+// channel already holds its declared number of outstanding messages has plenty
+// of space in BYTES, so a park keyed on bytes alone returns immediately and the
+// send loop spins at 100% CPU on both ends - the sender burning a core, and the
+// receiver failing to advance because the exchange cannot complete. The
+// consumer advances readIdx as it takes each frame, so one wake covers both
+// conditions.
+func ringParkRead(ring uintptr, need uint32, slots uint32) {
 	hdr := (*ringBuf)(unsafe.Pointer(ring))
 	atomicStoreU32(&hdr.sendSleeper, 1)
 	cmp := atomicLoadU32(&hdr.readIdx)
-	if ringSpace(ring) < need && !ringIsClosed(ring) {
+	if (ringSpace(ring) < need || ringDepth(ring) >= slots) && !ringIsClosed(ring) {
 		moxie_futex_wait_timeout_shared(&hdr.readIdx, cmp, pipeParkTimeoutNs)
 	}
 	atomicStoreU32(&hdr.sendSleeper, 0)

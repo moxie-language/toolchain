@@ -1,5 +1,93 @@
 # Moxie Changelog
 
+## Unreleased
+
+- **TLS 1.2 record ciphers are built where they live.** `establishKeys` built
+  the record cipher in the handshake frame and stored it into the connection
+  through `prepareCipherSpec`, whose receiver is `&c.in` - a store through a
+  parameter, which the return protocol does not relocate. The handshake frame
+  was released, the arena reused, and the first encrypted record dispatched on
+  a recycled type word: `interface dispatch: no impl for explicitNonceLen (4
+  impl(s), none matches)`, a panic that killed every TLS-1.2 connection
+  (nostr.build and tls-v1-2.badssl.com; TLS-1.3 hosts were unaffected because
+  `setTrafficSecret` builds its cipher inside the method that stores it). The
+  cipher and MAC are now built by `prepareCipherSpec` itself, in the
+  halfConn's sovereign arena, so they live as long as the connection does.
+- **P_hash writes every block.** `crypto/internal/fips140/tls12` iterated with
+  `result = result[n:]`, which is a copy: only the first digest reached the
+  caller's buffer and every later block was written into a slice that died
+  with the frame. The key block was one block of real material and the rest
+  zeros - a wrong key, a wrong IV, and `bad record MAC` from the server on
+  every TLS-1.2 suite. The block is now written through a cursor.
+- **A spawn wrapper does not inherit the caller's defer state.** The
+  `$gowrapper` body is generated while the spawning function is mid-emission,
+  and `e.w()` inserts a defer checkpoint before every call it sees. Every call
+  in the wrapper branched to the CALLER's `%defer_landingN`, a block in
+  another function's body (or, once the wrapper is moved to the package tail,
+  nowhere), and clang rejected the module with "use of undefined value
+  '%defer_landing2'". Any function that both defers and spawns failed to
+  compile. The checkpoint policy is now cleared for the wrapper's body and
+  restored after it.
+- **Loop scratch follows the prologue's predicate.** The "no declaration
+  inside a loop in a self-mutating method" check used the direct
+  receiver-write scan, while the sovereign prologue borrows the receiver's
+  arena whenever the method mutates it *transitively* (a call on the receiver
+  counts). A method whose only mutation was `g.advance(...)` therefore ran
+  with the receiver's arena current and was free to declare per-iteration
+  scratch in it, which is the accumulation the rule exists to prevent. Both
+  compilers now ask the question the prologue asks; the loop bodies that
+  answered it wrongly move their scratch into helper functions (store's
+  `indexEvent` and `populateGraphEdges`) or hoist it (transport's write loops,
+  the proxy reaper, the broadcast frame reader).
+- **The stdlib test gate runs each package in place.** `run_tests.sh` copied a
+  package into a scratch directory, renamed it to `package main` and generated
+  a main of its own. That copy cost the package its `init()` ("init() is not
+  allowed in main package") and its global stores ("package globals are
+  immutable outside init"), and the generated main had no `shutdown` arm: nine
+  packages failed to build for those reasons alone. The gate now drives
+  `moxie test`, the compiler's own harness, which compiles the package where it
+  lives. Ten of ten packages pass.
+- **`blake2b.Sum` appends.** The digest was returned as `sum | hVal`, a fresh
+  slice, while `hash.Hash.Sum` is specified to append to the buffer it is
+  given. Every caller that passed a sized buffer and used it - argon2's H'
+  calls `Sum(resize(out, 0))` and discards the result - kept a zeroed buffer,
+  so Argon2 hashed 1 KiB of zeros per block and matched no test vector.
+- **Argon2's H' writes every block.** `blake2bHash` walked its output with
+  `out = out[32:]`, which is a copy, so only the first 32 bytes of a 1 KiB
+  block reached the caller. Both defects had to be fixed before the RFC 9106
+  vectors passed; `Key` and `IDKey` now match the Go reference exactly.
+- **Three more stdlib packages build.** `chainhash.Decode` passed a `Hash`
+  where `mxutil.CopyAt` takes `[]byte`; `secp256k1.taggedHash` used unnamed
+  results; and `chacha20poly1305`/`xchacha20poly1305` copied into `key[:]`,
+  which is a subslice (a copy) - four sites, all caught by the gate.
+- **A metadata reply is taken, not announced.** The database engine sent each
+  reply on the codec channel and then nudged a zero-size "ready" channel, and
+  the dispatch domain waited on the nudge before reading the reply. Two
+  channels for one event is a window: the engine parks on a reply nobody has
+  read yet, stops taking requests, and the dispatch domain parks offering one.
+  Reproduced under 4,700 REQ/CLOSE pairs in two minutes, every time. The reply
+  channel now carries the event alone and the dispatch domain takes it with a
+  plain receive, which also decodes.
+- **A blocked send parks.** `ringParkRead` slept only while the ring lacked
+  bytes, but a send also blocks when the channel already holds its declared
+  number of messages. That case has bytes to spare, so the park returned
+  immediately and both ends spun at 100% CPU each. The park condition now
+  includes the slot count: a send blocked for 2s costs 0.002s of CPU.
+- **The poll wait allocates once.** `poll_runtime_pollWait` declared its epoll
+  event buffer inside the wait loop, 768 bytes per round, and the rounds ARE
+  the wait: a read that had to wait filled the arena with dead buffers until
+  the region table was full (8.5 GB of 64 MB regions, none of it read). The
+  buffer is hoisted out of the loop.
+- **The DNS resolver owns its results.** `(*Resolver).lookupIPAddr` ran the
+  lookup through a singleflight group. A domain is one thread with no shared
+  mutable state, so the group never merged anything here, and its call record -
+  a map value, which is not a relocation boundary - held the error past the
+  frame that built it. A failed lookup handed its caller a `DNSError` whose
+  `Name` pointed into a released frame, and formatting it killed the process
+  (SIGSEGV in `runtime[sliceConcat]` behind a relay's media proxy). The lookup
+  now runs in the calling frame, which also stops the resolved addresses being
+  parked in the root arena for the life of the process.
+
 ## v1.0.1-rc.1
 
 The memory and type-resolution release candidate. No language changes.

@@ -458,9 +458,9 @@ func (b *Reader) ReadLine() (line []byte, isPrefix bool, err error) {
 // to minimize allocations and copies.
 func (b *Reader) collectFragments(delim byte) (fullBuffers [][]byte, finalFragment []byte, totalLen int32, err error) {
 	var frag []byte
+	var e error
 	// Use ReadSlice to look for delim, accumulating full buffers.
 	for {
-		var e error
 		frag, e = b.ReadSlice(delim)
 		if e == nil { // got final fragment
 			break
@@ -471,14 +471,21 @@ func (b *Reader) collectFragments(delim byte) (fullBuffers [][]byte, finalFragme
 		}
 
 		// Make a copy of the buffer.
-		buf := bytes.Clone(frag)
-		fullBuffers = mxutil.Ensure(fullBuffers, 1)
-		fullBuffers = push(fullBuffers, buf)
-		totalLen += len(buf)
+		fullBuffers = cloneInto(fullBuffers, frag)
+		totalLen += len(frag)
 	}
 
 	totalLen += len(frag)
 	return fullBuffers, frag, totalLen, err
+}
+
+// cloneInto appends a copy of frag to frags. A free function, so the copy is
+// allocated outside the caller's sovereign arena: collectFragments is a
+// self-mutating method, and a per-iteration buffer declared in its loop would
+// accumulate there until the reader is released.
+func cloneInto(frags [][]byte, frag []byte) (out [][]byte) {
+	out = mxutil.Ensure(frags, 1)
+	return push(frags, bytes.Clone(frag))
 }
 
 // ReadBytes reads until the first occurrence of delim in the input,

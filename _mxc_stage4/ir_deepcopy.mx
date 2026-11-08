@@ -128,9 +128,78 @@ func ssaIsSovereignNamedType(p *SSAPackage, named *Named) (ok bool) {
 }
 
 func ssaFuncHasReceiverWrite(fn *SSAFunction) (ok bool) {
-	if fn.Signature == nil || fn.Signature.Recv == nil || len(fn.Params) == 0 {
+	return ssaFuncHasReceiverWriteSeen(fn, map[*SSAFunction]bool{}, 0)
+}
+
+// ssaFuncHasReceiverWriteDirectly is the direct-only query. The loop-scratch
+// restriction still asks THIS question, not the transitive one the prologue
+// asks: seeing delegation would put every method that mutates by calling
+// g.advance(...) under the restriction, and each one then needs its loop
+// scratch moved into a helper. That port is a pass of its own - the sites found
+// so far are bufio's collectFragments, cryptobyte's readBase128Int, dnsmessage's
+// four All* readers, net.Buffers, x509's AppendCertsFromPEM, tls's
+// writeRecordLocked and loadSession, filter.F.Marshal and store/sorted's
+// File.Get/GetPrefix/Last/lowerBound - and it continues from there.
+// Mirrors legacy ssaFuncWritesReceiverDirectly.
+func ssaFuncHasReceiverWriteDirectly(fn *SSAFunction) (ok bool) {
+	return ssaFuncHasDirectReceiverWrite(fn)
+}
+
+// ssaFuncHasDirectReceiverWrite is the direct scan the transitive walk performs
+// at each level.
+func ssaFuncHasDirectReceiverWrite(fn *SSAFunction) (ok bool) {
+	if fn == nil || fn.Signature == nil || fn.Signature.Recv == nil || len(fn.Params) == 0 {
 		return false
 	}
+	recvParam := fn.Params[0]
+	localStore := map[SSAValue]SSAValue{}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			store, ok2 := instr.(*SSAStore)
+			if !ok2 {
+				continue
+			}
+			if _, isAlloc := store.Addr.(*SSAAlloc); !isAlloc {
+				continue
+			}
+			localStore[store.Addr] = store.Val
+		}
+	}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if mu, ok3 := instr.(*SSAMapUpdate); ok3 {
+				if mu.Map != nil && ssaRecvRooted(mu.Map, recvParam, localStore) {
+					return true
+				}
+				continue
+			}
+			store, ok2 := instr.(*SSAStore)
+			if !ok2 {
+				continue
+			}
+			if _, isAlloc := store.Addr.(*SSAAlloc); isAlloc {
+				continue
+			}
+			if ssaRecvRooted(store.Addr, recvParam, localStore) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ssaFuncHasReceiverWriteSeen is ssaFuncHasReceiverWrite with the call chain
+// that reached fn. A cycle (a method calling another method of the same type
+// that calls back) is cut by the seen set: the inner visit answers false,
+// which is conservative for the cycle and exact for every acyclic path.
+func ssaFuncHasReceiverWriteSeen(fn *SSAFunction, seen map[*SSAFunction]bool, depth int32) (ok bool) {
+	if fn == nil || fn.Signature == nil || fn.Signature.Recv == nil || len(fn.Params) == 0 || depth > 8 {
+		return false
+	}
+	if seen[fn] {
+		return false
+	}
+	seen[fn] = true
 	recvParam := fn.Params[0]
 	// The stage4 SSA spills the receiver and locals into allocas and reloads
 	// them. Map each alloca to the value stored into it so the walk can follow
@@ -164,6 +233,22 @@ func ssaFuncHasReceiverWrite(fn *SSAFunction) (ok bool) {
 				}
 				continue
 			}
+			// A method call ON the receiver mutates it exactly as a field
+			// store does: the callee borrows the same object and stores
+			// through it. Missing this classified a method whose only
+			// mutation is `g.advanceAfterOwnCommit(...)` as READ-ONLY, so it
+			// pushed a frame arena instead of borrowing the receiver's, and
+			// the callee's store-back left the receiver's fields pointing
+			// into that frame. Measured on mls.(*Group).CreateWelcome: the
+			// group context hash and confirmed transcript hash dangled as
+			// soon as it returned and the next Marshal dereferenced a
+			// released arena.
+			if call, okC := instr.(*SSACall); okC {
+				if ssaCallHasReceiverWrite(call, recvParam, localStore, seen, depth) {
+					return true
+				}
+				continue
+			}
 			store, ok2 := instr.(*SSAStore)
 			if !ok2 {
 				continue
@@ -177,6 +262,42 @@ func ssaFuncHasReceiverWrite(fn *SSAFunction) (ok bool) {
 		}
 	}
 	return false
+}
+
+// ssaCallHasReceiverWrite reports whether a call in fn mutates fn's receiver by
+// calling a method on it.
+func ssaCallHasReceiverWrite(call *SSACall, recvParam SSAValue, localStore map[SSAValue]SSAValue, seen map[*SSAFunction]bool, depth int32) (ok bool) {
+	if call == nil || recvParam == nil || len(call.Call.Args) == 0 {
+		return false
+	}
+	if !ssaRecvRooted(call.Call.Args[0], recvParam, localStore) {
+		return false
+	}
+	callee, okF := call.Call.Value.(*SSAFunction)
+	if !okF || callee == nil || callee.Signature == nil || callee.Signature.Recv == nil {
+		return false
+	}
+	if !sameRecvType(recvParam.SSAType(), callee.Params) {
+		return false
+	}
+	return ssaFuncHasReceiverWriteSeen(callee, seen, depth+1)
+}
+
+// sameRecvType reports whether a receiver parameter's type names the same
+// object type as the callee's receiver parameter, ignoring the pointer.
+func sameRecvType(recvType Type, calleeParams []*SSAParameter) (ok bool) {
+	if recvType == nil || len(calleeParams) == 0 || calleeParams[0] == nil {
+		return false
+	}
+	a := recvType
+	if pa, isP := SafeUnderlying(a).(*Pointer); isP {
+		a = pa.Base
+	}
+	b := calleeParams[0].SSAType()
+	if pb, isP := SafeUnderlying(b).(*Pointer); isP {
+		b = pb.Base
+	}
+	return a == b
 }
 
 // recvWalkItem is one node of the receiver-derivation walk with its depth, so
