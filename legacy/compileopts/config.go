@@ -33,6 +33,18 @@ func (c *Config) Debug() bool       { return c.Options.Debug }
 func (c *Config) ExtraFiles() []string { return c.Target.ExtraFiles }
 func (c *Config) IsStandaloneRuntime() bool { return c.Options.StandaloneRuntime }
 
+// NoMainArena reports -tags no_main_arena: package main gets no function arena
+// and no return encode. The compiler's own bootstrap needs it; see
+// funcNeedsArenaCopy.
+func (c *Config) NoMainArena() bool {
+	for _, t := range c.BuildTags() {
+		if t == "no_main_arena" {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Config) BuildMode() string {
 	if c.Options.BuildMode != "" {
 		return c.Options.BuildMode

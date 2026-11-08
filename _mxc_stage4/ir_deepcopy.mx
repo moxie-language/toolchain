@@ -50,9 +50,17 @@ func (e *irEmitter) funcNeedsCodec(f *SSAFunction) (ok bool) {
 	}
 	if f.Pkg != nil && f.Pkg.Pkg != nil {
 		path := f.Pkg.Pkg.Path
+		// Mirrors legacy funcNeedsArenaCopy: no "main" exemption by PATH. User
+		// code lives in "main", and a main function that builds a
+		// pointer-containing value needs the same arena and return encode as
+		// any other or the caller reads the popped frame it was built in.
+		// The compiler's own bootstrap passes -tags no_main_arena instead,
+		// because the path cannot tell the two mains apart.
 		if path == "runtime" || path == "unsafe" || path == "syscall" || path == "os" ||
-			path == "main" ||
 			mxutil.HasPrefix(path, "moxielang.dev/pkg/") {
+			return false
+		}
+		if bst != nil && bst.noMainArena && path == "main" {
 			return false
 		}
 	}
@@ -66,6 +74,7 @@ func (e *irEmitter) funcNeedsCodec(f *SSAFunction) (ok bool) {
 	}
 	return false
 }
+
 
 // recvNamedType returns the named type a method's receiver denotes. The
 // declared receiver may be a value (a named slice/map, passed as a reference),

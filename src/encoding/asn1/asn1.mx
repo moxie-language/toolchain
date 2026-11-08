@@ -21,6 +21,7 @@ package asn1
 
 import (
 	"moxielang.dev/pkg/mxutil"
+	"runtime"
 	"errors"
 	"fmt"
 	"internal/saferio"
@@ -133,13 +134,22 @@ func parseInt32(der []byte) (out int32, derr error) {
 	return int32(ret64), nil
 }
 
-// parseBigInt treats the given bytes as a big-endian, signed integer and returns
-// the result.
-func parseBigInt(der []byte) (out *big.Int, derr error) {
+// setBigInt treats the given bytes as a big-endian, signed integer and stores
+// the result IN ret, which the caller owns.
+//
+// It writes into the caller's big.Int instead of returning a fresh one. The
+// parser hands the destination struct to this decoder as an unsafe.Pointer, and
+// a store through that pointer is not a relocation root: a *big.Int allocated
+// here lived in THIS frame's arena, the frame returned, the arena was reused,
+// and the field kept a pointer into recycled memory. Every certificate whose
+// integers were parsed that way had a garbage limb slice - x.abs read back as
+// 0x10 - and it only showed up when some field happened to be dereferenced
+// before the memory was overwritten again, which is why RSA keys verified on
+// some connections and not others.
+func setBigInt(ret *big.Int, der []byte) (derr error) {
 	if err := checkInteger(der); err != nil {
-		return nil, err
+		return err
 	}
-	ret := &big.Int{}
 	if len(der) > 0 && der[0]&0x80 == 0x80 {
 		// This is a negative number.
 		notBytes := []byte{:len(der)}
@@ -149,10 +159,10 @@ func parseBigInt(der []byte) (out *big.Int, derr error) {
 		ret.SetBytes(notBytes)
 		ret.Add(ret, big.NewInt(1))
 		ret.Neg(ret)
-		return ret, nil
+		return nil
 	}
 	ret.SetBytes(der)
-	return ret, nil
+	return nil
 }
 
 // BIT STRING
@@ -922,12 +932,27 @@ func parseFieldUnsafe(typ *_rawType, ptr unsafe.Pointer, data []byte, initOffset
 		return
 	}
 	if typ == _bigIntPtrTC() {
-		bi, e := parseBigInt(innerBytes)
-		if e != nil {
-			err = e
-			return
+		// Build the value inside the field's own big.Int, which the caller
+		// owns and which outlives this frame.
+		//
+		// A nil field means the struct slot itself has to be created, and it is
+		// created in the memory the parser was given for it - the pointer is
+		// written through ptr, so the storage came from the caller's side.
+		slot := (**big.Int)(ptr)
+		if *slot == nil {
+			*slot = &big.Int{}
 		}
-		*(**big.Int)(ptr) = bi
+		// The value is built in a LOCAL first and the field slot is written
+		// last, so the field is never a live pointer argument while a call
+		// runs: a call in between would make the field an argument the return
+		// protocol can re-home, and a store made before it would be the one
+		// that gets re-homed. `v` is copied with no call and the slot write is
+		// the final statement.
+		var v big.Int
+		err = setBigInt(&v, innerBytes)
+		bi := *slot
+		*bi = v
+		(*slot) = bi
 		return
 	}
 
@@ -1093,7 +1118,35 @@ func UnmarshalWithParams(b []byte, typ, data unsafe.Pointer, params []byte) (res
 		}
 		return nil, &invalidUnmarshalError{typeName: name, isNil: true}
 	}
-	offset, err := parseFieldUnsafe(elemType, data, b, 0, parseFieldParameters(params))
+	// The destination is reached through an unsafe pointer, so nothing this
+	// parse produces is ever returned or relocated: the return protocol only
+	// moves return values and receiver fields. Everything the parse creates
+	// must therefore live in the arena that owns the destination, where the
+	// caller will read it — not in frame arenas that are popped as the parse
+	// unwinds.
+	offset := int32(0)
+	own := runtime.ArenaOwning(uintptr(data))
+	if own != nil {
+		// Switching the CURRENT frame's arena is not enough: every callee in
+		// the parse pushes its own frame arena, so the *big.Int a callee
+		// allocates lives in a frame that is popped at its return, and the next
+		// field's parse recycles those bytes. Measured: the last *big.Int field
+		// of a two-field struct parsed correctly and the earlier one came back
+		// with a garbage header pointing at recycled memory.
+		//
+		// Manual arena mode routes the whole parse - nested helpers included -
+		// into the arena that owns the destination, so nothing the parser
+		// allocates is freed before the caller reads it. The scratch then lives
+		// until the caller's frame ends: memory, not correctness.
+		runtime.ManualArenaEnter(own)
+		offset, err = parseFieldUnsafe(elemType, data, b, 0, parseFieldParameters(params))
+		runtime.ManualArenaExit(own)
+	} else {
+		// No arena owns the destination: a stack local or a static, neither of
+		// which any codec sees. Parse in place; the caller owns what it asked
+		// for directly.
+		offset, err = parseFieldUnsafe(elemType, data, b, 0, parseFieldParameters(params))
+	}
 	if err != nil {
 		return nil, err
 	}

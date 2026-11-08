@@ -58,7 +58,19 @@ func structPtrFieldIdx(t string) (idx int32, ftype string) {
 // capping the count at width-1 (ashr by width-1 is the required sign fill).
 func (e *irEmitter) emitShift(b *SSABinOp, reg, resT, lv, rv string) {
 	width := e.intBits(resT)
-	op := e.llvmBinOp(b.Op, b.X.SSAType())
+	// Signedness for a right shift comes from the SHIFT's type, not from the
+	// left operand's, when the left operand is an untyped constant: Go converts
+	// that constant to the type it would have if the shift expression were
+	// replaced by the left operand alone, which is the expression's context
+	// type. `var i byte = 0xff >> n` therefore shifts a uint8 and must use
+	// lshr; reading the operand's untyped type made it a signed shift, and
+	// ashr of i8 0xff is -1, i.e. 255 - measured as a PSS bitMask of 0xff
+	// instead of 0x7f, so every PSS signature failed.
+	shiftTyp := b.X.SSAType()
+	if isUntypedBasicType(shiftTyp) && b.SSAType() != nil {
+		shiftTyp = b.SSAType()
+	}
+	op := e.llvmBinOp(b.Op, shiftTyp)
 	if isNumericLiteral(rv) {
 		if n, ok := floatLitToInt(rv); ok {
 			if n >= int64(width) || n < 0 {

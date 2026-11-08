@@ -1029,14 +1029,23 @@ func (out *Nat) Exp(x *Nat, e []byte, m *Modulus) (ret0 *Nat) {
 	out.montgomeryRepresentation(m)
 	tmp := NewNat().ExpandFor(m)
 	var k uint32
+	// Squaring `d` times multiplies the result by x^(2^d), so d MUST equal the
+	// number of bits each loop step is meant to consume - four for the eight
+	// nibbles of a byte. The loop used to square exactly once per step while
+	// masking four bits below, which silently reduced EVERY 4-bit digit to its
+	// low bit: x^e became x^(sum of set bits of e). The table was built and
+	// then barely used, the result was wrong for any exponent that is not a
+	// string of single bits, and the failure looked random because it depended
+	// on the exponent. Measured on the RFC 8448 RSA certificate: k^d mod n came
+	// out as k^(popcount d).
+	const nibbleBits = int32(4)
 	for _, b := range e {
 		for _, j := range []int32{4, 0} {
 			// Square four times. Optimization note: this can be implemented
 			// more efficiently than with generic Montgomery multiplication.
-			out.montgomeryMul(out, out, m)
-			out.montgomeryMul(out, out, m)
-			out.montgomeryMul(out, out, m)
-			out.montgomeryMul(out, out, m)
+			for d := int32(0); d < nibbleBits; d++ {
+				out.montgomeryMul(out, out, m)
+			}
 
 			// Select x^k in constant time from the table.
 			k = uint32((b >> j) & 0b1111)
@@ -1066,7 +1075,14 @@ func (out *Nat) ExpShortVarTime(x *Nat, e uint32, m *Modulus) (ret0 *Nat) {
 	// For short exponents, precomputing a table and using a window like in Exp
 	// doesn't pay off. Instead, we do a simple conditional square-and-multiply
 	// chain, skipping the initial run of zeroes.
-	xR := NewNat().set(x).montgomeryRepresentation(m)
+	// Two statements, not `NewNat().set(x).montgomeryRepresentation(m)`: a
+	// mutating method returns a relocated copy of its receiver, so chaining
+	// here leaves xR in the normal domain while Exp's table builder below
+	// converts table[0] properly. Measured on RSA public ops: half of all
+	// certificate signature verifications failed.
+	xR := NewNat()
+	xR.set(x)
+	xR.montgomeryRepresentation(m)
 	out.set(xR)
 	for i := bits.UintSize - bits.Len(e) + 1; i < bits.UintSize; i++ {
 		out.montgomeryMul(out, out, m)

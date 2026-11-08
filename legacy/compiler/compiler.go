@@ -65,6 +65,7 @@ type Config struct {
 	Cover              bool // Whether to emit per-block coverage hits (-cover)
 	PanicStrategy      string
 	StandaloneRuntime  bool // keep symbols external for cross-module linking
+	NoMainArena        bool // -tags no_main_arena: package main gets no arena or return encode
 }
 
 // compilerContext contains function-independent data that should still be
@@ -1666,7 +1667,7 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 			}
 		}
 	}
-	needsArena := funcNeedsArenaCopy(b.fn)
+	needsArena := funcNeedsArenaCopy(b.fn, b.NoMainArena)
 	if b.runtimePkg != nil && needsArena {
 		b.fnArenaVal = b.createRuntimeCall("FnArenaPush", []llvm.Value{
 			llvm.ConstInt(b.uintptrType, 65536, false),
@@ -2909,7 +2910,18 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 	case *ssa.BinOp:
 		x := b.getValue(expr.X, getPos(expr))
 		y := b.getValue(expr.Y, getPos(expr))
-		return b.createBinOp(expr.Op, expr.X.Type(), expr.Y.Type(), x, y, expr.Pos())
+		xt := expr.X.Type()
+		// A shift whose left operand is an untyped constant takes the shift's
+		// own type: Go converts the constant to the type it would have if the
+		// shift expression were replaced by the left operand alone, which is
+		// the expression's context type. `var i byte = 0xff >> n` is a uint8
+		// shift and must use lshr; reading the operand's untyped type made it
+		// a signed shift (stage4 measured: ashr i8 255 = -1, which reached
+		// PSS's mask and broke every signature).
+		if (expr.Op == token.SHL || expr.Op == token.SHR) && isUntypedType(xt) {
+			xt = expr.Type()
+		}
+		return b.createBinOp(expr.Op, xt, expr.Y.Type(), x, y, expr.Pos())
 	case *ssa.Call:
 		return b.createFunctionCall(expr.Common(), expr)
 	case *ssa.ChangeInterface:
@@ -3385,6 +3397,15 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 	default:
 		return llvm.Value{}, b.makeError(expr.Pos(), "todo: unknown expression: "+expr.String())
 	}
+}
+
+// isUntypedType reports whether t is an untyped basic type.
+func isUntypedType(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	b, ok := t.Underlying().(*types.Basic)
+	return ok && b.Info()&types.IsUntyped != 0
 }
 
 // createBinOp creates a LLVM binary operation (add, sub, mul, etc) for a Go
@@ -4596,7 +4617,7 @@ func typeNeedsCopyDepth(t types.Type, depth int) bool {
 // funcNeedsArenaCopy returns true if the function returns pointer-containing
 // types and should get per-function arena FnArenaPush/FnArenaPop lifecycle.
 // Matches stage4 ir_deepcopy.mx funcNeedsArenaCopy.
-func funcNeedsArenaCopy(fn *ssa.Function) bool {
+func funcNeedsArenaCopy(fn *ssa.Function, excludeMain bool) bool {
 	if fn == nil || fn.Blocks == nil {
 		return false
 	}
@@ -4604,9 +4625,20 @@ func funcNeedsArenaCopy(fn *ssa.Function) bool {
 		return false
 	}
 	path := fn.Pkg.Pkg.Path()
+	// No "main" exemption by PATH. User code is always "main", and a main
+	// function that builds a pointer-containing value needs the same arena and
+	// return encode as any other: without it the value is never relocated and
+	// the caller reads a popped frame (measured - an asn1-parsed *big.Int read
+	// `bits 0` in the caller and 73 inside the parser). The compiler's own
+	// main is not exempt either; when it cannot afford the cost, the bootstrap
+	// passes -tags no_main_arena and this flag does what the path check used
+	// to do. The path cannot tell the two mains apart, which is why the
+	// decision is a flag.
 	if path == "runtime" || path == "unsafe" || path == "syscall" || path == "os" ||
-		path == "main" ||
 		strings.HasPrefix(path, "moxielang.dev/pkg/") {
+		return false
+	}
+	if excludeMain && path == "main" {
 		return false
 	}
 	sig := fn.Signature
@@ -4676,7 +4708,7 @@ func (b *builder) emitArenaEpilogue(instr *ssa.Return) {
 		return
 	}
 
-	needsCodec := funcNeedsArenaCopy(b.fn)
+	needsCodec := funcNeedsArenaCopy(b.fn, b.NoMainArena)
 	if needsCodec && sig != nil && sig.Results() != nil {
 		hasPtrReturn := false
 		for i := 0; i < sig.Results().Len(); i++ {

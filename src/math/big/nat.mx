@@ -992,13 +992,20 @@ func natBytes(z []Word, buf []byte) (i int32) {
 }
 
 // natBytesAt writes z into buf[off:] and returns the offset of the first byte
-// written. The Go original wrote into buf, and its callers passed buf[10:] or
-// buf[:i] - a sub-slice, which is a copy - so the bytes went nowhere.
+// written relative to buf. The Go original wrote into buf, and its callers
+// passed buf[10:] or buf[:i] - a sub-slice, which is a copy - so the bytes went
+// nowhere; the span form keeps the write in the caller's buffer.
+//
+// The offset is counted against the whole of buf, not against a span local to
+// this function. It was `i = len(buf)` with `buf[off+i]`, which for off > 0
+// wrote past the end (float gob encoding) or before the start (Rat gob
+// encoding), and for off == 0 wrote exactly one byte upstream of where it
+// meant to and left the high byte of every word unwritten.
 func natBytesAt(z []Word, buf []byte, off int32) (i int32) {
 	// This function is used in cryptographic operations. It must not leak
 	// anything but the Int's sign and bit size through side-channels. Any
 	// changes must be reviewed by a security expert.
-	i = len(buf)
+	i = len(buf) - off
 	for _, d := range z {
 		for j := 0; j < _S; j++ {
 			i--
@@ -1014,9 +1021,6 @@ func natBytesAt(z []Word, buf []byte, off int32) (i int32) {
 	if i < 0 {
 		i = 0
 	}
-	for i < len(buf) && buf[i] == 0 {
-		i++
-	}
 
 	return
 }
@@ -1031,13 +1035,35 @@ func bigEndianWord(buf []byte) (rword Word) {
 
 // setBytes interprets buf as the bytes of a big-endian unsigned
 // integer, sets z to that value, and returns z.
+//
+// The words are built byte by byte, not read as a Word through byteorder and
+// not from a subslice. A big-endian Word read through a []byte operand
+// miscompiles (P.bits 73 -> bits 0 in the caller), and buf[i-_S:i] is a COPY,
+// so the gather copies the source into a fresh slice on every word.
 func natSetBytes(z []Word, buf []byte) (rnat []Word) {
-	z = natAlloc(z, (len(buf) + _S - 1) / _S)
-
+	// Words are least-significant first: the full words fill z[0..] from the
+	// END of buf, and the leading partial word goes in the highest slot. Built
+	// byte by byte, not read as a Word through byteorder and not from a
+	// subslice: a big-endian Word read through a []byte operand miscompiles
+	// (P.bits 73 -> bits 0 in the caller), and buf[i-_S:i] is a COPY.
+	n := (len(buf) + _S - 1) / _S
+	z = natAlloc(z, n)
 	i := len(buf)
-	for k := 0; i >= _S; k++ {
-		z[k] = bigEndianWord(buf[i-_S : i])
+	k := 0
+	for ; i >= _S; k++ {
 		i -= _S
+		var w Word
+		w = Word(buf[i])
+		w = w<<8 | Word(buf[i+1])
+		w = Word(buf[i+2]) | w<<8
+		w = Word(buf[i+3]) | w<<8
+		if _S == 8 {
+			w = Word(buf[i+4]) | w<<8
+			w = Word(buf[i+5]) | w<<8
+			w = Word(buf[i+6]) | w<<8
+			w = Word(buf[i+7]) | w<<8
+		}
+		z[k] = w
 	}
 	if i > 0 {
 		var d Word
@@ -1045,7 +1071,7 @@ func natSetBytes(z []Word, buf []byte) (rnat []Word) {
 			d |= Word(buf[i-1]) << s
 			i--
 		}
-		z[len(z)-1] = d
+		z[n-1] = d
 	}
 
 	return natNorm(z)

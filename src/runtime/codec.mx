@@ -86,6 +86,37 @@ func codecArenaContains(a *Arena, p uintptr) (ok bool) {
 	return false
 }
 
+// codecArenaOwning is the inverse of codecArenaContains: it reports the arena
+// that owns addr, or nil when no arena on this domain's stack, the registered
+// stable arena, or the root contains it (a stack local, a literal, a global).
+//
+// It exists for the one case a return protocol cannot reach: a callee that
+// fills the caller's value through a parameter. The caller passes an
+// unsafe.Pointer, the callee writes through it, and nothing is ever returned -
+// so nothing is relocated, and everything the callee allocated for that value
+// lives in the CALLEE's frame and dies with it. asn1.Unmarshal is exactly that
+// shape, and it handed back *big.Int fields whose limbs had been recycled. A
+// parser that switches its current arena to the destination's own arena for
+// the duration of the parse puts every byte it creates where the value will be
+// read from.
+func ArenaOwning(p uintptr) (a *Arena) {
+	if domainRoot == nil || p < 65536 {
+		return nil
+	}
+	for i := domainRoot.fnTop; i >= 1; i-- {
+		if ca := domainRoot.fnStack[i]; ca != nil && codecArenaContains(ca, p) {
+			return ca
+		}
+	}
+	if domainRoot.stableArena != nil && codecArenaContains(domainRoot.stableArena, p) {
+		return domainRoot.stableArena
+	}
+	if codecArenaContainsAddr(rootArenaAddr(), p) {
+		return trueRootArena()
+	}
+	return nil
+}
+
 // codecArenaContainsAddr is codecArenaContains with the arena as an address, for
 // callers on the stability test's hot path, where fetching a pointer-typed arena
 // would pay the very protocol the test exists to skip.

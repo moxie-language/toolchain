@@ -141,7 +141,9 @@ func emsaPSSEncode(mHash []byte, emBits int32, salt []byte, hasher hash.Hash) (r
 	//
 	// 10. Let maskedDB = DB \xor dbMask.
 
-	mgf1XOR(db, hasher, h)
+	// XOR over that many leading bytes of the mask; `db` is a resized
+	// buffer whose storage IS em, so writing em writes DB into EM.
+	mgf1XORAt(em, 0, len(db), hasher, h)
 
 	// 11. Set the leftmost 8 * emLen - emBits bits of the leftmost octet in
 	//     maskedDB to zero.
@@ -188,21 +190,27 @@ func emsaPSSVerify(mHash, em []byte, emBits, sLen int32, hasher hash.Hash) (ret0
 
 	// 5.  Let maskedDB be the leftmost emLen - hLen - 1 octets of EM, and
 	//     let H be the next hLen octets.
-	db := resize(em, emLen-hLen-1)
 	h := em[emLen-hLen-1 : emLen-1]
 
 	// 6.  If the leftmost 8 * emLen - emBits bits of the leftmost octet in
 	//     maskedDB are not all equal to zero, output "inconsistent" and
-	//     stop.
+	//     stop. This tests the MASKED byte: the mask has not been applied
+	//     yet, so the check must run before the MGF is XORed in. With the
+	//     XOR first it read DB's top bit instead, and for emBits = 1023 the
+	//     top bit of a valid DB is allowed to be set - every PSS signature
+	//     failed at this line.
 	var bitMask byte = 0xff >> (8*emLen - emBits)
 	if em[0] & ^bitMask != 0 {
 		return ErrVerification
 	}
 
-	// 7.  Let dbMask = MGF(H, emLen - hLen - 1).
-	//
-	// 8.  Let DB = maskedDB \xor dbMask.
-	mgf1XOR(db, hasher, h)
+	// 7-8. DB = maskedDB xor MGF(H, emLen - hLen - 1). maskedDB is kept as
+	//      an OFFSET into em, not a slice: a slice here is a copy, so the
+	//      mask would be XORed into the copy, the DB checks below would read
+	//      the copy, and H read back from the expression would be the
+	//      caller's buffer rather than EM's.
+	mgf1XORAt(em, 0, emLen-hLen-1, hasher, h)
+	db := resize(em, emLen-hLen-1)
 
 	// 9.  Set the leftmost 8 * emLen - emBits bits of the leftmost octet in DB
 	//     to zero.
@@ -228,8 +236,8 @@ func emsaPSSVerify(mHash, em []byte, emBits, sLen int32, hasher hash.Hash) (ret0
 	//     position is "position 1") does not have hexadecimal value 0x01,
 	//     output "inconsistent" and stop.
 	psLen := emLen - hLen - sLen - 2
-	for _, e := range db[:psLen] {
-		if e != 0x00 {
+	for ei := int32(0); ei < psLen; ei++ {
+		if db[ei] != 0x00 {
 			return ErrVerification
 		}
 	}
@@ -362,14 +370,20 @@ func verifyPSS(pub *PublicKey, hasher hash.Hash, digest []byte, sig []byte, salt
 	// function, but we'd rather always encode to the size of the modulus and
 	// then strip leading zeroes if necessary. This only happens for weird
 	// modulus sizes anyway.
-	for len(em) > emLen && len(em) > 0 {
-		if em[0] != 0 {
+	//
+	// Strip by OFFSET. `em = em[1:]` is a copy here, which would work by
+	// accident (the copy starts at the right byte) but loses the relationship
+	// between em and the buffer emsaPSSVerify writes into - keep an index so
+	// the two cannot drift.
+	off := int32(0)
+	for len(em)-off > emLen && len(em)-off > 0 {
+		if em[off] != 0 {
 			return ErrVerification
 		}
-		em = em[1:]
+		off++
 	}
 
-	return emsaPSSVerify(digest, em, emBits, saltLength, hasher)
+	return emsaPSSVerify(digest, em[off:], emBits, saltLength, hasher)
 }
 
 func checkApprovedHash(hasher hash.Hash) {
