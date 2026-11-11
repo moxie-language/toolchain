@@ -309,18 +309,16 @@ func codecSovDataAlias(p uintptr) (ok bool) {
 // .buf sidecar accumulated duplicate records and a range scan that sized
 // itself from Count() silently dropped the newest event.
 func codecSovDataLive(p uintptr) (ok bool) {
+	// A returned pointer into a receiver group used to become a stable alias
+	// and mark the group escaped forever, with no owner lifetime. Until escape
+	// holders are tracked, copy the value instead: the group stays compactable,
+	// and the conservative mark (stack + all groups) keeps real holders alive.
+	// codecRetTransient/domainRoot are still consulted so the fast path below
+	// stays meaningful for non-sovereign data.
 	if !codecRetTransient || domainRoot == nil {
 		return false
 	}
-	g := sovRangeOwner(p)
-	if g == nil || g.released || g.data == nil {
-		return false
-	}
-	if domainRoot.fnTop >= 1 && sovGroupInDyingArena(domainRoot.fnStack[domainRoot.fnTop], p) {
-		return false
-	}
-	g.escaped = true
-	return true
+	return false
 }
 
 // codecOnStack reports whether p addresses the current thread's stack. Stack
@@ -356,7 +354,12 @@ func codecNoteStable(p uintptr) {
 	}
 	a := domainRoot.stableArena
 	if a.sovereign != 0 && a.owner != nil && codecArenaContains(a, p) {
-		a.owner.escaped = true
+		// Do not pin the group here. A stable alias the caller keeps is caught
+		// by the conservative external scan (stack, fn arenas, other groups)
+		// before compaction moves anything; if the caller drops it, the group
+		// becomes reclaimable again. Pinning here made every group that ever
+		// returned a read-only slice permanent (measured: the relay's Server
+		// group grew at ~25 MB/min with comp=0 pend=0).
 	}
 }
 

@@ -46,6 +46,10 @@ type DomainRoot struct {
 	stableArena *Arena // receiver sovereign arena of the current method (if any)
 	stableStack  []*Arena // stack of previous stable arenas for nested sovereign methods
 	stableTop    int32
+	// rootScope counts active root scopes. While it is non-zero, root-arena
+	// allocations made by frames other than the root arena itself are
+	// reclaimable: a scope exit trims what nothing live points at.
+	rootScope int32
 	manualStack  []*Arena // stack of previous manual arenas for nested manual phases
 	manualTop    int32
 	sovereignRoot *hashmap // receiver -> sovereign arena, created lazily in root arena
@@ -139,6 +143,11 @@ const arenaPoolMaxBytes = uintptr(4 << 20)
 
 var arenaPool []*Arena
 var arenaPoolN int32
+// arenaFreedPooled counts frees of an arena the function pool still listed.
+// Non-zero means an arena was released twice or freed while an ancestor held
+// it; the free path clears the pool entry so the pool never hands out dead
+// memory.
+var arenaFreedPooled uint64
 var arenaPoolBytes uintptr
 
 // sovDepth bounds the pointer-following recursion in the sovereign mark and
@@ -421,6 +430,15 @@ type sovRecord struct {
 	typeDesc *RawType // walker descriptor; nil = opaque (walked by referrer)
 	batchID  int32
 	live     bool
+	// extra marks a released extent: it stays in the table so a lookup of a
+	// pointer into it still answers with its bounds (a frame may still hold
+	// that pointer), and it is never counted as live.
+	extra    bool
+	// region is the data-arena region this block was allocated in. A region is
+	// only ever released when no live block is in it, and records are sorted by
+	// address, so it is what lets the reclaim leave a region alone without a
+	// walk that allocates.
+	region   int32
 	newAddr  uintptr // set during copy-compact: the relocated address
 }
 
@@ -439,8 +457,17 @@ type sovGroup struct {
 	curBatch int32
 	liveBytes  uintptr
 	allocBytes uintptr
+	dirtyBytes uintptr // allocated since the last compaction attempt
 	batchMax   uintptr
-	escaped  bool // an exterior holder was handed a stable pointer: never compact
+	// escaped counts live escape leases: a stable alias into this group's data
+	// that the runtime cannot follow to its owner. It is a COUNT, not a flag,
+	// because the holder is transient and unnamed: each alias takes a lease
+	// when it is handed out and drops it when the holder is released, and the
+	// group is compactable again when the count returns to zero. A flag with no
+	// owner was permanent - one returned slice pinned a group for the life of
+	// the process (measured: the relay's Server group, comp=0 for minutes).
+	escaped   int32
+	rootRef  bool // root arena holds a pointer to this group's live data
 	released bool // group's arenas are freed; skip it in every scan
 	compacting bool // set during copy-compact: ArenaAlloc skips auto-record
 	// A cycle paused between copy steps. The group's data still lives in
@@ -460,6 +487,14 @@ type sovGroup struct {
 	ctxArena *Arena    // arena containing the receiver; group dies with it
 	queued      bool       // linked into the pending-compaction list
 	pendingNext *sovGroup  // next group queued for compaction
+	// inRelease guards SovReleaseDead's own reclaim: it walks the group and
+	// unregisters ranges, and a nested release or a lookup on this group while
+	// that is in progress must not see a half-updated table.
+	inRelease int32
+	// rootScopeTouched marks a group that allocated while root was the current
+	// arena and a root scope was open: one flag, so the scope exit can queue it
+	// without scanning every group.
+	rootScopeTouched int32
 }
 
 // sovRootAlloc grows a root-lifetime slice without disturbing the current
@@ -866,7 +901,7 @@ func SovSetCopyBudget(n int64) {
 // frame, so that test is true by construction and would make this a no-op. The
 // borrow check belongs at the drain, which runs where no such frame is live.
 func sovQueueCompact(g *sovGroup) {
-	if g == nil || g.queued || g.escaped || g.released || g.compacting || g.data == nil {
+	if g == nil || g.queued || g.released || g.compacting || g.data == nil {
 		return
 	}
 	g.queued = true
@@ -878,6 +913,19 @@ func sovQueueCompact(g *sovGroup) {
 	}
 	sovPendingTail.pendingNext = g
 	sovPendingTail = g
+}
+
+// SovResetStable clears read-only stable registrations left over at a safe
+// loop boundary. A leaked registration keeps its receiver's arena "held", so
+// the group is never compacted (measured: stable=3 at the relay's loop top and
+// the Server group growing with comp=0 for minutes). Safe only where no
+// read-only method of the affected receivers is on the stack.
+func SovResetStable() {
+	if domainRoot == nil {
+		return
+	}
+	domainRoot.stableTop = 0
+	domainRoot.stableArena = nil
 }
 
 // SovDrainCompactions compacts up to budget queued groups and returns how many
@@ -896,6 +944,15 @@ func sovQueueCompact(g *sovGroup) {
 func SovDrainCompactions(budget int32) (n int32) {
 	if RootMapRefuses() {
 		sovRefusals++
+		return 0
+	}
+	sovDrainTick++
+	// A pin costs a walk of every other group's live records, and a group that
+	// is pinned now is usually pinned for a while (the holder is a connection's
+	// or a subscription's state). Retrying it on the very next turn paid that
+	// walk hundreds of times a second during a subscription burst and took the
+	// event loop down with it. Back off before looking again.
+	if sovDrainTick < sovBackoffUntil {
 		return 0
 	}
 	for n < budget {
@@ -927,9 +984,32 @@ func SovDrainCompactions(budget int32) (n int32) {
 		}
 		if sovGroupHeld(g) {
 			sovQueueCompact(g)
-			continue
+			sovBackoffUntil = sovDrainTick + 64
+			return
 		}
-		codecSovereignCompact(g, 0)
+		// Liveness must be current BEFORE the external-reference test: a word
+		// that names a block this group has already dropped is recycled bytes,
+		// not a holder, and must not pin the group. codecSovereignCompact is
+		// told the mark is done so the walk is not repeated.
+		sovFullMark(g)
+		if sovExternalRef(g) {
+			// An unrewritable holder names live data in this group right now.
+			// Do not pin it permanently: a stack or turn-arena reference is
+			// usually gone by the next safe point. Rotate and retry; the scan is
+			// only paid while the group is queued.
+			//
+			// A pin blocks compaction, which is the only copy-reclaim, but it
+			// does not block the free reclaim: trimming the tail moves no live
+			// byte, so an exterior holder stays valid. Doing it here is what
+			// keeps a group that is permanently referenced from root (a relay's
+			// connection table does that) from also keeping every dead tail
+			// allocation and every burst region it ever grew.
+			sovTrimTail(g)
+			sovRotatePending(g)
+			sovBackoffUntil = sovDrainTick + 64
+			return
+		}
+		codecSovereignCompact(g, 0, true)
 		if g.cycleActive {
 			// The copy step hit its budget; keep the group queued so the next
 			// safe point resumes it.
@@ -937,6 +1017,491 @@ func SovDrainCompactions(budget int32) (n int32) {
 		}
 	}
 	return
+}
+
+// sovTrimmedBytes counts bytes released by tail trimming.
+var sovTrimmedBytes uint64
+
+// SovTrimmed is the number of bytes tail trimming has released on this
+// domain. Diagnostics only.
+func SovTrimmed() (n uint64) { return sovTrimmedBytes }
+
+// SovTrimAll marks each sovereign group from its receiver roots and then
+// releases dead allocations that sit at the very end of the data arena. It
+// never moves a live byte, so an exterior holder (a pipeline, an ACL cache, a
+// worker's persistent helper) that still points at live receiver data stays
+// valid. Workers use this instead of compaction: compaction relocates live
+// data and those holders are not in the receiver's root graph, which is a
+// use-after-free waiting for the next request.
+func SovTrimAll() {
+	if domainRoot == nil {
+		return
+	}
+	if RootMapRefuses() {
+		return
+	}
+	owners := domainRoot.sovRangeOwners
+	ranges := domainRoot.sovRanges
+	for i := 0; i < len(owners); i++ {
+		g := owners[i]
+		if g == nil || g.data == nil || g.compacting || g.cycleActive || g.released {
+			continue
+		}
+		if ranges[2*i] != g.data.regions[0].base {
+			continue
+		}
+		if !sovCtxLive(g.ctxArena) {
+			// The receiver's home frame is gone; the group should already have
+			// been released with that arena. Its recv pointer is not safe to
+			// dereference, so skip it rather than walk freed memory.
+			continue
+		}
+		if sovGroupHeld(g) {
+			continue
+		}
+		sovFullMark(g)
+		sovTrimTail(g)
+	}
+}
+
+// sovCtxLive reports whether a group's context arena is still part of this
+// domain's live arena set. The comparison is by pointer identity only: a
+// freed arena is never dereferenced.
+func sovCtxLive(a *Arena) (ok bool) {
+	if a == nil || domainRoot == nil {
+		return false
+	}
+	if a == trueRootArena() {
+		return true
+	}
+	for i := int32(0); i <= domainRoot.fnTop; i++ {
+		if domainRoot.fnStack[i] == a {
+			return true
+		}
+	}
+	for i := int32(0); i < domainRoot.stableTop; i++ {
+		if domainRoot.stableStack[i] == a {
+			return true
+		}
+	}
+	if manualArena == a {
+		return true
+	}
+	p := uintptr(unsafe.Pointer(a))
+	for i := 0; i < len(domainRoot.sovRanges); i += 2 {
+		if p >= domainRoot.sovRanges[i] && p < domainRoot.sovRanges[i+1] {
+			return true
+		}
+	}
+	return false
+}
+
+// sovTrimTail releases dead records from the end of the data arena while each
+// one ends exactly at the current allocation watermark. Removing a record from
+// the table and lowering the region offset is all it does; live addresses do
+// not change.
+// SovRootScopeEnter starts a root scope: allocations made in the root arena
+// while it is open are tracked so a scope exit can reclaim the ones nothing
+// live points at. It answers the runtime's oldest lifetime hole
+// ("SovereignSetArena(RootArena()) makes every allocation permanent") without
+// freeing anything a live frame can still see: the mark decides, not a guess.
+func SovRootScopeEnter() {
+	RootScopeEnter()
+}
+
+// RootScopeEnter is SovRootScopeEnter's unpromoted form for hand-written
+// runtime code.
+func RootScopeEnter() {
+	if domainRoot == nil {
+		return
+	}
+	domainRoot.rootScope++
+}
+
+// SovRootScopeExit ends the scope. When the outermost scope closes, every group
+// that received root-arena allocations during the scope is queued for the
+// ordinary compaction groom, which walks from the receiver: garbage is
+// reclaimed and live data - including a connection record still referenced
+// from root - is kept. It deliberately does NOT trim: a trim believes the mark,
+// and an allocation made by an open (not yet returned) method is live-but-empty.
+// Compaction's mark runs at a safe point where every such frame is gone.
+func SovRootScopeExit() {
+	RootScopeExit()
+}
+
+func RootScopeExit() {
+	if domainRoot == nil {
+		return
+	}
+	if domainRoot.rootScope <= 0 {
+		return
+	}
+	domainRoot.rootScope--
+	if domainRoot.rootScope > 0 {
+		return
+	}
+	owners := domainRoot.sovRangeOwners
+	ranges := domainRoot.sovRanges
+	for i := 0; i < len(owners); i++ {
+		g := owners[i]
+		if g == nil || g.data == nil || g.released {
+			continue
+		}
+		if ranges[2*i] != g.data.regions[0].base {
+			continue
+		}
+		if g.rootScopeTouched == 0 {
+			continue
+		}
+		g.rootScopeTouched = 0
+		sovQueueCompact(g)
+	}
+}
+
+// sovMaxZeroRuns bounds how many separate zeroed windows one release may write
+// into a dead record. Runs are merged while they fit; past this, the rest of
+// the record is left as it is and simply stays allocated until compaction.
+const sovMaxZeroRuns = 4
+
+// sovZeroRuns zeroes, inside [lo, hi) of a dead record, every 8-byte window a
+// live record, a live slot or a pinned root-arena block points into. It
+// answers the one thing a free-in-place reclaim cannot know: a frame on the
+// stack may still hold a pointer into this record (parameters, locals and
+// temporaries are not enumerable), and reading it after the reclaim must still
+// see a valid pointer to zeroed bytes - a nil slice, an empty string - rather
+// than the recycled contents of that address.
+func sovZeroRuns(g *sovGroup, lo, hi uintptr) {
+	var runs [sovMaxZeroRuns][2]uintptr
+	n := int32(0)
+	add := func(a, b uintptr) {
+		if a < lo {
+			a = lo
+		}
+		if b > hi {
+			b = hi
+		}
+		if a >= b {
+			return
+		}
+		if n < sovMaxZeroRuns {
+			runs[n][0] = a
+			runs[n][1] = b
+			n++
+		}
+	}
+	keep := func(p, sz uintptr) {
+		if p == 0 || sz == 0 {
+			return
+		}
+		add(p&^7, (p+sz+7)&^7)
+	}
+	// Live records still hold their pointers: the frame that will run next
+	// dereferences them, and a dereference in the window would misread the
+	// released slot.
+	for i := int32(0); i < int32(len(g.recs)); i++ {
+		r := g.recs[i]
+		if r.extra || !r.live || r.size == 0 {
+			continue
+		}
+		if sovRangeOverlaps(r.dataAddr, r.dataAddr+r.size, lo, hi) {
+			keep(r.dataAddr, r.size)
+		}
+	}
+	// Stable slots are the runtime's own external references.
+	for i := 0; i < len(g.slots); i++ {
+		sl := g.slots[i]
+		if sl.dataPtr == nil {
+			continue
+		}
+		p := uintptr(sl.dataPtr)
+		if p >= lo && p < hi {
+			keep(p, 8)
+		}
+	}
+	for i := int32(0); i < n; i++ {
+		a := runs[i][0]
+		b := runs[i][1]
+		memzero(unsafe.Pointer(a), b-a)
+	}
+}
+
+// sovRangeOverlaps reports whether [a,b) intersects [c,d).
+func sovRangeOverlaps(a, b, c, d uintptr) (ok bool) {
+	return a < d && c < b
+}
+
+// sovRegionOf returns the data-arena region containing p, or 0.
+func sovRegionOf(a *Arena, p uintptr) (i int32) {
+	if a == nil {
+		return 0
+	}
+	for i = int32(0); i < a.nregions; i++ {
+		if p >= a.regions[i].base && p < a.regions[i].base+a.regions[i].cap {
+			return i
+		}
+	}
+	return 0
+}
+
+// sovReleaseDeadGroup releases the records of g that the full mark left dead,
+// in place, without moving a live byte:
+//
+//   - a whole dead arena region is unmapped;
+//   - a dead record whose extent reaches the allocation top of its region is
+//     reclaimed exactly (the top drops past it, every address below stays);
+//   - any other dead record is reclaimed by cloning its extent into a
+//     root-lifetime "extra" record and zeroing it, so allocation may hand the
+//     space out again while a stale pointer into it still reads zeroed bytes.
+//
+// It allocates nothing in the group's own arenas and unmaps nothing that holds
+// its own bookkeeping, because both would invalidate the very structures it
+// is walking. That is what makes it usable at a request boundary.
+func sovReleaseDeadGroup(g *sovGroup) {
+	da := g.data
+	if da == nil || da.nregions == 0 {
+		return
+	}
+	nr := da.nregions
+	base := []uintptr{:nr}
+	top := []uintptr{:nr}
+	keep := []bool{:nr}
+	for r := int32(0); r < nr; r++ {
+		base[r] = da.regions[r].base
+		top[r] = da.regions[r].base + da.regions[r].off
+		// Region 0 always survives: it carries the region registry this walk is
+		// reading, and the group's own struct when the receiver lives there.
+		keep[r] = r == 0
+	}
+	released := []bool{:int32(len(g.recs))}
+	for pass := 0; pass < 6; pass++ {
+		moved := false
+		for i := int32(0); i < int32(len(g.recs)); i++ {
+			rec := g.recs[i]
+			if rec.extra || rec.live || released[i] || rec.size == 0 {
+				continue
+			}
+			r := rec.region
+			if r < 0 || r >= nr || !keep[r] {
+				r = sovRegionOfIdx(base, top, rec.dataAddr)
+			}
+			if r < 0 || !keep[r] {
+				continue
+			}
+			sz := align(rec.size)
+			// Anything not yet accounted for above a dead block keeps it from
+			// reaching the top; the released set is checked because a block
+			// released in this pass no longer counts.
+			if rec.dataAddr+sz != top[r] {
+				continue
+			}
+			top[r] -= sz
+			released[i] = true
+			moved = true
+			sovTrimmedBytes += uint64(rec.size)
+		}
+		if !moved {
+			break
+		}
+	}
+	// Whole dead regions: no surviving block is inside one, and the walk has
+	// already dropped every dead top block, so a region whose top reached its
+	// data offset is empty.
+	for r := int32(1); r < nr; r++ {
+		occupied := false
+		for i := int32(0); i < int32(len(g.recs)); i++ {
+			rec := g.recs[i]
+			// Released extents are gone; live blocks and zeroed extents still
+			// hold data that must not be unmapped out from under a reader.
+			if released[i] || rec.live || rec.extra {
+				continue
+			}
+			if rec.dataAddr >= base[r] && rec.dataAddr < top[r] {
+				occupied = true
+				break
+			}
+		}
+		if occupied {
+			continue
+		}
+		keep[r] = false
+	}
+	// Rebuild the region table from the surviving entries, then unmap the
+	// dropped ones. Field copies happen before any unmap: the slice header
+	// lives inside region 0, but a dropped region's fields are read here and
+	// only then released.
+	dropped := int32(0)
+	for r := int32(0); r < nr; r++ {
+		if keep[r] {
+			if dropped != r {
+				da.regions[dropped].base = base[r]
+				da.regions[dropped].off = top[r] - base[r]
+				da.regions[dropped].cap = da.regions[r].cap
+			} else {
+				da.regions[r].off = top[r] - base[r]
+			}
+			dropped++
+			continue
+		}
+		nb := base[r]
+		nc := da.regions[r].cap
+		da.regions[r].base = 0
+		da.regions[r].off = 0
+		da.regions[r].cap = 0
+		RecordRegionFree(da.scope, 1, nc)
+		sysUnmap(unsafe.Pointer(nb), nc)
+	}
+	da.nregions = dropped
+	// Rebuild the record table: live records, released extents cloned to root
+	// lifetime, and zeroed extents for the interior dead blocks.
+	nrec := int32(0)
+	for i := int32(0); i < int32(len(g.recs)); i++ {
+		rec := g.recs[i]
+		if rec.extra && !released[i] {
+			g.recs[nrec] = rec
+			nrec++
+			continue
+		}
+		if rec.live && !released[i] {
+			g.recs[nrec] = rec
+			nrec++
+			continue
+		}
+		er := (*sovRecord)(sovRootAlloc(unsafe.Sizeof(sovRecord{})))
+		er.dataAddr = rec.dataAddr
+		er.size = rec.size
+		er.region = rec.region
+		er.extra = true
+		g.recs[nrec] = er
+		nrec++
+		if released[i] {
+			continue
+		}
+		if liveCover(g, rec.dataAddr, rec.dataAddr+rec.size) {
+			continue
+		}
+		sovZeroRuns(g, rec.dataAddr, rec.dataAddr+rec.size)
+		sovTrimmedBytes += uint64(rec.size)
+	}
+	g.recs = resize(g.recs, nrec)
+	g.recsSorted = false
+	g.allocBytes = 0
+	g.liveBytes = 0
+	for i := int32(0); i < int32(len(g.recs)); i++ {
+		rec := g.recs[i]
+		g.allocBytes += rec.size
+		if rec.live {
+			g.liveBytes += rec.size
+		}
+	}
+}
+
+// sovRegionOfIdx finds the region containing p in the snapshot arrays.
+func sovRegionOfIdx(base, top []uintptr, p uintptr) (r int32) {
+	for r = int32(0); r < int32(len(base)); r++ {
+		if p >= base[r] && p < top[r] {
+			return r
+		}
+	}
+	return -1
+}
+
+
+// liveCover reports whether a live record of g overlaps [lo,hi).
+func liveCover(g *sovGroup, lo, hi uintptr) (ok bool) {
+	for i := int32(0); i < int32(len(g.recs)); i++ {
+		rec := g.recs[i]
+		if rec.extra || !rec.live || rec.size == 0 {
+			continue
+		}
+		if sovRangeOverlaps(rec.dataAddr, rec.dataAddr+rec.size, lo, hi) {
+			return true
+		}
+	}
+	return false
+}
+
+// SovReleaseDead reclaims the dead records of the group whose receiver is
+// recv, in place, without copying live data - so a frame, a helper or a cache
+// that holds a pointer into a live record is never invalidated, which is the
+// one thing compaction cannot promise. It is the primitive a long-lived engine
+// needs: the owner says "the request is over", and the group's per-call
+// garbage goes while its caches and index views stay.
+//
+// It is safe to call at a method boundary (not mid-allocation): it walks from
+// the receiver, zeroes stale extents rather than unmapping them, and never
+// moves a live byte.
+func SovReleaseDead(recv unsafe.Pointer) (freed uintptr) {
+	if recv == nil || domainRoot == nil {
+		return 0
+	}
+	g := sovLookup(recv)
+	if g == nil || g.released || g.data == nil || g.compacting || g.cycleActive {
+		return 0
+	}
+	if g.inRelease != 0 {
+		return 0
+	}
+	if sovArenaBorrowed(g.data) || sovBorrowedReceiverIn(g) {
+		return 0
+	}
+	g.inRelease = 1
+	defer func() { g.inRelease = 0 }()
+	before := g.allocBytes
+	sovFullMark(g)
+	sovReleaseDeadGroup(g)
+	if before > g.allocBytes {
+		freed = before - g.allocBytes
+	}
+	return freed
+}
+
+// sovTrimTail releases dead records that sit at the top of the data arena, and
+// with them the trailing empties of the top region. It stops at the first live
+// record: everything below that is covered by live allocations. It is not a
+// substitute for compaction (an interior dead record stays), but it is free -
+// no copy, no relocation, so no external holder can be invalidated - which is
+// what makes it usable on every group at every safe point.
+func sovTrimTail(g *sovGroup) {
+	da := g.data
+	for len(g.recs) > 0 {
+		rec := g.recs[len(g.recs)-1]
+		if rec.live {
+			break
+		}
+		li := da.nregions - 1
+		if li < 0 {
+			break
+		}
+		base := da.regions[li].base
+		off := da.regions[li].off
+		sz := align(rec.size)
+		if rec.dataAddr+sz != base+off {
+			break
+		}
+		da.regions[li].off = off - sz
+		g.recs = resize(g.recs, len(g.recs)-1)
+		if g.allocBytes >= rec.size {
+			g.allocBytes -= rec.size
+		} else {
+			g.allocBytes = 0
+		}
+		sovTrimmedBytes += uint64(rec.size)
+	}
+	// Empty trailing regions are holes in the address space, not capacity: a
+	// group that grew a 64MB region for a burst and then trimmed back to its
+	// first region should hand the 64MB back, or RSS keeps the peak forever.
+	r := da.nregions - 1
+	for r > 0 && da.regions[r].off == arenaDataOffset() {
+		nb := da.regions[r].base
+		nc := da.regions[r].cap
+		da.regions[r].base = 0
+		da.regions[r].off = 0
+		da.regions[r].cap = 0
+		da.nregions = r
+		r--
+		RecordRegionFree(da.scope, 1, nc)
+		sysUnmap(unsafe.Pointer(nb), nc)
+	}
 }
 
 // sovDequeuePending unlinks the head group.
@@ -1043,6 +1608,18 @@ func sovReleaseArena(a *Arena) {
 	if a == nil {
 		return
 	}
+	// Unregister BEFORE any of it runs: arenaReleaseGroups below releases
+	// nested groups, and a release that scans the range table while this
+	// arena's base is still registered finds THIS group's records and frees
+	// its arenas a second time - the data arena's `regions` slice lives in the
+	// arena being unmapped, so the second pass read it as garbage. (Measured as
+	// a fault at the top of sovReleaseDeadGroup's region loop, right after the
+	// first unmap.)
+	for i := int32(0); i < a.nregions; i++ {
+		if a.sovereign != 0 {
+			sovRangeUnregister(a.regions[i].base)
+		}
+	}
 	// A data arena's release is an exit like any other, so it runs the SAME
 	// teardown as the other three: receivers allocated inside this arena are
 	// dead once it is released, and their groups go with it. This was the one
@@ -1055,11 +1632,6 @@ func sovReleaseArena(a *Arena) {
 	// Measured: ~1 MB of root arena per CreateCertificate, 9.5 MB -> 112.9 MB
 	// over 100 calls, and 4,272 live groups after six.
 	arenaReleaseGroups(a)
-	for i := int32(0); i < a.nregions; i++ {
-		if a.sovereign != 0 {
-			sovRangeUnregister(a.regions[i].base)
-		}
-	}
 	arenaScopeFreed(a.scope, uintptr(a.alloc))
 	a.alloc = 0
 	if a.nregions > 1 {
@@ -1248,6 +1820,7 @@ func sovAddRec(g *sovGroup, dataAddr, size uintptr, typeDesc *RawType) {
 	rec := (*sovRecord)(ArenaAlloc(g.allocTbl, unsafe.Sizeof(sovRecord{})))
 	rec.dataAddr = dataAddr
 	rec.size = size
+	rec.region = sovRegionOf(g.data, dataAddr)
 	rec.typeDesc = typeDesc
 	rec.batchID = g.curBatch
 	rec.live = true
@@ -1256,7 +1829,18 @@ func sovAddRec(g *sovGroup, dataAddr, size uintptr, typeDesc *RawType) {
 	}
 	g.recs = push(g.recs, rec)
 	g.allocBytes += size
+	g.dirtyBytes += size
 	g.liveBytes += size
+	// A method on a receiver stored in the ROOT arena allocates into the
+	// receiver's group while root is the current frame: those bytes were
+	// permanent before there was a root scope. While a scope is open the group
+	// is flagged once, so the scope exit can queue it for the compaction groom,
+	// which reclaims what the receiver no longer points at.
+	if domainRoot != nil && domainRoot.rootScope > 0 && g.rootScopeTouched == 0 {
+		if frame := CurrentArena(); frame != nil && frame == trueRootArena() {
+			g.rootScopeTouched = 1
+		}
+	}
 }
 
 // codecSovereignAlloc allocates size bytes in the receiver's data arena
@@ -1302,6 +1886,11 @@ func sovFind(g *sovGroup, p uintptr) (r *sovRecord) {
 		if p < rec.dataAddr {
 			hi = mid - 1
 		} else if p >= rec.dataAddr+rec.size {
+			lo = mid + 1
+		} else if rec.extra {
+			// A released extent: it is in the table for pointer validation, not
+			// as a live record. The address may now belong to a new allocation
+			// recorded further along, so keep looking.
 			lo = mid + 1
 		} else {
 			return rec
@@ -1393,9 +1982,441 @@ func sovMarkBlock(g *sovGroup, p unsafe.Pointer) {
 	}
 	rec.live = true
 	g.liveBytes += rec.size
-	if rec.typeDesc != nil {
-		sovWalkValue(g, p, rec.typeDesc)
+	if rec.typeDesc == nil {
+		sovNodescRecs++
+		sovNodescBytes += uint64(rec.size)
+		if sovNodescHasPtr(g, rec) {
+			sovNodescPtrRecs++
+		}
 	}
+	if rec.typeDesc != nil {
+		// Walk from the record start: p may be an interior pointer (slice
+		// data, struct field) and a type walk from there would apply field
+		// offsets to the wrong base.
+		sovWalkValue(g, unsafe.Pointer(rec.dataAddr), rec.typeDesc)
+	}
+}
+
+// sovRangeHasPtr reports whether any word in [base,end) points at a LIVE block
+// of g, and returns the first such word's address so the caller can name the
+// holder. A word naming a block this group has dropped is recycled bytes: it
+// cannot be a holder of anything, and pinning on it stops compaction forever
+// (measured on the relay: a turn arena's stale header word pinned the top group
+// at ext=2 with the target record already dead).
+func sovRangeHasPtr(g *sovGroup, base, end uintptr) (ok bool, at uintptr) {
+	if g == nil || g.data == nil {
+		return false, 0
+	}
+	p := (base + 7) &^ 7
+	for p+8 <= end {
+		v := *(*uintptr)(unsafe.Pointer(p))
+		if v != 0 && sovRangeOwner(v) == g {
+			rec := sovFind(g, v)
+			if rec != nil && rec.live {
+				return true, p
+			}
+		}
+		p += 8
+	}
+	return false, 0
+}
+
+// sovExternalRef reports whether a holder the compaction cannot rewrite - the
+// stack, a live fn arena, or another group's records - points into g. Marking
+// such a record live keeps its bytes, but relocation changes its address and
+// the holder still names the old one (a stale map header faults in
+// hashmapContentGet). Compaction must refuse instead.
+//
+// The ext* variables are diagnostics: extWhere says which kind of holder, and
+// for a fn arena sovExtArena/sovExtOff name the arena slot and the word offset
+// inside its region, while sovExtRecSize/sovExtRecLive say whether the word
+// names a record that is still live. A word that names nothing (dead space, or
+// no record at all) is recycled bytes, not a holder.
+var sovExtWhere int32
+var sovExtArena int32
+var sovExtOff uintptr
+var sovExtRecSize int32
+var sovExtRecLive int32
+var sovExtWord uintptr
+var sovExtFnTop int32
+var sovExtArenaOff uintptr
+var sovExtArenaRegs int32
+// sovExtRecv and sovExtFieldOff identify the holder when the pin comes from
+// another group: the holder group's receiver address and the byte offset inside
+// the holder record. The field NAME is not kept: the descriptor walk produces it
+// during the drain, and printing it from a later turn read a released arena -
+// that crash was the diagnostic's own.
+var sovExtRecv uintptr
+var sovExtFieldOff uintptr
+// The holder record's own descriptor. A record whose type contains no pointers
+// is a byte buffer (a frame, a key copy, a serialized event): a word inside it
+// that happens to land in a group's data is payload, not a reference, and must
+// not pin that group.
+var sovExtHoldKind int32
+var sovExtHoldSize int32
+var sovExtHoldTyped int32
+
+// sovNameExtField records which field of the holder record contains the word at
+// offset off, so a cross-group pin names the reference instead of a byte offset.
+func sovNameExtField(td *RawType, off uintptr) {
+	sovExtFieldOff = 0
+	if td == nil || td.Kind() != KindStruct {
+		return
+	}
+	nf := td.NumField()
+	for i := int32(0); i < nf; i++ {
+		fo := td.StructFieldOffset(i)
+		sz := uintptr(8)
+		ft := td.StructFieldType(i)
+		if ft != nil {
+			sz = ft.Size()
+		}
+		if off >= fo && off < fo+sz {
+			sovExtFieldOff = off - fo
+			return
+		}
+	}
+}
+
+var sovExtTdKind int32
+var sovExtTdSize uintptr
+
+func sovExtNote(g *sovGroup, p uintptr) {
+	v := *(*uintptr)(unsafe.Pointer(p))
+	sovExtWord = v
+	sovExtRecSize = 0
+	sovExtRecLive = 0
+	sovExtTdKind = 0
+	sovExtTdSize = 0
+	rec := sovFind(g, v)
+	if rec != nil {
+		sovExtRecSize = int32(rec.size)
+		if rec.live {
+			sovExtRecLive = 1
+		}
+		td := rec.typeDesc
+		if td != nil {
+			sovExtTdKind = int32(td.Kind())
+			sovExtTdSize = td.Size()
+		}
+	}
+}
+
+// sovRootLiveRef reports whether the root arena holds a word naming a live block
+// of g. Root is the one holder the group loop cannot see, and it is where the
+// relay keeps its connection records: those records carry map headers, filters
+// and buffers allocated while a receiver method had the group borrowed, so the
+// bytes are group-owned but the pointer is in root. Compaction would move them
+// and leave root naming retired memory.
+func sovRootLiveRef(g *sovGroup) (ok bool) {
+	if g == nil || g.data == nil {
+		return false
+	}
+	a := trueRootArena()
+	if a == nil {
+		return false
+	}
+	for r := int32(0); r < a.nregions; r++ {
+		base := a.regions[r].base
+		end := base + a.regions[r].off
+		p := (base + 7) &^ 7
+		for p+8 <= end {
+			v := *(*uintptr)(unsafe.Pointer(p))
+			if v != 0 && sovRangeOwner(v) == g {
+				rec := sovFind(g, v)
+				if rec != nil && rec.live {
+					return true
+				}
+			}
+			p += 8
+		}
+	}
+	return false
+}
+
+var sovRootTick int32
+
+// sovDrainTick counts drain calls; sovBackoffUntil skips the drain while a pin
+// or a held group is expected to persist, so the holder walk is not paid on
+// every event-loop turn.
+var sovDrainTick int32
+var sovBackoffUntil int32
+
+// sovCeil is the frame depth at the caller's safe point, and sovCeilSet says the
+// caller declared one. Everything above it is sweep scratch.
+var sovCeil int32
+var sovCeilSet bool
+
+// SovScanCeil records the current frame depth as the compaction sweep ceiling.
+// Call it at the safe point, immediately before SovDrainCompactions, so the
+// sweep does not treat its own frames as holders of the group it is about to
+// move.
+func SovScanCeil() {
+	sovCeil = domainRoot.fnTop
+	sovCeilSet = true
+}
+
+func sovExternalRef(g *sovGroup) (ok bool) {
+	if g == nil || g.data == nil || domainRoot == nil {
+		return false
+	}
+	// The root arena is a holder too, and the one the group loop cannot see.
+	// Scanning it costs a walk of the whole root region (tens of MB), so a group
+	// that is big enough to be worth compacting is checked once every 512
+	// attempts and between checks the previous answer stands: a group that was
+	// referenced from root stays pinned until a fresh walk says otherwise.
+	sovRootTick++
+	if g.liveBytes > (1<<20) && sovRootTick%512 == 0 {
+		g.rootRef = sovRootLiveRef(g)
+	}
+	if g.rootRef {
+		sovExtWhere = 4
+		return true
+	}
+	// Stack scan omitted: the event loop's long-lived frame reuses slots that
+	// held handler-era pointers, so a loop-top drain sees permanent false
+	// positives. No handler frame is live at that point; fn-arena and
+	// other-group references are the holders that survive a turn.
+	//
+	// Frames pushed at or after the safe point are the sweep's own scratch: the
+	// record table it sorts, the slices it builds while deciding. They are gone
+	// by the time the sweep returns, so a pointer they hold into g is not a
+	// holder - and treating it as one pinned the relay's DB group at 600 MB
+	// with comp=2 for the life of the process. SovScanCeil records where the
+	// safe point is; without it every frame is scanned, which is safe but may
+	// pin.
+	top := domainRoot.fnTop
+	if sovCeilSet && sovCeil < top {
+		top = sovCeil
+	}
+	for i := int32(0); i <= top && i < fnStackMax; i++ {
+		a := domainRoot.fnStack[i]
+		if a == nil || a == g.data || a.sovereign != 0 {
+			continue
+		}
+		// The arena holding the receiver struct is not an external holder: the
+		// receiver's own fields are the root graph and compaction rebases them.
+		// Scanning it made every group permanently "externally referenced"
+		// (root holds the Server/sub struct), so nothing ever compacted.
+		if g.recv != nil && sovInArena(a, uintptr(g.recv)) {
+			continue
+		}
+		for r := int32(0); r < a.nregions; r++ {
+			base := a.regions[r].base
+			// Skip the arena's own header. Region 0 carries the registry of
+			// arenaMaxRegions entries, and ArenaReset leaves the entries past
+			// nregions holding the base addresses of regions it has since
+			// unmapped. Those addresses are recycled by later mappings, so a
+			// stale entry can land inside a sovereign group's data and pin that
+			// group forever (measured: ext=2 from arena slot 3, word offset 3152
+			// in a registry 3984 bytes long, target record dead).
+			lo := base
+			if r == 0 {
+				lo = base + arenaDataOffset()
+			}
+			hit, at := sovRangeHasPtr(g, lo, base+a.regions[r].off)
+			if hit {
+				sovExtWhere = 2
+				sovExtArena = i
+				sovExtOff = at - base
+				sovExtFnTop = domainRoot.fnTop
+				sovExtArenaOff = a.regions[0].off
+				sovExtArenaRegs = a.nregions
+				sovExtNote(g, at)
+				return true
+			}
+		}
+	}
+	for i := 0; i < len(domainRoot.sovRangeOwners); i++ {
+		o := domainRoot.sovRangeOwners[i]
+		if o == nil || o == g || o.released || o.data == nil {
+			continue
+		}
+		if domainRoot.sovRanges[2*i] != o.data.regions[0].base {
+			continue
+		}
+		for j := int32(0); j < int32(len(o.recs)); j++ {
+			rec := o.recs[j]
+			if rec == nil || !rec.live || rec.size == 0 {
+				continue
+			}
+			// A record whose descriptor proves it holds no pointers is a byte
+			// buffer: a word inside a serialized frame or a key copy that
+			// happens to land in g's data is payload, not a reference, and
+			// pinning on it stops compaction forever (that is what kept the
+			// relay's Server group at tens of MB). An unknown descriptor stays
+			// conservative.
+			if rec.typeDesc != nil && !sovTypeHasPtrs(rec.typeDesc) {
+				continue
+			}
+			sovExtHoldKind = 0
+			sovExtHoldSize = int32(rec.size)
+			sovExtHoldTyped = 0
+			if rec.typeDesc != nil {
+				sovExtHoldKind = int32(rec.typeDesc.Kind())
+				if sovTypeHasPtrs(rec.typeDesc) {
+					sovExtHoldTyped = 1
+				}
+			}
+			hit, at := sovRangeHasPtr(g, rec.dataAddr, rec.dataAddr+rec.size)
+			if hit {
+				sovExtWhere = 3
+				sovExtArena = i
+				sovExtOff = at - rec.dataAddr
+				sovExtRecv = uintptr(unsafe.Pointer(o.recv))
+				sovNameExtField(rec.typeDesc, at-rec.dataAddr)
+				sovExtNote(g, at)
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// SovPrintStackWords prints up to n return addresses from the current thread's
+// stack: a word whose fifth preceding byte is the x86-64 `call rel32` opcode
+// (0xE8) is the address a call left behind, so it names a caller frame. The
+// filter matters - an unfiltered word scan prints recycled stack garbage, which
+// is why the loop-top external scan does not use one.
+func SovPrintStackWords(n int32) {
+	if stackTop == 0 {
+		return
+	}
+	sp := getCurrentStackPointer()
+	if sp == 0 || sp >= stackTop {
+		return
+	}
+	p := (sp + 7) &^ 7
+	c := int32(0)
+	for p+8 <= stackTop && c < n {
+		v := *(*uintptr)(unsafe.Pointer(p))
+		if v >= 0x100000 && v < 0x800000 {
+			if *(*uint8)(unsafe.Pointer(v - 5)) == 0xE8 {
+				printstring(" ")
+				printuint64(uint64(v))
+				c++
+			}
+		}
+		p += 8
+	}
+	printstring("\n")
+}
+
+// sovMarkStack treats every word of the current thread's active stack as a
+// possible interior pointer into g. Parameters and locals are the roots the
+// type-descriptor walk cannot see; a conservative stack scan is the safe way
+// to include them. False positives keep a dead block, which costs memory but
+// cannot fault; a missed one is a use-after-move.
+func sovMarkStack(g *sovGroup) {
+	if g == nil || g.data == nil || stackTop == 0 {
+		return
+	}
+	sp := getCurrentStackPointer()
+	if sp == 0 || sp >= stackTop {
+		return
+	}
+	p := (sp + 7) &^ 7
+	for p+8 <= stackTop {
+		w := *(*uintptr)(unsafe.Pointer(p))
+		if w != 0 && sovRangeOwner(w) == g {
+			sovMarkBlock(g, unsafe.Pointer(w))
+		}
+		p += 8
+	}
+}
+
+// sovMarkExternalGroups walks the live records of every other group and marks
+// any block of g they point into. Helper objects (pipeline, ACL checker, index
+// views) keep such pointers outside g's receiver graph; without this walk a
+// compaction moves data they still name.
+func sovMarkExternalGroups(g *sovGroup) {
+	if g == nil || g.data == nil || domainRoot == nil {
+		return
+	}
+	for i := 0; i < len(domainRoot.sovRangeOwners); i++ {
+		o := domainRoot.sovRangeOwners[i]
+		if o == nil || o == g || o.released || o.data == nil {
+			continue
+		}
+		if domainRoot.sovRanges[2*i] != o.data.regions[0].base {
+			continue
+		}
+		// Word scan, not a typed recursion: one level of field/array contents
+		// is enough to catch a helper's cached interior pointer, and it cannot
+		// cycle through other groups' graphs.
+		for j := int32(0); j < int32(len(o.recs)); j++ {
+			rec := o.recs[j]
+			if rec == nil || !rec.live || rec.size == 0 {
+				continue
+			}
+			p := rec.dataAddr
+			endw := rec.dataAddr + rec.size
+			for w := p; w+8 <= endw; w += 8 {
+				v := *(*uintptr)(unsafe.Pointer(w))
+				if v != 0 && sovRangeOwner(v) == g {
+					sovMarkBlock(g, unsafe.Pointer(v))
+				}
+			}
+		}
+	}
+}
+
+// sovSkippedForeign counts bytes fields whose backing array lives outside the
+// group (a temp arena, a decode buffer). Diagnostics only.
+var sovSkippedForeign int32
+
+// sovNodescRecs and sovNodescBytes count the LIVE records of the group being
+// compacted that carry no type descriptor. A record without one is a black
+// hole in the mark: sovMarkBlock marks the record and stops, so everything
+// reachable only through it is counted dead and the copy pass frees it. The
+// numbers say whether that hole exists on a real receiver - and how much of its
+// live set hangs behind it - instead of leaving it to inference.
+var sovNodescRecs int32
+var sovNodescBytes uint64
+
+// sovNodescPtrRecs counts the descriptor-less records of the group being marked
+// that hold a word naming LIVE data of their OWN group. That is the armed
+// form of the hole: the mark marks the record and cannot know which of its
+// words are pointers, so the block that word names is counted dead and the copy
+// pass frees it. This is the difference between "untyped and harmless" and
+// "untyped and a dangling pointer".
+var sovNodescPtrRecs int32
+
+// sovNodescHasPtr is a word scan, deliberately conservative: with no type
+// descriptor there is no field map to apply, and a false positive here costs a
+// report field, while a false negative would hide the very defect the counter
+// exists to find.
+func sovNodescHasPtr(g *sovGroup, rec *sovRecord) (ok bool) {
+	p := rec.dataAddr
+	end := rec.dataAddr + rec.size
+	for p+8 <= end {
+		w := *(*uintptr)(unsafe.Pointer(p))
+		if w != 0 {
+			if o := sovRangeOwner(w); o == g {
+				if sovFind(g, w) != nil {
+					return true
+				}
+			}
+		}
+		p += 8
+	}
+	return false
+}
+
+// sovInReadableArena reports whether p lies in a mapped arena. Unlike
+// sovReadable it does not consult the sovereign range table, because compaction
+// rebuilds that table while it is walking and a mid-cycle lookup is not a
+// lifetime test.
+func sovInReadableArena(p uintptr) (ok bool) {
+	if p == 0 || domainRoot == nil {
+		return false
+	}
+	for i := domainRoot.fnTop; i >= 0; i-- {
+		if sovAddrInArena(domainRoot.fnStack[i], p) {
+			return true
+		}
+	}
+	return sovInSovereignDataArena(p)
 }
 
 // sovWalkValue marks every block reachable through the value at p.
@@ -1448,6 +2469,15 @@ func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 		v := *(*unsafe.Pointer)(p)
 		if v != nil {
 			if g.refTbl != nil && sovInArena(g.refTbl, uintptr(v)) {
+				// A slot pointer names the SLOT, and the slot's target is the
+				// only thing a relocation has to follow. Reading a slot that
+				// the release pass has already retired is a dereference of
+				// freed memory - the fault seen in sovWalkValue1 on the DB
+				// domain - so the slot table is treated as unreadable rather
+				// than trusted here.
+				if !sovInArena(g.refTbl, uintptr(v)) {
+					return
+				}
 				v = (*sovSlot)(v).dataPtr
 			}
 			sovMarkBlock(g, v)
@@ -1458,7 +2488,7 @@ func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 			// the field's element type. Depth-bounded to keep compile-arena
 			// cycles (parent/prog chains) from unbounded traversal.
 			et := td.Elem()
-			if et != nil && sovTypeHasPtrs(et) && !sovInArena(g.data, uintptr(v)) && sovDepth < sovMaxDepth && sovReadable(uintptr(v)) {
+			if et != nil && sovTypeHasPtrs(et) && !sovInArena(g.data, uintptr(v)) && sovDepth < sovMaxDepth && sovInReadableArena(uintptr(v)) {
 				sovDepth++
 				sovWalkValue(g, v, et)
 				sovDepth--
@@ -1469,9 +2499,27 @@ func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 		// array, and the next push or | writes straight into it. Reclaiming
 		// that array out from under a resliced-to-zero buffer is a write into
 		// freed memory.
+		//
+		// The block is marked whether or not the bytes live in g, because a
+		// backing array in the calling frame's arena is still referenced by
+		// this field and will be COPIED into g by the next store-back. Only the
+		// WALK is confined to g's own blocks: a struct descriptor whose bytes
+		// sit in another arena (a temp arena, a decode buffer) does not contain
+		// pointers, and walking it with a real struct descriptor used to chase
+		// every word of raw payload whose value happened to land inside the
+		// group's address range - each hit marking a whole foreign record live,
+		// so the group's live set grew to what looked like hundreds of
+		// megabytes per second and never compacted.
 		s := *(*_string)(p)
 		if s.ptr != nil {
+			own := sovInArena(g.data, uintptr(unsafe.Pointer(s.ptr)))
+			if s.length > 0 && !own {
+				sovSkippedForeign++
+			}
 			sovMarkBlock(g, unsafe.Pointer(s.ptr))
+			if !own {
+				return
+			}
 		}
 	case KindSlice:
 		s := *(*_string)(p)
@@ -1621,6 +2669,21 @@ func codecSovereignEndCall(g *sovGroup) {
 		} else if g.allocBytes > g.liveBytes && da.regions[act].off+slack > da.regions[act].cap {
 			sovQueueCompact(g)
 		}
+		// Volume pressure, independent of where the last region happens to be:
+		// a group that keeps allocating dead per-call scratch must visit the
+		// groom even when its arena has slack left. The groom is a full copy of
+		// the live set, so it is only worth paying when the garbage is a
+		// meaningful share: a group that is simply big and live (the relay's
+		// Server group during a subscription burst) would otherwise be copied
+		// end to end every few megabytes of new work, which is quadratic and
+		// starves the event loop of exactly the throughput it is being measured
+		// on.
+		if g.dirtyBytes > (4<<20) {
+			g.dirtyBytes = 0
+			if g.allocBytes > g.liveBytes+(g.liveBytes>>2) {
+				sovQueueCompact(g)
+			}
+		}
 	}
 }
 
@@ -1628,12 +2691,16 @@ func codecSovereignEndCall(g *sovGroup) {
 // starts dead and the walk from the receiver's root fields marks what is
 // actually reachable. Runs only at compaction.
 func sovFullMark(g *sovGroup) {
+	g.dirtyBytes = 0
 	sovDepth = 0
 	sovWalkDepth = 0
 	for i := int32(0); i < int32(len(g.recs)); i++ {
 		g.recs[i].live = false
 	}
 	g.liveBytes = 0
+	sovNodescRecs = 0
+	sovNodescBytes = 0
+	sovNodescPtrRecs = 0
 	// Roots: the receiver's fields (or the receiver value itself for
 	// non-struct receivers such as named slice types).
 	sovMarkReceiverRoots(g, g.recv, g.recvTypeDesc)
@@ -1647,6 +2714,8 @@ func sovFullMark(g *sovGroup) {
 	// The frame that is parked in the select published its pointer slots; they
 	// are roots even when only the frame names the block.
 	sovMarkFrameRoots(g)
+	sovMarkStack(g)
+	sovMarkExternalGroups(g)
 }
 
 // sovMarkFrameRoots marks what the selecting frame's root map names. A slice
@@ -1953,8 +3022,8 @@ func sovCycleOrder(g *sovGroup) {
 }
 
 // codecSovereignCompact starts a cycle when none is active, or continues one.
-func codecSovereignCompact(g *sovGroup, needed uintptr) {
-	if g == nil || g.data == nil || g.escaped || g.compacting {
+func codecSovereignCompact(g *sovGroup, needed uintptr, marked bool) {
+	if g == nil || g.data == nil || g.escaped > 0 || g.compacting {
 		return
 	}
 	if g.cycleActive {
@@ -1969,15 +3038,19 @@ func codecSovereignCompact(g *sovGroup, needed uintptr) {
 	// retired memory - the crash seen in the store's WAL replay.
 	// SovDrainCompactions tests for this before calling and leaves the group
 	// queued, so returning here means the caller skipped the test; it is not a
-	// permanent opt-out the way `escaped` is.
+	// permanent opt-out the way a live escape lease is.
 	if sovArenaBorrowed(g.data) || sovBorrowedReceiverIn(g) {
 		return
 	}
 	g.compacting = true
 	// Liveness was deferred by codecSovereignEndCall: recompute the full live
 	// set from the receiver's root fields and the selecting frame's roots now
-	// that no batch is in flight.
-	sovFullMark(g)
+	// that no batch is in flight. A caller that already marked (the compaction
+	// drain, which tests external references against live records first) says
+	// so and the walk is not repeated.
+	if !marked {
+		sovFullMark(g)
+	}
 	live := g.liveBytes
 	newCap := live + g.batchMax + needed + 65536
 	nd := sovNewArena(newCap)
@@ -2266,6 +3339,14 @@ func sovRebaseMap(g *sovGroup, m *hashmap, td *RawType, nd *Arena) {
 	if m == nil {
 		return
 	}
+	// The map remembers the arena it was born in, and compaction retires that
+	// arena: leaving the field pointing at it made every later Set copy its key
+	// bytes into freed (then recycled) memory, so the stored key dangled and a
+	// later lookup faulted while hashing it. The new arena is the head of the
+	// same lifetime.
+	if m.owner == g.data {
+		m.owner = nd
+	}
 	if m.buckets != nil && !sovInArena(nd, uintptr(m.buckets)) {
 		m.buckets = sovRebasePtr(g, uintptr(m.buckets), nd)
 	}
@@ -2458,6 +3539,546 @@ func SovereignRestoreArena(a *Arena) {
 	domainRoot.fnBorrow[i>>6] &^= 1 << (i & 63)
 	domainRoot.fnStack[i] = nil
 	domainRoot.fnTop = i - 1
+}
+
+// SovereignDepth is the current function/borrow stack top for this domain. A
+// method's borrow is pushed on top of the frame arena, so a depth that grows
+// with calls means an epilogue did not restore. Diagnostics only.
+func SovereignDepth() (n int32) {
+	if domainRoot == nil {
+		return 0
+	}
+	return domainRoot.fnTop
+}
+
+// SovereignSlotArena returns the arena at stack slot i (zero for empty).
+func SovereignSlotArena(i int32) (p uintptr) {
+	if domainRoot == nil || i < 0 || i > domainRoot.fnTop {
+		return 0
+	}
+	return uintptr(unsafe.Pointer(domainRoot.fnStack[i]))
+}
+
+// SovereignSlotBorrowed reports whether slot i is a sovereign borrow rather
+// than a function frame.
+func SovereignSlotBorrowed(i int32) (b bool) {
+	if domainRoot == nil || i < 0 || i > domainRoot.fnTop {
+		return false
+	}
+	return domainRoot.fnBorrow[i>>6]&(1<<(i&63)) != 0
+}
+
+// SovPendingArena is the data arena of the group at the head of the
+// compaction queue, or zero when nothing is pending. Diagnostics only.
+func SovPendingArena() (p uintptr) {
+	if sovPendingHead == nil || sovPendingHead.data == nil {
+		return 0
+	}
+	return uintptr(unsafe.Pointer(sovPendingHead.data))
+}
+
+// sovLookup returns the group keyed by a receiver address, or nil.
+func sovLookup(recv unsafe.Pointer) (g *sovGroup) {
+	m := domainRoot.sovereignRoot
+	if m == nil || recv == nil {
+		return nil
+	}
+	keyv := recv
+	h := m.keyHash(unsafe.Pointer(&keyv), 8, m.seed)
+	var av unsafe.Pointer
+	if !hashmapGet(m, unsafe.Pointer(&keyv), unsafe.Pointer(&av), 8, h) || av == nil {
+		return nil
+	}
+	return (*sovGroup)(av)
+}
+
+// SovUnescape drops one escape lease on the group whose receiver is recv and
+// queues it for compaction when the last one goes. An escape lease is taken
+// when a stable alias into the group's data is handed to a holder the runtime
+// cannot follow (SovEscapeLease); the holder drops it when it is finished -
+// a worker that has encoded and discarded a query result, a request that has
+// written its response. That call is the "the owner was severed" signal the
+// groom needs, and it is what turns an uncollectable group back into a
+// collectable one.
+func SovUnescape(recv unsafe.Pointer) {
+	sovEscapeDrop(recv)
+}
+
+// SovEscapeLease takes one escape lease on the group whose receiver is recv.
+// It is the runtime's answer to "this pointer will be held by someone I cannot
+// scan": mark the group uncollectable until the holder says it is done.
+func SovEscapeLease(recv unsafe.Pointer) {
+	if recv == nil || domainRoot == nil || domainRoot.sovereignRoot == nil {
+		return
+	}
+	g := sovLookup(recv)
+	if g == nil || g.released {
+		return
+	}
+	g.escaped++
+}
+
+func sovEscapeDrop(recv unsafe.Pointer) {
+	g := sovLookup(recv)
+	if g == nil || g.released {
+		return
+	}
+	if g.escaped > 0 {
+		g.escaped--
+	}
+	if g.escaped == 0 {
+		sovQueueCompact(g)
+	}
+}
+
+// SovReleaseGroup frees the sovereign group keyed by recv and removes it from
+// the receiver map. It is for state whose owner has been deliberately severed
+// (a subscription removed on CLOSE, a connection torn down): the receiver will
+// never run again, so its data arena, record table and reference table can go
+// now instead of waiting for an arena that never dies.
+func SovReleaseGroup(recv unsafe.Pointer) {
+	// Canonical teardown: unqueue from the compaction list, abort any paused
+	// cycle, free data/record/reference arenas and remove the receiver map
+	// entry. A hand-rolled subset that omitted the unqueue left the pending
+	// queue holding a freed group, which the main loop then compacted: the
+	// hashmap SIGSEGV.
+	codecSovereignFree(recv)
+}
+
+// SovDomainRetained is the bytes this domain's scopes allocated and have not
+// reclaimed. A worker uses it to decide when its state has outgrown a budget
+// and the domain should be retired and respawned.
+func SovDomainRetained() (retained uint64) {
+	for i := int32(0); i < arenaScopeMax; i++ {
+		if arenaScopes[i].alloc > arenaScopes[i].freed {
+			retained += arenaScopes[i].alloc - arenaScopes[i].freed
+		}
+	}
+	return
+}
+
+// SovRootHits counts words in the root arena's allocated range that point at a
+// live block of the given group. The root arena is not a sovereign group, so the
+// external-reference test never scans it: a pointer stored there (a map bucket
+// pinned to root, a root-allocated struct keeping a receiver view) is invisible
+// to compaction and would be left naming retired memory. Diagnostics only - the
+// walk covers the whole root region, so it belongs at a report point, not in the
+// drain.
+var sovRootFieldHits int32
+var sovRootOtherHits int32
+
+func SovRootHits(g *sovGroup) (n int32) {
+	sovRootFieldHits = 0
+	sovRootOtherHits = 0
+	if domainRoot == nil || g == nil || g.data == nil {
+		return 0
+	}
+	// The receiver struct lives in the root arena, and its fields are the
+	// group's root graph: compaction rebases them (sovRebaseRoots). A hit inside
+	// the receiver's own bytes is therefore expected and safe. A hit anywhere
+	// else in root is a copy compaction cannot rewrite, and that is the one that
+	// matters.
+	rl := uintptr(unsafe.Pointer(g.recv))
+	rh := rl + 4096
+	a := trueRootArena()
+	if a == nil {
+		return 0
+	}
+	for r := int32(0); r < a.nregions; r++ {
+		base := a.regions[r].base
+		end := base + a.regions[r].off
+		p := (base + 7) &^ 7
+		for p+8 <= end {
+			v := *(*uintptr)(unsafe.Pointer(p))
+			if v != 0 && sovRangeOwner(v) == g {
+				n++
+				if p >= rl && p < rh {
+					sovRootFieldHits++
+				} else {
+					sovRootOtherHits++
+				}
+			}
+			p += 8
+		}
+	}
+	return
+}
+
+// sovTopGroupCache is the group SovTopGroup last reported, so the report can ask
+// what else names it without repeating the selection walk.
+var sovTopGroupCache *sovGroup
+var sovTopAlloc uint64
+var sovTopBatch uint64
+
+// SovTopGroup returns the receiver address and live bytes of the group with
+// the most live data in this domain. It names the owner of a leak directly.
+func SovTopGroup() (recv uintptr, live uint64, esc bool, queued bool, held bool) {
+	if domainRoot == nil {
+		return
+	}
+	var best *sovGroup
+	for i := 0; i < len(domainRoot.sovRangeOwners); i++ {
+		g := domainRoot.sovRangeOwners[i]
+		if g == nil || g.data == nil || g.released {
+			continue
+		}
+		if domainRoot.sovRanges[2*i] != g.data.regions[0].base {
+			continue
+		}
+		if uint64(g.liveBytes) > live {
+			live = uint64(g.liveBytes)
+			best = g
+		}
+	}
+	if best == nil {
+		return
+	}
+	recv = uintptr(unsafe.Pointer(best.recv))
+	sovTopGroupCache = best
+	sovTopAlloc = uint64(best.allocBytes)
+	sovTopBatch = uint64(best.batchMax)
+	esc = best.escaped > 0
+	queued = best.queued
+	held = sovGroupHeld(best)
+	return
+}
+
+// SovDomainReport writes one compact line of this domain's arena accounting to
+// stderr (journald). Worker domains are invisible to the main domain's debug
+// endpoint, and this is how a leak names the domain that holds it.
+func SovDomainReport(tag string) {
+	var retained uint64
+	for i := int32(0); i < arenaScopeMax; i++ {
+		if arenaScopes[i].alloc > arenaScopes[i].freed {
+			retained += arenaScopes[i].alloc - arenaScopes[i].freed
+		}
+	}
+	live, _, gcap := SovGroupTotals()
+	net := uint64(0)
+	if sysMapBytes > sysUnmapBytes {
+		net = sysMapBytes - sysUnmapBytes
+	}
+	printstring("SOVDOMAIN ")
+	printstring(tag)
+	printstring(" retained=")
+	printuint64(retained)
+	printstring(" net=")
+	printuint64(net)
+	printstring(" livecap=")
+	printuint64(uint64(liveArenaCapBytes()))
+	printstring(" glive=")
+	printuint64(live)
+	printstring(" gcap=")
+	printuint64(gcap)
+	printstring(" comp=")
+	printuint64(SovCompactions())
+	printstring(" pend=")
+	printuint64(uint64(uint32(SovPendingCompactions())))
+	printstring(" top=")
+	tp, tl, tesc, tq, th := SovTopGroup()
+	printuint64(uint64(tp))
+	printstring(" toplive=")
+	printuint64(tl)
+	printstring(" topesc=")
+	if tesc {
+		printstring("1")
+	} else {
+		printstring("0")
+	}
+	printstring(" topq=")
+	if tq {
+		printstring("1")
+	} else {
+		printstring("0")
+	}
+	printstring(" ext=")
+	printuint64(uint64(uint32(sovExtWhere)))
+	printstring(" exta=")
+	printuint64(uint64(uint32(sovExtArena)))
+	printstring(" exto=")
+	printuint64(uint64(sovExtOff))
+	printstring(" extft=")
+	printuint64(uint64(uint32(sovExtFnTop)))
+	printstring(" extao=")
+	printuint64(uint64(sovExtArenaOff))
+	printstring(" extar=")
+	printuint64(uint64(uint32(sovExtArenaRegs)))
+	printstring(" extrsz=")
+	printuint64(uint64(uint32(sovExtRecSize)))
+	printstring(" exttd=")
+	printuint64(uint64(uint32(sovExtTdKind)))
+	printstring(":")
+	printuint64(uint64(sovExtTdSize))
+	printstring(" extrl=")
+	printuint64(uint64(uint32(sovExtRecLive)))
+	printstring(" extw=")
+	if tp != 0 {
+		printuint64(uint64(sovExtWord) - uint64(tp))
+	} else {
+		printstring("-")
+	}
+	if sovExtWhere == 3 {
+		printstring(" extrecv=")
+		printuint64(uint64(sovExtRecv))
+		printstring(" extfoff=")
+		printuint64(uint64(sovExtFieldOff))
+		printstring(" exthold=")
+		printuint64(uint64(uint32(sovExtHoldKind)))
+		printstring(":")
+		printuint64(uint64(uint32(sovExtHoldSize)))
+		printstring(":")
+		printuint64(uint64(uint32(sovExtHoldTyped)))
+	}
+	printstring(" toph=")
+	if th {
+		printstring("1")
+	} else {
+		printstring("0")
+	}
+	printstring(" skipf=")
+	printuint64(uint64(uint32(sovSkippedForeign)))
+	printstring(" nodesc=")
+	printuint64(uint64(uint32(sovNodescRecs)))
+	printstring(" nodescb=")
+	printuint64(sovNodescBytes)
+	printstring(" nodescptr=")
+	printuint64(uint64(uint32(sovNodescPtrRecs)))
+	// Size histogram of the top group's live records. The totals say "all of
+	// it is live"; this says WHICH allocation is all of it. Eight buckets over
+	// the common sizes, counted in records, so the shape of an unbounded list
+	// is named in one line instead of guessed at from a debugger.
+	printstring(" bins=")
+	if sovTopGroupCache != nil && !sovTopGroupCache.released {
+		var cnt [8]int32
+		recs := sovTopGroupCache.recs
+		for i := int32(0); i < int32(len(recs)); i++ {
+			r := recs[i]
+			if r.extra || !r.live {
+				continue
+			}
+			switch {
+			case r.size <= 16:
+				cnt[0]++
+			case r.size <= 32:
+				cnt[1]++
+			case r.size <= 64:
+				cnt[2]++
+			case r.size <= 128:
+				cnt[3]++
+			case r.size <= 512:
+				cnt[4]++
+			case r.size <= 4096:
+				cnt[5]++
+			case r.size <= 65536:
+				cnt[6]++
+			default:
+				cnt[7]++
+			}
+		}
+		for b := int32(0); b < 8; b++ {
+			if b > 0 {
+				printstring(" ")
+			}
+			printuint64(uint64(uint32(cnt[b])))
+		}
+	}
+	// What the big buckets actually are: the descriptor kind and size of the
+	// largest live records, so a histogram bucket becomes a named allocation.
+	printstring(" big=")
+	if sovTopGroupCache != nil && !sovTopGroupCache.released {
+		var top [4]uintptr
+		var tds [4]*RawType
+		recs := sovTopGroupCache.recs
+		for i := int32(0); i < int32(len(recs)); i++ {
+			r := recs[i]
+			if r.extra || !r.live || r.size > (1 << 16) {
+				continue
+			}
+			for b := 0; b < 4; b++ {
+				if r.size > top[b] {
+					var k int32
+					for k = 3; k > b; k-- {
+						top[k] = top[k-1]
+						tds[k] = tds[k-1]
+					}
+					top[b] = r.size
+					tds[b] = r.typeDesc
+					break
+				}
+			}
+		}
+		for b := 0; b < 4; b++ {
+			if b > 0 {
+				printstring(" ")
+			}
+			printuint64(uint64(top[b]))
+			printstring(":")
+			if tds[b] == nil {
+				printstring("nil")
+			} else {
+				printuint64(uint64(uint32(tds[b].Kind())))
+			}
+		}
+	}
+	printstring(" topalloc=")
+	printuint64(sovTopAlloc)
+	printstring(" topbatch=")
+	printuint64(sovTopBatch)
+	printstring(" roothits=")
+	printuint64(uint64(uint32(SovRootHits(sovTopGroupCache))))
+	printstring(" rootfield=")
+	printuint64(uint64(uint32(sovRootFieldHits)))
+	printstring(" rootother=")
+	printuint64(uint64(uint32(sovRootOtherHits)))
+	// Frame-stack depth and how many of those slots are arena borrows. At the
+	// event loop's safe point the expected shape is root, main, the loop's own
+	// frame and the per-turn arena; anything deeper is a frame or borrow that
+	// was not restored, and a leaked borrow keeps a sovereign arena on the
+	// stack so that group can never be compacted.
+	nb := int32(0)
+	for i := int32(0); i <= domainRoot.fnTop && i < fnStackMax; i++ {
+		if domainRoot.fnBorrow[i>>6]&(1<<(uint64(i)&63)) != 0 {
+			nb++
+		}
+	}
+	printstring(" fntop=")
+	printuint64(uint64(uint32(domainRoot.fnTop)))
+	printstring(" borrows=")
+	printuint64(uint64(uint32(nb)))
+	printstring("\n")
+}
+
+// SovPendingHeld reports whether the head compaction group is pinned by a
+// live borrow or a stable registration right now. Diagnostics only.
+func SovPendingHeld() (b bool) {
+	return sovGroupHeld(sovPendingHead)
+}
+
+// SovereignStableDepth is how many read-only receiver arenas are registered
+// stable on this domain. A read-only method registers its receiver for its
+// body and restores at return; a depth that grows with calls means an
+// epilogue did not restore, and every group registered there is pinned.
+func SovereignStableDepth() (n int32) {
+	if domainRoot == nil {
+		return 0
+	}
+	return domainRoot.stableTop
+}
+
+// SovereignStableSlot returns the stable arena at slot i (zero for empty).
+func SovereignStableSlot(i int32) (p uintptr) {
+	if domainRoot == nil || i < 0 || i >= domainRoot.stableTop {
+		return 0
+	}
+	return uintptr(unsafe.Pointer(domainRoot.stableStack[i]))
+}
+
+// Loop-top compaction sample, written by the transport at its yield point so
+// the debug report can say whether the pending group was held there rather
+// than inside a request frame.
+var sovSampleDepth int32
+var sovSampleHeld bool
+var sovSampleSet bool
+
+// SovSampleLoop records the borrow depth and pending-group hold at the safe
+// point. Called by the event loop immediately after SovDrainCompactions.
+func SovSampleLoop() {
+	sovSampleDepth = SovereignDepth()
+	sovSampleHeld = sovGroupHeld(sovPendingHead)
+	sovSampleSet = true
+}
+
+// SovSampleGet returns the last loop-top sample.
+func SovSampleGet() (depth int32, held bool, set bool) {
+	return sovSampleDepth, sovSampleHeld, sovSampleSet
+}
+
+
+// RootArenaStats reports the root arena's region count, first-region cap,
+// total cap, current region offset and cumulative allocation. The root arena
+// is never reset, so a rising alloc means a leak outside every sovereign group.
+func RootArenaStats() (nregions int32, cap0, capTotal, off, allocB uint64) {
+	a := trueRootArena()
+	if a == nil {
+		return
+	}
+	nregions = a.nregions
+	for i := int32(0); i < a.nregions; i++ {
+		capTotal += uint64(a.regions[i].cap)
+		if i == 0 {
+			cap0 = uint64(a.regions[i].cap)
+		}
+		if i == a.nregions-1 {
+			off = uint64(a.regions[i].off)
+		}
+	}
+	allocB = a.alloc
+	return
+}
+
+// SovGroupTotals sums the distinct groups' live bytes, allocation bytes and
+// data-arena capacity.
+func SovGroupTotals() (live, allocB, capTotal uint64) {
+	if domainRoot == nil {
+		return
+	}
+	for i := 0; i < len(domainRoot.sovRangeOwners); i++ {
+		g := domainRoot.sovRangeOwners[i]
+		if g == nil || g.data == nil {
+			continue
+		}
+		if domainRoot.sovRanges[2*i] != g.data.regions[0].base {
+			continue
+		}
+		live += uint64(g.liveBytes)
+		allocB += uint64(g.allocBytes)
+		for r := int32(0); r < g.data.nregions; r++ {
+			capTotal += uint64(g.data.regions[r].cap)
+		}
+	}
+	return
+}
+
+// SovGroupCount is the number of distinct sovereign groups registered on this
+// domain (one per receiver, counted once by its first data region).
+func SovGroupCount() (n int32) {
+	if domainRoot == nil {
+		return 0
+	}
+	for i := 0; i < len(domainRoot.sovRangeOwners); i++ {
+		g := domainRoot.sovRangeOwners[i]
+		if g == nil || g.data == nil {
+			continue
+		}
+		if domainRoot.sovRanges[2*i] == g.data.regions[0].base {
+			n++
+		}
+	}
+	return n
+}
+
+// SovGroupAt reports one distinct group by index, in range order.
+func SovGroupAt(k int32) (recv, live, allocB, cap0 uint64, nregions int32, escaped, queued bool) {
+	if domainRoot == nil {
+		return
+	}
+	seen := int32(0)
+	for i := 0; i < len(domainRoot.sovRangeOwners); i++ {
+		g := domainRoot.sovRangeOwners[i]
+		if g == nil || g.data == nil {
+			continue
+		}
+		if domainRoot.sovRanges[2*i] != g.data.regions[0].base {
+			continue
+		}
+		if seen != k {
+			seen++
+			continue
+		}
+		return uint64(uintptr(g.recv)), uint64(g.liveBytes), uint64(g.allocBytes),
+			uint64(g.data.regions[0].cap), g.data.nregions, g.escaped > 0, g.queued
+	}
+	return
 }
 
 // ManualArenaEnter routes an entire phase (including nested helper calls) into
@@ -2773,6 +4394,24 @@ func ArenaFree(a *Arena) {
 	if a == nil {
 		return
 	}
+	// A freed arena must not remain in the function pool: the next
+	// FnArenaPush would be handed unmapped memory. Freeing a pooled arena
+	// means some exit released or freed it while another path still held it,
+	// so the removal is recorded rather than silently repaired.
+	n := int32(0)
+	for i := int32(0); i < arenaPoolN; i++ {
+		if arenaPool[i] == a {
+			arenaPoolBytes -= a.regions[0].cap
+			arenaFreedPooled++
+			continue
+		}
+		arenaPool[n] = arenaPool[i]
+		n++
+	}
+	for i := n; i < arenaPoolN; i++ {
+		arenaPool[i] = nil
+	}
+	arenaPoolN = n
 	arenaReleaseGroups(a)
 	arenaScopeFreed(a.scope, uintptr(a.alloc))
 	a.alloc = 0
@@ -2828,6 +4467,12 @@ func ArenaReset(a *Arena) {
 	}
 	for i := a.nregions - 1; i > 0; i-- {
 		sysUnmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
+		// Clear the entry with the mapping: a registry word naming an address
+		// the process has handed back is not metadata, it is a dangling
+		// pointer that a later mapping can recycle into live data.
+		a.regions[i].base = 0
+		a.regions[i].off = 0
+		a.regions[i].cap = 0
 	}
 	a.nregions = 1
 	a.regions[0].off = arenaDataOffset()

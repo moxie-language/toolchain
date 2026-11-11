@@ -72,6 +72,13 @@ func MarkChildPipeChannel(ch *channel, chanID uint16) {
 	if !childSpawnTarget {
 		return
 	}
+	// A nil channel argument is legal: the target may take a channel it never
+	// uses. Binding it is how the one sighting of a `MarkChildPipeChannel`
+	// SIGSEGV happened (the store wrote %rdi through a nil *channel), so the
+	// check is the boundary, not a guard over a wrong state.
+	if ch == nil {
+		return
+	}
 	MarkChannelPipeBound(ch, chanID)
 	// This domain is the child of the spawn: its token is the channel's
 	// childDomain, so both this domain and its parent resolve the direction
@@ -91,6 +98,11 @@ func MarkChildPipeChannel(ch *channel, chanID uint16) {
 // ring pair at chanID. Emitted by createSpawn after spawnDomain returns.
 // No-op if no spawn has occurred (defensive - should not happen).
 func MarkParentPipeChannel(ch *channel, chanID uint16) {
+	// Same boundary as the child side: a nil channel argument carries no ring.
+	// `ch.childDomain` two lines down dereferenced it unconditionally.
+	if ch == nil {
+		return
+	}
 	MarkChannelPipeBound(ch, chanID)
 	ch.childDomain = lastChildDomain
 	idx := int32(chanID) - 1
