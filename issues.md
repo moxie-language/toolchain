@@ -1558,3 +1558,92 @@ boundary. That is also the pattern the measured variants say is safe.
 Still open: the underlying codegen defect itself. Until it is fixed, a
 `map[string]*T` plus a method that returns `*T` is a trap anywhere in the
 tree, and the reproduction above is the regression test it needs.
+
+## 10. C-12: an object holding a callback is deep-copied on every return
+
+**Resolved 2026-11-11. This was the cordn interop blocker.**
+
+**Symptom.** No cordn tool call was ever answered. The relay proxy published
+nothing at all: `Publish` saw `state=0` while the socket reported `ready=1`, so
+every EVENT was queued into `pendingSend` and never written, and the app sat on
+"waiting to be added to the group" while cordn polled `requests=0` for two and a
+half minutes.
+
+**Measurement.** Pointer identity, printed from the proxy itself:
+
+    Publish ws://127.0.0.1:23334 me=67510896 map=67288448 kind=25910 state=0
+    OPEN    resolved=67334640     map=67288448 same=0
+
+Two different objects behind one registry entry: `wsOnOpen` wrote `state=1` to
+one, `Publish` read `0` from the other. The map's own entry never changed
+address.
+
+**Root cause, measured.** `retPointeeDies` walks a pointee's fields to decide
+whether `codecRetStable` may alias a returned pointer. It grouped `KindFunc`
+with the `KindMap`/`KindChan` heads and asked `codecIsStableAddr` about the
+field's first word - but a Moxie function value is a CODE address, the text
+segment, never an arena, so the answer was always "not stable" and therefore
+"dies". A struct holding any non-nil callback was declared dying, the fast path
+refused, and the whole object was encoded and decoded - deep-copied - on every
+return. `Conn` carries `onEvent`/`onEOSE`/`ScheduleReconnect`, so once
+`wireConn` installed them every `lookup` and every `Pool.Connect` handed back a
+fresh copy.
+
+Diagnosed by naming the dying field rather than guessing:
+
+    codec-die] field=11 kind=22      (40x, the only field)
+
+Field 11 is `pendingSend []string`; kind 22 is slice.
+
+**The code fixes - all three on the caller side, none in the runtime.**
+1. `web/common/relay/conn.mx` `queueSend`: the `push` that grows `pendingSend`
+   ran AFTER the root-arena switch was restored, so the slice backing array
+   landed in the caller's frame and died with it. It now grows inside the root
+   arena. **This was the trigger**: the diagnostic named it (field 11, slice)
+   and fixing it alone made every `Conn` return alias again.
+2. `web/common/relay/conn.mx` `Dial`: `URL: url` stored the caller's frame
+   string in a root-arena object; it is now copied into the root arena
+   (`keepString`). Field 0, same class of defect, found while narrowing.
+3. `wsRegistry.lookup` was a MUTATING method - `r.pending = nil` inside it - and
+   a mutating method always returns through the full encode/decode protocol, so
+   the result was a copy regardless of how stable the pointee was. Adoption
+   moved to `adopt`, which returns nothing; the callbacks do lookup, then adopt
+   and re-read on a miss. `Pool.Connect` was already fixed the same way.
+
+**A fourth hypothesis, measured and rejected.** `retPointeeDies` groups
+`KindFunc` with the map and channel heads and asks `codecIsStableAddr` about the
+field's first word, which for a function value is a CODE address - the text
+segment, never an arena. That looks like it declares every struct holding a
+callback to be dying. It was changed to answer false for `KindFunc` and the
+relay-proxy output was **byte-identical before and after**, and a standalone
+fixture built in the root arena with a callback field took the same path with
+and without the change (instrumented: `retPointeeDies` never reached the field).
+So it was reverted rather than committed: it may be a real inefficiency, but
+nothing measured it, and an unproven edit to a codec shared by both compilers is
+not worth the risk. Left open below.
+
+**No minimal reproduction yet.** Two fixtures were written - one with a callback
+field, one growing a slice outside the root arena - and both pass with the bug
+present. The trigger depends on the real call depth and the sovereign-arena
+borrow that `Conn`'s methods take, which the small shapes do not reproduce. The
+evidence for the defect is therefore the interop test itself, which fails
+without the fix and passes with it; a standalone regression test remains open.
+
+**Evidence.** `test_cordn_chat_messages_cordn_peer` passes three consecutive
+times on a clean build with no instrumentation: the coordinator records
+`publishKeyPackage`, `storeJoinRequest`, `consumeKeyPackage`, `postGroupMessage`
+and `storeWelcome`, and the peer prints `SENT hello from cordn`,
+`READ hello from smesh`, `SENT cordn hears you`, `PASS`.
+
+**Authoring rule this establishes.** A struct that lives in the root arena must
+have every field - text, slices, maps - allocated in the root arena. One
+frame-backed field is enough to turn every return of that object into a deep
+copy, and the copy fails silently: the fields look right, identity does not.
+
+**Still open.** (a) Why `KindFunc` never reaches `retPointeeDies`' field walk -
+either the fast path is skipped earlier for these shapes or function values take
+a different branch, and the answer decides whether that grouping is a real
+inefficiency. (b) A standalone reproduction, so the defect cannot return
+unnoticed. (c) The compiler could refuse the shape outright: a `SovereignSetArena`
+block that stores a frame-allocated slice or string into a root-arena object is
+visible at compile time in the same function.
