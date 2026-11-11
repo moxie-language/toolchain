@@ -42,6 +42,7 @@ type Options struct {
 	StandaloneRuntime  bool // skip internalization, keep runtime symbols external
 	RebuildAll         bool // if true, rebuild all packages from scratch (ignore cache)
 	NoMainArena        bool // package main gets no function arena or return encode (bootstrap only)
+	NoSovNotes         bool // -no-sov-notes: silence the mutating-method sovereign arena notes
 }
 
 // Verify performs validation on the given options.

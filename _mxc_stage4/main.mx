@@ -7,6 +7,7 @@ import (
 	"unsafe"
 
 	"moxielang.dev/pkg/mxcover"
+	"moxielang.dev/pkg/mxsrc"
 	"moxielang.dev/pkg/mxutil"
 	. "moxielang.dev/pkg/types"
 )
@@ -91,6 +92,11 @@ type buildState struct {
 	// bootstrap passes it; every other build includes main, test builds
 	// included.
 	noMainArena bool
+
+	// noSovNotes is -no-sov-notes: no sovereign arena note for each mutating
+	// method of a sovereign type in user code. Mirrors legacy Config.NoSovNotes.
+	// The note changes no generated code, so it is not in the package key.
+	noSovNotes bool
 
 	// extraTags are the -tags values, on top of the target and release tags
 	// buildTagTrue already knows.
@@ -961,7 +967,34 @@ func dirExists(path string) (ok bool) {
 	return info.IsDir()
 }
 
-func mxcVersion() (s string) { return "1.0.1-rc.1" }
+// mxcVersion reports the release tag installed beside this binary. The VERSION
+// file is written by release.sh into the tarball root, so a versioned install
+// reports the tag it was built from instead of a constant that drifts.
+func mxcVersion() (s string) {
+	root := getenv("MOXIEROOT")
+	if root == "" {
+		root = getMoxiePath()
+	}
+	if b, err := os.ReadFile(mxutil.JoinPath(root, "VERSION")); err == nil {
+		s = trimVersionFile(string(b))
+		if s != "" {
+			return s
+		}
+	}
+	return "1.0.1-rc.1"
+}
+
+func trimVersionFile(s string) (r string) {
+	i := int32(0)
+	for i < int32(len(s)) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+		i++
+	}
+	j := int32(len(s))
+	for j > i && (s[j-1] == ' ' || s[j-1] == '\t' || s[j-1] == '\n' || s[j-1] == '\r') {
+		j--
+	}
+	return s[i:j]
+}
 
 
 func compilerHash() (s string) {
@@ -3144,7 +3177,7 @@ func concatSources(dir string, files []string) (buf []byte) {
 		bodyChunks = mxutil.Ensure(bodyChunks, 1)
 		push(bodyChunks, []byte("\n"))
 	}
-	return joinChunks(bodyChunks)
+	return mxsrc.JoinChunks(bodyChunks)
 }
 
 func fileContainsPart(base string, part string) (ok bool) {
@@ -6413,6 +6446,9 @@ func cmdTest(args []string) {
 		} else if args[i] == "-no-main-arena" {
 			bst.noMainArena = true
 			i++
+		} else if args[i] == "-no-sov-notes" {
+			bst.noSovNotes = true
+			i++
 		} else if args[i] == "-print-allocs" {
 			if i+1 >= int32(len(args)) {
 				fatal("flag needs an argument: -print-allocs")
@@ -7566,6 +7602,8 @@ func main() {
 	initCompilerState()
 	initObjectFlags()
 	initCompileCtx()
+	resolveGenManifestFlag(os.Args)
+	defer writeGenManifest()
 	// The target must be known before InitUniverse: uintptr's width depends
 	// on it, and InitUniverse builds the type table once per process.
 	resolveTargetFlag(os.Args)
@@ -7762,6 +7800,9 @@ func main() {
 		} else if args[i] == "-no-main-arena" {
 			bst.noMainArena = true
 			i++
+		} else if args[i] == "-no-sov-notes" {
+			bst.noSovNotes = true
+			i++
 		} else if args[i] == "-print-allocs" {
 			if i+1 >= int32(len(args)) {
 				fatal("flag needs an argument: -print-allocs")
@@ -7785,6 +7826,9 @@ func main() {
 			i += 2
 		} else if mxutil.HasPrefix(args[i], "-buildmode=") {
 			buildMode = args[i][int32(len("-buildmode=")):]
+			i++
+		} else if mxutil.HasPrefix(args[i], "-gen-manifest=") {
+			cctx.genManifestPath = args[i][int32(len("-gen-manifest=")):]
 			i++
 		} else if args[i] == "-x" {
 			bst.printCommands = true
@@ -8845,6 +8889,16 @@ func serializePkgMeta(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase, root, m
 	b = b | targetPkgPath
 	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
+	// -no-sov-notes, as the parent was given it: a worker emits the notes for
+	// the packages it compiles, so the flag has to reach it or the serial and
+	// parallel paths would disagree about which diagnostics the build prints.
+	if bst != nil && bst.noSovNotes {
+		b = b | "1"
+	} else {
+		b = b | "0"
+	}
+	b = mxutil.Ensure(b, 1)
+	push(b, '\n')
 	for _, p := range pkgs {
 		b = b | p.path
 		b = mxutil.Ensure(b, 1)
@@ -8930,6 +8984,8 @@ type workerMeta struct {
 	// targetPkgPath is the compiled path of the package the build asked for,
 	// which is what isTargetPkg matches before it consults the module prefix.
 	targetPkgPath string
+	// noSovNotes is the parent's -no-sov-notes.
+	noSovNotes bool
 }
 
 func deserializePkgMeta(data []byte) (m *workerMeta) {
@@ -8947,6 +9003,11 @@ func deserializePkgMeta(data []byte) (m *workerMeta) {
 	m.modDir, pos = deserLine(data, pos)
 	m.rootModPrefix, pos = deserLine(data, pos)
 	m.targetPkgPath, pos = deserLine(data, pos)
+	sov, pos := deserLine(data, pos)
+	m.noSovNotes = false
+	if sov == "1" {
+		m.noSovNotes = true
+	}
 	m.pkgs = []*pkgInfo{:numPkgs}
 	for i := int32(0); i < numPkgs; i++ {
 		p := &pkgInfo{}
@@ -9031,6 +9092,7 @@ func workerEntryExport(arg unsafe.Pointer) {
 	bst.globalModDir = meta.modDir
 	bst.rootModPrefix = meta.rootModPrefix
 	bst.targetPkgPath = meta.targetPkgPath
+	bst.noSovNotes = meta.noSovNotes
 	bst.quietDiscover = true
 
 	// The target comes from the metadata, never from the triple string: both

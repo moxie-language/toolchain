@@ -383,6 +383,51 @@ func ssaRecvRooted(v SSAValue, recvParam SSAValue, localStore map[SSAValue]SSAVa
 	return false
 }
 
+// noteSovereignMutating prints one line to stderr for a MUTATING method of a
+// sovereign receiver: the same decision that borrows the arena below. The
+// classification is invisible in the source - a method that calls a method on
+// a receiver field borrows the receiver's arena, and every allocation it makes
+// lives there until compaction instead of dying at return - so the point of
+// the note is to make a group writer visible when it is compiled. User code
+// only, silenced by -no-sov-notes, never an error, and it emits no IR.
+// Mirrors legacy compiler.go noteSovereignMutating; the text is identical, so
+// the two compilers name the same methods in the same words.
+func (e *irEmitter) noteSovereignMutating(named *Named) {
+	if bst != nil && bst.noSovNotes {
+		return
+	}
+	if e.pkg == nil || e.pkg.Pkg == nil {
+		return
+	}
+	// The toolchain's own infrastructure packages are not the stdlib, but every
+	// program pulls them in and they are not the subject of the note. Same gate
+	// as legacy, so both compilers stay silent on the same packages.
+	if p := e.pkg.Pkg.Path; !isUserPackagePath(restrictPath(p)) || mxutil.HasPrefix(p, "moxielang.dev/pkg") {
+		return
+	}
+	if named.Obj == nil || named.Obj.Pkg == nil {
+		return
+	}
+	// stage4 names a method's SSA function "(*Acc).Add" where legacy's
+	// Name() is "Add", so the two build the same line from different pieces:
+	// the receiver type comes from the function name here and from the
+	// signature there. Everything after the type is byte-identical.
+	fnName := e.curFunc.name
+	if isInitFuncName(fnName) {
+		// A package initialiser is not a method anybody calls.
+		return
+	}
+	msg := "note: method " | named.Obj.Pkg.Name | "." | fnName |
+		" is mutating: its allocations land in the receiver's sovereign arena (they persist until compaction; put scratch in a free helper function), silence with -no-sov-notes\n"
+	if e.curFunc.pos > 0 && len(cctx.concatSourceMap) > 0 {
+		file, srcLine := concatLineToFile(e.curFunc.pos)
+		if file != "" {
+			msg = file | ":" | simpleItoa(srcLine) | ": " | msg
+		}
+	}
+	mxutil.WriteStr(2, msg)
+}
+
 func (e *irEmitter) emitArenaPrologue() (ok bool) {
 	// Sovereign arena prologue: borrow the receiver's arena instead of
 	// FnArenaPush. This is decided before the codec gate below: that gate asks
@@ -400,6 +445,7 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 		named := e.recvNamedType()
 		if named != nil {
 			if e.isSovereignNamedType(named) {
+				e.noteSovereignMutating(named)
 				recvName := e.operand(e.curFunc.Params[0])
 				// Acquire the receiver's sovereign group (root-arena
 				// hashmap keyed by receiver address), register its data

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"runtime"
+	"moxielang.dev/pkg/mxsrc"
 	"moxielang.dev/pkg/syntax"
 	"moxielang.dev/pkg/mxutil"
 	"moxielang.dev/pkg/token"
@@ -94,6 +95,9 @@ type compileCtx struct {
 	sigDeclPkgImports    []*TCPackage
 	typeDescPkgPath      string
 	parseTypePkgScope    *Scope
+	genManifestPath      string
+	genManifestBuf       []byte
+	genManifestN         int32
 	genericFuncDecls     map[string]*syntax.FuncDecl
 	genericMethodDecls   map[string]*syntax.FuncDecl
 	irResults            []string
@@ -192,6 +196,141 @@ func initCompileCtx() {
 	if cctx == nil {
 		cctx = &compileCtx{}
 	}
+	if cctx.genManifestBuf == nil {
+		cctx.genManifestBuf = []byte{:1 << 20}
+	}
+}
+
+// recordGen appends one generic instantiation to the manifest requested with
+// -gen-manifest. It is the compiler's own inference result: explicit and
+// inferred calls both arrive here with concrete type arguments, which is why a
+// source rewriter must not try to infer them a second time.
+func manifestTypeName(t Type) (s string) {
+	switch x := t.(type) {
+	case nil:
+		return "?"
+	case *Basic:
+		return x.Name
+	case *Named:
+		if x.Obj == nil {
+			return "?"
+		}
+		if x.Obj.Pkg != nil && x.Obj.Pkg.Path != "" {
+			return x.Obj.Pkg.Path | "." | x.Obj.Name
+		}
+		return x.Obj.Name
+	case *Pointer:
+		return "*" | manifestTypeName(x.Elem())
+	case *Slice:
+		return "[]" | manifestTypeName(x.Elem)
+	case *Array:
+		return "[" | irItoa64(x.Len) | "]" | manifestTypeName(x.Elem)
+	case *TCMap:
+		return "map[" | manifestTypeName(x.Key) | "]" | manifestTypeName(x.Elem)
+	case *TCChan:
+		return "chan " | manifestTypeName(x.Elem)
+	case *TypeParam:
+		if x.Obj == nil {
+			return "?"
+		}
+		return x.Obj.Name
+	case *Signature:
+		return "func"
+	}
+	return "?"
+}
+
+
+func genSiteString(pos token.Pos) (s string) {
+	if !pos.IsKnown() {
+		return ""
+	}
+	f, l := concatLineToFile(int32(pos.Line()))
+	return f | ":" | simpleItoa(l) | ":" | simpleItoa(int32(pos.Col()))
+}
+
+func recordGen(kind, pkg, decl, method, caller string, args []Type, site token.Pos) {
+	initCompileCtx()
+	if cctx.genManifestPath == "" {
+		return
+	}
+	line := kind | "\t" | pkg | "\t" | decl | "\t" | method | "\t" | caller | "\t"
+	for i := 0; i < len(args); i++ {
+		if i > 0 {
+			line = line | ","
+		}
+		line = line | manifestTypeName(args[i])
+	}
+	line = line | "\t" | genSiteString(site)
+	// Copy into the manifest buffer allocated in the root arena. A slice held in
+	// cctx and grown here would land in the current function arena and dangle
+	// when the function returns.
+	if cctx.genManifestN+int32(len(line)) + 1 > int32(len(cctx.genManifestBuf)) {
+		return
+	}
+	for i := int32(0); i < int32(len(line)); i++ {
+		cctx.genManifestBuf[cctx.genManifestN] = line[i]
+		cctx.genManifestN++
+	}
+	cctx.genManifestBuf[cctx.genManifestN] = '\n'
+	cctx.genManifestN++
+}
+
+// resolveGenManifestFlag picks up -gen-manifest=PATH from the command line.
+// It is a side-channel for the distillation pipeline, not a build input.
+func resolveGenManifestFlag(args []string) {
+	const flag = "-gen-manifest="
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if len(a) >= len(flag) && a[:len(flag)] == flag {
+			cctx.genManifestPath = a[len(flag):]
+
+		}
+	}
+}
+
+// writeGenManifest writes the recorded requests, sorted, so two builds of the
+// same program produce the same file. Failures are silent: the manifest is a
+// diagnostic surface, never a build gate.
+func writeGenManifest() {
+	if cctx == nil || cctx.genManifestPath == "" || cctx.genManifestN == 0 {
+		return
+	}
+	// Split the buffer into lines, dedupe and sort. This runs at exit, in the
+	// main arena, so the strings and the slice may be ordinary allocations.
+	lines := []string{}
+	start := int32(0)
+	for i := int32(0); i < cctx.genManifestN; i++ {
+		if cctx.genManifestBuf[i] == '\n' {
+			lines = mxutil.Ensure(lines, 1)
+			push(lines, string(cctx.genManifestBuf[start:i]))
+			start = i + 1
+		}
+	}
+	for i := 0; i < len(lines); i++ {
+		for j := i + 1; j < len(lines); j++ {
+			if lines[i] == lines[j] {
+				lines[j] = ""
+			}
+		}
+	}
+	uniq := []string{}
+	for i := 0; i < len(lines); i++ {
+		if lines[i] != "" {
+			uniq = mxutil.Ensure(uniq, 1)
+			push(uniq, lines[i])
+		}
+	}
+	for i := 1; i < len(uniq); i++ {
+		for j := i; j > 0 && uniq[j] < uniq[j-1]; j-- {
+			uniq[j], uniq[j-1] = uniq[j-1], uniq[j]
+		}
+	}
+	out := []byte{}
+	for i := 0; i < len(uniq); i++ {
+		out = out | string([]byte(uniq[i])) | "\n"
+	}
+	os.WriteFile(cctx.genManifestPath, out, 0644)
 }
 
 // reportCompileError records a front-end error. CompileToIR's gate on
@@ -456,8 +595,8 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 	// __slicealloc([]byte, n)`, which is not a type at all - that was the
 	// "cannot resolve the type of b ... the right-hand side is not a value"
 	// failure for a buffered channel of a slice.
-	rw := rewriteChanMakeLiterals(src)
-	src = rewriteSliceMakeLiterals(rw)
+	rw := mxsrc.RewriteChanMakeLiterals(src)
+	src = mxsrc.RewriteSliceMakeLiterals(rw)
 	src = stripDuplicatePackageClauses2(src)
 
 	if len(src) == 0 {
@@ -913,8 +1052,8 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 
 func scanParse(src []byte, name string, arena *runtime.Arena) (file *syntax.File) {
 	rw := rewriteShutdownWord(src)
-	rw = rewriteChanMakeLiterals(rw)
-	rw = rewriteSliceMakeLiterals(rw)
+	rw = mxsrc.RewriteChanMakeLiterals(rw)
+	rw = mxsrc.RewriteSliceMakeLiterals(rw)
 	rw = stripDuplicatePackageClauses2(rw)
 	if len(rw) == 0 {
 		return nil
@@ -1675,10 +1814,10 @@ func compileTargetArch() (s string) {
 }
 
 func compileTargetOS() (s string) {
-	if lIndexByte(cctx.compileTargetTriple, '-') >= 0 {
-		rest := cctx.compileTargetTriple[lIndexByte(cctx.compileTargetTriple, '-')+1:]
-		if lIndexByte(rest, '-') >= 0 {
-			osName := rest[lIndexByte(rest, '-')+1:]
+	if mxsrc.LIndexByte(cctx.compileTargetTriple, '-') >= 0 {
+		rest := cctx.compileTargetTriple[mxsrc.LIndexByte(cctx.compileTargetTriple, '-')+1:]
+		if mxsrc.LIndexByte(rest, '-') >= 0 {
+			osName := rest[mxsrc.LIndexByte(rest, '-')+1:]
 			if mxutil.HasPrefix(osName, "linux") {
 				return "linux"
 			}

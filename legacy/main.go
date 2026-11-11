@@ -595,6 +595,7 @@ func main() {
 	verifyIR := flag.Bool("internal-verifyir", false, "run extra verification steps on LLVM IR")
 	standaloneRuntime := flag.Bool("standalone-runtime", false, "keep runtime symbols external (for build-runtime)")
 	noMainArena := flag.Bool("no-main-arena", false, "package main gets no function arena or return encode (bootstrap only)")
+	noSovNotes := flag.Bool("no-sov-notes", false, "do not print the sovereign arena note for each mutating method in user code")
 	rebuildAll := flag.Bool("a", false, "rebuild all packages from scratch (ignore build cache; required for bootstrap)")
 
 	var flagDeps, flagTest bool
@@ -686,6 +687,7 @@ func main() {
 		StandaloneRuntime:  *standaloneRuntime,
 		RebuildAll:         *rebuildAll,
 		NoMainArena:        *noMainArena,
+		NoSovNotes:         *noSovNotes,
 	}
 	if *printCommands {
 		options.PrintCommands = printCommand

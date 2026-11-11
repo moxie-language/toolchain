@@ -41,6 +41,14 @@ func (c *Config) NoMainArena() bool {
 	return c.Options.NoMainArena
 }
 
+// NoSovNotes reports -no-sov-notes: the note printed for every mutating method
+// of a sovereign type in user code is silenced. The note is a diagnostic, never
+// an error, and it changes no generated code, so it is not part of the package
+// cache key.
+func (c *Config) NoSovNotes() bool {
+	return c.Options.NoSovNotes
+}
+
 func (c *Config) BuildMode() string {
 	if c.Options.BuildMode != "" {
 		return c.Options.BuildMode

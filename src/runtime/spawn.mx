@@ -155,6 +155,9 @@ func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
 	if moxie_thread_spawn(unsafe.Pointer(h)) != 0 {
 		runtimePanic("spawn: thread create failed")
 	}
+	// The child holds the rings now; this is the record the owner's next
+	// releaseLastSpawn retires, once that child has closed its breaker.
+	recordLastSpawn(spawnCtlRing, spawnCtlPtr, spawnBreaker)
 }
 
 // moxie_runtime_thread_entry is the child side of a spawn. It runs on the new
@@ -193,6 +196,59 @@ func moxie_runtime_thread_entry(arg unsafe.Pointer) {
 func moxie_thread_spawn(arg unsafe.Pointer) int32
 
 
+// releaseLastSpawn frees the rings, control ring and breaker of the spawn this
+// domain performed most recently, unless that domain is still alive. Called at
+// the START of the next spawn, which is a safe point: the previous worker has
+// ended (its breaker is closed) or it is a peer this domain still talks to -
+// and then nothing is freed, because its channels are still in use.
+// releaseLastSpawn is M-09's "retire at a barrier", and it is NOT called
+// automatically: measured on this build, a program that spawns in a loop
+// deadlocked at the sixth spawn with it in spawnDomain - a manager cannot
+// synchronously await a child's teardown from its own domain. It is a call the
+// OWNER of a worker makes after that worker has closed its breaker, which is
+// the only point at which the rings the record names are provably dead.
+func releaseLastSpawn() {
+	if lastSpawnCtlRing == 0 && lastSpawnCtlPtr == 0 && lastSpawnBreaker == nil {
+		return
+	}
+	// Alive means: the target we started has not closed its breaker. A domain
+	// that is still running owns every ring we gave it, so the record stays.
+	if lastSpawnBreaker != nil && !ringIsClosed(lastSpawnBreaker.ringA) && lastSpawnRingCount > 0 {
+		return
+	}
+	if lastSpawnCtlRing != 0 {
+		ringDestroy(lastSpawnCtlRing)
+	}
+	if lastSpawnCtlPtr != 0 {
+		sysUnmap(unsafe.Pointer(lastSpawnCtlPtr), unsafe.Sizeof(spawnCtl{}))
+	}
+	for i := int32(0); i < 16; i++ {
+		for d := int32(0); d < 2; d++ {
+			if lastSpawnRings[i][d] != 0 {
+				ringDestroy(lastSpawnRings[i][d])
+				lastSpawnRings[i][d] = 0
+			}
+		}
+	}
+	lastSpawnCtlRing = 0
+	lastSpawnCtlPtr = 0
+	lastSpawnBreaker = nil
+	lastSpawnRingCount = 0
+}
+
+// recordLastSpawn copies the spawn that just started into the retirement
+// record: the bookkeeping half of retire-at-barrier, without the wait.
+func recordLastSpawn(ctl uintptr, ctlPtr uintptr, breaker *channel) {
+	lastSpawnCtlRing = ctl
+	lastSpawnCtlPtr = ctlPtr
+	lastSpawnBreaker = breaker
+	lastSpawnRingCount = spawnRingCount
+	for i := int32(0); i < 16; i++ {
+		lastSpawnRings[i][0] = spawnRingSet[i][0]
+		lastSpawnRings[i][1] = spawnRingSet[i][1]
+	}
+}
+
 // spawnCtl is the shared spawn-control block: one per spawn, mmap'd
 // MAP_SHARED before fork so parent and child both see the same memory.
 // The child sets ready=1 after its channels are marked; the parent spins
@@ -213,6 +269,18 @@ var childSpawnTarget bool
 // recent one): what spawn returns to the parent and DomainClosed names in the
 // child. Root-arena object, TLS pointer.
 var spawnBreaker *channel
+
+// The retirement record: the rings, control block and breaker of the spawn
+// that most recently started. A separate set of variables, because
+// spawnCtlRing/spawnRingSet/spawnBreaker describe the spawn being established
+// and are overwritten before the child has taken them.
+var (
+	lastSpawnCtlRing   uintptr
+	lastSpawnCtlPtr    uintptr
+	lastSpawnRingCount int32
+	lastSpawnBreaker   *channel
+	lastSpawnRings     [16][2]uintptr
+)
 
 // domainID names THIS domain in a channel's role test: the root is 1, and every
 // spawned domain takes the next number from one process-wide sequence, assigned

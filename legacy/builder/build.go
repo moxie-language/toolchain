@@ -211,6 +211,7 @@ func Build(
 		PanicStrategy:      config.PanicStrategy(),
 		StandaloneRuntime:  config.IsStandaloneRuntime(),
 		NoMainArena:        config.NoMainArena(),
+		NoSovNotes:         config.NoSovNotes(),
 	}
 
 	// Load the target machine, which is the LLVM object that contains all

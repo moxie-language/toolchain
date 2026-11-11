@@ -509,11 +509,20 @@ func scanWasmSpawnTargets(p *SSAPackage) {
 	}
 }
 
-// checkSovereignLoopDecls rejects variable declarations inside a loop body in
-// a self-mutating (sovereign) method. Such declarations allocate per iteration
-// into the receiver's sovereign arena, accumulating scratch that is only
-// reclaimed at method return. Move the loop scratch into a helper function.
-// Applies to all code, the compiler included.
+// checkSovereignLoopDecls rejects declarations that ALLOCATE, per iteration,
+// inside a loop body of a self-mutating (sovereign) method. Such a declaration
+// lands in the receiver's sovereign arena and persists until the method
+// returns. Move the loop scratch into a helper function so it runs in a
+// per-call arena. Applies to all code, the compiler included.
+//
+// The rule is about what the declaration allocates, not about the ':=' token.
+// A per-iteration binding of a scalar (`x := n*2`) or of a view of data the
+// frame already owns (`v := vec[:]`) writes one word on the stack; refusing it
+// made the rule unactionable in exactly the helper functions it points authors
+// to. What it refuses is an aggregate constructed per iteration (a struct,
+// slice, map or array literal, with or without &) and a value of a
+// pointer-bearing type - see sovLoopDeclAllocates. This is the mirror of
+// legacy/compiler/restrict.go checkSovereignLoopDecls.
 func checkSovereignLoopDecls(p *SSAPackage, files []*syntax.File) {
 	if p == nil {
 		return
@@ -553,7 +562,7 @@ func checkSovereignLoopDecls(p *SSAPackage, files []*syntax.File) {
 			if named == nil || !ssaIsSovereignNamedType(p, named) {
 				continue
 			}
-			scanSovLoopDecls(fn.name, fd.Body.List, false)
+			scanSovLoopDecls(p, fn.name, f, fd.Body.List, false)
 		}
 	}
 }
@@ -575,7 +584,7 @@ func shadowErr(fnName, ident string) {
 	push(cctx.compileErrors, fnName | ": '" | ident | "' shadows declaration in enclosing scope")
 }
 
-func scanSovLoopDecls(name string, stmts []syntax.Stmt, inLoop bool) {
+func scanSovLoopDecls(p *SSAPackage, name string, f *syntax.File, stmts []syntax.Stmt, inLoop bool) {
 	for _, s := range stmts {
 		if s == nil {
 			continue
@@ -584,46 +593,101 @@ func scanSovLoopDecls(name string, stmts []syntax.Stmt, inLoop bool) {
 		case *syntax.DeclStmt:
 			if inLoop {
 				for _, d := range st.DeclList {
-					if _, ok := d.(*syntax.VarDecl); ok {
-						sovLoopErr(name, "variable declaration inside a loop in a self-mutating method is not allowed: move the loop scratch into a helper function")
+					vd, ok := d.(*syntax.VarDecl)
+					if !ok {
+						continue
+					}
+					if what := sovLoopAllocates(p, f, vd.Values); what != "" {
+						sovLoopErr(name, "variable declaration of " | what | " inside a loop in a self-mutating method allocates in the receiver's sovereign arena on every iteration: move the loop scratch into a helper function")
 					}
 				}
 			}
 		case *syntax.AssignStmt:
+			// lhs := rhs: the initialiser is the only expression that can
+			// allocate here; the names bind stack slots.
 			if inLoop && st.Op == token.Def {
-				sovLoopErr(name, "':=' declaration inside a loop in a self-mutating method is not allowed: move the loop scratch into a helper function")
+				if what := sovLoopAllocates(p, f, st.Rhs); what != "" {
+					sovLoopErr(name, "':=' of " | what | " inside a loop in a self-mutating method allocates in the receiver's sovereign arena on every iteration: move the loop scratch into a helper function")
+				}
 			}
 		case *syntax.ForStmt:
 			if st.Body != nil {
-				scanSovLoopDecls(name, st.Body.List, true)
+				scanSovLoopDecls(p, name, f, st.Body.List, true)
 			}
 		case *syntax.BlockStmt:
-			scanSovLoopDecls(name, st.List, inLoop)
+			scanSovLoopDecls(p, name, f, st.List, inLoop)
 		case *syntax.IfStmt:
 			if st.Then != nil {
-				scanSovLoopDecls(name, st.Then.List, inLoop)
+				scanSovLoopDecls(p, name, f, st.Then.List, inLoop)
 			}
 			if st.Else != nil {
-				scanSovLoopDecls(name, []syntax.Stmt{st.Else}, inLoop)
+				scanSovLoopDecls(p, name, f, []syntax.Stmt{st.Else}, inLoop)
 			}
 		case *syntax.SwitchStmt:
 			for _, c := range st.Body {
 				if c != nil {
-					scanSovLoopDecls(name, c.Body, inLoop)
+					scanSovLoopDecls(p, name, f, c.Body, inLoop)
 				}
 			}
 		case *syntax.SelectStmt:
 			for _, c := range st.Body {
 				if c != nil {
-					scanSovLoopDecls(name, c.Body, inLoop)
+					scanSovLoopDecls(p, name, f, c.Body, inLoop)
 				}
 			}
 		case *syntax.LabeledStmt:
 			if st.Stmt != nil {
-				scanSovLoopDecls(name, []syntax.Stmt{st.Stmt}, inLoop)
+				scanSovLoopDecls(p, name, f, []syntax.Stmt{st.Stmt}, inLoop)
 			}
 		}
 	}
+}
+
+// sovLoopAllocates names the aggregate a loop-body declaration's initialiser
+// CONSTRUCTS, or "" when it constructs none. Mirror of legacy/compiler/restrict.go
+// sovLoopDeclAllocates.
+//
+// The rule is about construction, not about the ':=' token and not about the
+// variable's type: a per-iteration literal builds its bytes again on every pass
+// and they stay in the receiver's sovereign arena until the method returns.
+// `x := f()`, `v := vec[:]` and `g := &Node{}` pushed into a slice are bindings
+// and nodes, not loop scratch.
+func sovLoopAllocates(p *SSAPackage, f *syntax.File, e syntax.Expr) (what string) {
+	w, ok := sovLoopLiteralKind(e)
+	if ok {
+		return "a " | w
+	}
+	return ""
+}
+
+// sovLoopLiteralKind names the composite literal an expression builds.
+func sovLoopLiteralKind(e syntax.Expr) (what string, ok bool) {
+	lit, isLit := e.(*syntax.CompositeLit)
+	if !isLit {
+		if op, isOp := e.(*syntax.Operation); isOp && op.Y == nil && op.Op == token.And {
+			lit, isLit = op.X.(*syntax.CompositeLit)
+		}
+	}
+	if !isLit {
+		return "", false
+	}
+	if lit.Type == nil {
+		return "composite literal", true
+	}
+	return sovAggregateKind(lit.Type), true
+}
+
+// sovAggregateKind names the aggregate a literal's type expression constructs.
+func sovAggregateKind(t syntax.Expr) (what string) {
+	switch ty := t.(type) {
+	case *syntax.SliceType:
+		return "slice literal"
+	case *syntax.ArrayType:
+		return "array literal"
+	case *syntax.MapType:
+		return "map literal"
+	}
+	return "struct literal"
 }
 
 // --- position-insensitive shadow checking ----------------------------------

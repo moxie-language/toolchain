@@ -66,6 +66,7 @@ type Config struct {
 	PanicStrategy      string
 	StandaloneRuntime  bool // keep symbols external for cross-module linking
 	NoMainArena        bool // -no-main-arena: package main gets no arena or return encode
+	NoSovNotes         bool // -no-sov-notes: no sovereign arena note for mutating methods
 }
 
 // compilerContext contains function-independent data that should still be
@@ -1657,6 +1658,7 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 			elem := ptr.Elem()
 			if named, ok := elem.(*types.Named); ok && b.runtimePkg != nil && b.isSovereignNamedType(named) {
 				if ssaFuncWritesReceiver(b.fn) {
+					b.noteSovereignMutating(named)
 					b.emitSovereignPrologue(named)
 					return
 				}
@@ -1708,6 +1710,44 @@ func funcStoresGlobal(fn *ssa.Function) bool {
 		}
 	}
 	return false
+}
+
+// noteSovereignMutating reports that fn is a MUTATING method of a sovereign
+// receiver, which is the same decision that emits the borrow in the prologue.
+// The classification is invisible in the source: a method that looks read-only
+// but calls a method on a receiver field borrows the receiver's arena, and
+// every allocation it makes lives there until compaction instead of dying at
+// return - the loop-scratch leak the relay kept rediscovering. One line on
+// stderr per method, for user code only (the stdlib's own methods are not the
+// subject of the note), silenced by -no-sov-notes. Not an error, not in
+// diagnostics, and it changes no generated code.
+func (b *builder) noteSovereignMutating(named *types.Named) {
+	if b.NoSovNotes || b.fn == nil || b.fn.Pkg == nil || !b.isUserPackage(b.fn.Pkg) {
+		return
+	}
+	if p := b.fn.Pkg.Pkg.Path(); p == "moxielang.dev/pkg" || strings.HasPrefix(p, "moxielang.dev/pkg/") {
+		// The toolchain's own infrastructure packages (mxutil, mxregexp,
+		// mxcover, ...) are not the stdlib, but every program pulls them in and
+		// they are not the subject of the note: a hello-world would otherwise
+		// report a dozen methods it never calls. The rest of the toolchain
+		// exempts them by the same rule.
+		return
+	}
+	recv := named.Obj()
+	if recv == nil || recv.Pkg() == nil {
+		return
+	}
+	name := b.fn.Name()
+	if name == "init" || strings.HasPrefix(name, "init$") {
+		// A package initialiser is not a method anybody calls.
+		return
+	}
+	msg := fmt.Sprintf("note: method (*%s.%s).%s is mutating: its allocations land in the receiver's sovereign arena (they persist until compaction; put scratch in a free helper function), silence with -no-sov-notes\n",
+		recv.Pkg().Name(), recv.Name(), name)
+	if pos := b.fn.Pos(); pos.IsValid() && b.program != nil && b.program.Fset != nil {
+		msg = b.program.Fset.Position(pos).String() + ": " + msg
+	}
+	os.Stderr.WriteString(msg)
 }
 
 // emitSovereignPrologue sets up a mutating method on a sovereign receiver:

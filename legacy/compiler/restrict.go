@@ -197,12 +197,21 @@ func (b *builder) checkMoxieRestrictions() {
 	b.checkSpawnMoveRestriction()
 }
 
-// checkSovereignLoopDecls rejects new variable declarations inside a loop body
-// in a self-mutating method. Such declarations allocate per iteration into the
-// receiver's sovereign arena, accumulating scratch that is only reclaimed at
-// method return - the sovereign bloat failure. Move the loop scratch into a
-// helper function so it runs in a per-call arena. Applies to all code (the
-// compiler included); the runtime implements the arena system and is exempt.
+// checkSovereignLoopDecls rejects declarations that ALLOCATE, per iteration,
+// inside a loop body of a self-mutating method. Such a declaration lands in the
+// receiver's sovereign arena and persists until the method returns - the
+// sovereign bloat failure. Move the loop scratch into a helper function so it
+// runs in a per-call arena. Applies to all code (the compiler included); the
+// runtime implements the arena system and is exempt.
+//
+// The rule is about what the declaration allocates, not about the ':=' token.
+// A per-iteration binding of a scalar (`x := n*2`), a call result or a view of
+// data the frame already owns (`v := vec[:]`) writes one word on the stack: it
+// is idiomatic, it is what a helper-shaped loop looks like, and refusing it made
+// the rule unactionable in exactly the functions it points authors to. What it
+// refuses is an aggregate the caller constructs per iteration (a struct, slice,
+// map or array literal, with or without &) and a value of a pointer-bearing
+// type the loop body cannot prove it copied - see sovLoopDeclAllocates.
 func (b *builder) checkSovereignLoopDecls() {
 	if !b.hasReceiver() || b.fn == nil || b.fn.Signature == nil || b.fn.Signature.Recv() == nil {
 		return
@@ -235,12 +244,26 @@ func scanSovLoopDecls(b *builder, stmts []ast.Stmt, inLoop bool) {
 		case *ast.DeclStmt:
 			if inLoop {
 				if gd, ok := st.Decl.(*ast.GenDecl); ok && gd.Tok == token.VAR {
-					b.addError(st.Pos(), "moxie: variable declaration inside a loop in a self-mutating method is not allowed: move the loop scratch into a helper function")
+					for _, spec := range gd.Specs {
+						vs, ok := spec.(*ast.ValueSpec)
+						if !ok {
+							continue
+						}
+						what := b.sovLoopDeclAllocates(vs.Type, vs.Values)
+						if what == "" {
+							continue
+						}
+						b.addError(st.Pos(), "moxie: variable declaration of a "+what+" inside a loop in a self-mutating method allocates in the receiver's sovereign arena on every iteration: move the loop scratch into a helper function")
+					}
 				}
 			}
 		case *ast.AssignStmt:
+			// lhs := rhs: the initialiser is the only expression that can
+			// allocate here; the names bind stack slots.
 			if inLoop && st.Tok == token.DEFINE {
-				b.addError(st.Pos(), "moxie: ':=' declaration inside a loop in a self-mutating method is not allowed: move the loop scratch into a helper function")
+				if what := b.sovLoopDeclAllocates(nil, st.Rhs); what != "" {
+					b.addError(st.Pos(), "moxie: ':=' of a "+what+" inside a loop in a self-mutating method allocates in the receiver's sovereign arena on every iteration: move the loop scratch into a helper function")
+				}
 			}
 		case *ast.ForStmt:
 			scanSovLoopDecls(b, st.Body.List, true)
@@ -267,6 +290,67 @@ func scanSovLoopDecls(b *builder, stmts []ast.Stmt, inLoop bool) {
 			scanSovLoopDecls(b, st.Body, inLoop)
 		}
 	}
+}
+
+// sovLoopDeclAllocates names the aggregate a loop-body declaration's
+// initialiser CONSTRUCTS, or "" when it constructs none.
+//
+// The rule is about construction, not about the ':=' token and not about the
+// variable's type. A per-iteration literal builds its bytes again on every
+// pass and they stay in the receiver's sovereign arena until the method
+// returns - that is the accumulation the rule exists for, and it names the kind
+// so the message says what the author wrote (`slice literal`, `map literal`,
+// `struct literal`, `array literal`, `composite literal`).
+//
+// A pointer to a literal (`p := &T{}`) reports the literal: the pointer is a
+// word, the struct behind it is the iteration's garbage.
+//
+// Everything else is permitted. `x := n*2` writes one stack word; `v := vec[:]`
+// names data the frame already owns; `g := &SSAGlobal{...}` pushed into a slice
+// is a NODE the method builds on purpose. The last one is worth being explicit
+// about: the message used to say "move the loop scratch into a helper function",
+// which is unactionable when the loop IS the helper that builds the things the
+// method returns. The rule can tell an aggregate being constructed from a value
+// being bound; it is not going to infer lifetime from one either, so the
+// allocator note (noteSovereignMutating) covers the rest.
+func (b *builder) sovLoopDeclAllocates(declType ast.Expr, values []ast.Expr) (what string) {
+	for _, v := range values {
+		lit, ok := v.(*ast.CompositeLit)
+		if !ok {
+			if u, isUnary := v.(*ast.UnaryExpr); isUnary && u.Op == token.AND {
+				lit, ok = u.X.(*ast.CompositeLit)
+			}
+		}
+		if !ok {
+			continue
+		}
+		if lit.Type == nil {
+			return "composite literal"
+		}
+		return sovAggregateKind(lit.Type)
+	}
+	return ""
+}
+
+// sovAggregateKind names the aggregate that a literal's type expression
+// constructs.
+func sovAggregateKind(t ast.Expr) (what string) {
+	switch ty := t.(type) {
+	case *ast.StarExpr:
+		return sovAggregateKind(ty.X)
+	case *ast.ArrayType:
+		if ty.Len == nil {
+			return "slice literal"
+		}
+		return "array literal"
+	case *ast.MapType:
+		return "map literal"
+	}
+	// A named aggregate or a struct literal: the type expression is an
+	// identifier (point) or an inline struct. Name it as a struct when nothing
+	// else fits, since that is what a bare identifier in a composite literal
+	// almost always is in this codebase.
+	return "struct literal"
 }
 
 // isIndexableType reports whether a type can be indexed: slice, array, string,

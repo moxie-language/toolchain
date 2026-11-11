@@ -1076,29 +1076,51 @@ func (pb *ssaPkgBuilder) registerVar(d *syntax.VarDecl) {
 		if o := pb.pkg.Pkg.Scope.Lookup(name.Value); o != nil {
 			obj, _ = o.(*TCVar)
 		}
-		var typ Type
-		if obj != nil {
-			typ = obj.Typ
-		}
-		if typ == nil && d.Type != nil {
-			typ = pkgResolveTypeAST(pb.pkg, d.Type)
-		}
-		if typ == nil && d.Values != nil {
-			typ = pkgResolveTypeAST(pb.pkg, d.Values)
-		}
-		g := &SSAGlobal{
-			name:   name.Value,
-			object: obj,
-			typ:    NewPointer(typ),
-			pos:    0,
-			pkg:    pb.pkg,
-		}
-		pb.pkg.SetMember(name.Value, g)
+		// The node lives in the package's own arena, not in whatever arena
+		// was current: this method is a package builder, so its sovereign
+		// arena is the wrong home for a node the package retains.
+		pb.pkg.SetMember(name.Value, newSSAGlobal(pb.pkg, name.Value, obj, varDeclType(pb.pkg, d, obj)))
 	}
 	if d.Values != nil {
 		pb.varInits = mxutil.Ensure(pb.varInits, 1)
 		push(pb.varInits, d)
 		pb.varInitScopes[d] = pb.curFileScope
+	}
+}
+
+// newSSAParameter builds one parameter node in its own frame arena, so a
+// builder that fills a parameter list in a loop accumulates the nodes it
+// returns and nothing else.
+func newSSAParameter(name string, typ Type, pos int32, parent *SSAFunction) (p *SSAParameter) {
+	return &SSAParameter{name: name, typ: typ, pos: pos, parent: parent}
+}
+
+// varDeclType is the declared type of a package variable: the scope's object
+// when it has one, else the declaration's type expression, else the type of
+// its initialiser.
+func varDeclType(p *SSAPackage, d *syntax.VarDecl, obj *TCVar) (typ Type) {
+	if obj != nil {
+		typ = obj.Typ
+	}
+	if typ == nil && d.Type != nil {
+		typ = pkgResolveTypeAST(p, d.Type)
+	}
+	if typ == nil && d.Values != nil {
+		typ = pkgResolveTypeAST(p, d.Values)
+	}
+	return typ
+}
+
+// newSSAGlobal is a free function so the node it builds is allocated in this
+// function's own frame arena and returned by value, instead of accumulating in
+// the caller's sovereign arena one call at a time.
+func newSSAGlobal(p *SSAPackage, name string, obj *TCVar, typ Type) (g *SSAGlobal) {
+	return &SSAGlobal{
+		name:   name,
+		object: obj,
+		typ:    NewPointer(typ),
+		pos:    0,
+		pkg:    p,
 	}
 }
 
@@ -1567,12 +1589,7 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 	if params != nil {
 		for i := 0; i < params.Len(); i++ {
 			pvar := params.At(i)
-			p := &SSAParameter{
-				name:   pvar.Name,
-				typ:    pvar.Typ,
-				pos:    fb.fn.pos,
-				parent: fb.fn,
-			}
+			p := newSSAParameter(pvar.Name, pvar.Typ, fb.fn.pos, fb.fn)
 			fb.fn.Params = mxutil.Ensure(fb.fn.Params, 1)
 			push(fb.fn.Params, p)
 			if pvar.Name != "" && pvar.Name != "_" {
@@ -4373,11 +4390,20 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 
 	var states []*SSASelectState
 	caseBlocks := [](*SSABasicBlock){:0:len(s.Body)}
+	nstates := len(s.Body)
+	states = mxutil.Ensure(states, nstates)
+	for i := int32(0); i < nstates; i++ {
+		states = push(states, &SSASelectState{})
+	}
 	for i, clause := range s.Body {
 		cb := fb.newBlock("select.case")
 		caseBlocks = mxutil.Ensure(caseBlocks, 1)
 		push(caseBlocks, cb)
-		state := &SSASelectState{}
+		// The node for this clause was created once, above; its per-clause
+		// fields are written once, here. Rebuilding it per iteration
+		// (`state := &SSASelectState{}` inline) put a fresh aggregate in
+		// this method's sovereign arena on every pass.
+		state := states[i]
 		if clause.Comm != nil {
 			switch comm := clause.Comm.(type) {
 			case *syntax.SendStmt:
@@ -4412,9 +4438,6 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 				}
 			}
 		}
-		states = mxutil.Ensure(states, 1)
-		push(states, state)
-		_ = i
 	}
 
 	// Build tuple type with recv element types.
@@ -5924,7 +5947,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 		checkParenCallTarget(e, fb.fn.Pkg.Pkg.Path)
 	}
 	if ie, ok := e.Fun.(*syntax.IndexExpr); ok {
-		if result, handled := fb.tryGenericCallFromIndex(ie, e.ArgList, e.HasDots); handled {
+		if result, handled := fb.tryGenericCallFromIndex(ie, e.ArgList, e.HasDots, ie.Pos()); handled {
 			return result
 		}
 	}
@@ -5964,7 +5987,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 				return nil
 			}
 		}
-		if result, handled := fb.tryGenericLocalCall(name.Value, e.ArgList, e.HasDots); handled {
+		if result, handled := fb.tryGenericLocalCall(name.Value, e.ArgList, e.HasDots, name.Pos()); handled {
 			return result
 		}
 	}
@@ -6081,7 +6104,7 @@ func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
 			if fv, handled := fb.buildFuncFieldCall(sel, e.ArgList, e.HasDots); handled {
 				return fv
 			}
-			if gm, gmHandled := fb.tryGenericMethodCall(sel, recv, e.ArgList, e.HasDots); gmHandled {
+			if gm, gmHandled := fb.tryGenericMethodCall(sel, recv, e.ArgList, e.HasDots, sel.Pos()); gmHandled {
 				return gm
 			}
 			// No method, interface dispatch, function field or generic
@@ -7120,7 +7143,7 @@ func (fb *ssaFuncBuilder) buildFuncFieldCall(sel *syntax.SelectorExpr, argList [
 // resolveTypeExprWithSubst). Looks up the generic method decl collected by
 // ScanGenericDecls, substitutes the type params, builds the body, and emits
 // the call with the receiver as first argument.
-func (fb *ssaFuncBuilder) tryGenericMethodCall(sel *syntax.SelectorExpr, recv SSAValue, argList []syntax.Expr, hasDots bool) (s SSAValue, handled bool) {
+func (fb *ssaFuncBuilder) tryGenericMethodCall(sel *syntax.SelectorExpr, recv SSAValue, argList []syntax.Expr, hasDots bool, site token.Pos) (s SSAValue, handled bool) {
 	typ := recv.SSAType()
 	if typ == nil {
 		return nil, false
@@ -7195,6 +7218,11 @@ func (fb *ssaFuncBuilder) genericMethodInstance(named *Named, methodName string)
 	for i, tn := range tparamNames {
 		typeSubst[tn] = named.TArgs[i]
 	}
+	callerPkg := ""
+	if fb.fn != nil && fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil {
+		callerPkg = fb.fn.Pkg.Pkg.Path
+	}
+	recordGen("M", pkgPath, named.Obj.Name, methodName, callerPkg, named.TArgs, token.Pos{})
 	var srcScope *Scope
 	if cctx.genericPkgScopes != nil {
 		srcScope = cctx.genericPkgScopes[pkgPath]
@@ -8904,7 +8932,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		}
 		return nil
 	}
-	if result, handled := fb.tryGenericPkgCall(pn, funcName, argList, hasDots); handled {
+	if result, handled := fb.tryGenericPkgCall(pn, funcName, argList, hasDots, token.Pos{}); handled {
 		return result
 	}
 	obj := imported.Scope.Lookup(funcName)
@@ -10015,6 +10043,19 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
 				push(args, ta)
 			}
 			if len(args) > 0 {
+				declPkg := ""
+				if named.Obj != nil && named.Obj.Pkg != nil {
+					declPkg = named.Obj.Pkg.Path
+				}
+				callerPkg := ""
+				if fb.fn != nil && fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil {
+					callerPkg = fb.fn.Pkg.Pkg.Path
+				}
+				tn := ""
+				if named.Obj != nil {
+					tn = named.Obj.Name
+				}
+				recordGen("T", declPkg, tn, "", callerPkg, args, token.Pos{})
 				inst := &Named{Obj: named.Obj, Under: named.Under, Methods: named.Methods, TParams: named.TParams, TArgs: args}
 				return inst
 			}
@@ -10620,6 +10661,16 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope
 		base := resolveTypeExprWithSubst(ev.X, typeSubst, pkgScope)
 		args := resolveTypeArgsExpr(ev.Index, typeSubst, pkgScope)
 		if named, ok := base.(*Named); ok && named.TArgs == nil && len(args) > 0 {
+			declPkg := ""
+			if named.Obj != nil && named.Obj.Pkg != nil {
+				declPkg = named.Obj.Pkg.Path
+			}
+			callerPkg := ""
+			tn := ""
+			if named.Obj != nil {
+				tn = named.Obj.Name
+			}
+			recordGen("T", declPkg, tn, "", callerPkg, args, token.Pos{})
 			inst := &Named{Obj: named.Obj, Under: named.Under, Methods: named.Methods, TParams: named.TParams, TArgs: args}
 			return inst
 		}
@@ -11047,12 +11098,17 @@ func (fb *ssaFuncBuilder) unifyParamAST(paramAST syntax.Expr, argAST syntax.Expr
 // was emitted - the value is nil for void functions, so callers must NOT use
 // value-nilness to decide whether to fall through to a non-generic call path
 // (that double-emits the call).
-func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, plainName string, typeArgs []Type, args []SSAValue, targetPkg *SSAPackage, srcPkgPath string, hasDots bool) (s SSAValue, handled bool) {
+func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, plainName string, typeArgs []Type, args []SSAValue, targetPkg *SSAPackage, srcPkgPath string, hasDots bool, site token.Pos) (s SSAValue, handled bool) {
 	for _, ta := range typeArgs {
 		if ta == nil {
 			return nil, false
 		}
 	}
+	callerPkg := ""
+	if fb.fn != nil && fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil {
+		callerPkg = fb.fn.Pkg.Pkg.Path
+	}
+	recordGen("F", srcPkgPath, plainName, "", callerPkg, typeArgs, site)
 	mangledName := mangleGenericName(plainName, typeArgs)
 	if srcPkgPath != "" {
 		// Two generic funcs with the same name from different packages can
@@ -11181,7 +11237,7 @@ func (fb *ssaFuncBuilder) emitCallToSSAFunc(fn *SSAFunction, args []SSAValue, ha
 	return call
 }
 
-func (fb *ssaFuncBuilder) tryGenericLocalCall(funcName string, argList []syntax.Expr, hasDots bool) (s SSAValue, handled bool) {
+func (fb *ssaFuncBuilder) tryGenericLocalCall(funcName string, argList []syntax.Expr, hasDots bool, site token.Pos) (s SSAValue, handled bool) {
 	pkgPath := fb.fn.Pkg.Pkg.Path
 	key := pkgPath + "." + funcName
 	fd, ok := cctx.genericFuncDecls[key]
@@ -11211,11 +11267,11 @@ func (fb *ssaFuncBuilder) tryGenericLocalCall(funcName string, argList []syntax.
 	args := fb.buildArgs(argList)
 	typeArgs := inferTypeArgsFromFunc(fd, args)
 	typeArgs = fb.inferTypeArgsFromArgASTs(fd, argList, typeArgs)
-	return fb.monomorphizeAndCall(fd, funcName, typeArgs, args, fb.fn.Pkg, pkgPath, hasDots)
+	return fb.monomorphizeAndCall(fd, funcName, typeArgs, args, fb.fn.Pkg, pkgPath, hasDots, site)
 }
 
 
-func (fb *ssaFuncBuilder) tryGenericPkgCall(pn *PkgName, funcName string, argList []syntax.Expr, hasDots bool) (s SSAValue, handled bool) {
+func (fb *ssaFuncBuilder) tryGenericPkgCall(pn *PkgName, funcName string, argList []syntax.Expr, hasDots bool, site token.Pos) (s SSAValue, handled bool) {
 	imported := pn.Imported
 	if imported == nil {
 		return nil, false
@@ -11228,10 +11284,10 @@ func (fb *ssaFuncBuilder) tryGenericPkgCall(pn *PkgName, funcName string, argLis
 	args := fb.buildArgs(argList)
 	typeArgs := inferTypeArgsFromFunc(fd, args)
 	typeArgs = fb.inferTypeArgsFromArgASTs(fd, argList, typeArgs)
-	return fb.monomorphizeAndCall(fd, funcName, typeArgs, args, fb.fn.Pkg, imported.Path, hasDots)
+	return fb.monomorphizeAndCall(fd, funcName, typeArgs, args, fb.fn.Pkg, imported.Path, hasDots, site)
 }
 
-func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList []syntax.Expr, hasDots bool) (s SSAValue, handled bool) {
+func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList []syntax.Expr, hasDots bool, site token.Pos) (s SSAValue, handled bool) {
 	switch x := ie.X.(type) {
 	case *syntax.Name:
 		pkgPath := fb.fn.Pkg.Pkg.Path
@@ -11254,7 +11310,7 @@ func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList 
 		}
 		typeArgs := fb.resolveExplicitTypeArgs(ie.Index, fd)
 		args := fb.buildArgs(argList)
-		return fb.monomorphizeAndCall(fd, x.Value, typeArgs, args, fb.fn.Pkg, pkgPath, hasDots)
+		return fb.monomorphizeAndCall(fd, x.Value, typeArgs, args, fb.fn.Pkg, pkgPath, hasDots, site)
 	case *syntax.SelectorExpr:
 		if pkgName, ok2 := x.X.(*syntax.Name); ok2 {
 			obj := fb.lookupObject(pkgName.Value)
@@ -11266,7 +11322,7 @@ func (fb *ssaFuncBuilder) tryGenericCallFromIndex(ie *syntax.IndexExpr, argList 
 				}
 				typeArgs := fb.resolveExplicitTypeArgs(ie.Index, fd)
 				args := fb.buildArgs(argList)
-				mono, handledMono := fb.monomorphizeAndCall(fd, x.Sel.Value, typeArgs, args, fb.fn.Pkg, pn.Imported.Path, hasDots)
+				mono, handledMono := fb.monomorphizeAndCall(fd, x.Sel.Value, typeArgs, args, fb.fn.Pkg, pn.Imported.Path, hasDots, site)
 				return mono, handledMono
 			}
 		}
