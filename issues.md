@@ -1635,6 +1635,14 @@ times on a clean build with no instrumentation: the coordinator records
 and `storeWelcome`, and the peer prints `SENT hello from cordn`,
 `READ hello from smesh`, `SENT cordn hears you`, `PASS`.
 
+The other three cordn tests in that file pass individually. Running all four in
+one pytest session is unreliable: each one boots a second Firefox driver against
+module-scoped relay and coordinator fixtures, and the run then reports
+"device B never linked the group" / "the cordn control never appeared" on tests
+that pass on their own. Treat the per-test runs as the evidence, not the batch.
+Do not rebuild a wasm module while a suite is running either - that alone
+produced one false failure here.
+
 **Authoring rule this establishes.** A struct that lives in the root arena must
 have every field - text, slices, maps - allocated in the root arena. One
 frame-backed field is enough to turn every return of that object into a deep
