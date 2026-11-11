@@ -1655,3 +1655,47 @@ inefficiency. (b) A standalone reproduction, so the defect cannot return
 unnoticed. (c) The compiler could refuse the shape outright: a `SovereignSetArena`
 block that stores a frame-allocated slice or string into a root-arena object is
 visible at compile time in the same function.
+
+## 11. A spawned domain can start with a channel that no longer exists
+
+**Measured 2026-11-11, intermittently, while running the cordn interop.**
+Roughly one relay start in eight died before serving a request:
+
+    store: rebuilt indexes for 0 events
+    ORLY 0.6.11 listening on 127.0.0.1:23334
+    panic: runtime error at 0x000000000031b7a0: caught signal SIGSEGV
+
+`addr2line -f -C -e tmp/morly 0x31b7a0` -> `runtime.MarkChildPipeChannel`.
+A second sighting of the same class symbolised to `runtime.ArenaAllocTD`.
+
+**Why it is intermittent.** `chanMake` allocates the `channel` struct with
+`&channel{...}`, which lands in the CALLER'S frame arena. That pointer is what
+the spawn call stores in `spawnChanSet`, and it is what the child's prologue
+hands to `MarkChildPipeChannel`. The child is a thread that starts
+asynchronously: if the spawning function returns first, its frame is released
+and the child's first store writes into recycled memory. `MarkChildPipeChannel`
+already checks `ch == nil`, which is a different case - a dangling non-nil
+pointer passes it.
+
+**Why it matters.** The language contract says a channel parameter is "a durable
+right to a shared structure". Today the struct behind that right is only as
+durable as the frame that made it, so the contract holds only while the spawning
+frame is still alive. A manager that creates channels in a helper and returns is
+exactly the shape the contract is supposed to permit.
+
+**Fix direction (not yet done - it is a compiler+runtime change, both sides).**
+The channel struct must be relocated into the ROOT arena at the spawn boundary,
+in the same way a value parameter is frozen at the call. `spawnDomain` can
+refresh `spawnChanSet[i]` with a root-arena copy, and the child binds that copy.
+That is safe because direction is chosen by role (`childDomain` vs `domainID`),
+not by which copy a side holds - the struct is a handle, the rings are shared.
+The parent's own variable keeps pointing at its frame copy, which it is entitled
+to do only while that frame lives, so the write-back into the caller's variable
+is the part that needs the compiler: the spawn call site knows the local's
+address, `spawnDomain` does not.
+
+**Not fixed now because** it changes emitted code and must land in `legacy/` and
+`_mxc_stage4/` together (wood law), and no reproduction exists yet that fails
+deterministically - the 8-run rate is too slow to verify against. The
+reproduction to write first is a program that spawns from a helper function and
+returns immediately, in a loop, on native.
