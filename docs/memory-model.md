@@ -1708,6 +1708,17 @@ Not yet demonstrated, and why:
   decode. Equal bytes mean the decoder starts at the wrong offset; different
   bytes mean the saved pointer is stale.
 
+  **Round 9: located in the typecheck pass, between the builtin-String
+  injection and the alias pass.** Instrumenting `typeCheckPkg` with stage
+  markers showed `internal/bytealg` printing `parsed` and `inj` and then never
+  reaching `pre-scan` or the first `pass` marker, while the packages before it
+  (`array`, `internal/task`) print every marker and finish in seconds. The
+  region between those two markers is the per-declaration loop that records a
+  generic type declaration's parameters on its `Named` before the body resolves
+  - which is where the next instrumented build should count iterations, because
+  bytealg has no generic type declarations of its own, so a loop that spends
+  minutes there is iterating something it should not.
+
   **Round 9: the next wall is a performance cliff, not a hang.** After the codec
   fix a compiler built from these sources starts and compiles, but it needs more
   than ten minutes on `internal/bytealg`'s typecheck where the six-day-old
