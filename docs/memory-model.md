@@ -1708,8 +1708,33 @@ Not yet demonstrated, and why:
   decode. Equal bytes mean the decoder starts at the wrong offset; different
   bytes mean the saved pointer is stale.
 
-  **Round 15: three samples all sit in the seen-set lookup, and an index with
-  base-only registration still does not move it.** Interrupting the compiler
+  **Round 15: the numbers, all of them in one place.** For package `array`:
+  7,181 encode ROOTS (one per returned value) and 330,620 encoder entries, so an
+  average walk is 46 nodes - a few big walks (the scope graph) among thousands
+  of tiny ones. `internal/task` is smaller (1,950 roots, 251,114 entries). The
+  cold-build cost is ~28 s per package, i.e. ~4 ms per root. Everything below
+  was measured by rebuilding the compiler and timing a cold `hello`:
+
+  | change | time |
+  |---|---|
+  | baseline (round 13 newest-first region scan) | 4m40s |
+  | base-only seen registration (entries cut by the field count) | 6m22s -> no gain |
+  | + 2^18-slot generation-stamped index | 4m48s |
+  | + cap raised to 2^20 and 2^22-slot index (never saturates) | 4m53s, RSS 39 MB |
+  | cached arena extents (`fastBase`/`fastCap`) | 4m47s |
+  | arena regions visited newest first | 6m22s -> **4m40s** (kept) |
+
+  So the seen-set lookup, its density, its cap and the arena tests have all been
+  eliminated as the dominant term. What is left is the per-root overhead of the
+  return protocol itself - thousands of returns per package, each allocating,
+  encoding and decoding a small graph - which is exactly what phase 1 (the flat
+  return copy) exists to replace. That reorders the work: phase 1 is no longer
+  "after 4", it is the unblocker, and it does not need the compiler to be fast to
+  be written - only to be run, which the working binary still allows.
+
+  **Round 15 (superseded by the table above): three samples all sit in the
+  seen-set lookup, and an index with base-only registration still does not move
+  it.** Interrupting the compiler
   under gdb three times during `bytealg` gives the same innermost frame every
   time: `codecSeenLookup` called from `codecEncodeMap`'s value loop, reached
   through `Scope` -> map -> `TCConst` -> `object` -> `TCPackage`. So the walk
