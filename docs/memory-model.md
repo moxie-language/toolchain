@@ -1720,8 +1720,11 @@ Not yet demonstrated, and why:
   yet the walk descends - so either the objects being walked are NOT in the root
   arena (a package scope is created in the typecheck frame; its parent chain
   reaches the universe), or the stable test is not reached for the shape being
-  encoded. The next step is to log, for one package, whether each level of the
-  walk is judged stable, and if not, which arena it lives in.
+  encoded. Two cheap measurements will separate these: count ENCODE CALLS per
+  package (a global counter printed next to `tc-out`) to see whether one huge
+  walk or thousands of small ones add up, and log at the top few levels whether
+  `codecIsStableAddr` returned true for the pointer about to be walked. Both need
+  one compiler build (~7 min) and one run that reaches `bytealg` (~90 s).
 
   **Round 11: the cost is the SEEN SET, not the declaration.** Running the slow
   compiler under gdb and interrupting it mid-package caught it inside
