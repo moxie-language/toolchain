@@ -1838,16 +1838,23 @@ strings, so the protocol should have run.
   question is where that release happens relative to the read, not whether the
   encoder aliased.
 
-A third experiment did answer it, and rules out my own framing. An
-`ArenaHoldsAddr` probe (scan the fn stack and root regions for the buffer) was
-placed at the entry of `bytesConcatMove`: it never fired before the crash. So
-the buffer IS inside a live arena region - the string is not dangling at all.
-The fault is a write at `x.ptr + len(x)` past the *end of that region*: the
-inline extension believed `cap(x)` left room that the mapping did not have.
+A third experiment narrowed it further. An `ArenaHoldsAddr` probe (scan the fn
+stack and root region tables for the buffer) at the entry of `bytesConcatMove`
+never fired, and the inline extension is what faulted at `x.ptr + len(x)` - so
+`cap(x)` said there was room where there was no mapping.
 
-So the bug is capacity accounting at a region boundary in the string growth
-path, not the return protocol, not aliasing, and not a released frame. The next
-step is `sliceGrow`/`bytesConcatMove`'s capacity arithmetic against
-`arenaRegionHolds`, and how `cap` is produced for a slice that reaches a region
-end - the old model (a "startup allocator"/contiguous heap) never met that
-boundary, so a legacy-built binary is the first to exercise it.
+That is consistent with one specific story: the buffer belonged to a frame arena
+that was popped and released - returned to the pool, then re-acquired and
+re-pushed by a later frame - so the region TABLE still covers the address while
+the mapping behind it is gone. The probe asked the tables, which is why it could
+not see it. A capacity test on a slice whose backing was released answers "room"
+for memory that no longer exists.
+
+So the defect is the one the relocation protocol exists to prevent - a value
+outliving the arena it was built in - and the reason my two codec experiments
+missed it is that the copy they forced is not the copy this path needs. The next
+step is to check what legacy emits for the *caller* of `mxutil.JoinPath`: whether
+the returned string arrives through the codec at all, and whether the caller's
+`|` chain then writes into a buffer the callee owned. `gdb` frames and the
+arena-scope dump (`arena_scope.mx` has `emitLiveArena` for pooled arenas) are
+the two instruments to use.
