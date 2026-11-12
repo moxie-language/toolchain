@@ -1708,6 +1708,19 @@ Not yet demonstrated, and why:
   decode. Equal bytes mean the decoder starts at the wrong offset; different
   bytes mean the saved pointer is stale.
 
+  **Round 14: the arena tests are not the remaining cost either.** Caching each
+  arena's active-region extent (`fastBase`/`fastCap`, set when a region opens or
+  an arena is created) and testing it before the region loop left the build at
+  4m47s against the 4m40s baseline - no change, so it was reverted. With the
+  region scan already newest-first (round 13) and `sovInSovereignDataArena` a
+  binary search, the remaining per-node cost is elsewhere: the candidates are
+  `retPointeeDies` (walked for every stable candidate) and the outcome mix
+  measured for `array` - 1516 stable, 16411 back-refs, and ~29k pointers that
+  take the escape/basic-pointee path, each of which registers an entry and notes
+  an escape. Sampling the stack at several moments during `bytealg` (run under
+  gdb, then SIGINT - attaching is blocked by `yama/ptrace_scope`) is what names
+  it; a single sample is not enough because the walk moves between phases.
+
   **Round 13: the cost is per-POINTER work, quantified.** Counting encoder
   entries per package gives the scale: `array` 330,620 and `internal/task`
   251,114 entries for packages that take seconds. So a return is not one huge
