@@ -1622,6 +1622,12 @@ Evidence:
   sources.
 - A wasm build of the self-hosted compiler completes:
   `mxc build -target wasm ./_mxc_stage4` produces a module.
+- The stdlib test suite (`run_tests.sh`, every package with tests) passes 11 of
+  11 with a compiler built by the checked-in generation and the new runtime.
+  The first run, with a compiler whose own runtime predated the root-table
+  growth, lost `crypto/x509` to a root-table overflow at 1024 regions; that is
+  the failure the growth above was written for, and it is in the record because
+  the fix is only trustworthy when the test that caught it is named.
 
 Not yet demonstrated, and why:
 
