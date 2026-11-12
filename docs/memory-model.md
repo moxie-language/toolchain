@@ -1657,6 +1657,25 @@ Not yet demonstrated, and why:
   works, and that every fixture in this record was verified with, is
   `./mxc-stage4 build -a` (C0). The fixpoint needs the codec panic found first.
 
+  The panic now has a precise shape: instrumenting both `codec bad pointer tag`
+  sites showed the decoder reading tag **2 (slice)** where a pointer tag was
+  expected, at byte 4451 of a 6086-byte frame, while decoding a value whose
+  layout kind is 21. That is a desynchronisation between the encoder's and the
+  decoder's idea of one field: the two sides disagree about a slice-versus-
+  pointer field, which is the family the string/[]byte unification creates when
+  the two spellings of the same type are given different descriptors. It is the
+  next thing to chase, and it is why every compiler-derived binary dies before
+  it compiles anything while the checked-in one does not.
+
+  A second fact that constrains the repair: the older working binaries in
+  `/tmp` (10-11 November) cannot compile the present sources at all - they
+  enforce "':=' declaration inside a loop in a self-mutating method" as an
+  ERROR, a rule the newer compiler relaxed to a note - so the compiler can only
+  be rebuilt through a binary that is itself built from sources at or after that
+  relaxation. Preserve one such binary (`/tmp/mm-seg/mxc-r46`) before replacing
+  it, or the tree becomes unbuildable, which is exactly what happened in this
+  round.
+
   **Operational trap: `./mxc-stage4` is a BUILD ARTIFACT and can be stale.**
   The copy in the tree was from 6 November and predated the child channel handle
   copy and the whole ownership surface, so fixtures compiled with it exercised
