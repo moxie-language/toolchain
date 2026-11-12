@@ -1708,6 +1708,21 @@ Not yet demonstrated, and why:
   decode. Equal bytes mean the decoder starts at the wrong offset; different
   bytes mean the saved pointer is stale.
 
+  **Root cause found.** The trigger is the hand-built ownership-type graph
+  installed by `installChannelOwnershipTypes`. With that call disabled the
+  compiler built by `legacy/moxie` starts and compiles (it reached
+  `internal/bytealg` instead of dying at start-up); with only `Edge` left out of
+  the universe it also runs. The `Sender`/`Receiver` objects alone are harmless;
+  `Edge` - a `Named` whose `Under` is a hand-built three-field `TCStruct` whose
+  field types are hand-made `Named` instances carrying `TArgs` - is what
+  desynchronises the encode. Two repairs were tried and both still desync:
+  giving the field instances their own instantiated `TCChan` underlying, and
+  leaving the generic bodies in place. The next repair to try is to keep the
+  ownership objects OUT of the universe graph that `InitUniverse` returns (build
+  them on first lookup of the name, after the return encode) or to build the
+  `Edge` instance through the same path user generics take, so the descriptor
+  graph never contains a hand-assembled generic.
+
   Growth alone is NOT the trigger: a 64-item bundle of pointer+slice+string
   elements returned from a function (a frame far past the codec's first
   allocation, so `push` moves the buffer) round-trips intact on the current
