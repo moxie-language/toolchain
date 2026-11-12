@@ -169,7 +169,35 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		}
 	}
 
+	// Note every channel's ring slot before the domain exists: spawnDomain
+	// sizes each ring pair from that channel's declared depth and its
+	// compiler-computed frame budget, both of which travel on the handle.
+	//
+	// NoteSpawnChan also hands back a ROOT-ARENA copy of the handle, and that
+	// copy is what goes into the argument bundle. The child must never read or
+	// write the parent's struct: it lives in this frame, and the parent stops
+	// waiting for the child after half a second (PipeWaitChildReady), so a
+	// slowly starting child would bind its channels against memory this frame
+	// had already released - the relay's start-up SIGSEGV in
+	// MarkChildPipeChannel.
+	target := b.nativeSpawnTargetFor(targetFn)
+	chanCopies := make(map[int]llvm.Value, len(chanArgs))
+	if target != nil && len(chanArgs) > 0 {
+		note := b.program.ImportedPackage("runtime").Members["NoteSpawnChan"].(*ssa.Function)
+		noteType, noteFn := b.getFunction(note)
+		i32 := b.ctx.Int32Type()
+		for i, ca := range chanArgs {
+			own := b.CreateCall(noteType, noteFn, []llvm.Value{
+				llvm.ConstInt(i32, uint64(target.chanIDs[i]-1), false),
+				ca.llvm,
+				llvm.Undef(b.dataPtrType),
+			}, "child.chan")
+			chanCopies[i] = own
+		}
+	}
+
 	var params []llvm.Value
+	chanIdx := 0
 	for _, arg := range concreteArgs {
 		v := b.getValue(arg, instr.Pos())
 		// Channels are shared; values are copied. A value's own bytes are
@@ -177,6 +205,10 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		// into this frame, so the runtime copies the whole graph at the
 		// boundary (and refuses to if it does not fit its declared budget).
 		if _, isChan := arg.Type().Underlying().(*types.Chan); isChan {
+			if own, ok := chanCopies[chanIdx]; ok {
+				v = own
+			}
+			chanIdx++
 			params = append(params, b.expandFormalParam(v)...)
 			continue
 		}
@@ -190,23 +222,6 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 
 	// Create a goroutine-style wrapper that unpacks args and calls the function.
 	wrapper := b.createGoroutineStartWrapper(funcType, funcPtr, "spawn", false, false, instr.Pos())
-
-	// Note every channel's ring slot before the domain exists: spawnDomain
-	// sizes each ring pair from that channel's declared depth and its
-	// compiler-computed frame budget, both of which travel on the handle.
-	target := b.nativeSpawnTargetFor(targetFn)
-	if target != nil && len(chanArgs) > 0 {
-		note := b.program.ImportedPackage("runtime").Members["NoteSpawnChan"].(*ssa.Function)
-		noteType, noteFn := b.getFunction(note)
-		i32 := b.ctx.Int32Type()
-		for i, ca := range chanArgs {
-			b.CreateCall(noteType, noteFn, []llvm.Value{
-				llvm.ConstInt(i32, uint64(target.chanIDs[i]-1), false),
-				ca.llvm,
-				llvm.Undef(b.dataPtrType),
-			}, "")
-		}
-	}
 
 	// Call runtime.spawnDomain(wrapper, paramBundle, nChans).
 	nChans := llvm.ConstInt(b.ctx.Int32Type(), uint64(len(chanArgs)), false)

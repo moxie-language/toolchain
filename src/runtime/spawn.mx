@@ -21,20 +21,56 @@ import "unsafe"
 // runtime.LastSpawnedLockdownFd(). If pipe creation fails the child
 // falls back to the stderr sink and the parent gets -1; spawn does not
 // fail on a lockdown-pipe failure, only observability degrades.
-// spawnChanSet holds the channel pointers of the spawn being established. The
-// compiler notes each channel argument before it calls spawnDomain, so each
-// ring is sized from that channel's declared depth (`chan T{:N}`) and its
-// compiler-computed frame budget - both of which live on the channel itself.
+// spawnChanSet holds the PARENT's channel handles for the spawn being
+// established: the compiler notes each channel argument before it calls
+// spawnDomain, and the ring pair is sized from that channel's declared depth
+// (`chan T{:N}`) and its compiler-computed frame budget, both of which live on
+// the handle. The parent's own struct is also what MarkParentPipeChannel marks
+// and what the parent's sends consult for liveness.
 var spawnChanSet [16]*channel
 
-// NoteSpawnChan records a channel argument for the spawn about to start. The
-// compiler emits one call per channel argument, in argument order, before
-// spawnDomain; spawnDomain clears the slot once the ring pair is created.
-func NoteSpawnChan(idx int32, ch *channel) {
+// spawnChanCopy holds the handle the CHILD receives, one per channel argument.
+// It is a copy in the root arena, taken here, by the parent, while the parent's
+// frame is certainly alive.
+//
+// The child must never read or write the parent's handle. That struct lives in
+// the spawning frame, and the parent stops waiting for the child after half a
+// second (PipeWaitChildReady), at which point it may return and release the
+// frame - while a slowly starting child is still binding its channels. That is
+// the relay's start-up SIGSEGV in MarkChildPipeChannel: the child wrote into a
+// frame that no longer existed.
+var spawnChanCopy [16]*channel
+
+// NoteSpawnChan records a channel argument for the spawn about to start and
+// returns the handle the child is to be given: a root-arena copy of the
+// parent's, so the argument bundle the child reads points at memory that
+// outlives both frames. The compiler emits one call per channel argument, in
+// argument order, before spawnDomain, and substitutes the result for the
+// argument it packs.
+func NoteSpawnChan(idx int32, ch *channel) (out *channel) {
 	if idx < 0 || idx >= 16 {
-		return
+		return ch
 	}
 	spawnChanSet[idx] = ch
+	out = rootChannelCopy(ch)
+	spawnChanCopy[idx] = out
+	return out
+}
+
+// rootChannelCopy copies a channel handle into the root arena, which lives as
+// long as the process. The rings and the message buffer are shared by pointer,
+// so both copies describe the same transport; only the handle's own bookkeeping
+// is per-domain.
+func rootChannelCopy(ch *channel) (out *channel) {
+	if ch == nil {
+		return nil
+	}
+	save := CurrentArena()
+	SetCurrentArena(trueRootArena())
+	cp := (*channel)(alloc(unsafe.Sizeof(channel{}), nil, nil))
+	*cp = *ch
+	SetCurrentArena(save)
+	return cp
 }
 
 // spawnRingDataSize is the power-of-two data area for one direction of a spawn
@@ -99,10 +135,17 @@ func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
 		slots := uintptr(1)
 		ch := spawnChanSet[i]
 		spawnChanSet[i] = nil
+		cp := spawnChanCopy[i]
+		spawnChanCopy[i] = nil
 		if ch != nil {
 			// One channel belongs to the child it was handed to; the parent's
 			// waits consult that child's breaker for liveness.
 			ch.ownerBreaker = spawnBreaker
+			// The child holds the root copy, so it needs the same breaker on its
+			// own handle - it never sees the parent's.
+			if cp != nil {
+				cp.ownerBreaker = spawnBreaker
+			}
 			// A channel that already sits on a boundary KEEPS its rings, the
 			// same rule the wasm side learns per channel (SpawnChannelHandle).
 			// Both domains hold this struct, so "re-ringed" would mean every

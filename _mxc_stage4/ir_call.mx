@@ -1452,6 +1452,32 @@ func (e *irEmitter) emitSpawnCall(c *SSACall) {
 		}
 	}
 
+	// Note each channel's ring slot before the domain exists: spawnDomain sizes
+	// each ring pair from the channel's declared depth and its compiler-computed
+	// frame budget, both of which travel on the handle.
+	//
+	// NoteSpawnChan also hands back a ROOT-ARENA copy of the handle, and that
+	// copy is what goes into the argument bundle. The child must never read or
+	// write the parent's struct: it lives in this frame, and the parent stops
+	// waiting for the child after half a second (PipeWaitChildReady), so a
+	// slowly starting child would bind its channels against memory this frame
+	// had already released - the relay's start-up SIGSEGV in
+	// MarkChildPipeChannel.
+	// chanOrig keeps the parent's OWN handle: the bundle carries the copy the
+	// child receives, but the parent-side mark below must land on the handle
+	// this frame actually uses, or the parent's sends would never see the
+	// binding.
+	var chanOrig []string
+	chanOrig = mxutil.Ensure(chanOrig, len(chanIdxs))
+	var own string
+	for ci, ai := range chanIdxs {
+		chanOrig = push(chanOrig, argVals[ai])
+		own = e.nextReg2("sp")
+		e.w("  ") ; e.w(own) ; e.w(" = call ptr @runtime.NoteSpawnChan(i32 ") ; e.w(irItoa(ci)) ; e.w(", ptr ") ; e.w(argVals[ai]) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.NoteSpawnChan", "ptr", "i32, ptr")
+		argVals[ai] = own
+	}
+
 	structTy := "{"
 	for i, lt := range argTypes {
 		if i > 0 {
@@ -1471,22 +1497,14 @@ func (e *irEmitter) emitSpawnCall(c *SSACall) {
 
 	wrapperSym := e.emitSpawnWrapper(targetFn, argTypes, structTy, chanIdxs)
 
-	// Note each channel's ring slot before the domain exists: spawnDomain sizes
-	// each ring pair from the channel's declared depth and its compiler-computed
-	// frame budget, both of which travel on the handle.
-	for ci, ai := range chanIdxs {
-		e.w("  call void @runtime.NoteSpawnChan(i32 ") ; e.w(irItoa(ci)) ; e.w(", ptr ") ; e.w(argVals[ai]) ; e.w(", ptr null)\n")
-		e.declareRuntime("runtime.NoteSpawnChan", "void", "i32, ptr")
-	}
-
 	fnPtr := e.nextReg2("sp")
 	e.w("  ") ; e.w(fnPtr) ; e.w(" = ptrtoint ptr ") ; e.w(wrapperSym) ; e.w(" to ") ; e.w(ipt) ; e.w("\n")
 	e.w("  call void @runtime.spawnDomain(") ; e.w(ipt) ; e.w(" ") ; e.w(fnPtr)
 	e.w(", ptr ") ; e.w(buf) ; e.w(", i32 ") ; e.w(irItoa(nChans)) ; e.w(", ptr null)\n")
 	e.declareRuntime("runtime.spawnDomain", "void", ipt | ", ptr, i32")
 
-	for ci, ai := range chanIdxs {
-		e.w("  call void @runtime.MarkParentPipeChannel(ptr ") ; e.w(argVals[ai]) ; e.w(", i16 ") ; e.w(irItoa(int32(ci)+1)) ; e.w(", ptr null)\n")
+	for ci, orig := range chanOrig {
+		e.w("  call void @runtime.MarkParentPipeChannel(ptr ") ; e.w(orig) ; e.w(", i16 ") ; e.w(irItoa(int32(ci)+1)) ; e.w(", ptr null)\n")
 		e.declareRuntime("runtime.MarkParentPipeChannel", "void", "ptr, i16")
 	}
 
@@ -1545,11 +1563,23 @@ func (e *irEmitter) emitSpawnWrapper(targetFn *SSAFunction, argTypes []string, s
 	// signal the parent that the child is ready. These run in the child
 	// process (the wrapper is only ever invoked by spawnDomain's child
 	// branch); MarkChildPipeChannel no-ops when childSpawnTarget is false.
+	//
+	// The child writes only to its own memory: it takes a copy of the handle
+	// into its own arena, marks THAT, and passes the copy to the target. The
+	// parameter it loaded above names the parent's channel, which lives in the
+	// spawning frame - a mark written there is one thread mutating another
+	// thread's frame, on memory that frame was free to release (the relay's
+	// start-up SIGSEGV in MarkChildPipeChannel).
+	var own string
 	for ci, ai := range chanIdxs {
 		if ai < 0 || ai >= int32(len(loaded)) {
 			continue
 		}
-		e.w("  call void @runtime.MarkChildPipeChannel(ptr ") ; e.w(loaded[ai]) ; e.w(", i16 ") ; e.w(irItoa(int32(ci)+1)) ; e.w(", ptr null)\n")
+		own = e.nextReg2("gw")
+		e.w("  ") ; e.w(own) ; e.w(" = call ptr @runtime.ChildChannelCopy(ptr ") ; e.w(loaded[ai]) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.ChildChannelCopy", "ptr", "ptr")
+		loaded[ai] = own
+		e.w("  call void @runtime.MarkChildPipeChannel(ptr ") ; e.w(own) ; e.w(", i16 ") ; e.w(irItoa(int32(ci)+1)) ; e.w(", ptr null)\n")
 		e.declareRuntime("runtime.MarkChildPipeChannel", "void", "ptr, i16")
 	}
 	e.w("  call void @runtime.PipeChildReady(ptr null)\n")

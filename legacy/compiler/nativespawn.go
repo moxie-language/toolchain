@@ -198,6 +198,8 @@ func (b *builder) setupNativeSpawnTargetChannels() {
 	runtimePkg := b.program.ImportedPackage("runtime")
 	mark := runtimePkg.Members["MarkChildPipeChannel"].(*ssa.Function)
 	markType, markFn := b.getFunction(mark)
+	copySSA := runtimePkg.Members["ChildChannelCopy"].(*ssa.Function)
+	copyType, copyFn := b.getFunction(copySSA)
 	i16 := b.ctx.Int16Type()
 
 	for i, paramIdx := range target.chanParamIdxs {
@@ -209,9 +211,22 @@ func (b *builder) setupNativeSpawnTargetChannels() {
 		if !ok {
 			continue
 		}
+		// The child writes only to its own memory. Take a copy of the handle in
+		// this domain's arena and rebind the parameter to it, so the marks below
+		// and the whole function body read the child's own struct. Without this
+		// the marks stamped spawnBound/childDomain/ringA/ringB into the PARENT's
+		// channel, which lives in the spawning frame - one thread mutating
+		// another thread's frame, on memory that frame was free to release (the
+		// relay's start-up SIGSEGV in MarkChildPipeChannel).
+		//
+		// b.locals holds the parameter VALUE, not a slot - it is what every later
+		// read of the parameter resolves through, so rebinding it is how the body
+		// is pointed at the copy. A store here would write through the handle.
+		own := b.CreateCall(copyType, copyFn, []llvm.Value{llvmParam, llvm.Undef(b.dataPtrType)}, "child.chan")
+		b.locals[param] = own
 		chanID := target.chanIDs[i]
 		b.CreateCall(markType, markFn, []llvm.Value{
-			llvmParam,
+			own,
 			llvm.ConstInt(i16, uint64(chanID), false),
 			llvm.Undef(b.dataPtrType),
 		}, "")

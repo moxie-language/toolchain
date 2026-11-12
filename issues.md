@@ -1699,3 +1699,70 @@ address, `spawnDomain` does not.
 deterministically - the 8-run rate is too slow to verify against. The
 reproduction to write first is a program that spawns from a helper function and
 returns immediately, in a loop, on native.
+
+## 12. Fix: a spawned domain gets its own channel handles
+
+**Implemented 2026-11-12. The emitted-code half is not yet executable - see the
+gate at the end.**
+
+Section 11 named the defect: `chanMake` allocates the `channel` struct in the
+caller's frame, the spawn call stores that pointer in `spawnChanSet`, and the
+child's prologue binds its channels against it. Two threads then write one
+struct that lives in one of their frames, and `PipeWaitChildReady` gives the
+parent a half-second exit, after which it may return and release that frame.
+
+**What changed.** Three layers, mirrored where emitted code changes (wood law):
+
+1. `src/runtime/spawn.mx` - `NoteSpawnChan` now also takes a ROOT-ARENA copy of
+   the parent's handle and returns it. `rootChannelCopy` is the one allocation;
+   `spawnDomain` sets `ownerBreaker` on both handles and clears both slots. The
+   rings and the message buffer stay shared by pointer - only the handle's own
+   bookkeeping is per-domain.
+2. `legacy/compiler/spawn.go` - the value `NoteSpawnChan` returns replaces the
+   channel in the argument bundle, so what the child reads is root memory that
+   no frame owns. `emitNativeSpawnChannelMark` still marks the parent's OWN
+   handle, which is what its sends consult.
+3. `_mxc_stage4/ir_call.mx` - the same substitution in `emitSpawnCall`, with
+   `chanOrig` keeping the parent's handle for the parent-side mark, and the loop
+   scratch hoisted (`var own string` before the loop) because the sovereign-loop
+   rule forbids a `:=` in a loop body.
+4. `src/runtime/pipe_channel.mx` - `ChildChannelCopy` gives the child a handle
+   in ITS OWN root arena, and `setupNativeSpawnTargetChannels` /
+   `emitSpawnWrapper` take it and mark that. A direct call of the same function
+   keeps the caller's channel: the helper returns `ch` unchanged when
+   `childSpawnTarget` is false, mirroring `MarkChildPipeChannel`'s own test.
+
+Direction still resolves per side: `chSendRing`/`chRecvRing` compare `domainID`
+with `childDomain` in whichever copy they are handed, which is why the two
+domains no longer need one struct.
+
+**One trap found while writing it.** `b.locals[param]` holds the parameter
+VALUE, not a slot. Storing the copy there would have written through the handle
+into the channel struct; the parameter is rebound instead (`b.locals[param] =
+own`), which is how every later read of it resolves.
+
+**What is verified.**
+- The runtime changes compile: `make build-relay-proxy-wasm` succeeds with
+  `spawn.mx` and `pipe_channel.mx` in the closure.
+- The legacy compiler compiles: `go build -tags purego` in `legacy/`.
+- **The change adds no bootstrap blocker**: `_mxc_stage4` fails with 585
+  sovereign-loop errors both on a pristine tree and with these edits, and none of
+  them names `NoteSpawnChan`, `ChildChannelCopy` or `emitSpawnCall`'s new code.
+  It parses and type-checks.
+- No regression on the working path: `morly` rebuilt against the changed runtime
+  and `test_cordn_chat_messages_cordn_peer` passed 4 runs out of 4.
+
+**The gate: the emitted-code half cannot be executed.** Both compilers are
+unbuildable in this tree, independently of this change:
+- stage4 cannot be rebuilt by `./moxie`: 585 pre-existing sovereign-loop sites
+  across `_mxc_stage4` (this is the P-02 conversion, still open).
+- `legacy/` cannot compile any program, not even a hello-world: it resolves
+  `moxielang.dev/pkg/mxregexp` to `/home/mleku/moxie/moxielang.dev/`, a stale
+  tree outside this checkout, and then reports `undefined: push` / `undefined:
+  resize`.
+
+So no binary exists that emits the new calls. What to run the moment that
+gate opens is `/tmp/spawnchk`: spawns from a helper that creates the channels in
+its own frame and returns, 50 times, asserting the message round trip
+(`sum 2450`). Then the relay start loop, which is what reproduced the original
+crash roughly once in eight.

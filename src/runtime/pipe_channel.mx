@@ -63,6 +63,42 @@ func MarkChannelPipeBound(ch *channel, chanID uint16) {
 	ch.spawnChanID = chanID
 }
 
+// ChildChannelCopy gives the child domain its own handle for a spawn channel.
+//
+// A spawned domain must write only to its own memory. The child's channel
+// parameter names the PARENT's channel struct, which lives in the spawning
+// frame, and MarkChildPipeChannel then stamped spawnBound, childDomain, ringA
+// and ringB into it - one thread writing into another thread's frame, on memory
+// that frame may already have released. Those marks belong on the child's own
+// copy.
+//
+// The copy lives in the child's ROOT arena because a channel outlives the
+// function that first received it; a frame-arena copy would die with the target
+// function's frame while the domain still held the capability.
+//
+// The rings themselves stay shared - they are the transport, and both sides keep
+// pointing at the same pair. Direction is chosen by role: chSendRing and
+// chRecvRing compare domainID against childDomain in whichever copy they are
+// handed, so the two sides do not need to be one struct. That is also why the
+// parent keeps its own copy, untouched by anything the child does.
+func ChildChannelCopy(ch *channel) (out *channel) {
+	if ch == nil {
+		return nil
+	}
+	// Only a spawn child gets its own handle. The same function may be invoked
+	// directly, and that call must keep the channel the caller passed - the
+	// mirror of MarkChildPipeChannel's own childSpawnTarget test.
+	if !childSpawnTarget {
+		return ch
+	}
+	save := CurrentArena()
+	SetCurrentArena(trueRootArena())
+	cp := (*channel)(alloc(unsafe.Sizeof(channel{}), nil, nil))
+	*cp = *ch
+	SetCurrentArena(save)
+	return cp
+}
+
 // MarkChildPipeChannel is the child-side variant emitted by
 // setupNativeSpawnTargetChannels: it binds ch to the shared rings if and
 // only if the function is running as a spawn target (childSpawnTarget).
