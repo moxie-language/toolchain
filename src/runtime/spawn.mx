@@ -73,27 +73,6 @@ func rootChannelCopy(ch *channel) (out *channel) {
 	return cp
 }
 
-// spawnRingDataSize is the power-of-two data area for one direction of a spawn
-// channel: room for the declared depth plus one in-flight frame, each frame
-// being the length prefix plus the channel's frame budget. The mask arithmetic
-// in ringWrite/ringRead requires a power of two, and the area may not exceed
-// ringMaxMsg, which is the largest frame the protocol can carry at all.
-func spawnRingDataSize(slots, budget uintptr) uint32 {
-	frame := uintptr(ringAlign8(4 + uint32(budget)))
-	if frame < 16 {
-		frame = 16
-	}
-	need := (slots + 1) * frame
-	size := uintptr(4096)
-	for size < need {
-		size = size << 1
-	}
-	if size > ringMaxMsg {
-		runtimePanic("spawn: channel frame budget exceeds ringMaxMsg: declare the slice/map dimension with a cap tag that fits")
-	}
-	return uint32(size)
-}
-
 // spawnHandoff is what a forked child used to inherit for free: the breaker,
 // the ring pairs, the control block and the target. A thread starts with zeroed
 // TLS, so the values are copied into it explicitly before the target runs.
@@ -125,14 +104,12 @@ func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
 	// DomainClosed: one object, in the root arena because it outlives the frame.
 	spawnBreaker = spawnBreakerMake()
 
-	// Ring pairs, sized from each channel's declared depth and frame budget.
-	// The sizing rules do not change with threads; only the mapping does.
+	// Ring pairs. The data area is fixed (D4) because frames chain (D3): the
+	// declared depth is a message count enforced by sentFrames/recvFrames and
+	// the declared budget by the send's own check, so neither one sizes the
+	// mapping any more.
 	spawnRingCount = nChans
 	for i := int32(0); i < nChans && i < 16; i++ {
-		// One page and one slot when the channel is nil or was never noted:
-		// that is the documented default for an unstated capacity.
-		budget := uintptr(4096)
-		slots := uintptr(1)
 		ch := spawnChanSet[i]
 		spawnChanSet[i] = nil
 		cp := spawnChanCopy[i]
@@ -156,16 +133,9 @@ func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
 				spawnRingSet[i][1] = ch.ringB
 				continue
 			}
-			if ch.frameBudget > 0 {
-				budget = ch.frameBudget
-			}
-			if ch.bufCap > 0 {
-				slots = ch.bufCap
-			}
 		}
-		dataSize := spawnRingDataSize(slots, budget)
-		spawnRingSet[i][0] = ringCreate(dataSize) // parent->child
-		spawnRingSet[i][1] = ringCreate(dataSize) // child->parent
+		spawnRingSet[i][0] = ringCreate(ringDefaultDataSize()) // parent->child
+		spawnRingSet[i][1] = ringCreate(ringDefaultDataSize()) // child->parent
 	}
 
 	// Control block for the child-ready handshake. Both threads see it directly
@@ -230,6 +200,7 @@ func moxie_runtime_thread_entry(arg unsafe.Pointer) {
 	if !ringIsClosed(h.breaker.ringA) {
 		SpawnClose(h.breaker)
 	}
+	ArenaDomainExitCheck()
 	// Returning ends THIS thread: the C trampoline calls pthread_exit on the
 	// result. The process and every other domain keep running, and the process
 	// exits when main returns.
@@ -325,14 +296,6 @@ var (
 	lastSpawnRings     [16][2]uintptr
 )
 
-// domainID names THIS domain in a channel's role test: the root is 1, and every
-// spawned domain takes the next number from one process-wide sequence, assigned
-// at spawn and never reused. A domain that spawns a child is still a child of its
-// own parent, so the role of a channel is decided per channel by comparing this
-// token with the channel's childDomain - not by a per-domain flag, which cannot
-// express both roles - and the token is the same domain id the page's hub uses
-// for its lineage, so a debugging session reads one number everywhere.
-var domainID uintptr
 
 // lastChildDomain is the id the spawn just started took from the sequence; the
 // parent's channel markers record it as their channels' childDomain.

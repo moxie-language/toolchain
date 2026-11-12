@@ -22,12 +22,6 @@ import (
 	"unsafe"
 )
 
-// ringMaxMsg caps the size of a single chan-IPC frame. The ring is sized
-// to carry it (32MB ring, lazily faulted, so the virtual reservation is
-// cheap). Frames over this limit are rejected fail-loud so the protocol
-// never silently truncates.
-const ringMaxMsg = 32 << 20
-
 // channelIsPipeBound reports whether the channel is on a spawn boundary.
 // chSendRing and chRecvRing resolve a channel's direction for THIS domain.
 // The parent sends on the parent->child ring and receives on the other; a spawn
@@ -191,42 +185,50 @@ func PipeChanSend(ch *channel, encoded []byte) bool {
 	if ch == nil || !ch.spawnBound {
 		return false
 	}
-	if chSendRing(ch) == 0 {
+	ring := chSendRing(ch)
+	if ring == 0 {
 		return false
 	}
-	// The ring is sized from this budget, so a message over it means the
-	// declared cap dimensions do not describe this value. Both sides of a spawn
-	// channel are trusted code, and the budget is the bound the declaration
-	// promised: overrun it and the programmer is taking the piss, so the send
-	// dies naming the actual size, the budget and the fields to fix. The budget
-	// is checked before the ring size so the declaration-level message is the
-	// one a programmer sees.
+	// The budget is the bound the declaration promised. Both sides of a spawn
+	// channel are trusted code, so an overrun means the cap tags do not describe
+	// the data: die naming the actual size, the budget and the fields to fix.
 	chanDbgSent++
 	chanDbgSendCh = uintptr(unsafe.Pointer(ch))
 	chanDbgLastLen = uintptr(len(encoded))
 	if uintptr(len(encoded)) > ch.frameBudget {
 		pipeBudgetPanic(ch, uintptr(len(encoded)))
 	}
-	if !ringFits(chSendRing(ch), int32(len(encoded))) {
-		runtimePanic("PipeChanSend: frame exceeds ring size")
-	}
 	// One slot is the default (`chan T{}`): the mailbox the event-loop model
 	// needs, where the first send never blocks and the second waits for the
 	// receiver to take the first. A deeper buffer trades latency for slack.
 	slots := uint32(ch.bufCap)
-	need := ringAlign8(4 + uint32(len(encoded)))
+	if slots == 0 {
+		slots = 1
+	}
+	chunkMax := ringChunkCap(ring)
+	pos := int32(0)
 	for {
-		if ringIsClosed(chSendRing(ch)) {
+		if ringIsClosed(ring) {
 			return false
 		}
-		if ringDepth(chSendRing(ch)) < slots && ringSend(chSendRing(ch), encoded) {
-			return true
+		first := pos == 0
+		if !first || ringDepth(ring) < slots {
+			remaining := int32(len(encoded)) - pos
+			final := remaining <= chunkMax
+			n, ok := ringSendChunk(ring, encoded, pos, first, final)
+			if ok {
+				pos += n
+				if final {
+					return true
+				}
+				continue
+			}
 		}
 		if !peerAlive(ch) {
-			ringClose(chSendRing(ch))
+			ringClose(ring)
 			return false
 		}
-		ringParkRead(chSendRing(ch), need, slots)
+		ringParkRead(ring, ringAlign8(uint32(ringChunkHdr)+uint32(chunkMax)), slots)
 	}
 }
 
@@ -252,31 +254,43 @@ func PipeChanRecv(ch *channel) ([]byte, bool) {
 	if ch == nil || !ch.spawnBound {
 		return nil, false
 	}
-	if chRecvRing(ch) == 0 {
+	ring := chRecvRing(ch)
+	if ring == 0 {
 		return nil, false
 	}
+	// A message may be several chunks. Consume as much as is published, then
+	// park for the rest: consuming a chunk is what frees the space the sender
+	// needs for the next one, so a message larger than the ring still arrives.
+	var msg []byte
 	for {
-		data, ok := ringRecv(chRecvRing(ch))
+		chunk, final, ok := ringRecvChunk(ring)
 		if ok {
-			return data, true
+			if len(msg) == 0 && final {
+				return chunk, true
+			}
+			msg = push(msg, chunk...)
+			if final {
+				return msg, true
+			}
+			continue
 		}
-		if ringIsClosed(chRecvRing(ch)) {
+		if ringIsClosed(ring) {
 			return nil, false
 		}
 		if !peerAlive(ch) {
-			// The final reason may have landed on the ring just before the
-			// close; deliver it before declaring the channel dead.
-			if lateData, late := ringRecv(chRecvRing(ch)); late {
-				return lateData, true
+			// The final chunk may have landed just before the close; deliver a
+			// complete message before declaring the channel dead.
+			if lateChunk, lateFinal, late := ringRecvChunk(ring); late && lateFinal && len(msg) == 0 {
+				return lateChunk, true
 			}
-			ringClose(chRecvRing(ch))
+			ringClose(ring)
 			// ok=false is the answer. A forked child used to exit() the PROCESS
 			// here, which is right for a process and fatal for a thread: it
 			// terminated every other domain in the program. The target gets
 			// false and returns, which is its termination arm.
 			return nil, false
 		}
-		ringParkWrite(chRecvRing(ch))
+		ringParkWrite(ring)
 	}
 }
 
@@ -444,16 +458,22 @@ func (ch *channel) tryPipeSend(value unsafe.Pointer, c moxie.Codec, td *RawType)
 	if !ok {
 		return false
 	}
-	if chSendRing(ch) == 0 || ringDepth(chSendRing(ch)) >= uint32(ch.bufCap) {
+	ring := chSendRing(ch)
+	if ring == 0 || ringDepth(ring) >= uint32(ch.bufCap) {
 		return false
 	}
 	if uintptr(len(frame)) > ch.frameBudget {
 		pipeBudgetPanic(ch, uintptr(len(frame)))
 	}
-	if !ringFits(chSendRing(ch), int32(len(frame))) {
-		runtimePanic("PipeChanSend: frame exceeds ring size")
+	// A select arm cannot park, so it cannot carry a chained message: a frame
+	// larger than one chunk would need the arm to block between chunks and the
+	// whole loop it belongs to would stall. The arm loses instead; a blocking
+	// send on the same channel carries the chained form.
+	if int32(len(frame)) > ringChunkCap(ring) {
+		return false
 	}
-	return ringSend(chSendRing(ch), frame)
+	n, wrote := ringSendChunk(ring, frame, 0, true, true)
+	return wrote && n == int32(len(frame))
 }
 
 // tryPipeRecv attempts a non-blocking receive on a spawn-bound channel.
@@ -462,25 +482,52 @@ func (ch *channel) tryPipeSend(value unsafe.Pointer, c moxie.Codec, td *RawType)
 //   (true, false) : channel closed
 //   (false, _)    : no data right now, would block; caller should retry
 func (ch *channel) tryPipeRecv(value unsafe.Pointer, c moxie.Codec, td *RawType) (received, ok bool) {
-	if chRecvRing(ch) == 0 {
+	ring := chRecvRing(ch)
+	if ring == 0 {
 		return false, false
 	}
-	data, rok := ringRecv(chRecvRing(ch))
-	chanDbgRecv++
-	chanDbgRecvCh = uintptr(unsafe.Pointer(ch))
-	chanDbgLastLen = uintptr(len(data))
-	if rok {
-		// value is nil for a select case that binds nothing
-		// (`case <-closed:`), so there is nowhere to put the payload.
-		if value == nil {
+	// The loop scratch is declared once, outside: this method mutates the
+	// receiver (rxPartial), so its direct allocations land in the receiver's
+	// sovereign arena and a per-iteration declaration would persist as garbage.
+	var chunk []byte
+	var final, got bool
+	var data []byte
+	for {
+		chunk, final, got = ringRecvChunk(ring)
+		if !got {
+			break
+		}
+		if final && len(ch.rxPartial) == 0 {
+			chanDbgRecv++
+			chanDbgRecvCh = uintptr(unsafe.Pointer(ch))
+			chanDbgLastLen = uintptr(len(chunk))
+			// value is nil for a select case that binds nothing
+			// (`case <-closed:`), so there is nowhere to put the payload.
+			if value == nil {
+				return true, true
+			}
+			if !codecFrameDecode(c, td, value, ch.elementSize, chunk) {
+				return true, false
+			}
 			return true, true
 		}
-		if !codecFrameDecode(c, td, value, ch.elementSize, data) {
-			return true, false
+		ch.rxPartial = rootPushBytes(ch.rxPartial, chunk)
+		if final {
+			data = ch.rxPartial
+			ch.rxPartial = nil
+			chanDbgRecv++
+			chanDbgRecvCh = uintptr(unsafe.Pointer(ch))
+			chanDbgLastLen = uintptr(len(data))
+			if value == nil {
+				return true, true
+			}
+			if !codecFrameDecode(c, td, value, ch.elementSize, data) {
+				return true, false
+			}
+			return true, true
 		}
-		return true, true
 	}
-	if ringIsClosed(chRecvRing(ch)) {
+	if ringIsClosed(ring) {
 		chanDbgClosed++
 		if value != nil {
 			chanDbgZero++
@@ -489,6 +536,17 @@ func (ch *channel) tryPipeRecv(value unsafe.Pointer, c moxie.Codec, td *RawType)
 		return true, false
 	}
 	return false, false
+}
+
+// rootPushBytes appends src to dst with ROOT-lifetime backing. A select's frame
+// dies between attempts, so a reassembly buffer kept on the channel must not
+// live in it.
+func rootPushBytes(dst, src []byte) (out []byte) {
+	save := CurrentArena()
+	SetCurrentArena(trueRootArena())
+	out = push(dst, src...)
+	SetCurrentArena(save)
+	return out
 }
 
 // ChanSendDual is the runtime dispatch the compiler emits for any

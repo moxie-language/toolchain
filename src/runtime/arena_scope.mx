@@ -34,6 +34,206 @@ type arenaScopeRec struct {
 var arenaScopes [arenaScopeMax]arenaScopeRec
 var arenaScopeCurrent int32
 
+// --- allocation-size histogram (phase 0b) ---
+//
+// The phase 4 header size (D8), the slab decision (D9) and the frame budget
+// question are all read from this, so it is always on. The cost is one bin
+// computation and two adds per allocation; the bin is floor(log2(size)), so a
+// question about "objects at or below 32 bytes" is bins 0..5 and "just above
+// 64 KiB" is bin 16.
+//
+// The two slices are carved from the DOMAIN segment by initDomain and are
+// therefore per-domain TLS, like every other runtime table: a worker's
+// histogram is its own.
+const allocHistBins = int32(64)
+
+var allocHistCount []uint64
+var allocHistBytes []uint64
+
+// sizeBin is floor(log2(size)) without a library call or a loop. TargetBits
+// gates the 64-bit step because a shift of a 32-bit uintptr by 32 is not that
+// comparison on wasm.
+func sizeBin(size uintptr) (b int32) {
+	if TargetBits == 64 && size > 0xFFFFFFFF {
+		b = b + 32
+		size = size >> 32
+	}
+	if size >= 1<<16 {
+		b = b + 16
+		size = size >> 16
+	}
+	if size >= 1<<8 {
+		b = b + 8
+		size = size >> 8
+	}
+	if size >= 1<<4 {
+		b = b + 4
+		size = size >> 4
+	}
+	if size >= 1<<2 {
+		b = b + 2
+		size = size >> 2
+	}
+	if size >= 1<<1 {
+		b = b + 1
+	}
+	return b
+}
+
+// recordAllocSize charges one allocation to its size bin. A zero-length table
+// is the pre-initDomain state: initDomain itself allocates nothing through the
+// allocator, so nothing is ever dropped.
+func recordAllocSize(size uintptr) {
+	if len(allocHistCount) == 0 {
+		return
+	}
+	b := sizeBin(size)
+	if b >= allocHistBins {
+		b = allocHistBins - 1
+	}
+	allocHistCount[b]++
+	allocHistBytes[b] += uint64(size)
+}
+
+// AllocHistogram returns the size histogram (floor(log2) bins, count and
+// bytes). It is the measurement D8 and D9 are decided from.
+func AllocHistogram() (counts []uint64, bytes []uint64) {
+	return allocHistCount, allocHistBytes
+}
+
+// SegmentStats is the per-kind ledger: live segments, bytes reserved and
+// bytes allocated. A segment is a mapping; the arena's region table is its
+// descriptor, so these counters and that table must agree at every quiescent
+// point.
+type SegmentStats struct {
+	FnCount     uint64
+	FnBytes     uint64
+	RootCount   uint64
+	RootBytes   uint64
+	LargeCount  uint64
+	LargeBytes  uint64
+	DomainCount uint64
+	DomainBytes uint64
+	ChanCount   uint64
+	ChanBytes   uint64
+}
+
+var segFnCount uint64
+var segFnBytes uint64
+var segRootCount uint64
+var segRootBytes uint64
+var segLargeCount uint64
+var segLargeBytes uint64
+var segDomainCount uint64
+var segDomainBytes uint64
+var segChanCount uint64
+var segChanBytes uint64
+
+// RecordSegmentAdd charges one mapping to its kind.
+func RecordSegmentAdd(kind int32, bytes uintptr) {
+	switch kind {
+	case segKindFn:
+		segFnCount++
+		segFnBytes += uint64(bytes)
+	case segKindRoot:
+		segRootCount++
+		segRootBytes += uint64(bytes)
+	case segKindLarge:
+		segLargeCount++
+		segLargeBytes += uint64(bytes)
+	case segKindDomain:
+		segDomainCount++
+		segDomainBytes += uint64(bytes)
+	case segKindChannel:
+		segChanCount++
+		segChanBytes += uint64(bytes)
+	}
+}
+
+// RecordSegmentFree retires one mapping from its kind's ledger.
+func RecordSegmentFree(kind int32, bytes uintptr) {
+	switch kind {
+	case segKindFn:
+		segFnCount--
+		segFnBytes -= uint64(bytes)
+	case segKindRoot:
+		segRootCount--
+		segRootBytes -= uint64(bytes)
+	case segKindLarge:
+		segLargeCount--
+		segLargeBytes -= uint64(bytes)
+	case segKindDomain:
+		segDomainCount--
+		segDomainBytes -= uint64(bytes)
+	case segKindChannel:
+		segChanCount--
+		segChanBytes -= uint64(bytes)
+	}
+}
+
+// ReadSegmentStats copies the ledger into s.
+func ReadSegmentStats(s *SegmentStats) {
+	s.FnCount = segFnCount
+	s.FnBytes = segFnBytes
+	s.RootCount = segRootCount
+	s.RootBytes = segRootBytes
+	s.LargeCount = segLargeCount
+	s.LargeBytes = segLargeBytes
+	s.DomainCount = segDomainCount
+	s.DomainBytes = segDomainBytes
+	s.ChanCount = segChanCount
+	s.ChanBytes = segChanBytes
+}
+
+// ArenaLedger reports the function-tier book balance: pushes, releases, the
+// live frame depth and the pooled arenas. At quiescence pushed == released and
+// depth == 0; anything else is a release path that did not run, and the two
+// numbers name it.
+func ArenaLedger() (pushed, released, depth, pooled uint64) {
+	pushed = fnPushCount
+	released = fnReleaseCount
+	if domainRoot != nil {
+		depth = uint64(uint32(domainRoot.fnTop))
+	}
+	pooled = uint64(uint32(arenaPoolN))
+	return
+}
+
+// SysMapStats reports the process-level mapping ledger. Phase 2's exit
+// criterion is that a warm allocating loop stops mapping: two reads around the
+// loop with equal counts is that evidence, and it is the one measurement the
+// segment pool exists to make true.
+func SysMapStats() (maps, unmaps, mapBytes, unmapBytes uint64) {
+	maps = sysMapCount
+	unmaps = sysUnmapCount
+	mapBytes = sysMapBytes
+	unmapBytes = sysUnmapBytes
+	return
+}
+
+// ArenaDomainExitCheck runs at the end of a spawned domain, where the thread is
+// about to end and every frame it owns should already be gone. It reports only
+// when the ledger does not balance and only under the trace gate, because a
+// correct program's exit must stay silent.
+func ArenaDomainExitCheck() {
+	if domainRoot == nil || !arenaTraceWanted() {
+		return
+	}
+	pushed, released, depth, pooled := ArenaLedger()
+	if pushed == released && depth == 0 {
+		return
+	}
+	printstring("arena domain-exit pushed=")
+	printuint64(pushed)
+	printstring(" released=")
+	printuint64(released)
+	printstring(" depth=")
+	printuint64(depth)
+	printstring(" pooled=")
+	printuint64(pooled)
+	printstring("\n")
+}
+
 // SetArenaScope names the scope that arenas pushed from now on belong to, and
 // returns the previous one so a caller can restore it.
 func SetArenaScope(id int32) (prev int32) {

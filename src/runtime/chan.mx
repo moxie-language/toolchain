@@ -100,6 +100,12 @@ type channel struct {
 	// opaque int32 handle (see spawn_wasm.mx), so there is no ring address to
 	// hold: sabHandle carries that handle instead. Zero means local.
 	sabHandle   uintptr
+	// rxPartial is the receiver's reassembly buffer for a chained frame it met
+	// in a select. A select cannot block to collect the tail, so the chunks it
+	// has consumed are kept here and the next attempt continues; the backing is
+	// ROOT-lifetime because the select frame dies between attempts. Only the
+	// receiving domain writes this field, on its own copy of the handle.
+	rxPartial []byte
 }
 
 const (
@@ -738,6 +744,15 @@ const sovSelectTrimPages = int32(64)
 // The 'ops' slice must be set if (and only if) this is a blocking select.
 func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelOp) (uint32, bool) {
 	mask := interrupt.Disable()
+
+	// Compaction is drained at every select, BEFORE the arms are examined, so
+	// a loop that selects at all cleans the queue without calling the runtime
+	// itself. It is safe here and only here: the drain runs where no frame of
+	// the affected receivers is live, and this is the boundary between one
+	// round of the loop and the next. A frame holding a kind-9 root (a map,
+	// channel, interface or function value the root map cannot trace) makes
+	// the drain refuse, and the refusal is counted rather than silent.
+	SovDrainCompactions(sovSelectDrainBudget)
 
 	// Lock everything.
 	lockAllStates(states)

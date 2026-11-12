@@ -1,0 +1,92 @@
+// Phase 6 acceptance: the unified ring's frame protocol.
+//
+// A message several times the ring's data area crosses a spawn channel
+// byte-identical and in order, through the select path on the receiving side.
+// The ring is 128 KiB of data (D4), so a 300 KB frame proves the chaining
+// (D3), and the channel ledger proves the ring is no longer sized by the
+// worst message: five rings (control + two per direction) must stay under
+// 1 MiB of address space, where the old 32 MiB reservation would have been
+// 128 MiB per spawn.
+//
+//:wasmtest skip
+package main
+
+import (
+	"fmt"
+	"runtime"
+)
+
+type Wire struct {
+	ID   int64
+	Body []byte `cap:"300000"`
+}
+
+func echo(in chan Wire, out chan Wire) (closed chan struct{}) {
+	for {
+		select {
+		case <-closed:
+			return closed
+		case w, ok := <-in:
+			if !ok {
+				return closed
+			}
+			out <- w
+		}
+	}
+}
+
+func fill(n int32, seed byte) (b []byte) {
+	b = []byte{:n}
+	for i := int32(0); i < n; i++ {
+		b[i] = byte((i + int32(seed)) & 255)
+	}
+	return
+}
+
+func check(b []byte, seed byte) (ok bool) {
+	ok = true
+	for i := int32(0); i < len(b); i++ {
+		if b[i] != byte((i+int32(seed))&255) {
+			ok = false
+		}
+	}
+	return
+}
+
+func main() {
+	select {
+	case <-shutdown:
+		return
+	default:
+	}
+	// Chan memory must outlive this frame: the child reads the same channel
+	// storage, so it belongs to the root arena.
+	runtime.SovereignSetArena(runtime.RootArena())
+	in := chan Wire{:4}
+	out := chan Wire{:4}
+	done := spawn(echo, in, out)
+
+	for k := int32(0); k < 3; k++ {
+		n := int32(300000)
+		if k == 1 {
+			n = 100
+		}
+		in <- Wire{ID: int64(k), Body: fill(n, byte(k))}
+		got := <-out
+		if got.ID != int64(k) || len(got.Body) != n || !check(got.Body, byte(k)) {
+			panic("chained message mismatch")
+		}
+	}
+	close(in)
+	<-done
+
+	st := runtime.SegmentStats{}
+	runtime.ReadSegmentStats(&st)
+	if st.ChanCount == 0 {
+		panic("no channel rings are accounted")
+	}
+	if st.ChanBytes > 1<<20 {
+		panic("a spawn's rings reserve more than 1 MiB; frames are not chaining")
+	}
+	fmt.Println("ring chain ok", st.ChanCount, st.ChanBytes)
+}

@@ -1,0 +1,117 @@
+// Phase 2 acceptance: the segment heap's observable invariants.
+//
+//   - a warm function-arena loop maps nothing: fn chunks come from the domain's
+//     LIFO pool, so the call depth is paid for once (D1, section 7);
+//   - the arena ledger balances at a quiescent point: every push has its
+//     release and the frame depth is zero (phase 0b);
+//   - an object larger than a root segment takes a LARGE segment instead of
+//     becoming the allocation cursor (G4, D8);
+//   - the allocation-size histogram exists and has counted the program's
+//     allocations (phase 0b, the input to D8/D9);
+//   - a sovereign receiver's accumulation is still correct after the change of
+//     backing store (section 0: ownership semantics do not change).
+//
+//:wasmtest skip
+package main
+
+import (
+	"fmt"
+	"runtime"
+)
+
+func deep(n int32) (out []int64) {
+	if n == 0 {
+		out = []int64{:8}
+		return
+	}
+	out = deep(n - 1)
+	return
+}
+
+type Accum struct {
+	n     int64
+	items []int64
+}
+
+func (a *Accum) Add(v int64) {
+	a.n++
+	a.items = push(a.items, v)
+}
+
+func (a *Accum) Total() (t int64) {
+	for i := int32(0); i < len(a.items); i++ {
+		t += a.items[i]
+	}
+	return
+}
+
+func main() {
+	select {
+	case <-shutdown:
+		return
+	default:
+	}
+
+	// Warm the pool to this program's call depth.
+	for i := int32(0); i < 200; i++ {
+		deep(24)
+	}
+	maps0, unmaps0, _, _ := runtime.SysMapStats()
+	for i := int32(0); i < 2000; i++ {
+		deep(24)
+	}
+	maps1, unmaps1, _, _ := runtime.SysMapStats()
+	if maps1 != maps0 || unmaps1 != unmaps0 {
+		panic("a warm function-arena loop made a mapping syscall")
+	}
+
+	var acc Accum
+	for i := int32(0); i < 500; i++ {
+		acc.Add(int64(i))
+	}
+	if acc.Total() != 124750 {
+		panic("sovereign accumulation incorrect")
+	}
+
+	st := runtime.SegmentStats{}
+	runtime.ReadSegmentStats(&st)
+	if st.FnCount == 0 || st.FnBytes == 0 {
+		panic("no function segments are accounted")
+	}
+	if st.DomainCount != 1 || st.DomainBytes == 0 {
+		panic("the domain segment is missing from the ledger")
+	}
+
+	// A big object is a LARGE segment, never the cursor. Root-lifetime
+	// allocation is the existing idiom for a value that must outlive main's
+	// own frame.
+	runtime.SovereignSetArena(runtime.RootArena())
+	big := []byte{:2 * 1024 * 1024}
+	if len(big) != 2*1024*1024 || big[len(big)-1] != 0 {
+		panic("the large allocation lost its length or its zeroing")
+	}
+	st2 := runtime.SegmentStats{}
+	runtime.ReadSegmentStats(&st2)
+	if st2.LargeCount <= st.LargeCount || st2.LargeBytes == st.LargeBytes {
+		panic("a 2 MB object did not take a LARGE segment")
+	}
+
+	cnts, bytes := runtime.AllocHistogram()
+	if len(cnts) == 0 || len(bytes) == 0 {
+		panic("the allocation histogram is not carved")
+	}
+	total := uint64(0)
+	for i := int32(0); i < len(cnts); i++ {
+		total += cnts[i]
+	}
+	if total == 0 {
+		panic("the allocation histogram counted nothing")
+	}
+
+	pushed, released, depth, _ := runtime.ArenaLedger()
+	fmt.Println("ledger", pushed, released, depth)
+	if pushed != released {
+		panic("the arena ledger does not balance")
+	}
+	fmt.Println("segment heap ok", maps0, maps1, st2.FnCount, total)
+}

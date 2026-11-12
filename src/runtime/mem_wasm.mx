@@ -22,15 +22,27 @@ import "unsafe"
 // memory.grow failed at 64529 of 65536 pages (4 GiB) inside
 // nistec.buildP521GeneratorTable before the program had produced a byte.
 
-// arenaChainCap is the capacity a chained (overflow) arena region asks for.
+// arenaRootSegCap is the capacity of one ROOT segment (D17).
 //
-// Native maps are virtual and overcommitted: a 64MB chain region costs address
-// space and nothing else until it is touched, which is why the native granule
-// is that large. Linear memory is the opposite - memory.grow COMMITS the pages
-// - so the same granule is 64MB of resident memory per chained region, and a
-// crypto fixture measured 270MB of linear memory for work that used kilobytes.
-// A smaller granule chains more often, and recycling makes those chains cheap.
-func arenaChainCap() (n uintptr) {
+// Linear memory is the opposite of a native address space: memory.grow COMMITS
+// the pages, and sysUnmap can only return them to the pool, never to the host.
+// A 1 MiB root segment would therefore be 1 MiB permanently committed per
+// segment even after cleaning, so the wasm granule is one 64 KiB page.
+func arenaRootSegCap() (n uintptr) {
+	return uintptr(wasmPageSize)
+}
+
+// arenaDomainSegCap is the DOMAIN segment on wasm: the carved tables are ~60 KiB
+// (the root region table alone is 40 KiB), so the domain root needs four pages
+// before any root data is useful.
+func arenaDomainSegCap() (n uintptr) {
+	return uintptr(4) * wasmPageSize
+}
+
+// arenaPhaseChainCap is the wasm overflow class of a phase scope or sovereign
+// data arena. Linear memory is committed by memory.grow and only recycled, so
+// the chain is the same 4 MiB granule the arena system already used there.
+func arenaPhaseChainCap() (n uintptr) {
 	return uintptr(4) * 1024 * 1024
 }
 

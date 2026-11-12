@@ -4,30 +4,38 @@ package runtime
 
 import "unsafe"
 
-// SPSC ring buffer for lock-free cross-domain channel IPC.
-// Allocated via mmap(MAP_SHARED) so the buffer survives fork and both
-// parent and child access the same physical memory. One ring per
-// channel direction - no multiplexing, no chanID headers.
+// SPSC ring buffer for lock-free cross-domain channel transport.
+// Allocated via mmap(MAP_SHARED) and mapped into both domains, which are
+// threads in one address space: the ring is ordinary memory both sides can
+// reach, and the shared mapping is what makes the same bytes the transport.
 //
-// Layout: 32-byte header followed by data[size] bytes.
-//   [0:4]   writeIdx - monotonically increasing, producer-written
-//   [4:8]   readIdx  - monotonically increasing, consumer-written
-//   [8:12]  size     - data area size (power of 2)
-//   [12:16] closed   - 0=open, 1=closed
-//   [16:20] recvSleeper - reader is parked on writeIdx (waiting for data)
-//   [20:24] sendSleeper - writer is parked on readIdx (waiting for space)
-//   [24:28] sentFrames - frames published, producer-written
-//   [28:32] recvFrames - frames consumed, consumer-written
-//   [32:]   data
+// Layout (D2): 384-byte header, then data[size] bytes.
 //
-// The frame counters give the channel its declared depth: outstanding frames
-// are sentFrames-recvFrames, and the sender refuses (parks) while that reaches
-// the channel's capacity. Each counter has exactly one writer, so the
-// difference needs no read-modify-write between the two processes.
+//   line 0   [0:4]    writeIdx    producer-written
+//            [4:8]    sentFrames  producer-written
+//   line 1   [128:132] readIdx    consumer-written
+//            [132:136] recvFrames consumer-written
+//   line 2   [256:260] size       data area, power of two, fixed at creation
+//            [260:264] closed
+//            [264:268] recvSleeper
+//            [268:272] sendSleeper
+//            [272:276] refcount  one per end (phase 7)
+//   data     [384:]
 //
-// Messages: [len:4][payload:len][pad to align 8].
-// Indices wrap via mask (size-1). Both sides use atomic load/store
-// for cross-process visibility.
+// The two indices are on separate lines because the producer publishes one and
+// the consumer publishes the other on every operation. With both in the first
+// eight bytes, as this header used to be, every publish by one side invalidates
+// the other side's line and the channel costs more than the work it carries.
+// That is a correctness-of-performance requirement, not a tuning choice, and
+// ringLayoutCheck enforces it at every creation.
+//
+// Frames are chained, the ring stays small (D3/D4). A message larger than half
+// the ring is written as a sequence of chunks; each chunk is
+// [len u32][flags u32][payload][pad to 8] and all but the last carry flags=0.
+// The receiver consumes chunks as they arrive, which frees space for the next
+// chunk, so maximum message size is bounded by receiver memory rather than by
+// the ring. The index advance IS the commit: the single writer publishes a
+// chunk by storing writeIdx with release, and no committed flag is needed.
 //
 // The index word is also the parking word (L21: signal is the operation). A
 // receiver waits on writeIdx, a writer on readIdx, each with the value it just
@@ -35,10 +43,13 @@ import "unsafe"
 // and the sleep turns the wait into an immediate EAGAIN instead of a lost
 // wakeup. The sleeper flags are only a wake-elision hint: they keep the
 // uncontended publish free of the FUTEX_WAKE syscall.
+//
+// Messages: [len u32][flags u32][payload:len][pad to align 8].
 
 const (
-	ringHeaderSize  = 32
-	ringDefaultSize = 1 << 25 // 32MB data area (lazily faulted; matches ringMaxMsg)
+	ringHeaderSize  = 384
+	ringChunkHdr    = 8
+	ringFlagFinal   = uint32(1)
 	flag_MAP_SHARED = 0x1
 )
 
@@ -47,18 +58,63 @@ const (
 // ring state and peer liveness after each return.
 const pipeParkTimeoutNs = 20_000_000 // 20ms
 
+// ringDefaultDataSize is the ring's data area (D4): 128 KiB natively, 64 KiB on
+// wasm. It is independent of message size because frames chain, so address
+// space is no longer a function of the worst message a channel might carry.
+func ringDefaultDataSize() uint32 {
+	return 128 * 1024
+}
+
+// ringBuf is the shared header. The pad fields are layout constants, not data
+// structures: they are what put writeIdx and readIdx 128 bytes apart.
 type ringBuf struct {
-	writeIdx    uint32
-	readIdx     uint32
-	size        uint32
+	writeIdx    uint32 // producer line
+	sentFrames  uint32
+	padProducer [120]byte
+
+	readIdx    uint32 // consumer line
+	recvFrames uint32
+	padConsumer [120]byte
+
+	size        uint32 // shared line
 	closed      uint32
 	recvSleeper uint32
 	sendSleeper uint32
-	sentFrames  uint32
-	recvFrames  uint32
+	refcount    uint32
+	padShared   [108]byte
 }
 
+// ringLayoutCheck is the compile-time-intent assertion of D2, run once per ring
+// creation because the runtime has no const-assert form. A layout that puts the
+// indices on one line is the bug this check exists to make loud.
+func ringLayoutCheck() {
+	var h ringBuf
+	if unsafe.Offsetof(h.writeIdx) != 0 ||
+		unsafe.Offsetof(h.sentFrames) != 4 ||
+		unsafe.Offsetof(h.readIdx) != 128 ||
+		unsafe.Offsetof(h.recvFrames) != 132 ||
+		unsafe.Offsetof(h.size) != 256 ||
+		unsafe.Offsetof(h.closed) != 260 ||
+		unsafe.Offsetof(h.recvSleeper) != 264 ||
+		unsafe.Offsetof(h.sendSleeper) != 268 ||
+		unsafe.Offsetof(h.refcount) != 272 ||
+		unsafe.Sizeof(ringBuf{}) != ringHeaderSize {
+		runtimePanic("ring: write and read indices must be on separate cache lines")
+	}
+}
+
+// ringCreate maps a ring whose data area is dataSize bytes. The data area is
+// half the ring's chunk class: a chunk occupies at most half of it, so a chunk
+// can always be written when the ring is otherwise empty and the reader always
+// has room to consume the chunk that is blocking the writer.
 func ringCreate(dataSize uint32) uintptr {
+	ringLayoutCheck()
+	if dataSize < 2*ringChunkHdr {
+		dataSize = 2 * ringChunkHdr
+	}
+	if dataSize&(dataSize-1) != 0 {
+		runtimePanic("ring: data area must be a power of two")
+	}
 	total := uintptr(ringHeaderSize) + uintptr(dataSize)
 	p := sysMapShared(total)
 	if uintptr(p) == 0 {
@@ -73,6 +129,8 @@ func ringCreate(dataSize uint32) uintptr {
 	hdr.sendSleeper = 0
 	hdr.sentFrames = 0
 	hdr.recvFrames = 0
+	hdr.refcount = 2
+	RecordSegmentAdd(segKindChannel, total)
 	return uintptr(p)
 }
 
@@ -82,6 +140,7 @@ func ringDestroy(ring uintptr) {
 	}
 	hdr := (*ringBuf)(unsafe.Pointer(ring))
 	total := uintptr(ringHeaderSize) + uintptr(hdr.size)
+	RecordSegmentFree(segKindChannel, total)
 	sysUnmap(unsafe.Pointer(ring), total)
 }
 
@@ -143,7 +202,7 @@ func ringParkWrite(ring uintptr) {
 	hdr := (*ringBuf)(unsafe.Pointer(ring))
 	atomicStoreU32(&hdr.recvSleeper, 1)
 	cmp := atomicLoadU32(&hdr.writeIdx)
-	if ringAvail(ring) < 4 && !ringIsClosed(ring) {
+	if ringAvail(ring) < ringChunkHdr && !ringIsClosed(ring) {
 		moxie_futex_wait_timeout_shared(&hdr.writeIdx, cmp, pipeParkTimeoutNs)
 	}
 	atomicStoreU32(&hdr.recvSleeper, 0)
@@ -158,7 +217,7 @@ func ringParkWrite(ring uintptr) {
 // of space in BYTES, so a park keyed on bytes alone returns immediately and the
 // send loop spins at 100% CPU on both ends - the sender burning a core, and the
 // receiver failing to advance because the exchange cannot complete. The
-// consumer advances readIdx as it takes each frame, so one wake covers both
+// consumer advances readIdx as it takes each chunk, so one wake covers both
 // conditions.
 func ringParkRead(ring uintptr, need uint32, slots uint32) {
 	hdr := (*ringBuf)(unsafe.Pointer(ring))
@@ -170,10 +229,11 @@ func ringParkRead(ring uintptr, need uint32, slots uint32) {
 	atomicStoreU32(&hdr.sendSleeper, 0)
 }
 
-// ringDepth is the number of frames published and not yet consumed: the
+// ringDepth is the number of messages published and not yet consumed: the
 // outstanding message count the channel's declared capacity limits. Only the
-// producer writes sentFrames and only the consumer writes recvFrames, so the
-// difference is an SPSC count that needs no read-modify-write to be shared.
+// producer writes sentFrames (once, on the first chunk of a message) and only
+// the consumer writes recvFrames (once, on FINAL), so the difference is an SPSC
+// count that needs no read-modify-write to be shared.
 func ringDepth(ring uintptr) uint32 {
 	hdr := (*ringBuf)(unsafe.Pointer(ring))
 	return atomicLoadU32(&hdr.sentFrames) - atomicLoadU32(&hdr.recvFrames)
@@ -181,6 +241,29 @@ func ringDepth(ring uintptr) uint32 {
 
 func ringAlign8(n uint32) uint32 {
 	return (n + 7) &^ 7
+}
+
+// ringChunkCap is the largest payload one chunk may carry. Half the data area
+// leaves the other half as room for the reader to consume it.
+func ringChunkCap(ring uintptr) (n int32) {
+	hdr := (*ringBuf)(unsafe.Pointer(ring))
+	n = int32(hdr.size/2) - ringChunkHdr
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+func ringPutU32(b []byte, off int32, v uint32) {
+	b[off] = byte(v >> 24)
+	b[off+1] = byte(v >> 16)
+	b[off+2] = byte(v >> 8)
+	b[off+3] = byte(v)
+}
+
+func ringGetU32(b []byte, off int32) (v uint32) {
+	v = uint32(b[off])<<24 | uint32(b[off+1])<<16 | uint32(b[off+2])<<8 | uint32(b[off+3])
+	return
 }
 
 // ringWrite copies src[0:n] into the ring at offset pos, handling wrap.
@@ -213,83 +296,89 @@ func ringRead(ring uintptr, pos, n uint32, dst unsafe.Pointer) {
 	}
 }
 
-// ringFits returns true if payload could ever fit in this ring buffer.
-func ringFits(ring uintptr, payloadLen int32) bool {
-	if ring == 0 {
-		return false
-	}
-	hdr := (*ringBuf)(unsafe.Pointer(ring))
-	return ringAlign8(4+uint32(payloadLen)) <= hdr.size
-}
-
-// ringSend writes a length-prefixed message to the ring. Returns false
-// if the ring is full (backpressure) or closed.
-func ringSend(ring uintptr, payload []byte) bool {
+// ringSendChunk writes one chunk of a message and returns the payload bytes it
+// carried. ok=false means the ring has no room for a chunk right now, so the
+// caller parks on the read index; n=0 with ok=true is the empty message.
+//
+// first counts the message in sentFrames before the commit store. The index
+// advance is the commit, so a consumer that sees the first chunk can never see
+// a depth that has not counted it - counting after the store would let a
+// single-chunk message complete on the far side before the sender's count and
+// make depth underflow.
+func ringSendChunk(ring uintptr, payload []byte, off int32, first, final bool) (n int32, ok bool) {
 	if ring == 0 || ringIsClosed(ring) {
-		return false
+		return 0, false
 	}
 	hdr := (*ringBuf)(unsafe.Pointer(ring))
-	msgLen := uint32(len(payload))
-	total := ringAlign8(4 + msgLen)
-	if total > hdr.size {
-		return false
+	maxPayload := ringChunkCap(ring)
+	n = int32(len(payload)) - off
+	if n < 0 {
+		n = 0
 	}
+	if n > maxPayload {
+		n = maxPayload
+	}
+	total := ringAlign8(uint32(ringChunkHdr) + uint32(n))
 	if ringSpace(ring) < total {
-		return false
+		return 0, false
 	}
 	w := atomicLoadU32(&hdr.writeIdx)
-	// Write length prefix.
-	lenBuf := []byte{:4}
-	lenBuf[0] = byte(msgLen >> 24)
-	lenBuf[1] = byte(msgLen >> 16)
-	lenBuf[2] = byte(msgLen >> 8)
-	lenBuf[3] = byte(msgLen)
-	ringWrite(ring, w, 4, unsafe.Pointer(&lenBuf[0]))
-	// Write payload.
-	if msgLen > 0 {
-		ringWrite(ring, w+4, msgLen, unsafe.Pointer(&payload[0]))
+	if first {
+		atomicStoreU32(&hdr.sentFrames, atomicLoadU32(&hdr.sentFrames)+1)
 	}
-	// Publish: advance writeIdx with release semantics, then count the frame so
-	// a sender blocked on the declared depth sees this send in flight.
+	hb := []byte{:ringChunkHdr}
+	ringPutU32(hb, 0, uint32(n))
+	if final {
+		ringPutU32(hb, 4, ringFlagFinal)
+	} else {
+		ringPutU32(hb, 4, 0)
+	}
+	ringWrite(ring, w, ringChunkHdr, unsafe.Pointer(&hb[0]))
+	if n > 0 {
+		ringWrite(ring, w+ringChunkHdr, uint32(n), unsafe.Add(unsafe.Pointer(&payload[0]), uintptr(off)))
+	}
 	atomicStoreU32(&hdr.writeIdx, w+total)
-	atomicStoreU32(&hdr.sentFrames, atomicLoadU32(&hdr.sentFrames)+1)
 	ringWakeReaders(ring)
-	return true
+	return n, true
 }
 
-// ringRecv reads one length-prefixed message from the ring. Returns
-// (data, true) on success, (nil, false) if empty or closed.
-func ringRecv(ring uintptr) ([]byte, bool) {
+// ringRecvChunk reads exactly one chunk. ok=false means no complete chunk is
+// currently available. The caller reassembles until FINAL is set.
+func ringRecvChunk(ring uintptr) (chunk []byte, final bool, ok bool) {
 	if ring == 0 {
-		return nil, false
+		return nil, false, false
 	}
 	hdr := (*ringBuf)(unsafe.Pointer(ring))
-	if ringAvail(ring) < 4 {
-		if ringIsClosed(ring) {
-			return nil, false
-		}
-		return nil, false
+	if ringAvail(ring) < ringChunkHdr {
+		return nil, false, false
 	}
 	r := atomicLoadU32(&hdr.readIdx)
-	// Read length prefix.
-	lenBuf := []byte{:4}
-	ringRead(ring, r, 4, unsafe.Pointer(&lenBuf[0]))
-	msgLen := uint32(lenBuf[0])<<24 | uint32(lenBuf[1])<<16 | uint32(lenBuf[2])<<8 | uint32(lenBuf[3])
-	total := ringAlign8(4 + msgLen)
+	hb := []byte{:ringChunkHdr}
+	ringRead(ring, r, ringChunkHdr, unsafe.Pointer(&hb[0]))
+	n := int32(ringGetU32(hb, 0))
+	flags := ringGetU32(hb, 4)
+	if n < 0 || n > ringChunkCap(ring) {
+		// Both ends are generated from one declaration in one binary, so a
+		// chunk length outside the class is a protocol bug, not bad input.
+		runtimePanic("ring: chunk length outside the chunk class")
+	}
+	total := ringAlign8(uint32(ringChunkHdr) + uint32(n))
 	if ringAvail(ring) < total {
-		return nil, false
+		// The commit store publishes the whole chunk, so a header without its
+		// payload cannot be observed. Fail loud rather than decode garbage.
+		runtimePanic("ring: torn chunk visible above the commit index")
 	}
-	var data []byte
-	if msgLen > 0 {
-		data = []byte{:msgLen}
-		ringRead(ring, r+4, msgLen, unsafe.Pointer(&data[0]))
+	if n > 0 {
+		chunk = []byte{:n}
+		ringRead(ring, r+ringChunkHdr, uint32(n), unsafe.Pointer(&chunk[0]))
 	}
-	// Consume: advance readIdx with release semantics, then count the frame so a
-	// sender parked on the depth limit wakes to a free slot.
 	atomicStoreU32(&hdr.readIdx, r+total)
-	atomicStoreU32(&hdr.recvFrames, atomicLoadU32(&hdr.recvFrames)+1)
+	final = flags&ringFlagFinal != 0
+	if final {
+		atomicStoreU32(&hdr.recvFrames, atomicLoadU32(&hdr.recvFrames)+1)
+	}
 	ringWakeWriters(ring)
-	return data, true
+	return chunk, final, true
 }
 
 // Atomic operations - use C builtins for cross-process visibility.
@@ -313,6 +402,7 @@ func moxie_atomic_load_u32(p *uint32) uint32
 func moxie_atomic_store_u32(p *uint32, val uint32)
 
 // spawnRingSet holds ring buffer pairs for the most recent spawn call.
-// Set before fork, inherited by child. Each pair: [0]=parent→child, [1]=child→parent.
+// Set before the thread starts, read by the child through the handoff. Each
+// pair: [0]=parent→child, [1]=child→parent.
 var spawnRingSet [16][2]uintptr
 var spawnRingCount int32

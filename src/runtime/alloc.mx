@@ -26,6 +26,13 @@ var mallocs uint64
 // domainRoot: one TLS slot per domain. Written once, never mutated.
 var domainRoot *DomainRoot
 
+// domainID names THIS domain in a channel's role test and in a segment's owner
+// field: the root is 1, and every spawned domain takes the next number from one
+// process-wide sequence, assigned at spawn and never reused. It lives here, not
+// in spawn.mx, because a segment owner and a channel role are properties of the
+// memory model rather than of the native transport, and wasm has a domain too.
+var domainID uintptr
+
 // fnStackMax is the maximum function arena nesting depth.
 // 512 entries = 4096 bytes = one page. More call depth than any
 // compiler pass will hit.
@@ -76,24 +83,73 @@ type DomainRoot struct {
 	root   Arena // inline root arena, fnStack[0] = &root
 }
 
-// ArenaRegion is one mmap'd region owned by an Arena.
+// Region kinds. A region IS a segment: the region table is the arena's
+// segment table, so there is no second descriptor to keep in sync.
+//
+//   FN      a function chunk or a fn-arena overflow chain member. Pooled and
+//           released at frame exit; never a compaction victim.
+//   ROOT    a domain-lifetime segment. The only kind the cleaner may move.
+//   LARGE   one allocation larger than its class cap. PINNED, freed whole.
+//   DOMAIN  the domain root: DomainRoot, the carved tables and the first root
+//           data. Owned by the domain, released only at domain death.
+//   CHANNEL a ring buffer. Not allocated by this allocator (section 4), listed
+//           so the kind numbering is one namespace across the runtime.
+const (
+	segKindFn      = int32(1)
+	segKindRoot    = int32(2)
+	segKindLarge   = int32(3)
+	segKindDomain  = int32(4)
+	segKindChannel = int32(5)
+)
+
+// Region states. Only LIVE and FREE exist until the cleaner lands; EVACUATING
+// is reserved here so the numbering is fixed once (section 9).
+const (
+	segLive       = int32(0)
+	segEvacuating = int32(1)
+	segFree       = int32(2)
+)
+
+// ArenaRegion is one segment owned by an Arena. base/off/cap keep the meaning
+// the codec, the relocator and the trim path already rely on: base is the
+// mapping base, off is the bump offset from it (so base+off is the allocation
+// top), and cap is the mapping capacity.
 type ArenaRegion struct {
-	base uintptr
-	off  uintptr // bytes allocated
-	cap  uintptr
+	base  uintptr
+	off   uintptr // bytes allocated, from base
+	cap   uintptr
+	kind  int32  // segKind*
+	state int32  // segLive | segEvacuating | segFree
+	owner int32  // domain id; exactly one owner per region (section 11)
+	gen   uint32 // incremented on every compaction (phase 5)
 }
 
-// arenaMaxRegions is the maximum number of regions per arena. It is also the
-// size of each arena's region registry, which is carved from the arena's own
-// first region: 1024 entries cost 24KB of every arena, most of a small arena's
-// mapping, and a build creates hundreds of thousands of small arenas.
-// 128 regions at the 64MB default region size still allows 8GB per arena.
-const arenaMaxRegions = int32(128)
+// arenaStdRegions is the region-table size of every arena created by ArenaNew.
+// 16 entries at 40 bytes is 640 bytes, against 3KB for the old 128-entry table
+// carved from every function arena. An overflow chain doubles, so 16 entries
+// reach past any frame's real footprint; the root arena is the one exception and
+// carves its own larger table in the domain root.
+const arenaStdRegions = int32(32)
 
-// arenaDefaultRegion is the capacity of chained (overflow) regions on a target
-// that overcommits its address space. wasm does not, so it chains smaller (see
-// arenaChainCap), and the chain cap is a function for exactly that reason.
-const arenaDefaultRegion = uintptr(64) * 1024 * 1024 // 64MB chain regions
+// arenaPhaseRegions is the region table of a phase scope: a manual arena is
+// 4-64 MiB from the start and its graph can chain a dozen large regions, so 32
+// entries is too tight for the compiler's own passes. The cost is 10 KiB in an
+// arena that already reserves megabytes.
+const arenaPhaseRegions = int32(256)
+
+// Segment classes. One class per pool; both fixed and both a power of two.
+//
+//   fn chunks   64 KiB, matching the compiler's FnArenaPush(65536).
+//   root        1 MiB natively, 64 KiB on wasm (D17: waste is permanent there).
+//   domain root 1 MiB natively, 256 KiB on wasm (carries the tables).
+//
+// The fn chain cap bounds a doubling overflow region; past it the allocation
+// takes the LARGE path.
+const (
+	segFnCap       = uintptr(64) * 1024
+	segFnChainMax  = uintptr(4) * 1024 * 1024
+	segLargeMin    = uintptr(65535) // D8: the largest object an inline size covers
+)
 
 // Arena is a bump-pointer allocator with a flat region registry.
 // The Arena struct lives at offset 0 of its primary mmap region.
@@ -105,12 +161,18 @@ const arenaDefaultRegion = uintptr(64) * 1024 * 1024 // 64MB chain regions
 // reclaimed by copy-compaction. They are never pooled.
 type Arena struct {
 	nregions  int32
+	active    int32 // region the small-allocation cursor is in (LARGE never becomes active)
 	sovereign int32 // nonzero: sovereign data arena (records allocations)
 	compacting int32 // nonzero while a compaction owns this arena's space
+	isRoot    int32 // nonzero: the domain root arena (grows in ROOT segments)
+	// dataOff is where region 0's data begins: past the Arena struct and its
+	// carved region table. A pooled arena is reset to it rather than to a
+	// process-wide constant, so a smaller table is a smaller per-frame cost.
+	dataOff   uintptr
 	// growDouble chains overflow regions at twice the active region's capacity
-	// (capped at arenaDefaultRegion) instead of a fixed 64MB. Sovereign group
-	// arenas are created in the hundreds of thousands at a few KB each, and a
-	// fixed 64MB overflow region would reserve 64MB to hold a few KB more.
+	// instead of a fixed 64MB. Sovereign group arenas are created in the
+	// hundreds of thousands at a few KB each, and a fixed 64MB overflow region
+	// would reserve 64MB to hold a few KB more.
 	growDouble int32
 	owner     *sovGroup
 	sovGroups int32 // live sovGroups whose receivers live in this arena
@@ -130,16 +192,17 @@ type Arena struct {
 // Arena pool: bounded freelist of reset arenas for reuse.
 // Eliminates mmap/munmap syscalls for short-lived function arenas.
 //
-// Bounded by BYTES as well as by count. The pool is a cache of the mmap churn
-// that function arenas would otherwise cause, and a cached arena is resident
-// memory: a reset reclaims the bytes and keeps the pages, so an arena that grew
-// to megabytes while a request used it would sit in the pool, untouched and
-// never unmapped, for the life of the process. Count alone let eight such
-// arenas retire - measured on the http channel path as ~76MB of RSS held by the
-// pool across 3000 keep-alive requests. An arena too large to be worth caching
-// is unmapped instead of kept.
-const arenaPoolMax = int32(8)
-const arenaPoolMaxBytes = uintptr(4 << 20)
+// The cache is what makes the function tier allocation-syscall-free in steady
+// state: a push pops a chunk and a pop returns it, so a program whose call depth
+// has stabilised makes no mmap at all. The pool is bounded BY BYTES as well as
+// by count because a cached arena is resident memory: a reset reclaims the bytes
+// and keeps the pages, so an arena that grew to megabytes while a request used
+// it would sit in the pool, untouched and never unmapped, for the life of the
+// process. Count alone let eight such arenas retire - measured on the http
+// channel path as ~76MB of RSS held by the pool across 3000 keep-alive
+// requests. An arena too large to be worth caching is unmapped instead of kept.
+const arenaPoolMax = int32(64)
+const arenaPoolMaxBytes = uintptr(8 << 20)
 
 var arenaPool []*Arena
 var arenaPoolN int32
@@ -218,10 +281,17 @@ func ReadMemStats(m *MemStats) {
 
 // --- Domain lifecycle ---
 
-// initDomain creates the domain root in a new mmap region.
+// arenaRootRegions is the root arena's region-table size. A root segment is
+// 1 MiB natively, so 1024 entries allow a 1 GiB root heap before the table
+// itself is the limit; the compiler's own root arena measured 174 MB in a
+// single region before segmentation, so the table is sized for real builds.
+const arenaRootRegions = int32(1024)
+
+// initDomain creates the domain root in its DOMAIN segment.
 // Sets the one TLS slot. Called once per domain lifetime.
-// Carves fnStack/fnBorrow/domStack/root-region-registry out of the
-// region after the header; the root arena's allocator starts past them.
+// Carves fnStack/fnBorrow/domStack/root-region-registry and the measurement
+// tables out of the segment after the header; the root arena's allocator starts
+// past them and grows by ROOT segments from there.
 func initDomain(capacity uintptr) {
 	capacity = (capacity + 4095) &^ 4095
 	headerSz := domainHeaderSize()
@@ -232,6 +302,7 @@ func initDomain(capacity uintptr) {
 	if addr == nil {
 		runtimePanic("domain: mmap failed")
 	}
+	RecordSegmentAdd(segKindDomain, capacity)
 	memzero(addr, unsafe.Sizeof(DomainRoot{}))
 	dr := (*DomainRoot)(addr)
 	// Runtime package variables are not re-run through the package
@@ -256,13 +327,25 @@ func initDomain(capacity uintptr) {
 	// arena pool: fixed slots carved from the domain region
 	arenaPool = rawSliceArena(p, arenaPoolMax)
 	p += uintptr(arenaPoolMax) * unsafe.Sizeof(&dr.root)
+	// allocation-size histogram (phase 0b)
+	allocHistCount = rawSliceU64(p, allocHistBins)
+	p += uintptr(allocHistBins) * 8
+	allocHistBytes = rawSliceU64(p, allocHistBins)
+	p += uintptr(allocHistBins) * 8
 	// root arena region registry
-	dr.root.regions = rawSliceRegion(p, arenaMaxRegions)
-	p += uintptr(arenaMaxRegions) * unsafe.Sizeof(ArenaRegion{})
+	dr.root.regions = rawSliceRegion(p, arenaRootRegions)
+	p += uintptr(arenaRootRegions) * unsafe.Sizeof(ArenaRegion{})
 	dr.root.nregions = 1
+	dr.root.active = 0
+	dr.root.isRoot = 1
+	dr.root.dataOff = p - uintptr(addr) // data starts past carved tables
 	dr.root.regions[0].base = uintptr(addr)
-	dr.root.regions[0].off = p - uintptr(addr) // data starts past carved tables
+	dr.root.regions[0].off = dr.root.dataOff
 	dr.root.regions[0].cap = capacity
+	dr.root.regions[0].kind = segKindDomain
+	dr.root.regions[0].state = segLive
+	dr.root.regions[0].owner = 0
+	dr.root.regions[0].gen = 0
 	dr.fnStack[0] = &dr.root
 	dr.root.scope = ArenaScopeRoot
 	dr.fnTop = 0
@@ -297,9 +380,7 @@ func FnArenaPush(capacity uintptr) (a *Arena) {
 		return manualArena
 	}
 	domainRoot.fnTop++
-	if arenaTraceWanted() {
-		fnPushCount++
-	}
+	fnPushCount++
 	if domainRoot.fnTop >= fnStackMax {
 		runtimePanic("function arena stack overflow")
 	}
@@ -1336,6 +1417,10 @@ func sovReleaseDeadGroup(g *sovGroup) {
 				da.regions[dropped].base = base[r]
 				da.regions[dropped].off = top[r] - base[r]
 				da.regions[dropped].cap = da.regions[r].cap
+				da.regions[dropped].kind = da.regions[r].kind
+				da.regions[dropped].state = da.regions[r].state
+				da.regions[dropped].owner = da.regions[r].owner
+				da.regions[dropped].gen = da.regions[r].gen
 			} else {
 				da.regions[r].off = top[r] - base[r]
 			}
@@ -1344,13 +1429,17 @@ func sovReleaseDeadGroup(g *sovGroup) {
 		}
 		nb := base[r]
 		nc := da.regions[r].cap
+		RecordSegmentFree(da.regions[r].kind, nc)
 		da.regions[r].base = 0
 		da.regions[r].off = 0
 		da.regions[r].cap = 0
+		da.regions[r].kind = 0
+		da.regions[r].state = segFree
 		RecordRegionFree(da.scope, 1, nc)
 		sysUnmap(unsafe.Pointer(nb), nc)
 	}
 	da.nregions = dropped
+	da.active = arenaPickActive(da)
 	// Rebuild the record table: live records, released extents cloned to root
 	// lifetime, and zeroed extents for the interior dead blocks.
 	nrec := int32(0)
@@ -1491,17 +1580,21 @@ func sovTrimTail(g *sovGroup) {
 	// group that grew a 64MB region for a burst and then trimmed back to its
 	// first region should hand the 64MB back, or RSS keeps the peak forever.
 	r := da.nregions - 1
-	for r > 0 && da.regions[r].off == arenaDataOffset() {
+	for r > 0 && da.regions[r].off == 0 {
 		nb := da.regions[r].base
 		nc := da.regions[r].cap
+		RecordSegmentFree(da.regions[r].kind, nc)
 		da.regions[r].base = 0
 		da.regions[r].off = 0
 		da.regions[r].cap = 0
+		da.regions[r].kind = 0
+		da.regions[r].state = segFree
 		da.nregions = r
 		r--
 		RecordRegionFree(da.scope, 1, nc)
 		sysUnmap(unsafe.Pointer(nb), nc)
 	}
+	da.active = arenaPickActive(da)
 }
 
 // sovDequeuePending unlinks the head group.
@@ -1586,7 +1679,9 @@ func sovNewArena(capacity uintptr) (a *Arena) {
 		s[i] = s[sovPoolN]
 		s[sovPoolN] = nil
 		a.nregions = 1
-		a.regions[0].off = arenaDataOffset()
+		a.active = 0
+		a.regions[0].off = a.dataOff
+		a.regions[0].state = segLive
 		a.alloc = 0
 		a.owner = nil
 		a.sovGroupList = resize(a.sovGroupList, 0)
@@ -1644,17 +1739,21 @@ func sovReleaseArena(a *Arena) {
 			RecordSovRegionFree(uintptr(a.nregions-1), rb)
 		}
 		for i := a.nregions - 1; i > 0; i-- {
+			RecordSegmentFree(a.regions[i].kind, a.regions[i].cap)
 			sysUnmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
 		}
 		a.nregions = 1
+		a.active = 0
 	}
 	tooBig := sovPoolBytes+a.regions[0].cap > sovPoolMaxBytes
 	s := sovPoolSlots()
 	if sovPoolN >= sovPoolMax || tooBig {
+		RecordSegmentFree(segKindFn, a.regions[0].cap)
 		sysUnmap(unsafe.Pointer(a.regions[0].base), a.regions[0].cap)
 		return
 	}
-	a.regions[0].off = arenaDataOffset()
+	a.regions[0].off = a.dataOff
+	a.regions[0].state = segLive
 	a.owner = nil
 	sovPoolBytes += a.regions[0].cap
 	s[sovPoolN] = a
@@ -2204,7 +2303,7 @@ func sovExternalRef(g *sovGroup) (ok bool) {
 		for r := int32(0); r < a.nregions; r++ {
 			base := a.regions[r].base
 			// Skip the arena's own header. Region 0 carries the registry of
-			// arenaMaxRegions entries, and ArenaReset leaves the entries past
+			// the arena's table size, and ArenaReset leaves the entries past
 			// nregions holding the base addresses of regions it has since
 			// unmapped. Those addresses are recycled by later mappings, so a
 			// stale entry can land inside a sovereign group's data and pin that
@@ -4149,24 +4248,40 @@ func SovereignRegRestore() {
 }
 
 // ArenaNew creates a new arena. The Arena struct is embedded at offset 0
-// of the mmap'd region, with its region registry carved after the header.
+// of the arena's primary segment, with its region table carved after the
+// header. A primary segment is a FN-class segment: function chunks, phase
+// scopes and sovereign data arenas all start here, and each grows by chaining
+// further segments rather than by asking for its worst case up front.
 func ArenaNew(capacity uintptr) (a *Arena) {
 	capacity = (capacity + 4095) &^ 4095
 	headerSz := arenaHeaderSize()
-	dataStart := arenaDataOffset()
-	if capacity < headerSz+dataStart+4096 {
-		capacity = (headerSz + dataStart + 4096 + 4095) &^ 4095
+	regCap := arenaStdRegions
+	if capacity > 2*segFnCap {
+		regCap = arenaPhaseRegions
+	}
+	dataStart := uintptr(regCap) * unsafe.Sizeof(ArenaRegion{})
+	dataStart = (dataStart + 15) &^ 15
+	dataOff := headerSz + dataStart
+	if capacity < dataOff+4096 {
+		capacity = (dataOff + 4096 + 4095) &^ 4095
 	}
 	addr := sysMap(capacity)
 	if addr == nil {
 		runtimePanic("arena: mmap failed")
 	}
 	a = (*Arena)(addr)
-	a.regions = rawSliceRegion(uintptr(addr)+headerSz, arenaMaxRegions)
+	a.regions = rawSliceRegion(uintptr(addr)+headerSz, regCap)
 	a.nregions = 1
+	a.active = 0
+	a.dataOff = dataOff
 	a.regions[0].base = uintptr(addr)
-	a.regions[0].off = headerSz + dataStart
+	a.regions[0].off = dataOff
 	a.regions[0].cap = capacity
+	a.regions[0].kind = segKindFn
+	a.regions[0].state = segLive
+	a.regions[0].owner = int32(domainID)
+	a.regions[0].gen = 0
+	RecordSegmentAdd(segKindFn, capacity)
 	return a
 }
 
@@ -4176,20 +4291,167 @@ func arenaHeaderSize() (sz uintptr) {
 	return sz
 }
 
-// arenaDataOffset returns the number of bytes after the region registry
-// (aligned up to 16) at which data allocations begin.
+// arenaDataOffset returns the number of bytes the region table occupies,
+// aligned up to 16, at which data allocations begin after the header.
 func arenaDataOffset() (off uintptr) {
-	off = uintptr(arenaMaxRegions) * unsafe.Sizeof(ArenaRegion{})
+	off = uintptr(arenaStdRegions) * unsafe.Sizeof(ArenaRegion{})
 	off = (off + 15) &^ 15
 	return off
 }
 
-// ArenaAlloc allocates size bytes from the arena, 16-byte aligned, zeroed.
-// If the active region has no room, a fresh region is appended when the
-// registry allows; otherwise the arena is considered full.
-// arenaAllocRaw bumps size bytes in the arena without recording an
-// allocation-map entry. Used by the compaction copy pass and by
-// codecSovereignAlloc, which record their own entries.
+// arenaGrowRegions doubles the root arena's region table into its own LARGE
+// mapping. The old table stays where it is: it is carved in the DOMAIN segment
+// (or was a previous growth mapping), and nothing frees a root table before
+// domain death. The table's mapping is not entered in the table it describes;
+// it is charged to the segment ledger as a LARGE segment instead.
+func arenaGrowRegions(a *Arena) {
+	old := a.regions
+	n := int32(len(old)) * 2
+	size := (uintptr(n)*unsafe.Sizeof(ArenaRegion{}) + 4095) &^ 4095
+	addr := sysMap(size)
+	if addr == nil {
+		runtimePanic("arena: region table mmap failed")
+	}
+	RecordSegmentAdd(segKindLarge, size)
+	nr := rawSliceRegion(uintptr(addr), n)
+	for i := int32(0); i < a.nregions; i++ {
+		nr[i] = old[i]
+	}
+	a.regions = nr
+}
+
+// arenaPickActive chooses the region the next allocation continues in after a
+// region table has been compacted or trimmed. A LARGE region is never the
+// cursor (G4), and a full region is skipped so the next small allocation opens
+// a new segment instead of allocating into a full one.
+func arenaPickActive(a *Arena) int32 {
+	for i := a.nregions - 1; i >= 0; i-- {
+		if a.regions[i].kind == segKindLarge {
+			continue
+		}
+		if a.regions[i].off < a.regions[i].cap {
+			return i
+		}
+	}
+	if a.nregions > 0 {
+		return a.nregions - 1
+	}
+	return 0
+}
+
+// arenaOpenSegment appends a segment to the arena and returns its index.
+//
+// The class rule is the whole of phase 2: a function arena grows by doubling
+// 64 KiB chunks up to segFnChainMax, the root heap grows by ROOT segments of
+// arenaRootSegCap, and an allocation too big for its class takes a dedicated
+// LARGE segment. A LARGE segment never becomes the active cursor, so one big
+// buffer cannot swallow every small allocation behind it (G4).
+func arenaOpenSegment(a *Arena, size uintptr) (idx int32) {
+	if a.nregions >= int32(len(a.regions)) {
+		// The root heap lives for the whole domain and has no upper bound: on
+		// wasm a ROOT segment is 64 KiB, so 1024 entries would cap the heap at
+		// 64 MiB and a compaction of a large receiver graph would run it over.
+		// Grow the table itself. Every other arena is bounded by its class and
+		// a full table there is a real defect (the panic below).
+		if a.isRoot != 0 {
+			arenaGrowRegions(a)
+		}
+	}
+	if a.nregions >= int32(len(a.regions)) {
+		printstring("OVERFLOW nregions=")
+		printuint64(uint64(a.nregions))
+		printstring(" size=")
+		printuint64(uint64(size))
+		printstring(" r0.cap=")
+		printuint64(uint64(a.regions[0].cap))
+		printstring(" r0.off=")
+		printuint64(uint64(a.regions[0].off))
+		printstring(" active=")
+		printuint64(uint64(uint32(a.active)))
+		printstring(" active.cap=")
+		printuint64(uint64(a.regions[a.active].cap))
+		printstring(" active.off=")
+		printuint64(uint64(a.regions[a.active].off))
+		printstring(" alloc=")
+		printuint64(a.alloc)
+		printstring(" scope=")
+		printuint64(uint64(uint32(a.scope)))
+		printstring(" sovereign=")
+		printuint64(uint64(uint32(a.sovereign)))
+		printstring(" root=")
+		printuint64(uint64(uint32(a.isRoot)))
+		printstring(" arena=")
+		printuint64(uint64(uintptr(unsafe.Pointer(a))))
+		printstring("\n")
+		runtimePanic("arena: region table full")
+	}
+	ncap := uintptr(0)
+	kind := segKindFn
+	if a.isRoot != 0 {
+		// The root heap grows in fixed ROOT segments. A request above
+		// one sixteenth of a segment gets its own mapping instead, so the
+		// tail waste per segment stays under a segment's sixteenth.
+		if size > arenaRootSegCap()/16 {
+			kind = segKindLarge
+			ncap = size
+		} else {
+			kind = segKindRoot
+			ncap = arenaRootSegCap()
+		}
+	} else {
+		// A frame chunk doubles to segFnChainMax; a phase scope or a
+		// sovereign data arena grows to the larger class cap, because it is
+		// deliberately long-lived and a few KiB of state per helper call must
+		// not turn every multi-megabyte allocation into its own mapping.
+		maxCap := segFnChainMax
+		if a.sovereign != 0 || a.regions[0].cap > 2*segFnCap {
+			maxCap = arenaPhaseChainCap()
+		}
+		ncap = a.regions[a.active].cap * 2
+		if ncap < segFnCap {
+			ncap = segFnCap
+		}
+		if ncap > maxCap {
+			ncap = maxCap
+		}
+		if ncap < size {
+			if size <= maxCap {
+				ncap = size
+			} else {
+				kind = segKindLarge
+				ncap = size
+			}
+		}
+	}
+	ncap = (ncap + 4095) &^ 4095
+	addr := sysMap(ncap)
+	if addr == nil {
+		runtimePanic("arena: region mmap failed")
+	}
+	nr := &a.regions[a.nregions]
+	nr.base = uintptr(addr)
+	nr.off = 0
+	nr.cap = ncap
+	nr.kind = kind
+	nr.state = segLive
+	nr.owner = a.regions[0].owner
+	nr.gen = 0
+	idx = a.nregions
+	a.nregions++
+	if kind != segKindLarge {
+		a.active = idx
+	}
+	RecordSegmentAdd(kind, ncap)
+	RecordRegionAdd(a.scope, ncap)
+	if a.growDouble != 0 {
+		RecordSovRegionAdd(ncap)
+	}
+	if a.sovereign != 0 {
+		sovRangeRegister(uintptr(addr), ncap, a.owner)
+	}
+	return idx
+}
+
 // maxSingleAlloc bounds one allocation. Sizes reaching the allocator come
 // from decoded length fields and computed table sizes; when one of those is
 // corrupt the request used to be honoured, and a multi-gigabyte region whose
@@ -4200,7 +4462,10 @@ func arenaDataOffset() (off uintptr) {
 // not here.
 const maxSingleAlloc = uintptr(1) << 30
 
-func arenaAllocRaw(a *Arena, size uintptr) unsafe.Pointer {
+// arenaBump is the one allocation core. arenaAllocRaw and ArenaAllocTD differ
+// only in whether a sovereign allocation-map entry is recorded, so the segment
+// logic exists exactly once.
+func arenaBump(a *Arena, size uintptr) unsafe.Pointer {
 	if a == nil {
 		runtimePanic("ArenaAlloc: nil arena")
 	}
@@ -4215,65 +4480,30 @@ func arenaAllocRaw(a *Arena, size uintptr) unsafe.Pointer {
 		printstring("\n")
 		runtimePanic("alloc: implausible allocation size")
 	}
-	active := a.nregions - 1
-	if a.regions[active].off+size > a.regions[active].cap {
-		if a.nregions >= arenaMaxRegions {
-			printstring("OVERFLOW nregions=")
-			printuint64(uint64(a.nregions))
-			printstring(" size=")
-			printuint64(uint64(size))
-			printstring(" r0.cap=")
-			printuint64(uint64(a.regions[0].cap))
-			printstring(" r0.off=")
-			printuint64(uint64(a.regions[0].off))
-			printstring(" active.cap=")
-			printuint64(uint64(a.regions[active].cap))
-			printstring(" active.off=")
-			printuint64(uint64(a.regions[active].off))
-			printstring(" arena=")
-			printuint64(uint64(uintptr(unsafe.Pointer(a))))
-			printstring("\n")
-			runtimePanic("arena: region table full")
-		}
-		newCap := arenaChainCap()
-		if a.growDouble != 0 {
-			newCap = a.regions[active].cap * 2
-			if newCap > arenaChainCap() {
-				newCap = arenaChainCap()
-			}
-		}
-		if size > newCap {
-			newCap = (size + 4095) &^ 4095
-		}
-		addr := sysMap(newCap)
-		if addr == nil {
-			runtimePanic("arena: region mmap failed")
-		}
-		a.regions[a.nregions].base = uintptr(addr)
-		a.regions[a.nregions].off = 0
-		a.regions[a.nregions].cap = newCap
-		RecordRegionAdd(a.scope, newCap)
-		if a.growDouble != 0 {
-			RecordSovRegionAdd(newCap)
-		}
-		a.nregions++
-		if a.sovereign != 0 {
-			sovRangeRegister(uintptr(addr), newCap, a.owner)
-		}
-		active = a.nregions - 1
+	idx := a.active
+	if a.regions[idx].off+size > a.regions[idx].cap {
+		idx = arenaOpenSegment(a, size)
 	}
-	ptr := unsafe.Pointer(a.regions[active].base + a.regions[active].off)
-	a.regions[active].off += size
+	ptr := unsafe.Pointer(a.regions[idx].base + a.regions[idx].off)
+	a.regions[idx].off += size
 	a.alloc += uint64(size)
 	arenaScopeAlloc(a.scope, size)
 	// Direct allocations (hashmap buckets, codec buffers) reach this entry
 	// without passing through alloc(), so the site recorder cannot see them;
 	// the size is what identifies them.
-	if arenaTraceWanted() && a == trueRootArena() {
+	if arenaTraceWanted() && a.isRoot != 0 {
 		RecordRootSize(size)
 	}
+	recordAllocSize(size)
 	memzero(ptr, size)
 	return ptr
+}
+
+// arenaAllocRaw bumps size bytes in the arena without recording an
+// allocation-map entry. Used by the compaction copy pass and by
+// codecSovereignAlloc, which record their own entries.
+func arenaAllocRaw(a *Arena, size uintptr) unsafe.Pointer {
+	return arenaBump(a, size)
 }
 
 // ArenaAlloc allocates size bytes from the arena, 16-byte aligned, zeroed.
@@ -4287,101 +4517,8 @@ func ArenaAlloc(a *Arena, size uintptr) unsafe.Pointer {
 }
 
 func ArenaAllocTD(a *Arena, size uintptr, td *RawType) unsafe.Pointer {
-	if a == nil {
-		runtimePanic("ArenaAlloc: nil arena")
-	}
 	size = align(size)
-	if size > maxSingleAlloc {
-		printstring("alloc: implausible size ")
-		printuint64(uint64(size))
-		printstring(" arena=")
-		printuint64(uint64(uintptr(unsafe.Pointer(a))))
-		printstring(" sovereign=")
-		printuint64(uint64(a.sovereign))
-		printstring("\n")
-		runtimePanic("alloc: implausible allocation size")
-	}
-	active := a.nregions - 1
-	if a.regions[active].off+size > a.regions[active].cap {
-		if a.nregions >= arenaMaxRegions {
-			printstring("OVERFLOW nregions=")
-			printuint64(uint64(a.nregions))
-			printstring(" size=")
-			printuint64(uint64(size))
-			printstring(" r0.cap=")
-			printuint64(uint64(a.regions[0].cap))
-			printstring(" r0.off=")
-			printuint64(uint64(a.regions[0].off))
-			printstring(" active.cap=")
-			printuint64(uint64(a.regions[active].cap))
-			printstring(" active.off=")
-			printuint64(uint64(a.regions[active].off))
-			printstring(" alloc=")
-			printuint64(a.alloc)
-			printstring(" scope=")
-			printuint64(uint64(uint32(a.scope)))
-			printstring(" growDouble=")
-			printuint64(uint64(uint32(a.growDouble)))
-			printstring(" sovereign=")
-			printuint64(uint64(uint32(a.sovereign)))
-			printstring(" arena=")
-			printuint64(uint64(uintptr(unsafe.Pointer(a))))
-			printstring(" root=")
-			if a == trueRootArena() {
-				printstring("yes")
-			} else {
-				printstring("no")
-			}
-			printstring("\n")
-			runtimePanic("arena: region table full")
-		}
-		newCap := arenaChainCap()
-		if a.growDouble != 0 {
-			newCap = a.regions[active].cap * 2
-			if newCap > arenaChainCap() {
-				newCap = arenaChainCap()
-			}
-		}
-		if size > newCap {
-			newCap = (size + 4095) &^ 4095
-		}
-		addr := sysMap(newCap)
-		if addr == nil {
-			runtimePanic("arena: region mmap failed")
-		}
-		a.regions[a.nregions].base = uintptr(addr)
-		a.regions[a.nregions].off = 0
-		a.regions[a.nregions].cap = newCap
-		RecordRegionAdd(a.scope, newCap)
-		if a.growDouble != 0 {
-			RecordSovRegionAdd(newCap)
-		}
-		// A sovereign group's data arena is identified by its registered
-		// regions. Registers 0 of g.data is recorded when the group is made,
-		// and every region a compaction makes is recorded too, but a region
-		// grown here - the ordinary allocation path every method body uses -
-		// was not. sovInSovereignDataArena then missed the grown region, the
-		// codec treated a pointer into it as stable and aliased it instead of
-		// copying, and the caller kept a pointer into memory the group's
-		// ArenaFree unmapped: the SIGSEGV in store.(*Engine).scanKPC and in
-		// main after filter.UnmarshalFilters.
-		if a.sovereign != 0 {
-			sovRangeRegister(uintptr(addr), newCap, a.owner)
-		}
-		a.nregions++
-		active = a.nregions - 1
-	}
-	ptr := unsafe.Pointer(a.regions[active].base + a.regions[active].off)
-	a.regions[active].off += size
-	a.alloc += uint64(size)
-	arenaScopeAlloc(a.scope, size)
-	// Direct allocations (hashmap buckets, codec buffers) reach this entry
-	// without passing through alloc(), so the site recorder cannot see them;
-	// the size is what identifies them.
-	if arenaTraceWanted() && a == trueRootArena() {
-		RecordRootSize(size)
-	}
-	memzero(ptr, size)
+	ptr := arenaBump(a, size)
 	if a.sovereign != 0 && a.owner != nil && !a.owner.compacting {
 		sovAddRec(a.owner, uintptr(ptr), size, td)
 	}
@@ -4431,8 +4568,10 @@ func ArenaFree(a *Arena) {
 		}
 	}
 	for i := a.nregions - 1; i > 0; i-- {
+		RecordSegmentFree(a.regions[i].kind, a.regions[i].cap)
 		sysUnmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
 	}
+	RecordSegmentFree(segKindFn, a.regions[0].cap)
 	b := a.regions[0].base
 	c := a.regions[0].cap
 	sysUnmap(unsafe.Pointer(b), c)
@@ -4466,6 +4605,7 @@ func ArenaReset(a *Arena) {
 		}
 	}
 	for i := a.nregions - 1; i > 0; i-- {
+		RecordSegmentFree(a.regions[i].kind, a.regions[i].cap)
 		sysUnmap(unsafe.Pointer(a.regions[i].base), a.regions[i].cap)
 		// Clear the entry with the mapping: a registry word naming an address
 		// the process has handed back is not metadata, it is a dangling
@@ -4473,9 +4613,13 @@ func ArenaReset(a *Arena) {
 		a.regions[i].base = 0
 		a.regions[i].off = 0
 		a.regions[i].cap = 0
+		a.regions[i].kind = 0
+		a.regions[i].state = segFree
 	}
 	a.nregions = 1
-	a.regions[0].off = arenaDataOffset()
+	a.active = 0
+	a.regions[0].off = a.dataOff
+	a.regions[0].state = segLive
 }
 
 // ArenaAcquire returns a pooled arena with cap >= capacity, or
@@ -4508,9 +4652,7 @@ func ArenaRelease(a *Arena) {
 	if a == nil {
 		return
 	}
-	if arenaTraceWanted() {
-		fnReleaseCount++
-	}
+	fnReleaseCount++
 	// The frame pop is an exit like any other: receivers inside this arena are
 	// dead once the function returns, so their groups go with it.
 	arenaReleaseGroups(a)
