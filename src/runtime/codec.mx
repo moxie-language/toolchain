@@ -124,11 +124,19 @@ func codecArenaContainsAddr(a, p uintptr) (ok bool) {
 	if a == 0 {
 		return false
 	}
+	// Fast path: the regions are visited newest first. The allocator appends
+	// regions and then keeps allocating in the newest one, so nearly every
+	// question is answered by the last region, and this function sits on the
+	// hot path of the return encoder (one call per pointer, and the type
+	// universe is hundreds of thousands of pointers). Scanning oldest first
+	// made a large arena's test cost proportional to its region count.
 	ar := (*Arena)(unsafe.Pointer(a))
-	for i := int32(0); i < ar.nregions; i++ {
+	i := ar.nregions - 1
+	for i >= 0 {
 		if p >= ar.regions[i].base && p < ar.regions[i].base+ar.regions[i].cap {
 			return true
 		}
+		i--
 	}
 	return false
 }
