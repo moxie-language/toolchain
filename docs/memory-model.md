@@ -1678,7 +1678,11 @@ Evidence:
 Still open in phase 6: the `LOCAL`/`SHARED` class field, replacing `chan.mx`'s
 bounded queue with the ring and deleting its sender/receiver task lists, the
 capacity-0 rule, `futex_waitv` for select, and the `Edge`/`Sender`/`Receiver`
-two-ring binding that phase 0c declares.
+two-ring binding that phase 0c declares. The `refcount` word exists in the
+header and is initialised to two ends, but the release protocol it belongs to is
+not implemented: `releaseLastSpawn` still unmaps a ring pair directly once the
+peer's breaker is closed. That is acceptance test 18 and risk 14, and it is the
+next item after the class split.
 
 ### 21.5 Phase 0c — role checks landed; the Edge half is open
 
