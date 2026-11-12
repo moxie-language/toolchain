@@ -1708,6 +1708,19 @@ Not yet demonstrated, and why:
   decode. Equal bytes mean the decoder starts at the wrong offset; different
   bytes mean the saved pointer is stale.
 
+  **Round 13: the cost is per-POINTER work, quantified.** Counting encoder
+  entries per package gives the scale: `array` 330,620 and `internal/task`
+  251,114 entries for packages that take seconds. So a return is not one huge
+  walk; it is hundreds of thousands of per-pointer decisions, and each one ran
+  several linear arena/stack scans (`codecIsStableAddr` ->
+  `codecOnStack`/`codecArenaContainsAddr`, then `retPointeeDies`). Making the
+  arena test visit newest regions first - the allocator appends regions and keeps
+  allocating in the newest - took the legacy-built compiler's cold hello build
+  from 6m22s to 4m40s: a real gain, still 10x the old binary's 21s. What remains
+  is the rest of the per-pointer path (`codecOnStack`, `retPointeeDies`, the
+  stable checks), which needs a cached extent for the current arena and the root
+  rather than a scan per pointer.
+
   **Round 12: base-only registration does not change the time.** Registering
   only an object's BASE (dropping the per-field entries on both the encode and
   decode sides, and re-verifying the seven codec-heavy regressions, all green)
