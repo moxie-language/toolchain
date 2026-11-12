@@ -6891,19 +6891,42 @@ func (fb *ssaFuncBuilder) checkSpawnSignature(args []SSAValue) {
 	// on the rendered type because the instance's arguments are part of its
 	// identity (types.Identical compares a named generic by its origin alone).
 	if sig.Params == nil {
+		if len(args) > 1 {
+			reportCompileError("spawn: the target takes no arguments but " | irItoa(int32(len(args)-1)) | " were passed")
+		}
+		return
+	}
+	targetName := "the target"
+	if fn, isFn := args[0].(*SSAFunction); isFn {
+		targetName = fn.name
+	}
+	if int32(len(args))-1 != sig.Params.Len() {
+		reportCompileError("spawn: " | targetName | " expects " | irItoa(sig.Params.Len()) | " arguments, got " | irItoa(int32(len(args)-1)))
 		return
 	}
 	for ai := int32(1); ai < int32(len(args)); ai++ {
-		if args[ai] == nil || ai-1 >= sig.Params.Len() {
-			break
+		if args[ai] == nil {
+			return
 		}
 		at := args[ai].SSAType()
-		if !isOwnershipType(at) {
+		pt := sig.Params.At(ai - 1).Typ
+		if isOwnershipType(at) || isOwnershipType(pt) {
+			// By NAME: a struct with the same fields is not an Edge, and a
+			// transposed pair is a mismatch (the instance's arguments are part
+			// of its identity, which the rendering now shows).
+			if at.String() != pt.String() {
+				reportCompileError("spawn: argument " | irItoa(ai) | " has type " | at.String() | " but the target's parameter " | irItoa(ai) | " is " | pt.String() | "; the spawn argument and the target parameter must agree")
+				return
+			}
 			continue
 		}
-		pt := sig.Params.At(ai - 1).Typ
-		if at.String() != pt.String() {
-			reportCompileError("spawn: argument " | irItoa(ai) | " has type " | at.String() | " but the target's parameter " | irItoa(ai) | " is " | pt.String() | "; the spawn argument and the target parameter must agree")
+		au := SafeUnderlying(at)
+		pu := SafeUnderlying(pt)
+		if au == nil || pu == nil {
+			continue
+		}
+		if au.String() != pu.String() {
+			reportCompileError("spawn: argument " | irItoa(ai) | " has type " | at.String() | ", " | targetName | " expects " | pt.String())
 			return
 		}
 	}

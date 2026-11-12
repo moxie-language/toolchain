@@ -1978,14 +1978,14 @@ so the child receives capabilities, not a copy of the ring.
    are predeclared in both compilers; `Sender[int32]`, `Edge[Request, Response]`
    and the field roles type-check and run, pinned by `edge_types.mx` and
    `reject_edge_field_role.mx`.
-3. **`edge[In, Out]{d}`** — DONE (21.5): the declaration, the runtime factory,
-   spawn acceptance, name-based agreement and breaker binding through the pair
-   record. Pinned by `edge_decl.mx`, `edge_spawn.mx` and
-   `reject_edge_transposed.mx`. Bare `Sender`/`Receiver` spawn arguments and the
-   two-value `chan` form remain.
-3. **`edge[In, Out]{d}`** declaration and the runtime factory (two rings, four
-   fixed-direction handles, pair record, root arena), with `spawn` accepting
-   the child value and binding the breaker through the pair.
+3. **`edge[In, Out]{d}`** — DONE (21.5): the declaration, the runtime factory
+   (two rings, four fixed-direction handles, pair record, root arena), spawn
+   acceptance, name-based agreement, breaker binding through the pair, and the
+   general spawn argument/parameter agreement in stage4 that legacy already had
+   (a user struct no longer satisfies an Edge parameter there). Pinned by
+   `edge_decl.mx`, `edge_spawn.mx`, `edge_roundtrip.mx`,
+   `reject_edge_transposed.mx` and `reject_edge_user_struct.mx`. Bare
+   `Sender`/`Receiver` spawn arguments and the two-value `chan` form remain.
 4. **Affineness checks** (22.5) in stage4, then the legacy mirror.
 5. **Acceptance fixtures**: role through an Edge field; transposed Edge;
    one Edge to two spawns; a copied end; a user struct with the same field

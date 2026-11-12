@@ -1,0 +1,54 @@
+// Phase 0c step 5: a pair outlives the frame that declared it.
+//
+// The declaration allocates both rings and all four handles in the ROOT arena
+// (section 4: the storage cannot be a frame's), so returning the two Edges from
+// the function that declared them leaves a working pair: the return relocation
+// copies the channel handles as handles and the pair word as an integer. The
+// child is then spawned from the caller and both directions run.
+//
+//:wasmtest skip
+package main
+
+import "fmt"
+
+type Req struct {
+	Body []byte `cap:"1024"`
+}
+
+func worker(ep Edge[Req, int32]) (closed chan struct{}) {
+	for {
+		select {
+		case <-closed:
+			return closed
+		case r := <-ep.Recv:
+			if len(r.Body) == 0 {
+				return closed
+			}
+			ep.Send <- int32(len(r.Body))
+		}
+	}
+}
+
+func makePair() (parent Edge[int32, Req], child Edge[Req, int32]) {
+	p, c := edge[int32, Req]{2}
+	return p, c
+}
+
+func main() {
+	select {
+	case <-shutdown:
+		return
+	default:
+	}
+	parent, child := makePair()
+	done := spawn(worker, child)
+	for _, n := range []int32{1, 64, 300, 1024} {
+		parent.Send <- Req{Body: []byte{:n}}
+		if got := <-parent.Recv; got != n {
+			panic("edge roundtrip lost a reply")
+		}
+	}
+	close(parent.Send)
+	<-done
+	fmt.Println("edge roundtrip ok")
+}
