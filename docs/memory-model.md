@@ -1935,6 +1935,37 @@ so the child receives capabilities, not a copy of the ring.
   child outlives the declaring function, and the rings are released by the last
   end (the 21.4 protocol, now over four handles).
 
+### 22.4a Step 3's implementation path (recorded before the code)
+
+The parser accepts `edge[In, Out]{d}` on both sides without change: it is a
+composite literal whose type is an index expression, which is valid Go syntax
+(and stage4's parser mirrors it). A builtin generic *function* `edge(...)` is
+NOT the cheap path: `Signature` in `pkg/types` carries no type parameters
+(stage4 monomorphizes generic functions textually), and legacy would need a
+universe Func with a generic signature.
+
+The cheap path is the one `[]T{:n}` already takes: `mxsrc.RewriteChanMakeLiterals`
+turns the literal into `__slicealloc(T, n)`, where the FIRST argument is a TYPE
+expression and the compiler special-cases the builtin (`ssa_types.mx`'s
+`__slicealloc` case). So:
+
+1. `pkg/mxsrc` rewrites `edge[In, Out]{d}` to `__edgealloc(Edge[In, Out], d)`
+   before the parser runs, next to the chan/slice literal rewrites.
+2. Both compilers special-case the `__edgealloc` call: the first argument is the
+   instantiated Edge type (supplying element sizes, codec descriptors and frame
+   budgets from the same walk the channel element uses), the second the depth.
+   The call has TWO results (parent, child), so the assignment stays a normal
+   two-value `:=`.
+3. The runtime `edgeMake` allocates the pair record and the two rings in the
+   root arena and returns the four fixed-direction handles; the compiler builds
+   the parent and child `Edge` structs from them.
+4. `spawn(childEdge)` binds the breaker through the pair record (D22.2), and
+   affineness (D22.5) then keeps a second transfer from being expressible.
+
+Nothing in this path needs a parser change, which is why it is the recorded
+one. The legacy half needs the same rewriter hook (legacy's pipeline has its own
+rewrites) and the same builtin case in its SSA builder.
+
 ### 22.5 Open decisions, recorded rather than guessed
 
 - **The two-value `chan` form.** Whether `s, r := chan T{d}` replaces the
