@@ -1708,6 +1708,21 @@ Not yet demonstrated, and why:
   decode. Equal bytes mean the decoder starts at the wrong offset; different
   bytes mean the saved pointer is stale.
 
+  **Round 12: base-only registration does not change the time.** Registering
+  only an object's BASE (dropping the per-field entries on both the encode and
+  decode sides, and re-verifying the seven codec-heavy regressions, all green)
+  left the compile at 6m22s on `internal/bytealg` - the same as with field
+  registration. So the dominant cost is the SIZE OF THE GRAPH WALKED, not the
+  density of the seen set: a return is walking the whole type universe, node by
+  node, once per package. That reframes the fix: the universe is ROOT-resident
+  and the root arena is already treated as stable (`codecIsStableArenaAddr`
+  returns true for it, so a pointer into root should alias rather than recurse),
+  yet the walk descends - so either the objects being walked are NOT in the root
+  arena (a package scope is created in the typecheck frame; its parent chain
+  reaches the universe), or the stable test is not reached for the shape being
+  encoded. The next step is to log, for one package, whether each level of the
+  walk is judged stable, and if not, which arena it lives in.
+
   **Round 11: the cost is the SEEN SET, not the declaration.** Running the slow
   compiler under gdb and interrupting it mid-package caught it inside
   `codecSeenLookup`, reached from `codecEncodeMap` -> `TCConst` -> `TCPackage` ->
