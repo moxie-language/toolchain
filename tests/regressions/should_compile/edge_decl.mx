@@ -1,0 +1,70 @@
+// Phase 0c step 3: the declared ownership pair, `parent, child := edge[In, Out]{depth}`.
+//
+// The declaration allocates both directions' rings and FOUR fixed-direction
+// handles in the root arena at the declaration (section 4: the storage cannot be
+// a frame's), and returns two complementary Edge values whose roles never
+// change: parent.Send writes parent -> child, child.Recv reads it, child.Send
+// writes child -> parent, parent.Recv reads it. The compiler rewrites the form
+// to the internal __edgealloc builtin and reads the two element types from the
+// instantiated Edge type for the element sizes and frame budgets.
+//
+// spawn agreement and affineness are the next slice; this one pins the pair's
+// existence and both directions, on both compilers.
+//
+//:wasmtest skip
+package main
+
+import "fmt"
+
+type Msg struct {
+	Body []byte `cap:"1024"`
+}
+
+func main() {
+	select {
+	case <-shutdown:
+		return
+	default:
+	}
+
+	// A plain element type: two one-way rings, both directions. The parent is
+	// Edge[In, Out] (Recv In, Send Out); the child is the complement
+	// Edge[Out, In].
+	parent, child := edge[int32, int64]{2}
+	parent.Send <- 5
+	if (<-child.Recv) != 5 {
+		panic("parent -> child lost the value")
+	}
+	child.Send <- 9
+	if (<-parent.Recv) != 9 {
+		panic("child -> parent lost the value")
+	}
+
+	// A reference-carrying element: the request direction encodes through the
+	// codec, so the receiver gets its own copy (the same frame protocol a
+	// spawn channel uses).
+	// Request direction is the parent's Send (Out), response is its Recv (In).
+	req, resp := edge[int32, Msg]{4}
+	body := []byte{:100}
+	for i := int32(0); i < len(body); i++ {
+		body[i] = byte(i & 255)
+	}
+	req.Send <- Msg{Body: body}
+	got := <-resp.Recv
+	if len(got.Body) != 100 || got.Body[99] != 99 {
+		panic("codec element lost its payload")
+	}
+	resp.Send <- 42
+	if (<-req.Recv) != 42 {
+		panic("response direction lost the value")
+	}
+
+	// Closing a sender releases that direction's ring once the peer end is
+	// done with it; the receiver handles cannot be closed by the language
+	// (a Receiver is receive-only), so their resources go with the domain.
+	close(parent.Send)
+	close(child.Send)
+	close(req.Send)
+	close(resp.Send)
+	fmt.Println("edge decl ok")
+}

@@ -3664,3 +3664,173 @@ func FilterStringByteMismatch(errs []error) []error {
 	return filtered
 }
 
+
+// RewriteEdgeDecls lowers the declared ownership pair
+//
+//	parent, child := edge[In, Out]{depth}
+//
+// into the form the compiler special-cases:
+//
+//	var parent Edge[In, Out]; var child Edge[In, Out]; __edgealloc(&parent, &child, Edge[In, Out]{}, depth)
+//
+// The declaration is the language surface (docs/memory-model.md D19); the
+// lowered form is the same machinery []T{:n} uses, where the first argument of
+// the internal builtin is a TYPE expression and the compiler lowers it.
+func RewriteEdgeDecls(src []byte, fset *token.FileSet) RewriteResult {
+	localFset := token.NewFileSet()
+	file := localFset.AddFile("", localFset.Base(), len(src))
+	var s scanner.Scanner
+	s.Init(file, src, nil, scanner.ScanComments)
+
+	type tok struct {
+		tok    token.Token
+		lit    string
+		offset int
+		end    int
+	}
+	var toks []tok
+	for {
+		pos, t, lit := s.Scan()
+		if t == token.EOF {
+			break
+		}
+		// A punctuation token has an empty literal, so its end is one byte past
+		// its offset; operators are ASCII. Using len(lit) for those made the
+		// splice end inside the token and left the original braces behind.
+		end := file.Offset(pos) + len(lit)
+		if lit == "" {
+			end = file.Offset(pos) + 1
+		}
+		toks = append(toks, tok{tok: t, lit: lit, offset: file.Offset(pos), end: end})
+	}
+
+	var out []byte
+	last := 0
+	for i := 0; i < len(toks); i++ {
+		t := toks[i]
+		if t.tok != token.IDENT || t.lit != "edge" || i+1 >= len(toks) || toks[i+1].tok != token.LBRACK {
+			continue
+		}
+		// The declaration shape: ident ',' ident ':=' 'edge' '[' types ']' '{' depth '}'
+		if i < 4 || toks[i-1].tok != token.DEFINE || toks[i-2].tok != token.IDENT ||
+			toks[i-3].tok != token.COMMA || toks[i-4].tok != token.IDENT {
+			continue
+		}
+		parent := toks[i-4].lit
+		child := toks[i-2].lit
+		if parent == "_" || child == "_" {
+			continue
+		}
+		// Match the type argument list.
+		depth := 0
+		rb := -1
+		for j := i + 1; j < len(toks); j++ {
+			switch toks[j].tok {
+			case token.LBRACK:
+				depth++
+			case token.RBRACK:
+				depth--
+				if depth == 0 {
+					rb = j
+				}
+			}
+			if rb >= 0 {
+				break
+			}
+		}
+		if rb < 0 || rb+3 >= len(toks) || toks[rb+1].tok != token.LBRACE {
+			continue
+		}
+		// Match the depth braces.
+		depth = 0
+		rc := -1
+		for j := rb + 1; j < len(toks); j++ {
+			switch toks[j].tok {
+			case token.LBRACE:
+				depth++
+			case token.RBRACE:
+				depth--
+				if depth == 0 {
+					rc = j
+				}
+			}
+			if rc >= 0 {
+				break
+			}
+		}
+		if rc < 0 {
+			continue
+		}
+		typeText := strings.TrimSpace(string(src[toks[i+1].end:toks[rb].offset]))
+		depthText := strings.TrimSpace(string(src[toks[rb+1].end:toks[rc].offset]))
+		if depthText == "" {
+			depthText = "1"
+		}
+		if typeText == "" {
+			continue
+		}
+		// The child is the COMPLEMENT: Edge[Out, In]. With one type on both
+		// sides the child's Receive end would be typed for In while the parent
+		// sends Out, and the pair would not type-check.
+		inText, outText, okArgs := splitEdgeArgs(typeText)
+		if !okArgs {
+			continue
+		}
+		childTypeText := "Edge[" + outText + ", " + inText + "]"
+		// Splice from the parent identifier through the closing brace.
+		start := toks[i-4].offset
+		end := toks[rc].end
+		out = append(out, src[last:start]...)
+		out = append(out, "var "...)
+		out = append(out, parent...)
+		out = append(out, " Edge["...)
+		out = append(out, typeText...)
+		out = append(out, "]; var "...)
+		out = append(out, child...)
+		out = append(out, " "...) // childTypeText already carries Edge[...]
+		out = append(out, childTypeText...)
+		out = append(out, "; __edgealloc(&"...)
+		out = append(out, parent...)
+		out = append(out, ", &"...)
+		out = append(out, child...)
+		out = append(out, ", Edge["...)
+		out = append(out, typeText...)
+		out = append(out, "]{}"...)
+		out = append(out, ", "...)
+		out = append(out, depthText...)
+		out = append(out, ")"...)
+		// Keep the line count: a multi-line declaration keeps its blank lines.
+		for k := start; k < end; k++ {
+			if src[k] == '\n' {
+				out = append(out, '\n')
+			}
+		}
+		last = end
+		i = rc
+	}
+	if out == nil {
+		return RewriteResult{Src: src}
+	}
+	out = append(out, src[last:]...)
+	return RewriteResult{Src: out}
+}
+
+// splitEdgeArgs splits an edge declaration's type arguments at the top-level
+// comma: edge[In, Out] names the parent's receive type first and its send type
+// second.
+func splitEdgeArgs(b string) (in, out string, ok bool) {
+	depth := 0
+	for i := 0; i < len(b); i++ {
+		switch b[i] {
+		case '[', '(', '{':
+			depth++
+		case ']', ')', '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				return strings.TrimSpace(b[:i]), strings.TrimSpace(b[i+1:]), true
+			}
+		}
+	}
+	return "", "", false
+}

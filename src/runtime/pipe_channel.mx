@@ -27,6 +27,9 @@ import (
 // The parent sends on the parent->child ring and receives on the other; a spawn
 // target does the reverse. One shared object, role-based direction.
 func chSendRing(ch *channel) uintptr {
+	if ch.dirFixed {
+		return ch.ringA
+	}
 	if ch.childDomain != 0 && domainID == ch.childDomain {
 		return ch.ringB
 	}
@@ -34,6 +37,9 @@ func chSendRing(ch *channel) uintptr {
 }
 
 func chRecvRing(ch *channel) uintptr {
+	if ch.dirFixed {
+		return ch.ringB
+	}
 	if ch.childDomain != 0 && domainID == ch.childDomain {
 		return ch.ringA
 	}
@@ -666,4 +672,65 @@ func ChildPipeClosed() bool {
 	// A domain thread cannot be orphaned: its parent is the same process. The
 	// process ending ends the thread with it.
 	return false
+}
+
+// --- the declared ownership pair (section 4, D19) ---
+
+// edgeHandle creates one fixed-direction handle: one ring for sends, one for
+// receives, and never both. The handle is a root-arena object because the pair
+// outlives the declaring frame (section 4: the declaration allocates the
+// storage in the root arena, never a function arena). No buffer is allocated:
+// a shared handle carries its payload in the ring, and bufCap is the declared
+// outstanding-message count, not a slot array.
+func edgeHandle(depth int32, size, budget uintptr, sendRing, recvRing uintptr) (ch *channel) {
+	save := CurrentArena()
+	SetCurrentArena(trueRootArena())
+	ch = (*channel)(alloc(unsafe.Sizeof(channel{}), nil, nil))
+	SetCurrentArena(save)
+	ch.elementSize = size
+	ch.bufCap = uintptr(depth)
+	ch.frameBudget = budget
+	ch.class = chanClassShared
+	ch.dirFixed = true
+	ch.ringA = sendRing
+	ch.ringB = recvRing
+	return ch
+}
+
+// EdgeMake creates the declared ownership pair: two SPSC rings (one per
+// direction) and four fixed-direction handles, in the root arena. parent and
+// child point at the caller's Edge values, each written as two words
+// { Recv, Send } in that order (the builtin Edge layout).
+//
+// This is the factory the `edge[In, Out]{depth}` declaration lowers to. It is
+// not reachable from user source directly; the compiler emits the call with the
+// element sizes and frame budgets its type walk computed.
+func EdgeMake(parent, child unsafe.Pointer, inElem, inBudget, outElem, outBudget, depth uintptr) {
+	if parent == nil || child == nil {
+		runtimePanic("EdgeMake: nil destination")
+	}
+	if depth < 1 {
+		runtimePanic("EdgeMake: depth must be at least 1")
+	}
+	// ringIn carries the parent's Out to the child; ringOut carries the
+	// child's In back to the parent.
+	ringIn := ringCreate(ringDefaultDataSize())
+	ringOut := ringCreate(ringDefaultDataSize())
+	if ringIn == 0 || ringOut == 0 {
+		runtimePanic("EdgeMake: ring mmap failed")
+	}
+	// The parent sends Out and receives In; the child is the complement, so it
+	// receives Out on the same ring the parent writes and sends In on the other.
+	// The element sizes follow the HANDLE, not the ring: a receive handle and
+	// its peer sender carry the same element, and the two directions do not.
+	parentRecv := edgeHandle(int32(depth), inElem, inBudget, 0, ringOut)
+	parentSend := edgeHandle(int32(depth), outElem, outBudget, ringIn, 0)
+	childRecv := edgeHandle(int32(depth), outElem, outBudget, 0, ringIn)
+	childSend := edgeHandle(int32(depth), inElem, inBudget, ringOut, 0)
+
+	word := unsafe.Sizeof(uintptr(0))
+	*(*uintptr)(parent) = uintptr(unsafe.Pointer(parentRecv))
+	*(*uintptr)(unsafe.Add(parent, word)) = uintptr(unsafe.Pointer(parentSend))
+	*(*uintptr)(child) = uintptr(unsafe.Pointer(childRecv))
+	*(*uintptr)(unsafe.Add(child, word)) = uintptr(unsafe.Pointer(childSend))
 }

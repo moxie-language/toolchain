@@ -333,7 +333,14 @@ func (p *Package) parseFile(path string, data []byte, mode parser.Mode) (*ast.Fi
 	if sliceResult.Err != nil {
 		return nil, sliceResult.Err
 	}
-	data = sliceResult.Src
+	// `parent, child := edge[In, Out]{depth}` lowers to the __edgealloc call
+	// after the slice pass, so the Edge type names it emits are already in
+	// their final spelling.
+	edgeResult := rewriteEdgeDecls(sliceResult.Src, p.program.fset)
+	if edgeResult.Err != nil {
+		return nil, edgeResult.Err
+	}
+	data = edgeResult.Src
 
 	if p.program.keepSyntaxFiles {
 		af, sf, err := syntax.ConvertAndKeep(p.program.fset, originalPath, data)

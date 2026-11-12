@@ -1,0 +1,693 @@
+// Package mxsrc holds the byte-level source rewrites shared by the compiler
+// and the distillation tools. Moving them here is the first step of the package
+// layout refactor: there is one implementation of the make-literal lowering, not
+// one in the compiler and another in a rewriter.
+package mxsrc
+
+import (
+	"moxielang.dev/pkg/mxutil"
+)
+
+// JoinChunks concatenates byte slices in one allocation.
+func JoinChunks(chunks [][]byte) (r []byte) {
+	n := int32(0)
+	for _, c := range chunks {
+		n += len(c)
+	}
+	out := []byte{:n}
+	off := int32(0)
+	for _, c := range chunks {
+		for j := int32(0); j < len(c); j++ {
+			out[off+j] = c[j]
+		}
+		off += len(c)
+	}
+	return out
+}
+
+// LIndexByte returns the first index of c in b, or -1.
+func LIndexByte(b []byte, c byte) (n int32) {
+	for i := int32(0); i < int32(len(b)); i++ {
+		if b[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// LIndex returns the first index of sep in s, or -1.
+func LIndex(s, sep []byte) (n int32) {
+	n = len(sep)
+	if n == 0 {
+		return 0
+	}
+	if n > len(s) {
+		return -1
+	}
+	c0 := sep[0]
+	for i := int32(0); i <= int32(len(s))-int32(n); i++ {
+		if s[i] == c0 {
+			match := true
+			for j := int32(1); j < int32(n); j++ {
+				if s[i+j] != sep[j] {
+					match = false
+					break
+				}
+			}
+			if match {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// LTrimSpace trims leading and trailing ASCII whitespace.
+func LTrimSpace(s []byte) (buf []byte) {
+	start := int32(0)
+	for start < int32(len(s)) && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r') {
+		start++
+	}
+	stop := int32(len(s))
+	for stop > start && (s[stop-1] == ' ' || s[stop-1] == '\t' || s[stop-1] == '\n' || s[stop-1] == '\r') {
+		stop--
+	}
+	return s[start:stop]
+}
+
+func RewriteSliceMakeLiterals(src []byte) (buf []byte) {
+	chunks := [][]byte{:0:len(src)/2 + 8}
+	i := 0
+	for i < len(src) {
+		start := LIndex(src[i:], []byte("{:"))
+		if start < 0 {
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, src[i:])
+			break
+		}
+		start = start + i
+		lbrack := findSliceTypeStart(src, start)
+		if lbrack < 0 {
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, src[i:start+2])
+			i = start + 2
+			continue
+		}
+		closeIdx := findMatchingBrace(src, start)
+		if closeIdx < 0 {
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, src[i:start+2])
+			i = start + 2
+			continue
+		}
+		inner := src[start+2 : closeIdx]
+		colonIdx := LIndexByte(inner, ':')
+		typeText := src[lbrack:start]
+		chunks = mxutil.Ensure(chunks, 1)
+		push(chunks, src[i:lbrack])
+		if colonIdx < 0 {
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, []byte("__slicealloc("))
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, typeText)
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, []byte(", "))
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, LTrimSpace(inner))
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, []byte(")"))
+		} else {
+			lenExpr := LTrimSpace(inner[:colonIdx])
+			capExpr := LTrimSpace(inner[colonIdx+1:])
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, []byte("__slicealloc("))
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, typeText)
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, []byte(", "))
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, lenExpr)
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, []byte(", "))
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, capExpr)
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, []byte(")"))
+		}
+		i = closeIdx + 1
+	}
+	if len(chunks) == 0 {
+		return src
+	}
+	return JoinChunks(chunks)
+}
+
+func isIdentByteAt(src []byte, k int32) (r bool) {
+	if k < 0 {
+		return false
+	}
+	ch := src[k]
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '.'
+}
+
+// followsConstruct reports whether the identifier at start is the result type
+// of a construct whose text continues leftward, in which case a space before it
+// is inside the type rather than a boundary: `func() int32` and `map[K]V` end in
+// `)` / `]`, while `chan int32` and friends end in a bare type keyword.
+func followsConstruct(src []byte, start int32) (r bool) {
+	k := start - 1
+	for k >= 0 && (src[k] == ' ' || src[k] == '\t') {
+		k--
+	}
+	if k < 0 {
+		return false
+	}
+	if src[k] == ')' || src[k] == ']' {
+		return true
+	}
+	for _, kw := range []string{"chan", "map", "func", "struct", "interface"} {
+		if wordEndsAt(src, k+1, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// wordEndsAt reports whether word occupies src[end-len(word):end] as a whole
+// word (not as the tail of a longer identifier).
+func wordEndsAt(src []byte, end int32, word string) (r bool) {
+	n := int32(len(word))
+	if end < n {
+		return false
+	}
+	for i := int32(0); i < n; i++ {
+		if src[end-n+i] != word[i] {
+			return false
+		}
+	}
+	return !isIdentByteAt(src, end-n-1)
+}
+
+func findSliceTypeStart(src []byte, braceIdx int32) (n int32) {
+	j := braceIdx - 1
+	for j >= 0 && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n') {
+		j--
+	}
+	if j < 0 {
+		return -1
+	}
+	depth := 0
+	parenDepth := 0
+	// braceDepth tracks the TYPE's own braces: `[]struct{ n int32 }{:2}` must
+	// scan back over `struct{ n int32 }` as one unit. Without it the `}` of the
+	// struct was treated as a boundary and the type text came out as
+	// `int32 }`, which the parser then rejected with "unexpected :". inTag
+	// skips a backquoted struct tag, whose contents may hold braces or colons.
+	braceDepth := 0
+	inTag := false
+	candidate := -1
+	identStart := -1
+	for j >= 0 {
+		ch := src[j]
+		if ch == '`' {
+			inTag = !inTag
+			j--
+			continue
+		}
+		if inTag {
+			j--
+			continue
+		}
+		if ch == '}' {
+			braceDepth++
+			j--
+			continue
+		}
+		if ch == '{' {
+			if braceDepth > 0 {
+				braceDepth--
+			}
+			j--
+			continue
+		}
+		if braceDepth > 0 {
+			j--
+			continue
+		}
+		if ch == ')' {
+			parenDepth++
+		} else if ch == '(' {
+			if parenDepth > 0 {
+				parenDepth--
+			} else {
+				if candidate >= 0 {
+					return candidate
+				}
+				if identStart >= 0 {
+					return identStart
+				}
+				return -1
+			}
+		} else if parenDepth > 0 {
+			j--
+			continue
+		}
+		if ch == ']' {
+			depth++
+		} else if ch == '[' {
+			depth--
+			if depth == 0 && !isIdentByteAt(src, j-1) {
+				// A balanced pair starts the type only when nothing names it:
+				// the `[` of `map[K]V` or of a generic `List[T]` is preceded by
+				// an identifier and must not be mistaken for the slice's `[`.
+				candidate = j
+			}
+		} else if depth == 0 && parenDepth == 0 {
+			if candidate >= 0 {
+				return candidate
+			}
+			if ch == ' ' || ch == '\t' || ch == '\n' {
+				// A space after a type name ends the type: `return nat{:1}`
+				// must not scan back into the `return` keyword. Spaces
+				// before any type char (e.g. `[]byte {`) are skipped.
+				if identStart >= 0 && !followsConstruct(src, identStart) {
+					return identStart
+				}
+				j--
+				continue
+			}
+			if ch == '*' || ch == '(' || ch == ')' {
+				j--
+				continue
+			}
+			if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '.' {
+				// A bare type name (buffer{:0:64}) has no brackets to mark
+				// its start; record the leftmost identifier byte and return
+				// it when a real boundary follows.
+				identStart = j
+				j--
+				continue
+			}
+			if identStart >= 0 {
+				return identStart
+			}
+			return -1
+		}
+		j--
+	}
+	if candidate >= 0 {
+		return candidate
+	}
+	if identStart >= 0 {
+		return identStart
+	}
+	return -1
+}
+
+func findMatchingBrace(src []byte, openIdx int32) (n int32) {
+	depth := 1
+	for i := openIdx + 1; i < len(src); i++ {
+		if src[i] == '{' {
+			depth++
+		} else if src[i] == '}' {
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+
+func RewriteChanMakeLiterals(src []byte) (buf []byte) {
+	chanKw := []byte("chan ")
+	var chunks [][]byte
+	started := false
+	i := 0
+	for i < len(src) {
+		idx := LIndex(src[i:], chanKw)
+		if idx < 0 {
+			if started {
+				chunks = mxutil.Ensure(chunks, 1)
+				push(chunks, src[i:])
+			}
+			break
+		}
+		idx = idx + i
+		j := idx + 5
+		for j < len(src) && (src[j] == ' ' || src[j] == '\t') {
+			j++
+		}
+		if j >= len(src) {
+			if started {
+				chunks = mxutil.Ensure(chunks, 1)
+				push(chunks, src[i:])
+			}
+			break
+		}
+		if src[j] == '<' && j+1 < len(src) && src[j+1] == '-' {
+			if started {
+				chunks = mxutil.Ensure(chunks, 1)
+				push(chunks, src[i:j+2])
+			}
+			i = j + 2
+			continue
+		}
+		for j < len(src) && (src[j] != '{' && src[j] != '\n' && src[j] != ';' && src[j] != '(' && src[j] != ')') {
+			if src[j] == ' ' || src[j] == '\t' {
+				break
+			}
+			j++
+		}
+		if j >= len(src) || src[j] != '{' {
+			if !started {
+				i = idx + 4
+			} else {
+				chunks = mxutil.Ensure(chunks, 1)
+				push(chunks, src[i:idx+4])
+				i = idx + 4
+			}
+			continue
+		}
+		braceOpen := j
+		endsStruct := braceOpen >= 6 && string(src[braceOpen-6:braceOpen]) == "struct"
+		endsIface := braceOpen >= 9 && string(src[braceOpen-9:braceOpen]) == "interface"
+		if endsStruct || endsIface {
+			typeClose := findMatchingBrace(src, braceOpen)
+			if typeClose < 0 {
+				if !started {
+					i = idx + 4
+				} else {
+					chunks = mxutil.Ensure(chunks, 1)
+					push(chunks, src[i:idx+4])
+					i = idx + 4
+				}
+				continue
+			}
+			k := typeClose + 1
+			if k >= len(src) || src[k] != '{' {
+				if !started {
+					i = typeClose + 1
+				} else {
+					chunks = mxutil.Ensure(chunks, 1)
+					push(chunks, src[i:typeClose+1])
+					i = typeClose + 1
+				}
+				continue
+			}
+			braceOpen = k
+		}
+		closeIdx := findMatchingBrace(src, braceOpen)
+		if closeIdx < 0 {
+			if !started {
+				i = idx + 4
+			} else {
+				chunks = mxutil.Ensure(chunks, 1)
+				push(chunks, src[i:idx+4])
+				i = idx + 4
+			}
+			continue
+		}
+		inner := LTrimSpace(src[braceOpen+1 : closeIdx])
+		// chan T{:n} is the capacity-only form (a channel has no length
+		// separate from its capacity): the allocator takes the number.
+		if len(inner) > 0 && inner[0] == ':' {
+			inner = LTrimSpace(inner[1:])
+		}
+		chanType := src[idx : braceOpen]
+		for len(chanType) > 0 && (chanType[len(chanType)-1] == ' ' || chanType[len(chanType)-1] == '\t') {
+			chanType = resize(chanType, len(chanType)-1)
+		}
+		if !started {
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, src[:idx])
+			started = true
+		} else {
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, src[i:idx])
+		}
+		// chan T{depth, budget}: the second field is the PER-MESSAGE byte budget,
+		// which the ring is sized from. It is an ordinary expression,
+		// so relay policy read from config can set it at run time. A channel
+		// with no stated depth still gets one slot.
+		depth, budget := splitChanSpec(inner)
+		if len(depth) == 0 {
+			depth = []byte("1")
+		}
+		chunks = mxutil.Ensure(chunks, 1)
+		push(chunks, []byte("__slicealloc("))
+		chunks = mxutil.Ensure(chunks, 1)
+		push(chunks, chanType)
+		chunks = mxutil.Ensure(chunks, 1)
+		push(chunks, []byte(", "))
+		chunks = mxutil.Ensure(chunks, 1)
+		push(chunks, depth)
+		if len(budget) > 0 {
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, []byte(", "))
+			chunks = mxutil.Ensure(chunks, 1)
+			push(chunks, budget)
+		}
+		chunks = mxutil.Ensure(chunks, 1)
+		push(chunks, []byte(")"))
+		i = closeIdx + 1
+	}
+	if !started {
+		return src
+	}
+	return JoinChunks(chunks)
+}
+
+// splitChanSpec splits a channel literal's inner text into its element count
+// and its optional per-element byte budget at the first TOP-LEVEL colon, the
+// notation `chan T{:depth:bytes}`. A colon inside brackets is part of a slice
+// expression, not a field separator. An empty depth means the default (one
+// slot), which is how `chan T{::65536}` states a budget with no element count.
+func splitChanSpec(inner []byte) (depth, budget []byte) {
+	parens := int32(0)
+	brackets := int32(0)
+	braces := int32(0)
+	for i := int32(0); i < len(inner); i++ {
+		switch inner[i] {
+		case '(':
+			parens++
+		case ')':
+			parens--
+		case '[':
+			brackets++
+		case ']':
+			brackets--
+		case '{':
+			braces++
+		case '}':
+			braces--
+		case ':':
+			if parens == 0 && brackets == 0 && braces == 0 {
+				return LTrimSpace(inner[:i]), LTrimSpace(inner[i+1:])
+			}
+		}
+	}
+	return LTrimSpace(inner), nil
+}
+
+// RewriteEdgeDecls lowers the declared ownership pair
+//
+//	parent, child := edge[In, Out]{depth}
+//
+// into the form the compiler special-cases:
+//
+//	var parent Edge[In, Out]; var child Edge[In, Out]; __edgealloc(&parent, &child, Edge[In, Out]{}, depth)
+//
+// The declaration is the language surface (docs/memory-model.md D19); the
+// lowered form is the same machinery []T{:n} uses, where the first argument of
+// the internal builtin is a TYPE expression and the compiler lowers the call.
+// Newlines in the replaced range are re-emitted so diagnostics keep their
+// line numbers.
+func RewriteEdgeDecls(src []byte) (buf []byte) {
+	var chunks [][]byte
+	i := int32(0)
+	last := int32(0)
+	for i < len(src) {
+		k := LIndex(src[i:], []byte("edge["))
+		if k < 0 {
+			break
+		}
+		e0 := i + k
+		// Identifier boundary: not part of a longer identifier.
+		if e0 > 0 && isIdentByteAt(src, e0-1) {
+			i = e0 + 5
+			continue
+		}
+		open := e0 + 4
+		rb := edgeMatchDelim(src, open, '[', ']')
+		if rb < 0 {
+			i = e0 + 5
+			continue
+		}
+		j := rb + 1
+		for j < len(src) && edgeSpace(src[j]) {
+			j = j + 1
+		}
+		if j >= len(src) || src[j] != '{' {
+			i = e0 + 5
+			continue
+		}
+		rc := findMatchingBrace(src, j)
+		if rc < 0 {
+			i = e0 + 5
+			continue
+		}
+		// Backward: ident ',' ident ':=' before the keyword.
+		b := e0 - 1
+		for b >= 0 && edgeSpace(src[b]) {
+			b = b - 1
+		}
+		// Backward from the keyword the define token is `=:` read right-to-left.
+		if b < 1 || src[b] != '=' || src[b-1] != ':' {
+			i = e0 + 5
+			continue
+		}
+		b = b - 2
+		for b >= 0 && edgeSpace(src[b]) {
+			b = b - 1
+		}
+		cEnd := b + 1
+		for b >= 0 && edgeIdentBody(src[b]) {
+			b = b - 1
+		}
+		cStart := b + 1
+		if cStart >= cEnd {
+			i = e0 + 5
+			continue
+		}
+		for b >= 0 && edgeSpace(src[b]) {
+			b = b - 1
+		}
+		if b < 0 || src[b] != ',' {
+			i = e0 + 5
+			continue
+		}
+		b = b - 1
+		for b >= 0 && edgeSpace(src[b]) {
+			b = b - 1
+		}
+		pEnd := b + 1
+		for b >= 0 && edgeIdentBody(src[b]) {
+			b = b - 1
+		}
+		pStart := b + 1
+		if pStart >= pEnd {
+			i = e0 + 5
+			continue
+		}
+		// Statement position: start of input, or after ; { } or a line break.
+		if pStart > 0 {
+			pc := src[pStart-1]
+			if !(pc == ';' || pc == '{' || pc == '}' || pc == '\n' || pc == '\t' || pc == ' ') {
+				i = e0 + 5
+				continue
+			}
+		}
+		paren := src[pStart:pEnd]
+		cname := src[cStart:cEnd]
+		types := LTrimSpace(src[open+1 : rb])
+		depth := LTrimSpace(src[j+1 : rc])
+		if len(types) == 0 {
+			i = e0 + 5
+			continue
+		}
+		if len(depth) == 0 {
+			depth = []byte("1")
+		}
+		// The child is the COMPLEMENT: Edge[Out, In]. One type on both sides
+		// would type the child's Receive end for In while the parent sends Out.
+		inText, outText, okArgs := splitEdgeArgs(types)
+		if !okArgs {
+			i = e0 + 5
+			continue
+		}
+		childType := []byte("Edge[")
+		childType = push(childType, outText...)
+		childType = push(childType, []byte(", ")...)
+		childType = push(childType, inText...)
+		childType = push(childType, []byte("]")...)
+		push(chunks, src[last:pStart])
+		push(chunks, []byte("var "))
+		push(chunks, paren)
+		push(chunks, []byte(" Edge["))
+		push(chunks, types)
+		push(chunks, []byte("]; var "))
+		push(chunks, cname)
+		push(chunks, []byte(" ")) // childType already carries Edge[...]
+		push(chunks, childType)
+		push(chunks, []byte("; __edgealloc(&"))
+		push(chunks, paren)
+		push(chunks, []byte(", &"))
+		push(chunks, cname)
+		push(chunks, []byte(", Edge["))
+		push(chunks, types)
+		push(chunks, []byte("]{}"))
+		push(chunks, []byte(", "))
+		push(chunks, depth)
+		push(chunks, []byte(")"))
+		for nl := pStart; nl <= rc; nl++ {
+			if src[nl] == '\n' {
+				push(chunks, []byte("\n"))
+			}
+		}
+		last = rc + 1
+		i = rc + 1
+	}
+	if len(chunks) == 0 {
+		return src
+	}
+	push(chunks, src[last:])
+	return JoinChunks(chunks)
+}
+
+func edgeSpace(c byte) (ok bool) {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+func edgeIdentBody(c byte) (ok bool) {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// edgeMatchDelim finds the delimiter that closes the one at open. Type
+// arguments nest brackets ([]byte) but cannot contain a string literal, so
+// counting is enough.
+func edgeMatchDelim(src []byte, open int32, oc, cc byte) (n int32) {
+	d := int32(0)
+	for i := open; i < len(src); i++ {
+		if src[i] == oc {
+			d = d + 1
+		} else if src[i] == cc {
+			d = d - 1
+			if d == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// splitEdgeArgs splits an edge declaration's type arguments at the top-level
+// comma: edge[In, Out] names the parent's receive type first and its send type
+// second.
+func splitEdgeArgs(b []byte) (ins, outs []byte, ok bool) {
+	d := int32(0)
+	for i := int32(0); i < len(b); i++ {
+		switch b[i] {
+		case '[', '(', '{':
+			d = d + 1
+		case ']', ')', '}':
+			d = d - 1
+		case ',':
+			if d == 0 {
+				return LTrimSpace(b[:i]), LTrimSpace(b[i+1:]), true
+			}
+		}
+	}
+	return nil, nil, false
+}

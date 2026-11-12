@@ -136,6 +136,10 @@ func checkPlusOnText(files []*ast.File, info *types.Info, fset *token.FileSet) [
 	return mxtext.CheckPlusOnText(files, info, fset)
 }
 
+func rewriteEdgeDecls(src []byte, fset *token.FileSet) mxtext.RewriteResult {
+	return mxtext.RewriteEdgeDecls(src, fset)
+}
+
 func rewriteSliceLiterals(src []byte, fset *token.FileSet, priorOffsets ...[]int) mxtext.RewriteResult {
 	return mxtext.RewriteSliceLiterals(src, fset, priorOffsets...)
 }

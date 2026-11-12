@@ -2747,6 +2747,8 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon, callInstr *ssa.Call)
 		switch call.Name() {
 		case "spawn":
 			return b.createSpawn(instr)
+		case "__edgealloc":
+			return b.createEdgeAlloc(callInstr)
 		case "__shutdown":
 			// The termination channel is the runtime's, created in the root
 			// arena at startup; the word only names it.

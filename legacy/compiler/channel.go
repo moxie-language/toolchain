@@ -1165,3 +1165,63 @@ func (b *builder) createPipeChanCodecIface(elemType types.Type, valPtr llvm.Valu
 	itf = b.CreateInsertValue(itf, valPtr, 1, "")
 	return itf
 }
+
+// createEdgeAlloc lowers `__edgealloc(&parent, &child, Edge[In, Out]{}, depth)`,
+// the form the `edge[In, Out]{depth}` declaration rewrites to. The third
+// argument exists only to carry the INSTANTIATED Edge type: its two fields give
+// the In and Out element types, from which the element sizes and frame budgets
+// come by the same walk `chan T{}` uses. The runtime call writes the four
+// fixed-direction handles into the two destinations (docs/memory-model.md
+// section 4, D19).
+func (b *builder) createEdgeAlloc(instr *ssa.Call) (llvm.Value, error) {
+	args := instr.Call.Args
+	pos := instr.Call.Pos()
+	if len(args) != 4 {
+		return llvm.Value{}, b.makeError(pos, "__edgealloc takes (&parent, &child, Edge[In, Out]{}, depth)")
+	}
+	et := args[2].Type()
+	named, ok := et.(*types.Named)
+	if !ok {
+		return llvm.Value{}, b.makeError(pos, "__edgealloc: third argument is not an Edge type")
+	}
+	st, ok := named.Underlying().(*types.Struct)
+	if !ok || st.NumFields() != 2 {
+		return llvm.Value{}, b.makeError(pos, "__edgealloc: third argument is not an Edge type")
+	}
+	recvCh, ok := st.Field(0).Type().Underlying().(*types.Chan)
+	if !ok {
+		return llvm.Value{}, b.makeError(pos, "__edgealloc: Edge.Recv is not a channel")
+	}
+	sendCh, ok := st.Field(1).Type().Underlying().(*types.Chan)
+	if !ok {
+		return llvm.Value{}, b.makeError(pos, "__edgealloc: Edge.Send is not a channel")
+	}
+	inElem := recvCh.Elem()
+	outElem := sendCh.Elem()
+	inSize := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(b.getLLVMType(inElem)), false)
+	outSize := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(b.getLLVMType(outElem)), false)
+	inBudget := b.frameBudget(inElem, nil, 0, pos)
+	outBudget := b.frameBudget(outElem, nil, 0, pos)
+	if inBudget > frameBudgetMax {
+		b.addError(pos, fmt.Sprintf("edge: %s has a %d-byte frame budget, over the %d-byte maximum; reduce its cap dimensions", inElem, inBudget, frameBudgetMax))
+		inBudget = frameBudgetMax
+	}
+	if outBudget > frameBudgetMax {
+		b.addError(pos, fmt.Sprintf("edge: %s has a %d-byte frame budget, over the %d-byte maximum; reduce its cap dimensions", outElem, outBudget, frameBudgetMax))
+		outBudget = frameBudgetMax
+	}
+	depth := b.getValue(args[3], getPos(args[3]))
+	if depth.Type().IntTypeWidth() < b.uintptrType.IntTypeWidth() {
+		depth = b.CreateZExt(depth, b.uintptrType, "")
+	}
+	b.createRuntimeCall("EdgeMake", []llvm.Value{
+		b.getValue(args[0], getPos(args[0])),
+		b.getValue(args[1], getPos(args[1])),
+		inSize,
+		llvm.ConstInt(b.uintptrType, uint64(inBudget), false),
+		outSize,
+		llvm.ConstInt(b.uintptrType, uint64(outBudget), false),
+		depth,
+	}, "")
+	return llvm.Value{}, nil
+}

@@ -1146,3 +1146,64 @@ func budgetElemIsByte(t Type) (ok bool) {
 	b, isB := u.(*Basic)
 	return isB && b.Kind == Uint8
 }
+
+// emitMakeEdge lowers the declared ownership pair (section 4, D19): two rings
+// and four fixed-direction handles, built by the runtime in the root arena. The
+// element sizes come from the instantiated Edge type; the frame budgets from
+// the same walk `chan T{}` uses. The call writes both Edge structs, so it
+// produces no SSA value.
+func (e *irEmitter) emitMakeEdge(m *SSAMakeEdge) {
+	ipt := e.intptrType()
+	var inElem, outElem Type
+	if st, ok := SafeUnderlying(instantiatedUnder(m.Edges)).(*TCStruct); ok && st.NumFields() == 2 {
+		inElem = ssaChanElemType(st.Field(0).Typ)
+		outElem = ssaChanElemType(st.Field(1).Typ)
+	}
+	inT := "i8"
+	if inElem != nil {
+		if t := e.llvmType(inElem); t != "void" && t != "" {
+			inT = t
+		}
+	}
+	outT := "i8"
+	if outElem != nil {
+		if t := e.llvmType(outElem); t != "void" && t != "" {
+			outT = t
+		}
+	}
+	e.nextReg++
+	inSz := "%mei" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(inSz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(inT)
+	e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+	e.nextReg++
+	outSz := "%meo" | irItoa(e.nextReg)
+	e.w("  ") ; e.w(outSz) ; e.w(" = ptrtoint ptr getelementptr (") ; e.w(outT)
+	e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+
+	inBudget := int32(4096)
+	if inElem != nil {
+		inBudget = e.frameBudget(inElem, nil, 0)
+	}
+	outBudget := int32(4096)
+	if outElem != nil {
+		outBudget = e.frameBudget(outElem, nil, 0)
+	}
+	if inBudget > 16<<20 {
+		reportCompileError("edge: " | inElem.String() | " has a frame budget over the 16MB maximum; reduce its cap dimensions")
+		inBudget = 16 << 20
+	}
+	if outBudget > 16<<20 {
+		reportCompileError("edge: " | outElem.String() | " has a frame budget over the 16MB maximum; reduce its cap dimensions")
+		outBudget = 16 << 20
+	}
+	depth := e.sextToIpt(m.Size, e.operand(m.Size))
+	e.w("  call void @runtime.EdgeMake(ptr ") ; e.w(e.operand(m.Parent))
+	e.w(", ptr ") ; e.w(e.operand(m.Child))
+	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(inSz)
+	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(irItoa(inBudget))
+	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(outSz)
+	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(irItoa(outBudget))
+	e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(depth)
+	e.w(", ptr null)\n")
+	e.declareRuntime("runtime.EdgeMake", "void", ipt | ", " | ipt | ", " | ipt | ", " | ipt | ", " | ipt | ", ptr")
+}

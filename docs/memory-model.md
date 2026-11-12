@@ -1780,9 +1780,36 @@ Two things learned while installing them, recorded for the next reader:
   compiler keys the builtin identity on the universe object rather than on
   the spelling.
 
-Still open: the `edge[In, Out]{depth}` declaration form with its runtime
-factory, the hidden pair linkage for `spawn`, affine ends, spawn agreement, and
-the two-value `chan` form. Until those land, the tree still
+**The declaration form (22.3 step 3) landed.** `parent, child := edge[In, Out]{depth}`
+is lowered by each compiler's literal pass (Go scanner tokens in legacy,
+`pkg/mxsrc` text scanning in stage4) into
+
+    var parent Edge[In, Out]; var child Edge[Out, In]; __edgealloc(&parent, &child, Edge[In, Out]{}, depth)
+
+`__edgealloc` is an internal builtin in both universes, and both compilers lower
+it to `runtime.EdgeMake`, which allocates two SPSC rings and four
+fixed-direction handles in the root arena. Three details are load-bearing:
+
+- **The child is the complement.** With one type on both sides the child's
+  Receive end would be typed for In while the parent sends Out, and the pair
+  would not type-check. The declaration names In first (the parent's receive
+  type) and Out second.
+- **Direction is a property of the handle.** A fixed-direction handle
+  (`dirFixed`) resolves `chSendRing`/`chRecvRing` from itself, not from the
+  domain role: a Sender handle has only a send ring, a Receiver handle only a
+  receive ring.
+- **Element sizes follow the HANDLE, not the ring convention.** The two
+  directions carry different elements, and a receive handle shares its element
+  with the peer sender. Swapping the child's sizes was caught at run time by the
+  frame-size check ("received 8 bytes for a 4-byte element"), which is why the
+  factory's four handles are written out explicitly rather than derived.
+
+`tests/regressions/should_compile/edge_decl.mx` passes on both compilers: both
+directions of an int32/int64 pair and a codec-carrying struct pair.
+
+Still open in step 3: `spawn` accepting an `Edge` (agreement plus breaker
+binding through the pair record), affineness (D22.5), and the two-value `chan`
+form. Until those land, the tree still
 passes the same channel handle to a child and to the parent, and nothing rejects
 two transfers of one send end: that is a live soundness hole, exactly as D19
 states. The role check above is rule 5 of D19 and does not close rule 3.
@@ -1917,6 +1944,9 @@ so the child receives capabilities, not a copy of the ring.
    are predeclared in both compilers; `Sender[int32]`, `Edge[Request, Response]`
    and the field roles type-check and run, pinned by `edge_types.mx` and
    `reject_edge_field_role.mx`.
+3. **`edge[In, Out]{d}`** — the declaration and the runtime factory are DONE
+   (21.5), pinned by `edge_decl.mx`. Spawn acceptance and breaker binding
+   through the pair record are the remaining half of this step.
 3. **`edge[In, Out]{d}`** declaration and the runtime factory (two rings, four
    fixed-direction handles, pair record, root arena), with `spawn` accepting
    the child value and binding the breaker through the pair.

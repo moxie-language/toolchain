@@ -6526,6 +6526,27 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		}
 		typ := fb.resolveType(e.ArgList[0])
 		return fb.emitMake(typ, args)
+	case BuiltinEdgeAlloc:
+		// __edgealloc(&parent, &child, Edge[In, Out]{}, depth): the declared
+		// ownership pair (section 4, D19). The third argument exists only to
+		// carry the INSTANTIATED Edge type; the emitter's type walk turns its
+		// two fields into element sizes and frame budgets.
+		if len(args) != 4 || args[0] == nil || args[1] == nil || args[3] == nil {
+			reportCompileError("__edgealloc takes (&parent, &child, Edge[In, Out]{}, depth)")
+			return nil
+		}
+		var edges Type
+		if cl, ok := e.ArgList[2].(*syntax.CompositeLit); ok && cl.Type != nil {
+			edges = fb.resolveType(cl.Type)
+		}
+		if edges == nil {
+			reportCompileError("__edgealloc: third argument is not an Edge type")
+			return nil
+		}
+		me := &SSAMakeEdge{Parent: args[0], Child: args[1], Edges: edges, Size: args[3]}
+		me.name = fb.nextName()
+		fb.emit(me)
+		return nil
 	case BuiltinNew:
 		reportCompileError("new() is not supported (use &T{})")
 		return nil

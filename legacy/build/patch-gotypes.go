@@ -71,6 +71,7 @@ func main() {
 	patchTypeTerm(dstDir)
 	patchSpawnBuiltin(dstDir)
 	patchMoxieSliceBuiltins(dstDir)
+	patchEdgeBuiltin(dstDir)
 	patchTypeOfBuiltin(dstDir)
 	patchRemovePredeclaredTypes(dstDir)
 	patchChannelOwnershipTypes(dstDir)
@@ -609,6 +610,45 @@ func patchMoxieSliceBuiltins(dir string) {
 	mustWrite(f, src)
 }
 
+// patchEdgeBuiltin installs __edgealloc, the internal builtin the
+// `edge[In, Out]{depth}` declaration lowers to: it takes the two Edge
+// destinations by address, a zero Edge value whose TYPE carries In and Out, and
+// the depth, and produces no value. The compiler's SSA lowering reads the type
+// from the third argument and emits runtime.EdgeMake; the checker only has to
+// accept the shape.
+func patchEdgeBuiltin(dir string) {
+	f := filepath.Join(dir, "universe.go")
+	src := mustRead(f)
+
+	src = mustReplace(f, src,
+		"\t_Push\n\t_Pop\n\t_Resize\n\n\t// package unsafe",
+		"\t_Push\n\t_Pop\n\t_Resize\n\t_EdgeAlloc\n\n\t// package unsafe")
+
+	src = mustReplace(f, src,
+		"\t_Resize:  {\"resize\", 2, false, statement},",
+		"\t_Resize:  {\"resize\", 2, false, statement},\n\t_EdgeAlloc: {\"__edgealloc\", 4, false, statement},")
+
+	mustWrite(f, src)
+
+	f = filepath.Join(dir, "builtins.go")
+	src = mustRead(f)
+	src = mustReplace(f, src,
+		"\tcase _Push:",
+		`	case _EdgeAlloc:
+		// __edgealloc(&parent, &child, Edge[In, Out]{}, depth): the declared
+		// ownership pair. The compiler's lowering reads the Edge type from the
+		// third argument for the two element sizes and frame budgets; the
+		// runtime call takes the two destinations and writes the four handles.
+		if nargs != 4 {
+			check.errorf(x, WrongArgCount, invalidOp+"__edgealloc takes (&parent, &child, Edge[In, Out]{}, depth)")
+			return
+		}
+		x.mode = novalue
+
+	case _Push:`)
+	mustWrite(f, src)
+}
+
 func patchTypeOfBuiltin(dir string) {
 	// Patch universe.go: add _TypeOf builtin ID and predeclaredFuncs entry.
 	f := filepath.Join(dir, "universe.go")
@@ -893,8 +933,8 @@ func patchShutdownBuiltin(dir string) {
 	src := mustRead(f)
 
 	src = mustReplace(f, src,
-		"\t_Resize\n\n\t// package unsafe",
-		"\t_Resize\n\t_Shutdown\n\n\t// package unsafe")
+		"\t_Resize\n\t_EdgeAlloc\n\n\t// package unsafe",
+		"\t_Resize\n\t_EdgeAlloc\n\t_Shutdown\n\n\t// package unsafe")
 
 	src = mustReplace(f, src,
 		"\t_Resize:  {\"resize\", 2, false, statement},",
