@@ -1766,3 +1766,68 @@ gate opens is `/tmp/spawnchk`: spawns from a helper that creates the channels in
 its own frame and returns, 50 times, asserting the message round trip
 (`sum 2450`). Then the relay start loop, which is what reproduced the original
 crash roughly once in eight.
+
+## 13. Compiler bootstrap status (2026-11-12)
+
+**Progress: `_mxc_stage4` now compiles.** It could not be built by anything when
+this round started.
+
+**The legacy compiler was never broken - its build was.** `cd legacy && go build`
+produces a compiler without the patched `go/types`, so `push`/`pop`/`resize` do
+not exist and every program fails with `undefined: push` in `pkg/mxregexp`. The
+supported build is `legacy/build.sh`, which materialises a patched GOROOT at
+`/tmp/moxie-goroot` and builds with it. Any later claim about legacy must use
+that binary; a plain `go build` proves nothing. (A worktree checkout also needs
+`MOXIEPATH` set, or `moxielang.dev` resolves to a stale tree under `$HOME/moxie`
+rather than to `MOXIEROOT`.)
+
+**The 585 loop-rule violations are fixed.** 66 sites in `_mxc_stage4` declared
+`:=' of a struct/slice/map literal inside a loop of a self-mutating method. Each
+now declares once above the loop and assigns inside, with the loop wrapped in
+its own block and the variable renamed uniquely (`zzqN`) - shadowing is illegal
+here, so a rename inside the loop body can only hit that one variable. The count
+at the Nov 8 commit was 588; it is now 0, and `_mxc_stage4` type-checks and
+compiles when built by legacy. Commits: `63e0dc45` (and the rule relaxation in
+`45d5456a`, which could not take effect until a compiler implementing it could
+be built - it can now).
+
+**The bootstrap chain still stops one step short.** The binary legacy produces
+crashes compiling the first program:
+
+    runtime.memcpy (dst=0x7ffff7f12daf, src=0x7fffe43dd500, size=8)
+      <- runtime.bytesConcatMove (x.ptr=0x7ffff7f12d90 "mxc-1.0.1-rc.1-", y.len=8)
+      <- main.moxieCacheDir (_mxc_stage4/main.mx:1098)
+      <- main.pkgCacheDir <- main.main
+
+`x.ptr` is a stack address roughly 135 MB below the current stack top, i.e. a
+frame that had already been popped: the accumulator string was handed back
+without being relocated out of the callee's arena. A minimal probe (a callee
+returning `a | "-" | b`, churned afterwards) reproduces nothing, so the trigger
+is narrower than "string returns" - the missing copy needs the real call depth
+and arena pressure.
+
+This is **not** a regression from this round. It reproduces identically at
+`61872ec8`, which predates every recent compiler and runtime edit, and it
+reproduces with the spawn work stashed. The candidate cause is the arena
+relocation lifecycle: CLAUDE.md says the legacy compiler must emit the same
+`Reloc*` three-pass protocol stage4 does, and the return path here is the fast
+path plus the codec, so the question to answer next is which of the two decided
+this string was stable. Legacy's `typeNeedsCopy` does answer true for slices and
+strings, so the protocol should have run.
+
+**What is verified working.**
+- `legacy/build.sh` produces a compiler that builds and runs programs
+  (`hello`, a `push` probe).
+- `_mxc_stage4` compiles with zero rule violations under that compiler.
+- The spawn fix is REAL, end to end: `/tmp/spawnchk` (50 spawns from a helper
+  that creates its channels in its own frame and returns) prints `sum 2450`
+  when built by legacy, and the binary contains `runtime.NoteSpawnChan` and
+  `runtime.ChildChannelCopy`. The child now binds its own handle.
+- `test_cordn_chat_messages_cordn_peer` still passes: `SENT hello from cordn`,
+  `READ hello from smesh`, `SENT cordn hears you`, `PASS`.
+
+**Next step.** Get a backtrace with the arena state at the failing frame
+(`gdb`, `frame 2`, print the arena the string came from), and decide whether the
+fast path `codecRetStable` or the codec encode answered "stable" for a
+frame-backed string. That decision is the one bug between here and a
+self-hosting compiler.
