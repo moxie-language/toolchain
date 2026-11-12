@@ -1430,6 +1430,7 @@ func (e *irEmitter) emitSpawnCall(c *SSACall) {
 	var argVals []string
 	var chanIdxs []int32
 	var edgeIdxs []int32
+	var edgeEnds []string
 	nChans := int32(0)
 	for i := 1; i < len(c.Call.Args); i++ {
 		arg := c.Call.Args[i]
@@ -1444,7 +1445,14 @@ func (e *irEmitter) emitSpawnCall(c *SSACall) {
 			edgeIdxs = mxutil.Ensure(edgeIdxs, 1)
 			push(edgeIdxs, int32(i-1))
 		}
-		if _, isChan := SafeUnderlying(arg.SSAType()).(*TCChan); isChan {
+		if isOwnershipEndType(arg.SSAType()) {
+			// A bare Sender/Receiver is a handle, not a channel to be rung: the
+			// integer word IS the message. spawnDomain must not size a pair for
+			// it, and the child's breaker is bound through the handle's pair.
+			push(argVals, e.operand(arg))
+			edgeEnds = mxutil.Ensure(edgeEnds, 1)
+			push(edgeEnds, e.operand(arg))
+		} else if _, isChan := SafeUnderlying(arg.SSAType()).(*TCChan); isChan {
 			// Channels are shared: the child gets the same ring.
 			push(argVals, e.operand(arg))
 			chanIdxs = mxutil.Ensure(chanIdxs, 1)
@@ -1531,6 +1539,10 @@ func (e *irEmitter) emitSpawnCall(c *SSACall) {
 		e.w("  call void @runtime.EdgeSpawnBind(ptr ") ; e.w(gp) ; e.w(", ptr ") ; e.w(reg) ; e.w(", ptr null)\n")
 		e.declareRuntime("runtime.EdgeSpawnBind", "void", "ptr, ptr")
 	}
+	for _, ev := range edgeEnds {
+		e.w("  call void @runtime.EdgeBindHandle(ptr ") ; e.w(ev) ; e.w(", ptr ") ; e.w(reg) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.EdgeBindHandle", "void", "ptr, ptr")
+	}
 }
 
 // isEdgeType reports whether t is the builtin Edge instantiation.
@@ -1540,6 +1552,16 @@ func isEdgeType(t Type) (ok bool) {
 		return false
 	}
 	return n.Obj.Name == "Edge" && n.Obj.Pkg == nil
+}
+
+// isOwnershipEndType reports whether t is a bare declared end (Sender or
+// Receiver) rather than an Edge pair.
+func isOwnershipEndType(t Type) (ok bool) {
+	n, isN := t.(*Named)
+	if !isN || n == nil || n.Obj == nil || n.Obj.Pkg != nil {
+		return false
+	}
+	return n.Obj.Name == "Sender" || n.Obj.Name == "Receiver"
 }
 
 // isOwnershipType reports whether t is one of the declared ownership types

@@ -150,6 +150,14 @@ func (c *compilerContext) scanFnForNativeSpawn(fn *ssa.Function, seen map[*ssa.F
 			var nextID uint16 = 1
 			for i := 0; i < sig.Params().Len(); i++ {
 				if _, isChan := sig.Params().At(i).Type().Underlying().(*types.Chan); isChan {
+					// A declared End (Sender/Receiver) carries its own ring: it
+					// consumes no spawn ring slot, and the parent's NoteSpawnChan
+					// list does not include it either. Counting it here shifted
+					// every later channel by one, so the child bound a fresh pair
+					// over a handle that already had one.
+					if isOwnershipType(sig.Params().At(i).Type()) {
+						continue
+					}
 					chanIdxs = append(chanIdxs, i)
 					chanIDs = append(chanIDs, nextID)
 					nextID++

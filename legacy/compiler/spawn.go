@@ -173,9 +173,16 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	// Collect channel args (in declaration order) for post-spawn marking.
 	var chanArgs []spawnChanArg
 	var edgeArgs []ssa.Value
+	var edgeEnds []llvm.Value
 	for _, arg := range concreteArgs {
 		if isEdgeType(arg.Type()) {
 			edgeArgs = append(edgeArgs, arg)
+		}
+		if isOwnershipType(arg.Type()) {
+			// A bare declared end is a handle, not a channel to be rung: the
+			// child gets the pointer and the breaker is bound through its pair.
+			edgeEnds = append(edgeEnds, b.getValue(arg, instr.Pos()))
+			continue
 		}
 		if _, isChan := arg.Type().Underlying().(*types.Chan); isChan {
 			chanArgs = append(chanArgs, spawnChanArg{
@@ -220,6 +227,11 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		// copied by the bundle, but its slices and pointers would still look
 		// into this frame, so the runtime copies the whole graph at the
 		// boundary (and refuses to if it does not fit its declared budget).
+		if isOwnershipType(arg.Type()) {
+			// The handle word is the message; no codec, no ring.
+			params = append(params, v)
+			continue
+		}
 		if _, isChan := arg.Type().Underlying().(*types.Chan); isChan {
 			if own, ok := chanCopies[chanIdx]; ok {
 				v = own
@@ -276,6 +288,9 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 		slot := b.CreateAlloca(lt, "edge.bind")
 		b.CreateStore(v, slot)
 		b.createRuntimeCall("EdgeSpawnBind", []llvm.Value{slot, doneCh}, "")
+	}
+	for _, ev := range edgeEnds {
+		b.createRuntimeCall("EdgeBindHandle", []llvm.Value{ev, doneCh}, "")
 	}
 	return doneCh, nil
 }

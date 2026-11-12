@@ -740,6 +740,10 @@ func EdgeMake(parent, child unsafe.Pointer, inElem, inBudget, outElem, outBudget
 	pair.parentSend = parentSend
 	pair.childRecv = childRecv
 	pair.childSend = childSend
+	parentRecv.edgePair = unsafe.Pointer(pair)
+	parentSend.edgePair = unsafe.Pointer(pair)
+	childRecv.edgePair = unsafe.Pointer(pair)
+	childSend.edgePair = unsafe.Pointer(pair)
 
 	word := unsafe.Sizeof(uintptr(0))
 	*(*uintptr)(parent) = uintptr(unsafe.Pointer(parentRecv))
@@ -772,8 +776,27 @@ func EdgeSpawnBind(edge unsafe.Pointer, breaker *channel) {
 	if pair == nil {
 		runtimePanic("spawn: Edge value was not created by an edge declaration")
 	}
-	if breaker == nil {
-		runtimePanic("spawn: Edge bind with no breaker")
+	bindEdgePair(pair, breaker)
+}
+
+// EdgeBindHandle is EdgeSpawnBind for a BARE end: a Sender/Receiver value handed
+// to spawn. The handle carries its pair, so binding through it reaches the other
+// three handles - the parent's end included, which is the one that has to wake.
+func EdgeBindHandle(handle unsafe.Pointer, breaker *channel) {
+	if handle == nil {
+		runtimePanic("spawn: nil ownership handle")
+	}
+	ch := (*channel)(handle)
+	if ch.edgePair == nil {
+		runtimePanic("spawn: ownership end was not created by an edge declaration")
+	}
+	bindEdgePair((*edgePair)(ch.edgePair), breaker)
+}
+
+// bindEdgePair binds the child's breaker on all four handles of one pair.
+func bindEdgePair(pair *edgePair, breaker *channel) {
+	if pair == nil || breaker == nil {
+		runtimePanic("spawn: Edge bind with no pair or breaker")
 	}
 	pair.parentRecv.ownerBreaker = breaker
 	pair.parentSend.ownerBreaker = breaker

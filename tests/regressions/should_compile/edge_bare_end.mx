@@ -1,0 +1,50 @@
+// Phase 0c: a bare end crosses a spawn boundary.
+//
+// The pair's two ends need not travel together: the parent can keep its send
+// end and hand the child's receive end to a worker. A Sender/Receiver is a
+// handle, so the word IS the message - spawnDomain must not size a ring pair
+// for it, and the child's breaker is bound through the handle's pair record
+// (which reaches the parent's end, the one that has to wake).
+//
+//:wasmtest skip
+package main
+
+import "fmt"
+
+type Req struct {
+	Body []byte `cap:"1024"`
+}
+
+func sink(in Receiver[Req], out chan int32) (closed chan struct{}) {
+	for {
+		select {
+		case <-closed:
+			return closed
+		case r, ok := <-in:
+			if !ok {
+				return closed
+			}
+			out <- int32(len(r.Body))
+		}
+	}
+}
+
+func main() {
+	select {
+	case <-shutdown:
+		return
+	default:
+	}
+	parent, child := edge[int32, Req]{2}
+	out := chan int32{:4}
+	done := spawn(sink, child.Recv, out)
+	for _, n := range []int32{5, 300, 1024} {
+		parent.Send <- Req{Body: []byte{:n}}
+		if got := <-out; got != n {
+			panic("bare end lost a request")
+		}
+	}
+	close(parent.Send)
+	<-done
+	fmt.Println("edge bare end ok")
+}

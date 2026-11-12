@@ -1864,11 +1864,29 @@ check added moments ago appears not to fire. Every one of these fixtures was
 confirmed in a FRESH directory; several negative results in this round were
 cache artifacts, not logic errors.
 
-Still open in step 3/4: bare `Sender`/`Receiver` spawn arguments (spawnDomain
-would currently re-ring a fixed handle instead of keeping its one ring) and the
-two-value `chan` form. The over-budget panic from an Edge frame also prints an
-empty variable-length field list, because the budget note travels on the
-channel and an Edge handle has none; the message names size and budget only. Until those land, the tree still
+**A bare end crosses spawn too.** The ends of a pair need not travel together:
+the parent can keep its send end and hand the child's receive end to a worker.
+A `Sender`/`Receiver` is a handle, so the word IS the message - no codec, no
+ring. Three things had to line up:
+
+- Both compilers exclude ownership ends from the spawn's channel-argument list,
+  so `spawnDomain` does not size a ring pair for a handle that already has one.
+- The child-side chan-ID assignment must skip them too. stage4 assigns IDs from
+  the CALL SITE's channel indices, which already exclude them; legacy assigns
+  them from the TARGET SIGNATURE, so a bare end shifted every later channel by
+  one and the child bound a fresh ring pair over a handle that already had one -
+  the child then parked forever on a ring nobody wrote.
+- The child's breaker is bound through the HANDLE's pair link: a fixed-direction
+  handle carries `edgePair`, so `runtime.EdgeBindHandle(handle, breaker)` reaches
+  all four handles, including the parent's end - the one that has to wake.
+
+Pinned by `edge_bare_end.mx` (parent keeps `Edge.Send`, child gets
+`child.Recv` as a `Receiver[Req]`, requests 5/300/1024 bytes, replies on a plain
+spawn channel), on both compilers. The two-value `chan` form remains open.
+
+The over-budget panic from an Edge frame also prints an empty variable-length
+field list, because the budget note travels on the channel and an Edge handle
+has none; the message names size and budget only. Until those land, the tree still
 passes the same channel handle to a child and to the parent, and nothing rejects
 two transfers of one send end: that is a live soundness hole, exactly as D19
 states. The role check above is rule 5 of D19 and does not close rule 3.
