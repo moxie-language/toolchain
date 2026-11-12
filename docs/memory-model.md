@@ -1759,7 +1759,9 @@ the patched `go/types` universe from `legacy/build/patch-gotypes.go`. Because
 the underlying types are ordinary directional channels and a two-field struct,
 the operation-level role check applies through `e.Send`/`e.Recv` unchanged, and
 an instantiated field carries its instantiation (pinned by a send through
-`e.Send` arriving at `e.Recv` on both compilers).
+`e.Send` arriving at `e.Recv` on both compilers). The stdlib test suite passes
+11 of 11 with the universe change, and the sampled regression set (channels,
+spawn, sovereign compaction, segment heap, rootmap) is green.
 
 Two things learned while installing them, recorded for the next reader:
 
