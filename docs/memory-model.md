@@ -1642,6 +1642,21 @@ Not yet demonstrated, and why:
   found; phase 2's other exit criterion (zero mmap per allocating call in
   steady state) is met and pinned by `segment_heap`.
 
+  Re-measured while landing phase 0c, with a narrower symptom: the compiler
+  built by the checked-in binary (`./mxc-stage4`, call it C0) works and is
+  REPRODUCIBLE (two C0 builds of the same sources are byte-identical, sha256
+  `57c55732…`). Any compiler built BY a stage4 compiler - C1 from C0, and C2
+  from C1 - builds sources correctly but then panics at start-up in
+  `runtime.codecDecodeValue` with "codec bad pointer tag", before it compiles a
+  single file. A compiler built by legacy (`legacy/moxie build -a ./_mxc_stage4`)
+  shows the same panic, so this is not a stage4-vs-legacy divergence in the
+  compiler's own output: it is a miscompile of the compiler (or of the runtime it
+  embeds) by every builder except the checked-in C0. Bisected to the same
+  symptom at 8335db88, 50fccafe and the bare-end commit, so it predates the
+  ownership work; a clean package cache does not change it. The build PATH that
+  works, and that every fixture in this record was verified with, is
+  `./mxc-stage4 build -a` (C0). The fixpoint needs the codec panic found first.
+
 ### 21.4 Phase 6 — the ring half landed
 
 Implemented:
@@ -2083,14 +2098,15 @@ rewrites) and the same builtin case in its SSA builder.
 
 ### 22.4b Open defect found while landing step 3
 
-stage4's `types.Identical` returns true for any two instantiations of one
-generic whose origin matches, ignoring the type arguments: `Edge[int32, Req]`
-and `Edge[Req, int32]` compare equal, so a transposed pair is assignable in
-stage4 while legacy (go/types) refuses it. Fixing it touches every assignability
-path, and the first attempt (comparing TArgs recursively) segfaulted the
-compiler, so it is an isolated piece of work: compare origin AND arguments, with
-a guard for typed-nil `*Named`, and run the stdlib suite plus the generics
-fixtures before landing. The spawn agreement check does not depend on it.
+stage4's `types.Identical` returned true for any two instantiations of one
+generic whose origin matched, ignoring the type arguments: `Box[int32]` and
+`Box[uint32]` - and a transposed Edge pair - compared equal, so assignments
+legacy (go/types) rejects were accepted. FIXED: the Named case now compares the
+origin, rejects a typed-nil `*Named`, and compares each type argument
+recursively; `reject_generic_assign_mismatch.mx` pins it (both compilers say
+"cannot use"). The earlier crash while attempting this was the typed-nil
+dereference, not the comparison itself: with the guard in place the compiler
+builds its own next generation (r50 → r51 completed).
 
 ### 22.5 Open decisions, recorded rather than guessed
 
