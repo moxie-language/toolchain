@@ -77,7 +77,7 @@ func SpawnDomain(fnIdx int32, argPtr unsafe.Pointer, argLen int32, chanHandlesPt
 
 // --- spawn-boundary channel behaviour ---
 //
-// chan.mx routes a channel whose spawnBound flag is set through
+// chan.mx routes a channel whose class is chanClassShared through
 // tryPipeSend/tryPipeRecv/PipeChanCloseSignal instead of the in-runtime queue.
 // On native those move bytes through mmap'd SPSC rings; on wasm the same rings
 // live in JavaScript behind an opaque int32 handle, so this file supplies the
@@ -86,7 +86,7 @@ func SpawnDomain(fnIdx int32, argPtr unsafe.Pointer, argLen int32, chanHandlesPt
 
 // sabHandleOf returns the boundary handle for a channel, or 0 if it is local.
 func sabHandleOf(ch *channel) uintptr {
-	if ch == nil || !ch.spawnBound {
+	if ch == nil || ch.class != chanClassShared {
 		return 0
 	}
 	return ch.sabHandle
@@ -103,7 +103,7 @@ func SpawnChannelHandle(ch *channel, slotSize int32, slotCount int32) int32 {
 	if ch == nil {
 		return 0
 	}
-	if ch.spawnBound && ch.sabHandle != 0 {
+	if ch.class == chanClassShared && ch.sabHandle != 0 {
 		return int32(ch.sabHandle)
 	}
 	h := SpawnChannelCreate(slotSize, slotCount)
@@ -120,7 +120,7 @@ func MarkChannelSAB(ch *channel, handle uintptr) {
 	if ch == nil {
 		return
 	}
-	ch.spawnBound = true
+	ch.class = chanClassShared
 	ch.sabHandle = handle
 }
 
@@ -151,7 +151,7 @@ func SpawnChannelWrap(handle uintptr, elementSize uintptr) (ch *channel) {
 	// ring's depth, so the wrapper reports the minimum capacity rather than the
 	// parent's declared size, which the handle does not carry.
 	ch = chanMake(elementSize, 1, elementSize, nil, 0)
-	ch.spawnBound = true
+	ch.class = chanClassShared
 	ch.sabHandle = handle
 	return ch
 }
@@ -246,6 +246,12 @@ func (ch *channel) tryPipeRecv(value unsafe.Pointer, c moxie.Codec, td *RawType)
 }
 
 // PipeChanCloseSignal closes the boundary ring.
+// channelDropRings is a no-op on wasm: the shared ring is a SharedArrayBuffer
+// owned by the JS bridge (spawn_wasm.mx passes an opaque handle), so there is
+// no mapping of this address space to refcount. The worker's memory is the
+// lifetime, and it is reclaimed with the worker.
+func channelDropRings(ch *channel) {}
+
 func PipeChanCloseSignal(ch *channel) {
 	h := sabHandleOf(ch)
 	if h == 0 {
@@ -274,14 +280,14 @@ const sabFrameMax = 1 << 20
 // value silently, which is how every wasm spawn channel sent into the void
 // while its receiver waited on an empty ring.
 func PipeChanSendRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
-	if ch == nil || !ch.spawnBound {
+	if ch == nil || ch.class != chanClassShared {
 		return false
 	}
 	return ch.tryPipeSend(ptr, nil, nil)
 }
 
 func PipeChanRecvRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
-	if ch == nil || !ch.spawnBound {
+	if ch == nil || ch.class != chanClassShared {
 		return false
 	}
 	// The direct receive waits: the ring blocks in Atomics.wait until a frame
@@ -310,7 +316,7 @@ func SharedBuffer(n int32) (b []byte) {
 // carries an encoded frame, so these encode with the structural codec and hand
 // the bytes to the bridge.
 func ChanSendStructural(ch *channel, td *RawType, value unsafe.Pointer, op *channelOp) {
-	if ch != nil && ch.spawnBound && ch.sabHandle != 0 {
+	if ch != nil && ch.class == chanClassShared && ch.sabHandle != 0 {
 		frame, ok := codecFrameEncode(nil, td, value, ch.elementSize)
 		if !ok {
 			return
@@ -326,7 +332,7 @@ func ChanSendStructural(ch *channel, td *RawType, value unsafe.Pointer, op *chan
 }
 
 func ChanRecvStructural(ch *channel, td *RawType, value unsafe.Pointer, op *channelOp) bool {
-	if ch != nil && ch.spawnBound && ch.sabHandle != 0 {
+	if ch != nil && ch.class == chanClassShared && ch.sabHandle != 0 {
 		buf := []byte{:sabFrameMax}
 		n := SpawnChannelRecv(ch.sabHandle, unsafe.Pointer(&buf[0]), int32(len(buf)))
 		if n <= 0 {
@@ -343,7 +349,7 @@ func ChanRecvStructural(ch *channel, td *RawType, value unsafe.Pointer, op *chan
 // ChanSendDual is declared below.
 
 func ChanSendDual(ch *channel, c moxie.Codec, value unsafe.Pointer, op *channelOp) {
-	if ch != nil && ch.spawnBound && ch.sabHandle != 0 {
+	if ch != nil && ch.class == chanClassShared && ch.sabHandle != 0 {
 		frame, ok := codecFrameEncode(c, nil, value, ch.elementSize)
 		if !ok {
 			return
@@ -359,7 +365,7 @@ func ChanSendDual(ch *channel, c moxie.Codec, value unsafe.Pointer, op *channelO
 }
 
 func ChanRecvDual(ch *channel, c moxie.Codec, value unsafe.Pointer, op *channelOp) bool {
-	if ch != nil && ch.spawnBound && ch.sabHandle != 0 {
+	if ch != nil && ch.class == chanClassShared && ch.sabHandle != 0 {
 		buf := []byte{:sabFrameMax}
 		n := SpawnChannelRecv(ch.sabHandle, unsafe.Pointer(&buf[0]), int32(len(buf)))
 		if n <= 0 {

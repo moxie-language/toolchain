@@ -49,7 +49,7 @@ func chRecvRing(ch *channel) uintptr {
 // (chanID 0) is excluded: its ring is the spawn's control ring, owned by the
 // spawn rather than by a channel, and nothing sends on it.
 func channelDropRings(ch *channel) {
-	if ch == nil || !ch.spawnBound || ch.ringsDropped || ch.spawnChanID == 0 {
+	if ch == nil || ch.class != chanClassShared || ch.ringsDropped || ch.spawnChanID == 0 {
 		return
 	}
 	ch.ringsDropped = true
@@ -58,9 +58,9 @@ func channelDropRings(ch *channel) {
 }
 
 // A spawn-bound channel always has both rings bound; the compiler
-// and chan.mx dispatch on spawnBound to route off the in-runtime queue.
+// and chan.mx dispatch on the shared class to route off the in-runtime queue.
 func channelIsPipeBound(ch *channel) bool {
-	return ch != nil && ch.spawnBound
+	return ch != nil && ch.class == chanClassShared
 }
 
 // MarkChannelPipeBound tags ch as spawn-bound at chanID. Both the
@@ -70,7 +70,7 @@ func MarkChannelPipeBound(ch *channel, chanID uint16) {
 	if ch == nil {
 		return
 	}
-	ch.spawnBound = true
+	ch.class = chanClassShared
 	ch.spawnChanID = chanID
 }
 
@@ -78,7 +78,7 @@ func MarkChannelPipeBound(ch *channel, chanID uint16) {
 //
 // A spawned domain must write only to its own memory. The child's channel
 // parameter names the PARENT's channel struct, which lives in the spawning
-// frame, and MarkChildPipeChannel then stamped spawnBound, childDomain, ringA
+// frame, and MarkChildPipeChannel then stamped the shared class, childDomain, ringA
 // and ringB into it - one thread writing into another thread's frame, on memory
 // that frame may already have released. Those marks belong on the child's own
 // copy.
@@ -199,7 +199,7 @@ func breakerFallback() *channel {
 // failed send rather than a hang. Returns false on close or peer death.
 // Fail-loud on frames that can never fit the ring.
 func PipeChanSend(ch *channel, encoded []byte) bool {
-	if ch == nil || !ch.spawnBound {
+	if ch == nil || ch.class != chanClassShared {
 		return false
 	}
 	ring := chSendRing(ch)
@@ -268,7 +268,7 @@ func pipeBudgetPanic(ch *channel, actual uintptr) {
 // liveness on every return, so a dead peer is reported, never waited
 // on forever. Returns (encoded_bytes, ok). ok=false means closed/dead.
 func PipeChanRecv(ch *channel) ([]byte, bool) {
-	if ch == nil || !ch.spawnBound {
+	if ch == nil || ch.class != chanClassShared {
 		return nil, false
 	}
 	ring := chRecvRing(ch)
@@ -315,7 +315,7 @@ func PipeChanRecv(ch *channel) ([]byte, bool) {
 // has been closed. Ring-only: closes both rings so the peer's recv
 // observes ringIsClosed and its send observes ringIsClosed.
 func PipeChanCloseSignal(ch *channel) {
-	if ch == nil || !ch.spawnBound {
+	if ch == nil || ch.class != chanClassShared {
 		return
 	}
 	if chSendRing(ch) != 0 {
@@ -337,7 +337,7 @@ func PipeChanCloseSignal(ch *channel) {
 // stays on the codec path - its pointers point into the sender's arena, and the
 // relocation the codec performs is the point.
 func PipeChanSendRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
-	if ch == nil || !ch.spawnBound {
+	if ch == nil || ch.class != chanClassShared {
 		return false
 	}
 	frame, ok := codecFrameEncode(nil, nil, ptr, uintptr(size))
@@ -357,7 +357,7 @@ func PipeChanSendRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
 // present it as an ordinary close and the receiver would loop or exit on a
 // channel that is perfectly alive.
 func PipeChanRecvRaw(ch *channel, ptr unsafe.Pointer, size int32) bool {
-	if ch == nil || !ch.spawnBound {
+	if ch == nil || ch.class != chanClassShared {
 		return false
 	}
 	data, ok := PipeChanRecv(ch)
@@ -411,7 +411,7 @@ func SharedBuffer(n int32) (b []byte) {
 // PipeChanSendStructural encodes one value structurally onto the send ring.
 func PipeChanSendStructural(ch *channel, td *RawType, value unsafe.Pointer) bool {
 	chanDbgSendStruct++
-	if ch == nil || !ch.spawnBound || td == nil || value == nil {
+	if ch == nil || ch.class != chanClassShared || td == nil || value == nil {
 		chanDbgSendEarly++
 		if td == nil {
 			chanDbgSendTdNil++
@@ -430,7 +430,7 @@ func PipeChanSendStructural(ch *channel, td *RawType, value unsafe.Pointer) bool
 // fresh backing in the receiver's current arena.
 func PipeChanRecvStructural(ch *channel, td *RawType, value unsafe.Pointer) bool {
 	chanDbgRecvStruct++
-	if ch == nil || !ch.spawnBound || td == nil || value == nil {
+	if ch == nil || ch.class != chanClassShared || td == nil || value == nil {
 		chanDbgRecvEarly++
 		if td == nil {
 			chanDbgRecvTdNil++
@@ -448,7 +448,7 @@ func PipeChanRecvStructural(ch *channel, td *RawType, value unsafe.Pointer) bool
 // elements that hold pointers. A local channel takes the raw in-runtime queue
 // path: only a spawn boundary needs the encode.
 func ChanSendStructural(ch *channel, td *RawType, value unsafe.Pointer, op *channelOp) {
-	if ch != nil && ch.spawnBound {
+	if ch != nil && ch.class == chanClassShared {
 		PipeChanSendStructural(ch, td, value)
 		return
 	}
@@ -457,7 +457,7 @@ func ChanSendStructural(ch *channel, td *RawType, value unsafe.Pointer, op *chan
 
 // ChanRecvStructural is ChanRecvDual's structural counterpart.
 func ChanRecvStructural(ch *channel, td *RawType, value unsafe.Pointer, op *channelOp) bool {
-	if ch != nil && ch.spawnBound {
+	if ch != nil && ch.class == chanClassShared {
 		return PipeChanRecvStructural(ch, td, value)
 	}
 	return chanRecv(ch, value, op)
@@ -568,8 +568,8 @@ func rootPushBytes(dst, src []byte) (out []byte) {
 
 // ChanSendDual is the runtime dispatch the compiler emits for any
 // chan-send whose element type implements moxie.Codec. It branches
-// on ch.spawnBound to pick the path:
-//   spawnBound -> PipeChanSendCodec (codec encode + ring write)
+// on ch.class == chanClassShared to pick the path:
+//   shared  -> PipeChanSendCodec (codec encode + ring write)
 //   otherwise  -> chanSend (in-runtime queue, the existing path)
 //
 // Runtime dispatch instead of compile-time SSA tracking so chans
@@ -578,7 +578,7 @@ func rootPushBytes(dst, src []byte) (out []byte) {
 // chan-op site refers to a spawn-bound chan, but the channel struct
 // itself always knows.
 func ChanSendDual(ch *channel, c moxie.Codec, value unsafe.Pointer, op *channelOp) {
-	if ch != nil && ch.spawnBound {
+	if ch != nil && ch.class == chanClassShared {
 		PipeChanSendCodec(ch, c)
 		return
 	}
@@ -587,7 +587,7 @@ func ChanSendDual(ch *channel, c moxie.Codec, value unsafe.Pointer, op *channelO
 
 // ChanRecvDual is the recv counterpart of ChanSendDual.
 func ChanRecvDual(ch *channel, c moxie.Codec, value unsafe.Pointer, op *channelOp) bool {
-	if ch != nil && ch.spawnBound {
+	if ch != nil && ch.class == chanClassShared {
 		return PipeChanRecvCodec(ch, c)
 	}
 	return chanRecv(ch, value, op)
@@ -598,7 +598,7 @@ func ChanRecvDual(ch *channel, c moxie.Codec, value unsafe.Pointer, op *channelO
 // PipeWriter, then writes the bytes to the send ring. Returns false on
 // EncodeTo error or ring write failure.
 func PipeChanSendCodec(ch *channel, c moxie.Codec) bool {
-	if ch == nil || !ch.spawnBound {
+	if ch == nil || ch.class != chanClassShared {
 		return false
 	}
 	frame, ok := codecFrameEncode(c, nil, nil, ch.elementSize)
@@ -615,7 +615,7 @@ func PipeChanSendCodec(ch *channel, c moxie.Codec) bool {
 // Returns ok (true on successful receive+decode, false on closed/decode
 // error).
 func PipeChanRecvCodec(ch *channel, c moxie.Codec) bool {
-	if ch == nil || !ch.spawnBound {
+	if ch == nil || ch.class != chanClassShared {
 		return false
 	}
 	data, ok := PipeChanRecv(ch)

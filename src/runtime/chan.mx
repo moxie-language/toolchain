@@ -61,12 +61,16 @@ type channel struct {
 	receivers    chanQueue
 	buf unsafe.Pointer
 
-	// Spawn-boundary metadata (native targets only). When spawnBound is
-	// true the channel is on a fork + shared-ring boundary, not a local
-	// in-runtime queue. send/recv route through the ring buffers with
-	// codec-encoded bytes. Zero values = local channel, existing
-	// behavior unchanged.
-	spawnBound  bool
+	// class is the channel's concurrency class (section 4): chanClassLocal
+	// for a channel whose both ends live in this domain, chanClassShared for
+	// one bound to a spawn boundary. The zero value is LOCAL, so every
+	// existing channel is local until a spawn binds it.
+	//
+	// LOCAL has no atomics and no wait: a full send or an empty receive is a
+	// deadlock in a domain with one thread, which is why the in-runtime queue
+	// stays the LOCAL body until the transport body is unified. SHARED routes
+	// through the ring pair with codec-encoded frames.
+	class       int32
 	spawnChanID uint16
 	spawnPid    int32    // peer pid for death detection (0 = local/none)
 	// A spawn channel carries one SPSC ring per DIRECTION, and both domains
@@ -112,6 +116,14 @@ type channel struct {
 	// receiving domain writes this field, on its own copy of the handle.
 	rxPartial []byte
 }
+
+// Concurrency classes (section 4). Two, and there is no multi-writer class:
+// a channel's send end belongs to exactly one domain, and two claimants on it
+// is the state the ownership model exists to make inexpressible.
+const (
+	chanClassLocal  = int32(0)
+	chanClassShared = int32(1)
+)
 
 const (
 	chanOperationWaiting = 0b00 // waiting for a send/receive operation to continue
@@ -442,7 +454,7 @@ func chanSend(ch *channel, value unsafe.Pointer, op *channelOp) {
 	// end writes the ring, it does not know about this domain's senders.
 	// Retry in the pipe helper, which knows how to distinguish backpressure
 	// from a closed or dead peer.
-	if ch.spawnBound {
+	if ch.class == chanClassShared {
 		PipeChanSendRaw(ch, value, int32(ch.elementSize))
 		return
 	}
@@ -537,7 +549,7 @@ func chanRecv(ch *channel, value unsafe.Pointer, op *channelOp) bool {
 	// in-runtime waker. Parking on ch.receivers after one empty ring read
 	// would hang forever; poll the ring instead. PipeChanRecvRaw also
 	// reports closed and dead-peer as ok=false, matching chanRecv.
-	if ch.spawnBound {
+	if ch.class == chanClassShared {
 		return PipeChanRecvRaw(ch, value, int32(ch.elementSize))
 	}
 
@@ -659,7 +671,7 @@ func SpawnClose(ch *channel) {
 	if ch == nil {
 		return
 	}
-	if ch.spawnBound {
+	if ch.class == chanClassShared {
 		// The breaker rides the control ring both sides read, not a
 		// copy-on-write flag: closing it means closing that ring.
 		PipeChanCloseSignal(ch)
@@ -717,7 +729,7 @@ func chanClose(ch *channel) {
 
 	// Spawn-boundary: if this is a pipe-bound channel, signal the remote
 	// end so its receiver-side bridge / chan recv observes the close.
-	if ch.spawnBound {
+	if ch.class == chanClassShared {
 		PipeChanCloseSignal(ch)
 		// A control breaker is its domain's termination handle. A domain is a
 		// thread in this process, so the close is observed by its loop where it
@@ -776,7 +788,7 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 			continue
 		}
 
-		if state.ch.spawnBound {
+		if state.ch.class == chanClassShared {
 			// The boundary arm moves a frame, not the element's extent: an
 			// element that holds references is encoded here, exactly as its
 			// direct send would encode it, and the peer decodes one format.
@@ -850,7 +862,7 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 	// each poll iteration via pipeSelectRecheck.
 	hasPipeBound := false
 	for _, state := range states {
-		if state.ch != nil && state.ch.spawnBound {
+		if state.ch != nil && state.ch.class == chanClassShared {
 			hasPipeBound = true
 			break
 		}
@@ -948,7 +960,7 @@ func chanSelect(recvbuf unsafe.Pointer, states []chanSelectState, ops []channelO
 // correctness if/when this is ported to a multi-thread scheduler.
 func pipeSelectRecheck(t *task.Task, states []chanSelectState, recvbuf unsafe.Pointer) bool {
 	for i, state := range states {
-		if state.ch == nil || !state.ch.spawnBound {
+		if state.ch == nil || state.ch.class != chanClassShared {
 			continue
 		}
 		var newDataValue uint32

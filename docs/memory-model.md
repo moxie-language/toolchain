@@ -1663,6 +1663,14 @@ Implemented:
   and `ringMaxMsg` are deleted. A spawn's rings are no longer a function of the
   declared depth or frame budget; the depth is enforced by the message counters
   and the budget by the send's own check.
+- **The concurrency class (section 4).** A channel carries `class`:
+  `chanClassLocal` (the zero value, so every channel that is not bound to a
+  spawn is local) or `chanClassShared`. Dispatch in `chan.mx`, `pipe_channel.mx`
+  and `spawn_wasm.mx` reads the class rather than a spawn-bound boolean, so the
+  one branch the design describes exists and has two named sides. The LOCAL body
+  is still the in-runtime queue: deleting it is the remaining half of phase 6,
+  not a rounding error, because the queue's park loop is the only place a
+  local send can make progress while I/O callbacks run in the same thread.
 - **Reassembly.** `PipeChanSend`/`PipeChanRecv` stream chunks and reassemble.
   A select receive keeps its partial message in `channel.rxPartial`, backed by
   the root arena (`rootPushBytes`), because the selecting frame dies between
@@ -1701,10 +1709,10 @@ parent-side reference lives until the process ends — 4 KiB per spawn, against
 the 32 MiB per direction the old sizing reserved. The `spawnCtl` block (16
 bytes per spawn) goes with the process for the same reason.
 
-Still open in phase 6: the `LOCAL`/`SHARED` class field, replacing `chan.mx`'s
-bounded queue with the ring and deleting its sender/receiver task lists, the
-capacity-0 rule, `futex_waitv` for select, and the `Edge`/`Sender`/`Receiver`
-two-ring binding that phase 0c declares.
+Still open in phase 6: replacing `chan.mx`'s bounded queue with the ring and
+deleting its sender/receiver task lists, the capacity-0 rule, `futex_waitv` for
+select, and the `Edge`/`Sender`/`Receiver` two-ring binding that phase 0c
+declares.
 
 ### 21.5 Phase 0c — role checks landed; the Edge half is open
 
@@ -1744,5 +1752,12 @@ states. The role check above is rule 5 of D19 and does not close rule 3.
   (`<compiler> build-runtime`) after any runtime change, or applications link
   the previous runtime and fail with undefined symbols.
 - The wasm target keeps its own transport (`spawn_wasm.mx`, SharedArrayBuffer);
-  the ring changes in this record are native-only by construction, and the
-  wasm channel paths were not touched.
+  the ring changes in this record are native-only by construction. The class
+  field is shared, so a wasm build must still compile: `channelDropRings` has a
+  wasm no-op there (the SAB is owned by the JS bridge, not by this address
+  space).
+- `5/spawn_orphan` fails on wasm with interleaved output from two domains
+  writing to the host's stdout one character at a time. It is an output-path
+  failure, not a memory-model one, and it is red with the unmodified runtime as
+  well; it is recorded here so a later reader does not attribute it to the
+  transport.
