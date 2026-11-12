@@ -550,6 +550,13 @@ func (p *Package) Check() error {
 		return Errors{p, typeErrors}
 	}
 
+	// The declared pair is affine (docs/memory-model.md section 4, D19 rule 4):
+	// one owner, one move. Checked on the final type information, after every
+	// rewrite, because the declaration's lowered form is what the uses see.
+	if errs := checkEdgeAffinity(p.Files, &p.info, p.program.fset); len(errs) != 0 {
+		return Errors{p, errs}
+	}
+
 	return nil
 }
 

@@ -37,7 +37,11 @@ run_one() {
 		cp "$fixture" "$UNIT_WORK/pkg/main.mx"
 	fi
 	log="$UNIT_WORK/build.log"
-	MOXIEROOT="$ROOT" "$MOXIE" build -o /dev/null "$UNIT_WORK/pkg" >"$log" 2>&1 || rc=$?
+	# -a: a restriction test must RUN the compiler. Without it the package
+	# object from an earlier run is reused silently, so a check added to the
+	# compiler since then is never exercised and the fixture passes while the
+	# compiler does not reject it.
+	MOXIEROOT="$ROOT" "$MOXIE" build -a -o /dev/null "$UNIT_WORK/pkg" >"$log" 2>&1 || rc=$?
 	if [ "$rc" -eq 0 ]; then
 		unit_no "$UNIT_NAME" "compiler did not reject (exit 0, expected '$expected')"
 	elif grep -qE "panic:|caught signal|nil pointer dereference" "$log" 2>/dev/null; then

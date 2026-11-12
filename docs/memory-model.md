@@ -1841,9 +1841,34 @@ ORIGIN alone, so assignment between transposed pairs is accepted where legacy
 rejects it; the spawn check therefore compares rendered types, and the Identical
 defect is recorded in the open decisions rather than papered over.
 
-Still open in step 3: bare `Sender`/`Receiver` spawn arguments (spawnDomain
-would currently re-ring a fixed handle instead of keeping its one ring), and the
-two-value `chan` form. Affineness (D22.5) is step 4. Until those land, the tree still
+**Affineness (step 4) landed.** An Edge has one owner and moves once: into a
+spawn, or out of the function as a return value. Reading its fields
+(`e.Send`, `e.Recv`) is a read. Everything else - `e2 := e1`, a non-spawn call,
+a struct literal, a send, a slice element - is a copy and is rejected; a second
+spawn of one pair is rejected too. Bare `Sender`/`Receiver` values are not yet
+tracked this way.
+
+The two compilers check it in different places for the same reason: legacy has
+go/types information over the go/ast, so it walks parent links after the final
+type-check; stage4's SSA builder carries NO type information (it resolves through
+scopes), so its check runs in the typecheck pass, where every expression has a
+TypeAndValue, and the verdict goes through the deferred-error channel that const
+underflow already uses (the typecheck pass drops its own `compileErrors`, because
+their slices live in the pass arena). stage4 identifies a pair-holding variable
+syntactically - the lowered declaration is `var name Edge[In, Out]` - which also
+sidesteps shadowing.
+
+A verification trap worth recording: a build can be served from cached package
+objects even with `-a` when the source path was built before, so a compiler-side
+check added moments ago appears not to fire. Every one of these fixtures was
+confirmed in a FRESH directory; several negative results in this round were
+cache artifacts, not logic errors.
+
+Still open in step 3/4: bare `Sender`/`Receiver` spawn arguments (spawnDomain
+would currently re-ring a fixed handle instead of keeping its one ring) and the
+two-value `chan` form. The over-budget panic from an Edge frame also prints an
+empty variable-length field list, because the budget note travels on the
+channel and an Edge handle has none; the message names size and budget only. Until those land, the tree still
 passes the same channel handle to a child and to the parent, and nothing rejects
 two transfers of one send end: that is a live soundness hole, exactly as D19
 states. The role check above is rule 5 of D19 and does not close rule 3.
@@ -1986,7 +2011,11 @@ so the child receives capabilities, not a copy of the ring.
    `edge_decl.mx`, `edge_spawn.mx`, `edge_roundtrip.mx`,
    `reject_edge_transposed.mx` and `reject_edge_user_struct.mx`. Bare
    `Sender`/`Receiver` spawn arguments and the two-value `chan` form remain.
-4. **Affineness checks** (22.5) in stage4, then the legacy mirror.
+4. **Affineness checks** — DONE (21.5), in BOTH compilers: legacy checks the
+   lowered AST after the final type-check; stage4 checks in the typecheck pass
+   (its SSA pass has no type information) and fails the package through the
+   same deferred-error channel const underflow uses. Pinned by
+   `reject_edge_copy.mx` and `reject_edge_two_spawns.mx`.
 5. **Acceptance fixtures**: role through an Edge field; transposed Edge;
    one Edge to two spawns; a copied end; a user struct with the same field
    shape rejected; channel storage outliving the declaring frame.

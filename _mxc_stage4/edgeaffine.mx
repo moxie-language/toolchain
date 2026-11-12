@@ -1,0 +1,304 @@
+package main
+
+import (
+	"moxielang.dev/pkg/syntax"
+	"moxielang.dev/pkg/token"
+)
+
+// edgeAffinityCtx enforces D19 rule 4 on one function body: a declared pair owns
+// one pair of rings and one pair of handles, so it has one owner and MOVES
+// ONCE - into a spawn, or out of the function as a return value. Reading its
+// fields (e.Send / e.Recv) is a read, not a copy. Everything else is a copy:
+// `e2 := e1`, `f(e1)` for a non-spawn f, a struct literal field, a send, a slice
+// element. A second spawn would give two domains the same handles.
+//
+// The walk judges an expression by its TYPE rather than by tracking declared
+// objects. The declaration is compiler-generated ("var p Edge[...]"), and every
+// expression carries the checker's TypeAndValue, so "is this value an Edge"
+// answers the question directly and shadowing cannot confuse it.
+type edgeAffinityCtx struct {
+	// vars are the names this body declares as a pair: the lowered declaration
+	// is `var p Edge[In, Out]`, and Edge is a universe generic, so the shape is
+	// syntactic and needs no type information.
+	vars  map[string]bool
+	moved map[string]bool
+	msg   string
+}
+
+func (c *edgeAffinityCtx) fail(m string) {
+	if c.msg == "" {
+		c.msg = m
+	}
+}
+
+// edgeAffinityFile runs the check over every function body in one file. The
+// first violation goes into the deferred-error table, which CompileToIR turns
+// into a build failure: the typecheck pass drops its own compileErrors on
+// purpose (their slices live in the pass arena).
+func edgeAffinityFile(f *syntax.File, pkgName string) {
+	if f == nil {
+		return
+	}
+	for i := int32(0); i < int32(len(f.DeclList)); i++ {
+		fd, ok := f.DeclList[i].(*syntax.FuncDecl)
+		if !ok || fd == nil || fd.Body == nil {
+			continue
+		}
+		c := &edgeAffinityCtx{vars: map[string]bool{}, moved: map[string]bool{}}
+		c.collectFields(fd.Type.ParamList)
+		c.collectFields(fd.Type.ResultList)
+		c.collectStmts(fd.Body.List)
+		if len(c.vars) == 0 {
+			continue
+		}
+		c.stmts(fd.Body.List)
+		if c.msg != "" {
+			reportConstOverflow(pkgName, c.msg)
+			return
+		}
+	}
+}
+
+func (c *edgeAffinityCtx) collectFields(list []*syntax.Field) {
+	for i := int32(0); i < int32(len(list)); i++ {
+		f := list[i]
+		if f == nil || f.Name == nil || f.Type == nil {
+			continue
+		}
+		if c.isEdgeTypeExpr(f.Type) {
+			c.vars[f.Name.Value] = true
+		}
+	}
+}
+
+func (c *edgeAffinityCtx) collectStmts(list []syntax.Stmt) {
+	for i := int32(0); i < int32(len(list)); i++ {
+		switch s := list[i].(type) {
+		case *syntax.BlockStmt:
+			c.collectStmts(s.List)
+		case *syntax.LabeledStmt:
+			c.collectStmts([]syntax.Stmt{s.Stmt})
+		case *syntax.DeclStmt:
+			for j := int32(0); j < int32(len(s.DeclList)); j++ {
+				vd, ok := s.DeclList[j].(*syntax.VarDecl)
+				if !ok || vd.Type == nil {
+					continue
+				}
+				if !c.isEdgeTypeExpr(vd.Type) {
+					continue
+				}
+				for k := int32(0); k < int32(len(vd.NameList)); k++ {
+					c.vars[vd.NameList[k].Value] = true
+				}
+			}
+		case *syntax.IfStmt:
+			c.collectStmts([]syntax.Stmt{s.Then})
+			if s.Else != nil {
+				c.collectStmts([]syntax.Stmt{s.Else})
+			}
+		case *syntax.ForStmt:
+			c.collectStmts([]syntax.Stmt{s.Body})
+		case *syntax.SwitchStmt:
+			for j := int32(0); j < int32(len(s.Body)); j++ {
+				c.collectStmts(s.Body[j].Body)
+			}
+		case *syntax.SelectStmt:
+			for j := int32(0); j < int32(len(s.Body)); j++ {
+				c.collectStmts(s.Body[j].Body)
+			}
+		}
+	}
+}
+
+// isEdgeTypeExpr reports whether e is the syntactic Edge[...] instantiation.
+func (c *edgeAffinityCtx) isEdgeTypeExpr(e syntax.Expr) (ok bool) {
+	ix, isIndex := e.(*syntax.IndexExpr)
+	if !isIndex {
+		return false
+	}
+	n, isName := ix.X.(*syntax.Name)
+	return isName && n.Value == "Edge"
+}
+
+func (c *edgeAffinityCtx) isEdgeName(name string) (ok bool) {
+	return c.vars[name]
+}
+
+func (c *edgeAffinityCtx) stmts(list []syntax.Stmt) {
+	for i := int32(0); i < int32(len(list)); i++ {
+		c.stmt(list[i])
+	}
+}
+
+func (c *edgeAffinityCtx) stmt(st syntax.Stmt) {
+	switch s := st.(type) {
+	case *syntax.BlockStmt:
+		c.stmts(s.List)
+	case *syntax.LabeledStmt:
+		c.stmt(s.Stmt)
+	case *syntax.DeclStmt:
+		for i := int32(0); i < int32(len(s.DeclList)); i++ {
+			vd, ok := s.DeclList[i].(*syntax.VarDecl)
+			if !ok || vd.Values == nil {
+				continue
+			}
+			c.expr(vd.Values, false)
+		}
+	case *syntax.AssignStmt:
+		c.expr(s.Lhs, true)
+		// `_ = e` discards the value: no second owner is created.
+		c.expr(s.Rhs, c.blankTarget(s.Lhs))
+	case *syntax.ExprStmt:
+		c.expr(s.X, false)
+	case *syntax.SendStmt:
+		c.expr(s.Chan, true)
+		c.expr(s.Value, false)
+	case *syntax.ReturnStmt:
+		c.expr(s.Results, true)
+	case *syntax.IfStmt:
+		c.simple(s.Init)
+		c.expr(s.Cond, false)
+		c.stmt(s.Then)
+		if s.Else != nil {
+			c.stmt(s.Else)
+		}
+	case *syntax.ForStmt:
+		c.simple(s.Init)
+		c.expr(s.Cond, false)
+		c.simple(s.Post)
+		c.stmt(s.Body)
+	case *syntax.SwitchStmt:
+		c.simple(s.Init)
+		c.expr(s.Tag, false)
+		for i := int32(0); i < int32(len(s.Body)); i++ {
+			c.expr(s.Body[i].Cases, false)
+			c.stmts(s.Body[i].Body)
+		}
+	case *syntax.SelectStmt:
+		for i := int32(0); i < int32(len(s.Body)); i++ {
+			c.simple(s.Body[i].Comm)
+			c.stmts(s.Body[i].Body)
+		}
+	case *syntax.CallStmt:
+		c.expr(s.Call, false)
+	}
+}
+
+// blankTarget reports whether the assignment target is the blank identifier.
+func (c *edgeAffinityCtx) blankTarget(e syntax.Expr) (ok bool) {
+	n, isName := e.(*syntax.Name)
+	return isName && n.Value == "_"
+}
+
+func (c *edgeAffinityCtx) simple(st syntax.SimpleStmt) {
+	if st == nil {
+		return
+	}
+	switch s := st.(type) {
+	case *syntax.AssignStmt:
+		c.expr(s.Lhs, true)
+		c.expr(s.Rhs, false)
+	case *syntax.ExprStmt:
+		c.expr(s.X, false)
+	case *syntax.SendStmt:
+		c.expr(s.Chan, true)
+		c.expr(s.Value, false)
+	case *syntax.RangeClause:
+		c.expr(s.X, false)
+	}
+}
+
+// expr walks one expression; allow is true only where reading the value IS the
+// move or a field read.
+func (c *edgeAffinityCtx) expr(e syntax.Expr, allow bool) {
+	if e == nil {
+		return
+	}
+	switch x := e.(type) {
+	case *syntax.Name:
+		if !c.isEdgeName(x.Value) || allow {
+			return
+		}
+		c.fail("an Edge cannot be copied; pass it to one spawn or return it")
+	case *syntax.ParenExpr:
+		c.expr(x.X, allow)
+	case *syntax.SelectorExpr:
+		// e.Send / e.Recv: the pair is read, not copied.
+		c.expr(x.X, true)
+	case *syntax.Operation:
+		if x.Y == nil && x.Op == token.And {
+			// &p in the declaration's __edgealloc call.
+			c.expr(x.X, true)
+			return
+		}
+		c.expr(x.X, false)
+		c.expr(x.Y, false)
+	case *syntax.CallExpr:
+		if isEdgeBuiltinCall(x, "spawn") {
+			for i := int32(0); i < int32(len(x.ArgList)); i++ {
+				if i == 0 {
+					c.expr(x.ArgList[i], false)
+					continue
+				}
+				c.expr(x.ArgList[i], true)
+				c.move(x.ArgList[i])
+			}
+			return
+		}
+		if isEdgeBuiltinCall(x, "__edgealloc") {
+			// The declaration: &p, &c and the zero Edge carrying the type.
+			for i := int32(0); i < int32(len(x.ArgList)); i++ {
+				c.expr(x.ArgList[i], true)
+			}
+			return
+		}
+		c.expr(x.Fun, false)
+		for i := int32(0); i < int32(len(x.ArgList)); i++ {
+			c.expr(x.ArgList[i], false)
+		}
+	case *syntax.CompositeLit:
+
+		for i := int32(0); i < int32(len(x.ElemList)); i++ {
+			c.expr(x.ElemList[i], false)
+		}
+	case *syntax.KeyValueExpr:
+		c.expr(x.Key, false)
+		c.expr(x.Value, false)
+	case *syntax.ListExpr:
+		for i := int32(0); i < int32(len(x.ElemList)); i++ {
+			c.expr(x.ElemList[i], allow)
+		}
+	case *syntax.IndexExpr:
+		c.expr(x.X, false)
+		c.expr(x.Index, false)
+	case *syntax.SliceExpr:
+		c.expr(x.X, false)
+		for i := int32(0); i < int32(len(x.Index)); i++ {
+			c.expr(x.Index[i], false)
+		}
+	case *syntax.AssertExpr:
+		c.expr(x.X, false)
+	}
+}
+
+// move records the spawn that takes the pair and rejects a second one. Identity
+// is the name: the pair is a local `var` in this function, and two spawns of one
+// pair is the fault the doc names.
+func (c *edgeAffinityCtx) move(e syntax.Expr) {
+	n, ok := e.(*syntax.Name)
+	if !ok || !c.isEdgeName(n.Value) {
+		return
+	}
+	if c.moved[n.Value] {
+		c.fail("this Edge was already passed to spawn; a pair has one child")
+		return
+	}
+	c.moved[n.Value] = true
+}
+
+// isEdgeBuiltinCall reports whether the call invokes the named builtin. The
+// name alone is enough: `spawn` and `__edgealloc` are universe entries.
+func isEdgeBuiltinCall(c *syntax.CallExpr, name string) (ok bool) {
+	n, isName := c.Fun.(*syntax.Name)
+	return isName && n.Value == name
+}

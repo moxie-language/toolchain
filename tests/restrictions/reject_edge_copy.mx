@@ -1,0 +1,35 @@
+// An Edge has one owner (docs/memory-model.md section 4, D19 rule 4): it moves
+// to one spawn, or out of a function as a return value, and any other use copies
+// the pair. A copy would give two owners the same handles.
+//
+// expected: an Edge cannot be copied
+package main
+
+type Req struct {
+	Body []byte `cap:"1024"`
+}
+
+func worker(ep Edge[Req, int32]) (closed chan struct{}) {
+	for {
+		select {
+		case <-closed:
+			return closed
+		case r := <-ep.Recv:
+			_ = r
+		}
+	}
+}
+
+func main() {
+	select {
+	case <-shutdown:
+		return
+	default:
+	}
+	parent, child := edge[int32, Req]{2}
+	dup := child
+	_ = dup
+	done := spawn(worker, child)
+	close(parent.Send)
+	<-done
+}
