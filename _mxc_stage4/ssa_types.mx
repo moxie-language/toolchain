@@ -994,7 +994,11 @@ func ssaElemType(t Type) (tv Type) {
 	if t == nil {
 		return nil
 	}
-	switch u := SafeUnderlying(t).(type) {
+	// A named generic container instantiated at a concrete type (`S[int32]`
+	// where S[T] []T) has its element only after the instance is bound. The
+	// same fix as ssaChanElemType: without it an index load had no layout and
+	// printed an empty value while legacy printed the number.
+	switch u := SafeUnderlying(instantiatedUnder(t)).(type) {
 	case *Slice:
 		return u.Elem
 	case *Array:
@@ -1020,8 +1024,8 @@ func ssaIndexElemType(t Type) (tv Type) {
 	if t == nil {
 		return nil
 	}
-	if p, ok := SafeUnderlying(t).(*Pointer); ok {
-		switch u := SafeUnderlying(p.Base).(type) {
+	if p, ok := SafeUnderlying(instantiatedUnder(t)).(*Pointer); ok {
+		switch u := SafeUnderlying(instantiatedUnder(p.Base)).(type) {
 		case *Array:
 			return u.Elem
 		case *Slice:
@@ -1031,11 +1035,18 @@ func ssaIndexElemType(t Type) (tv Type) {
 	return ssaElemType(t)
 }
 
+// ssaChanElemType is the element type of a channel-typed value, with a generic
+// named channel's instantiation bound: `Q[int32]` is `chan int32`, not `chan T`.
+// Without the binding the element stayed a bare type parameter, which has no
+// layout: a receive through such a channel loaded nothing and printed an empty
+// value (stage4) while legacy printed the value, and the emitter's string
+// helper fell back to "i8" so clang rejected the store. Every channel-element
+// query in the compiler routes through here for that reason.
 func ssaChanElemType(t Type) (tv Type) {
 	if t == nil {
 		return nil
 	}
-	if ch, ok := SafeUnderlying(t).(*TCChan); ok {
+	if ch, ok := SafeUnderlying(instantiatedUnder(t)).(*TCChan); ok {
 		return ch.Elem
 	}
 	return nil
@@ -1055,10 +1066,10 @@ func ssaSliceOf(t Type) (tv Type) {
 	if t == nil {
 		return nil
 	}
-	if b, ok := SafeUnderlying(t).(*Basic); ok && b.Info&IsString != 0 {
+	if b, ok := SafeUnderlying(instantiatedUnder(t)).(*Basic); ok && b.Info&IsString != 0 {
 		return t
 	}
-	switch u := SafeUnderlying(t).(type) {
+	switch u := SafeUnderlying(instantiatedUnder(t)).(type) {
 	case *Slice:
 		// Slicing a slice keeps its type: there are no named slice types to
 		// strip, but a TYPE PARAMETER with a slice core type ([]T inside a

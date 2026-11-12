@@ -1732,6 +1732,19 @@ select send clause, both select receive forms and the unary receive), and it is
 pinned by `tests/restrictions/reject_chan_send_role.mx` and
 `reject_chan_recv_role.mx`.
 
+**Prerequisite fixed in the same round.** The phase-0c probe surfaced a second
+bilateral divergence, this one in the type machinery Edge stands on: every
+element-type query used `SafeUnderlying` without binding a generic named
+container's instantiation, so `Q[int32]` (where `type Q[T cmp.Ordered] chan T`)
+looked like `chan T`. A receive through it printed an empty value in stage4
+while legacy printed the number, a named generic slice indexed the same way,
+and the emitter's channel-element string helper fell back to `i8`. The four
+queries (`ssaChanElemType`, `ssaElemType`, `ssaIndexElemType` and the emitter's
+two channel helpers) now bind the instantiation, and the emitter's helpers
+route through the one SSA definition instead of four copies. Pinned by
+`tests/regressions/should_compile/chan_named_elem.mx` (channel, slice, map and
+the directional forms) on both compilers.
+
 Still open: the `Edge[In, Out]` builtin generic, `Sender T`/`Receiver T`, the
 two-value `chan`/`edge` declaration forms, affine ends, and spawn accepting an
 `Edge` or a bare end with agreement checking. Until those land, the tree still
@@ -1793,19 +1806,18 @@ next round starts at the first unfinished line rather than at the argument.
   the directional-channel machinery the runtime and the role checks need is
   already in the type system once the parameters are builtin rather than
   user-constrained.
-- **Prerequisite bug, found with the probe.** A channel whose type is a generic
-  instantiation loses its instantiation before the operation is built: with
-  `type Q[T cmp.Ordered] chan T`, `var q Q[int32]`, the send's channel type
-  prints `main.Q` (not `main.Q[int32]`) and the receive loads an unbound
-  element. Consequence today: `<-q` yields an empty value in stage4 while the
-  legacy compiler yields the number (measured on both). A first attempt to bind
-  the instantiation inside `ssaChanElemType` moved the failure into the IR
-  (`icmp ne i32 %t18, 9` with `%t18 : i8`) instead of fixing the value's type,
-  so it was reverted; the trace is recorded here because it is the exact place
-  the next attempt starts: **the variable's/conversion's SSA type is the
-  generic origin without TArgs**, not the receive's element extraction.
-  Edge must not be built on unresolved generic channel types; whichever
-  representation 22.2 chooses, this is fixed first.
+- **Prerequisite bug, found with the probe and FIXED (21.5).** A channel whose
+  type is a generic instantiation lost its instantiation at every element-type
+  query: with `type Q[T cmp.Ordered] chan T`, `var q Q[int32]` was treated as
+  `chan T`, `<-q` yielded an empty value in stage4 while legacy yielded the
+  number, and the emitter's string fallback turned it into an `i8` store once
+  the SSA side was bound. The fix was to bind `instantiatedUnder` in the four
+  element-type definitions and delete the parallel copies in the emitter; the
+  fixture `chan_named_elem.mx` covers channel, slice, map and directional
+  forms on both compilers. The first attempt (binding only at the receive call
+  site) moved the failure into the IR and was reverted; it is recorded because
+  "fix the query, not the call site" is the lesson. Edge now starts on
+  resolved types.
 - The universe is built from `src/builtin/builtin.mx` plus the `Typ` table
   (`ir_util.mx`/`ir_typecheck.mx`/`ir_iface.mx`). A builtin generic type is a
   universe entry with `TParams` and a marker that exempts it from the

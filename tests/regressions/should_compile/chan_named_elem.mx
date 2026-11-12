@@ -1,0 +1,62 @@
+// A container's element type survives its NAME and its INSTANTIATION.
+//
+// `type Q[T cmp.Ordered] chan T`, `type S[T cmp.Ordered] []T` and
+// `type M[T cmp.Ordered] map[int32]T` are ordinary values. An operation on one
+// must see the element the instantiation binds, not the bare type parameter,
+// which has no layout: stage4 used to print empty values for all three while
+// legacy printed the numbers (a bilateral divergence in exactly the machinery
+// the phase-0c ownership types stand on), and the emitter's fallback turned a
+// channel receive into an i8 store that clang rejected.
+//
+//:wasmtest skip
+package main
+
+import (
+	"cmp"
+	"fmt"
+)
+
+type Q[T cmp.Ordered] chan T
+type S[T cmp.Ordered] []T
+type M[T cmp.Ordered] map[int32]T
+
+type Sender[T cmp.Ordered] chan<- T
+type Receiver[T cmp.Ordered] <-chan T
+
+func sendThrough(c Q[int32]) {
+	c <- 5
+}
+
+func main() {
+	select {
+	case <-shutdown:
+		return
+	default:
+	}
+	var q Q[int32] = Q[int32](chan int32{:1})
+	sendThrough(q)
+	if (<-q) != 5 {
+		panic("generic named channel lost its element")
+	}
+
+	var s S[int32] = S[int32]([]int32{:2})
+	s[0] = 7
+	if s[0] != 7 {
+		panic("generic named slice lost its element")
+	}
+
+	var m M[int32] = M[int32](map[int32]int32{})
+	m[3] = 11
+	if m[3] != 11 {
+		panic("generic named map lost its value type")
+	}
+
+	ch := chan int32{:1}
+	var ps Sender[int32] = Sender[int32](ch)
+	var pr Receiver[int32] = Receiver[int32](ch)
+	ps <- 42
+	if (<-pr) != 42 {
+		panic("directional named channel lost its element")
+	}
+	fmt.Println("named element types ok")
+}
