@@ -1708,6 +1708,20 @@ Not yet demonstrated, and why:
   decode. Equal bytes mean the decoder starts at the wrong offset; different
   bytes mean the saved pointer is stale.
 
+  **Round 10: the stalling declaration is a GENERIC FUNCTION.** Counting the
+  declarations of `internal/bytealg` through the scope-population loop prints
+  0..19 and then stops inside declaration 20, which in that file is the first
+  generic function (`HashStr[T []byte]`; `HashStrRev`, `IndexRabinKarp` and
+  `LastIndexRabinKarp` follow). The old binary typechecks the same file in
+  under a second, so the regression is in how the current sources handle a
+  generic function DECLARATION, not in parsing (the scanner's own no-progress
+  detector never fired) and not in the alias pass. A standalone reproduction is
+  not available through the normal build path - even a non-main package pulls
+  the runtime closure, so bytealg is always typechecked first - and a git
+  worktree at an older commit cannot simply reuse the current `legacy/moxie`
+  binary (it is linked against its own checkout's runtime libs), so the next
+  bisect point has to build legacy inside the worktree.
+
   **Round 9: located in the typecheck pass, between the builtin-String
   injection and the alias pass.** Instrumenting `typeCheckPkg` with stage
   markers showed `internal/bytealg` printing `parsed` and `inj` and then never
