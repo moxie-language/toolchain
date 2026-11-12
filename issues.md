@@ -1826,8 +1826,19 @@ strings, so the protocol should have run.
 - `test_cordn_chat_messages_cordn_peer` still passes: `SENT hello from cordn`,
   `READ hello from smesh`, `SENT cordn hears you`, `PASS`.
 
-**Next step.** Get a backtrace with the arena state at the failing frame
-(`gdb`, `frame 2`, print the arena the string came from), and decide whether the
-fast path `codecRetStable` or the codec encode answered "stable" for a
-frame-backed string. That decision is the one bug between here and a
-self-hosting compiler.
+**Two experiments ruled out the obvious suspects** (both reverted):
+
+- `codecRetStable` forced to answer false, so every return takes the full codec
+  protocol: the compiler still crashes at the same frame in `bytesConcatMove`.
+  The fast path is not what aliases this string.
+- `codecIsStableAddr` forced to answer false, so nothing is ever aliased and
+  everything is copied: it still crashes, at a slightly different address in the
+  same function. So the value is already dead *before* the copy is attempted -
+  the callee's arena was released while the string was still live, and the
+  question is where that release happens relative to the read, not whether the
+  encoder aliased.
+
+That narrows the next step: instrument the arena lifecycle around
+`mxutil.JoinPath` / `bytesConcatMove` (which arena the buffer came from, which
+call released it, and the arena stack depth at each point) rather than the codec
+policy. `gdb` is available and gives usable frames, which makes this tractable.
