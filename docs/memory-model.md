@@ -1748,6 +1748,13 @@ states. The role check above is rule 5 of D19 and does not close rule 3.
   compiler: build the generation with `./mxc-stage4` and compare against the
   same chain on unmodified runtime sources, which is how the pre-existing
   failure is separated from a regression.
+- Narrowed on 2026-11-12 with `tclen` prints in `typeCheckPkg`: for
+  `internal/bytealg` the rewrites leave 9,285 bytes of source (const 9,272,
+  shutdown 9,272, chan 9,272, slice 9,285, duppkg 9,285) and the runaway starts
+  in `syntax.ParseBytesArena`, which consumes hundreds of megabytes for that
+  source in the broken generation. The rewrites are not implicated, the parser
+  (or what it calls) is. Recorded so the next attempt starts at the parser
+  rather than at the arena.
 - `sysroot/runtime_go.bc` is gitignored and must be re-baked
   (`<compiler> build-runtime`) after any runtime change, or applications link
   the previous runtime and fail with undefined symbols.
