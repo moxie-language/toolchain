@@ -1708,6 +1708,28 @@ Not yet demonstrated, and why:
   decode. Equal bytes mean the decoder starts at the wrong offset; different
   bytes mean the saved pointer is stale.
 
+  **Round 11: the cost is the SEEN SET, not the declaration.** Running the slow
+  compiler under gdb and interrupting it mid-package caught it inside
+  `codecSeenLookup`, reached from `codecEncodeMap` -> `TCConst` -> `TCPackage` ->
+  `Scope` -> ... : the compiler is encoding one package's type universe on a
+  RETURN, and the encode's seen-set lookup is a LINEAR SCAN over up to
+  `codecSeenCap` (65536) entries - one scan per registered pointer, and the
+  encoder registers every struct FIELD address. Two attempts were made and
+  measured: an open-addressing index over the same entries (still governed by
+  the cap, and a saturated table falls back to the scan), and sizing cap and
+  index for the graph (2^18 entries, 2^19 slots). Both still left the compile at
+  ~6 minutes on `internal/bytealg`, while a variant that grew a slice index took
+  52 s and then died with "arena: region table full" - so the index DOES attack
+  the right cost, but the registration DENSITY is the real problem: the universe
+  graph legitimately holds more pointers than any sane table, because every
+  field of every struct is registered as its own entry.
+
+  The next fix is therefore structural, not a bigger table: register only the
+  addresses that a back-reference can actually land on (object bases and the
+  field addresses a decoded pointer may target), and re-verify the two cases the
+  current comment cites (`crypto/ecdh.PrivateKey` field aliasing and fmt's
+  `buf *[]byte`). That both shrinks the table and keeps the quadratic term out.
+
   **Round 10: the stalling declaration is a GENERIC FUNCTION.** Counting the
   declarations of `internal/bytealg` through the scope-population loop prints
   0..19 and then stops inside declaration 20, which in that file is the first
