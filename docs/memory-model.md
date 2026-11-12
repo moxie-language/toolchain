@@ -1708,6 +1708,22 @@ Not yet demonstrated, and why:
   decode. Equal bytes mean the decoder starts at the wrong offset; different
   bytes mean the saved pointer is stale.
 
+  **Round 16: the return path is NOT slow per return.** A micro-benchmark run
+  on the working compiler's runtime - 200,000 calls returning `*Node` (a struct
+  with an int64, a pointer and a slice) - completes in 0.18 s of user time:
+  about **0.9 us per return**, including the encode/decode of the graph. So the
+  per-root figure above (~4 ms) cannot be the return protocol itself; the
+  compiler's cost must come from a FEW ENORMOUS walks (a package's scope graph
+  reaching the whole universe), which is a graph-size problem, not a per-return
+  one. That also explains why every per-lookup and per-return optimisation
+  measured above changed nothing: the sampled function is where a multi-million
+  node walk happens, not where a per-return overhead lives.
+
+  The measurement that decides this: the MAXIMUM seen-set size reached per
+  package. If it is in the hundreds of thousands, the walk is the universe and
+  the fix is to stop copying it (alias it, or keep the built types in the root
+  arena); if it is small, the cost is somewhere else entirely.
+
   **Round 15: the numbers, all of them in one place.** For package `array`:
   7,181 encode ROOTS (one per returned value) and 330,620 encoder entries, so an
   average walk is 46 nodes - a few big walks (the scope graph) among thousands
