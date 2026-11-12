@@ -1,0 +1,44 @@
+// Phase 0c, first slice: the declared channel ownership types exist as BUILTIN
+// generics in the universe, on both compilers.
+//
+//   Sender[T]   = chan<- T   (one writer)
+//   Receiver[T] = <-chan T   (one reader)
+//   Edge[In, Out] = { Recv Receiver[In]; Send Sender[Out] }
+//
+// The declaration form (`edge[In, Out]{depth}`) and spawn agreement are the
+// next slice; this one pins that the types are predeclared (no import), that a
+// channel converts to either directional end, that an instantiated Edge field
+// carries the instantiation (a send through e.Send arrives at e.Recv), and that
+// the operation-level role check applies through an Edge field on both
+// compilers.
+//
+//:wasmtest skip
+package main
+
+import "fmt"
+
+func main() {
+	select {
+	case <-shutdown:
+		return
+	default:
+	}
+	ch := chan int32{:1}
+	var e Edge[int32, int32]
+	e.Send = Sender[int32](ch)
+	e.Recv = Receiver[int32](ch)
+	e.Send <- 42
+	if (<-e.Recv) != 42 {
+		panic("Edge field lost its instantiated element type")
+	}
+
+	// A one-way handoff: the writer end alone, then the reader end alone.
+	out := chan int64{:1}
+	var w Sender[int64] = Sender[int64](out)
+	w <- 7
+	var r Receiver[int64] = Receiver[int64](out)
+	if (<-r) != 7 {
+		panic("directional end lost its element")
+	}
+	fmt.Println("edge types ok")
+}

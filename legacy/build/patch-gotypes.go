@@ -73,6 +73,7 @@ func main() {
 	patchMoxieSliceBuiltins(dstDir)
 	patchTypeOfBuiltin(dstDir)
 	patchRemovePredeclaredTypes(dstDir)
+	patchChannelOwnershipTypes(dstDir)
 	patchErrorString(dstDir)
 	patchPanicRecoverString(dstDir)
 	patchExportAccess(dstDir)
@@ -672,6 +673,78 @@ func patchRemovePredeclaredTypes(dir string) {
 	src = mustReplace(f, src,
 		"\t\tuniverseAnyAlias.setColor(black)\n\t\t_ = NewAlias(universeAnyAlias, universeAnyNoAlias.Type().Underlying()) // Link TypeName and Alias\n\t\tdef(universeAnyAlias)",
 		"\t\tuniverseAnyAlias.setColor(black)\n\t\t_ = NewAlias(universeAnyAlias, universeAnyNoAlias.Type().Underlying()) // Link TypeName and Alias\n\t\t// Moxie: any is not predeclared - undefined")
+	mustWrite(f, src)
+}
+
+// patchChannelOwnershipTypes adds Moxie's declared channel ownership types to
+// the go/types universe: Sender[T] (chan<- T), Receiver[T] (<-chan T) and
+// Edge[In, Out] (the complementary pair). They are BUILTIN generics because a
+// user generic parameter must carry a concrete non-empty constraint, and
+// Edge's parameters must accept any element type; the exemption therefore
+// belongs to the declaration, in the universe, not to a special case at every
+// use site. The empty interface is used only as the internal constraint (the
+// type set of all types); Moxie's source-level ban on interface{} is about
+// user declarations, and it is why these cannot be written in builtin.mx.
+func patchChannelOwnershipTypes(dir string) {
+	f := filepath.Join(dir, "universe.go")
+	src := mustRead(f)
+
+	// Install after the basic-alias loop, still inside defPredeclaredTypes:
+	// the function continues with the `any` alias handling, so the end of the
+	// Typ loop is not the end of the function.
+	src = mustReplace(f, src,
+		"\tfor _, t := range basicAliases {\n\t\tdef(NewTypeName(nopos, nil, t.name, t))\n\t}",
+		"\tfor _, t := range basicAliases {\n\t\tdef(NewTypeName(nopos, nil, t.name, t))\n\t}\n\tdefChannelOwnershipTypes()")
+
+	src = src + `
+// defChannelOwnershipTypes installs Sender, Receiver and Edge (Moxie: the
+// declared channel ownership types of docs/memory-model.md, D19). The empty
+// interface is the internal constraint (all types); it is never named by user
+// code, which cannot spell it.
+func defChannelOwnershipTypes() {
+	con := &emptyInterface
+
+	// NewTypeName with a nil type is WHITE (colorFor(nil)); the universe's own
+	// names are black. Set the colour explicitly and leave the type nil so
+	// NewNamed installs the named type on the object (it only does so when the
+	// object has no type yet).
+	tpS := NewTypeParam(NewTypeName(nopos, nil, "T", nil), con)
+	senderTN := NewTypeName(nopos, nil, "Sender", nil)
+	senderTN.setColor(black)
+	sender := NewNamed(senderTN, NewChan(SendOnly, tpS), nil)
+	sender.SetTypeParams([]*TypeParam{tpS})
+	// def() sends an EXPORTED name to the unsafe package scope, and these
+	// three are exported names that must be predeclared, so insert directly.
+	Universe.Insert(senderTN)
+
+	tpR := NewTypeParam(NewTypeName(nopos, nil, "T", nil), con)
+	receiverTN := NewTypeName(nopos, nil, "Receiver", nil)
+	receiverTN.setColor(black)
+	receiver := NewNamed(receiverTN, NewChan(RecvOnly, tpR), nil)
+	receiver.SetTypeParams([]*TypeParam{tpR})
+	Universe.Insert(receiverTN)
+
+	in := NewTypeParam(NewTypeName(nopos, nil, "In", nil), con)
+	out := NewTypeParam(NewTypeName(nopos, nil, "Out", nil), con)
+	recvIn, err := Instantiate(nil, receiver, []Type{in}, false)
+	if err != nil {
+		panic(err)
+	}
+	sendOut, err := Instantiate(nil, sender, []Type{out}, false)
+	if err != nil {
+		panic(err)
+	}
+	fields := []*Var{
+		NewField(nopos, nil, "Recv", recvIn, false),
+		NewField(nopos, nil, "Send", sendOut, false),
+	}
+	edgeTN := NewTypeName(nopos, nil, "Edge", nil)
+	edgeTN.setColor(black)
+	edge := NewNamed(edgeTN, NewStruct(fields, []string{"", ""}), nil)
+	edge.SetTypeParams([]*TypeParam{in, out})
+	Universe.Insert(edgeTN)
+}
+`
 	mustWrite(f, src)
 }
 

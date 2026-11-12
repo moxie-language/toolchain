@@ -291,7 +291,49 @@ func buildUniverse() (u *UniverseState) {
 	s.Insert(newBuiltin("pop", BuiltinPop))
 	s.Insert(newBuiltin("resize", BuiltinResize))
 	s.Insert(newBuiltin("__shutdown", BuiltinShutdown))
+	installChannelOwnershipTypes(s)
 	return u
+}
+
+// Sender[T] and Receiver[T] are the directional ends of one one-way ring, and
+// Edge[In, Out] is the declared complementary pair (D19, section 4).
+//
+// These are BUILTIN generics, not declarations in a package, for two reasons.
+// Moxie requires a user generic parameter to carry a concrete non-empty
+// constraint, and Edge's parameters must accept any element type, so the
+// constraint exemption has to be a property of the builtin declaration rather
+// than a special case at every use site. And D19 rule 2 says a user-declared
+// struct with the same field shape must NOT satisfy a spawn parameter of type
+// Edge: identity, not shape, is what the compiler will check.
+func newOwnershipEnd(s *Scope, name string, dir TCChanDir) (n *Named) {
+	tp := NewTypeParam(NewTypeName(nil, "T", nil), nil)
+	tn := NewTypeName(nil, name, nil)
+	n = NewNamed(tn, nil)
+	n.TParams = []*TypeParam{tp}
+	n.Under = NewTCChan(dir, tp)
+	s.Insert(tn)
+	return
+}
+
+func installChannelOwnershipTypes(s *Scope) {
+	sender := newOwnershipEnd(s, "Sender", TCSendOnly)
+	receiver := newOwnershipEnd(s, "Receiver", TCRecvOnly)
+	in := NewTypeParam(NewTypeName(nil, "In", nil), nil)
+	out := NewTypeParam(NewTypeName(nil, "Out", nil), nil)
+	edgeName := NewTypeName(nil, "Edge", nil)
+	edge := NewNamed(edgeName, nil)
+	edge.TParams = []*TypeParam{in, out}
+	// The field types are instances of the two ends at the edge's own
+	// parameters: Send is a chan<- Out and Recv a <-chan In. They are built as
+	// Named copies carrying TArgs so the existing instantiation binding
+	// (instantiatedUnder) reaches the channel element.
+	recvIn := (&Named{Obj: receiver.Obj, Under: receiver.Under, TParams: receiver.TParams, TArgs: []Type{in}})
+	sendOut := (&Named{Obj: sender.Obj, Under: sender.Under, TParams: sender.TParams, TArgs: []Type{out}})
+	edge.Under = NewTCStruct([]*TCVar{
+		NewTCField(nil, "Recv", recvIn, false),
+		NewTCField(nil, "Send", sendOut, false),
+	}, []string{"", ""})
+	s.Insert(edgeName)
 }
 
 

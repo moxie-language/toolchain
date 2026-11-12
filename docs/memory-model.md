@@ -1746,9 +1746,41 @@ route through the one SSA definition instead of four copies. Pinned by
 the directional forms) on both compilers, and the stdlib test suite passes 11 of
 11 with the change.
 
-Still open: the `Edge[In, Out]` builtin generic, `Sender T`/`Receiver T`, the
-two-value `chan`/`edge` declaration forms, affine ends, and spawn accepting an
-`Edge` or a bare end with agreement checking. Until those land, the tree still
+**Builtin ownership types (22.3 step 2) landed.** `Sender[T]`, `Receiver[T]`
+and `Edge[In, Out]` are now PREDECLARED generic types in both compilers, with
+no import and no user constraint:
+
+    Sender[T]     chan<- T
+    Receiver[T]   <-chan T
+    Edge[In, Out] struct { Recv Receiver[In]; Send Sender[Out] }
+
+stage4 constructs them in `pkg/types`' `buildUniverse`; legacy installs them in
+the patched `go/types` universe from `legacy/build/patch-gotypes.go`. Because
+the underlying types are ordinary directional channels and a two-field struct,
+the operation-level role check applies through `e.Send`/`e.Recv` unchanged, and
+an instantiated field carries its instantiation (pinned by a send through
+`e.Send` arriving at `e.Recv` on both compilers).
+
+Two things learned while installing them, recorded for the next reader:
+
+- `go/types`' `def()` routes an EXPORTED name to the unsafe package scope and
+  asserts the object is black. These names are exported and must be
+  predeclared, so the legacy patch sets the object colour explicitly
+  (`NewTypeName` with a nil type is white) and inserts into `Universe`
+  directly. Leaving the placeholder type non-nil instead (to get a black
+  object) silently kept the object's type at `invalid`, which type-checked as
+  a generic type but panicked the SSA builder with "no types.Object for
+  ast.Ident".
+- Package-level declarations named `Edge`/`Sender` are legal in both compilers
+  (the shadowing rule governs inner scopes), so `internal/profile.Edge` and
+  `crypto/hpke.Sender` keep working and no exemption was needed. Inside those
+  packages the spelling means their own type, which is exactly why the
+  compiler keys the builtin identity on the universe object rather than on
+  the spelling.
+
+Still open: the `edge[In, Out]{depth}` declaration form with its runtime
+factory, the hidden pair linkage for `spawn`, affine ends, spawn agreement, and
+the two-value `chan` form. Until those land, the tree still
 passes the same channel handle to a child and to the parent, and nothing rejects
 two transfers of one send end: that is a live soundness hole, exactly as D19
 states. The role check above is rule 5 of D19 and does not close rule 3.
@@ -1877,13 +1909,12 @@ so the child receives capabilities, not a copy of the ring.
 
 ### 22.3 Order of work (each step independently testable)
 
-1. **Fix the instantiated-channel-type prerequisite** (22.1) in stage4, mirror
-   nothing in legacy (go/types is already correct), and pin it with a fixture
-   that a named generic channel's element survives a receive, a send and a
-   select arm. This is a compiler bug fix, not part of Edge.
-2. **Universe builtin generics**: register `Sender`, `Receiver`, `Edge` with
-   `TParams` and the constraint exemption; type-check `Sender[int32]` and
-   `Edge[Request, Response]` in a declaration; emit their layouts.
+1. **Fix the instantiated-channel-type prerequisite** — DONE (21.5), pinned by
+   `chan_named_elem.mx`.
+2. **Universe builtin generics** — DONE (21.5): `Sender`, `Receiver` and `Edge`
+   are predeclared in both compilers; `Sender[int32]`, `Edge[Request, Response]`
+   and the field roles type-check and run, pinned by `edge_types.mx` and
+   `reject_edge_field_role.mx`.
 3. **`edge[In, Out]{d}`** declaration and the runtime factory (two rings, four
    fixed-direction handles, pair record, root arena), with `spawn` accepting
    the child value and binding the breaker through the pair.
