@@ -1680,12 +1680,43 @@ bounded queue with the ring and deleting its sender/receiver task lists, the
 capacity-0 rule, `futex_waitv` for select, and the `Edge`/`Sender`/`Receiver`
 two-ring binding that phase 0c declares.
 
-### 21.5 Phase 0c — not started
+### 21.5 Phase 0c — role checks landed; the Edge half is open
 
-The channel-linearity type feature (`Edge[In, Out]` as a builtin generic,
-`Sender T`/`Receiver T`, affine ends, spawn agreement, operation-level role
-checks) has not been implemented. It is the largest remaining prerequisite for
-phase 6's ownership rule and for the declaration form section 4 specifies. The
-current tree still passes the same channel handle to a child and to the parent,
-and nothing in either compiler rejects two transfers of one send end. This is
-recorded as a live soundness hole, exactly as D19 states.
+Landed: **D19 rule 5, the operation-level role check**, in stage4. A send on a
+`<-chan T`, a receive from a `chan<- T`, and both shapes inside a select clause
+are compile errors naming the file and line:
+
+    main.mx:13: cannot send to receive-only channel
+    main.mx:20: cannot receive from send-only channel
+
+This was a real bilateral divergence, not a missing nicety: the legacy compiler
+gets the check from go/types and always rejected these programs, while stage4
+accepted them and emitted `PipeChanSendRaw` on the receive ring. The two halves
+of the stack disagreed about a program that type-checks at all. The fix is in
+`ssa_builder.mx` (`checkSendChan`/`checkRecvChan` at the send statement, the
+select send clause, both select receive forms and the unary receive), and it is
+pinned by `tests/restrictions/reject_chan_send_role.mx` and
+`reject_chan_recv_role.mx`.
+
+Still open: the `Edge[In, Out]` builtin generic, `Sender T`/`Receiver T`, the
+two-value `chan`/`edge` declaration forms, affine ends, and spawn accepting an
+`Edge` or a bare end with agreement checking. Until those land, the tree still
+passes the same channel handle to a child and to the parent, and nothing rejects
+two transfers of one send end: that is a live soundness hole, exactly as D19
+states. The role check above is rule 5 of D19 and does not close rule 3.
+
+### 21.6 Verification notes for a later reader
+
+- The compiler generation built BY a working stage4 is currently unstable in
+  this checkout (it runs away in typecheck and aborts). A generation built by
+  the checked-in `./mxc-stage4` works and is what the fixtures above ran with.
+  Do not conclude from a red bootstrap that a memory-model change broke the
+  compiler: build the generation with `./mxc-stage4` and compare against the
+  same chain on unmodified runtime sources, which is how the pre-existing
+  failure is separated from a regression.
+- `sysroot/runtime_go.bc` is gitignored and must be re-baked
+  (`<compiler> build-runtime`) after any runtime change, or applications link
+  the previous runtime and fail with undefined symbols.
+- The wasm target keeps its own transport (`spawn_wasm.mx`, SharedArrayBuffer);
+  the ring changes in this record are native-only by construction, and the
+  wasm channel paths were not touched.

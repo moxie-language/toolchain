@@ -1882,6 +1882,7 @@ func (fb *ssaFuncBuilder) buildStmt(s syntax.Stmt) {
 		ch := fb.buildExpr(ss.Chan)
 		val := fb.buildExpr(ss.Value)
 		if ch != nil && val != nil {
+			fb.checkSendChan(ch)
 			// The channel's ELEMENT type is the send's context, the same way a
 			// parameter type is for an argument: a send of *T into an
 			// interface-element channel must BOX the value. Without this the raw
@@ -2268,6 +2269,30 @@ func (fb *ssaFuncBuilder) requireBool(v SSAValue, what string) {
 		return
 	}
 	fb.errArgs("non-boolean condition in " | what | " statement")
+}
+
+// checkSendChan and checkRecvChan enforce D19 rule 5: the role is a property of
+// the operation, not only of the type. The legacy compiler gets both from
+// go/types; stage4 accepted a send on a receive-only end and a receive on a
+// send-only end, so the two halves of the stack disagreed about a program that
+// type-checks at all. Interfaces and type parameters are skipped for the same
+// reason checkAssignable skips them: an unresolved method set is not a role.
+func (fb *ssaFuncBuilder) checkSendChan(v SSAValue) {
+	if v == nil {
+		return
+	}
+	if ce, isChan := SafeUnderlying(v.SSAType()).(*TCChan); isChan && ce != nil && ce.Dir == TCRecvOnly {
+		fb.errArgs("cannot send to receive-only channel")
+	}
+}
+
+func (fb *ssaFuncBuilder) checkRecvChan(v SSAValue) {
+	if v == nil {
+		return
+	}
+	if ce, isChan := SafeUnderlying(v.SSAType()).(*TCChan); isChan && ce != nil && ce.Dir == TCSendOnly {
+		fb.errArgs("cannot receive from send-only channel")
+	}
 }
 
 // checkAssignable reports a value that cannot be assigned to the target type,
@@ -4483,6 +4508,7 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 				// *http2startPushRequest: the raw pointer was stored into the
 				// interface's 2-word slot.
 				if state.Chan != nil && state.Send != nil {
+					fb.checkSendChan(state.Chan)
 					if ce, isChan := SafeUnderlying(state.Chan.SSAType()).(*TCChan); isChan && ce != nil && ce.Elem != nil {
 						state.Send = fb.coerceSendValue(state.Send, ce.Elem)
 					}
@@ -4495,11 +4521,13 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 				if chanExpr != nil {
 					state.Dir = SelectDirRecv
 					state.Chan = fb.buildExpr(chanExpr)
+					fb.checkRecvChan(state.Chan)
 				}
 			case *syntax.ExprStmt:
 				if op, ok2 := comm.X.(*syntax.Operation); ok2 && op.Y == nil && op.Op == token.Recv {
 					state.Dir = SelectDirRecv
 					state.Chan = fb.buildExpr(op.X)
+					fb.checkRecvChan(state.Chan)
 				}
 			}
 		}
@@ -5605,6 +5633,7 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 			}
 		}
 		if op2 == OpArrow {
+			fb.checkRecvChan(xv3)
 			u2 := &SSAUnOp{Op: OpArrow, X: xv3}
 			u2.typ = ssaChanElemType(xv3.SSAType())
 			u2.name = fb.nextName()
