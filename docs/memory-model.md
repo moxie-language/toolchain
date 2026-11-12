@@ -1708,6 +1708,14 @@ Not yet demonstrated, and why:
   decode. Equal bytes mean the decoder starts at the wrong offset; different
   bytes mean the saved pointer is stale.
 
+  Growth alone is NOT the trigger: a 64-item bundle of pointer+slice+string
+  elements returned from a function (a frame far past the codec's first
+  allocation, so `push` moves the buffer) round-trips intact on the current
+  compiler, printing `grow return ok 189` (with the known arena-escape note for
+  an unknown-extent pointee). So the suspect is narrower than "returns that
+  grow": it is this graph - one with interfaces whose dynamic types are
+  package-level named types, which is what the universe is made of.
+
   A second fact that constrains the repair: the older working binaries in
   `/tmp` (10-11 November) cannot compile the present sources at all - they
   enforce "':=' declaration inside a loop in a self-mutating method" as an
