@@ -1708,7 +1708,16 @@ Not yet demonstrated, and why:
   decode. Equal bytes mean the decoder starts at the wrong offset; different
   bytes mean the saved pointer is stale.
 
-  **Root cause found.** The trigger is the hand-built ownership-type graph
+  **CLEARED in round 8.** `installChannelOwnershipTypes` now runs from
+  `SetUniverseGlobals`, after the universe has been handed out, instead of
+  inside `buildUniverse`. A compiler built by `legacy/moxie` from these sources
+  starts and compiles; it no longer dies in `codecDecodeValue`. The next
+  blocker is the parse runaway this record already names: the new compiler
+  spends 22 minutes at 89% CPU on `internal/bytealg` before the build times out,
+  which is the `syntax.ParseBytesArena` blow-up described above, not a codec
+  fault.
+
+  **Root cause found (round 8).** The trigger is the hand-built ownership-type graph
   installed by `installChannelOwnershipTypes`. With that call disabled the
   compiler built by `legacy/moxie` starts and compiles (it reached
   `internal/bytealg` instead of dying at start-up); with only `Edge` left out of
