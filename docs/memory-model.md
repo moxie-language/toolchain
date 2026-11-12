@@ -1690,6 +1690,24 @@ Not yet demonstrated, and why:
   side (print the tag written for each field of the 224-byte struct), which
   names the branch that writes 2.
 
+  A per-field trace on the ENCODE side settles where the fault is NOT: field 0
+  (`Scope`, kind 21 Pointer, 8 bytes) is encoded with tag **0**, `codecTagPtr`,
+  exactly as the decoder expects, and the fields are the same eight in the same
+  order. The decoder nevertheless reads 2 for that position, and every encode
+  position read as 0 because the encoder appends through `push` rather than
+  advancing `cb.pos`. Conclusion: what the decoder is handed is not the buffer
+  the encoder filled, or not the same window of it - the defect is in the RETURN
+  buffer handoff (`ir_deepcopy` saves the data pointer and length after the
+  encode loop, restores the caller arena, then rebuilds a CodecBuf from them),
+  most likely a stale slice when the encode GREW the buffer. That is exactly
+  why a small graph passes (`codecEnsure` never grows) and the universe graph
+  fails, and it is the same region phase 1 (flat return copy) rewrites.
+
+  The next experiment is a byte-window comparison: print the first eight bytes
+  and the length at the end of the encode, and again at the entry of the failing
+  decode. Equal bytes mean the decoder starts at the wrong offset; different
+  bytes mean the saved pointer is stale.
+
   A second fact that constrains the repair: the older working binaries in
   `/tmp` (10-11 November) cannot compile the present sources at all - they
   enforce "':=' declaration inside a loop in a self-mutating method" as an
