@@ -50,18 +50,14 @@ func (e *irEmitter) funcNeedsCodec(f *SSAFunction) (ok bool) {
 	}
 	if f.Pkg != nil && f.Pkg.Pkg != nil {
 		path := f.Pkg.Pkg.Path
-		// Mirrors legacy funcNeedsArenaCopy: no "main" exemption by PATH. User
-		// code lives in "main", and a main function that builds a
-		// pointer-containing value needs the same arena and return encode as
-		// any other or the caller reads the popped frame it was built in.
-		// The compiler's own bootstrap passes -no-main-arena instead, because
-		// the path cannot tell the two mains apart. Every other build - user
-		// programs and test binaries alike - includes main.
-		if path == "runtime" || path == "unsafe" || path == "syscall" || path == "os" ||
-			mxutil.HasPrefix(path, "moxielang.dev/pkg/") {
-			return false
-		}
-		if bst != nil && bst.noMainArena && path == "main" {
+		// ONLY runtime and unsafe are exempt, and that is not a policy
+		// exemption: they ARE the arena system, so an FnArenaPush at their
+		// entry would recurse through alloc into itself. Every other package -
+		// the toolchain's own infrastructure packages included, package main
+		// included, os and syscall included - gets the frame arena and the
+		// return relocation exactly like user code. Mirrors legacy
+		// funcNeedsArenaCopy.
+		if path == "runtime" || path == "unsafe" {
 			return false
 		}
 	}

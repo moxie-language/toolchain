@@ -4674,20 +4674,16 @@ func funcNeedsArenaCopy(fn *ssa.Function, excludeMain bool) bool {
 		return false
 	}
 	path := fn.Pkg.Pkg.Path()
-	// No "main" exemption by PATH. User code is always "main", and a main
-	// function that builds a pointer-containing value needs the same arena and
-	// return encode as any other: without it the value is never relocated and
-	// the caller reads a popped frame (measured - an asn1-parsed *big.Int read
-	// `bits 0` in the caller and 73 inside the parser). The compiler's own
-	// main is not exempt either; when it cannot afford the cost, the bootstrap
-	// passes -no-main-arena and this flag does what the path check used to do.
-	// The path cannot tell the two mains apart, which is why the decision is a
-	// flag defaulting to inclusion for every program the compiler builds.
-	if path == "runtime" || path == "unsafe" || path == "syscall" || path == "os" ||
-		strings.HasPrefix(path, "moxielang.dev/pkg/") {
-		return false
-	}
-	if excludeMain && path == "main" {
+	// ONLY runtime and unsafe are exempt, and that is not a policy exemption:
+	// they ARE the arena system, so an FnArenaPush at their entry would recurse
+	// through alloc into itself. Every other package - the toolchain's own
+	// infrastructure packages (mxutil, mxregexp, ...) included, package main
+	// included, os and syscall included - gets the frame arena and the return
+	// relocation exactly like user code. The old list here skipped
+	// moxielang.dev/pkg/ entirely, which is why a string returned from
+	// mxutil.JoinPath arrived in a caller that then wrote past the arena it had
+	// been built in.
+	if path == "runtime" || path == "unsafe" {
 		return false
 	}
 	sig := fn.Signature

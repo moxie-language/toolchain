@@ -12,6 +12,76 @@ import (
 	. "moxielang.dev/pkg/types"
 )
 
+// rootStrMap / rootFlagMap / rootPkgMap build a map in the ROOT arena and store
+// it through out.
+//
+// They write through a POINTER rather than returning the map. A map is not a
+// pointer or a slice, so the return protocol cannot alias it: it encodes and
+// decodes, i.e. deep-copies, and the returned map lands in the CALLER's arena
+// again. Writing the field directly is the only way to leave the map where it
+// was made.
+//
+// Every map stored into buildState must be made this way. `bst` is a package
+// pointer, and a field store through a pointer is not relocated by any
+// store-back protocol (only method receivers are tracked), so a map built in a
+// frame leaves the holder with its header and buckets in memory that is
+// released when that frame returns - the SIGSEGV in hashmapContentGet via
+// pkgExportHash, where the map header itself was unmapped.
+func rootStrMap(out *map[string]string) {
+	prev := runtime.CurrentArena()
+	runtime.SovereignSetArena(runtime.RootArena())
+	*out = map[string]string{}
+	runtime.SovereignRestoreArena(prev)
+}
+
+func rootFlagMap(out *map[string]bool) {
+	prev := runtime.CurrentArena()
+	runtime.SovereignSetArena(runtime.RootArena())
+	*out = map[string]bool{}
+	runtime.SovereignRestoreArena(prev)
+}
+
+func rootPkgMap(out *map[string]*pkgInfo) {
+	prev := runtime.CurrentArena()
+	runtime.SovereignSetArena(runtime.RootArena())
+	*out = map[string]*pkgInfo{}
+	runtime.SovereignRestoreArena(prev)
+}
+
+// keepStrs copies a string slice into the ROOT arena, for the same reason.
+func keepStrs(ss []string) (out []string) {
+	if len(ss) == 0 {
+		return nil
+	}
+	prev := runtime.CurrentArena()
+	runtime.SovereignSetArena(runtime.RootArena())
+	out = []string{:len(ss)}
+	copy(out, ss)
+	runtime.SovereignRestoreArena(prev)
+	return out
+}
+
+// keepStr copies s into the ROOT arena and returns the copy.
+//
+// buildState is reached through the package pointer `bst`, and a field store
+// through a pointer is not relocated by any store-back protocol - only METHOD
+// RECEIVERS are tracked. A string built in a frame and stored here therefore
+// leaves the struct holding a pointer into memory that is released when that
+// frame returns: the next reader gets a dangling string, and the cache-dir path
+// crashed on exactly that (a dead 8-byte build id read back out of bst).
+func keepStr(s string) (out string) {
+	if s == "" {
+		return ""
+	}
+	prev := runtime.CurrentArena()
+	runtime.SovereignSetArena(runtime.RootArena())
+	cp := []byte{:len(s)}
+	copy(cp, s)
+	out = string(cp)
+	runtime.SovereignRestoreArena(prev)
+	return out
+}
+
 // buildState holds all build-configuration and persistent state that
 // outlives individual package compilations. Allocated once at init and
 // never reassigned; fields are mutated through the pointer.
@@ -132,7 +202,16 @@ var bst *buildState
 
 func initBuildState() {
 	if bst == nil {
+		// The holder lives for the process, so it must live in the ROOT arena.
+		// Built in whatever arena happens to be current, it inherits that
+		// arena's lifetime, and every field written later points into memory
+		// that may already be gone - the family of crashes this file hit while
+		// a legacy-built compiler was being brought up (a dead build id, then a
+		// dead map header, then a dead region table).
+		prev := runtime.CurrentArena()
+		runtime.SovereignSetArena(runtime.RootArena())
 		bst = &buildState{}
+		runtime.SovereignRestoreArena(prev)
 	}
 }
 
@@ -1050,7 +1129,7 @@ func compilerHash() (s string) {
 	}
 	if total == 0 {
 		bst.selfHash = "unknown"
-		return bst.selfHash
+		return "unknown"
 	}
 	acc := []byte{:total}
 	off := int32(0)
@@ -1058,8 +1137,15 @@ func compilerHash() (s string) {
 		mxutil.CopyAt(acc, off, part)
 		off += int32(len(part))
 	}
-	bst.selfHash = fnvHash(acc)
-	return bst.selfHash
+	// Return the value THIS frame produced, not the copy read back out of the
+	// holder: the return protocol relocates a result into the caller's arena,
+	// and it only knows about the result. `bst` is reached through a package
+	// pointer, whose field stores are not relocated (only method receivers are
+	// tracked for store-back), so re-reading the field here handed the caller a
+	// pointer into this frame's arena - which is released on the way out.
+	s = keepStr(fnvHash(acc))
+	bst.selfHash = s
+	return s
 }
 
 // compilerBuildID identifies the running binary by content. It is folded into
@@ -1075,16 +1161,19 @@ func compilerBuildID() (s string) {
 		return bst.buildID
 	}
 	if data, ok := mxutil.ReadFile("/proc/self/exe"); ok && len(data) > 0 {
-		bst.buildID = fnvHash(data)
-		return bst.buildID
+		s = keepStr(fnvHash(data))
+		bst.buildID = s
+		return s
 	}
 	if len(os.Args) > 0 && os.Args[0] != "" {
 		if data, ok := mxutil.ReadFile(os.Args[0]); ok && len(data) > 0 {
-			bst.buildID = fnvHash(data)
-			return bst.buildID
+			s = keepStr(fnvHash(data))
+			bst.buildID = s
+			return s
 		}
 	}
 	bst.buildID = "nobuild"
+	return "nobuild"
 	return bst.buildID
 }
 
@@ -1654,7 +1743,7 @@ func loadManifest(root string) {
 	if root != "" {
 		if data, ok := mxutil.ReadFile(mxutil.JoinPath(root, "MANIFEST")); ok {
 			bst.manifestDir = root
-			bst.manifestPins = map[string]string{}
+			rootStrMap(&bst.manifestPins)
 			for _, e := range parseManifestText(string(data)) {
 				bst.manifestPins[e.repo] = e.ref
 			}
@@ -1665,7 +1754,7 @@ func loadManifest(root string) {
 		if migrateModuleFile(root) {
 			if data, ok := mxutil.ReadFile(mxutil.JoinPath(root, "MANIFEST")); ok {
 				bst.manifestDir = root
-				bst.manifestPins = map[string]string{}
+				rootStrMap(&bst.manifestPins)
 				for _, e := range parseManifestText(string(data)) {
 					bst.manifestPins[e.repo] = e.ref
 				}
@@ -1676,7 +1765,7 @@ func loadManifest(root string) {
 	if bst.manifestPins != nil {
 		return
 	}
-	bst.manifestPins = map[string]string{}
+	rootStrMap(&bst.manifestPins)
 	if rt := getenv("MOXIEROOT"); rt != "" && rt != root {
 		data, ok := mxutil.ReadFile(mxutil.JoinPath(rt, "MANIFEST"))
 		if ok {
@@ -1720,7 +1809,7 @@ func resolvePinnedRepo(pkgPath, repo, ref string) (dir string) {
 		fatal("MANIFEST: " | repo | " has no ref " | ref)
 	}
 	if bst.manifestCommits == nil {
-		bst.manifestCommits = map[string]string{}
+		rootStrMap(&bst.manifestCommits)
 	}
 	bst.manifestCommits[repo] = gitCapture([]string{"-C", wt, "rev-parse", "HEAD"}, mxutil.JoinPath(mpath, "cache/pin"))
 	if len(pkgPath) <= len(repo) {
@@ -2520,7 +2609,7 @@ func pkgCacheKey(dir string, files []string) (s string) {
 
 func pkgHash(p *pkgInfo) (s string) {
 	if bst.pkgKeyMemo == nil {
-		bst.pkgKeyMemo = map[string]string{}
+		rootStrMap(&bst.pkgKeyMemo)
 	}
 	if h, ok := bst.pkgKeyMemo[p.path]; ok {
 		return h
@@ -2563,7 +2652,7 @@ func pkgHash(p *pkgInfo) (s string) {
 		// whatever order those reached; the key must not depend on that.
 		if dp, found := bst.pkgByPath[imp]; found && dp != nil && dp != p {
 			if bst.pkgHashBusy == nil {
-				bst.pkgHashBusy = map[string]bool{}
+				rootFlagMap(&bst.pkgHashBusy)
 			}
 			if !bst.pkgHashBusy[imp] {
 				bst.pkgHashBusy[imp] = true
@@ -2628,7 +2717,7 @@ func pkgHash(p *pkgInfo) (s string) {
 // masked by any warm cache, which is how it survived every gate.
 func pkgExportHash(p *pkgInfo) (s string) {
 	if bst.pkgExportKeyMemo == nil {
-		bst.pkgExportKeyMemo = map[string]string{}
+		rootStrMap(&bst.pkgExportKeyMemo)
 	}
 	if h, ok := bst.pkgExportKeyMemo[p.path]; ok {
 		return h
@@ -2652,7 +2741,7 @@ func pkgExportHash(p *pkgInfo) (s string) {
 		}
 		if dp, found := bst.pkgByPath[imp]; found && dp != nil && dp != p {
 			if bst.pkgExportBusy == nil {
-				bst.pkgExportBusy = map[string]bool{}
+				rootFlagMap(&bst.pkgExportBusy)
 			}
 			if !bst.pkgExportBusy[imp] {
 				bst.pkgExportBusy[imp] = true
@@ -4023,7 +4112,7 @@ func (r *resolver) walk(path, importer string) {
 	r.order = mxutil.Ensure(r.order, 1)
 	push(r.order, pkg)
 	if bst.pkgByPath == nil {
-		bst.pkgByPath = map[string]*pkgInfo{}
+		rootPkgMap(&bst.pkgByPath)
 	}
 	bst.pkgByPath[path] = pkg
 	bst.pkgByPath[pkg.path] = pkg
@@ -7384,7 +7473,7 @@ func measureDispFingerprints(pkgs []*pkgInfo) {
 	// next read of it a nil-arena panic (measured: the compiler self-build
 	// aborted after 43 packages, exactly when the map first grew).
 	if bst.pkgDispFingerprint == nil {
-		bst.pkgDispFingerprint = map[string]string{}
+		rootStrMap(&bst.pkgDispFingerprint)
 	}
 	for _, dp := range pkgs {
 		if dp.baked {
@@ -7427,7 +7516,7 @@ func measureDispFingerprints(pkgs []*pkgInfo) {
 // under-measuring would be a stale hit.
 func measureDispFingerprint(dp *pkgInfo) {
 	if bst.pkgDispFingerprint == nil {
-		bst.pkgDispFingerprint = map[string]string{}
+		rootStrMap(&bst.pkgDispFingerprint)
 	}
 	if _, done := bst.pkgDispFingerprint[dp.path]; done {
 		return
@@ -7627,6 +7716,8 @@ func main() {
 		// serial path rather than letting it reference the worker IPC.
 		bst.buildJobs = 1
 	}
+	prevArena := runtime.CurrentArena()
+	runtime.SovereignSetArena(runtime.RootArena())
 	bst.wasmRtPkgs = map[string]bool{
 		"runtime": true, "runtime/interrupt": true,
 		"internal/task": true, "internal/itoa": true,
@@ -7640,7 +7731,8 @@ func main() {
 		"internal/gclayout": true, "internal/oserror": true,
 		"internal/stringslite": true, "internal/testlog": true,
 	}
-	bst.builtinOnly = []string{"unsafe"}
+	runtime.SovereignRestoreArena(prevArena)
+	bst.builtinOnly = keepStrs([]string{"unsafe"})
 	args := os.Args
 	if len(args) < 2 {
 		mxutil.WriteStr(2, "usage: mxc <build|test|version|cache|get|update> ...\n")
@@ -8747,7 +8839,7 @@ func cacheCompiledBc(cacheBase, tmpdir, pkgPath, hash, version string) {
 		// copy is byte-identical (optBc ran above, before the copy), so the
 		// object can be built from the copy and published beside it.
 		if bst.bcTwin == nil {
-			bst.bcTwin = map[string]string{}
+			rootStrMap(&bst.bcTwin)
 		}
 		bst.bcTwin[bcFile] = cp
 	}
@@ -9117,7 +9209,7 @@ func workerEntryExport(arg unsafe.Pointer) {
 	// whose spelling differs from it, which is the same class of divergence as
 	// the export/object key split: the worker then reads a file the parent
 	// never wrote.
-	bst.pkgByPath = map[string]*pkgInfo{}
+	rootPkgMap(&bst.pkgByPath)
 	for i := int32(0); i < int32(len(meta.pkgs)); i++ {
 		bst.pkgByPath[meta.pkgs[i].path] = meta.pkgs[i]
 	}
