@@ -1768,3 +1768,140 @@ states. The role check above is rule 5 of D19 and does not close rule 3.
   failure, not a memory-model one, and it is red with the unmodified runtime as
   well; it is recorded here so a later reader does not attribute it to the
   transport.
+
+---
+
+## 22. Phase 0c: the channel ownership types — plan and prerequisites
+
+Status: operation-level role checks landed (21.5). `Edge[In, Out]`,
+`Sender T`, `Receiver T`, the declaration forms, affineness and spawn
+agreement are open. This section records what the reconnaissance established,
+the decisions taken, the order, and the one discovered prerequisite, so the
+next round starts at the first unfinished line rather than at the argument.
+
+### 22.1 What was verified
+
+- **Unconstrained type parameters are not a thing in this language.** Both
+  compilers reject `type Sender[T] chan<- T` with `syntax error: missing type
+  constraint`, and claude.md requires a concrete non-empty constraint. So
+  `Edge[In, Out]`, whose parameters are deliberately unconstrained, cannot be
+  an ordinary generic declared in a package: it must be a **builtin (universe)
+  generic**, exactly as D19 rule 2 says. This is a parse/semantics fact, not a
+  style choice.
+- **The type forms themselves exist.** `type Sender[T cmp.Ordered] chan<- T`
+  compiles, converts from `chan T`, and enforces the role on the operation. So
+  the directional-channel machinery the runtime and the role checks need is
+  already in the type system once the parameters are builtin rather than
+  user-constrained.
+- **Prerequisite bug, found with the probe.** A channel whose type is a generic
+  instantiation loses its instantiation before the operation is built: with
+  `type Q[T cmp.Ordered] chan T`, `var q Q[int32]`, the send's channel type
+  prints `main.Q` (not `main.Q[int32]`) and the receive loads an unbound
+  element. Consequence today: `<-q` yields an empty value in stage4 while the
+  legacy compiler yields the number (measured on both). A first attempt to bind
+  the instantiation inside `ssaChanElemType` moved the failure into the IR
+  (`icmp ne i32 %t18, 9` with `%t18 : i8`) instead of fixing the value's type,
+  so it was reverted; the trace is recorded here because it is the exact place
+  the next attempt starts: **the variable's/conversion's SSA type is the
+  generic origin without TArgs**, not the receive's element extraction.
+  Edge must not be built on unresolved generic channel types; whichever
+  representation 22.2 chooses, this is fixed first.
+- The universe is built from `src/builtin/builtin.mx` plus the `Typ` table
+  (`ir_util.mx`/`ir_typecheck.mx`/`ir_iface.mx`). A builtin generic type is a
+  universe entry with `TParams` and a marker that exempts it from the
+  constraint check; that is new machinery and it belongs to the universe, not
+  to a package.
+
+### 22.2 Decisions
+
+**D22.1 — Edge is a builtin generic in the universe.** A package-level generic
+is impossible (22.1) and a shape-matched user struct must not satisfy `spawn`
+(D19 rule 2). The three types are universe entries: `Sender[T]`,
+`Receiver[T]`, `Edge[In, Out]`.
+
+**D22.2 — Representation.** `Sender[T]`/`Receiver[T]` are channel types with a
+direction (`TCChan` with `Dir`), so the existing role check applies unchanged
+and `spawn` can verify agreement by type identity. `Edge[In, Out]` is a struct
+of `Recv Receiver[In]` and `Send Sender[Out]` plus one compiler-known hidden
+word: a pointer to the pair record. The hidden word is what lets `spawn(child)`
+reach the four handles to bind the child's breaker without deriving the mirror
+from an argument (A1 forbids the derivation, not the linkage). It is invisible
+to user code and is not part of the type's field set.
+
+**D22.3 — Runtime handles get a fixed direction.** A channel handle gains
+`dirFixed`; when set, `chSendRing` returns `ringA` and `chRecvRing` returns
+`ringB` unconditionally, so a handle's role is a property of the handle rather
+than of `domainID`. The edge factory creates two rings (one per direction) and
+four handles: parent Send, parent Recv, child Send, child Recv. Each handle
+drops exactly the ring it references on close, and the ring's two references
+are the two ends, so the release protocol from 21.4 is unchanged.
+
+**D22.4 — Declaration order: `edge` first.** `parent, child := edge[In, Out]{d}`
+is new syntax with no ambiguity: it allocates the pair and two rings in the
+root arena at the declaration and returns the two complementary values. The
+two-value `s, r := chan T{d}` form is the same machinery, but `chan T{:N}`
+already means one bidirectional value, so making the two-value form mean
+something different is a separate decision (recorded open in 22.5). Do not
+introduce it in the same step.
+
+**D22.5 — Affineness, concretely.**
+- A *use* of a held end is a send, a receive, or a select arm on `e.Send`/
+  `e.Recv`; it does not move the value and may happen any number of times.
+- A *move* is a whole-value transfer: a `spawn` argument, assignment to another
+  linear variable, a return, or a store into a field/slice/map.
+- Anything else that needs the value's bytes (comparison, printing, a
+  non-spawn call argument, a conversion) is a **copy** and is an error.
+- After a move, any use of that variable is an error. Tracking is per function
+  and sequential in the SSA builder (legacy mirrors in its own builder); a move
+  in one branch of an if is treated as a move on the joined path, which is
+  conservative and sound for a one-thread domain.
+
+**D22.6 — spawn agreement.** `spawn` accepts `Edge[In, Out]`, `Sender T` or
+`Receiver T`; the child parameter's type must be identical. Transposition is a
+type mismatch because the parameters are named, not positional. The child's
+handles are the same structures the parent holds (they are in the root arena),
+so the child receives capabilities, not a copy of the ring.
+
+### 22.3 Order of work (each step independently testable)
+
+1. **Fix the instantiated-channel-type prerequisite** (22.1) in stage4, mirror
+   nothing in legacy (go/types is already correct), and pin it with a fixture
+   that a named generic channel's element survives a receive, a send and a
+   select arm. This is a compiler bug fix, not part of Edge.
+2. **Universe builtin generics**: register `Sender`, `Receiver`, `Edge` with
+   `TParams` and the constraint exemption; type-check `Sender[int32]` and
+   `Edge[Request, Response]` in a declaration; emit their layouts.
+3. **`edge[In, Out]{d}`** declaration and the runtime factory (two rings, four
+   fixed-direction handles, pair record, root arena), with `spawn` accepting
+   the child value and binding the breaker through the pair.
+4. **Affineness checks** (22.5) in stage4, then the legacy mirror.
+5. **Acceptance fixtures**: role through an Edge field; transposed Edge;
+   one Edge to two spawns; a copied end; a user struct with the same field
+   shape rejected; channel storage outliving the declaring frame.
+
+### 22.4 Acceptance fixtures to add when the step lands
+
+- `reject_edge_transposed.mx` — `spawn` given `Edge[Request, Response]` where
+  the target takes `Edge[Response, Request]`.
+- `reject_edge_two_spawns.mx` — one child End passed to two `spawn` calls.
+- `reject_edge_copy.mx` — `e2 := e1` or `f(e1)` where `f` is not a spawn.
+- `reject_edge_user_struct.mx` — a local struct with `Send`/`Recv` fields does
+  not satisfy a spawn parameter of type `Edge[In, Out]`.
+- `edge_roundtrip.mx` — request and response cross in both directions, the
+  child outlives the declaring function, and the rings are released by the last
+  end (the 21.4 protocol, now over four handles).
+
+### 22.5 Open decisions, recorded rather than guessed
+
+- **The two-value `chan` form.** Whether `s, r := chan T{d}` replaces the
+  single-value meaning or coexists with it (and how the compiler distinguishes
+  them) is not decided. `edge` does not depend on it.
+- **Hidden word in a builtin type's layout.** D22.2 needs one compiler-known
+  word in `Edge`; whether it is part of the user-visible struct layout (and so
+  `unsafe.Sizeof`) or kept in a side table is decided when the layout is
+  emitted. The constraint is that it must not be reachable from user code as a
+  field.
+- **Constraints on builtin generic parameters.** They are unconstrained by
+  definition; the universe entry must bypass the "concrete non-empty
+  constraint" rule that applies to user generics, and the bypass must be a
+  property of the builtin type, not a special case at every use site.
