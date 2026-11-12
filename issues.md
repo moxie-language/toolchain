@@ -1838,7 +1838,16 @@ strings, so the protocol should have run.
   question is where that release happens relative to the read, not whether the
   encoder aliased.
 
-That narrows the next step: instrument the arena lifecycle around
-`mxutil.JoinPath` / `bytesConcatMove` (which arena the buffer came from, which
-call released it, and the arena stack depth at each point) rather than the codec
-policy. `gdb` is available and gives usable frames, which makes this tractable.
+A third experiment did answer it, and rules out my own framing. An
+`ArenaHoldsAddr` probe (scan the fn stack and root regions for the buffer) was
+placed at the entry of `bytesConcatMove`: it never fired before the crash. So
+the buffer IS inside a live arena region - the string is not dangling at all.
+The fault is a write at `x.ptr + len(x)` past the *end of that region*: the
+inline extension believed `cap(x)` left room that the mapping did not have.
+
+So the bug is capacity accounting at a region boundary in the string growth
+path, not the return protocol, not aliasing, and not a released frame. The next
+step is `sliceGrow`/`bytesConcatMove`'s capacity arithmetic against
+`arenaRegionHolds`, and how `cap` is produced for a slice that reaches a region
+end - the old model (a "startup allocator"/contiguous heap) never met that
+boundary, so a legacy-built binary is the first to exercise it.
