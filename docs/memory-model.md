@@ -1667,6 +1667,18 @@ Not yet demonstrated, and why:
   next thing to chase, and it is why every compiler-derived binary dies before
   it compiles anything while the checked-in one does not.
 
+  A debugger backtrace turned that into a call chain: the decoder was walking
+  `map[bytes]TypeName` -> `TypeName.object` (interface) -> `typeapi.Type`
+  (interface) -> `*Named` -> `Named` -> an interface whose 8-byte typecode had
+  become **3**, the value of `codecTagIface` - so the stream was already
+  desynchronised one field earlier and the "typecode" was the next tag. A
+  position trace showed the failing struct is 224 bytes with eight fields whose
+  first two are `Scope`, `Typ`, and that NO encode of that struct ran in the
+  process: the encoder and decoder disagree about the layout of one compiler
+  type, so the encoder's descriptor says "small" and the decoder's says 224.
+  It reproduces with `-j 1` (no spawn) and with a cold package cache, so it is
+  neither the parallel compiler nor stale export data.
+
   A second fact that constrains the repair: the older working binaries in
   `/tmp` (10-11 November) cannot compile the present sources at all - they
   enforce "':=' declaration inside a loop in a self-mutating method" as an
