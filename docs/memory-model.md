@@ -1708,6 +1708,25 @@ Not yet demonstrated, and why:
   decode. Equal bytes mean the decoder starts at the wrong offset; different
   bytes mean the saved pointer is stale.
 
+  **Round 15: three samples all sit in the seen-set lookup, and an index with
+  base-only registration still does not move it.** Interrupting the compiler
+  under gdb three times during `bytealg` gives the same innermost frame every
+  time: `codecSeenLookup` called from `codecEncodeMap`'s value loop, reached
+  through `Scope` -> map -> `TCConst` -> `object` -> `TCPackage`. So the walk
+  really is the universe graph, repeatedly. Combining the round-12 base-only
+  registration (which cuts entries by the field count) WITH a 2^18-slot
+  generation-stamped index still gave 4m48s against the 4m40s baseline - the
+  index never gets to matter, because the cost is the NUMBER OF WALKS, not the
+  lookup inside one. Each declaration's result is copied from the package arena
+  into the caller (the package arena is freed at the end of the compile, so
+  aliasing it is not an option), and that copy walks the graph again.
+
+  The next measurement that would settle it is a count of encode ROOTS per
+  package - one per returned value - rather than entries: if a small package
+  performs thousands of root encodes over the same graph, the fix is to encode
+  once (or to keep the built value in the root arena), not to speed up each
+  walk.
+
   **Round 14: the arena tests are not the remaining cost either.** Caching each
   arena's active-region extent (`fastBase`/`fastCap`, set when a region opens or
   an arena is created) and testing it before the region loop left the build at
