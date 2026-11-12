@@ -125,6 +125,18 @@ func InitUniverse() (u *UniverseState) {
 // InitUniverse; the caller's arena owns the data.
 func SetUniverseGlobals(u *UniverseState) {
 	initUniverseGlobals(u)
+	// The declared ownership types are installed HERE, not while the universe
+	// is being built. Their descriptors are assembled by hand (a Named whose
+	// Under is a hand-built struct of Named instances), and a universe graph
+	// that contains them desynchronises the codec on the RETURN that hands the
+	// universe out: every compiler built from these sources then died in
+	// codecDecodeValue before compiling anything. Installing them after every
+	// return has happened keeps the graph clean, and the scope object is the
+	// same one every later type-check sees. Idempotent: a second call finds the
+	// name already bound.
+	if u != nil && u.Scope != nil && u.Scope.Lookup("Edge") == nil && u.Uintptr != nil {
+		installChannelOwnershipTypes(u.Scope, u.Uintptr.Typ)
+	}
 }
 
 // initUniverseGlobals performs the stores. It is the one-time initialiser for
@@ -292,9 +304,7 @@ func buildUniverse() (u *UniverseState) {
 	s.Insert(newBuiltin("resize", BuiltinResize))
 	s.Insert(newBuiltin("__shutdown", BuiltinShutdown))
 	s.Insert(newBuiltin("__edgealloc", BuiltinEdgeAlloc))
-	if u.Uintptr != nil {
-		installChannelOwnershipTypes(s, u.Uintptr.Typ)
-	}
+
 	return u
 }
 
