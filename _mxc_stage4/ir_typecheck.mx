@@ -598,6 +598,16 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 	rw := mxsrc.RewriteChanMakeLiterals(src)
 	src = mxsrc.RewriteSliceMakeLiterals(rw)
 	src = mxsrc.RewriteEdgeDecls(src)
+	// The pair's four handles and two rings are native objects. On wasm the
+	// channel transport is a SharedArrayBuffer behind a JS handle
+	// (spawn_wasm.mx) and the pair has no equivalent yet: fail loud HERE, at
+	// typecheck, because an error recorded during IR emission is too late - the
+	// emitter still walks the rest of the function and the wasm channel path
+	// dereferences handles the aborted declaration never created.
+	if mxutil.TargetArch() == "wasm" && mxsrc.LIndex(src, []byte("__edgealloc(")) >= 0 {
+		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
+		push(cctx.compileErrors, "edge[In, Out]{depth} is not implemented on wasm yet: the pair needs the SAB channel transport")
+	}
 	src = stripDuplicatePackageClauses2(src)
 
 	if len(src) == 0 {

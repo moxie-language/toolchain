@@ -1174,6 +1174,10 @@ func (b *builder) createPipeChanCodecIface(elemType types.Type, valPtr llvm.Valu
 // fixed-direction handles into the two destinations (docs/memory-model.md
 // section 4, D19).
 func (b *builder) createEdgeAlloc(instr *ssa.Call) (llvm.Value, error) {
+	if b.GOOS == "js" && b.GOARCH == "wasm" {
+		return llvm.Value{}, b.makeError(instr.Call.Pos(),
+			"edge[In, Out]{depth} is not implemented on wasm yet: the pair needs the SAB channel transport")
+	}
 	args := instr.Call.Args
 	pos := instr.Call.Pos()
 	if len(args) != 4 {
