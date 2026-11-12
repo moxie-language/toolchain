@@ -1708,6 +1708,19 @@ Not yet demonstrated, and why:
   decode. Equal bytes mean the decoder starts at the wrong offset; different
   bytes mean the saved pointer is stale.
 
+  **Round 9: the next wall is a performance cliff, not a hang.** After the codec
+  fix a compiler built from these sources starts and compiles, but it needs more
+  than ten minutes on `internal/bytealg`'s typecheck where the six-day-old
+  working binary needs 21-28 seconds for the whole closure (measured with a cold
+  package cache via `MOXIEPATH`, so the cache is not the difference). Two
+  hypotheses were eliminated by rebuilding the compiler and timing it: the
+  `Identical` type-argument comparison, and the phase 0b allocation
+  instrumentation (`arenaScopeAlloc`/`recordAllocSize` on every bump). Attaching
+  a debugger to the running compiler is not possible in this environment (no
+  frames from `gdb -p`), so the next step is a source bisect: build the compiler
+  with `legacy/moxie` at successive commits and time `internal/bytealg`
+  (~7 minutes per candidate, cold cache).
+
   **CLEARED in round 8.** `installChannelOwnershipTypes` now runs from
   `SetUniverseGlobals`, after the universe has been handed out, instead of
   inside `buildUniverse`. A compiler built by `legacy/moxie` from these sources
