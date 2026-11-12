@@ -1,0 +1,76 @@
+// Section 11 / acceptance test 18: ring storage is refcounted one per end and
+// released by whichever side is done with it last. A domain that ends while the
+// other end is still open must decrement, never free (risk 14: the failure that
+// only shows up in a test that exercises shutdown under load).
+//
+// The order is forced, not raced: the child closes its own handle and returns,
+// the parent waits for the child's end, and only then closes its handle - so
+// the parent's drop is the last reference and the release happens on the
+// parent's own thread, where the segment ledger (per domain, by construction)
+// can observe it.
+//
+//:wasmtest skip
+package main
+
+import (
+	"fmt"
+	"runtime"
+)
+
+// hold takes one value, closes its own handle (returning its references) and
+// ends. Its close is the child's drop; the parent's later close is the last.
+func hold(in chan int32) (closed chan struct{}) {
+	for {
+		select {
+		case <-closed:
+			return closed
+		case v, ok := <-in:
+			_ = v
+			if !ok {
+				return closed
+			}
+			close(in)
+			return closed
+		}
+	}
+}
+
+func main() {
+	select {
+	case <-shutdown:
+		return
+	default:
+	}
+	// Chan memory must outlive this frame: the child reads the same channel
+	// storage, so it belongs to the root arena.
+	runtime.SovereignSetArena(runtime.RootArena())
+	in := chan int32{:1}
+	done := spawn(hold, in)
+
+	st0 := runtime.SegmentStats{}
+	runtime.ReadSegmentStats(&st0)
+	if st0.ChanCount != 3 {
+		panic("a spawn with one channel must create three rings: control plus one pair")
+	}
+
+	in <- 1
+	<-done
+
+	// The child dropped its references, but the parent's are still held: the
+	// pair must still be mapped.
+	st1 := runtime.SegmentStats{}
+	runtime.ReadSegmentStats(&st1)
+	if st1.ChanCount != 3 {
+		panic("a ring was released while the parent still held it")
+	}
+
+	// The parent's drop is the last reference; the pair goes, the control ring
+	// (the breaker's, not a channel's) stays.
+	close(in)
+	st2 := runtime.SegmentStats{}
+	runtime.ReadSegmentStats(&st2)
+	if st2.ChanCount != 1 {
+		panic("the closed channel pair's rings were not released by the last end")
+	}
+	fmt.Println("ring release ok", st0.ChanCount, st2.ChanCount)
+}

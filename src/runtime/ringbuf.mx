@@ -134,6 +134,30 @@ func ringCreate(dataSize uint32) uintptr {
 	return uintptr(p)
 }
 
+// ringRetain adds one holder to a ring. A ring is created with two references
+// (one per end); a channel handed to a second child adds one more for that
+// child, so the ring is never released while a live domain still holds it.
+func ringRetain(ring uintptr) {
+	if ring == 0 {
+		return
+	}
+	hdr := (*ringBuf)(unsafe.Pointer(ring))
+	moxie_atomic_add_u32(&hdr.refcount, 1)
+}
+
+// ringEndDrop drops one holder's reference. The mapping is released exactly by
+// the holder that decrements the count to zero, so a domain that ends while the
+// other end is still open decrements and never frees (section 11, risk 14).
+func ringEndDrop(ring uintptr) {
+	if ring == 0 {
+		return
+	}
+	hdr := (*ringBuf)(unsafe.Pointer(ring))
+	if moxie_atomic_add_u32(&hdr.refcount, 0xFFFFFFFF) == 0 {
+		ringDestroy(ring)
+	}
+}
+
 func ringDestroy(ring uintptr) {
 	if ring == 0 {
 		return

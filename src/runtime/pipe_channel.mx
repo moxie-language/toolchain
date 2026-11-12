@@ -40,6 +40,23 @@ func chRecvRing(ch *channel) uintptr {
 	return ch.ringB
 }
 
+// channelDropRings releases this handle's references to its ring pair, once.
+//
+// The ring pair is refcounted one per end, so neither side ever frees storage
+// the other still reads: the child drops its references when its domain ends,
+// the parent drops its own when it closes the channel, and whichever drop is
+// last unmaps the pair (section 11, acceptance test 18). The domain breaker
+// (chanID 0) is excluded: its ring is the spawn's control ring, owned by the
+// spawn rather than by a channel, and nothing sends on it.
+func channelDropRings(ch *channel) {
+	if ch == nil || !ch.spawnBound || ch.ringsDropped || ch.spawnChanID == 0 {
+		return
+	}
+	ch.ringsDropped = true
+	ringEndDrop(chSendRing(ch))
+	ringEndDrop(chRecvRing(ch))
+}
+
 // A spawn-bound channel always has both rings bound; the compiler
 // and chan.mx dispatch on spawnBound to route off the in-runtime queue.
 func channelIsPipeBound(ch *channel) bool {

@@ -23,10 +23,9 @@ import "unsafe"
 // fail on a lockdown-pipe failure, only observability degrades.
 // spawnChanSet holds the PARENT's channel handles for the spawn being
 // established: the compiler notes each channel argument before it calls
-// spawnDomain, and the ring pair is sized from that channel's declared depth
-// (`chan T{:N}`) and its compiler-computed frame budget, both of which live on
-// the handle. The parent's own struct is also what MarkParentPipeChannel marks
-// and what the parent's sends consult for liveness.
+// spawnDomain. The parent's own struct is what MarkParentPipeChannel marks and
+// what the parent's sends consult for liveness; the ring pair itself is a fixed
+// size (D4) because frames chain (D3).
 var spawnChanSet [16]*channel
 
 // spawnChanCopy holds the handle the CHILD receives, one per channel argument.
@@ -40,6 +39,12 @@ var spawnChanSet [16]*channel
 // the relay's start-up SIGSEGV in MarkChildPipeChannel: the child wrote into a
 // frame that no longer existed.
 var spawnChanCopy [16]*channel
+
+// handoffChans is the child's handle for each channel argument, collected while
+// the spawn is being established and copied into the handoff. The child drops
+// each handle's ring references when its domain ends, so a ring is released
+// when the last end is done with it rather than when the parent guesses.
+var handoffChans [16]*channel
 
 // NoteSpawnChan records a channel argument for the spawn about to start and
 // returns the handle the child is to be given: a root-arena copy of the
@@ -85,6 +90,10 @@ type spawnHandoff struct {
 	childID uintptr // this domain's id in the process-wide sequence
 	seqPtr  uintptr // the shared counter, so this domain can spawn too
 	rings   [16][2]uintptr
+	// chans are the child's own channel handles (the root-arena copies). The
+	// child drops each handle's ring references when its domain ends, which is
+	// what lets the parent's close be the last reference.
+	chans   [16]*channel
 }
 
 // spawnDomain starts one domain THREAD running fn(args).
@@ -129,11 +138,18 @@ func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
 			// holder silently follows the newest pair: a manager passing a
 			// worker's channel on would detach the worker it came from.
 			if ch.spawnBound && ch.ringA != 0 && ch.ringB != 0 {
+				// The rings already exist, so this child becomes one more
+				// holder of them: retain before handing them over, or the
+				// child's exit would drop a reference the manager still owns.
+				ringRetain(ch.ringA)
+				ringRetain(ch.ringB)
 				spawnRingSet[i][0] = ch.ringA
 				spawnRingSet[i][1] = ch.ringB
+				handoffChans[i] = cp
 				continue
 			}
 		}
+		handoffChans[i] = cp
 		spawnRingSet[i][0] = ringCreate(ringDefaultDataSize()) // parent->child
 		spawnRingSet[i][1] = ringCreate(ringDefaultDataSize()) // child->parent
 	}
@@ -163,14 +179,13 @@ func spawnDomain(fn uintptr, argp unsafe.Pointer, nChans int32) {
 	for i := int32(0); i < 16; i++ {
 		h.rings[i][0] = spawnRingSet[i][0]
 		h.rings[i][1] = spawnRingSet[i][1]
+		h.chans[i] = handoffChans[i]
+		handoffChans[i] = nil
 	}
 
 	if moxie_thread_spawn(unsafe.Pointer(h)) != 0 {
 		runtimePanic("spawn: thread create failed")
 	}
-	// The child holds the rings now; this is the record the owner's next
-	// releaseLastSpawn retires, once that child has closed its breaker.
-	recordLastSpawn(spawnCtlRing, spawnCtlPtr, spawnBreaker)
 }
 
 // moxie_runtime_thread_entry is the child side of a spawn. It runs on the new
@@ -194,6 +209,19 @@ func moxie_runtime_thread_entry(arg unsafe.Pointer) {
 	}
 	InitCShared()
 	spawnCall(h.fn, h.argp)
+	// This domain's references to the channel rings go with it, BEFORE the
+	// breaker close: the parent observes that close as "the child has ended",
+	// so everything the child owed must already be returned by then. The
+	// parent's own references are dropped when IT closes the channel, so a ring
+	// is released exactly when the last end is done with it.
+	for i := int32(0); i < 16; i++ {
+		channelDropRings(h.chans[i])
+	}
+	// The control ring is reached through the breaker, which is the object both
+	// ends hold: h.ctl is the spawn-control block, not a ring.
+	if h.breaker != nil {
+		ringEndDrop(h.breaker.ringA)
+	}
 	// The domain is done: close the breaker if the target did not, so the parent
 	// observes the end exactly as it would from a forked child's exit. The
 	// closed flag is one object both threads hold.
@@ -209,59 +237,6 @@ func moxie_runtime_thread_entry(arg unsafe.Pointer) {
 //export moxie_thread_spawn
 func moxie_thread_spawn(arg unsafe.Pointer) int32
 
-
-// releaseLastSpawn frees the rings, control ring and breaker of the spawn this
-// domain performed most recently, unless that domain is still alive. Called at
-// the START of the next spawn, which is a safe point: the previous worker has
-// ended (its breaker is closed) or it is a peer this domain still talks to -
-// and then nothing is freed, because its channels are still in use.
-// releaseLastSpawn is M-09's "retire at a barrier", and it is NOT called
-// automatically: measured on this build, a program that spawns in a loop
-// deadlocked at the sixth spawn with it in spawnDomain - a manager cannot
-// synchronously await a child's teardown from its own domain. It is a call the
-// OWNER of a worker makes after that worker has closed its breaker, which is
-// the only point at which the rings the record names are provably dead.
-func releaseLastSpawn() {
-	if lastSpawnCtlRing == 0 && lastSpawnCtlPtr == 0 && lastSpawnBreaker == nil {
-		return
-	}
-	// Alive means: the target we started has not closed its breaker. A domain
-	// that is still running owns every ring we gave it, so the record stays.
-	if lastSpawnBreaker != nil && !ringIsClosed(lastSpawnBreaker.ringA) && lastSpawnRingCount > 0 {
-		return
-	}
-	if lastSpawnCtlRing != 0 {
-		ringDestroy(lastSpawnCtlRing)
-	}
-	if lastSpawnCtlPtr != 0 {
-		sysUnmap(unsafe.Pointer(lastSpawnCtlPtr), unsafe.Sizeof(spawnCtl{}))
-	}
-	for i := int32(0); i < 16; i++ {
-		for d := int32(0); d < 2; d++ {
-			if lastSpawnRings[i][d] != 0 {
-				ringDestroy(lastSpawnRings[i][d])
-				lastSpawnRings[i][d] = 0
-			}
-		}
-	}
-	lastSpawnCtlRing = 0
-	lastSpawnCtlPtr = 0
-	lastSpawnBreaker = nil
-	lastSpawnRingCount = 0
-}
-
-// recordLastSpawn copies the spawn that just started into the retirement
-// record: the bookkeeping half of retire-at-barrier, without the wait.
-func recordLastSpawn(ctl uintptr, ctlPtr uintptr, breaker *channel) {
-	lastSpawnCtlRing = ctl
-	lastSpawnCtlPtr = ctlPtr
-	lastSpawnBreaker = breaker
-	lastSpawnRingCount = spawnRingCount
-	for i := int32(0); i < 16; i++ {
-		lastSpawnRings[i][0] = spawnRingSet[i][0]
-		lastSpawnRings[i][1] = spawnRingSet[i][1]
-	}
-}
 
 // spawnCtl is the shared spawn-control block: one per spawn, mmap'd
 // MAP_SHARED before fork so parent and child both see the same memory.
@@ -283,19 +258,6 @@ var childSpawnTarget bool
 // recent one): what spawn returns to the parent and DomainClosed names in the
 // child. Root-arena object, TLS pointer.
 var spawnBreaker *channel
-
-// The retirement record: the rings, control block and breaker of the spawn
-// that most recently started. A separate set of variables, because
-// spawnCtlRing/spawnRingSet/spawnBreaker describe the spawn being established
-// and are overwritten before the child has taken them.
-var (
-	lastSpawnCtlRing   uintptr
-	lastSpawnCtlPtr    uintptr
-	lastSpawnRingCount int32
-	lastSpawnBreaker   *channel
-	lastSpawnRings     [16][2]uintptr
-)
-
 
 // lastChildDomain is the id the spawn just started took from the sequence; the
 // parent's channel markers record it as their channels' childDomain.

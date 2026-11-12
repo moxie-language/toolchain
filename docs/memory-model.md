@@ -1681,14 +1681,30 @@ Evidence:
 - `futexpark` (200 parked ping-pong rounds and a dead-peer unpark) passes with
   the new header and chaining.
 
+**The ring release protocol (section 11, acceptance test 18).** A ring is
+created with two references, one per end. A handle drops its end's references
+when the parent closes the channel and when the child's domain ends (its exit
+path, before the breaker close, so "the child has ended" means everything it
+owed is returned). A channel handed to a second child retains the pair first, so
+a manager passing a worker's channel on cannot let the new child's exit drop the
+manager's reference. The holder that decrements to zero unmaps, and only that
+holder: a domain that ends while the other end is open decrements and never
+frees (risk 14). `tests/regressions/should_compile/ring_release.mx` forces the
+parent's drop to be last and asserts three rings → one.
+
+Landing it deleted the dead retirement machinery: `releaseLastSpawn`,
+`recordLastSpawn` and the `lastSpawn*` record had no caller in the tree, and
+with a refcount the "retire the previous spawn's rings" notion is gone. The
+control ring is the exception and the remaining cost: it is the breaker's ring,
+it has no close hook (the child closes it, the parent only observes it), and its
+parent-side reference lives until the process ends — 4 KiB per spawn, against
+the 32 MiB per direction the old sizing reserved. The `spawnCtl` block (16
+bytes per spawn) goes with the process for the same reason.
+
 Still open in phase 6: the `LOCAL`/`SHARED` class field, replacing `chan.mx`'s
 bounded queue with the ring and deleting its sender/receiver task lists, the
 capacity-0 rule, `futex_waitv` for select, and the `Edge`/`Sender`/`Receiver`
-two-ring binding that phase 0c declares. The `refcount` word exists in the
-header and is initialised to two ends, but the release protocol it belongs to is
-not implemented: `releaseLastSpawn` still unmaps a ring pair directly once the
-peer's breaker is closed. That is acceptance test 18 and risk 14, and it is the
-next item after the class split.
+two-ring binding that phase 0c declares.
 
 ### 21.5 Phase 0c — role checks landed; the Edge half is open
 
