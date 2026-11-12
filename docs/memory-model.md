@@ -1679,6 +1679,17 @@ Not yet demonstrated, and why:
   It reproduces with `-j 1` (no spawn) and with a cold package cache, so it is
   neither the parallel compiler nor stale export data.
 
+  The decisive comparison: BOTH sides print the same descriptor for the failing
+  value - 224 bytes, eight fields, `Scope:0 Typ:8 Error:176 Uintptr:184
+  Registry:192 DirectImports:200 ByName:208 byNameSeq:216`. So the descriptor is
+  not duplicated or stale; the encoder writes something for field `Scope` (a
+  `*Scope`, kind 21 Pointer) that begins with tag **2**, the slice tag, and the
+  decoder then reads that as a pointer tag. The fault is therefore in the
+  encoder's choice of tag for one pointer field of a compiler type during a
+  return encode - the next diagnostic is a per-field tag trace on the encode
+  side (print the tag written for each field of the 224-byte struct), which
+  names the branch that writes 2.
+
   A second fact that constrains the repair: the older working binaries in
   `/tmp` (10-11 November) cannot compile the present sources at all - they
   enforce "':=' declaration inside a loop in a self-mutating method" as an
