@@ -6885,6 +6885,28 @@ func (fb *ssaFuncBuilder) checkSpawnSignature(args []SSAValue) {
 		}
 		reportCompileError("spawn: " | name | " must be declared with exactly one result, (closed chan struct{}), which is the domain's breaker; a function without it cannot be spawned")
 	}
+	// A declared ownership argument must agree with the target's parameter BY
+	// NAME: Edge[In, Out] is the parent and Edge[Out, In] the child, so a
+	// transposed pair is a type mismatch, not a runtime check. The comparison is
+	// on the rendered type because the instance's arguments are part of its
+	// identity (types.Identical compares a named generic by its origin alone).
+	if sig.Params == nil {
+		return
+	}
+	for ai := int32(1); ai < int32(len(args)); ai++ {
+		if args[ai] == nil || ai-1 >= sig.Params.Len() {
+			break
+		}
+		at := args[ai].SSAType()
+		if !isOwnershipType(at) {
+			continue
+		}
+		pt := sig.Params.At(ai - 1).Typ
+		if at.String() != pt.String() {
+			reportCompileError("spawn: argument " | irItoa(ai) | " has type " | at.String() | " but the target's parameter " | irItoa(ai) | " is " | pt.String() | "; the spawn argument and the target parameter must agree")
+			return
+		}
+	}
 }
 
 // reportUndefinedField mirrors legacy's diagnostic for a selector that is

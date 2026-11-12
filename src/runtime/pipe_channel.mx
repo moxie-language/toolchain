@@ -728,9 +728,55 @@ func EdgeMake(parent, child unsafe.Pointer, inElem, inBudget, outElem, outBudget
 	childRecv := edgeHandle(int32(depth), outElem, outBudget, 0, ringIn)
 	childSend := edgeHandle(int32(depth), inElem, inBudget, ringOut, 0)
 
+	// The pair record is the hidden third word of both Edge values. It exists so
+	// spawn can reach all four handles to bind the child's breaker without
+	// deriving the mirror from an argument (A1); the word is a uintptr, not a
+	// pointer, so the argument codec copies it verbatim instead of following it.
+	save := CurrentArena()
+	SetCurrentArena(trueRootArena())
+	pair := (*edgePair)(alloc(unsafe.Sizeof(edgePair{}), nil, nil))
+	SetCurrentArena(save)
+	pair.parentRecv = parentRecv
+	pair.parentSend = parentSend
+	pair.childRecv = childRecv
+	pair.childSend = childSend
+
 	word := unsafe.Sizeof(uintptr(0))
 	*(*uintptr)(parent) = uintptr(unsafe.Pointer(parentRecv))
 	*(*uintptr)(unsafe.Add(parent, word)) = uintptr(unsafe.Pointer(parentSend))
+	*(*uintptr)(unsafe.Add(parent, 2*word)) = uintptr(unsafe.Pointer(pair))
 	*(*uintptr)(child) = uintptr(unsafe.Pointer(childRecv))
 	*(*uintptr)(unsafe.Add(child, word)) = uintptr(unsafe.Pointer(childSend))
+	*(*uintptr)(unsafe.Add(child, 2*word)) = uintptr(unsafe.Pointer(pair))
+}
+
+// edgePair is the record behind an Edge value's hidden third word: the four
+// fixed-direction handles of one declared pair. spawn binds the child's breaker
+// on every handle through it.
+type edgePair struct {
+	parentRecv *channel
+	parentSend *channel
+	childRecv  *channel
+	childSend  *channel
+}
+
+// EdgeSpawnBind records breaker on every handle of the pair the given Edge
+// value belongs to, so a parent parked on any of the four wakes when the child
+// ends. The value may be either side's Edge: they share the record.
+func EdgeSpawnBind(edge unsafe.Pointer, breaker *channel) {
+	if edge == nil {
+		runtimePanic("spawn: nil Edge argument")
+	}
+	word := unsafe.Sizeof(uintptr(0))
+	pair := (*edgePair)(unsafe.Pointer(*(*uintptr)(unsafe.Add(edge, 2*word))))
+	if pair == nil {
+		runtimePanic("spawn: Edge value was not created by an edge declaration")
+	}
+	if breaker == nil {
+		runtimePanic("spawn: Edge bind with no breaker")
+	}
+	pair.parentRecv.ownerBreaker = breaker
+	pair.parentSend.ownerBreaker = breaker
+	pair.childRecv.ownerBreaker = breaker
+	pair.childSend.ownerBreaker = breaker
 }

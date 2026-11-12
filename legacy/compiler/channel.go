@@ -1189,7 +1189,7 @@ func (b *builder) createEdgeAlloc(instr *ssa.Call) (llvm.Value, error) {
 		return llvm.Value{}, b.makeError(pos, "__edgealloc: third argument is not an Edge type")
 	}
 	st, ok := named.Underlying().(*types.Struct)
-	if !ok || st.NumFields() != 2 {
+	if !ok || st.NumFields() != 3 {
 		return llvm.Value{}, b.makeError(pos, "__edgealloc: third argument is not an Edge type")
 	}
 	recvCh, ok := st.Field(0).Type().Underlying().(*types.Chan)

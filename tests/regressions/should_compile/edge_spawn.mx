@@ -1,0 +1,51 @@
+// Phase 0c step 3b: a declared pair crosses a spawn boundary.
+//
+// `parent, child := edge[In, Out]{d}` makes the parent an Edge[In, Out] (Recv
+// In, Send Out) and the child its complement Edge[Out, In], so the child's
+// Receive end is typed for what the parent sends. `spawn(worker, child)` passes
+// that value; the compiler checks it against the target's parameter by NAME
+// (a same-shaped struct would not pass) and binds the child's breaker on all
+// four handles through the pair record, so a parent parked on either direction
+// wakes when the child ends.
+//
+//:wasmtest skip
+package main
+
+import "fmt"
+
+type Req struct {
+	Body []byte `cap:"1024"`
+}
+
+func worker(ep Edge[Req, int32]) (closed chan struct{}) {
+	for {
+		select {
+		case <-closed:
+			return closed
+		case r := <-ep.Recv:
+			if len(r.Body) == 0 {
+				return closed
+			}
+			ep.Send <- int32(len(r.Body))
+		}
+	}
+}
+
+func main() {
+	select {
+	case <-shutdown:
+		return
+	default:
+	}
+	parent, child := edge[int32, Req]{2}
+	done := spawn(worker, child)
+	for _, n := range []int32{10, 300, 1000} {
+		parent.Send <- Req{Body: []byte{:n}}
+		if got := <-parent.Recv; got != n {
+			panic("edge response lost")
+		}
+	}
+	close(parent.Send)
+	<-done
+	fmt.Println("edge spawn ok")
+}

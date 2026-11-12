@@ -1807,9 +1807,43 @@ fixed-direction handles in the root arena. Three details are load-bearing:
 `tests/regressions/should_compile/edge_decl.mx` passes on both compilers: both
 directions of an int32/int64 pair and a codec-carrying struct pair.
 
-Still open in step 3: `spawn` accepting an `Edge` (agreement plus breaker
-binding through the pair record), affineness (D22.5), and the two-value `chan`
-form. Until those land, the tree still
+**spawn acceptance (step 3b) landed.** A declared pair crosses the spawn
+boundary as a value: the child receives the complement it was handed, the
+argument's type must match the target's parameter BY NAME (a same-shaped struct
+does not pass), and the child's breaker is bound on all four handles through the
+pair record. The record is the Edge value's hidden third word, typed `uintptr`
+so the argument codec copies it verbatim instead of following it.
+
+Two more findings, both fixed:
+
+- An `Edge` value contains channel fields, and legacy's spawn validator rejected
+  any argument with a nested channel. A declared pair is a capability (its
+  channel fields are the pair's ends), so ownership types are exempt from that
+  rule; values that hide a capability inside copied bytes are still rejected.
+- stage4's `emitMakeEdge` still required the Edge struct to have TWO fields when
+  computing the two element sizes, so with the hidden word added the sizes fell
+  back to i8/i8. The pair then carried 1-byte elements: a 300-byte response was
+  truncated to a byte (44) while short ones looked correct, which is what the
+  multi-size fixture caught.
+
+Fixtures: `edge_spawn.mx` (both directions, 10/300/1000-byte requests, passes on
+both compilers) and `reject_edge_transposed.mx` (the parent handed to a target
+taking the child type; stage4 rejects it in the SSA builder, legacy in its spawn
+argument check, both with the same sentence).
+
+**A diagnostics defect behind that check.** stage4's `Named.String()` rendered
+only the origin, so `Edge[int32, Req]` and `Edge[Req, int32]` both printed as
+`Edge` - the transposed pair looked identical in every message, and an
+agreement check that compared rendered names could not see the difference. It
+now renders the instance's arguments, matching go/types. Related and still
+open: stage4's `types.Identical` compares two instantiations of a generic by
+ORIGIN alone, so assignment between transposed pairs is accepted where legacy
+rejects it; the spawn check therefore compares rendered types, and the Identical
+defect is recorded in the open decisions rather than papered over.
+
+Still open in step 3: bare `Sender`/`Receiver` spawn arguments (spawnDomain
+would currently re-ring a fixed handle instead of keeping its one ring), and the
+two-value `chan` form. Affineness (D22.5) is step 4. Until those land, the tree still
 passes the same channel handle to a child and to the parent, and nothing rejects
 two transfers of one send end: that is a live soundness hole, exactly as D19
 states. The role check above is rule 5 of D19 and does not close rule 3.
@@ -1944,9 +1978,11 @@ so the child receives capabilities, not a copy of the ring.
    are predeclared in both compilers; `Sender[int32]`, `Edge[Request, Response]`
    and the field roles type-check and run, pinned by `edge_types.mx` and
    `reject_edge_field_role.mx`.
-3. **`edge[In, Out]{d}`** — the declaration and the runtime factory are DONE
-   (21.5), pinned by `edge_decl.mx`. Spawn acceptance and breaker binding
-   through the pair record are the remaining half of this step.
+3. **`edge[In, Out]{d}`** — DONE (21.5): the declaration, the runtime factory,
+   spawn acceptance, name-based agreement and breaker binding through the pair
+   record. Pinned by `edge_decl.mx`, `edge_spawn.mx` and
+   `reject_edge_transposed.mx`. Bare `Sender`/`Receiver` spawn arguments and the
+   two-value `chan` form remain.
 3. **`edge[In, Out]{d}`** declaration and the runtime factory (two rings, four
    fixed-direction handles, pair record, root arena), with `spawn` accepting
    the child value and binding the breaker through the pair.
@@ -1997,6 +2033,17 @@ expression and the compiler special-cases the builtin (`ssa_types.mx`'s
 Nothing in this path needs a parser change, which is why it is the recorded
 one. The legacy half needs the same rewriter hook (legacy's pipeline has its own
 rewrites) and the same builtin case in its SSA builder.
+
+### 22.4b Open defect found while landing step 3
+
+stage4's `types.Identical` returns true for any two instantiations of one
+generic whose origin matches, ignoring the type arguments: `Edge[int32, Req]`
+and `Edge[Req, int32]` compare equal, so a transposed pair is assignable in
+stage4 while legacy (go/types) refuses it. Fixing it touches every assignability
+path, and the first attempt (comparing TArgs recursively) segfaulted the
+compiler, so it is an isolated piece of work: compare origin AND arguments, with
+a guard for typed-nil `*Named`, and run the stdlib suite plus the generics
+fixtures before landing. The spawn agreement check does not depend on it.
 
 ### 22.5 Open decisions, recorded rather than guessed
 

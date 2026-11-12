@@ -146,6 +146,18 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	for i, arg := range concreteArgs {
 		paramType := sig.Params().At(i).Type()
 		argType := arg.Type()
+		// A declared ownership type is matched by NAME, not by shape: a local
+		// struct with the same fields must not satisfy an Edge parameter
+		// (D19 rule 2), and a transposed Edge is a type mismatch because its
+		// fields are the complement.
+		if isOwnershipType(argType) || isOwnershipType(paramType) {
+			if !types.Identical(argType, paramType) {
+				b.addError(instr.Pos(), fmt.Sprintf("spawn: argument %d has type %s, %s expects %s; the spawn argument and the target parameter must agree",
+					i+1, argType, targetFn.Name(), paramType))
+				return llvm.Value{}, nil
+			}
+			continue
+		}
 		if !types.Identical(argType.Underlying(), paramType.Underlying()) {
 			b.addError(instr.Pos(), fmt.Sprintf("spawn: argument %d has type %s, %s expects %s",
 				i+1, argType, targetFn.Name(), paramType))
@@ -160,7 +172,11 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 
 	// Collect channel args (in declaration order) for post-spawn marking.
 	var chanArgs []spawnChanArg
+	var edgeArgs []ssa.Value
 	for _, arg := range concreteArgs {
+		if isEdgeType(arg.Type()) {
+			edgeArgs = append(edgeArgs, arg)
+		}
 		if _, isChan := arg.Type().Underlying().(*types.Chan); isChan {
 			chanArgs = append(chanArgs, spawnChanArg{
 				ssa:  arg,
@@ -249,7 +265,42 @@ func (b *builder) createSpawn(instr *ssa.CallCommon) (llvm.Value, error) {
 	// ending reclaims every domain there is.
 	lcFnType, lcFn := b.getFunction(b.program.ImportedPackage("runtime").Members["SpawnLifecycleChannel"].(*ssa.Function))
 	doneCh := b.createCall(lcFnType, lcFn, []llvm.Value{llvm.Undef(b.dataPtrType)}, "done.ch")
+
+	// Bind the child's breaker on every handle of a declared pair. The pair
+	// record is shared by both Edges, so binding through this copy reaches all
+	// four handles. Done after the spawn call because the breaker is its
+	// result.
+	for _, ea := range edgeArgs {
+		v := b.getValue(ea, instr.Pos())
+		lt := b.getLLVMType(ea.Type())
+		slot := b.CreateAlloca(lt, "edge.bind")
+		b.CreateStore(v, slot)
+		b.createRuntimeCall("EdgeSpawnBind", []llvm.Value{slot, doneCh}, "")
+	}
 	return doneCh, nil
+}
+
+// isEdgeType reports whether t is the builtin Edge instantiation.
+func isEdgeType(t types.Type) bool {
+	n, ok := t.(*types.Named)
+	if !ok || n.Obj() == nil || n.Obj().Pkg() != nil {
+		return false
+	}
+	return n.Obj().Name() == "Edge"
+}
+
+// isOwnershipType reports whether t is one of the declared ownership types
+// (Edge, Sender, Receiver) from the universe rather than a user shape.
+func isOwnershipType(t types.Type) bool {
+	n, ok := t.(*types.Named)
+	if !ok || n.Obj() == nil || n.Obj().Pkg() != nil {
+		return false
+	}
+	switch n.Obj().Name() {
+	case "Edge", "Sender", "Receiver":
+		return true
+	}
+	return false
 }
 
 // terminationConsumed reports whether fn consumes a termination signal from
@@ -460,6 +511,15 @@ func (b *builder) spawnArgCopy(t types.Type, v llvm.Value, pos token.Pos) []llvm
 // parameter is a static startup value: it is serialized at the spawn call and
 // frozen in the child from that moment, so it must implement moxie.Codec.
 func validateSpawnArg(t types.Type, argIndex int, codec *types.Interface) error {
+	// A declared ownership value (Edge, Sender, Receiver) is a capability, not a
+	// payload: its channel fields are the pair's ends and cross as handles,
+	// exactly as a top-level channel parameter does. The nested-channel rule
+	// below exists for VALUES that would hide a capability inside copied bytes;
+	// an Edge is matched by name at the call site and bound through its pair
+	// record, so it is exempt here.
+	if isOwnershipType(t) {
+		return nil
+	}
 	if ch, ok := t.Underlying().(*types.Chan); ok {
 		return validateSpawnElem(ch.Elem(), argIndex, codec)
 	}

@@ -1429,6 +1429,7 @@ func (e *irEmitter) emitSpawnCall(c *SSACall) {
 	var argTypes []string
 	var argVals []string
 	var chanIdxs []int32
+	var edgeIdxs []int32
 	nChans := int32(0)
 	for i := 1; i < len(c.Call.Args); i++ {
 		arg := c.Call.Args[i]
@@ -1439,6 +1440,10 @@ func (e *irEmitter) emitSpawnCall(c *SSACall) {
 		argTypes = mxutil.Ensure(argTypes, 1)
 		push(argTypes, lt)
 		argVals = mxutil.Ensure(argVals, 1)
+		if isEdgeType(arg.SSAType()) {
+			edgeIdxs = mxutil.Ensure(edgeIdxs, 1)
+			push(edgeIdxs, int32(i-1))
+		}
 		if _, isChan := SafeUnderlying(arg.SSAType()).(*TCChan); isChan {
 			// Channels are shared: the child gets the same ring.
 			push(argVals, e.operand(arg))
@@ -1514,6 +1519,41 @@ func (e *irEmitter) emitSpawnCall(c *SSACall) {
 	reg := e.regName(c)
 	e.w("  ") ; e.w(reg) ; e.w(" = call ptr @runtime.SpawnLifecycleChannel(ptr null)\n")
 	e.declareRuntime("runtime.SpawnLifecycleChannel", "ptr", "")
+
+	// Bind the child's breaker on every handle of a declared pair. It is done
+	// after the spawn call because the breaker is the spawn's return value; the
+	// pair record is shared by both Edges, so binding through the bundle's copy
+	// reaches all four handles.
+	for _, ai := range edgeIdxs {
+		e.nextReg++
+		gp := "%spedge" ; gp = gp | irItoa(e.nextReg)
+		e.w("  ") ; e.w(gp) ; e.w(" = getelementptr inbounds ") ; e.w(structTy) ; e.w(", ptr ") ; e.w(buf) ; e.w(", i32 0, i32 ") ; e.w(irItoa(ai)) ; e.w("\n")
+		e.w("  call void @runtime.EdgeSpawnBind(ptr ") ; e.w(gp) ; e.w(", ptr ") ; e.w(reg) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.EdgeSpawnBind", "void", "ptr, ptr")
+	}
+}
+
+// isEdgeType reports whether t is the builtin Edge instantiation.
+func isEdgeType(t Type) (ok bool) {
+	n, isN := t.(*Named)
+	if !isN || n == nil || n.Obj == nil {
+		return false
+	}
+	return n.Obj.Name == "Edge" && n.Obj.Pkg == nil
+}
+
+// isOwnershipType reports whether t is one of the declared ownership types
+// (Edge, Sender, Receiver) from the universe rather than a user shape.
+func isOwnershipType(t Type) (ok bool) {
+	n, isN := t.(*Named)
+	if !isN || n == nil || n.Obj == nil || n.Obj.Pkg != nil {
+		return false
+	}
+	switch n.Obj.Name {
+	case "Edge", "Sender", "Receiver":
+		return true
+	}
+	return false
 }
 
 // emitSpawnWrapper emits (once) the goroutine-start wrapper for a spawn

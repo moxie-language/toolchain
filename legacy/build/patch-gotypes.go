@@ -774,13 +774,16 @@ func defChannelOwnershipTypes() {
 	if err != nil {
 		panic(err)
 	}
+	// The third word is the pair record address, typed uintptr so the argument
+	// codec copies it verbatim rather than following it.
 	fields := []*Var{
 		NewField(nopos, nil, "Recv", recvIn, false),
 		NewField(nopos, nil, "Send", sendOut, false),
+		NewField(nopos, nil, "pair", Typ[Uintptr], false),
 	}
 	edgeTN := NewTypeName(nopos, nil, "Edge", nil)
 	edgeTN.setColor(black)
-	edge := NewNamed(edgeTN, NewStruct(fields, []string{"", ""}), nil)
+	edge := NewNamed(edgeTN, NewStruct(fields, []string{"", "", ""}), nil)
 	edge.SetTypeParams([]*TypeParam{in, out})
 	Universe.Insert(edgeTN)
 }

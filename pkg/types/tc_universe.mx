@@ -292,7 +292,9 @@ func buildUniverse() (u *UniverseState) {
 	s.Insert(newBuiltin("resize", BuiltinResize))
 	s.Insert(newBuiltin("__shutdown", BuiltinShutdown))
 	s.Insert(newBuiltin("__edgealloc", BuiltinEdgeAlloc))
-	installChannelOwnershipTypes(s)
+	if u.Uintptr != nil {
+		installChannelOwnershipTypes(s, u.Uintptr.Typ)
+	}
 	return u
 }
 
@@ -316,7 +318,7 @@ func newOwnershipEnd(s *Scope, name string, dir TCChanDir) (n *Named) {
 	return
 }
 
-func installChannelOwnershipTypes(s *Scope) {
+func installChannelOwnershipTypes(s *Scope, pairWord Type) {
 	sender := newOwnershipEnd(s, "Sender", TCSendOnly)
 	receiver := newOwnershipEnd(s, "Receiver", TCRecvOnly)
 	in := NewTypeParam(NewTypeName(nil, "In", nil), nil)
@@ -330,10 +332,13 @@ func installChannelOwnershipTypes(s *Scope) {
 	// (instantiatedUnder) reaches the channel element.
 	recvIn := (&Named{Obj: receiver.Obj, Under: receiver.Under, TParams: receiver.TParams, TArgs: []Type{in}})
 	sendOut := (&Named{Obj: sender.Obj, Under: sender.Under, TParams: sender.TParams, TArgs: []Type{out}})
+	// The third word is the pair record address, typed uintptr so the argument
+	// codec copies it verbatim. It is unexported and has no user-facing name.
 	edge.Under = NewTCStruct([]*TCVar{
 		NewTCField(nil, "Recv", recvIn, false),
 		NewTCField(nil, "Send", sendOut, false),
-	}, []string{"", ""})
+		NewTCField(nil, "pair", pairWord, false),
+	}, []string{"", "", ""})
 	s.Insert(edgeName)
 }
 
