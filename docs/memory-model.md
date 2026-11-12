@@ -1743,7 +1743,8 @@ queries (`ssaChanElemType`, `ssaElemType`, `ssaIndexElemType` and the emitter's
 two channel helpers) now bind the instantiation, and the emitter's helpers
 route through the one SSA definition instead of four copies. Pinned by
 `tests/regressions/should_compile/chan_named_elem.mx` (channel, slice, map and
-the directional forms) on both compilers.
+the directional forms) on both compilers, and the stdlib test suite passes 11 of
+11 with the change.
 
 Still open: the `Edge[In, Out]` builtin generic, `Sender T`/`Receiver T`, the
 two-value `chan`/`edge` declaration forms, affine ends, and spawn accepting an
