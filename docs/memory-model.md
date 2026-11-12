@@ -1657,6 +1657,16 @@ Not yet demonstrated, and why:
   works, and that every fixture in this record was verified with, is
   `./mxc-stage4 build -a` (C0). The fixpoint needs the codec panic found first.
 
+  **Operational trap: `./mxc-stage4` is a BUILD ARTIFACT and can be stale.**
+  The copy in the tree was from 6 November and predated the child channel handle
+  copy and the whole ownership surface, so fixtures compiled with it exercised
+  none of that: `ring_release` appeared to regress (the child shared the parent's
+  handle and no end was released) purely because the wrapper that binary emitted
+  had no `ChildChannelCopy`. The rule that follows: after any compiler change,
+  rebuild `./mxc-stage4` from the current sources with the previous one, and use
+  THAT for fixtures. The refreshed binary (`r46`) works and is reproducible, and
+  the sources at this commit also build it through `legacy/moxie`.
+
 ### 21.4 Phase 6 — the ring half landed
 
 Implemented:
@@ -2095,6 +2105,40 @@ expression and the compiler special-cases the builtin (`ssa_types.mx`'s
 Nothing in this path needs a parser change, which is why it is the recorded
 one. The legacy half needs the same rewriter hook (legacy's pipeline has its own
 rewrites) and the same builtin case in its SSA builder.
+
+### 22.4c The spawn agreement check regressed `chan string` vs `chan []byte`
+
+The agreement check added in step 3b compares spawn arguments to the target's
+parameters, and for non-ownership types it compared the RENDERED underlying
+types. Moxie treats `string` and `[]byte` as one type, so a spawn whose target
+takes `chan string` while the caller passes `chan []byte` (the pre-existing
+fixture `spawn_closed_crosspkg`) is rejected by stage4 although it is legal, and
+legacy's go/types check accepts it because go/types unifies the two spellings
+where Moxie's checker does.
+
+The fix is one line: compare with `Identical` (which unifies string/[]byte, and
+now also compares generic instance arguments) instead of comparing rendered
+strings. It is NOT landed because it cannot currently be compiled into a working
+compiler: see 21.6 - every compiler built from the present sources panics at
+start-up in `runtime.codecDecodeValue`, by both paths (stage4-built and
+legacy-built), so the tree stays byte-identical to the sources of the working
+`./mxc-stage4` binary until that bug is found. Recorded here so the next round
+starts from the defect rather than rediscovering it.
+
+### 22.4d The 8-byte object header needs phase 4's offset addressing
+
+The per-object header (section 5) was implemented in `ArenaAlloc` during this
+round and reverted: with `sizeof(header) == 8` and a 16-byte span (the payload
+must stay 16-byte aligned or the compiler dies on its first `movaps`), the
+verifier walked the root heap correctly (`root objects ok 623 624`), but SIX
+regression units broke: `asn1_builder_der` produced wrong DER for a 128-bit
+integer, `generic_aggregate_subst` substituted the wrong field, `http_header_api`,
+`tls_handshake` and `spawn_closed_crosspkg` failed. The cause is the same one
+phase 4 exists for: a header shifts every payload by 16 bytes, and code that
+derives an address from a region base plus a recorded offset (hashmap buckets,
+codec buffers, offset frames) no longer agrees with it. The header therefore
+lands WITH the `%fn_base` offset addressing, not before it; its alignment rule
+(span 16, size 8) and the verifier's walk shape are settled and recorded here.
 
 ### 22.4b Open defect found while landing step 3
 
