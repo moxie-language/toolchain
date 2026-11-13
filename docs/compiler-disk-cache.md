@@ -464,6 +464,22 @@ where the ownership types are installed, which stopped the immediate panic and
 turned it into a segfault 118 s later -- a guard-shaped fix that moved the
 failure instead of removing it, exactly the pattern `claude.md` warns about.
 
+The segfault at `492a65aa` has a backtrace, so it is not a desync after all:
+
+```
+#0 runtime[arenaBump]        <- the crash lands here
+#1 runtime[alloc]
+#2 runtime[codecEncodeValue]
+#3..#N runtime[codecEncodeValue]   (recursion, hundreds of frames)
+```
+
+`codecEncodeValue` recursing until the stack runs out, allocating a copy at every
+level. That is the 137-million-allocation walk seen from the inside: the encode
+does not terminate on the type universe graph, because every descent COPIES and
+the copy has a new address, so the seen set never matches and the same subgraph
+is expanded again. A larger cap and a hash index both fail for the same reason:
+they make each step cheaper while the walk itself is unbounded.
+
 The consequence for this plan is that **the domain boundary is not only a
 performance fix**. With the artifact as the only channel, the universe graph
 never crosses a return, so the codec is never asked to encode it, and this entire
