@@ -539,6 +539,55 @@ they run to completion (`cur == root` throughout, 17/17 packages), and the crash
 is one package later, inside typechecking a package whose source was just
 parsed.
 
+### 8.3b3 Post-mortem on the core: what is corrupt, and what is ruled out
+
+`systemd-coredump` keeps every crash, so the fault is read post-mortem instead
+of guessed at (`coredumpctl dump <pid> > core`, then `gdb -batch -ex bt`). That
+works on this machine even though `gdb` attached to a live inferior in cgroup
+reclaim hangs - nothing is running to interrupt.
+
+```
+#0..#3 runtime[codecEncodeValue]      (4 levels)
+#4    moxielang.dev/pkg/types[NewTCVar]
+#5    main[ScanGenericDecls]
+#6    main[TypeCheckOnly]
+#7    main[typeCheckPkgSource]
+#8    main[prepareDispatchIndex]
+```
+
+At the fault, `typ` (`$rbp`) is `reflect/types.type:named:pkg/syntax.Expr` and
+the slot address (`$rdx`) is `0x100000` - exactly `codecBadPtrFloor()`, which
+the guard tests with `<` so a pointer AT the floor passes. One frame up the
+call site is the slice-element loop (`ep = sl.ptr + i*elemSize`), and the slice
+it walked is `p=0x10 l=1003030640 c=1`, where `l` is the low half of the
+node's own address. So the AST node and the type-graph objects below it are
+reads of memory that has been reused.
+
+Byte-level findings, each checked rather than inferred:
+
+| question | answer |
+|---|---|
+| Is the struct descriptor wrong? | No. `pkg/types.Named` = size 96, fields at 0/8/24/48/72, matching `{Obj, Under, Methods, TParams, TArgs}` exactly. `syntax.CallExpr` = size 104, `ArgList` at 16, matching `{Fun, ArgList, HasDots, expr}` where `expr` embeds `typeAndValue`. |
+| Is the typecheck arena freed too early? | No. Leaking it (`if false { ArenaFree(arena) }`) leaves the crash identical; RSS rose 11 MB -> 1850 MB and nothing else changed. |
+| Does the `Named.Under = under` store land? | Yes. Re-reading the field immediately after the store compares equal every time (`0` mismatches in a full run). |
+| Which object is corrupt? | A `Named` whose `Under` reads `{0x7fdf4e7f2e10, 10}` and whose `Methods`/`TParams`/`TArgs` are nil - i.e. `{heap pointer, 10}`, first two words of a slice header, in a field declared `Type`. |
+
+The corruption is therefore upstream of every store this code performs, and it
+arrives in a value the codec produced: the decoder wrote a slice header where a
+16-byte interface belongs, which is either a tag-stream desync (the decoder is
+a field behind and writes each value into the wrong slot) or a slot size smaller
+than the write. That is the same class as the 8.3b `movups` fault, now with the
+object named.
+
+One fix did land on the way, and it is independent of this: `ScanGenericDecls`
+re-parsed a generic package with `SetCurrentArena(genericArena)` and no manual
+mode, so every parser `return Expr` relocated its copy into the callee's frame
+while the AST holding a pointer to it lived in `genericArena`. `FnArenaPush`
+ignores `SetCurrentArena` and pushes a fresh frame, so those copies died with
+the method. It now uses `ManualArenaEnter`, like the probe parse above it. The
+crash moves (from the AST encode to `NewTCVar`), which is why it is recorded
+here as a real fix and not as the fix.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
