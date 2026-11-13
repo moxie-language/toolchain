@@ -2428,6 +2428,20 @@ What that means:
   them, for every arena, and the panic remains only if the mmap itself fails.
   Regression-clean (`segment_heap`, `ring_release`, `sovereign_arena`,
   `rootmap`).
+- **The likely cause: the universe registry holds pointers into DEAD arenas.**
+  `InitUniverse` pushes the ROOT arena as a borrowed slot and `buildUniverse`
+  allocates there, so the universe itself is root-resident and must alias (the
+  root check is correct: `rootArenaAddr()` is `&domainRoot.root`). Yet only 2,458
+  pointers took that path while 12 M were descended - so the walk is over
+  `TCPackage`/`Scope`/`TCFunc` objects that are NOT in root. Those are the
+  per-package objects the compiler registers into the universe
+  (`ImportRegistry`, `u.Scope`) while they live in that package's compile arena,
+  which is freed when the compile ends. Every later package then encodes a
+  universe whose registry points into freed memory: the walk reads whatever is
+  there and re-copies it, which is exactly the unbounded, garbage-shaped
+  traversal measured. This is the escape the memory model exists to forbid -
+  a pointer crossing an arena boundary without relocation - and it is why no
+  amount of lookup tuning helped.
 - **The walk is millions of NON-ROOT objects, and aliasing root pointers does
   not help.** With encode-outcome counters printed alongside the allocation
   trace, the spin reads `ref=3956570 down=11780794 stab=2458`: nearly twelve
