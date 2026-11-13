@@ -19,9 +19,15 @@ first thing to die is `/tmp`.
   the step that starts it.
 - **`xargs -P`, `make -j`, fan-out subagents, detached `setsid` runs: same
   rule.** Sequential by default; concurrency only as the measured variable.
-- **Nothing durable in `/tmp`.** It gets purged. Builds, caches, backups and
-  logs go under `$HOME` (`~/mxc-builds/`), because `/tmp` taking the only
-  working compiler with it is not a hypothetical.
+- **Nothing durable in `/tmp`.** It is disk-backed (btrfs, verified: no tmpfs
+  mount, `tmp.mount` masked, no fstab entry) and on this machine it is no longer
+  cleaned — `/etc/tmpfiles.d/tmp.conf` used to say `D /tmp`, which emptied it on
+  every boot and once took the only working compiler with it; it now says
+  `d /tmp 1777 root root -`, verified by running the boot path
+  (`systemd-tmpfiles --remove`) and the age path (`--clean`) against a 30-day-old
+  file, which survived. It is still not a backup: builds, caches and the compiler
+  backup live under `$HOME` (`~/mxc-builds/`), so a wipe — or a reinstall that
+  ships its own tmpfiles.d — cannot cost the bootstrap again.
 
 The reason is not caution, it is measurement: a run under memory pressure is a
 run whose timing and peak RSS mean nothing, and this project's whole method is
