@@ -486,6 +486,29 @@ never crosses a return, so the codec is never asked to encode it, and this entir
 failure class disappears rather than being tuned. That is why Step 2 comes before
 any attempt to make the current path faster.
 
+### 8.3c What the codec cannot do, measured
+
+Two codec-level answers were tried and both are now closed off with numbers.
+
+**Publish instead of return** (done, `39010786`): the typecheck result travels
+through the context rather than as a returned `*TCPackage`. This removed the
+largest single walk and is correct.
+
+**Alias the phase arena** (tried, reverted): with the codec treating pointers into
+the phase arena as stable, the encode for one package dropped from **7,412,272**
+entries to **280,513** -- a 26x reduction, and the wrong thing to do. The
+typecheck arena is FREED at the end of the phase, so aliasing stores pointers
+into released memory in the parent's registry, and the build then stalls
+indefinitely a few packages later: measured, ENCS stops printing after
+`mxregexp` and the build runs until its 900-second timeout.
+
+That result is the important one, because it says the boundary is not negotiable:
+a pointer that crosses from the phase to the parent must be either COPIED (the
+walk) or backed by an arena that outlives the parent (the accumulation). Both are
+the failure. The only third option is that **nothing crosses**, which is the
+artifact: the parent re-reads the `.mxh`. That is Step 3, and it is now the only
+remaining path rather than a preference.
+
 ### 8.4 Steps, each with its acceptance
 
 Step 1 - **Measure the boundary before moving it.** No code changes.
