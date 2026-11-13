@@ -509,6 +509,30 @@ the failure. The only third option is that **nothing crosses**, which is the
 artifact: the parent re-reads the `.mxh`. That is Step 3, and it is now the only
 remaining path rather than a preference.
 
+### 8.3d Every codec-level option, measured and closed
+
+Five attempts, each built and run against the same 37-second baseline (the
+checked-in `mxc-stage4` building a hello):
+
+| attempt | result |
+|---|---|
+| raise the seen-set cap to 2^21 | still stalls; the walk is unbounded, not throttled |
+| O(1) hash index over the seen set | still stalls past 600 s at `internal/bytealg` |
+| publish the typecheck result through the context (kept, `39010786`) | 37 s once, then nondeterministic: fast / segfault / stall |
+| alias pointers into the phase arena | encode 7.4 M -> 280 k entries, then a permanent stall: the arena is freed |
+| parse the export text into the ROOT arena | no change |
+
+A gdb sample taken during the stall of the last two lands in `codecSeenLookup`
+from `codecEncodeValue`, during `internal/bytealg`'s typecheck - the largest
+package in the runtime closure. So the remaining cost is a genuinely enormous
+walk, and every mechanism that could make it cheaper or skip it has been tried and
+measured.
+
+The one option not yet taken is the architectural one, and it is Step 3: the
+parent must not hold a universe built from every package compiled so far. That is
+not a tuning change, it is a change to what the parent keeps, and it is the
+remaining path.
+
 ### 8.4 Steps, each with its acceptance
 
 Step 1 - **Measure the boundary before moving it.** No code changes.
