@@ -382,3 +382,126 @@ printed will not be maintained.
    are produced by one invocation but consumed differently. Recommendation:
    separate addresses, derived from the same manifest plus a kind tag, so that a
    `.mxh`-only consumer does not fetch an object file.
+
+---
+
+## 8. Execution plan: synchronous domains, not processes
+
+Sections 1-7 state the goal and the reason. This section fixes the MECHANISM,
+because the mechanism in section 1 ("one package per process") is not the one
+this codebase can implement, and it was written before the measurement below.
+
+### 8.1 What already exists (verified, not assumed)
+
+| piece | where | state |
+|---|---|---|
+| worker threads, not processes | `host.c:452` `mxc_spawn_worker` -> `mxc_spawn_thread` -> `pthread_create` | in use, 7 workers |
+| job/result transport | `main.mx:9513` `cRingCreate(262144)` pairs, `ringSend`/`ringRecv` | in use |
+| TLS package globals per domain | `host.c:469` `mxc_detect_tls` probes a global write in a thread; `-j 1` fallback | in use |
+| per-domain heap + arena stack | `workerEntryExport` -> `runtime.InitCShared()` | in use |
+| export data written to disk | `TypeCheckOnly` -> `generateMxh` -> `writeFile(mxhPath)` | in use |
+| export data read from disk | `loadMxh` for dependencies | in use |
+
+So the isolation the plan needs is not a runtime feature to build. It is the
+worker pool that already compiles objects. The work is to move ONE PHASE into it
+and to delete the in-memory return.
+
+### 8.2 The correction, and what it costs
+
+A domain is a thread in one address space. Therefore:
+
+- The memory bound does NOT come from the process dying. It comes from two
+  places: (a) the worker's arena is reset between jobs, so the previous package's
+  graph is gone before the next job starts; and (b) the parent's universe is
+  built per package from that package's DIRECT imports read off disk, so no
+  package ever sees every package compiled so far.
+- Crash containment is NOT available. A Moxie `runtimePanic` is death and the
+  thread shares the process, so a panic in a worker kills the build. This is the
+  one property a kernel process would give that a domain cannot, and the
+  mitigation is the existing discipline: a worker reports `reportCompileError`
+  as a status word over the ring, never as a panic.
+- What is gained over fork/exec: no `exec`, no re-mapping of the binary, no
+  re-reading of sources to warm a fresh process, and the pool amortises the
+  domain init (64 MB stack, `InitCShared`, package initialisers) across jobs
+  instead of paying it per package.
+
+The property that actually fixes the 137-million-allocation failure is neither
+the thread nor the wait: it is that **the result crosses as a file, not as a
+return value**. A returned `*TCPackage` is what walks Pkg -> Scope -> every
+object -> universe. A `.mxh` on disk is a byte string; its lifetime is the
+filesystem, and the codec is never asked to relocate it.
+
+### 8.3 The four gaps, in the order they must close
+
+1. **Typecheck is not in a worker.** `prepareDispatchIndex` ->
+   `typeCheckPkgSource` -> `TypeCheckOnly` -> `typeCheckPkg` run in the parent.
+2. **The result returns in memory.** `TypeCheckOnly` writes the `.mxh` AND calls
+   `loadMxhInto(mxhData)` into the parent's universe. The second call is the copy.
+3. **The parent accumulates one universe.** `ImportRegistry` and `u.Scope` grow
+   across the whole build, so each return carries every package compiled so far.
+4. **Errors must be values.** See 8.2; already the compiler's style, must be
+   enforced on the new job type.
+
+### 8.4 Steps, each with its acceptance
+
+Step 1 - **Measure the boundary before moving it.** No code changes.
+Record per package: wall time, peak RSS, `.mxh` bytes written, and the size of
+the type graph at return (the existing `memLine` counters plus the seen-set
+number from 22.4e). Run the same build with `-j 1` and `-j 7`.
+Accept: a table, one row per package, that names the packages dominating time and
+memory. Nothing else.
+
+Step 2 - **A typecheck job type.** Add "typecheck package P, write `<addr>.mxh`,
+report `{status, addr, bytes}`" to the worker's job switch, next to the existing
+object job. The parent dispatches it and waits for the status word.
+Accept: the `.mxh` files are byte-identical to the ones `TypeCheckOnly` writes
+today for the same sources (compare with `sha256sum` over the cache dir), and a
+deliberately broken package reports an error word instead of killing the build.
+
+Step 3 - **Delete the in-memory return.** Remove `loadMxhInto(mxhData)` from the
+typecheck path; the parent loads a dependency's exports from its `.mxh` when the
+dependent is dispatched, and drops them when that package finishes.
+Accept: peak RSS for the worst package stops growing with the number of packages
+built, measured across three tree sizes (hello, a mid-size package, the
+compiler). A second build with a warm cache reports zero parse/typecheck/emit.
+
+Step 4 - **Address the artifact.** The `.mxh` (and later the `.bc`) path is
+`H(normalised sources, ordered import addresses, target, flags)`. Nothing else -
+no commit, no timestamp, no user, no host.
+Accept: two builds of the same tree in different directories produce byte-
+identical artifacts; a `-j 1` and a `-j 7` build produce byte-identical
+artifacts; changing one leaf package rebuilds only its dependents.
+
+Step 5 - **Bound the workers.** `-j` caps worker count; each worker resets its
+arena between jobs; print per-worker peak RSS in the build summary.
+Accept: peak RSS per worker is a function of the largest single package, not of
+the program, and it is printed.
+
+Step 6 - **Acceptance.** `moxie build ./...` cold, then warm, on a clean
+checkout with an empty cache. Cold works and is bounded; warm does no
+parse/typecheck/emit and produces the same bytes. `morly` and `smesh` build and
+behave as they do today.
+
+### 8.5 Risks, and the check that catches each
+
+| risk | caught by |
+|---|---|
+| a worker panic kills the build | Step 2's broken-package acceptance; every worker path returns status, none panics |
+| the parent still accumulates (gap 3 half-closed) | Step 3's three-tree-size RSS check |
+| non-determinism from map iteration or worker order | Step 4's cross-directory and cross-`-j` hash comparison |
+| export format drift between parent and worker | Step 2's byte-identical `.mxh` comparison |
+| the pool hides a shared-state bug | `mxc_detect_tls` already probes globals; keep the `-j 1` fallback and run the suite both ways |
+| wood law | this changes the compiler's PROCESS STRUCTURE, not emitted code: stage4-only, per the scope clause in `claude.md`. The legacy compiler stays the bootstrap and must still build this tree |
+
+### 8.6 Rollback
+
+Every step is behind the existing cache: `-a` bypasses it, and `-j 1` serialises
+the pool. If a step misbehaves, `-j 1 -a` is the reference path and must keep
+working at every commit. A step that breaks `-j 1 -a` is not landed.
+
+### 8.7 What "done" prints
+
+The build summary prints, for every package: the artifact address, whether it was
+reused or rebuilt, wall time, and peak RSS; and for the build: workers used,
+artifacts written, artifacts reused, peak RSS per worker. A property that is not
+printed is not maintained.
