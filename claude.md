@@ -33,6 +33,54 @@ The reason is not caution, it is measurement: a run under memory pressure is a
 run whose timing and peak RSS mean nothing, and this project's whole method is
 that a number you cannot trust is worse than no number.
 
+## Rule 2: Every Build and Every Run Is Boxed Into 4 GB
+
+The compiler has blown the machine up more than once, and every time it was a
+program that asked for more memory than the work needed. A run that cannot fit
+in 4 GB is a run with a defect in it, and the defect is the thing to find - so
+the cap is not a budget, it is the diagnostic.
+
+**Every command that builds or runs anything goes through `scripts/moxbox.sh`:**
+
+```
+scripts/moxbox.sh ./mxc-stage4 build -a -o mxc-stage4-2 ./_mxc_stage4
+scripts/moxbox.sh ~/mxc-builds/storewrite /tmp/storewrite-db 5000
+scripts/moxbox.sh go build -o /tmp/mxc-legacy ./legacy
+```
+
+- It is a transient systemd scope with `MemoryMax=4G`, `MemoryHigh=3500M` and
+  `MemorySwapMax=0`. Swap off is the load-bearing part: with swap the cgroup
+  reclaims to stay under Max, so the run stays inside 4 GB by paging, the fan
+  runs all day and nothing fails - the symptom bounded instead of the bug
+  caught. With swap off the limit is an immediate OOM kill. High sits just
+  below Max so the run throttles before it dies: that window is where you
+  attach `gdb` or read the arena accounting while the process is still alive.
+- It caps every descendant, so a fan-out build is capped too. The unit is
+  `mxbuild.scope` and can be polled while it runs:
+  `systemctl --user show mxbuild.scope -p MemoryCurrent,MemoryPeak`. A new run
+  destroys the old unit first, because a transient scope keeps its name for a
+  moment after it exits.
+- **Read the exit code before concluding anything.** 137 is SIGKILL (the cgroup
+  OOM killer, or `timeout -s KILL`), 139 is SIGSEGV, 134 is SIGABRT (panic or
+  assertion). They are different findings.
+- **Check which process died.** LLVM's `opt` and `ld.lld` take 1-2 GB on a large
+  module and the kernel names whichever process was biggest. If `opt` died, the
+  budget is not measuring the compiler. The OOM message is in the *kernel*
+  journal, not the user one: `journalctl -k | grep -i oom` or `sudo dmesg | tail`.
+- `MemoryPeak` is the number that matters: 4.1 GB is a rounding error, 40 GB is
+  a type graph reaching the whole program.
+- **Nothing runs outside it.** Not the compiler, not a binary the compiler
+  produced, not a test, not a soak, not `go build`, not a shell one-liner that
+  happens to allocate. If a step needs to run a program, it runs in the box.
+- **A 4 GB kill is a finding, not an inconvenience.** Record the command, the
+  input and the peak, then fix what grew. Do not raise the cap to get past it;
+  the cap exists because raising it is what took the machine down.
+- `scripts/moxbox.sh` with no arguments is an interactive shell already inside
+  the box, for a debugging session where every command inherits the cap.
+- A container would be the right mechanism if the work were several independent
+  process trees that each needed their own limit. It is one tree, so a scope is
+  the whole mechanism.
+
 ## WOOD LAW: Bilateral Compiler Sync
 
 The legacy Go compiler (`legacy/`) and the stage4 compiler (`_mxc_stage4/`) are the SAME compiler in two languages. They must remain feature-identical at all times. Both sides or neither.
@@ -425,6 +473,31 @@ For the compiler this means: element loads and stores are bounds-checked for
 slices and strings (forming an address from an index is not), and there is no
 slice-to-array or array-to-slice conversion machinery to lean on - code that
 needs one works in slices.
+
+### The concatenation operator is one statement, and it is for cryptography
+
+`a | b | c` exists to write cryptographic notation as syntax: a key, a nonce, a
+length and a ciphertext in one expression. Its contract is deliberately narrow.
+
+- **One statement, one buffer.** The segment list of a single expression is
+  sized by summing the inputs and written with a memcpy per segment into the
+  target. That is what the operator means, and the compiler is supposed to lower
+  it that way; today it lowers a chain as pairwise `runtime.sliceConcat` calls,
+  so `a | b | c` allocates twice and abandons the first buffer. That is a
+  compiler gap, not a licence to write the chain differently.
+- **It does not extend across statements, and never into a loop.**
+  `x = x | part` in a loop is a Schlemiel loop: a new buffer every iteration,
+  and every abandoned one stays in the arena for the life of the frame. The
+  operator cannot see the repetition, so the guarantee stops at the statement
+  boundary. Do not accumulate through `|`.
+- **Bulk assembly is not its job.** For building a large buffer - coalescing
+  sources, encoding a document, assembling a record - use `bytes.Buffer` with
+  `io.Reader`/`io.Writer`, presized when the total is known, or a slice written
+  through a cursor. Concatenation is for cryptography; `bytes.Buffer` is for
+  compilers.
+- **Repetition belongs in a free function.** If a loop must build a result, put
+  the loop in a free function so the intermediate buffers die at its return
+  rather than accumulating in a sovereign arena or the root.
 
 ## Type System: No int/uint, Builtin Stringers
 
