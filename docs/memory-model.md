@@ -2401,33 +2401,35 @@ legacy-built), so the tree stays byte-identical to the sources of the working
 `./mxc-stage4` binary until that bug is found. Recorded here so the next round
 starts from the defect rather than rediscovering it.
 
-### 22.4e The `Identical` agreement fix crashes the compiler
+### 22.4e `.22.4c` was NOT a one-liner - and the first diagnosis of it was wrong
 
-Replacing the spawn agreement's rendered-name comparison with `Identical` — the
-one-line fix §22.4c names — makes the compiler SEGFAULT while building
-`spawn_closed_crosspkg` (`caught signal SIGSEGV` at
-`runtimePanicAt`/`ssa_builder`), whether the call is used for every argument or
-only for the non-ownership ones. Round 19 separated the two halves and the answer is
-different again: the crash is NOT in the comparison. Replacing `Identical` with
-a local structural helper (`sameSpawnType`, a plain recursive walk with no
-generic involvement) produced a compiler that **segfaults while typechecking
-`internal/bytealg` on a hello-world build** - before the fixture is even reached
-- and the fixed-message variant crashed the same way. So adding ANY new function
-call at that site miscompiles the compiler: the defect is in code generation for
-a call added inside `checkSpawnSignature`, not in the type comparison and not in
-the diagnostic.
+Attempts to make the spawn agreement compare types structurally - `Identical`
+with the rendered diagnostic, `Identical` with a fixed message, and a local
+recursive helper with no generic involvement - each produced a compiler that
+appeared to SEGFAULT while typechecking the first stdlib package. That reading
+was wrong: those runs were killed by a 300-second timeout, and the fault report
+was the kill landing inside the runtime, not a fault in the variant.
 
-HEAD itself is NOT broken: rebuilt from the committed sources with
-`legacy/moxie`, the compiler starts and typechecks the runtime closure (it is
-still slow, as measured above). So the miscompile is caused by the three
-variants of the §22.4c change, not by the tree.
+Run with a long enough timeout, the last variant executes for **17 minutes** and
+then dies with `arena: region table full` - the same resource failure the slow
+encode is heading for anyway. So none of the three variants miscompiles
+anything; they are all just as slow as HEAD, and the tree's real failure mode
+under a cold build is running out of region-table entries after ~17 minutes.
 
-That makes `.22.4c` a compiler-codegen bug, not a one-line agreement fix: until
-a call added there survives its own compilation, the spawn agreement cannot
-compare types structurally, and `spawn_closed_crosspkg` stays red. The rendered
-name comparison (which rejects `chan []byte` against `chan string`) stays in the
-tree as the least-bad behaviour, and the two experiments are recorded here so
-nobody repeats them: both were reverted.
+What that means:
+
+- The tree is sound (HEAD builds a working compiler; it is slow).
+- `.22.4c` (the `chan []byte` / `chan string` agreement) remains open, but for
+  the ordinary reason - nobody has verified a fix end-to-end, because a cold
+  build takes 17+ minutes and then fails on the arena table.
+- The two things to attack, in order, are the return-encode cost (which makes
+  every verification 17 minutes) and `arena: region table full` under a long
+  build (which turns that cost into a hard failure).
+
+**Lesson recorded:** a timeout kill is not a diagnosis. Every "compiler
+segfaulted" conclusion in this record must be re-read as "the run exceeded its
+timeout", and the only SIGSEGV that was real (round 8's codec panic) had a
+gdb backtrace behind it.
 
 ### 22.4d The 8-byte object header needs phase 4's offset addressing
 
