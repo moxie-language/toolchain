@@ -2407,14 +2407,22 @@ Replacing the spawn agreement's rendered-name comparison with `Identical` — th
 one-line fix §22.4c names — makes the compiler SEGFAULT while building
 `spawn_closed_crosspkg` (`caught signal SIGSEGV` at
 `runtimePanicAt`/`ssa_builder`), whether the call is used for every argument or
-only for the non-ownership ones. So the crash is in `Identical` itself on that
-input (`chan []byte` against `chan string`), not in the ownership branch: the
-same routine is called from assignment checking on every ordinary statement, so
-the crashing shape is specific to a channel compared against a channel whose
-elements are the other spelling of the same type. Until that is understood the
-render-name comparison stays, and `spawn_closed_crosspkg` stays red - it is a
-real defect, not a binary-staleness artefact, and §22.4c's "one line" framing was
-wrong.
+only for the non-ownership ones. Round 19 separated the two halves and the answer is
+different again: the crash is NOT in the comparison. Replacing `Identical` with
+a local structural helper (`sameSpawnType`, a plain recursive walk with no
+generic involvement) produced a compiler that **segfaults while typechecking
+`internal/bytealg` on a hello-world build** - before the fixture is even reached
+- and the fixed-message variant crashed the same way. So adding ANY new function
+call at that site miscompiles the compiler: the defect is in code generation for
+a call added inside `checkSpawnSignature`, not in the type comparison and not in
+the diagnostic.
+
+That makes `.22.4c` a compiler-codegen bug, not a one-line agreement fix: until
+a call added there survives its own compilation, the spawn agreement cannot
+compare types structurally, and `spawn_closed_crosspkg` stays red. The rendered
+name comparison (which rejects `chan []byte` against `chan string`) stays in the
+tree as the least-bad behaviour, and the two experiments are recorded here so
+nobody repeats them: both were reverted.
 
 ### 22.4d The 8-byte object header needs phase 4's offset addressing
 
