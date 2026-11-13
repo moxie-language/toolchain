@@ -1036,9 +1036,19 @@ func SovDrainCompactions(budget int32) (n int32) {
 	if sovDrainTick < sovBackoffUntil {
 		return 0
 	}
+	// A pinned or held group is skipped, not a reason to stop: the backoff is
+	// per-GROUP in effect (the group is rotated to the tail), and the queue is
+	// scanned up to a bounded number of refusals per call. Stopping on the
+	// first refusal made one pinned group stall every other group's compaction
+	// for 64 turns - measured as 4096 drain calls examining ~63 groups and
+	// `comp` frozen at 21 while `pend` grew by 2 per event.
+	refused := int32(0)
 	for n < budget {
 		g := sovPendingHead
 		if g == nil {
+			break
+		}
+		if refused >= 64 {
 			break
 		}
 		if g.cycleActive {
@@ -1065,8 +1075,9 @@ func SovDrainCompactions(budget int32) (n int32) {
 		}
 		if sovGroupHeld(g) {
 			sovQueueCompact(g)
-			sovBackoffUntil = sovDrainTick + 64
-			return
+			sovRotatePending(g)
+			refused++
+			continue
 		}
 		// Liveness must be current BEFORE the external-reference test: a word
 		// that names a block this group has already dropped is recycled bytes,
@@ -1087,8 +1098,8 @@ func SovDrainCompactions(budget int32) (n int32) {
 			// allocation and every burst region it ever grew.
 			sovTrimTail(g)
 			sovRotatePending(g)
-			sovBackoffUntil = sovDrainTick + 64
-			return
+			refused++
+			continue
 		}
 		codecSovereignCompact(g, 0, true)
 		if g.cycleActive {
