@@ -514,6 +514,16 @@ callee, which is exactly what the arena-escape warning is about. The interface
 itself is `raw` in `typeAccess`, so a codec IS emitted for it; what failed is the
 address judgement inside the codec, not the decision to encode.
 
+The reading is exact, not approximate: a `[]Expr` header is `{ptr, len, cap}`, and
+`{0x7f316e095730, 3}` are its first two words. So the encoder was handed the
+address of a **slice header** while the type it was told to encode is `Expr`.
+Either a struct field descriptor puts `Expr` where the real layout has a slice,
+or a slice-element walk used a stride that is not the element size. The two
+valid encodes immediately before it prove the descriptor walk itself works for
+`Expr` fields of `CallExpr` and `ExprStmt`, so the fault is one specific
+descriptor or one specific stride - not the decision to encode, and not
+`computeGraphNeeds` (instrumented: it completes, `cur == root` throughout).
+
 Two controls, so the finding is not attributed to the wrong change:
 
 | compiler | sources | result |
