@@ -2428,6 +2428,29 @@ What that means:
   them, for every arena, and the panic remains only if the mmap itself fails.
   Regression-clean (`segment_heap`, `ring_release`, `sovereign_arena`,
   `rootmap`).
+- **Two hypotheses killed, and the real one found: the SEEN-SET CAP.** The
+  registry was instrumented first: every `moxie_register_package` and
+  `moxie_register_func` checked `ArenaOwning` and printed if the object was not
+  root-resident - **zero** of either, and the whole registry holds 36-38 objects
+  in 4-5 packages. So no escape there. Next an encode was instrumented to report
+  its seen-set size: a single encode reaches **SEEN=262144** and keeps climbing.
+  The cap was 65536, so everything past it was never registered, every later
+  pointer re-walked, and the graph re-expanded: that is the 137 M allocations.
+  The cap is now 2^21 (`f8361251`), a correctness fix as much as a speed one.
+- **The deep-copy is the design working as written.** `TypeCheckOnly` creates a
+  per-package arena, typechecks into it, generates the `.mxh`, and **frees it** -
+  and every return inside that phase deep-copies its graph into the caller,
+  because the codec treats the top frame as transient. Returning one `*TCFunc`
+  drags its `Pkg`, the `Pkg` drags the `Scope`, and the `Scope` drags every
+  object and the universe behind them: 300,000+ pointers per declaration.
+  Making manual-arena pointers stable - they are a phase's own area, owned by a
+  caller that outlives every call inside it - collapsed the seen sets to 0-4 in
+  the fixtures, but it also broke the compiler built from it: an early run died
+  with `codec arena escape: pointer into a transient frame arena preserved
+  instead of copied`, so the rule is right in principle and too wide as written
+  (asn1 and net/http's chanpath/chanpool enter manual arenas whose escapes must
+  still be copied). It was reverted; the narrower form - exempting the arena a
+  TYPE-CHECK phase owns, not every manual arena - is the next step.
 - **The likely cause: the universe registry holds pointers into DEAD arenas.**
   `InitUniverse` pushes the ROOT arena as a borrowed slot and `buildUniverse`
   allocates there, so the universe itself is root-resident and must alias (the
