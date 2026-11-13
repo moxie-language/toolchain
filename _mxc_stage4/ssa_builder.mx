@@ -5881,6 +5881,24 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 			}
 		}
 	}
+	// A concatenation chain is ONE statement and must cost one buffer. `a|b|c`
+	// parses left-associatively, so this node's X is the binop just built for
+	// `a|b`; left to itself that binop allocates a buffer and the parent
+	// allocates again for the pair, abandoning the first. Mark the child as
+	// absorbed so the emitter never lowers it alone and the parent writes all
+	// three segments into one allocation. X here was returned by buildExpr on
+	// this node's own operand, so it is this expression's temporary; a load of
+	// a variable holding a previous concatenation is an SSAUnOp, not a binop,
+	// and is never absorbed.
+	if (op == OpOr || op == OpAdd) && b.X != nil && b.Y != nil && b.typ != nil {
+		if xb, isBin := x.(*SSABinOp); isBin && (xb.Op == OpOr || xb.Op == OpAdd) && xb.typ != nil && Identical(xb.typ, b.typ) {
+			if _, isSl := SafeUnderlying(b.typ).(*Slice); isSl || TextType(b.typ) {
+				if xb.Y != nil {
+					xb.absorbed = true
+				}
+			}
+		}
+	}
 	fb.emit(b)
 	return b
 }

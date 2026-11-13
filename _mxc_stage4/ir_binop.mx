@@ -213,6 +213,22 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 			}
 		}
 	}
+	// One statement, one buffer. The parser is left-associative, so `a | b | c`
+	// arrives as concat(concat(a, b), c); taking the inner result would size
+	// and fill a buffer for a|b that the next step abandons. Split the chain
+	// into its segments before either operand is emitted. The test is here and
+	// not in the parser because `|` is also integer bitwise OR - only the type
+	// tells the two apart.
+	if (b.Op == OpAdd || b.Op == OpOr) && b.X != nil && b.Y != nil && b.X.SSAType() != nil {
+		if sl, ok := SafeUnderlying(b.X.SSAType()).(*Slice); ok {
+			e.emitConcatStmt(reg, sl, b)
+			return
+		}
+		if e.isStringLike(b.X.SSAType()) {
+			e.emitConcatStmt(reg, NewSlice(Typ[Uint8]), b)
+			return
+		}
+	}
 	lv := e.operand(b.X)
 	rv := e.operand(b.Y)
 	// One interface and one concrete operand. Go's type-checker converts the
@@ -277,16 +293,6 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 					return
 				}
 			}
-		}
-	}
-	if (b.Op == OpAdd || b.Op == OpOr) && b.X.SSAType() != nil {
-		if sl, ok := SafeUnderlying(b.X.SSAType()).(*Slice); ok {
-			e.emitSliceConcat(reg, sl, lv, rv)
-			return
-		}
-		if e.isStringLike(b.X.SSAType()) {
-			e.emitSliceConcat(reg, NewSlice(Typ[Uint8]), lv, rv)
-			return
 		}
 	}
 	if b.X.SSAType() != nil && e.isStringLike(b.X.SSAType()) && (lt == e.sliceType() || lt == "ptr" || lt == "void") {
@@ -951,9 +957,108 @@ func (e *irEmitter) emitBinOp(b *SSABinOp) {
 	e.w("\n")
 }
 
+// concatSegments appends one concatenation statement's operands in source
+// order, splitting the absorbed nodes of the chain instead of taking their
+// result. Only absorbed nodes are descended into: a concatenation that some
+// other instruction can see keeps its own lowering, and appears here as one
+// operand.
+func (e *irEmitter) concatSegments(v SSAValue, segs []SSAValue) (out []SSAValue) {
+	if bo, isBin := v.(*SSABinOp); isBin && bo.absorbed {
+		out = e.concatSegments(bo.X, segs)
+		return e.concatSegments(bo.Y, out)
+	}
+	out = segs
+	out = mxutil.Ensure(out, 1)
+	push(out, v)
+	return out
+}
+
+// emitConcatStmt lowers one concatenation statement. Two segments keep the
+// pairwise runtime call, which is already a single exact allocation and
+// preserves the "empty slice with spare capacity" write-in-place idiom. Three
+// or more are written as one allocation with a memmove per segment.
+func (e *irEmitter) emitConcatStmt(reg string, sl *Slice, b *SSABinOp) {
+	segs := e.concatSegments(b.Y, e.concatSegments(b.X, nil))
+	if len(segs) == 2 {
+		e.emitSliceConcat(reg, sl, e.operand(segs[0]), e.operand(segs[1]))
+		return
+	}
+	e.emitSliceConcatN(reg, sl, segs)
+}
+
+// emitSliceConcatN writes N segments into one buffer of exactly their combined
+// length. This is the lowering the operator's contract states: size the sum,
+// then a memcpy per segment. Pairwise lowering allocated a buffer for the first
+// two segments and abandoned it as soon as the third was added, which is how a
+// single statement came to cost one arena block per `|`.
+func (e *irEmitter) emitSliceConcatN(reg string, sl *Slice, segs []SSAValue) {
+	ipt := e.intptrType()
+	sty := e.sliceType()
+	elemType := e.llvmType(sl.Elem)
+	if elemType == "void" {
+		elemType = "i8"
+	}
+	elemSz := e.nextReg2("cc")
+	e.w("  ") ; e.w(elemSz)
+	e.w(" = ptrtoint ptr getelementptr (") ; e.w(elemType)
+	e.w(", ptr null, i32 1) to ") ; e.w(ipt) ; e.w("\n")
+	// Operand text is collected first: each segment is emitted exactly once,
+	// and the sum below is over the same values that are copied.
+	aggs := []string{:0:int32(len(segs))}
+	total := "0"
+	for _, s := range segs {
+		agg := e.operand(s)
+		if isBareLiteral(agg) || agg == "null" {
+			agg = "zeroinitializer"
+		}
+		push(aggs, agg)
+		ln := e.nextReg2("cc")
+		e.w("  ") ; e.w(ln) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(agg) ; e.w(", 1\n")
+		nt := e.nextReg2("cc")
+		e.w("  ") ; e.w(nt) ; e.w(" = add ") ; e.w(ipt) ; e.w(" ") ; e.w(total) ; e.w(", ") ; e.w(ln) ; e.w("\n")
+		total = nt
+	}
+	byteLen := e.nextReg2("cc")
+	e.w("  ") ; e.w(byteLen) ; e.w(" = mul ") ; e.w(ipt) ; e.w(" ") ; e.w(total) ; e.w(", ") ; e.w(elemSz) ; e.w("\n")
+	buf := e.nextReg2("cc")
+	e.w("  ") ; e.w(buf) ; e.w(" = call ptr @runtime.alloc(") ; e.w(ipt) ; e.w(" ") ; e.w(byteLen) ; e.w(", ptr null, ptr null, ptr null)\n")
+	e.declareRuntime("runtime.alloc", "ptr", ipt | ", ptr, ptr")
+	off := "0"
+	for _, agg := range aggs {
+		sp := e.nextReg2("cc")
+		e.w("  ") ; e.w(sp) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(agg) ; e.w(", 0\n")
+		ln := e.nextReg2("cc")
+		e.w("  ") ; e.w(ln) ; e.w(" = extractvalue ") ; e.w(sty) ; e.w(" ") ; e.w(agg) ; e.w(", 1\n")
+		nb := e.nextReg2("cc")
+		e.w("  ") ; e.w(nb) ; e.w(" = mul ") ; e.w(ipt) ; e.w(" ") ; e.w(ln) ; e.w(", ") ; e.w(elemSz) ; e.w("\n")
+		dst := e.nextReg2("cc")
+		e.w("  ") ; e.w(dst) ; e.w(" = getelementptr inbounds i8, ptr ") ; e.w(buf) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(off) ; e.w("\n")
+		// An empty segment's pointer is null, and memmove takes a valid one
+		// even for a zero length. buf is always a real allocation.
+		empty := e.nextReg2("cc")
+		e.w("  ") ; e.w(empty) ; e.w(" = icmp eq ") ; e.w(ipt) ; e.w(" ") ; e.w(nb) ; e.w(", 0\n")
+		src := e.nextReg2("cc")
+		e.w("  ") ; e.w(src) ; e.w(" = select i1 ") ; e.w(empty) ; e.w(", ptr ") ; e.w(buf) ; e.w(", ptr ") ; e.w(sp) ; e.w("\n")
+		e.w("  call void @runtime.memmove(ptr ") ; e.w(dst) ; e.w(", ptr ") ; e.w(src) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(nb) ; e.w(", ptr null)\n")
+		e.declareRuntime("runtime.memmove", "void", "ptr, ptr, " | ipt)
+		off = e.nextReg2("cc")
+		e.w("  ") ; e.w(off) ; e.w(" = add ") ; e.w(ipt) ; e.w(" ") ; e.w(off) ; e.w(", ") ; e.w(nb) ; e.w("\n")
+	}
+	// An all-empty statement is the nil slice, not a one-byte allocation.
+	isZero := e.nextReg2("cc")
+	e.w("  ") ; e.w(isZero) ; e.w(" = icmp eq ") ; e.w(ipt) ; e.w(" ") ; e.w(total) ; e.w(", 0\n")
+	newPtr := e.nextReg2("cc")
+	e.w("  ") ; e.w(newPtr) ; e.w(" = select i1 ") ; e.w(isZero) ; e.w(", ptr null, ptr ") ; e.w(buf) ; e.w("\n")
+	s1 := e.nextReg2("cc")
+	e.w("  ") ; e.w(s1) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" undef, ptr ") ; e.w(newPtr) ; e.w(", 0\n")
+	s2 := e.nextReg2("cc")
+	e.w("  ") ; e.w(s2) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s1) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(total) ; e.w(", 1\n")
+	e.w("  ") ; e.w(reg) ; e.w(" = insertvalue ") ; e.w(sty) ; e.w(" ") ; e.w(s2) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(total) ; e.w(", 2\n")
+}
+
 func (e *irEmitter) emitSliceConcat(reg string, sl *Slice, lv, rv string) {
 	ipt := e.intptrType()
-	sty := "{ptr, " | ipt | ", " | ipt | "}"
+	sty := e.sliceType()
 	if isBareLiteral(lv) { lv = "zeroinitializer" }
 	if isBareLiteral(rv) { rv = "zeroinitializer" }
 	elemType := e.llvmType(sl.Elem)

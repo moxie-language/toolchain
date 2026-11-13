@@ -76,6 +76,16 @@ func slicePush(ptr unsafe.Pointer, slen, scap, n, elemSize uintptr) (unsafe.Poin
 // types). When x is empty and has capacity, the result is written into
 // x's backing (the append-into-buffer idiom). Otherwise allocates a fresh
 // buffer of exactly len(x)+len(y) elements and copies both halves.
+//
+// This is the TWO-segment case only. A statement with three or more segments
+// (`a|b|c`) is lowered to one allocation with a copy per segment - stage4
+// emits that inline in emitSliceConcatN and legacy calls runtime.bytesConcatN -
+// because pairwise lowering allocated for the first pair and abandoned it when
+// the third segment arrived. The operator's contract stops at the statement
+// boundary: `x = x | part` inside a loop allocates on every iteration and
+// every abandoned buffer stays in the arena for the life of the frame, so
+// accumulation through `|` is forbidden. Bulk assembly belongs to bytes.Buffer
+// or to a presized slice written through a cursor.
 func sliceConcat(xPtr, yPtr unsafe.Pointer, xLen, yLen, xCap, elemSize uintptr) (unsafe.Pointer, uintptr, uintptr) {
 	newLen := xLen + yLen
 	if newLen == 0 {

@@ -481,10 +481,15 @@ length and a ciphertext in one expression. Its contract is deliberately narrow.
 
 - **One statement, one buffer.** The segment list of a single expression is
   sized by summing the inputs and written with a memcpy per segment into the
-  target. That is what the operator means, and the compiler is supposed to lower
-  it that way; today it lowers a chain as pairwise `runtime.sliceConcat` calls,
-  so `a | b | c` allocates twice and abandons the first buffer. That is a
-  compiler gap, not a licence to write the chain differently.
+  target. That is what the operator means, and it is what both compilers now
+  lower: stage4 splits the chain in the builder (an operand concatenation is
+  marked `absorbed`, so it has no lowering of its own) and writes one exact
+  allocation with a `memmove` per segment in `emitSliceConcatN`; legacy
+  rewrites the chain to `__moxie_concat_n([][]byte{...})`, which becomes
+  `runtime.bytesConcatN`. Two segments still take the pairwise runtime call,
+  which is one exact allocation and keeps the "empty slice with spare
+  capacity" write-in-place idiom. Before this, `a | b | c` allocated for `a|b`
+  and abandoned that buffer when `c` arrived.
 - **It does not extend across statements, and never into a loop.**
   `x = x | part` in a loop is a Schlemiel loop: a new buffer every iteration,
   and every abandoned one stays in the arena for the life of the frame. The

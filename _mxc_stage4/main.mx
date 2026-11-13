@@ -7,7 +7,6 @@ import (
 	"unsafe"
 
 	"moxielang.dev/pkg/mxcover"
-	"moxielang.dev/pkg/mxsrc"
 	"moxielang.dev/pkg/mxutil"
 	. "moxielang.dev/pkg/types"
 )
@@ -3181,92 +3180,173 @@ func scanFileRegions(data []byte, imports map[string]bool) (bodyStart int32, bod
 	return bodyStart, bodyLine, fimps
 }
 
+// putStr writes s at off in an exactly-sized output buffer and returns the
+// next offset. The caller sized the buffer, so there is no capacity check.
+func putStr(dst []byte, off int32, s string) (n int32) {
+	for i := int32(0); i < int32(len(s)); i++ {
+		dst[off+i] = s[i]
+	}
+	return off + int32(len(s))
+}
+
+// scanSourceFile reads one source file into this frame and reports where its
+// body starts, the line the body starts on, the file's import specs, and the
+// package name. The read buffer belongs to this helper, so it is released when
+// the scan returns: the caller never holds a package's file bytes.
+func scanSourceFile(path string, imports map[string]bool) (bodyStart, bodyLine, size int32, fimps []string, pkgName string) {
+	size = mxutil.FileSize(path)
+	if size < 0 {
+		return -1, 0, 0, nil, ""
+	}
+	if size == 0 {
+		return 0, 1, 0, nil, ""
+	}
+	data := []byte{:size}
+	got := mxutil.ReadFileInto(path, data)
+	if got < 0 {
+		return -1, 0, 0, nil, ""
+	}
+	if got != size {
+		// The file changed between the size probe and the read. Trim to what
+		// was actually read rather than scanning past the end of the bytes.
+		trimmed := []byte{:got}
+		for i := int32(0); i < got; i++ {
+			trimmed[i] = data[i]
+		}
+		data = trimmed
+		size = got
+	}
+	pkgName = extractPkgName(data)
+	bodyStart, bodyLine, fimps = scanFileRegions(data, imports)
+	return
+}
+
+// copyFileBody copies one file's body - everything from bodyStart - into dst at
+// off, and returns the number of bytes written. The file is read into a buffer
+// this helper owns, so a package costs one file's bytes at a time, not all of
+// them for the length of the build.
+func copyFileBody(dst []byte, off int32, path string, size, bodyStart int32) (n int32) {
+	if size <= 0 || bodyStart >= size {
+		return 0
+	}
+	src := []byte{:size}
+	got := mxutil.ReadFileInto(path, src)
+	if got <= 0 || bodyStart >= got {
+		return 0
+	}
+	n = got - bodyStart
+	if n > int32(len(dst))-off {
+		n = int32(len(dst)) - off
+	}
+	for i := int32(0); i < n; i++ {
+		dst[off+i] = src[bodyStart+i]
+	}
+	return n
+}
+
+// concatSources writes a package's files into one buffer: the package clause,
+// the hoisted sorted import block, then each file's body followed by a newline.
+//
+// One allocation, one cursor. The output length is known before it is
+// allocated - a scan pass reports each file's body offset and line, and the
+// header length is a sum of the specs it collected - so nothing is grown,
+// nothing is joined, and no intermediate buffer outlives a step. Each file is
+// read twice (once to scan, once to copy its body) but only one file's bytes
+// are live at a time, against a previous shape that kept every file in this
+// frame and then copied them all again through mxsrc.JoinChunks.
+//
+// The text is byte-identical to that previous shape, so the line numbers
+// recorded for the source map and the per-file import segments still point
+// where the parser will look.
 func concatSources(dir string, files []string) (buf []byte) {
 	imports := map[string]bool{}
 	pkgName := ""
-	// Store body as a byte slice reference into the file data.
-	type fileBody struct {
+	type fileSpan struct {
+		path      string
 		name      string
-		data      []byte // full file data (freed after copy into output)
+		size      int32
 		bodyStart int32
 		bodyLine  int32
 		fimps     []string
 	}
-	var fb []fileBody
+	spans := []fileSpan{:0:len(files)}
+	bodyLen := int32(0)
 	for _, f := range files {
-		data, ok := mxutil.ReadFile(mxutil.JoinPath(dir, f))
-		if !ok {
+		p := mxutil.JoinPath(dir, f)
+		bs, bl, size, fimps, name := scanSourceFile(p, imports)
+		if bs < 0 {
 			continue
 		}
 		if pkgName == "" {
-			pkgName = extractPkgName(data)
+			pkgName = name
 		}
-		bs, bl, fimps := scanFileRegions(data, imports)
-		fb = mxutil.Ensure(fb, 1)
-		push(fb, fileBody{name: f, data: data, bodyStart: bs, bodyLine: bl, fimps: fimps})
+		push(spans, fileSpan{path: p, name: f, size: size, bodyStart: bs, bodyLine: bl, fimps: fimps})
+		if size > bs {
+			bodyLen += size - bs + 1
+		} else {
+			bodyLen++
+		}
 	}
-	// Estimate total size for pre-allocation
-	totalSize := int32(64) // header
-	for _, f := range fb {
-		totalSize += int32(len(f.data)) - f.bodyStart + 1
-	}
+	impKeys := []string{:0:int32(len(imports))}
 	for imp := range imports {
-		totalSize += int32(len(imp)) + 2
+		push(impKeys, imp)
 	}
-	var out []byte
-	out = out | ("package " | pkgName | "\n")
-	if len(imports) > 0 {
-		impKeys := []string{:0:len(imports)}
-		for imp := range imports {
-			impKeys = mxutil.Ensure(impKeys, 1)
-			push(impKeys, imp)
+	for i := int32(1); i < int32(len(impKeys)); i++ {
+		for j := i; j > 0 && impKeys[j] < impKeys[j-1]; j-- {
+			impKeys[j], impKeys[j-1] = impKeys[j-1], impKeys[j]
 		}
-		for i := int32(1); i < int32(len(impKeys)); i++ {
-			for j := i; j > 0 && impKeys[j] < impKeys[j-1]; j-- {
-				impKeys[j], impKeys[j-1] = impKeys[j-1], impKeys[j]
-			}
-		}
-		out = out | "import (\n"
+	}
+	hdrLen := int32(len("package ")) + int32(len(pkgName)) + 1
+	if len(impKeys) > 0 {
+		hdrLen += int32(len("import (\n")) + int32(len(")\n"))
 		for _, imp := range impKeys {
-			out = out | "\t" | imp | "\n"
+			hdrLen += 2 + int32(len(imp))
 		}
-		out = out | ")\n"
 	}
-	cctx.concatSourceMap = nil
-	mxutil.ResetConcatImportSegs()
+	out := []byte{:hdrLen + bodyLen}
+	w := putStr(out, 0, "package ")
+	w = putStr(out, w, pkgName)
+	w = putStr(out, w, "\n")
+	if len(impKeys) > 0 {
+		w = putStr(out, w, "import (\n")
+		for _, imp := range impKeys {
+			w = putStr(out, w, "\t")
+			w = putStr(out, w, imp)
+			w = putStr(out, w, "\n")
+		}
+		w = putStr(out, w, ")\n")
+	}
 	outLine := int32(1)
-	for j := int32(0); j < int32(len(out)); j++ {
+	for j := int32(0); j < w; j++ {
 		if out[j] == '\n' {
 			outLine++
 		}
 	}
-	bodyChunks := [][]byte{:0:len(fb)*2 + 1}
-	bodyChunks = mxutil.Ensure(bodyChunks, 1)
-	push(bodyChunks, out)
-	for i := range fb {
-		body := fb[i].data[fb[i].bodyStart:]
+	cctx.concatSourceMap = nil
+	mxutil.ResetConcatImportSegs()
+	for i := range spans {
+		sp := spans[i]
 		cctx.concatSourceMap = mxutil.Ensure(cctx.concatSourceMap, 1)
 		push(cctx.concatSourceMap, srcSpan{
-			file:     fb[i].name,
+			file:     sp.name,
 			outStart: outLine,
-			srcLine:  fb[i].bodyLine,
+			srcLine:  sp.bodyLine,
 		})
 		mxutil.AppendConcatImportSeg(mxutil.ImportSeg{
 			OutStart: outLine,
-			Specs:    fb[i].fimps,
+			Specs:    sp.fimps,
 		})
-		for j := int32(0); j < int32(len(body)); j++ {
-			if body[j] == '\n' {
+		n := copyFileBody(out, w, sp.path, sp.size, sp.bodyStart)
+		out[w+n] = '\n'
+		for j := int32(0); j < n; j++ {
+			if out[w+j] == '\n' {
 				outLine++
 			}
 		}
 		outLine++
-		bodyChunks = mxutil.Ensure(bodyChunks, 1)
-		push(bodyChunks, body)
-		bodyChunks = mxutil.Ensure(bodyChunks, 1)
-		push(bodyChunks, []byte("\n"))
+		w += n + 1
 	}
-	return mxsrc.JoinChunks(bodyChunks)
+	return out
 }
 
 func fileContainsPart(base string, part string) (ok bool) {

@@ -2729,6 +2729,8 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon, callInstr *ssa.Call)
 			if !retval.IsNil() {
 				return retval, nil
 			}
+		case strings.HasPrefix(fn.Name(), "__moxie_concat_n"):
+			return b.createMoxieConcatN(instr), nil
 		case strings.HasPrefix(fn.Name(), "__moxie_concat_move"):
 			return b.createMoxieConcatMove(instr), nil
 		case strings.HasPrefix(fn.Name(), "__moxie_concat"):

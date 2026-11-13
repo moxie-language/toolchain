@@ -3163,6 +3163,10 @@ func maybeReplacePipe(expr ast.Expr, set map[*ast.BinaryExpr]bool) ast.Expr {
 	if !ok || !set[bin] {
 		return expr
 	}
+	// Three or more segments are one statement and get one buffer.
+	if segs := pipeChainSegments(bin, set); len(segs) >= 3 {
+		return concatNCall(segs)
+	}
 	// Check if inner X is also a pipe (chain). If so, the inner result
 	// is a fresh temp - subsequent pipes can use move semantics.
 	if inner, ok := bin.X.(*ast.BinaryExpr); ok && set[inner] {
@@ -3177,6 +3181,33 @@ func maybeReplacePipe(expr ast.Expr, set map[*ast.BinaryExpr]bool) ast.Expr {
 	return &ast.CallExpr{
 		Fun:  &ast.Ident{Name: "__moxie_concat"},
 		Args: []ast.Expr{wrapForMoxieConcat(bin.X), wrapForMoxieConcat(bin.Y)},
+	}
+}
+
+// pipeChainSegments lists a concatenation chain's operands in source order.
+// The chain is left-associative, so the spine runs down X; an explicitly
+// parenthesised right side is one operand, exactly as stage4 reads it.
+func pipeChainSegments(bin *ast.BinaryExpr, set map[*ast.BinaryExpr]bool) []ast.Expr {
+	if inner, ok := bin.X.(*ast.BinaryExpr); ok && set[inner] {
+		return append(pipeChainSegments(inner, set), bin.Y)
+	}
+	return []ast.Expr{bin.X, bin.Y}
+}
+
+// concatNCall emits the single call that lowers a whole chain:
+// __moxie_concat_n([][]byte{a, b, c}). The compiler intercepts it and allocates
+// one buffer sized by the sum of the segments.
+func concatNCall(segs []ast.Expr) ast.Expr {
+	lit := &ast.CompositeLit{
+		Type: &ast.ArrayType{Elt: &ast.ArrayType{Elt: ast.NewIdent("byte")}},
+		Elts: make([]ast.Expr, len(segs)),
+	}
+	for i, s := range segs {
+		lit.Elts[i] = wrapForMoxieConcat(s)
+	}
+	return &ast.CallExpr{
+		Fun:  &ast.Ident{Name: "__moxie_concat_n"},
+		Args: []ast.Expr{lit},
 	}
 }
 
@@ -3205,6 +3236,13 @@ func maybeReplacePipeMove(expr ast.Expr, set map[*ast.BinaryExpr]bool, assignTar
 	bin, ok := expr.(*ast.BinaryExpr)
 	if !ok || !set[bin] {
 		return expr
+	}
+	// A chain of three or more is one buffer whatever it is assigned to: the
+	// move path exists to extend one owned buffer in place, and a chain that
+	// sizes and fills once abandons nothing at all. `x = x | a | b` therefore
+	// copies x once instead of growing it twice.
+	if segs := pipeChainSegments(bin, set); len(segs) >= 3 {
+		return concatNCall(segs)
 	}
 	leftmost := pipeChainLeftmost(bin, set)
 	// Check: leftmost matches assign target AND target is not a parameter.

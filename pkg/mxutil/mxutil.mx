@@ -237,6 +237,32 @@ func ReadFile(path string) (data []byte, ok bool) {
 	return buf[:n], true
 }
 
+// FileSize reports a file's size in bytes, or -1. A scalar, so a caller can
+// size a buffer in an arena it owns and then fill it.
+func FileSize(path string) (n int32) {
+	if len(path) == 0 {
+		return -1
+	}
+	pp := unsafe.Pointer(unsafe.SliceData([]byte(path)))
+	return cFilesize(pp, int32(len(path)))
+}
+
+// ReadFileInto fills buf from path and returns the bytes read, or -1.
+//
+// The caller owns the buffer, so nothing is returned by pointer: ReadFile
+// allocates in this function's frame and hands the slice back, and the return
+// protocol then copies it into the caller's arena. For a 6.8 MB .mxh read that
+// is a second copy of the whole file on every load, which is what the compiler
+// was paying at 3 GB.
+func ReadFileInto(path string, buf []byte) (n int32) {
+	if len(path) == 0 || len(buf) == 0 {
+		return -1
+	}
+	pp := unsafe.Pointer(unsafe.SliceData([]byte(path)))
+	return cReadfile(pp, int32(len(path)),
+		unsafe.Pointer(unsafe.SliceData(buf)), int32(len(buf)))
+}
+
 func WriteFile(path string, data []byte, mode uint32) {
 	if len(path) == 0 {
 		return

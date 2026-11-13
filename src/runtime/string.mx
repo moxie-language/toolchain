@@ -147,6 +147,32 @@ func bytesConcat(x, y []byte) []byte {
 	return unsafe.Slice((*byte)(buf), int32(bufCap))[:int32(length)]
 }
 
+// bytesConcatN concatenates N segments into ONE buffer sized by their sum,
+// with one memcpy per segment. This is a whole concatenation statement
+// (`a|b|c`): the legacy compiler lowers the chain to this call and stage4
+// emits the same shape inline (emitSliceConcatN). Lowering the chain as
+// nested pairs allocated a buffer for `a|b` and abandoned it the moment `c`
+// arrived, so one statement cost one arena block per `|`.
+func bytesConcatN(segs [][]byte) []byte {
+	total := int32(0)
+	for _, s := range segs {
+		total += len(s)
+	}
+	if total == 0 {
+		return nil
+	}
+	buf := alloc(uintptr(total), nil, nil)
+	off := uintptr(0)
+	for _, s := range segs {
+		n := len(s)
+		if n > 0 {
+			memcpy(unsafe.Add(buf, off), unsafe.Pointer(&s[0]), uintptr(n))
+			off += uintptr(n)
+		}
+	}
+	return unsafe.Slice((*byte)(buf), total)
+}
+
 // bytesConcatMove: move semantics (x = x | y / x |= y). Extends x
 // in place if capacity allows. Otherwise grows via sliceGrow which
 // frees the old buffer. x is consumed - caller must not use old x.

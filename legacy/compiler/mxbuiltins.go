@@ -88,6 +88,16 @@ func (b *builder) createMoxieConcatMove(instr *ssa.CallCommon) llvm.Value {
 	return b.createRuntimeCall("bytesConcatMove", []llvm.Value{a, bv}, "")
 }
 
+// createMoxieConcatN handles __moxie_concat_n(segments [][]byte) []byte, the
+// whole of a concatenation statement of three or more segments. One buffer
+// sized by the sum, one memcpy per segment - the same shape stage4 emits
+// inline in emitSliceConcatN. Lowering `a|b|c` as nested pairs allocated for
+// `a|b` and abandoned that buffer when `c` arrived.
+func (b *builder) createMoxieConcatN(instr *ssa.CallCommon) llvm.Value {
+	segs := b.getValue(instr.Args[0], instr.Pos())
+	return b.createRuntimeCall("bytesConcatN", []llvm.Value{segs}, "")
+}
+
 // createMoxieEq handles __moxie_eq(a, b []byte) bool.
 // Emits a call to runtime.stringEqual (same layout as []byte).
 func (b *builder) createMoxieEq(instr *ssa.CallCommon) llvm.Value {
