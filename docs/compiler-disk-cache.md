@@ -545,6 +545,22 @@ memory ceiling instead of a stack limit shows the other face: `mxutil.Ensure`
 growing a `[]byte` by doubling until the arena opens 64 MB regions, because the
 encode's buffer tracks the size of what it walks.
 
+**Step 3's first half, measured.** Removing `loadMxhInto(mxhData)` from
+`TypeCheckOnly` - so the parent keeps only the mxh text on disk - advances the
+build past the packages that used to die immediately (`mxutil`, `mxregexp`, `io`,
+`internal/cpu`) and into `math`, where the ceiling still fires. So the publish
+was one of the crossings, not the only one. The stack at the ceiling is the other
+half in its purest form:
+
+```
+mxutil.Ensure[byte] <- arenaBump <- alloc <- codecDecodeValue <- codecWriteRaw
+```
+
+`codecWriteRaw` writes a block whose length came from the value being encoded,
+and `Ensure` grows the codec buffer to that length: a dangling slice length makes
+the encoder copy gigabytes. Nothing about the buffer is wrong; the number it was
+given is.
+
 One defect, two symptoms, and both are the boundary in 8.3b: something
 graph-shaped is crossing a return. Where the stack exhaustion ends and the
 dangling pointer begins is not yet separated, which is why Step 3 - nothing
