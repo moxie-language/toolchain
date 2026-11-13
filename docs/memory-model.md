@@ -2362,6 +2362,26 @@ Nothing in this path needs a parser change, which is why it is the recorded
 one. The legacy half needs the same rewriter hook (legacy's pipeline has its own
 rewrites) and the same builtin case in its SSA builder.
 
+### 22.6 Verification status at this commit (full 0a + 0b run)
+
+`tests/unitrun.sh --phases 0a,0b` with `./mxc-stage4`: **220 units, 213 passed, 7
+failed**. The failures, classified, because they are not all the same kind:
+
+| unit | cause |
+|---|---|
+| `spawn_closed_crosspkg` | the §22.4c agreement defect (rendered-type comparison rejects `chan []byte` against `chan string`) |
+| `reject_generic_assign_mismatch` | `./mxc-stage4` predates the `Identical` fix (`334a6714`), so the fixture's "must reject" is not exercised by that binary |
+| `tree-cleanliness` | pre-existing dirty tree (build artifacts and unrelated edits) |
+| `http_header_api` | the compiler's loop rule fires on `mime/multipart`'s `readForm`: "':=' of a struct literal inside a loop in a self-mutating method". Hoisting `p, err :=` exposes a second one (an `err` shadow and a struct literal), so this is a small stdlib cleanup that must be done as a whole, not line by line |
+| `asn1_builder_der` | **wrong output**: `bigint_128: got 020400000080 want 02020080` - a big integer is serialised with four leading zero bytes |
+| `generic_aggregate_subst` | SIGSEGV in a generic aggregate substitution |
+| `tls_handshake` | `parse child ca: x509: malformed certificate`, preceded by the codec's arena-escape warning |
+
+The last three are correctness defects in the return/relocation machinery, which
+is the same area phases 1 and 4 rewrite; they are the acceptance cases for that
+work. None of them is a build failure, and all three reproduce with the working
+binary, so they are reachable and testable today.
+
 ### 22.4c The spawn agreement check regressed `chan string` vs `chan []byte`
 
 The agreement check added in step 3b compares spawn arguments to the target's
