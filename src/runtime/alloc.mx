@@ -2314,10 +2314,21 @@ func sovExternalRef(g *sovGroup) (ok bool) {
 		return false
 	}
 	// The root arena is a holder too, and the one the group loop cannot see.
-	// Scanning it costs a walk of the whole root region (tens of MB), so a group
-	// that is big enough to be worth compacting is checked once every 512
-	// attempts and between checks the previous answer stands: a group that was
-	// referenced from root stays pinned until a fresh walk says otherwise.
+	// Scanning it costs a walk of the whole root region (tens of MB), so the
+	// check is amortised: once every 512 attempts, and between checks the
+	// previous answer stands, so a group referenced from root stays pinned
+	// until a fresh walk says otherwise.
+	//
+	// The size condition here (`g.liveBytes > 1<<20`) is a predicate error and
+	// is kept only because removing it was MEASURED to be worse, which points at
+	// the real defect: sovRootLiveRef cannot tell a live holder from a stale
+	// word. Root is a bump arena that never reclaims, so a word written once and
+	// abandoned stays; if it happens to name a live record of some group, that
+	// group is pinned for the life of the process. Removing the gate dropped
+	// compaction to almost nothing and restored the runaway - groups 143 -> 2322
+	// and capacity 9.7 MB -> 365 MB at 3000 events - because nearly every group
+	// acquired rootRef. The upstream fix is a root SCOPE: a word in root is a
+	// reference only while the scope that wrote it is live.
 	sovRootTick++
 	if g.liveBytes > (1<<20) && sovRootTick%512 == 0 {
 		g.rootRef = sovRootLiveRef(g)
@@ -2442,11 +2453,23 @@ func SovPrintStackWords(n int32) {
 		return
 	}
 	p := (sp + 7) &^ 7
+	// The first matches are this function's own frame, its caller and the
+	// allocator entry points above it - printing them named the printer, not
+	// the request. The four that come after are the first real callers.
+	skip := int32(4)
 	c := int32(0)
 	for p+8 <= stackTop && c < n {
 		v := *(*uintptr)(unsafe.Pointer(p))
-		if v >= 0x100000 && v < 0x800000 {
-			if *(*uint8)(unsafe.Pointer(v - 5)) == 0xE8 {
+		// The upper bound used to be 0x800000, which is where the compiler's
+		// text ended when this was written; a bigger binary printed nothing.
+		// No dereference: testing *(v-5) for the call opcode faults on any
+		// word that merely looks like an address, and the panic path must not
+		// fault inside itself. A plausible code address is printed and left
+		// for the reader to resolve with addr2line.
+		if v >= 0x100000 && v < 0x00007f0000000000 {
+			if skip > 0 {
+				skip--
+			} else {
 				printstring(" ")
 				printuint64(uint64(v))
 				c++

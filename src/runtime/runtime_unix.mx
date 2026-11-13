@@ -424,8 +424,39 @@ func arenaPhaseChainCap() (n uintptr) {
 	return uintptr(64) * 1024 * 1024
 }
 
-// sysMap returns a zeroed, page-aligned region of size bytes, or nil on
-// failure. Anonymous private memory: the caller owns it outright.
+// sysMemCeiling is the live mapped-bytes limit this program asked for, or 0 for
+// none. Under a cgroup limit the kernel's OOM killer sends SIGKILL, which leaves
+// no stack and names no allocation; a ceiling below the cgroup's turns that into
+// a panic at the request that crossed it. The runtime supplies the mechanism,
+// the program sets the number.
+var sysMemCeiling uint64
+
+// SysSetMemoryCeiling makes every mapping past n live bytes die with a stack.
+// n == 0 disables it. Call it once at startup, before the work begins.
+func SysSetMemoryCeiling(n uint64) {
+	sysMemCeiling = n
+}
+
+// sysMapDie reports a mapping the program cannot have and dies.
+//
+// An allocator that returns nil hands the caller a pointer it will dereference,
+// so the failure has to be loud where it happens, with the size that was asked
+// for and the return addresses that asked for it. The alternative is a SIGSEGV
+// three frames later in code that has nothing to do with the request, or a
+// SIGKILL from the cgroup with no stack at all.
+func sysMapDie(size uintptr) {
+	printFD = 2
+	printstring("out of memory: mmap ")
+	printuint64(uint64(size))
+	printstring(" bytes failed, live ")
+	printuint64(sysMapBytes - sysUnmapBytes)
+	printstring("; requested from:")
+	SovPrintStackWords(16)
+	abort()
+}
+
+// sysMap returns a zeroed, page-aligned region of size bytes, and dies rather
+// than returning nil. Anonymous private memory: the caller owns it outright.
 //
 // The arena allocator needs a single primitive that both platforms can
 // provide. Native pages come from mmap; wasm derives them from linear
@@ -434,9 +465,13 @@ func sysMap(size uintptr) unsafe.Pointer {
 	p := mmap(nil, size, flag_PROT_READ|flag_PROT_WRITE,
 		flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
 	if uintptr(p) == ^uintptr(0) {
+		sysMapDie(size)
 		return nil
 	}
 	RecordSysMap(size)
+	if sysMemCeiling != 0 && sysMapBytes-sysUnmapBytes > sysMemCeiling {
+		sysMapDie(size)
+	}
 	return p
 }
 
@@ -446,6 +481,7 @@ func sysMapShared(size uintptr) unsafe.Pointer {
 	p := mmap(nil, size, flag_PROT_READ|flag_PROT_WRITE,
 		flag_MAP_SHARED|flag_MAP_ANONYMOUS, -1, 0)
 	if uintptr(p) == ^uintptr(0) {
+		sysMapDie(size)
 		return nil
 	}
 	return p
