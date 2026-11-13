@@ -1,10 +1,21 @@
-# The Segment Heap: Unified Memory Model
+# Memory Model: Function Arenas, Shelves, and Explicit Stores
 
-Status: design proposal. Supersedes the ad-hoc arena backing store described in
-`ownership.md`. The ownership semantics in that document do not change. What
-changes is what sits underneath them.
+Status: design proposal, revision 3. Supersedes the ad-hoc arena backing store
+described in `ownership.md`. The ownership semantics in that document do not
+change. What changes is what sits underneath them.
 
-This design is not novel. It is an assembly of five established systems, and
+**Revision 3 removes the root heap.** Revision 2 introduced it as a tier: memory
+reachable by ordinary allocation, whose release point a dead-ratio heuristic
+decides. That contradicted `axioms.md`, which says there is no startup bump
+allocator and no heap, because either reintroduces a release point that structure
+does not determine (A1), and because it is authority no signature names (A3). The
+mechanism was right; the placement was wrong. Segmentation, append-only writing
+and dead-ratio sweeping are the implementation of a store that someone
+**constructs and holds**, not a place a program falls into. The store is now a
+type, `shelf T`. The compiler does not use it, and section 2.1 records why that
+last sentence is the point rather than an omission.
+
+This design is not novel. It is an assembly of six established systems, and
 knowing which part came from where tells you where to look when something
 breaks.
 
@@ -26,6 +37,15 @@ Rules:
   arena boundaries.
 - Do not put the identity table in the dereference path. It is not a liveness
   oracle and it must never be consulted to decide whether an object is alive.
+- **There is no ambient allocator.** Every byte of long-lived, reclaimed memory
+  belongs to a `shelf` value that was constructed, and a shelf is reachable only
+  through the variable that holds it. A program that never declares a shelf never
+  has one. No `malloc`, no package-level store, no implicit fallback, no "the
+  runtime's heap". This is A3 applied to memory and it is not negotiable.
+- **Accumulated output is not memory.** A result that must outlive its process —
+  a compiler artifact, export data, an index — is written to a content-addressed
+  store on disk and read back on demand. Memory holds one unit of work, not a
+  history of units. Section 23 states the contract.
 - Every phase in section 16 is independently shippable and independently
   testable. Do not begin a phase until the previous phase's acceptance test
   passes.
@@ -36,7 +56,7 @@ Rules:
 
 ## 1. Prior art: what this is assembled from
 
-Five lineages, one mechanism taken from each.
+Six lineages, one mechanism taken from each.
 
 | Mechanism | Source | What transfers | What does not |
 |---|---|---|---|
@@ -45,6 +65,7 @@ Five lineages, one mechanism taken from each.
 | Scope-bound bulk-free arena | APR pools, C++ `std::pmr`, game frame allocators | push/pop discipline, hierarchical release, one-operation destroy | APR's manual cleanup registration, pool leakage |
 | Compacted segmented DRAM heap | RAMCloud log-structured memory (Rumble et al., FAST 2014) | the cost model, cleaning overhead, space overhead | distributed recovery |
 | Key-value separation | WiscKey (Lu et al., FAST 2016), BadgerDB | sparse side index, on-demand identity, separating metadata from payload | the indirection itself, index-based liveness |
+| Batch compilation with a content-addressed cache | the Go toolchain | one process per package, one artifact per package, imports read from disk, no shared working set | the build-graph policy, which is packaging rather than language |
 
 ### The five claims being borrowed
 
@@ -71,13 +92,20 @@ sparse, keep the payload free of fields that only some objects need, and never
 let the index become the authority on liveness. Section 6 applies this to the
 object header and removes 16 of the 24 bytes.
 
+**From the Go toolchain: the unit of work.** One package, one process, one
+artifact, written once and read by hash. The compiler's accumulated state is a
+directory, not a heap. This is the newest import and the one that removed a tier:
+section 23 applies it to the compiler, and section 2.1 applies the lesson to the
+language.
+
 ### What this means for debugging
 
 When the whole thing is on fire, ask which lineage the bug belongs to. A stale
-pointer after a clean is LFS territory. A missing copy is BEAM territory. A pool
-that never dies is APR territory. A cleaner that eats the frame budget is RAMCloud
-territory. A header field that is stale after a move is WiscKey territory. Sort
-the bug before you instrument.
+pointer after a sweep is LFS territory. A missing copy is BEAM territory. A pool
+that never dies is APR territory. A sweep that eats the frame budget is RAMCloud
+territory. A header field that is stale after a move is WiscKey territory. A
+rebuild that recomputes what it already had is the missing cache. Sort the bug
+before you instrument.
 
 ---
 
@@ -87,7 +115,9 @@ Function-scoped arenas solve short-lived allocation well. Every allocation made
 inside a function dies with the function, and release is one operation. That part
 of the model is sound and is being kept.
 
-The failure is the domain-lifetime arena, the root, and the pool beneath it.
+The failure is the domain-lifetime store and the pool beneath it: one unowned
+region that everything long-lived falls into, whose reclamation is decided by a
+heuristic instead of by an owner.
 
 1. **Reclaim exists but is in the wrong place.** Sovereign data arenas already
    copy-compact. `ArenaAllocTD`'s own comment says that when a new region would be
@@ -118,8 +148,37 @@ The failure is the domain-lifetime arena, the root, and the pool beneath it.
 
 APR pools have the fourth failure too and it is worth naming: a long-lived pool
 accumulates because nothing forces an accounting, and Apache modules leaked for
-years exactly this way. The fix there was per-request pools. The equivalent here
-is per-domain heaps with a compaction trigger.
+years exactly this way. The fix there was per-request pools.
+
+6. **The root heap existed to serve one application.** This is the sixth failure
+   and the one that produced the tier, so it is worth separating from the other
+   five. The relay and marmot growth curves are real, and so is the compiler's
+   137-million-allocation typecheck recorded in section 22.4e. But only the first
+   two are language problems. A compiler that holds one package's type graph
+   until the process exits and then folds the next package into the same graph,
+   until the graph reaches every package ever compiled, has an *application*
+   architecture problem. The repair is a process boundary and a directory. Giving
+   every moxie program a heap in order to spare one program from having a build
+   cache transfers that application's requirement into the language, and it is
+   the wrong direction of transfer.
+
+### 2.1 The test that settles a tier
+
+Ask of any proposed tier: **which program needs this, and could that program be
+restructured instead?**
+
+- Function arenas: every program needs them. Not restructurable, because the call
+  is the unit and the return is the release point.
+- Shelves: a minority, but a real one — a server's session table, an editor's
+  document index, a database's page cache. Each such program can name the store
+  it uses, and naming it is the point.
+- A root heap: no program, once the compiler is a batch process. Its one
+  motivated consumer is better served by a disk cache, and better *for* it than
+  memory was: the cache survives restarts, is shared between runs, is inspectable
+  when something goes wrong, and is bounded by a directory rather than by RSS.
+
+A tier with no program behind it is not a tier. It is a leak from an application
+into a language. Section 23 describes the shape that replaced it.
 
 ---
 
@@ -146,7 +205,9 @@ only if we relocate function arenas. We do not, because of section 4.
 
 ## 4. The partition
 
-Two kinds of memory, two mechanisms. This is the whole design.
+Three kinds of memory, three mechanisms, and the third is opt-in. This is the
+whole design. Channel rings, large objects and secret pages are variations on
+these three and are covered below.
 
 ### Function arena
 
@@ -162,11 +223,55 @@ register or frame slot, offsets are stable for the arena's life. This is the
 linker's position-independent-code trick and WebAssembly's linear memory applied
 to a scope.
 
-### Root heap
+### Main
 
-Domain-lifetime. Segmented, append-only, address-based pointers, **compacted**.
+Process lifetime, never reclaimed, never moved, never scanned. The domain root,
+its carved tables, the globals, the runtime's own bookkeeping, the channel control
+blocks declared at process scope. One region mapped at start-up, deliberately
+boring: nothing in this document moves a byte of it, so it needs no layout
+descriptor, no root set entry and no sweep.
+
+`main` is not an allocator a program calls. It is the region the runtime and the
+emitted program use for facts whose lifetime is the process. A program that wants
+its own data there says so at declaration and the compiler sizes the region from
+that declaration, exactly as it does for a frame. There is no growth path,
+because growth is the question this tier answers "never" to.
+
+### Shelf
+
+A declared store. Segmented, append-only, address-based pointers, **compacted**.
 The only memory that moves, and therefore the only memory whose pointers must be
 discoverable.
+
+```
+s := shelf[Entry]{ 1 << 20 }        // capacity in bytes; element type is the payload
+```
+
+The form follows `chan T{64}` and `edge[In, Out]{64}`: a brace-delimited capacity
+that governs behaviour, and a lowering to a builtin constructor for the same reason
+`[]T{:n}` lowers to `__slicealloc` — the first argument is a type expression, so
+the compiler supplies the layout descriptor the sweep needs.
+
+A shelf is a value. The code that needs one constructs it, passes it to the code
+that fills it, and it dies with its owner. Its segments are `SHELF` kind. It
+sweeps its own segments at its owner's safepoints. It never receives an object
+from another shelf, and no object leaves it except by copy. There is no implicit
+shelf, no default shelf, and none created by the runtime on a program's behalf.
+
+**Why a type and not a tier.** A tier is reachable; a value is held. That is the
+whole of A3. It also deletes the worst mechanism of revision 2: ownership by
+address lookup. `codecSovereignArena` keys a group on the receiver's address and
+then asks `sovFindContainingArena(p)` who owns a pointer; every drift in the
+"lifespan" discussion came from that question. With a shelf, ownership is
+lexical — the store is the variable in scope — so the registry, the stable-slot
+guessing and the re-keying on relocation are unnecessary, because nothing ever
+asks where a pointer lives.
+
+**What a shelf is not.** It is not a general allocator. It cannot free an
+individual object, and it cannot be grown past its declared capacity without
+asking. A program that wants a bag of mixed types with independent frees is
+asking for a shelf of a tagged union, and should build one explicitly rather than
+have the runtime guess.
 
 ### Channel ring buffers
 
@@ -318,11 +423,14 @@ and a receiver. A bidirectional relationship between two domains is therefore tw
 that way, one ring per direction, even though today both hang off a single channel
 object.
 
-**Who allocates it.** The declaration allocates the control block and the ring in the
-root arena, never a function arena. They cannot be in a frame, because the child
-outlives the frame that made the declaration. This is already how the runtime
-behaves: `NoteSpawnChan` hands back a root-arena copy of the handle specifically so
-the child never reads the parent's frame struct.
+**Who allocates it.** The declaration allocates the control block and the ring as
+one dedicated refcounted mapping, outside every arena. It cannot live in a frame,
+because the child outlives the frame that made the declaration, and it must not
+live in MAIN, because a channel declared inside a function has a function-shaped
+lifetime and MAIN never releases. Refcounting is the mechanism, and it is already
+how a ring is released: two ends, two references, whichever closes last unmaps.
+That is why a channel needs no stored tier at all, and why a program can use
+channels without declaring a shelf.
 
 **The declaration.** The fate of a channel is a property that governs execution, so
 A1 requires it be declared rather than inferred from wherever the handle later
@@ -434,8 +542,8 @@ invariants:
 - Zeroed on release, unconditionally, before the page returns to the OS.
 
 An object holding secret material must be allocated entirely inside a secret page,
-never split between a secret page and the root heap, because the root heap half
-would be copied by the cleaner and the guarantee would be gone. The type system
+never split between a secret page and a shelf, because a shelf would copy the half
+it holds during a sweep and the guarantee would be gone. The type system
 should eventually enforce this. Until it does, it is a review item.
 
 ### Boundaries
@@ -444,9 +552,13 @@ should eventually enforce this. Until it does, it is a review item.
 |---|---|---|
 | fn arena | same fn arena | offset from arena base |
 | fn arena | caller's fn arena | offset, after return-transfer copy |
-| fn arena | root heap | handle |
-| root heap | root heap | raw address |
-| root heap | any fn arena | handle |
+| fn arena | main | handle |
+| fn arena | shelf | handle, then copy on first non-borrowed store |
+| main | main | raw address |
+| main | shelf | handle |
+| shelf | same shelf | raw address |
+| shelf | other shelf | copy, then handle in the destination |
+| shelf | any fn arena | handle |
 | any arena | ring buffer | encoded bytes only, never a pointer |
 | any arena | other domain | codec relocation, unchanged |
 
@@ -463,21 +575,23 @@ rare, which is the premise of the language.
 Segment
     size            u32     fixed 1 MiB, power of two
     base            u64     mapping address
-    kind            u8      FN | ROOT | LARGE | CHANNEL | FREE
+    kind            u8      MAIN | FN | SHELF | LARGE | CHANNEL | FREE
+                            (the tree names the first kind DOMAIN; same segment)
     state           u8      LIVE | EVACUATING | FREE
-    bump            u32     FN and ROOT
-    live_bytes      u32     ROOT only
-    owner           u32     domain id. Exactly one per segment, except CHANNEL,
-                            which is owned by the channel. See section 4.
+    bump            u32     FN, MAIN and SHELF
+    live_bytes      u32     SHELF only
+    owner           u32     domain id, or the shelf handle id for SHELF. Exactly
+                            one per segment, except CHANNEL, which is owned by the
+                            channel. See section 4.
     refcount        u32     CHANNEL only. One per end, released by the last.
 
 CHANNEL is listed for bookkeeping but is not allocated from the pool: a ring is a
-dedicated mapping of its own size (section 4). The pool holds FN, ROOT and LARGE
-segments only.
+dedicated mapping of its own size (section 4). The pool holds MAIN, FN, SHELF and
+LARGE segments only.
     generation      u32     incremented on every compaction
-    next_in_log     u32     ROOT only
+    next_in_log     u32     SHELF only
 
-Object header, 8 bytes, prefix of every heap object
+Object header, 8 bytes, prefix of every object in a store
     size            u16     up to 65535; larger uses a LARGE segment
     kind            u16     layout table index
     flags           u8      PINNED | EXTERNAL | HAS_ID
@@ -488,7 +602,8 @@ No id field. No owner field. No forward field. Section 6 says where each went.
 Layout table     per type: count, then pointer-bearing offsets, then size
 Stack maps       per safepoint: bitmap of live pointer slots per frame
 Root set         globals, thread-locals, spilled registers, per safepoint
-Id table         address -> id. Sparse. Only objects with HAS_ID set. ROOT only.
+Id table         address -> id. Sparse. Only objects with HAS_ID set. Owned by a
+                 shelf; the domain's own table lives in MAIN.
 Id index         id -> address. The same table read backwards, or a second map.
                  Diagnostics and handle resolution. Never a liveness oracle.
 ```
@@ -628,12 +743,12 @@ alloc_fn(size):
     fn_arena.bump += align(8 + size)
     return fn_arena.base + p                    # offset, materialised as address
 
-alloc_root(size, kind, domain):
-    if current_root_segment.remaining < 8 + size:
-        current_root_segment = next_root_segment()
-    o = current_root_segment.bump
+alloc_shelf(shelf, size, kind):
+    if shelf.cursor.remaining < 8 + size:
+        shelf.cursor = shelf_next_segment(shelf)
+    o = shelf.cursor.bump
     write_header(o, size, kind, 0)
-    current_root_segment.live_bytes += 8 + size
+    shelf.cursor.live_bytes += 8 + size
     return address(o)
 
 take_handle(o):                                 # first handle to o
@@ -644,7 +759,7 @@ take_handle(o):                                 # first handle to o
 ```
 
 No free list, no coalescing, no external fragmentation by construction. The only
-fragmentation is dead bytes inside root segments, and that is the cleaner's job.
+fragmentation is dead bytes inside shelf segments, and that is the sweep's job.
 
 `alloc_large` maps a dedicated segment, marks it LARGE and PINNED, frees it whole.
 Large objects never move.
@@ -674,11 +789,12 @@ return-copy workload in the tree.
 
 ## 9. Compaction: the Sprite LFS cleaner
 
-Runs on one domain's root heap. Never touches function arenas.
+Runs on one shelf, on its owner's thread, at the owner's safepoint. Never touches
+function arenas and never touches MAIN.
 
 ```
-compact(domain):
-    victims = root segments of domain where kind == ROOT
+compact(shelf):
+    victims = shelf segments where kind == SHELF
                   and dead_bytes / size > THRESHOLD (0.5)
               ordered by dead ratio descending
     if victims empty: return
@@ -734,11 +850,11 @@ resolve(p):
 Victim-to-victim moves create forwarding chains, chains require path compression,
 and path compression is where every implementation of this has produced a bug.
 
-**Only ROOT segments are ever victims.** FN segments are released on pop, LARGE
-segments are pinned and freed whole, CHANNEL segments are refcounted and released
-by their owners. Assert `kind == ROOT` in victim selection rather than relying on
-the dead-ratio threshold, which a nearly-empty FN or CHANNEL segment would
-otherwise satisfy.
+**Only SHELF segments are ever victims.** MAIN is pinned and never reclaimed, FN
+segments are released on pop, LARGE segments are pinned and freed whole, CHANNEL
+segments are refcounted and released by their owners. Assert `kind == SHELF` in
+victim selection rather than relying on the dead-ratio threshold, which a
+nearly-empty FN or CHANNEL segment would otherwise satisfy.
 
 **Every live object in a victim segment is forwarded before phase 3 begins.**
 This is what makes `resolve` a single comparison instead of a search. If phase 2
@@ -774,17 +890,20 @@ safepoint**. No thread ever stops another. This is the BEAM property: each proce
 collects its own heap and no global pause exists.
 
 ```
-request_compaction(domain):
-    domain.compact_requested = 1
+request_sweep(shelf):
+    shelf.sweep_requested = 1        # set when an allocation crosses the watermark
 
-safepoint(domain):                  # function entry, channel op, explicit
-    if domain.compact_requested:
-        domain.compact_requested = 0
-        compact(domain)             # this thread, this domain
+safepoint(shelf):                    # function entry, channel op, explicit
+    if shelf.sweep_requested:
+        shelf.sweep_requested = 0
+        compact(shelf)               # this thread, at this point, this shelf
 ```
 
 Safepoints are the points that already publish stack maps. The check is a load and
-a branch. Do not add polling at loop backedges: loop bodies do not allocate across
+a branch **per shelf in scope**, not per program. A function that holds no shelf
+carries no check at all, which is the property that makes this design acceptable
+to a compiler that holds none: the emitted code for a shelf-free program contains
+no sweep machinery, no layout descriptor use and no root set entry. Do not add polling at loop backedges: loop bodies do not allocate across
 iterations in this model.
 
 The channel-operation safepoint is at **entry**, before any bytes are encoded or
@@ -810,9 +929,9 @@ Do this in phase 7, not phase 6. Whole-heap compaction first.
 
 ### Triggers
 
-- `dead_ratio(root) > 0.6` checked at safepoint against a running counter.
-- Explicit `runtime.Compact()`, for tests and pause-sensitive code.
-- Domain idle: blocked in `select` with no ready case, compact before parking.
+- A shelf's `dead_ratio > 0.6` checked at a safepoint against a running counter.
+- Explicit `s.sweep()`, for tests and pause-sensitive code.
+- Owner idle: about to park with no ready work, sweep before parking.
 
 ---
 
@@ -820,9 +939,9 @@ Do this in phase 7, not phase 6. Whole-heap compaction first.
 
 ### Ownership is per segment
 
-A segment has exactly one owner. Objects inherit it. Cross-domain references do
-not exist as pointers, because the codec copies at the channel boundary, so an
-object never belongs to a domain other than the one that allocated it.
+A segment has exactly one owner. Objects inherit it. Cross-shelf references do
+not exist as pointers: the boundary table in section 4 requires a copy, so an
+object never belongs to a shelf other than the one that allocated it.
 
 The one exception is the channel ring buffer, which has two owners: writer and
 reader, each owning a disjoint index and a disjoint half-open region. Section 4
@@ -840,9 +959,9 @@ segment's owner, that is a bug, and it should trap rather than create a shared
 segment. Do not build shared-segment machinery for a case the language makes
 impossible. If the language ever permits it, this section changes first.
 
-Domain death releases every segment the domain owns, without tracing. That is the
-arena win extended to the root heap, and it is the reason per-segment ownership is
-worth the constraint.
+Domain death releases every segment the domain owns, without tracing — including
+every shelf it constructed. That is the arena win extended to shelves, and it is
+the reason per-segment ownership is worth the constraint.
 
 ### Identity is per domain and sparse
 
@@ -897,9 +1016,9 @@ segments is the difference between a cleaner at a few percent and one that eats 
 machine.
 
 **Space overhead is roughly one segment per log plus destination space during
-cleaning.** Budget free segments at about 20% of the root heap. Below that the
-cleaner cannot find a destination and compaction stalls while the heap keeps
-growing.
+cleaning.** Budget free segments at about 20% of a shelf's declared capacity.
+Below that the sweep cannot find a destination and stalls while the shelf keeps
+growing toward its declared ceiling.
 
 **The cost curve turns sharply as utilisation rises.** At low utilisation cleaning
 is nearly free, at 90% it is brutal. That is where the 0.6 trigger and the
@@ -914,6 +1033,11 @@ concern is tuning, not feasibility.
 ## 14. Compiler work required
 
 Cannot be done in the runtime alone.
+
+**Scope.** All of it is conditional on a program declaring a shelf. The compiler,
+after section 23, declares none, so none of this work is on the compiler's
+critical path. It is the cost of making `shelf` available to programs that want
+one, and of being able to verify it when they use it.
 
 1. **Layout descriptors.** For every type, the array of pointer-bearing offsets,
    plus size and alignment, in the module type section. Derivable from the type
@@ -951,11 +1075,16 @@ for offset addressing; everything else in the function tier is unchanged.
 Every item below was open in an earlier draft. All are now decided, with the
 reasoning attached, so the implementer does not relitigate them.
 
+Numbering note: D22.1 to D22.6 in section 22 are sub-decisions of the
+channel-ownership work and are not part of this list, which is why the bare
+numbers D21 to D24 are absent. D25 to D28 are revision 3 and are the four
+that removed the root heap.
+
 **D1. Segment sizes.** Function chunks are 64 KiB, matching the existing
-`FnArenaPush(..., 65536)` call in `ir_deepcopy.mx`. Root segments are 1 MiB. Two
-pools, both power of two, both fixed. Function chunks are transient and small; root
-segments want cleaning granularity, and 1 MiB gives a pause bound comfortably under
-a millisecond.
+`FnArenaPush(..., 65536)` call in `ir_deepcopy.mx`. Shelf segments are 1 MiB. Two
+pools, both power of two, both fixed. Function chunks are transient and small;
+shelf segments want sweeping granularity, and 1 MiB gives a pause bound
+comfortably under a millisecond.
 
 **D2. Cache-line layout.** 128-byte stride, which is safe on both 64-byte and
 128-byte line architectures. Producer line holds `writeIdx` and `sentFrames`.
@@ -1010,9 +1139,9 @@ phase 0 histogram shows a meaningful population just above 64 KiB.
 **D9. Slab-side metadata.** Deferred. Trigger: more than 40% of allocations at or
 below 32 bytes. Measure in phase 0 and decide once.
 
-**D10. Cleaning policy.** Clean a segment when its dead ratio reaches 0.5. Start a
-cycle when the root heap's overall dead ratio reaches 0.6, or when free segments
-fall below 20% of the pool. The cold band above 0.75 live is never cleaned. All
+**D10. Sweeping policy.** Sweep a segment when its dead ratio reaches 0.5. Start a
+cycle when a shelf's overall dead ratio reaches 0.6, or when its free segments
+fall below 20% of its capacity. The cold band above 0.75 live is never swept. All
 four numbers live in one constants block and nowhere else.
 
 **D11. Identity width.** `id = (epoch << 40) | counter`. 24 bits of epoch gives
@@ -1021,18 +1150,20 @@ objects per run. Per domain, not global.
 
 **D12. Return path.** Flat copy with offsets. No structural walk. Phase 1.
 
-**D13. `-no-main-arena`.** No function arena; allocation goes to the ROOT heap. The
-bootstrap becomes the first consumer of the new path rather than a special case
-bolted onto it.
+**D13. `-no-main-arena`.** No function arena; allocation goes to MAIN. That is
+acceptable for a bootstrap — one process, one compile, nothing to reclaim — and
+unacceptable everywhere else, which is why it remains a build of the compiler
+rather than a mode a program can select. The bootstrap becomes the first consumer
+of MAIN rather than a special case bolted onto it.
 
 **D14. Function arena base.** `%fn_arena` already exists as an Arena pointer. Add
 `%fn_base` as a second SSA value, set at push and reloaded on region chaining. That
 is the whole codegen change for offset addressing.
 
 **D15. The arena inventory.** Phase 0a. Every function in `alloc.mx` is classified
-as subsumed by the function tier, subsumed by the root heap, or genuinely needed
-and missing from this document. Anything found in the third category is a gap in
-this document, not a feature to preserve.
+as subsumed by the function tier, subsumed by MAIN, subsumed by a shelf, or
+needed and missing from this document. Anything found in the third category is a
+question about the program that needs it, not a feature to preserve.
 
 **D16. The compactor is extracted, not written.** `relocate.mx` is already a
 three-pass mark-compact arena relocator: mark from roots, forward by allocating
@@ -1040,8 +1171,8 @@ destinations in the caller's arena, then compact and fix up pointer fields, with
 region locality determined by scanning the arena's flat region table. `ArenaAllocTD`
 additionally copy-compacts sovereign data arenas on region exhaustion, with an
 allocation map whose referrers walk object interiors. Between the two, the
-algorithm in section 9 already exists in the tree. The work is to point it at the
-ROOT heap, replace the trigger with D10, and delete the sovereign coupling. Do not
+algorithm in section 9 already exists in the tree. The work is to point it at a
+shelf's segments, replace the trigger with D10, and delete the sovereign coupling. Do not
 write a second compactor, and do not merge the two existing ones until one of them
 is provably unused.
 
@@ -1056,7 +1187,7 @@ waste is permanent; and `sysUnmap` returns to the pool rather than to the host.
 This is not theoretical. The runtime documents a failure where the NIST P-521
 generator table chained a 64 MB region per overflowing frame and `memory.grow`
 failed at 4 GiB inside `nistec.buildP521GeneratorTable` before the program had
-produced a byte. A recyclable pool with a compacted root heap is the fix, and it is
+produced a byte. A recyclable pool with a compacted shelf is the fix, and it is
 the strongest available argument for this design on that platform.
 
 Cross-thread channels on wasm use a `SharedArrayBuffer` with `Atomics.wait`, not
@@ -1098,11 +1229,12 @@ are already parsed.
    parameter's type must match. There is no inversion to check, only agreement.
 5. Writing to a `Receiver T` or reading from a `Sender T` is a compile error, whether
    reached directly or through a field. The check is on the operation.
-6. The storage is allocated in the root arena at the declaration, so the pair is a
-   division of authority over existing memory, never an allocation the child
-   performs.
-6. The storage is allocated in the root arena at the declaration, so the pair is a
-division of authority over existing memory, never an allocation the child performs.
+6. The storage is a dedicated refcounted mapping created at the declaration, part
+   of the channel rather than of any arena, so the pair is a division of authority
+   over existing memory and never an allocation the child performs. It is not in
+   MAIN, because a channel declared inside a function has a function-shaped
+   lifetime; two references and the ring's own release protocol are what keep it
+   alive exactly as long as an end does (section 11).
 
 Rules 1 and 3 together are what make the ring single-writer by construction rather
 than by convention, and they are the axiom-required form: authority over a
@@ -1127,11 +1259,48 @@ If that proves confusing in practice, `Link` is the fallback and means the same
 thing. Do not pick a third word; two candidates are enough and the doctrine prefers
 the first.
 
-**Decided out of scope.** Persistent root heap: `epoch` exists so it can be added
-without id collision, and WiscKey becomes relevant when it lands, because
-page-granular writes restore write amplification. Sub-segment incremental cleaning:
-ruled out by the overwrite-forwarding scheme in 6.4. Concurrent cleaning: one
-domain, one thread, one cleaner, always.
+**D25. There is no ambient allocator.** Long-lived reclaimed memory exists only
+inside a `shelf` value that was constructed in scope. No `malloc`, no
+package-level store, no runtime default, no "heap" a program can reach without
+naming. A binary that declares no shelf maps no SHELF segment, and that is an
+assertion, not a convention (test 34). This is A3 applied to memory and it is the
+decision revision 3 exists for.
+
+**D26. `shelf T` is the only long-lived reclaimed store, and it is a type.**
+
+```
+s := shelf[Entry]{ 1 << 20 }     // capacity in bytes
+```
+
+The shelf owns its segments, sweeps them at its owner's safepoints, and dies with
+its owner. Objects do not move between shelves except by copy, so a shelf is never
+a destination for another shelf's survivors and no cross-shelf fixup exists. The
+runtime supplies the mechanism — `mmap`, the sweep step, layout descriptors — and
+never the policy. `shelf` is the archivist: a store you hold, not a place you fall
+into.
+
+**D27. The compiler is a batch pipeline with a disk cache, not a shelf user.**
+One package per process. The artifact is content-addressed and written once. Each
+import is read from the cache and materialised into the compiling package's own
+arena, then released with it. No package's type graph is inherited by the next
+package's process. The compiler therefore declares no shelf, needs no stack maps,
+no layout descriptors and no sweep, and its memory is bounded by the largest
+single package rather than by the size of the program. Full contract in section
+23.
+
+**D28. Accumulated output is a disk artifact.** Address = hash of (normalised
+source, ordered import artifact addresses, target, flags). Published atomically
+(write to a temporary name, `rename`). Read-only afterwards. Never mmap'd into an
+arena, never parsed into a long-lived store, never trusted without verifying that
+the address matches the bytes. A cache entry is a *fact about a past run*, not
+memory this run owns.
+
+**Decided out of scope.** A persistent store in memory: `epoch` exists so ids can
+survive a restart, and WiscKey becomes relevant when page-granular persistence
+lands, because that restores write amplification. Persistence of *results* is
+D28's disk artifact, which is a different mechanism and is in scope from day one.
+Sub-segment incremental sweeping is ruled out by the overwrite-forwarding scheme
+in 6.4. Concurrent sweeping: one shelf, one thread, one sweeper, always.
 
 ---
 
@@ -1139,12 +1308,20 @@ domain, one thread, one cleaner, always.
 
 Ordered, with the dependency that forces each position. Every phase ships alone.
 
+Phase numbers are stable across revisions so that the implementation record in
+section 21 keeps referring to the same work. Phases 5 and 7 changed meaning in
+revision 3; their numbers did not. Phase 9 is new and is the only phase on this
+list that the compiler itself needs today.
+
 **Phase 0a. Arena inventory.** This is the first thing run, and it changes no code.
 Classify every function in `alloc.mx` per D15: subsumed by the function tier,
-subsumed by the root heap, or genuinely needed and missing from this document.
-Exit criterion: nothing unclassified, and every gap found is folded back into this
-document before any code changes. Phase 2 is blocked on this, because until the seven
-overlapping mechanisms are named, "replace the allocator" has no defined boundary.
+subsumed by MAIN, subsumed by a shelf, or needing a program named before it can be
+placed at all. For anything in the fourth category the question is not "where does
+this go" but "which application needed this, and can that application be
+restructured instead" (2.1). Exit criterion: nothing unclassified, and every gap
+folded back into this document before any code changes. Phase 2 is blocked on
+this, because until the seven overlapping mechanisms are named, "replace the
+allocator" has no defined boundary.
 
 **Phase 0b. Measurement.** No dependencies; runs alongside 0a.
 Counters per function and per domain; push/pop balance assertion; leak checker at
@@ -1170,17 +1347,20 @@ Replace the structural walk with a flat copy per D12.
 Exit criterion: bootstrap time improves measurably and the full suite passes.
 
 **Phase 2. Segment allocator.** Needs 0a and 0b.
-Function chunks of 64 KiB, root segments of 1 MiB natively and 64 KiB on wasm, two
+Function chunks of 64 KiB, shelf segments of 1 MiB natively and 64 KiB on wasm, two
 pools, arenas become bump slices. Both `sysMap` backends land together, because D17
-puts wasm in scope here. No compaction. Header unchanged at this point.
+puts wasm in scope here. No sweeping. Header unchanged at this point.
 Exit criterion: zero mmap per allocating call in steady state on native, and a
 wasm build of the self-hosted compiler completes where it currently fails.
 
 **Phase 3. Layout descriptors and stack maps.** Needs 2.
-Emit them and use them for nothing. Verifier walks the ROOT heap asserting every
-pointer offset holds null or a valid header.
+Emit them and use them for nothing. The verifier walks MAIN and every shelf,
+asserting that every pointer offset holds null or a valid header. Only programs
+that declare a shelf pay for the descriptors; the compiler declares none, so this
+work is not on its path.
 Exit criterion: verifier passes on the suite and under relay load.
-This is the gate. Nothing downstream starts until it is green.
+This is the gate for phases 4 onward. Phase 9 is independent of it, which is why
+phase 9 can ship while this is still being built.
 
 **Phase 4. Compact encoding.** Needs 3, and needs the phase 0b histogram.
 8-byte header, owner to segment, sparse identity, `%fn_base` offsets per D14. The
@@ -1191,9 +1371,11 @@ Exit criterion: `sizeof(header) == 8`; id table empty on a handle-free workload;
 verifier still green; metadata ratio reported against the 24-byte baseline; and a
 recorded decision on D9 with the histogram that justified it.
 
-**Phase 5. Extract the compactor.** Needs 4.
-Lift the existing sovereign-data-arena compaction onto the ROOT heap per D16,
-retrigger on D10, delete the sovereign coupling. Explicit `runtime.Compact()` only.
+**Phase 5. Extract the compactor behind `shelf`.** Needs 4.
+Lift the existing sovereign-data-arena compaction onto a shelf's segments per D16,
+retrigger on D10, delete the sovereign coupling, and put it behind the type from
+D26 so that the only way to reach it is to hold a shelf. Explicit `s.sweep()`
+only at this phase.
 Exit criterion: shadow model agrees over 1000 randomised sequences, and the
 victim-to-victim and forward-pointer assertions never fire.
 
@@ -1205,18 +1387,37 @@ Exit criterion: `LOCAL` makes no syscalls under strace; capacity zero is a compi
 error in `LOCAL`; `SHARED` passes the contention test; select works on 5.16 and
 degrades correctly below it.
 
-**Phase 7. Automatic and incremental cleaning.** Needs 5.
-Dead-ratio trigger at safepoint; one victim per step, whole-segment evacuation.
-Exit criterion: 24-hour soak, flat RSS, maximum pause under 2 ms.
+**Phase 7. Automatic and incremental sweeping.** Needs 5.
+Dead-ratio trigger at a shelf's safepoint; one victim per step, whole-segment
+evacuation. Exit criterion: 24-hour soak on a program that declares a shelf, flat
+RSS, maximum pause under 2 ms. A program with no shelf is unaffected by this phase
+and must run identically before and after it.
 
 **Phase 8. Handles.** Needs 5.
 Raw cross-arena pointers replaced by handles.
 Exit criterion: verifier proves no raw pointer crosses an arena boundary.
 
-Critical path is 0a, 2, 3, 4, 5, 7. Phases 0b and 0c run in parallel and should
-start immediately: 0c because it closes a live soundness hole, and 0b because phase
-4 cannot fix the encoding without the histogram. Phase 6 is independent of 3 through
-5 and should start alongside 2, since it has the most immediate user-visible effect.
+**Phase 9. The compiler's disk pipeline.** Needs nothing from 0a-8; this is the
+phase that lets phases 3, 5 and 7 wait for a program that needs them.
+One process per package, a content-addressed artifact per package, imports read
+from the cache, no cross-package in-memory accumulation, and a per-package memory
+ceiling. Exit criteria: a warm-cache rebuild of an unchanged package performs zero
+typechecks; an artifact is byte-identical to a cold build; peak RSS for a package
+compile is bounded by that package and its direct imports rather than by the
+program; and the `.mxh` export data is no longer built by folding one package's
+type graph into another's. Full contract and the working prompt are in
+`docs/compiler-disk-cache.md`.
+
+Critical path is now **9, 0c, 2, 3, 4**, then 6. Phase 9 first, because it is the
+only work on this list that removes a measured failure (the 137-million-allocation
+typecheck) and because it is the evidence that the root heap was never needed.
+Phases 3, 5, 7 follow and are gated on a real program that declares a shelf rather
+than on a date.
+
+0b and 0c still start immediately and in parallel: 0c because it closes a live
+soundness hole that predates all of this, and 0b because phase 4 cannot fix the
+encoding without the histogram. Phase 6 is independent of 3 through 5 and should
+start alongside 2, since it has the most immediate user-visible effect.
 
 ---
 
@@ -1246,7 +1447,7 @@ start immediately: 0c because it closes a live soundness hole, and 0b because ph
 15. **No liveness from the index.** A static check or code review gate that the
     cleaner never reads the id table to decide liveness. Record it as a review item
     because it cannot be tested.
-16. **Ring isolation.** Victim selection asserts `kind == ROOT`; a deliberately
+16. **Ring isolation.** Victim selection asserts `kind == SHELF`; a deliberately
     emptied CHANNEL segment must not be chosen even though its dead ratio is 1.0.
 17. **Index authority.** Debug assertions in the SPSC path that the writer never
     writes `head` and the reader never writes `tail`.
@@ -1281,12 +1482,33 @@ positional channel arguments would have accepted silently.
     not satisfy a `spawn` parameter of type `Edge[In, Out]`.
 31. **Role is enforced on the operation.** Reading from a `Sender T` and writing to
     a `Receiver T` are both compile errors, including through an `Edge` field.
-31. **Local cannot cross.** A `chan T` captured by a spawned closure or reachable
+32. **Local cannot cross.** A `chan T` captured by a spawned closure or reachable
     from a `spawn` argument is a compile error.
-32. **Storage outlives the frame.** A channel declared in a function that returns
-    before the child is signalled still works, because the control block is in the
-    root arena. This is the `MarkChildPipeChannel` start-up crash from the relay
+33. **Storage outlives the frame.** A channel declared in a function that returns
+    before the child is signalled still works, because the control block is in
+    MAIN. This is the `MarkChildPipeChannel` start-up crash from the relay
     turned into a test.
+34. **No shelf, no store.** A program that declares no `shelf` maps no `SHELF`
+    segment and emits no safepoint check. Asserted from `SysMapStats` per kind and
+    from the emitted IR. This is D25 and it is the test that would have caught the
+    root heap.
+35. **A shelf cannot be reached without naming it.** There is no package-level,
+    global or runtime-provided shelf, and no conversion or builtin that yields one.
+    A static check over the type universe, because it cannot be expressed as a
+    runtime assertion.
+36. **A shelf does not accept foreign objects.** Storing an object allocated in
+    another shelf, or in a frame, either copies it or fails to compile. Sharing is
+    unrepresentable rather than diagnosed (boundary table, section 4).
+37. **A shelf dies with its owner.** Releasing the frame that declared a shelf
+    releases every segment it owns, with the ledger balanced and no segment
+    surviving its scope.
+38. **Nothing crosses a shelf boundary without copy.** The verifier rejects any
+    pointer whose segment owner differs from the store the pointer is written
+    into.
+39. **A shelf-free program is unchanged by phases 3, 5 and 7.** The same binary
+    semantics, the same IR apart from the version stamp, before and after each of
+    those phases lands. This is the regression that keeps an opt-in feature from
+    becoming a tax.
 
 ---
 
@@ -1294,8 +1516,10 @@ positional channel arguments would have accepted silently.
 
 - **No protection against hostile code.** A program cannot attack itself here.
 - **No cross-domain compaction.** Per domain, on the domain's own thread, always.
-- **No persistent heap.** `epoch` exists so persistence can be added without id
-  collision, not because it is in scope.
+- **No persistent store in memory.** `epoch` exists so that ids can survive a
+  restart, not because a durable store is in scope. Persistence of results is
+  D28's disk artifact, and it is deliberately a different mechanism with a
+  different owner.
 - **No CHERI dependency.** CHERI would turn use-after-free from silent corruption
   into a trap, which is real and orthogonal. Do not depend on it.
 
@@ -1320,14 +1544,17 @@ positional channel arguments would have accepted silently.
    PINNED. Add `pin()` and make it explicit at every FFI boundary.
 8. **The `-no-main-arena` build tag.** Resolved: it gives package main no function
    arena and no return encode, for bootstrap. Under the new model that mode
-   allocates straight into the ROOT heap, which is what the tag already implies and
-   which makes the bootstrap the first consumer of the new path rather than a
-   special case bolted onto it.
+   allocates straight into MAIN, which never reclaims — acceptable for one process
+   compiling once, unacceptable as a program feature, which is why it stays a
+   build of the compiler rather than a selectable mode.
 9. **Binary size.** Stack maps at every call site are not free. Measure at phase 3;
    if unacceptable, emit per function region at the cost of coarser roots.
-10. **Cleaner stalls.** Guarded by the free-segment watermark. If the watermark is
-    ever violated the heap grows without bound and the failure looks like a leak.
-    Assert it.
+10. **Sweep stalls.** Guarded by the free-segment watermark. If the watermark is
+    ever violated a shelf grows to its declared ceiling and then fails an
+    allocation; it cannot grow past it, because growing past it is what the tier
+    no longer has. Assert the watermark anyway, because the failure will present
+    as an unrelated allocation error. Assertion:
+    `shelf.bytes_committed <= shelf.capacity`.
 11. **Identity table used as a liveness oracle.** The single prohibition in this
     document. It would introduce a synchronisation requirement between heap and
     index that no other part of the design has, and the resulting bugs would be
@@ -1366,6 +1593,14 @@ positional channel arguments would have accepted silently.
     phase as the implementation. Keep the signatures identical through phases 2 to
     5 and change them, if at all, only after a two-stage build passes. `-no-main-arena`
     exists because this problem is already known; do not discover it again.
+19. **The shelf becomes the default by accretion.** The failure mode this revision
+    is correcting, in its next form. It begins innocently: a convenience
+    constructor that makes a shelf on first use, a package-level shelf in the
+    standard library "just for the server", a shelf the runtime creates at start-up
+    "so that libraries can depend on it". Each one converts a held value back into
+    a reachable place, and each is a reversal of D25. The guard is test 34 and a
+    review rule: a shelf is created by the code that will own it, in a scope, and
+    nowhere else.
 
 ---
 
@@ -1386,18 +1621,24 @@ covered with the function tier because they read the same region table.
 `rawSliceUptr`, `rawSliceRegion`, `ArenaUsed`, `scanstack`.
 
 `arenaTrimTail` (in `idle_trim_linux.mx`) belongs here too: it trims the tail of
-the top region of a function or root arena and its semantics are unchanged when
+the top region of a function arena or MAIN and its semantics are unchanged when
 the region is a segment.
 
-### 20.2 Subsumed by the root heap
+### 20.2 Subsumed by MAIN
 
 `initDomain`, `domainHeaderSize`, `trueRootArena`, `RootArena`, `rootArenaAddr`,
 `sovRootAlloc`, `ArenaRootUsage`, `RootArenaStats`, `ReadMemStats`.
 
-`rootArenaAddr` exists for one reason: the codec's stability test asks "is this
-address in the root arena" on every pointer that could cross a boundary, and
-that test must not pay the return protocol. It survives phase 2 unchanged; it is
-deleted when handles remove the question (phase 8).
+Revision 3 places these in MAIN rather than in a swept store, and the distinction
+matters for the inventory: MAIN is the process region, it never reclaims, and
+nothing here needs a descriptor or a sweep. `rootArenaAddr` exists for one reason:
+the codec's stability test asks "is this address in the process region" on every
+pointer that could cross a boundary, and that test must not pay the return
+protocol. It survives phase 2 unchanged, becomes `mainAddr`, and is deleted when
+handles remove the question (phase 8).
+
+None of these becomes part of `shelf`. A shelf is new code in front of the
+extracted compactor, not a rename of the root arena.
 
 ### 20.3 Sovereign machinery
 
@@ -1411,7 +1652,7 @@ Retained (ownership semantics, section 0): `codecSovereignArena`,
 `sovRangeUnregister`, `sovInSovereignDataArena`, `sovRangeOwner`,
 `sovCtxLive`, `sovBorrowedReceiverIn`, `sovGroupHeld`, `sovRekeyRelocated`.
 
-Subsumed by the root heap's compactor (phase 5): `sovGroupTake`,
+Subsumed by `shelf`'s compactor (phase 5): `sovGroupTake`,
 `sovRecycleGroup`, `sovParkRecs`, `sovGrowRecs`, `sovGrowSlots`, `sovAddRec`,
 `sovFind`, `sovSortRecs`, `sovMergeSortRecs`, `sovMarkBlock`,
 `sovRangeHasPtr`, `sovNameExtField`, `sovExtNote`, `sovRootLiveRef`,
@@ -1427,8 +1668,8 @@ Subsumed by the root heap's compactor (phase 5): `sovGroupTake`,
 `sovReleaseDead`, `sovNewArena`, `sovReleaseArena`, `sovPoolSlots`.
 
 The reason the second list is subsumed and not merely deleted is D16: the
-algorithm is the root heap's compactor. These functions become the same code
-pointed at ROOT segments, with the receiver-keyed group as the root set. The
+algorithm is `shelf`'s compactor. These functions become the same code pointed at
+SHELF segments, with the receiver-keyed group as that shelf's root set. The
 borrow/stable half above is what remains of the sovereign arena as an
 ownership concept.
 
@@ -1446,7 +1687,7 @@ verifier is green; then delete them with the sovereign coupling, not before.
 `SovDrainCompactions`, `SovScanCeil`, `SovUnescape`. These are explicit
 "the request is over, reclaim now" calls from `net/http`'s worker loops and the
 wasm host boundary. They are not part of the memory model; they are the
-workaround for a root heap that cannot reclaim by itself. Each one is a
+workaround for a store that could not reclaim by itself. Each one is a
 migration site for phase 7, and each has a test that must move with it.
 
 ### 20.5 Measurement layer (phase 0b, retained and extended)
@@ -1479,22 +1720,22 @@ arena is released at `ManualArenaExit` exactly as a frame is at return. It stays
 in the function tier and is sized by its declaration (4-64 MiB today).
 
 **G2. Sovereign data arenas.** A sovereign group's data arena is long-lived and
-variable-sized, so it is neither a function chunk nor a ROOT segment. Until
-phase 5 folds it into the root heap it is a chain of FN-kind segments owned by
+variable-sized, so it is neither a function chunk nor a MAIN segment. Until
+phase 5 folds it into a shelf it is a chain of FN-kind segments owned by
 the group, pooled by `sovPoolSlots` as today. Section 5's segment kinds therefore
 carry `FN` for it; it is never a victim and never a destination.
 
 **G3. The domain root is itself a segment.** `initDomain` maps one region that
-holds `DomainRoot`, the carved tables and the root arena's first data. It is a
-`ROOT` segment owned by the domain: pinned, never a victim, released only at
-domain death. Section 5 lists ROOT without saying the domain root is one; it is.
+holds `DomainRoot`, the carved tables and MAIN's first data. It is a
+`MAIN` segment owned by the domain: pinned, never a victim, released only at
+domain death. Section 5 lists MAIN without saying the domain root is one; it is.
 
 **G4. LARGE is a real path, not an accident.** Today an allocation larger than
 the active region makes `arenaAllocRaw` map a region of exactly that size and
 the arena treats it like any other region. Section 5 calls this `alloc_large`
 and phase 2 must implement it as a distinguished `LARGE` segment that is PINNED
 and freed whole, while the arena's small-allocation cursor stays in its current
-`FN` or `ROOT` segment. Without the distinction a single 2 MiB buffer would
+`FN` or `SHELF` segment. Without the distinction a single 2 MiB buffer would
 become the arena's active region and swallow every subsequent small allocation
 in its tail.
 
@@ -1522,7 +1763,7 @@ section 16 keeps its numbering; this gap records that 1's code change lands afte
 sovereign range table answer "is this address in an arena that outlives the
 frame" by scanning `ArenaRegion` entries. Phase 2 changes what a region is
 (a segment), not this query; the region table must keep answering containment
-and allocation-top for every arena, including root segments and LARGE segments.
+and allocation-top for every arena, including MAIN and LARGE segments.
 Any phase that moves the table into a side structure must carry this query with
 it or the codec will start deep-copying root data on every return.
 
@@ -1536,6 +1777,12 @@ duplicate and no omission; the seven gaps are recorded here; no code changed.
 This section records what has landed, what the evidence is, and what is still
 open. It is append-only: a later phase appends, and a claim that is not backed
 by a named fixture is not a claim.
+
+**Vocabulary note (revision 3).** Entries in this section predate the removal of
+the root heap. Read `root arena` and `root segment` as what revision 3 calls
+MAIN, and `root heap` as what it calls a shelf. The measurements, fixtures and
+failures stand exactly as recorded; only the names changed, and only because MAIN
+and a shelf are now different things that this record had merged.
 
 ### 21.1 Phase 0a — done
 
@@ -2449,8 +2696,22 @@ What that means:
   with `codec arena escape: pointer into a transient frame arena preserved
   instead of copied`, so the rule is right in principle and too wide as written
   (asn1 and net/http's chanpath/chanpool enter manual arenas whose escapes must
-  still be copied). It was reverted; the narrower form - exempting the arena a
-  TYPE-CHECK phase owns, not every manual arena - is the next step.
+  still be copied). Reverted.
+
+  **The narrower form was attempted and rejected as a guard.** A per-arena
+  `phaseStable` flag that only the compiler sets, tested in the codec, is a
+  branch that exists to keep one caller working: it does not fail loud, it
+  silently aliases memory, and the repository law forbids that shape. The defect
+  is upstream of it and is a misclassification, not a missing flag:
+  `ManualArenaEnter` pushes a phase arena onto `fnStack`, and the return branch
+  of `codecIsStableAddr` reads the top of `fnStack` as "the callee's frame, which
+  dies at return". That premise is true of a frame and false of a phase scope.
+  The runtime already records the difference for sovereign borrows (`fnBorrow`)
+  and phase scopes (`manualStack`), just not in the one place the codec consults:
+  the fix is a frame-KIND bit on the stack, set by `ManualArenaEnter` and cleared
+  by `ManualArenaExit`, so the transient test asks "is the top slot a frame?"
+  rather than "is the top slot any arena?". That repairs asn1 and net/http at the
+  same time instead of exempting the compiler alone.
 - **The likely cause: the universe registry holds pointers into DEAD arenas.**
   `InitUniverse` pushes the ROOT arena as a borrowed slot and `buildUniverse`
   allocates there, so the universe itself is root-resident and must alias (the
@@ -2544,3 +2805,96 @@ builds its own next generation (r50 → r51 completed).
   definition; the universe entry must bypass the "concrete non-empty
   constraint" rule that applies to user generics, and the bypass must be a
   property of the builtin type, not a special case at every use site.
+
+---
+
+## 23. The compiler is a batch pipeline, not a store user
+
+Status: decided (D27, D28). The working prompt for the refactor is
+`docs/compiler-disk-cache.md`; this section is the design it implements.
+
+### 23.1 The shape
+
+One package, one process, one artifact, written once, read by address.
+
+```
+  moxie build ./...
+        |
+        +-- for each package P, in dependency order:
+        |       addr = H(normalised sources, ordered import addrs, target, flags)
+        |       if cache[addr] exists and verifies: continue
+        |       fork
+        |         child  read each direct import's export data from cache
+        |                materialise it into P's own arena
+        |                parse, typecheck, emit for P and nothing else
+        |                write artifact to cache/tmp, fsync, rename
+        |                exit
+        |       parent wait; record addr
+        |
+        +-- link: a separate process that reads artifacts and nothing else
+```
+
+Three properties do the work.
+
+1. **The process boundary is the memory boundary.** When the child exits, every
+   byte of P's type graph goes with it. Nothing has to be reclaimed, so nothing
+   needs a shelf, a layout descriptor, a stack map or a sweep.
+2. **The cache is the accumulation.** The cross-package type graph that revision 2
+   tried to keep alive in memory is exactly the set of artifacts on disk. Reading
+   it back is a file read, not an inheritance.
+3. **The artifact is the contract.** Two runs with the same inputs produce the
+   same bytes, so the cache is a function of its inputs rather than a memo of an
+   impure computation. That property is what makes the address meaningful.
+
+### 23.2 Why this is faster, not merely smaller
+
+The measured failure (22.4e) was 137 million 32-byte allocations in a single
+arena, chaining 64 MiB segments to several gigabytes of address space, and an
+encode reaching a seen-set of 262,144 and still climbing. That is not a slow
+allocator. It is one process walking a graph that contains every package it has
+ever compiled, because each package's result was folded into the same structure.
+
+A package compile whose working set is its own type graph plus the export data of
+its direct imports is bounded by that graph, and the bound is small enough to be
+written down as a per-package ceiling instead of hoped for.
+
+### 23.3 What this deletes
+
+- The root heap, from the language. Revision 3 preamble and D25.
+- The compiler's need for phases 3, 5 and 7. They remain for programs that declare
+  a shelf. The compiler is not one, and test 38 keeps it that way.
+- `-no-main-arena`'s claim to be a permanent mode. It becomes a measurement mode:
+  the check that a package compile allocates the way it is supposed to.
+
+### 23.4 What it does not delete
+
+- The function tier. A package compile is still a call tree with a frame.
+- The return path. A package compile returns values constantly, often large ones.
+- The codec. It moves to the artifact boundary — encode export data on the way
+  out, decode it in the importer — which is the same mechanism doing much less
+  work, not a different mechanism.
+
+### 23.5 The seam that remains
+
+One thing genuinely crosses the boundary: the export data. It must be stable
+across compiler builds within a version, bounded in size, verifiable, and decoded
+into the importing package's arena and no further. It is a codec payload, so
+`ownership.md`'s rule applies unchanged: a codec payload is copied, never shared.
+Its format is the compiler's compatibility contract and is versioned independently
+of the cache address, so a format change invalidates the cache without changing
+what an address means.
+
+### 23.6 The one shape that would justify a shelf
+
+A future language server is the single compiler-side program that would want a
+store: it keeps many packages' type information alive for the life of a session,
+and it must answer queries against them without re-reading the cache per query.
+That is a legitimate need, and the design supports it — the server declares a
+shelf, sizes it, and sweeps it, and the memory is bounded by the declaration
+rather than by the session.
+
+What the server must not do is ask the runtime for a store. That is exactly how
+revision 2 began, and the way it began was with the sentence "the compiler needs
+somewhere to accumulate". The correct form is "this server declares a store of
+this size, and here is where it is declared". The difference is one line of
+source and the whole of A3.
