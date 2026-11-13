@@ -757,6 +757,13 @@ When evaluating code quality, ask: does adding this make the system more coheren
 
 ## Bootstrap Build Protocol
 
+The compiler's per-package process structure and its content-addressed disk
+cache are specified in `docs/compiler-disk-cache.md`; §23 of
+`docs/memory-model.md` (decisions D25-D28) is the design it implements. The
+1500-line trap list in the brief's §3 is the accumulated record of what has
+already been tried on the compiler's memory behaviour - read it before changing
+the codec, `alloc.mx` or the build pipeline.
+
 Every step of the self-hosting bootstrap MUST use `moxie build -a` to force rebuild all packages from scratch. The `-a` flag clears the `.bc` build cache before compilation, preventing stale linker objects from a compiler built with a different runtime from being reused. This is critical because the runtime (`src/runtime/codec.mx`, `src/runtime/alloc.mx`, etc.) may change between bootstrap cycles, and cached `.bc` files from a previous compiler build are incompatible.
 
 Bootstrap cycle:
