@@ -442,6 +442,34 @@ filesystem, and the codec is never asked to relocate it.
 4. **Errors must be values.** See 8.2; already the compiler's style, must be
    enforced on the new job type.
 
+### 8.3b Step 0, measured first: the tree cannot currently rebuild its own compiler
+
+This was measured before any code was written, and it changes the order of work.
+
+| compiler | built by | hello build | verdict |
+|---|---|---|---|
+| `./mxc-stage4` (checked in, Nov 12 20:02) | - | **37 s** | works |
+| sources at `334a6714` (Nov 12 19:33) | `./mxc-stage4` | abort at once | `panic: codec bad pointer tag` |
+| sources at `492a65aa` (Nov 12 23:10, the commit that was supposed to fix that panic) | `./mxc-stage4` | 118 s | `SIGSEGV` |
+| sources at HEAD | `./mxc-stage4` | > 400 s | stalls in `internal/bytealg` typecheck |
+
+So the checked-in generation is **better than anything these sources can now
+produce**, and every source commit since Nov 12 20:02 makes a rebuilt compiler
+worse. The checked-in binary predates the change that folded the ownership types
+and the accumulated universe into what a return must carry.
+
+That is the same defect 22.4e chased, seen from the other side: it is not merely
+slow, it is **codec desynchronisation on the universe graph**. `492a65aa` moved
+where the ownership types are installed, which stopped the immediate panic and
+turned it into a segfault 118 s later -- a guard-shaped fix that moved the
+failure instead of removing it, exactly the pattern `claude.md` warns about.
+
+The consequence for this plan is that **the domain boundary is not only a
+performance fix**. With the artifact as the only channel, the universe graph
+never crosses a return, so the codec is never asked to encode it, and this entire
+failure class disappears rather than being tuned. That is why Step 2 comes before
+any attempt to make the current path faster.
+
 ### 8.4 Steps, each with its acceptance
 
 Step 1 - **Measure the boundary before moving it.** No code changes.
