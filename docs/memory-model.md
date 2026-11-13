@@ -1296,7 +1296,17 @@ arena, never parsed into a long-lived store, never trusted without verifying tha
 the address matches the bytes. A cache entry is a *fact about a past run*, not
 memory this run owns.
 
-**D29. Three ways to name an object, and the law that picks one.**
+**D29. Mark, rebase and sweep are batch passes, and the constraint is a rule.**
+
+> No function called from mark, rebase or sweep may allocate, materialise a
+> container view, or return an interior pointer into an arena. These walks are
+> batch passes over enumerable slots; anything they need must be borrowed from a
+> per-pass bump and discarded wholesale.
+
+This is checkable against a diff, which is what a decision of record has to be.
+The reason follows; it is not a substitute for the rule.
+
+**Why: three ways to name an object, and what each costs.**
 
 | | access cost | move cost | needs slot discovery |
 | --- | --- | --- | --- |
@@ -1305,11 +1315,13 @@ memory this run owns.
 | base + offset | 1 add | free (change the base) | no |
 
 `base + offset` is **static resolution**: the compiler walked the map once, at
-compile time, and wrote the answer down as a displacement. `%fn_arena + k` is
-already this, and it is optimal - no access cost, no fixup, and relocation
-within the scope is free because only the base register changes. Optimisation is
-the migration of symbol resolution from run time to compile time; the C-versus-
-Lisp performance gap is that mechanism, not a difference in pointer quality.
+compile time, and wrote the answer down as a displacement. It is
+`%fn_base + k` - the region base, not `%fn_arena`, which is a handle and moves
+when a chunk chains (D14) - and it is optimal: no access cost, no fixup, and
+relocation within the scope is free because only the base register changes.
+Optimisation is the migration of symbol resolution from run time to compile
+time; the C-versus-Lisp performance gap is that mechanism, not a difference in
+pointer quality.
 
 A handle does not avoid fixup, it **shrinks** it: one table write per object
 instead of one patch per reference, and slot count is at least object count and
@@ -1323,7 +1335,9 @@ prove stable; and the load serialises with the access it feeds.
 A map walk is **not** intrinsic to relocation. Fixup is a batch operation: scan
 the slots once at collection, patch them all, and every later access is a plain
 load. That is the whole reason tracing collectors are fast - the cost moves from
-per-access to per-collection.
+per-access to per-collection - and it is why a walk that allocates a view per
+field, or re-sorts a key set per iteration, has put a resolution back into the
+access path the batch existed to remove.
 
 **The law.** Indirection is what you need when you cannot enumerate the
 references. **Persistence destroys enumerability:** a filesystem has no live
@@ -1334,7 +1348,7 @@ precisely because the compiler emitted stack maps and layout descriptors. Hence:
 > Filesystems need inodes. Heaps need not. The id table is the price of
 > persistence, not of memory management.
 
-Placement follows, and it is a rule, not a preference:
+Placement follows:
 
 - **function arenas** - static resolution, `base + k`;
 - **shelves** - raw pointers and batch fixup at the sweep, immobility within a
@@ -1347,6 +1361,46 @@ The error this design rejects is not handles as such, it is **handles in the
 intra-arena hot path**, where enumerability already buys a cheaper option. At the
 boundary the handle is not a compromise; the boundary is exactly where the
 filesystem's condition becomes true again.
+
+**The survey: which pattern each type gets.** Every type in the language is one
+of three, and an aggregate is the union of its fields.
+
+| type | pattern | intra-arena | across a boundary |
+| --- | --- | --- | --- |
+| `bool`, `int8..64`, `uint8..64`, `uintptr`, `float32/64`, `complex64/128` | static | immediate, `base + k` | its bytes |
+| `string`, `[]byte` | raw | header inline, address into the arena | relocated (copied) |
+| `[]T` | raw | header inline, address into the arena | relocated |
+| `*T` | raw | a raw address | relocated |
+| `unsafe.Pointer` | raw | a raw address, not traced | carried as a word |
+| `[N]T` | inherits `T` | inline | follows `T` |
+| struct | union of fields | fields at fixed offsets | follows the fields |
+| `map[K]V` | raw | address of a runtime map object | relocated (deep copy) |
+| `chan T` | handle | address of the ring pair | **the bytes are the handle** |
+| `func(...)` | handle | code pointer | **the bytes are the handle** |
+| interface | raw | itab + data address | relocated |
+| type parameter | its constraint's | as its constraint | as its constraint |
+
+`raw` means the value names memory that can move: the return protocol relocates
+it and the sweep patches it. `handle` means the word *is* the capability and is
+copied, never relocated. Neither needs nothing.
+
+Both compilers carry this as one function, `typeAccess`, and the two boundaries
+project from it: the channel boundary (`elemNeedsReloc` / `typeNeedsReloc`) takes
+`raw`, the return boundary (`typeNeedsCodec` / `typeNeedsCopy`) takes `raw ||
+handle`. They previously ran two separate switches that disagreed about `chan`
+and `func`, which is how a compiler loses track of a type: the same value was a
+handle at one door and a payload at the other. The unclassifiable case is
+explicit at each site rather than in the shared function, because the two
+boundaries answer it differently on purpose - the channel path assumes a
+relocation, the return path assumes none.
+
+**A return protocol is not a resolution mechanism.** Returning an interior
+pointer into an arena asks the return path to decide whether the pointee may be
+aliased, and that decision is made from attribution (`ctxArena`, the stable
+registry). When attribution is wrong the answer is "copy", and the caller mutates
+a duplicate - a semantic hazard, not a performance pattern: a mark that sets
+`live` on a copy loses the object. Interior mutation during a pass therefore goes
+through an address, never through a returned pointer.
 
 **Decided out of scope.** A persistent store in memory: `epoch` exists so ids can
 survive a restart, and WiscKey becomes relevant when page-granular persistence
