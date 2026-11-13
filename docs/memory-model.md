@@ -2373,9 +2373,9 @@ failed**. The failures, classified, because they are not all the same kind:
 | `reject_generic_assign_mismatch` | `./mxc-stage4` predates the `Identical` fix (`334a6714`), so the fixture's "must reject" is not exercised by that binary |
 | `tree-cleanliness` | pre-existing dirty tree (build artifacts and unrelated edits) |
 | `http_header_api` | the compiler's loop rule fires on `mime/multipart`'s `readForm`: "':=' of a struct literal inside a loop in a self-mutating method". Hoisting `p, err :=` exposes a second one (an `err` shadow and a struct literal), so this is a small stdlib cleanup that must be done as a whole, not line by line |
-| `asn1_builder_der` | **wrong output**: `bigint_128: got 020400000080 want 02020080` - a big integer is serialised with four leading zero bytes |
-| `generic_aggregate_subst` | SIGSEGV in a generic aggregate substitution |
-| `tls_handshake` | `parse child ca: x509: malformed certificate`, preceded by the codec's arena-escape warning |
+| `asn1_builder_der` | **FIXED** (`c4c09a22`): `natBytes` never skipped leading zero bytes, so `Bytes()` returned the word-aligned buffer and 128 encoded as `00 00 00 80` |
+| `tls_handshake` | **FIXED by the same change**: every certificate INTEGER carried the same padding, so a real x509 certificate parsed as malformed |
+| `generic_aggregate_subst` | SIGSEGV in a generic aggregate substitution; reproduces with the r13, r20 and r32 compiler binaries too, so it predates this session's compiler work |
 
 The last three are correctness defects in the return/relocation machinery, which
 is the same area phases 1 and 4 rewrite; they are the acceptance cases for that
