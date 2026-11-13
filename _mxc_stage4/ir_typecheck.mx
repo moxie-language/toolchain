@@ -55,6 +55,17 @@ type linkDataInfo struct {
 // generic declaration state. Allocated once at init and never reassigned;
 // fields are mutated through the pointer.
 type compileCtx struct {
+	// The typecheck phase's RESULT is published here, not returned.
+	//
+	// A `*TCPackage` returned from a function is a pointer whose pointee the
+	// return protocol must encode and decode into the caller's arena - the whole
+	// package graph, its scope, and the universe behind it. That encode is the
+	// 137-million-allocation walk recorded in 22.4e: `codecEncodeValue`
+	// recursing until the stack ran out. Publishing through the context makes
+	// the boundary a field store, so nothing graph-shaped crosses a return.
+	tcPkg       *TCPackage
+	tcFile      *syntax.File
+	tcMxh       string
 	parseErrors          []string
 	compileErrors        []string
 	constErrN            int32
@@ -575,7 +586,7 @@ func isIdentCont(c byte) (ok bool) {
 	return isIdentStart(c) || (c >= '0' && c <= '9')
 }
 
-func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) (pkg *TCPackage, file *syntax.File) {
+func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) (tcOK bool) {
 
 	shortName := name
 	for i := len(name) - 1; i >= 0; i-- {
@@ -611,7 +622,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 	src = stripDuplicatePackageClauses2(src)
 
 	if len(src) == 0 {
-		return nil, nil
+		return false
 	}
 
 	cctx.parseErrors = nil
@@ -629,7 +640,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 	// returned, so even a hard parse failure surfaced as whatever unrelated
 	// symptom came next.
 	if file == nil || len(cctx.parseErrors) > 0 {
-		return nil, nil
+		return false
 	}
 	// The package name is the clause name from the source, not the import
 	// path tail - they differ for packages like crypto/ec (package btcec).
@@ -1063,7 +1074,14 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 	// expressions by.
 	edgeAffinityFile(file, name)
 
-	return pkg, file
+	// Publish the result where the caller reads it, in this frame, so the
+	// package graph never crosses a return.
+	cctx.tcPkg = pkg
+	cctx.tcFile = file
+	if pkg != nil {
+		cctx.tcMxh = generateMxh(pkg)
+	}
+	return pkg != nil && file != nil
 }
 
 func scanParse(src []byte, name string, arena *runtime.Arena) (file *syntax.File) {
@@ -1446,9 +1464,12 @@ func TypeCheckOnly(src []byte, name string, mxhPath string, pkgDir string) {
 	// sovereign groups whose receivers live in it - die together at
 	// ArenaFree below (sovInvalidateArena sweep).
 	runtime.ManualArenaEnter(arena)
-	pkg, file := typeCheckPkg(src, name, arena, pkgDir)
-	if pkg != nil && file != nil {
-		mxhData := generateMxh(pkg)
+	if typeCheckPkg(src, name, arena, pkgDir) {
+		// The mxh was generated inside the typecheck frame; only the text
+		// crosses out of it.
+		mxhData := cctx.tcMxh
+		cctx.tcPkg = nil
+		cctx.tcFile = nil
 		runtime.ManualArenaExit(arena)
 		// mxh text must land in the caller's (persistent) arena so the
 		// registry survives ArenaFree.
@@ -1514,14 +1535,16 @@ func CompileToIR(src []byte, name string, triple string, pkgDir string) (s strin
 	cctx.compileArena = arena
 	runtime.ManualArenaEnter(arena)
 
-	pkg, file := typeCheckPkg(src, name, arena, pkgDir)
+	typeCheckPkg(src, name, arena, pkgDir)
+	pkg := cctx.tcPkg
+	file := cctx.tcFile
 	memLine("   ci-tc "|name)
 
 	// Generate mxh inside compile arena - type graph is alive.
 	// Serialize exports before any arena switch. Then load the
 	// serialized text on the root arena. No cross-arena graph copy.
 	if pkg != nil && file != nil {
-		mxhData := generateMxh(pkg)
+		mxhData := cctx.tcMxh
 		runtime.ManualArenaExit(arena)
 		loadMxhInto([]byte(mxhData))
 		// Copy mxh text to root arena so it survives ArenaFree.
