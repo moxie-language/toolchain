@@ -490,11 +490,9 @@ func InitArenaRestore(save *Arena) {
 
 // --- Sovereign arena groups ---
 //
-// A sovereign type owns a group of three arenas: the data arena (the
-// type's live data structure), an allocation-map arena (one sovRecord per
-// data allocation), and a reference arena (stable sovSlot objects that
-// external holders point at - the slots are never moved, so compaction
-// only rewrites the slots and interior pointers).
+// A sovereign type owns a group of two arenas: the data arena (the type's live
+// data structure) and an allocation-map arena (one sovRecord per data
+// allocation, plus the group's own bookkeeping tables).
 //
 // Mutating methods run with a scratch fn arena current. Allocations that
 // are stored into the receiver's data structure (identified statically by
@@ -523,16 +521,10 @@ type sovRecord struct {
 	newAddr  uintptr // set during copy-compact: the relocated address
 }
 
-// sovSlot is a stable external reference to sovereign-arena data.
-type sovSlot struct {
-	dataPtr unsafe.Pointer
-}
-
 // sovGroup is the per-receiver sovereign arena group.
 type sovGroup struct {
 	data     *Arena
 	allocTbl *Arena
-	refTbl   *Arena
 	recv     unsafe.Pointer
 	recvTypeDesc *RawType
 	curBatch int32
@@ -564,7 +556,6 @@ type sovGroup struct {
 	recs  []*sovRecord // records in allocation order
 	recsSorted bool     // true when recs are sorted by dataAddr
 	batchStart []int32  // per-batch first-rec index stack (root lifetime)
-	slots []*sovSlot   // all slots ever allocated
 	ctxArena *Arena    // arena containing the receiver; group dies with it
 	queued      bool       // linked into the pending-compaction list
 	pendingNext *sovGroup  // next group queued for compaction
@@ -878,20 +869,6 @@ func sovGrowRecs(g *sovGroup) {
 	nb := unsafe.Slice((**sovRecord)(sovTableAlloc(g, uintptr(nc)*unsafe.Sizeof(&sovRecord{}))), nc)
 	copy(nb, g.recs)
 	g.recs = resize(nb, len(g.recs))
-}
-
-// sovGrowSlots grows the slot slice in the group's table arena.
-func sovGrowSlots(g *sovGroup) {
-	nc := cap(g.slots) * 2
-	if nc < 4 {
-		nc = 4
-	}
-	if nc > sovMapMax || nc < 0 {
-		runtimePanic("sovereign slot table overflow")
-	}
-	nb := unsafe.Slice((**sovSlot)(sovTableAlloc(g, uintptr(nc)*unsafe.Sizeof(&sovSlot{}))), nc)
-	copy(nb, g.slots)
-	g.slots = resize(nb, len(g.slots))
 }
 
 // Pending compaction queue.
@@ -1276,17 +1253,6 @@ func sovZeroRuns(g *sovGroup, lo, hi uintptr) {
 		}
 		if sovRangeOverlaps(r.dataAddr, r.dataAddr+r.size, lo, hi) {
 			keep(r.dataAddr, r.size)
-		}
-	}
-	// Stable slots are the runtime's own external references.
-	for i := 0; i < len(g.slots); i++ {
-		sl := g.slots[i]
-		if sl.dataPtr == nil {
-			continue
-		}
-		p := uintptr(sl.dataPtr)
-		if p >= lo && p < hi {
-			keep(p, 8)
 		}
 	}
 	for i := int32(0); i < n; i++ {
@@ -1785,7 +1751,7 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 	g.data.sovereign = 1
 	sovRangeRegister(g.data.regions[0].base, g.data.regions[0].cap, g)
 	g.data.owner = g
-	// allocTbl and refTbl are created on first use. A build creates hundreds of
+	// allocTbl is created on first use. A build creates hundreds of
 	// thousands of sovereign groups (418k / 25GB of cumulative capacity on a
 	// cold relay build, ~9GB of it mapped at the peak): two eager 64KB arenas
 	// per group is most of that virtual peak. An absent table is a defined
@@ -2657,18 +2623,6 @@ func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 	case KindPointer:
 		v := *(*unsafe.Pointer)(p)
 		if v != nil {
-			if g.refTbl != nil && sovInArena(g.refTbl, uintptr(v)) {
-				// A slot pointer names the SLOT, and the slot's target is the
-				// only thing a relocation has to follow. Reading a slot that
-				// the release pass has already retired is a dereference of
-				// freed memory - the fault seen in sovWalkValue1 on the DB
-				// domain - so the slot table is treated as unreadable rather
-				// than trusted here.
-				if !sovInArena(g.refTbl, uintptr(v)) {
-					return
-				}
-				v = (*sovSlot)(v).dataPtr
-			}
 			sovMarkBlock(g, v)
 			// A pointer may target an object outside the data arena
 			// (e.g. a receiver field that points into the compile arena).
@@ -2967,14 +2921,6 @@ func sovMarkReceiverRoots(g *sovGroup, recv unsafe.Pointer, td *RawType) {
 		}
 		faddr := unsafe.Add(recv, sovFieldOffset(td, i))
 		// A pointer field may hold a slot object; resolve it.
-		if ft.Kind() == KindPointer {
-			v := *(*unsafe.Pointer)(faddr)
-			if v != nil && g.refTbl != nil && sovInArena(g.refTbl, uintptr(v)) {
-				v = (*sovSlot)(v).dataPtr
-				sovMarkBlock(g, v)
-				continue
-			}
-		}
 		sovWalkValue(g, faddr, ft)
 	}
 }
@@ -3375,13 +3321,6 @@ func sovFinishCompact(g *sovGroup) {
 			sovRebaseValue(g, unsafe.Pointer(rec.newAddr), rec.typeDesc, nd)
 		}
 	}
-	// Slots: rewrite external references.
-	for i := int32(0); i < int32(len(g.slots)); i++ {
-		sl := g.slots[i]
-		if sl.dataPtr != nil {
-			sl.dataPtr = unsafe.Pointer(sovRebasePtr(g, uintptr(sl.dataPtr), nd))
-		}
-	}
 	// Rewrite the receiver's root fields and the selecting frame's root slots.
 	sovRebaseRoots(g, nd)
 	sovRebaseFrameRoots(g, nd)
@@ -3648,14 +3587,17 @@ func codecSovereignFree(recv unsafe.Pointer) {
 	}
 	g.ctxArena = nil
 	sovCycleAbort(g)
+	// Clear each field as its arena goes. The release pooled or unmapped the
+	// arena, so a pointer left behind makes every later `!= nil` test mean
+	// "this group once had one" instead of "this group has one", and the next
+	// reader dereferences whatever the pool handed out.
 	if g.data != nil {
 		sovReleaseArena(g.data)
+		g.data = nil
 	}
 	if g.allocTbl != nil {
 		sovReleaseArena(g.allocTbl)
-	}
-	if g.refTbl != nil {
-		sovReleaseArena(g.refTbl)
+		g.allocTbl = nil
 	}
 	hashmapDelete(m, unsafe.Pointer(&keyv), h)
 	sovRecycleGroup(g)
