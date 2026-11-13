@@ -2428,6 +2428,16 @@ What that means:
   them, for every arena, and the panic remains only if the mmap itself fails.
   Regression-clean (`segment_heap`, `ring_release`, `sovereign_arena`,
   `rootmap`).
+- **The stall is an UNBOUNDED ENCODE, quantified.** An allocation counter
+  (printing every million bumps) shows the compiler making **137 million
+  32-byte allocations** in a single non-root arena, chaining 64 MiB segments
+  (75+ regions, ~5 GB of address space) before it was killed at 300 s. A gdb
+  sample taken during that spin lands in the same place as every earlier sample:
+  `codecSeenLookup` -> `codecEncodeMap` -> `TCFunc` -> `object` -> `TCPackage` ->
+  `Scope`, i.e. the encode is walking the type universe. Raising the seen-set
+  cap to 2^21 does not change it. So the walk is **not closing the graph's
+  cycles**: a graph of a few thousand objects is re-expanded tens of thousands of
+  times.
 - **The stall is in the ALLOCATOR, not the codec.** Markers around the
   function-declaration path (`A` before `NewTCFunc`, `B` after it, `C` after
   `scope.Insert`) print `MAMBMCMAMBMCMA...` for every declaration of
