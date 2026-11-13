@@ -3826,15 +3826,33 @@ func SovPendingArena() (p uintptr) {
 }
 
 // sovLookup returns the group keyed by a receiver address, or nil.
+// sovKeySlot is the domain's one-word key scratch, for map lookups keyed by a
+// receiver address.
+//
+// A `keyv := recv` local whose address is passed to the hash and the lookup is
+// materialised in the arena - Moxie allocates what it has to take the address
+// of - so every lookup left 8 permanent bytes behind when the caller was the
+// root arena, which is exactly where the sweep runs. The slot is carved once
+// and rewritten in place.
+var sovKeySlot unsafe.Pointer
+
+func sovKey() unsafe.Pointer {
+	if sovKeySlot == nil {
+		sovKeySlot = sovRootAlloc(8)
+	}
+	return sovKeySlot
+}
+
 func sovLookup(recv unsafe.Pointer) (g *sovGroup) {
 	m := domainRoot.sovereignRoot
 	if m == nil || recv == nil {
 		return nil
 	}
-	keyv := recv
-	h := m.keyHash(unsafe.Pointer(&keyv), 8, m.seed)
+	k := sovKey()
+	*(*unsafe.Pointer)(k) = recv
+	h := m.keyHash(k, 8, m.seed)
 	var av unsafe.Pointer
-	if !hashmapGet(m, unsafe.Pointer(&keyv), unsafe.Pointer(&av), 8, h) || av == nil {
+	if !hashmapGet(m, k, unsafe.Pointer(&av), 8, h) || av == nil {
 		return nil
 	}
 	return (*sovGroup)(av)
