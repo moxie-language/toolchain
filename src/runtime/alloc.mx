@@ -4348,14 +4348,14 @@ func arenaPickActive(a *Arena) int32 {
 // buffer cannot swallow every small allocation behind it (G4).
 func arenaOpenSegment(a *Arena, size uintptr) (idx int32) {
 	if a.nregions >= int32(len(a.regions)) {
-		// The root heap lives for the whole domain and has no upper bound: on
-		// wasm a ROOT segment is 64 KiB, so 1024 entries would cap the heap at
-		// 64 MiB and a compaction of a large receiver graph would run it over.
-		// Grow the table itself. Every other arena is bounded by its class and
-		// a full table there is a real defect (the panic below).
-		if a.isRoot != 0 {
-			arenaGrowRegions(a)
-		}
+		// The table grows for EVERY arena. It used to grow only for the root,
+		// on the theory that the other classes are bounded - and a cold
+		// bootstrap then died after minutes of work with "arena: region table
+		// full" from some function frame that had chained past its 32 entries.
+		// A full table is a resource limit, not a defect in the caller: the
+		// segments themselves are already chained, so the table must chain with
+		// them. The panic below stays as the last resort if the mmap fails.
+		arenaGrowRegions(a)
 	}
 	if a.nregions >= int32(len(a.regions)) {
 		printstring("OVERFLOW nregions=")
