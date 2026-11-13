@@ -615,6 +615,24 @@ whole encode (`codecCheckConsumed`, temporary). Zero desyncs in a full run, so
 the two sides walk the same field stream and the decoder never wrote into the
 wrong slot.
 
+The object has since been NAMED from the core. Its `Name` field is a
+ten-byte string, and the bytes at that pointer read `"allocSites"`:
+
+```
+pkg/mxutil/mxutil.mx:140   var allocSites allocSiteTable
+```
+
+So the corrupt object is mxutil's own package variable, whose `Typ` reads
+`{typecode = *types.Named, value = <the TCVar's own address>}` - a Type that
+points at the variable holding it. Nothing was freed, so that value was
+written or resolved there, and the only place such a self-reference can arise
+is the `Named.Obj <-> TypeName.Typ` cycle: the encoder registers a struct's
+base and then its fields, the decoder mirrors it position for position, and a
+back-reference index that lands one entry off resolves to the enclosing
+object. The next probe is therefore the seen set itself: print
+`(index, address)` for every `codecSeenAdd` and `codecDecodeSeenAdd` around the
+cycle and compare the two sequences, which is a local, decisive check.
+
 So the interface header itself is the fault, and the leading hypothesis is a
 static-type/typecode disagreement at the box - the compiler believes the value
 being boxed is `*Named` when the pointer it stores is a `*TCVar`. The next probe
