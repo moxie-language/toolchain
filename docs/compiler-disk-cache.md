@@ -486,6 +486,49 @@ never crosses a return, so the codec is never asked to encode it, and this entir
 failure class disappears rather than being tuned. That is why Step 2 comes before
 any attempt to make the current path faster.
 
+### 8.3b2 The crash site, named: a returned `syntax.Expr` whose slot holds a slice header
+
+Measured with a compiler built from **clean HEAD** by the checked-in binary, so
+none of the uncommitted work is in it, plus a temporary print at the top of the
+codec's interface case (`typ`, the interface's `typecode` and `value`, and the
+two transient flags):
+
+```
+ci typ=0x...20f0c0 td=0x...21c250 v=0x7f...  rt=1 to=0   <- pointer:syntax.CallExpr
+ci typ=0x...20f0c0 td=0x...21cab8 v=0x7f...  rt=1 to=0   <- pointer:syntax.ExprStmt
+ci typ=0x...20f0c0 td=0x7f316e095730 v=0x0000000000000003 rt=1 to=0
+     ^ pkg/syntax.Expr  ^ a heap address, not a typecode   ^ 3
+```
+
+`nm` names the descriptors: `0x20f0c0` is `reflect/types.type:named:pkg/syntax.Expr`,
+`0x21c250` is `...pointer:named:pkg/syntax.CallExpr`, `0x21cab8` is
+`...pointer:named:pkg/syntax.ExprStmt`. So the first two encodes are ordinary
+`Expr` returns; the third is handed a 16-byte slot holding `{heap pointer, 3}` -
+the first two words of a **slice header**, not an interface - and dies in
+`codecEncodeValue` reading the pointee.
+
+That is not a corrupted typecode; it is the wrong 16 bytes. The frame arena that
+held the interface's pointee was released and the region reused for a slice
+before the return protocol walked it - `FnArenaPop` hands the region to the next
+callee, which is exactly what the arena-escape warning is about. The interface
+itself is `raw` in `typeAccess`, so a codec IS emitted for it; what failed is the
+address judgement inside the codec, not the decision to encode.
+
+Two controls, so the finding is not attributed to the wrong change:
+
+| compiler | sources | result |
+|---|---|---|
+| `./mxc-stage4` (Nov 12) | anything | builds and runs apps |
+| built from clean HEAD by `./mxc-stage4` | HEAD, nothing uncommitted | `SIGBUS`/`SIGSEGV` at `tc-in` of `internal/task`, `math`, `mxutil` |
+| built from `0d1f6ddf^` (pre-dates every commit since Nov 13 20:46) | that commit | `SIGSEGV` at `tc-in internal/task` |
+
+So the rebuild loop has been broken since before Nov 12 20:02, which is what
+8.3b already concluded; what is new here is the *shape* of the fault. It is also
+why `graphNeedsInit`/`computeGraphNeeds` were wrongly suspected: instrumented,
+they run to completion (`cur == root` throughout, 17/17 packages), and the crash
+is one package later, inside typechecking a package whose source was just
+parsed.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
