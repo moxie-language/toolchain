@@ -2898,3 +2898,54 @@ revision 2 began, and the way it began was with the sentence "the compiler needs
 somewhere to accumulate". The correct form is "this server declares a store of
 this size, and here is where it is declared". The difference is one line of
 source and the whole of A3.
+
+---
+
+## 24. Delivered scope, and what is now deferred by decision
+
+This section closes the implementation arc that began at section 21. It states
+what is in the tree and verified, and what is deliberately not, so that a later
+reader does not mistake an omission for an oversight.
+
+### 24.1 Delivered and verified
+
+| area | state | evidence |
+|---|---|---|
+| Segment heap: FN chunks, per-domain ROOT heap, LARGE, DOMAIN, CHANNEL classes; region tables that chain for every arena | in tree | `segment_heap`, `rootmap`, `sovereign_arena` units pass; region-table growth `1374d8fd` |
+| Ring transport: cache-line header, chaining, fixed sizing, refcounts, LOCAL/SHARED class | in tree | `ring_chain`, `ring_release`, `chan_named_elem`, `spawn_parked_intermediate` pass |
+| Declared ownership: `Edge[In, Out]`, `Sender T`, `Receiver T`, `edge[In, Out]{d}`, `EdgeMake`, affine ends, spawn agreement by rendered type | in tree, both compilers | `edge_types`, `edge_decl`, `edge_spawn`, `edge_roundtrip`, `edge_bare_end` pass; `reject_edge_*` restrictions pass |
+| Sovereign arenas, store-back, compaction drain at every select | in tree | `sovereign_arena`, `sov_compaction` pass |
+| Codec correctness fixes found by this arc | in tree | seen-set cap `f8361251`, `big.Int.Bytes` `c4c09a22`, multipart loop literal `5ff8e458` |
+
+Measured on the shipped compiler (`./mxc-stage4`, generation 7b104528): a cold
+build of a real application (sha256 of a file, `os.ReadFile`, `fmt`, `hex`) takes
+**42 s** and the digest matches `sha256sum` byte for byte.
+
+### 24.2 Deferred by decision, with the reason
+
+Phases 1 (flat return copy), 3 (layout descriptors and stack maps), 4 (the
+8-byte object header), 5 (compactor onto the root heap) and 7 (the LFS cleaner)
+are **not implemented**.
+
+The reason is a scope decision, not a technical one: every remaining
+verification of those phases runs through a compiler built from these sources,
+and that compiler's cold build spends its time in one place - the return
+protocol deep-copying a package's type graph, 137 M allocations in a single
+arena (22.4e). That cost is a property of the *compiler's process structure*
+(inheriting one growing universe across every package in one process), not of
+the memory model. The fix therefore belongs in the compiler, as decisions D25-D28
+and `docs/compiler-disk-cache.md` specify: one package per process, one artifact
+per package, read by address, nothing inherited.
+
+Implementing phases 1/3/4/5/7 against a compiler that cannot rebuild itself in
+reasonable time would mean verifying them through a 17-minute gate, and the
+temptation in that situation is to weaken the gate. Recording them as deferred,
+with the unblock named, is the honest form of stopping.
+
+### 24.3 The unblock, in one line
+
+Land `docs/compiler-disk-cache.md` Steps 1-4. When a cold `moxie build ./...`
+finishes in bounded time per package, phases 1 and 3-5 resume with the phase
+ordering this document already gives, and the three correctness defects that
+remain red (`generic_aggregate_subst`, `spawn_closed_crosspkg`'s agreement, and
+the `Identical`-in-`checkSpawnSignature` shape) become testable again.
