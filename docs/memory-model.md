@@ -2417,6 +2417,11 @@ call at that site miscompiles the compiler: the defect is in code generation for
 a call added inside `checkSpawnSignature`, not in the type comparison and not in
 the diagnostic.
 
+HEAD itself is NOT broken: rebuilt from the committed sources with
+`legacy/moxie`, the compiler starts and typechecks the runtime closure (it is
+still slow, as measured above). So the miscompile is caused by the three
+variants of the §22.4c change, not by the tree.
+
 That makes `.22.4c` a compiler-codegen bug, not a one-line agreement fix: until
 a call added there survives its own compilation, the spawn agreement cannot
 compare types structurally, and `spawn_closed_crosspkg` stays red. The rendered
