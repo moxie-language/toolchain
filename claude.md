@@ -2,6 +2,31 @@
 
 COMPACTION: ;always preserve: moxie is not Go, no stubs - remove dead references instead, no adding GC models to work around bugs, assembler pass required for .S files; slices replace arrays (an array type is leftover Go slice bypass), string and []byte are one MUTABLE type, and there is no aliasing - a subslice is a copy; there is NO recover() (a compile error) - panic is death, deferred calls do not run on the way out, error values are what recoverable failure is for
 
+## Rule 1: No Parallel Anything Unless Parallelism Is Being Tested
+
+One thing at a time. This machine is a potato: 15 GB of RAM shared with a
+4.7 GB bitcoind, and a compiler build peaks near 800 MB. Three builds at once
+does not make the work three times faster, it makes the machine swap, and the
+first thing to die is `/tmp`.
+
+- **One compiler invocation at a time.** Not two builds, not a build beside a
+  test run, not a build beside a `gdb` session.
+- **No background jobs for builds.** Run it in the foreground, write stdout to
+  a log file, and read the log with `tail`/`grep -c`. A job that outlives the
+  step that started it is a job nobody is watching.
+- **`-j 1` unless the run exists to test the worker pool.** The pool is a
+  feature under test, not a default. When parallelism IS the subject, say so in
+  the step that starts it.
+- **`xargs -P`, `make -j`, fan-out subagents, detached `setsid` runs: same
+  rule.** Sequential by default; concurrency only as the measured variable.
+- **Nothing durable in `/tmp`.** It gets purged. Builds, caches, backups and
+  logs go under `$HOME` (`~/mxc-builds/`), because `/tmp` taking the only
+  working compiler with it is not a hypothetical.
+
+The reason is not caution, it is measurement: a run under memory pressure is a
+run whose timing and peak RSS mean nothing, and this project's whole method is
+that a number you cannot trust is worse than no number.
+
 ## WOOD LAW: Bilateral Compiler Sync
 
 The legacy Go compiler (`legacy/`) and the stage4 compiler (`_mxc_stage4/`) are the SAME compiler in two languages. They must remain feature-identical at all times. Both sides or neither.
