@@ -2422,9 +2422,14 @@ What that means:
 - `.22.4c` (the `chan []byte` / `chan string` agreement) remains open, but for
   the ordinary reason - nobody has verified a fix end-to-end, because a cold
   build takes 17+ minutes and then fails on the arena table.
-- The two things to attack, in order, are the return-encode cost (which makes
-  every verification 17 minutes) and `arena: region table full` under a long
-  build (which turns that cost into a hard failure).
+- `arena: region table full` under a long build is **FIXED** (`1374d8fd`): the
+  region table grew only for the ROOT arena, so a function frame that chained
+  past its 32 entries died. Segments already chain; the table now chains with
+  them, for every arena, and the panic remains only if the mmap itself fails.
+  Regression-clean (`segment_heap`, `ring_release`, `sovereign_arena`,
+  `rootmap`).
+- What remains to attack is the return-encode cost, which makes every
+  verification 17 minutes long.
 
 **Lesson recorded:** a timeout kill is not a diagnosis. Every "compiler
 segfaulted" conclusion in this record must be re-read as "the run exceeded its
