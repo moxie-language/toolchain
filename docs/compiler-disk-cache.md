@@ -528,6 +528,28 @@ package in the runtime closure. So the remaining cost is a genuinely enormous
 walk, and every mechanism that could make it cheaper or skip it has been tried and
 measured.
 
+**The fault is a dangling interface pointer, not a deep stack.** With the fatal
+signal handler printing the faulting stack (and `sysMapDie` naming oversized
+mappings), the rebuilt compiler's crash resolves to one instruction:
+
+```
+runtime.codecEncodeValue+0xb9:  movups (%r12),%xmm0     <- r12 is unmapped
+    -> alloc(0x10)
+```
+
+Sixteen bytes, copied to the stack and then allocated: an interface. The type
+descriptors adjacent on the stack are `pkg/syntax.Expr` and `runtime._interface`,
+so what the return protocol is encoding is an AST node reached through an
+interface whose value pointer names memory that is gone. The same walk under a
+memory ceiling instead of a stack limit shows the other face: `mxutil.Ensure`
+growing a `[]byte` by doubling until the arena opens 64 MB regions, because the
+encode's buffer tracks the size of what it walks.
+
+One defect, two symptoms, and both are the boundary in 8.3b: something
+graph-shaped is crossing a return. Where the stack exhaustion ends and the
+dangling pointer begins is not yet separated, which is why Step 3 - nothing
+crosses - is the next move rather than a narrower fix.
+
 The one option not yet taken is the architectural one, and it is Step 3: the
 parent must not hold a universe built from every package compiled so far. That is
 not a tuning change, it is a change to what the parent keeps, and it is the
