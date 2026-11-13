@@ -2428,6 +2428,16 @@ What that means:
   them, for every arena, and the panic remains only if the mmap itself fails.
   Regression-clean (`segment_heap`, `ring_release`, `sovereign_arena`,
   `rootmap`).
+- **The walk is millions of NON-ROOT objects, and aliasing root pointers does
+  not help.** With encode-outcome counters printed alongside the allocation
+  trace, the spin reads `ref=3956570 down=11780794 stab=2458`: nearly twelve
+  million pointers are DESCENDED, and the root-arena alias path fires 2,458
+  times. Making root pointers alias unconditionally made the build slower still
+  (365 M allocations, 14 minutes), so what is being copied is NOT the root
+  universe: it is millions of objects in the package's own arena. That is only
+  possible if the type graph accumulated in the package arena reaches every
+  earlier package's objects - i.e. the compiler's per-package type graphs share
+  and re-encode one growing universe-shaped structure.
 - **The stall is an UNBOUNDED ENCODE, quantified.** An allocation counter
   (printing every million bumps) shows the compiler making **137 million
   32-byte allocations** in a single non-root arena, chaining 64 MiB segments
