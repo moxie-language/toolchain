@@ -609,6 +609,12 @@ named:pkg/types.ConstInt, <heap address>}` - which is exactly a `TCVar`'s tail
 `{typecode = *Named, value = <address of a TCVar>}`: an interface whose two
 halves do not describe the same object.
 
+The encode/decode pair was also instrumented for desynchronisation - every
+pointer-returning call now checks, after its decode, that `cb.pos` consumed the
+whole encode (`codecCheckConsumed`, temporary). Zero desyncs in a full run, so
+the two sides walk the same field stream and the decoder never wrote into the
+wrong slot.
+
 So the interface header itself is the fault, and the leading hypothesis is a
 static-type/typecode disagreement at the box - the compiler believes the value
 being boxed is `*Named` when the pointer it stores is a `*TCVar`. The next probe
