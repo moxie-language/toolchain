@@ -2428,8 +2428,18 @@ What that means:
   them, for every arena, and the panic remains only if the mmap itself fails.
   Regression-clean (`segment_heap`, `ring_release`, `sovereign_arena`,
   `rootmap`).
-- What remains to attack is the return-encode cost, which makes every
-  verification 17 minutes long.
+- **The stall is in the ALLOCATOR, not the codec.** Markers around the
+  function-declaration path (`A` before `NewTCFunc`, `B` after it, `C` after
+  `scope.Insert`) print `MAMBMCMAMBMCMA...` for every declaration of
+  `internal/bytealg` and then stop on a lone `MA`: the compiler hangs inside
+  `NewTCFunc(pkg, name, nil)`, whose whole body is three field stores plus the
+  allocation of the `TCFunc`. So what never returns is an ALLOCATION in that
+  arena, at one specific declaration - which is consistent with the region-table
+  exhaustion seen earlier and reframes the hunt: the encode measured in rounds
+  11-15 was the last heavy work before the stall, not its cause.
+- What remains to attack, therefore, is the allocator path that stalls during a
+  cold typecheck - the same arena machinery phase 2 landed, now under the load
+  the compiler itself puts on it.
 
 **Lesson recorded:** a timeout kill is not a diagnosis. Every "compiler
 segfaulted" conclusion in this record must be re-read as "the run exceeded its
