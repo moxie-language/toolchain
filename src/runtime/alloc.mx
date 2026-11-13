@@ -644,21 +644,16 @@ func sovGroupTake() (g *sovGroup) {
 }
 
 // sovRecycleGroup retires a released group: its arenas are already freed, so
-// only the bookkeeping is kept, truncated, for the next group.
+// only the struct is kept for the next group. The bookkeeping tables live in
+// the group's own record arena (sovTableAlloc), which the release path has just
+// freed, so they are dropped with it. Carrying them over was a use-after-free:
+// the next group took the recycled slices and wrote its records into an arena
+// that no longer existed.
 func sovRecycleGroup(g *sovGroup) {
 	if g == nil || sovGroupFreeN >= sovGroupFreeMax {
 		return
 	}
-	sovParkRecs(g)
-	recs := resize(g.recs, 0)
-	order := resize(g.cycleOrder, 0)
-	batches := resize(g.batchStart, 0)
-	slots := resize(g.slots, 0)
 	memzero(unsafe.Pointer(g), unsafe.Sizeof(sovGroup{}))
-	g.recs = recs
-	g.cycleOrder = order
-	g.batchStart = batches
-	g.slots = slots
 	g.pendingNext = sovGroupFreeHead
 	sovGroupFreeHead = g
 	sovGroupFreeN++
@@ -852,28 +847,19 @@ func sovGroupInDyingArena(a *Arena, p uintptr) (ok bool) {
 // instead of failing.
 const sovMapMax = int32(1) << 27
 
-// sovParkedRecs is one large record array kept between groups.
+// sovTableAlloc carves a bookkeeping table from the group's own record arena.
 //
-// The biggest receiver in a call needs 16,384 records - 128 KB of root arena -
-// and after a group is recycled the array it keeps is whatever it happened to
-// have, so the group that needs the big one next usually does not get it and
-// grows its own from 4 records up: 64 KB and 128 KB allocations on every
-// x509.CreateCertificate, 357 KB of root arena per call after the group-release
-// bugs were fixed (round 291). Park the largest array instead of leaving it
-// behind; it is root-lifetime state either way, and one slot is enough because
-// only one receiver per call is that large.
-const sovParkMinRecs = int32(1024)
-var sovParkedRecs []*sovRecord
-
-func sovParkRecs(g *sovGroup) {
-	if g == nil || cap(g.recs) < sovParkMinRecs {
-		return
+// The tables describe the data arena, so they live and die with the group: the
+// record arena is released by codecSovereignFree and replaced by compaction,
+// and nothing outside the group holds a table pointer. Root-lifetime backing
+// was the leak - every doubling abandoned its predecessor in the root arena,
+// which never frees, and a long-lived receiver that compacts per request left
+// one abandoned array per request there.
+func sovTableAlloc(g *sovGroup, sz uintptr) unsafe.Pointer {
+	if g.allocTbl == nil {
+		g.allocTbl = sovNewArena(8192)
 	}
-	if cap(sovParkedRecs) >= cap(g.recs) {
-		return
-	}
-	sovParkedRecs = resize(g.recs, 0)
-	g.recs = nil
+	return ArenaAlloc(g.allocTbl, sz)
 }
 
 func sovGrowRecs(g *sovGroup) {
@@ -889,19 +875,12 @@ func sovGrowRecs(g *sovGroup) {
 	if nc > sovMapMax || nc < 0 {
 		runtimePanic("sovereign allocation map overflow: compaction did not reclaim records")
 	}
-	if cap(sovParkedRecs) >= nc {
-		reuse := resize(sovParkedRecs, nc)
-		copy(reuse, g.recs)
-		g.recs = resize(reuse, len(g.recs))
-		sovParkedRecs = nil
-		return
-	}
-	nb := unsafe.Slice((**sovRecord)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(&sovRecord{}))), nc)
+	nb := unsafe.Slice((**sovRecord)(sovTableAlloc(g, uintptr(nc)*unsafe.Sizeof(&sovRecord{}))), nc)
 	copy(nb, g.recs)
 	g.recs = resize(nb, len(g.recs))
 }
 
-// sovGrowSlots grows the slot slice with root-lifetime backing.
+// sovGrowSlots grows the slot slice in the group's table arena.
 func sovGrowSlots(g *sovGroup) {
 	nc := cap(g.slots) * 2
 	if nc < 4 {
@@ -910,7 +889,7 @@ func sovGrowSlots(g *sovGroup) {
 	if nc > sovMapMax || nc < 0 {
 		runtimePanic("sovereign slot table overflow")
 	}
-	nb := unsafe.Slice((**sovSlot)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(&sovSlot{}))), nc)
+	nb := unsafe.Slice((**sovSlot)(sovTableAlloc(g, uintptr(nc)*unsafe.Sizeof(&sovSlot{}))), nc)
 	copy(nb, g.slots)
 	g.slots = resize(nb, len(g.slots))
 }
@@ -1910,7 +1889,7 @@ func codecSovereignEnter(g *sovGroup) {
 		if nc < 4 {
 			nc = 4
 		}
-		nb := unsafe.Slice((*int32)(sovRootAlloc(uintptr(nc)*4)), nc)
+		nb := unsafe.Slice((*int32)(sovTableAlloc(g, uintptr(nc)*4)), nc)
 		copy(nb, g.batchStart)
 		g.batchStart = resize(nb, len(g.batchStart))
 	}
@@ -1921,11 +1900,11 @@ func codecSovereignEnter(g *sovGroup) {
 // sovAddRec appends an allocation-map record, keeping the recs slice's
 // sortedness flag up to date.
 func sovAddRec(g *sovGroup, dataAddr, size uintptr, typeDesc *RawType) {
-	if len(g.recs) >= cap(g.recs) {
-		sovGrowRecs(g)
-	}
 	if g.allocTbl == nil {
 		g.allocTbl = sovNewArena(8192)
+	}
+	if len(g.recs) >= cap(g.recs) {
+		sovGrowRecs(g)
 	}
 	rec := (*sovRecord)(ArenaAlloc(g.allocTbl, unsafe.Sizeof(sovRecord{})))
 	rec.dataAddr = dataAddr
@@ -1977,12 +1956,18 @@ func sovInArena(a *Arena, p uintptr) (ok bool) {
 	return false
 }
 
-// sovFind returns the allocation-map record containing address p, or nil
-// if p is not inside the data arena's allocated range.
-func sovFind(g *sovGroup, p uintptr) (r *sovRecord) {
+// sovFind returns the address of the allocation-map record containing p, or 0
+// when p is not inside the data arena's allocated range.
+//
+// An address, not a *sovRecord: this is called once per pointer the mark and
+// the rebase visit, and a pointer return runs the return protocol, which copies
+// any pointee in a sovereign data arena - so the caller marked a COPY and the
+// live bit never reached the table. Measured as ~25 root-arena copies per
+// compaction before the conversion.
+func sovFind(g *sovGroup, p uintptr) (addr uintptr) {
 	n := int32(len(g.recs))
 	if n == 0 {
-		return nil
+		return 0
 	}
 	if !g.recsSorted {
 		sovSortRecs(g.recs)
@@ -2003,74 +1988,132 @@ func sovFind(g *sovGroup, p uintptr) (r *sovRecord) {
 			// recorded further along, so keep looking.
 			lo = mid + 1
 		} else {
-			return rec
+			return uintptr(unsafe.Pointer(rec))
 		}
 	}
-	return nil
+	return 0
 }
 
-// sovSortRecs merge-sorts the record slice by dataAddr. Called only when
-// a fresh arena region landed below an earlier one, breaking the natural
+// sovSortRecs sorts the record slice by dataAddr. Called only when a fresh
+// arena region landed below an earlier one, breaking the natural
 // allocation-order sorting.
+//
+// Heapsort, not merge sort: this runs inside the allocator (sovFind consults
+// it while marking, and the drain calls the drain at a safe point), so its
+// scratch would be allocated in whatever arena happens to be current - the
+// root arena when an event loop drains, where nothing is ever reclaimed. The
+// merge sort's `tmp` array was O(n log n) bytes of permanent root arena per
+// compaction, and at n~1500 that is ~10^4 allocations each: measured as 31.9
+// million 32-byte root allocations over 2000 events, 1.5 GB. Heapsort is
+// O(n log n) time with no allocation and no recursion.
 func sovSortRecs(recs []*sovRecord) {
 	n := int32(len(recs))
 	if n < 2 {
 		return
 	}
-	sovMergeSortRecs(recs, 0, n)
+	for i := n/2 - 1; i >= 0; i-- {
+		sovSiftRecs(recs, i, n)
+	}
+	for end := n - 1; end > 0; end-- {
+		t := recs[0]
+		recs[0] = recs[end]
+		recs[end] = t
+		sovSiftRecs(recs, 0, end)
+	}
 }
 
-func sovMergeSortRecs(recs []*sovRecord, lo, hi int32) {
-	if hi-lo < 2 {
-		return
-	}
-	mid := (lo + hi) / 2
-	sovMergeSortRecs(recs, lo, mid)
-	sovMergeSortRecs(recs, mid, hi)
-	tmp := []*sovRecord{:hi-lo}
-	i, j, k := lo, mid, int32(0)
-	for i < mid && j < hi {
-		if recs[i].dataAddr <= recs[j].dataAddr {
-			tmp[k] = recs[i]
-			i++
-		} else {
-			tmp[k] = recs[j]
-			j++
+// sovSiftRecs restores the max-heap property of recs[root:end].
+func sovSiftRecs(recs []*sovRecord, root, end int32) {
+	for {
+		child := root*2 + 1
+		if child >= end {
+			return
 		}
-		k++
-	}
-	for i < mid {
-		tmp[k] = recs[i]
-		i++
-		k++
-	}
-	for j < hi {
-		tmp[k] = recs[j]
-		j++
-		k++
-	}
-	for k = 0; k < hi-lo; k++ {
-		recs[lo+k] = tmp[k]
+		if child+1 < end && recs[child].dataAddr < recs[child+1].dataAddr {
+			child++
+		}
+		if recs[root].dataAddr >= recs[child].dataAddr {
+			return
+		}
+		t := recs[root]
+		recs[root] = recs[child]
+		recs[child] = t
+		root = child
 	}
 }
 
-// sovTypeHasPtrs reports whether walking a value of type td can reach
-// other blocks.
-func sovTypeHasPtrs(td *RawType) (ok bool) {
+// sovFieldTypeAddr returns the i-th field's type as an address. Scalar in,
+// scalar out: RawType.StructFieldType returns *RawType, so every call pays the
+// return protocol, and a type walk makes one per field of every record it
+// visits - measured as 1.8 MB of root-arena copies per 1500 events in the mark
+// walk alone, on a path that runs once per drain.
+func sovFieldTypeAddr(td *RawType, i int32) (tp uintptr) {
+	u := retUnderAddr(uintptr(unsafe.Pointer(td)))
+	if u == 0 {
+		return 0
+	}
+	st := (*rtStructType)(unsafe.Pointer(u))
+	if i < 0 || i >= int32(st.numField) {
+		return 0
+	}
+	fd := (*rtStructFieldDesc)(unsafe.Add(unsafe.Pointer(&st.fields[0]), uintptr(i)*unsafe.Sizeof(rtStructFieldDesc{})))
+	return uintptr(unsafe.Pointer(fd.fieldType))
+}
+
+// sovElemAddr is RawType.Elem as an address, for the same reason.
+func sovElemAddr(td *RawType) (tp uintptr) {
 	if td == nil {
+		return 0
+	}
+	if tag := uintptr(unsafe.Pointer(td)) & 0b11; tag != 0 {
+		return uintptr(unsafe.Pointer(td)) - 1
+	}
+	u := retUnderAddr(uintptr(unsafe.Pointer(td)))
+	if u == 0 {
+		return 0
+	}
+	if retKindOf(u) == KindPointer {
+		return uintptr(unsafe.Pointer((*rtPtrType)(unsafe.Pointer(u)).elem))
+	}
+	return uintptr(unsafe.Pointer((*rtElemType)(unsafe.Pointer(u)).elem))
+}
+
+// sovTypeHasPtrs reports whether a value of type td can reach other blocks.
+//
+// Scalar in, scalar out: the accessors it needs (Kind, NumField, Elem,
+// StructFieldType) all return *RawType, and every pointer-returning call pays
+// the return protocol - which for a static type descriptor still allocated a
+// copy of the descriptor in the caller's arena. This predicate is called once
+// per record of every other group on every drain, so at a loop-top drain those
+// copies landed in the root arena: measured as 8.6 million 24-byte root
+// allocations in 1100 events, 207 MB that never came back.
+func sovTypeHasPtrs(td *RawType) (ok bool) {
+	return sovTypeHasPtrsAddr(uintptr(unsafe.Pointer(td)), 0)
+}
+
+func sovTypeHasPtrsAddr(tp uintptr, depth int32) (ok bool) {
+	if tp == 0 || depth > 32 {
 		return false
 	}
-	k := td.Kind()
-	if k == KindBytes || k == KindPointer || k == KindSlice || k == KindInterface || k == KindMap || k == KindChan || k == KindFunc {
+	switch retKindOf(tp) {
+	case KindBytes, KindPointer, KindSlice, KindInterface, KindMap, KindChan, KindFunc:
 		return true
-	}
-	if k == KindStruct || k == KindArray {
-		nf := td.NumField()
-		if k == KindArray {
-			return sovTypeHasPtrs(td.Elem())
+	case KindArray:
+		u := retUnderAddr(tp)
+		if u == 0 {
+			return false
 		}
+		return sovTypeHasPtrsAddr(uintptr(unsafe.Pointer((*rtElemType)(unsafe.Pointer(u)).elem)), depth+1)
+	case KindStruct:
+		u := retUnderAddr(tp)
+		if u == 0 {
+			return false
+		}
+		st := (*rtStructType)(unsafe.Pointer(u))
+		nf := int32(st.numField)
 		for i := int32(0); i < nf; i++ {
-			if sovTypeHasPtrs(td.StructFieldType(i)) {
+			fd := (*rtStructFieldDesc)(unsafe.Add(unsafe.Pointer(&st.fields[0]), uintptr(i)*unsafe.Sizeof(rtStructFieldDesc{})))
+			if sovTypeHasPtrsAddr(uintptr(unsafe.Pointer(fd.fieldType)), depth+1) {
 				return true
 			}
 		}
@@ -2083,7 +2126,7 @@ func sovMarkBlock(g *sovGroup, p unsafe.Pointer) {
 	if p == nil {
 		return
 	}
-	rec := sovFind(g, uintptr(p))
+	rec := (*sovRecord)(unsafe.Pointer(sovFind(g, uintptr(p))))
 	if rec == nil {
 		return
 	}
@@ -2113,22 +2156,26 @@ func sovMarkBlock(g *sovGroup, p unsafe.Pointer) {
 // cannot be a holder of anything, and pinning on it stops compaction forever
 // (measured on the relay: a turn arena's stale header word pinned the top group
 // at ext=2 with the target record already dead).
-func sovRangeHasPtr(g *sovGroup, base, end uintptr) (ok bool, at uintptr) {
+// The single result is the holder's address, 0 for none: a two-value return
+// builds a result tuple in the caller's arena, and this is called once per
+// record of every other group on every drain - measured as 8.6 million 24-byte
+// root allocations in 1100 events, 207 MB that never came back.
+func sovRangeHasPtr(g *sovGroup, base, end uintptr) (at uintptr) {
 	if g == nil || g.data == nil {
-		return false, 0
+		return 0
 	}
 	p := (base + 7) &^ 7
 	for p+8 <= end {
 		v := *(*uintptr)(unsafe.Pointer(p))
 		if v != 0 && sovRangeOwner(v) == g {
-			rec := sovFind(g, v)
+			rec := (*sovRecord)(unsafe.Pointer(sovFind(g, v)))
 			if rec != nil && rec.live {
-				return true, p
+				return p
 			}
 		}
 		p += 8
 	}
-	return false, 0
+	return 0
 }
 
 // sovExternalRef reports whether a holder the compaction cannot rewrite - the
@@ -2177,7 +2224,7 @@ func sovNameExtField(td *RawType, off uintptr) {
 	for i := int32(0); i < nf; i++ {
 		fo := td.StructFieldOffset(i)
 		sz := uintptr(8)
-		ft := td.StructFieldType(i)
+		ft := (*RawType)(unsafe.Pointer(sovFieldTypeAddr(td, i)))
 		if ft != nil {
 			sz = ft.Size()
 		}
@@ -2198,7 +2245,7 @@ func sovExtNote(g *sovGroup, p uintptr) {
 	sovExtRecLive = 0
 	sovExtTdKind = 0
 	sovExtTdSize = 0
-	rec := sovFind(g, v)
+	rec := (*sovRecord)(unsafe.Pointer(sovFind(g, v)))
 	if rec != nil {
 		sovExtRecSize = int32(rec.size)
 		if rec.live {
@@ -2233,7 +2280,7 @@ func sovRootLiveRef(g *sovGroup) (ok bool) {
 		for p+8 <= end {
 			v := *(*uintptr)(unsafe.Pointer(p))
 			if v != 0 && sovRangeOwner(v) == g {
-				rec := sovFind(g, v)
+				rec := (*sovRecord)(unsafe.Pointer(sovFind(g, v)))
 				if rec != nil && rec.live {
 					return true
 				}
@@ -2324,8 +2371,8 @@ func sovExternalRef(g *sovGroup) (ok bool) {
 			if r == 0 {
 				lo = base + arenaDataOffset()
 			}
-			hit, at := sovRangeHasPtr(g, lo, base+a.regions[r].off)
-			if hit {
+			at := sovRangeHasPtr(g, lo, base+a.regions[r].off)
+			if at != 0 {
 				sovExtWhere = 2
 				sovExtArena = i
 				sovExtOff = at - base
@@ -2356,7 +2403,8 @@ func sovExternalRef(g *sovGroup) (ok bool) {
 			// pinning on it stops compaction forever (that is what kept the
 			// relay's Server group at tens of MB). An unknown descriptor stays
 			// conservative.
-			if rec.typeDesc != nil && !sovTypeHasPtrs(rec.typeDesc) {
+			hasPtrs := rec.typeDesc == nil || sovTypeHasPtrs(rec.typeDesc)
+			if rec.typeDesc != nil && !hasPtrs {
 				continue
 			}
 			sovExtHoldKind = 0
@@ -2364,12 +2412,13 @@ func sovExternalRef(g *sovGroup) (ok bool) {
 			sovExtHoldTyped = 0
 			if rec.typeDesc != nil {
 				sovExtHoldKind = int32(rec.typeDesc.Kind())
-				if sovTypeHasPtrs(rec.typeDesc) {
+				hp2 := sovTypeHasPtrs(rec.typeDesc)
+				if hp2 {
 					sovExtHoldTyped = 1
 				}
 			}
-			hit, at := sovRangeHasPtr(g, rec.dataAddr, rec.dataAddr+rec.size)
-			if hit {
+			at := sovRangeHasPtr(g, rec.dataAddr, rec.dataAddr+rec.size)
+			if at != 0 {
 				sovExtWhere = 3
 				sovExtArena = i
 				sovExtOff = at - rec.dataAddr
@@ -2503,7 +2552,7 @@ func sovNodescHasPtr(g *sovGroup, rec *sovRecord) (ok bool) {
 		w := *(*uintptr)(unsafe.Pointer(p))
 		if w != 0 {
 			if o := sovRangeOwner(w); o == g {
-				if sovFind(g, w) != nil {
+				if sovFind(g, w) != 0 {
 					return true
 				}
 			}
@@ -2597,7 +2646,7 @@ func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 			// store-backs through the pointer), so walk the pointee with
 			// the field's element type. Depth-bounded to keep compile-arena
 			// cycles (parent/prog chains) from unbounded traversal.
-			et := td.Elem()
+			et := (*RawType)(unsafe.Pointer(sovElemAddr(td)))
 			if et != nil && sovTypeHasPtrs(et) && !sovInArena(g.data, uintptr(v)) && sovDepth < sovMaxDepth && sovInReadableArena(uintptr(v)) {
 				sovDepth++
 				sovWalkValue(g, v, et)
@@ -2634,7 +2683,7 @@ func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 	case KindSlice:
 		s := *(*_string)(p)
 		if s.ptr != nil && sovReadable(uintptr(unsafe.Pointer(s.ptr))) {
-			et := td.Elem()
+			et := (*RawType)(unsafe.Pointer(sovElemAddr(td)))
 			if et != nil {
 				sovMarkBlock(g, unsafe.Pointer(s.ptr))
 				if sovTypeHasPtrs(et) {
@@ -2665,7 +2714,7 @@ func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 		// descriptor has to be the array type and the walk has to visit each
 		// element - otherwise only element zero is reachable and compaction
 		// reclaims the rest.
-		et := td.Elem()
+		et := (*RawType)(unsafe.Pointer(sovElemAddr(td)))
 		if et != nil && sovTypeHasPtrs(et) {
 			esz := et.Size()
 			an := td.ArrayLen()
@@ -2676,7 +2725,7 @@ func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 	case KindStruct:
 		nf := td.NumField()
 		for i := int32(0); i < nf; i++ {
-			ft := td.StructFieldType(i)
+			ft := (*RawType)(unsafe.Pointer(sovFieldTypeAddr(td, i)))
 			if ft != nil && sovTypeHasPtrs(ft) {
 				sovWalkValue(g, unsafe.Add(p, td.StructFieldOffset(i)), ft)
 			}
@@ -2695,7 +2744,7 @@ func sovMarkMap(g *sovGroup, m *hashmap, td *RawType) {
 	sovMarkBlock(g, unsafe.Pointer(m))
 	sovMarkBlock(g, m.buckets)
 	kt := hashmapKeyType(td)
-	vt := td.Elem()
+	vt := (*RawType)(unsafe.Pointer(sovElemAddr(td)))
 	keySz := m.keySize
 	valSz := m.valueSize
 	bucketSz := unsafe.Sizeof(hashmapBucket{}) + keySz*8 + valSz*8
@@ -2882,7 +2931,7 @@ func sovMarkReceiverRoots(g *sovGroup, recv unsafe.Pointer, td *RawType) {
 	}
 	nf := td.NumField()
 	for i := int32(0); i < nf; i++ {
-		ft := td.StructFieldType(i)
+		ft := (*RawType)(unsafe.Pointer(sovFieldTypeAddr(td, i)))
 		if ft == nil || !sovTypeHasPtrs(ft) {
 			continue
 		}
@@ -2911,15 +2960,18 @@ func sovMarkBorrowedReceivers(g *sovGroup) {
 	if m == nil {
 		return
 	}
+	// Stack locals, not []byte{:8}: this runs once per drain, which an event
+	// loop reaches once per select, and a slice literal there allocates in the
+	// root arena for the life of the process.
 	var it hashmapIterator
-	kb := []byte{:8}
-	vb := []byte{:8}
-	for hashmapNext(m, &it, unsafe.Pointer(&kb[0]), unsafe.Pointer(&vb[0])) {
-		recv := *(*unsafe.Pointer)(unsafe.Pointer(&kb[0]))
+	var kp unsafe.Pointer
+	var vp unsafe.Pointer
+	for hashmapNext(m, &it, unsafe.Pointer(&kp), unsafe.Pointer(&vp)) {
+		recv := kp
 		if recv == nil || !sovAddrInArena(g.data, uintptr(recv)) {
 			continue
 		}
-		g2 := (*sovGroup)(*(*unsafe.Pointer)(unsafe.Pointer(&vb[0])))
+		g2 := (*sovGroup)(vp)
 		if g2 == nil || g2.data == nil || !sovArenaBorrowed(g2.data) {
 			continue
 		}
@@ -2954,7 +3006,7 @@ func sovRebaseRoots(g *sovGroup, nd *Arena) {
 	}
 	nf := td.NumField()
 	for i := int32(0); i < nf; i++ {
-		ft := td.StructFieldType(i)
+		ft := (*RawType)(unsafe.Pointer(sovFieldTypeAddr(td, i)))
 		if ft == nil || !sovTypeHasPtrs(ft) {
 			continue
 		}
@@ -3049,14 +3101,14 @@ func sovBorrowedReceiverIn(g *sovGroup) (ok bool) {
 		return false
 	}
 	var it hashmapIterator
-	kb := []byte{:8}
-	vb := []byte{:8}
-	for hashmapNext(m, &it, unsafe.Pointer(&kb[0]), unsafe.Pointer(&vb[0])) {
-		recv := *(*unsafe.Pointer)(unsafe.Pointer(&kb[0]))
+	var kp unsafe.Pointer
+	var vp unsafe.Pointer
+	for hashmapNext(m, &it, unsafe.Pointer(&kp), unsafe.Pointer(&vp)) {
+		recv := kp
 		if recv == nil || !sovAddrInArena(g.data, uintptr(recv)) {
 			continue
 		}
-		g2 := (*sovGroup)(*(*unsafe.Pointer)(unsafe.Pointer(&vb[0])))
+		g2 := (*sovGroup)(vp)
 		if g2 == nil || g2.data == nil || !sovArenaBorrowed(g2.data) {
 			continue
 		}
@@ -3107,7 +3159,7 @@ func sovCycleAbort(g *sovGroup) {
 	g.cycleNext = 0
 }
 
-// sovCycleOrder records the live records in one pass, using the root-backed
+// sovCycleOrder records the live records in one pass, using the table arena
 // backing the group keeps between cycles.
 func sovCycleOrder(g *sovGroup) {
 	g.cycleOrder = resize(g.cycleOrder, 0)
@@ -3120,7 +3172,7 @@ func sovCycleOrder(g *sovGroup) {
 		if nc < 4 {
 			nc = 4
 		}
-		nb := unsafe.Slice((**sovRecord)(sovRootAlloc(uintptr(nc)*unsafe.Sizeof(&sovRecord{}))), nc)
+		nb := unsafe.Slice((**sovRecord)(sovTableAlloc(g, uintptr(nc)*unsafe.Sizeof(&sovRecord{}))), nc)
 		copy(nb, g.cycleOrder)
 		g.cycleOrder = resize(nb, len(g.cycleOrder))
 	}
@@ -3256,19 +3308,23 @@ func sovFinishCompact(g *sovGroup) {
 	// Rewrite the receiver's root fields and the selecting frame's root slots.
 	sovRebaseRoots(g, nd)
 	sovRebaseFrameRoots(g, nd)
-	// Rebuild the record table in the backing it already has. The recs
-	// backing array is root-lifetime: it must never live in g.data, which is
-	// munmapped below, and it must not be reallocated per compaction - a receiver that lives as long as a
-	// connection compacts once per request, and charging a fresh backing each
-	// time put that many abandoned arrays in the connection's arena per
-	// request. The live set after a compaction is never larger than the table
-	// that described it, so the existing capacity always fits.
+	// Rebuild the record table in the new table arena. The old table lives in
+	// oldTbl, which is released below, so the rebuilt table needs fresh backing
+	// in nt - reusing the old array was a use-after-free the moment the tables
+	// moved out of the root arena. Capacity is the old table's length: the live
+	// set after a compaction is never larger than the table that described it.
 	oldRecs := g.recs
 	oldTbl := g.allocTbl
 	g.allocTbl = nt
-	g.recs = resize(oldRecs, 0)
+	nc := int32(len(oldRecs))
+	if nc < 4 {
+		nc = 4
+	}
+	g.recs = resize(unsafe.Slice((**sovRecord)(ArenaAlloc(nt, uintptr(nc)*unsafe.Sizeof(&sovRecord{}))), nc), 0)
 	g.recsSorted = true
-	g.batchStart = resize(g.batchStart, 0)
+	// The batch stack and the cycle order list were in oldTbl too; both are
+	// empty at a compaction point and regrow on demand.
+	g.batchStart = nil
 	g.allocBytes = 0
 	g.liveBytes = 0
 	g.batchMax = 0
@@ -3328,7 +3384,9 @@ func sovFinishCompact(g *sovGroup) {
 	sovReleaseArena(oldTbl)
 	oldData.compacting = 0
 	ArenaFree(oldData)
-	g.cycleOrder = resize(g.cycleOrder, 0)
+	// The cycle order list was in oldTbl, which is now gone: drop it rather
+	// than keep a capacity that would be pushed into on the next cycle.
+	g.cycleOrder = nil
 	g.cycleActive = false
 	g.cycleData = nil
 	g.cycleTbl = nil
@@ -3346,7 +3404,7 @@ func sovRebasePtr(g *sovGroup, p uintptr, nd *Arena) unsafe.Pointer {
 	if sovInArena(nd, p) {
 		return unsafe.Pointer(p)
 	}
-	rec := sovFind(g, p)
+	rec := (*sovRecord)(unsafe.Pointer(sovFind(g, p)))
 	if rec == nil || !rec.live || rec.newAddr == 0 {
 		return unsafe.Pointer(p)
 	}
@@ -3375,7 +3433,7 @@ func sovRebaseValue1(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 		// Walk a pointee that still lives outside the new arena (compile
 		// arena) so data-arena pointers nested in it get rebased too.
 		nv := *(*unsafe.Pointer)(p)
-		et := td.Elem()
+		et := (*RawType)(unsafe.Pointer(sovElemAddr(td)))
 		if nv != nil && et != nil && sovTypeHasPtrs(et) && !sovInArena(nd, uintptr(nv)) && sovDepth < sovMaxDepth && sovReadable(uintptr(nv)) {
 			sovDepth++
 			sovRebaseValue(g, nv, et, nd)
@@ -3393,7 +3451,7 @@ func sovRebaseValue1(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 			s.ptr = (*byte)(sovRebasePtr(g, uintptr(unsafe.Pointer(s.ptr)), nd))
 			*(*_string)(p) = s
 		}
-		et := td.Elem()
+		et := (*RawType)(unsafe.Pointer(sovElemAddr(td)))
 		if et != nil && sovTypeHasPtrs(et) && sovReadable(uintptr(unsafe.Pointer(s.ptr))) {
 			esz := et.Size()
 			for i := int32(0); i < int32(s.length); i++ {
@@ -3425,7 +3483,7 @@ func sovRebaseValue1(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 			sovRebaseMap(g, (*hashmap)(m), td, nd)
 		}
 	case KindArray:
-		et := td.Elem()
+		et := (*RawType)(unsafe.Pointer(sovElemAddr(td)))
 		if et != nil && sovTypeHasPtrs(et) {
 			esz := et.Size()
 			an := td.ArrayLen()
@@ -3436,7 +3494,7 @@ func sovRebaseValue1(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 	case KindStruct:
 		nf := td.NumField()
 		for i := int32(0); i < nf; i++ {
-			ft := td.StructFieldType(i)
+			ft := (*RawType)(unsafe.Pointer(sovFieldTypeAddr(td, i)))
 			if ft != nil && sovTypeHasPtrs(ft) {
 				sovRebaseValue(g, unsafe.Add(p, td.StructFieldOffset(i)), ft, nd)
 			}
@@ -3461,7 +3519,7 @@ func sovRebaseMap(g *sovGroup, m *hashmap, td *RawType, nd *Arena) {
 		m.buckets = sovRebasePtr(g, uintptr(m.buckets), nd)
 	}
 	kt := hashmapKeyType(td)
-	vt := td.Elem()
+	vt := (*RawType)(unsafe.Pointer(sovElemAddr(td)))
 	keySz := m.keySize
 	valSz := m.valueSize
 	bucketSz := unsafe.Sizeof(hashmapBucket{}) + keySz*8 + valSz*8
