@@ -1031,36 +1031,17 @@ func (b *builder) createCodecChanRecv(unop *ssa.UnOp) llvm.Value {
 // Channels and funcs count as self-contained: a channel is one object both ends
 // hold (a capability, not a payload) and a func value is a code pointer. Both
 // are handles, and a handle's bytes ARE the message.
+// typeNeedsReloc reports whether a channel element must be relocated: it names
+// memory inside an arena. A handle element (chan, func) does not - its bytes
+// are the handle - and a static element is the extent. One classification, in
+// typeAccess, answers this and the return protocol's question.
+// Matches stage4 ir_chan.mx elemNeedsReloc.
 func typeNeedsReloc(t types.Type) bool {
-	if t == nil {
-		return false
+	raw, _, known := typeAccess(t)
+	if !known {
+		return true
 	}
-	switch u := t.Underlying().(type) {
-	case *types.Basic:
-		return u.Kind() == types.UnsafePointer || u.Kind() == types.String || u.Kind() == types.UntypedString
-	case *types.Pointer:
-		return true
-	case *types.Slice:
-		return true
-	case *types.Map:
-		return true
-	case *types.Interface:
-		return true
-	case *types.Array:
-		return typeNeedsReloc(u.Elem())
-	case *types.Struct:
-		for i := 0; i < u.NumFields(); i++ {
-			if typeNeedsReloc(u.Field(i).Type()) {
-				return true
-			}
-		}
-		return false
-	case *types.Signature:
-		return false
-	case *types.Chan:
-		return false
-	}
-	return true
+	return raw
 }
 
 // createStructuralChanSend emits the dual-path chan send for an element type

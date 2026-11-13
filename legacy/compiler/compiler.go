@@ -4362,8 +4362,15 @@ func (b *builder) createUnOp(unop *ssa.UnOp) (llvm.Value, error) {
 // typeNeedsCopy reports whether a value of type t may contain pointers to
 // arena-allocated data that would need relocation across an arena boundary.
 // Matches stage4 ir_deepcopy.mx typeNeedsCopy exactly.
+// typeNeedsCopy reports whether the return protocol must relocate a value of
+// type t: it names memory that can move, or it is a handle whose word is
+// carried through the codec unchanged.
 func typeNeedsCopy(t types.Type) bool {
-	return typeNeedsCopyDepth(t, 0)
+	raw, handle, known := typeAccess(t)
+	if !known {
+		return false
+	}
+	return raw || handle
 }
 
 // isSovereignNamedType reports whether t is a named struct type with at
@@ -4634,35 +4641,68 @@ func ssaValueRootedIn(v, target ssa.Value) bool {
 	return walk(v)
 }
 
-func typeNeedsCopyDepth(t types.Type, depth int) bool {
+// typeAccess classifies how a value of type t is named, which is what decides
+// whether it can move and what it costs (D29).
+//
+//	raw    - the value names memory inside an arena: a pointer, a slice or
+//	         string header, an interface, a map. It must be relocated by the
+//	         codec at a boundary and patched by the sweep when its arena moves.
+//	handle - the bytes ARE the handle: a channel's ring pair, a function's
+//	         code pointer. It is never relocated, only copied as a word.
+//	neither - a static type: an immediate at base + offset.
+//
+// A struct or array is the union of its fields, so it can carry both and the
+// walker must descend rather than treat the value as one or the other.
+//
+// known is false when the type cannot be classified (nil, no underlying, an
+// unrecognised kind, nesting past 20). The two boundaries answer that
+// differently and each says so at its own call site rather than here: the
+// return path treats it as nothing to relocate, the channel path as something
+// that must be. That divergence is deliberate and predates this function; what
+// this removes is the second switch, which disagreed about chan and func.
+// Matches stage4 ir_deepcopy.mx typeAccess.
+func typeAccess(t types.Type) (raw, handle, known bool) {
+	return typeAccessDepth(t, 0)
+}
+
+func typeAccessDepth(t types.Type, depth int) (raw, handle, known bool) {
 	if t == nil || depth > 20 {
-		return false
+		return false, false, false
 	}
-	switch u := t.Underlying().(type) {
+	u := t.Underlying()
+	if u == nil {
+		return false, false, false
+	}
+	switch tt := u.(type) {
 	case *types.Pointer:
-		return true
+		return true, false, true
 	case *types.Slice:
-		return true
+		return true, false, true
 	case *types.Basic:
-		return u.Info()&types.IsString != 0
+		return tt.Info()&types.IsString != 0, false, true
 	case *types.Map:
-		return true
+		return true, false, true
 	case *types.Chan:
-		return true
+		return false, true, true
 	case *types.Signature:
-		return true
+		return false, true, true
 	case *types.Interface:
-		return true
+		return true, false, true
 	case *types.Struct:
-		for i := 0; i < u.NumFields(); i++ {
-			if typeNeedsCopyDepth(u.Field(i).Type(), depth+1) {
-				return true
+		r, h := false, false
+		for i := 0; i < tt.NumFields(); i++ {
+			fr, fh, fk := typeAccessDepth(tt.Field(i).Type(), depth+1)
+			if !fk {
+				return false, false, false
 			}
+			r = r || fr
+			h = h || fh
 		}
+		return r, h, true
 	case *types.Array:
-		return typeNeedsCopyDepth(u.Elem(), depth+1)
+		return typeAccessDepth(tt.Elem(), depth+1)
 	}
-	return false
+	return false, false, false
 }
 
 // funcNeedsArenaCopy returns true if the function returns pointer-containing
@@ -4699,11 +4739,6 @@ func funcNeedsArenaCopy(fn *ssa.Function, excludeMain bool) bool {
 	}
 	return false
 }
-
-// typeContainsPointers returns true if the Go type contains any pointers,
-// slices, maps, channels, interfaces, strings, or function values that
-// would need deep copying when crossing an arena boundary.
-
 
 // emitArenaEpilogue encodes return values to CodecBuf in fn_arena, pops
 // the arena, then decodes into the caller's arena. For a sovereign (mutating)

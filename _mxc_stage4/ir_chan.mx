@@ -202,40 +202,16 @@ func chanElemType(t Type) (tv Type) {
 // Channels and funcs count as self-contained: a channel is one object both ends
 // hold (a capability, not a payload) and a func value is a code pointer. Both
 // are handles, and a handle's bytes ARE the message.
+// elemNeedsReloc reports whether a channel element must be relocated: it names
+// memory inside an arena. A handle element (chan, func) does not - its bytes
+// are the handle - and a static element is the extent. One classification, in
+// typeAccess, answers this and the return protocol's question.
 func elemNeedsReloc(t Type) (ok bool) {
-	if t == nil {
-		return false
-	}
-	u := SafeUnderlying(t)
-	if u == nil {
+	raw, _, known := typeAccess(t)
+	if !known {
 		return true
 	}
-	switch tt := u.(type) {
-	case *Basic:
-		return tt.Kind == UnsafePointer || tt.Kind == TCString || tt.Kind == UntypedString
-	case *Pointer:
-		return true
-	case *Slice:
-		return true
-	case *TCMap:
-		return true
-	case *TCInterface:
-		return true
-	case *Array:
-		return elemNeedsReloc(tt.Elem)
-	case *TCStruct:
-		for i := 0; i < tt.NumFields(); i++ {
-			if elemNeedsReloc(tt.Field(i).Typ) {
-				return true
-			}
-		}
-		return false
-	case *Signature:
-		return false
-	case *TCChan:
-		return false
-	}
-	return true
+	return raw
 }
 
 // emitTypeDescFor emits the address of t's type-descriptor global, the *RawType

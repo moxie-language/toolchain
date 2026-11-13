@@ -5,45 +5,82 @@ import (
 	. "moxielang.dev/pkg/types"
 )
 
-func typeNeedsCodec(t Type) (ok bool) {
-	return typeNeedsCodecDepth(t, 0)
+// typeAccess classifies how a value of type t is named, which is what decides
+// whether it can move and what it costs (D29).
+//
+//	raw    - the value names memory inside an arena: a pointer, a slice or
+//	         string header, an interface, a map. It must be relocated by the
+//	         codec at a boundary and patched by the sweep when its arena moves.
+//	handle - the bytes ARE the handle: a channel's ring pair, a function's
+//	         code pointer. It is never relocated, only copied as a word.
+//	neither - a static type: an immediate at base + offset.
+//
+// A struct or array is the union of its fields, so it can carry both and the
+// walker must descend rather than treat the value as one or the other.
+//
+// known is false when the type cannot be classified (nil, no underlying, an
+// unrecognised kind, nesting past 20). The two boundaries answer that
+// differently and each says so at its own call site rather than here: the
+// return path treats it as nothing to relocate, the channel path as something
+// that must be. That divergence is deliberate and predates this function; what
+// this removes is the second switch, which disagreed about chan and func.
+func typeAccess(t Type) (raw, handle, known bool) {
+	return typeAccessDepth(t, 0)
 }
 
-func typeNeedsCodecDepth(t Type, depth int32) (ok bool) {
+func typeAccessDepth(t Type, depth int32) (raw, handle, known bool) {
 	if t == nil || depth > 20 {
-		return false
+		return false, false, false
 	}
 	u := SafeUnderlying(t)
 	if u == nil {
-		return false
+		return false, false, false
 	}
 	switch tt := u.(type) {
 	case *Pointer:
-		return true
+		return true, false, true
 	case *Slice:
-		return true
+		return true, false, true
 	case *Basic:
-		return tt.Kind == TCString || tt.Kind == UntypedString
+		return tt.Kind == TCString || tt.Kind == UntypedString, false, true
 	case *TCMap:
-		return true
+		return true, false, true
 	case *TCChan:
-		return true
+		return false, true, true
 	case *Signature:
-		return true
+		return false, true, true
 	case *TCInterface:
-		return true
+		return true, false, true
 	case *TCStruct:
+		r, h := false, false
 		for i := int32(0); i < tt.NumFields(); i++ {
-			if typeNeedsCodecDepth(tt.Field(i).Typ, depth+1) {
-				return true
+			fr, fh, fk := typeAccessDepth(tt.Field(i).Typ, depth+1)
+			if !fk {
+				return false, false, false
 			}
+			r = r || fr
+			h = h || fh
 		}
+		return r, h, true
 	case *Array:
-		return typeNeedsCodecDepth(tt.Elem, depth+1)
+		return typeAccessDepth(tt.Elem, depth+1)
 	}
-	return false
+	return false, false, false
 }
 
+// typeNeedsCodec reports whether the return protocol must relocate a value of
+// type t: it names memory that can move, or it is a handle whose word is
+// carried through the codec unchanged.
+func typeNeedsCodec(t Type) (ok bool) {
+	raw, handle, known := typeAccess(t)
+	if !known {
+		return false
+	}
+	return raw || handle
+}
+
+// funcNeedsCodec reports whether f gets the frame arena and the return
+// relocation: it returns a value the return path must relocate.
 func (e *irEmitter) funcNeedsCodec(f *SSAFunction) (ok bool) {
 	if f == nil || f.Blocks == nil {
 		return false
@@ -71,7 +108,6 @@ func (e *irEmitter) funcNeedsCodec(f *SSAFunction) (ok bool) {
 	}
 	return false
 }
-
 
 // recvNamedType returns the named type a method's receiver denotes. The
 // declared receiver may be a value (a named slice/map, passed as a reference),
