@@ -160,6 +160,32 @@ func codecIsStableAddr(p uintptr) (ok bool) {
 	return codecIsStableArenaAddr(p)
 }
 
+// codecInManualArena reports whether p lives in the manual phase arena.
+//
+// ManualArenaEnter pushes that arena onto the fn stack so FnArenaPush and
+// FnArenaPop become no-ops, but it is NOT a frame: it outlives every call made
+// inside the phase and is released only by ManualArenaExit, after the phase's
+// last user. Treating it as the dying top frame copied every object a helper
+// returned, and a copy is not the same object:
+//
+//   - the parser's `t := Unparen(x); if t != x` compared a copy against the
+//     original, so every composite literal of an unparenthesised type was
+//     rejected with "cannot parenthesize type in composite literal" - a
+//     rebuilt compiler could not parse `map[string]bool{}`;
+//   - the encode walked the package's whole type graph at every return that
+//     handed one node out (7.4M seen-set entries for mxregexp, and unbounded
+//     recursion when the graph was cyclic).
+//
+// Byte data is deliberately NOT covered: a returned string or slice whose
+// bytes live in the phase arena is still copied, because text carved out of a
+// source buffer is what escapes a phase into registry keys.
+func codecInManualArena(p uintptr) (ok bool) {
+	if domainRoot == nil || manualArena == nil {
+		return false
+	}
+	return codecArenaContains(manualArena, p)
+}
+
 // codecIsStableArenaAddr is the arena-only half of codecIsStableAddr.
 func codecIsStableArenaAddr(p uintptr) (ok bool) {
 	if domainRoot == nil {
@@ -538,10 +564,10 @@ func codecRetStableInner(ptr unsafe.Pointer, tp uintptr) (ok bool) {
 		if uintptr(p) < codecBadPtrFloor() {
 			return false
 		}
-		if !codecIsStableAddr(uintptr(p)) {
+		if !codecIsStableAddr(uintptr(p)) && !codecInManualArena(uintptr(p)) {
 			return false
 		}
-		return !retPointeeDies(p, retElemAddr(tp))
+		return codecInManualArena(uintptr(p)) || !retPointeeDies(p, retElemAddr(tp))
 	case KindBytes:
 		sv := *(*_string)(ptr)
 		if sv.ptr == nil {
@@ -1076,8 +1102,14 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		// read: those values were aliased as garbage before this check existed
 		// and reading them is the SIGSEGV (a zeroed pointer field of a partially
 		// built TLS state).
-		if codecIsStableAddr(uintptr(p)) &&
-			(uintptr(p) < codecBadPtrFloor() || !retPointeeDies(p, retElemAddr(uintptr(unsafe.Pointer(typ))))) {
+		// In manual-arena mode nothing inside the pointee dies at this return:
+		// the whole phase arena lives until ManualArenaExit, which is not a
+		// return. retPointeeDies answers "dies" for any pointee holding a slice
+		// or pointer, and refusing the alias there copied every object handed
+		// out of a phase - so `t := Unparen(x); t != x` compared a copy.
+		if codecInManualArena(uintptr(p)) ||
+			(codecIsStableAddr(uintptr(p)) &&
+				(uintptr(p) < codecBadPtrFloor() || !retPointeeDies(p, retElemAddr(uintptr(unsafe.Pointer(typ)))))) {
 			codecSeenAdd(ss, p, codecPointeeSize(typ))
 			codecNoteStable(uintptr(p))
 			codecWriteVarint(cb, codecTagStable)
@@ -1726,7 +1758,28 @@ func codecWriteU8(cb *CodecBuf, v uint8) {
 	push(cb.data, v)
 }
 
+// codecBigBlocks counts reported oversized raw blocks, so the report does not
+// flood a build that is already in trouble.
+var codecBigBlocks int32
+
 func codecWriteRaw(cb *CodecBuf, ptr unsafe.Pointer, sz uintptr) {
+	// A raw block past a megabyte inside a return encode is worth naming: the
+	// buffer below grows to it, and on a per-package arena the copies
+	// accumulate. It is a MEASUREMENT, not a judgement - reading a large file
+	// legitimately produces one - but when a build dies at a memory ceiling,
+	// this line says which value was being copied and who asked for it.
+	// Measured on the rebuilt compiler: 6,800,368 bytes from mxutil.ReadFile,
+	// returned through extractTupleField.
+	if sz > (1<<20) && codecBigBlocks < 4 {
+		codecBigBlocks++
+		printFD = 2
+		printstring("codec: raw block of ")
+		printuint64(uint64(sz))
+		printstring(" bytes from ")
+		printptr(uintptr(ptr))
+		printstring("\n  from:")
+		SovPrintStackWords(12)
+	}
 	if sz > 0 {
 		cb.data = codecEnsure(cb.data, int32(sz))
 		off := len(cb.data)
