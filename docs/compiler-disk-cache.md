@@ -588,6 +588,34 @@ the method. It now uses `ManualArenaEnter`, like the probe parse above it. The
 crash moves (from the AST encode to `NewTCVar`), which is why it is recorded
 here as a real fix and not as the fix.
 
+### 8.3b4 Nothing is freed, so the corruption is a WRITE
+
+Every "stale pointer" explanation was tested and each one is now closed:
+
+| experiment | result |
+|---|---|
+| leak the typecheck arena (`if false { ArenaFree(arena) }`) | crash identical; RSS 11 MB -> 1850 MB |
+| never compact (`SovDrainCompactions` returns 0) | crash identical |
+| never unmap any arena (`ArenaFree` returns at entry) | crash identical; RSS 1905 MB |
+| detect a phase-arena rewind (highest `a.alloc` per arena, printed on a drop) | 333,292 rewinds, **every one `manual=0`** - all of them pooled frame arenas being reset on acquire, which is normal |
+| does the emitted epilogue release the phase arena (`FnArenaPush` returns it in manual mode)? | never fires; the epilogue releases `FnArenaPop`'s result, which is nil in manual mode |
+
+`arenaBump` memzeroes every allocation and only ever moves its offset forward
+within a live arena, so with nothing freed and nothing rewound the bytes at the
+corrupt field were **written there**, not inherited. The corrupt object is a
+`Named` whose `Methods` (`[]*TCFunc`, at +24) reads `{10,
+named:pkg/types.ConstInt, <heap address>}` - which is exactly a `TCVar`'s tail
+(`{Name.cap, Typ.typecode, Typ.value}`). The codec was told
+`{typecode = *Named, value = <address of a TCVar>}`: an interface whose two
+halves do not describe the same object.
+
+So the interface header itself is the fault, and the leading hypothesis is a
+static-type/typecode disagreement at the box - the compiler believes the value
+being boxed is `*Named` when the pointer it stores is a `*TCVar`. The next probe
+belongs there: print the concrete `SSAType` at the boxing site that produces the
+interface stored into `TCVar.Typ` / `TypeName.Typ` and compare it with the
+object actually passed.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
