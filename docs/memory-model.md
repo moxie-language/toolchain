@@ -2372,7 +2372,7 @@ failed**. The failures, classified, because they are not all the same kind:
 | `spawn_closed_crosspkg` | the §22.4c agreement defect (rendered-type comparison rejects `chan []byte` against `chan string`) |
 | `reject_generic_assign_mismatch` | `./mxc-stage4` predates the `Identical` fix (`334a6714`), so the fixture's "must reject" is not exercised by that binary |
 | `tree-cleanliness` | pre-existing dirty tree (build artifacts and unrelated edits) |
-| `http_header_api` | the compiler's loop rule fires on `mime/multipart`'s `readForm`: "':=' of a struct literal inside a loop in a self-mutating method". Hoisting `p, err :=` exposes a second one (an `err` shadow and a struct literal), so this is a small stdlib cleanup that must be done as a whole, not line by line |
+| `http_header_api` | **FIXED** (`5ff8e458`): the loop rule fired on `readForm`'s `fh := &FileHeader{...}`. The struct literal is the violation; declaring `fh` above the loop and assigning inside makes `mime/multipart` build again |
 | `asn1_builder_der` | **FIXED** (`c4c09a22`): `natBytes` never skipped leading zero bytes, so `Bytes()` returned the word-aligned buffer and 128 encoded as `00 00 00 80` |
 | `tls_handshake` | **FIXED by the same change**: every certificate INTEGER carried the same padding, so a real x509 certificate parsed as malformed |
 | `generic_aggregate_subst` | SIGSEGV in a generic aggregate substitution; reproduces with the r13, r20 and r32 compiler binaries too, so it predates this session's compiler work |
@@ -2400,6 +2400,21 @@ start-up in `runtime.codecDecodeValue`, by both paths (stage4-built and
 legacy-built), so the tree stays byte-identical to the sources of the working
 `./mxc-stage4` binary until that bug is found. Recorded here so the next round
 starts from the defect rather than rediscovering it.
+
+### 22.4e The `Identical` agreement fix crashes the compiler
+
+Replacing the spawn agreement's rendered-name comparison with `Identical` — the
+one-line fix §22.4c names — makes the compiler SEGFAULT while building
+`spawn_closed_crosspkg` (`caught signal SIGSEGV` at
+`runtimePanicAt`/`ssa_builder`), whether the call is used for every argument or
+only for the non-ownership ones. So the crash is in `Identical` itself on that
+input (`chan []byte` against `chan string`), not in the ownership branch: the
+same routine is called from assignment checking on every ordinary statement, so
+the crashing shape is specific to a channel compared against a channel whose
+elements are the other spelling of the same type. Until that is understood the
+render-name comparison stays, and `spawn_closed_crosspkg` stays red - it is a
+real defect, not a binary-staleness artefact, and §22.4c's "one line" framing was
+wrong.
 
 ### 22.4d The 8-byte object header needs phase 4's offset addressing
 
