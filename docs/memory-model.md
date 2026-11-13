@@ -34,7 +34,8 @@ Rules:
 - Do not introduce a write barrier. If a design step requires instrumenting every
   pointer store, the design is wrong for this project.
 - Do not introduce handles into the intra-arena hot path. Handles exist only at
-  arena boundaries.
+  arena boundaries, because indirection is the price of a reference set you
+  cannot enumerate, and inside an arena you can (D29).
 - Do not put the identity table in the dereference path. It is not a liveness
   oracle and it must never be consulted to decide whether an object is alive.
 - **There is no ambient allocator.** Every byte of long-lived, reclaimed memory
@@ -1294,6 +1295,58 @@ source, ordered import artifact addresses, target, flags). Published atomically
 arena, never parsed into a long-lived store, never trusted without verifying that
 the address matches the bytes. A cache entry is a *fact about a past run*, not
 memory this run owns.
+
+**D29. Three ways to name an object, and the law that picks one.**
+
+| | access cost | move cost | needs slot discovery |
+| --- | --- | --- | --- |
+| raw pointer | 1 load | O(references) patch | yes - stack maps + layouts |
+| handle | +1 dependent load | O(objects) table write | no |
+| base + offset | 1 add | free (change the base) | no |
+
+`base + offset` is **static resolution**: the compiler walked the map once, at
+compile time, and wrote the answer down as a displacement. `%fn_arena + k` is
+already this, and it is optimal - no access cost, no fixup, and relocation
+within the scope is free because only the base register changes. Optimisation is
+the migration of symbol resolution from run time to compile time; the C-versus-
+Lisp performance gap is that mechanism, not a difference in pointer quality.
+
+A handle does not avoid fixup, it **shrinks** it: one table write per object
+instead of one patch per reference, and slot count is at least object count and
+usually several times it. What it charges is a **dependent** load on every
+access - latency, not throughput, because the table lookup is an array index.
+The price is paid in four places: interior pointers become impossible (`&x.field`,
+`p + 8`, a slice's data pointer - a handle names an object, never a location);
+FFI needs pinning; the compiler cannot hoist or reorder a resolution it cannot
+prove stable; and the load serialises with the access it feeds.
+
+A map walk is **not** intrinsic to relocation. Fixup is a batch operation: scan
+the slots once at collection, patch them all, and every later access is a plain
+load. That is the whole reason tracing collectors are fast - the cost moves from
+per-access to per-collection.
+
+**The law.** Indirection is what you need when you cannot enumerate the
+references. **Persistence destroys enumerability:** a filesystem has no live
+pointer graph across a reboot, so nothing can scan "every place this block was
+referenced" and a stable name is mandatory. In memory the slots are enumerable
+precisely because the compiler emitted stack maps and layout descriptors. Hence:
+
+> Filesystems need inodes. Heaps need not. The id table is the price of
+> persistence, not of memory management.
+
+Placement follows, and it is a rule, not a preference:
+
+- **function arenas** - static resolution, `base + k`;
+- **shelves** - raw pointers and batch fixup at the sweep, immobility within a
+  segment;
+- **boundaries only** - cross-shelf, cross-domain, durable, FFI - handles, where
+  the destination does not understand this heap and the enumeration premise is
+  genuinely false.
+
+The error this design rejects is not handles as such, it is **handles in the
+intra-arena hot path**, where enumerability already buys a cheaper option. At the
+boundary the handle is not a compromise; the boundary is exactly where the
+filesystem's condition becomes true again.
 
 **Decided out of scope.** A persistent store in memory: `epoch` exists so ids can
 survive a restart, and WiscKey becomes relevant when page-granular persistence
