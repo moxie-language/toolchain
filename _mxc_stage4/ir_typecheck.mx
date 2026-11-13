@@ -1149,14 +1149,23 @@ func ScanGenericDecls(src []byte, name string) {
 	if !hasGeneric {
 		return
 	}
-	// Re-parse into the persistent arena so the AST outlives this call. Do
-	// NOT enter manual-arena mode: nested calls must get their own
-	// freed-at-return arenas so only the AST is retained, not the whole parse
-	// trace (the parser is a self-mutating type and its scratch is large).
-	saveArena := runtime.CurrentArena()
-	runtime.SetCurrentArena(cctx.genericArena)
-	defer runtime.SetCurrentArena(saveArena)
+	// Re-parse into the persistent arena so the AST outlives this call.
+	//
+	// This MUST be manual-arena mode, for the same reason the probe above is:
+	// a parser method's nodes are allocated through p.Arena, but every RETURN
+	// relocates a copy through the codec, and that copy lands in whatever the
+	// current arena is. Outside manual mode the current arena is the callee's
+	// frame, so each `return Expr`/`return *CallExpr` produced a node in a
+	// frame that died when that method returned, and the pointer to it was
+	// then stored into a parent node that lives in genericArena - a dangling
+	// reference the next allocation reused. Measured: the encode of a
+	// `*syntax.File` returned by scanParse read a CallExpr whose Fun slot held
+	// a slice header {ptr, 3, 16}, because the CallExpr's address had been
+	// reused by an ArgList once its frame was popped. SetCurrentArena alone
+	// does not fix this: FnArenaPush ignores it and pushes a fresh frame.
+	runtime.ManualArenaEnter(cctx.genericArena)
 	file := scanParse(src, name, cctx.genericArena)
+	runtime.ManualArenaExit(cctx.genericArena)
 	if file == nil {
 		return
 	}

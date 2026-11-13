@@ -1161,21 +1161,37 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		codecEncodeValue(cb, ss, p, typ.Elem())
 	case KindInterface:
 		iface := *(*_interface)(ptr)
-		codecWriteVarint(cb, codecTagIface)
-		codecWriteBytes(cb, unsafe.Slice((*byte)(unsafe.Pointer(&iface.typecode)), codecPtrSize()))
 		// Plausibility bound for a type descriptor pointer: above the
 		// target's data floor (codecDataFloor - 1024 on wasm32, the native
 		// first page elsewhere) and below the top of the address space. On a
 		// 32-bit target the whole space is plausible, so there is no upper
 		// bound to apply: 2^48 does not fit a uintptr there, and shifting a
 		// 32-bit value by 48 is not expressible at all.
+		//
+		// An IMPLAUSIBLE typecode is written as a NIL typecode, never as
+		// itself. Writing the raw typecode and then skipping the value looked
+		// harmless on the encode side, but the decoder only skips a value when
+		// the typecode it read is null: it took the garbage typecode for a real
+		// descriptor, decoded a value the encoder never wrote, and from there
+		// every later field in the enclosing struct was read from the wrong
+		// place in the stream. That is a silent desynchronisation, and its
+		// symptom is a value written into the wrong field - measured as a
+		// `[]*TCFunc` slice header landing on a `Named`'s `Methods` field.
+		codecWriteVarint(cb, codecTagIface)
 		tc := uintptr(iface.typecode)
 		tcMax := ^uintptr(0)
 		if codecPtrSize() >= 8 {
 			tcMax = ^uintptr(0) >> 16
 		}
-		if tc >= codecDataFloor() && tc < tcMax {
-			ct := (*RawType)(iface.typecode)
+		boxed := iface.typecode
+		if tc < codecDataFloor() || tc >= tcMax {
+			boxed = nil
+		} else if ct := (*RawType)(iface.typecode); ct.Kind() == Invalid || ct.Size() > 65536 {
+			boxed = nil
+		}
+		codecWriteBytes(cb, unsafe.Slice((*byte)(unsafe.Pointer(&boxed)), codecPtrSize()))
+		if boxed != nil {
+			ct := (*RawType)(boxed)
 			if ct.Kind() != Invalid && ct.Size() <= 65536 {
 				// Zero-size structs (e.g. empty context markers) still
 				// emit their struct tag + field count so the decode
