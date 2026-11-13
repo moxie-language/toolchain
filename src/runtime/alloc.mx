@@ -2060,6 +2060,36 @@ func sovFieldTypeAddr(td *RawType, i int32) (tp uintptr) {
 	return uintptr(unsafe.Pointer(fd.fieldType))
 }
 
+// sovFieldOffset is StructFieldOffset without the cost: the method builds an
+// array.Array[rtStructFieldDesc] view, and a call that RETURNS a struct value
+// holding a pointer allocates that value in the caller's arena - 24 bytes for
+// every field of every record a compaction rebases. retFieldOffsetAt decodes
+// the same varint from the field descriptor directly.
+func sovFieldOffset(td *RawType, i int32) (off uintptr) {
+	u := retUnderAddr(uintptr(unsafe.Pointer(td)))
+	if u == 0 {
+		return 0
+	}
+	st := (*rtStructType)(unsafe.Pointer(u))
+	if i < 0 || i >= int32(st.numField) {
+		return 0
+	}
+	return retFieldOffsetAt(st, i)
+}
+
+// sovMapKeyAddr is hashmapKeyType as an address, for the same reason: it is
+// called once per map record on every mark and rebase walk.
+func sovMapKeyAddr(td *RawType) (kt uintptr) {
+	if td == nil {
+		return 0
+	}
+	u := retUnderAddr(uintptr(unsafe.Pointer(td)))
+	if u == 0 {
+		return 0
+	}
+	return uintptr(*(*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(u), unsafe.Sizeof(rtElemType{}))))
+}
+
 // sovElemAddr is RawType.Elem as an address, for the same reason.
 func sovElemAddr(td *RawType) (tp uintptr) {
 	if td == nil {
@@ -2222,7 +2252,7 @@ func sovNameExtField(td *RawType, off uintptr) {
 	}
 	nf := td.NumField()
 	for i := int32(0); i < nf; i++ {
-		fo := td.StructFieldOffset(i)
+		fo := sovFieldOffset(td, i)
 		sz := uintptr(8)
 		ft := (*RawType)(unsafe.Pointer(sovFieldTypeAddr(td, i)))
 		if ft != nil {
@@ -2727,7 +2757,7 @@ func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 		for i := int32(0); i < nf; i++ {
 			ft := (*RawType)(unsafe.Pointer(sovFieldTypeAddr(td, i)))
 			if ft != nil && sovTypeHasPtrs(ft) {
-				sovWalkValue(g, unsafe.Add(p, td.StructFieldOffset(i)), ft)
+				sovWalkValue(g, unsafe.Add(p, sovFieldOffset(td, i)), ft)
 			}
 		}
 	}
@@ -2743,7 +2773,7 @@ func sovMarkMap(g *sovGroup, m *hashmap, td *RawType) {
 	// the referrer's map pointer dangles.
 	sovMarkBlock(g, unsafe.Pointer(m))
 	sovMarkBlock(g, m.buckets)
-	kt := hashmapKeyType(td)
+	kt := (*RawType)(unsafe.Pointer(sovMapKeyAddr(td)))
 	vt := (*RawType)(unsafe.Pointer(sovElemAddr(td)))
 	keySz := m.keySize
 	valSz := m.valueSize
@@ -2914,7 +2944,7 @@ func sovRebaseFrameRoots(g *sovGroup, nd *Arena) {
 		}
 		off := int32(rootWord(p, 2+3*i))
 		v := rootWord(p, base+off)
-		rootSetWord(p, base+off, uintptr(sovRebasePtr(g, v, nd)))
+		rootSetWord(p, base+off, sovRebasePtr(g, v, nd))
 	}
 }
 
@@ -2935,7 +2965,7 @@ func sovMarkReceiverRoots(g *sovGroup, recv unsafe.Pointer, td *RawType) {
 		if ft == nil || !sovTypeHasPtrs(ft) {
 			continue
 		}
-		faddr := unsafe.Add(recv, td.StructFieldOffset(i))
+		faddr := unsafe.Add(recv, sovFieldOffset(td, i))
 		// A pointer field may hold a slot object; resolve it.
 		if ft.Kind() == KindPointer {
 			v := *(*unsafe.Pointer)(faddr)
@@ -2949,6 +2979,62 @@ func sovMarkReceiverRoots(g *sovGroup, recv unsafe.Pointer, td *RawType) {
 	}
 }
 
+// sovRecvCursor walks the sovereign receiver map's buckets.
+//
+// A bucket walk, not hashmapNext: that materialises every key and sorts the
+// copy, so every iteration sequence allocates count*keySize bytes in the
+// caller's arena - and the drain, which iterates this map once per group per
+// drain, runs with the ROOT arena current. Measured on the store soak as a
+// 504-byte root allocation per iteration (the map's 63 entries x 8 bytes),
+// growing with the number of live groups.
+type sovRecvCursor struct {
+	bi uintptr
+	b  *hashmapBucket
+	si uint8
+}
+
+// sovNextReceiver returns the next receiver whose group is keyed by an address
+// inside g's data arena, with the group's type descriptor.
+func sovNextReceiver(g *sovGroup, c *sovRecvCursor) (recv unsafe.Pointer, td *RawType, ok bool) {
+	m := domainRoot.sovereignRoot
+	if m == nil || g == nil || g.data == nil {
+		return nil, nil, false
+	}
+	if c.b == nil {
+		c.bi = 0
+		c.si = 0
+	}
+	nb := uintptr(1) << m.bucketBits
+	for c.bi < nb {
+		if c.b == nil {
+			c.b = hashmapBucketAddr(m, m.buckets, c.bi)
+			c.si = 0
+		}
+		for c.b != nil {
+			for c.si < 8 {
+				si := c.si
+				c.si++
+				if c.b.tophash[si] == 0 {
+					continue
+				}
+				recv = *(*unsafe.Pointer)(hashmapSlotKey(m, c.b, si))
+				if recv == nil || !sovAddrInArena(g.data, uintptr(recv)) {
+					continue
+				}
+				g2 := (*sovGroup)(*(*unsafe.Pointer)(hashmapSlotValue(m, c.b, si)))
+				if g2 == nil || g2.data == nil {
+					continue
+				}
+				return recv, g2.recvTypeDesc, true
+			}
+			c.b = c.b.next
+			c.si = 0
+		}
+		c.bi++
+	}
+	return nil, nil, false
+}
+
 // sovMarkBorrowedReceivers marks every group receiver that is currently
 // borrowed by a live frame and lives in g's data arena, so a compaction keeps
 // the objects a running method is still using.
@@ -2956,27 +3042,27 @@ func sovMarkBorrowedReceivers(g *sovGroup) {
 	if g == nil || g.data == nil || domainRoot == nil {
 		return
 	}
-	m := domainRoot.sovereignRoot
-	if m == nil {
-		return
-	}
-	// Stack locals, not []byte{:8}: this runs once per drain, which an event
-	// loop reaches once per select, and a slice literal there allocates in the
-	// root arena for the life of the process.
-	var it hashmapIterator
-	var kp unsafe.Pointer
-	var vp unsafe.Pointer
-	for hashmapNext(m, &it, unsafe.Pointer(&kp), unsafe.Pointer(&vp)) {
-		recv := kp
-		if recv == nil || !sovAddrInArena(g.data, uintptr(recv)) {
+	var c sovRecvCursor
+	for {
+		recv, td, ok := sovNextReceiver(g, &c)
+		if !ok {
+			break
+		}
+		if !sovRecvBorrowed(recv) {
 			continue
 		}
-		g2 := (*sovGroup)(vp)
-		if g2 == nil || g2.data == nil || !sovArenaBorrowed(g2.data) {
-			continue
-		}
-		sovMarkReceiverRoots(g, recv, g2.recvTypeDesc)
+		sovMarkReceiverRoots(g, recv, td)
 	}
+}
+
+// sovRecvBorrowed reports whether the group keyed by recv has its data arena
+// borrowed by a live frame.
+func sovRecvBorrowed(recv unsafe.Pointer) (ok bool) {
+	g := sovLookup(recv)
+	if g == nil || g.data == nil {
+		return false
+	}
+	return sovArenaBorrowed(g.data)
 }
 
 // sovArenaBorrowed reports whether a is the working arena of a live frame.
@@ -3010,7 +3096,7 @@ func sovRebaseRoots(g *sovGroup, nd *Arena) {
 		if ft == nil || !sovTypeHasPtrs(ft) {
 			continue
 		}
-		sovRebaseValue(g, unsafe.Add(g.recv, td.StructFieldOffset(i)), ft, nd)
+		sovRebaseValue(g, unsafe.Add(g.recv, sovFieldOffset(td, i)), ft, nd)
 	}
 }
 
@@ -3096,25 +3182,16 @@ func sovBorrowedReceiverIn(g *sovGroup) (ok bool) {
 	if g == nil || g.data == nil || domainRoot == nil {
 		return false
 	}
-	m := domainRoot.sovereignRoot
-	if m == nil {
-		return false
-	}
-	var it hashmapIterator
-	var kp unsafe.Pointer
-	var vp unsafe.Pointer
-	for hashmapNext(m, &it, unsafe.Pointer(&kp), unsafe.Pointer(&vp)) {
-		recv := kp
-		if recv == nil || !sovAddrInArena(g.data, uintptr(recv)) {
-			continue
+	var c sovRecvCursor
+	for {
+		recv, _, more := sovNextReceiver(g, &c)
+		if !more {
+			return false
 		}
-		g2 := (*sovGroup)(vp)
-		if g2 == nil || g2.data == nil || !sovArenaBorrowed(g2.data) {
-			continue
+		if sovRecvBorrowed(recv) {
+			return true
 		}
-		return true
 	}
-	return false
 }
 
 // Sovereign compaction is copy-compaction into a fresh arena: the live set is
@@ -3302,7 +3379,7 @@ func sovFinishCompact(g *sovGroup) {
 	for i := int32(0); i < int32(len(g.slots)); i++ {
 		sl := g.slots[i]
 		if sl.dataPtr != nil {
-			sl.dataPtr = sovRebasePtr(g, uintptr(sl.dataPtr), nd)
+			sl.dataPtr = unsafe.Pointer(sovRebasePtr(g, uintptr(sl.dataPtr), nd))
 		}
 	}
 	// Rewrite the receiver's root fields and the selecting frame's root slots.
@@ -3396,19 +3473,22 @@ func sovFinishCompact(g *sovGroup) {
 }
 
 // sovRebasePtr rebases a pointer that targeted the old data arena into the
-// new arena, preserving pointers outside the arena unchanged.
-func sovRebasePtr(g *sovGroup, p uintptr, nd *Arena) unsafe.Pointer {
+// new arena, preserving pointers outside the arena unchanged. Address in,
+// address out: a pointer return is copied into the caller's arena by the
+// return protocol whenever it names a sovereign data arena, which is exactly
+// what this returns for every field of every live record during a compaction.
+func sovRebasePtr(g *sovGroup, p uintptr, nd *Arena) (q uintptr) {
 	if p == 0 {
-		return nil
+		return 0
 	}
 	if sovInArena(nd, p) {
-		return unsafe.Pointer(p)
+		return p
 	}
 	rec := (*sovRecord)(unsafe.Pointer(sovFind(g, p)))
 	if rec == nil || !rec.live || rec.newAddr == 0 {
-		return unsafe.Pointer(p)
+		return p
 	}
-	return unsafe.Pointer(rec.newAddr + (p - rec.dataAddr))
+	return rec.newAddr + (p - rec.dataAddr)
 }
 
 // sovRebaseValue rewrites the interior pointers of the value at p after a
@@ -3428,7 +3508,7 @@ func sovRebaseValue1(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 	case KindPointer:
 		v := *(*unsafe.Pointer)(p)
 		if v != nil && !sovInArena(nd, uintptr(v)) {
-			*(*unsafe.Pointer)(p) = sovRebasePtr(g, uintptr(v), nd)
+			*(*unsafe.Pointer)(p) = unsafe.Pointer(sovRebasePtr(g, uintptr(v), nd))
 		}
 		// Walk a pointee that still lives outside the new arena (compile
 		// arena) so data-arena pointers nested in it get rebased too.
@@ -3442,13 +3522,13 @@ func sovRebaseValue1(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 	case KindBytes:
 		s := *(*_string)(p)
 		if s.ptr != nil && !sovInArena(nd, uintptr(unsafe.Pointer(s.ptr))) {
-			s.ptr = (*byte)(sovRebasePtr(g, uintptr(unsafe.Pointer(s.ptr)), nd))
+			s.ptr = (*byte)(unsafe.Pointer(sovRebasePtr(g, uintptr(unsafe.Pointer(s.ptr)), nd)))
 			*(*_string)(p) = s
 		}
 	case KindSlice:
 		s := *(*_string)(p)
 		if s.ptr != nil && !sovInArena(nd, uintptr(unsafe.Pointer(s.ptr))) {
-			s.ptr = (*byte)(sovRebasePtr(g, uintptr(unsafe.Pointer(s.ptr)), nd))
+			s.ptr = (*byte)(unsafe.Pointer(sovRebasePtr(g, uintptr(unsafe.Pointer(s.ptr)), nd)))
 			*(*_string)(p) = s
 		}
 		et := (*RawType)(unsafe.Pointer(sovElemAddr(td)))
@@ -3467,7 +3547,7 @@ func sovRebaseValue1(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 				*(*_interface)(p) = iface
 			} else {
 				if iface.value != nil && !sovInArena(nd, uintptr(iface.value)) {
-					iface.value = sovRebasePtr(g, uintptr(iface.value), nd)
+					iface.value = unsafe.Pointer(sovRebasePtr(g, uintptr(iface.value), nd))
 					*(*_interface)(p) = iface
 				}
 			}
@@ -3475,7 +3555,7 @@ func sovRebaseValue1(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 	case KindMap:
 		m := *(*unsafe.Pointer)(p)
 		if m != nil && !sovInArena(nd, uintptr(m)) {
-			*(*unsafe.Pointer)(p) = sovRebasePtr(g, uintptr(m), nd)
+			*(*unsafe.Pointer)(p) = unsafe.Pointer(sovRebasePtr(g, uintptr(m), nd))
 			if sovReadable(uintptr(*(*unsafe.Pointer)(p))) {
 				sovRebaseMap(g, (*hashmap)(*(*unsafe.Pointer)(p)), td, nd)
 			}
@@ -3496,7 +3576,7 @@ func sovRebaseValue1(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 		for i := int32(0); i < nf; i++ {
 			ft := (*RawType)(unsafe.Pointer(sovFieldTypeAddr(td, i)))
 			if ft != nil && sovTypeHasPtrs(ft) {
-				sovRebaseValue(g, unsafe.Add(p, td.StructFieldOffset(i)), ft, nd)
+				sovRebaseValue(g, unsafe.Add(p, sovFieldOffset(td, i)), ft, nd)
 			}
 		}
 	}
@@ -3516,9 +3596,9 @@ func sovRebaseMap(g *sovGroup, m *hashmap, td *RawType, nd *Arena) {
 		m.owner = nd
 	}
 	if m.buckets != nil && !sovInArena(nd, uintptr(m.buckets)) {
-		m.buckets = sovRebasePtr(g, uintptr(m.buckets), nd)
+		m.buckets = unsafe.Pointer(sovRebasePtr(g, uintptr(m.buckets), nd))
 	}
-	kt := hashmapKeyType(td)
+	kt := (*RawType)(unsafe.Pointer(sovMapKeyAddr(td)))
 	vt := (*RawType)(unsafe.Pointer(sovElemAddr(td)))
 	keySz := m.keySize
 	valSz := m.valueSize
@@ -3537,7 +3617,7 @@ func sovRebaseMap(g *sovGroup, m *hashmap, td *RawType, nd *Arena) {
 				}
 			}
 			if b.next != nil {
-				b.next = (*hashmapBucket)(sovRebasePtr(g, uintptr(unsafe.Pointer(b.next)), nd))
+				b.next = (*hashmapBucket)(unsafe.Pointer(sovRebasePtr(g, uintptr(unsafe.Pointer(b.next)), nd)))
 			}
 		}
 	}
