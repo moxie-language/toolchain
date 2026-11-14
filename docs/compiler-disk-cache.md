@@ -1172,6 +1172,39 @@ the per-instruction path re-derives a type string whose size grows with the type
 Next instrument: count the entries of those six maps and the bytes returned by
 `llvmType` per function, and run it on `parseAtom` alone.
 
+### 8.3b14 The wall, named: the sovereign record table
+
+A guard that fails loud on any single allocation above 32 MB, plus a core dump,
+gives the whole chain:
+
+    arenaBump <- sovGrowRecs <- sovAddRec <- alloc <- codecDecodeValue
+      <- types[SafeUnderlying] <- (*irEmitter).emitAlloc <- emitInstr
+      <- emitFunction <- emit <- CompileToIR
+
+So it is not user data and not IR text: it is a SOVEREIGN ARENA's allocation
+record table doubling to 64 MB, repeatedly - ~40 of those is the 2.6 GB.
+
+The mechanism is the one the memory model warns about, in the compiler's own
+hot path. `irEmitter` is a self-mutating type, so `emitAlloc` is a mutating method
+and its prologue borrows the emitter's sovereign arena. Everything allocated
+inside then lands in that arena and is RECORDED, because the arena has to know
+what to compact. And what is allocated there is the return relocation of
+`SafeUnderlying`, which returns an interface: the codec decodes a fresh copy of a
+type graph into the current arena at every call, so a 31-block function with 226
+values causes millions of recorded allocations.
+
+That is why the per-function maps were tiny (val=226, tc=168) and the function
+still cost 804 MB, and why every aliasing lever was a no-op: the allocations are
+not the walk of a graph, they are copies CREATED by the walk, each one recorded.
+
+The fix the memory model already prescribes is the authoring rule: "a mutating
+method's direct allocations land in the sovereign arena and persist; push the
+heavy work into a regular helper function". `emitAlloc`/`emitInstr` should call a
+FREE function for the type work rather than doing it in the borrow - or the type
+accessors should stop returning an interface that the return protocol relocates.
+A third option, narrower, is to not record codec-decode allocations in the rec
+table, which needs an argument about compaction safety.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
