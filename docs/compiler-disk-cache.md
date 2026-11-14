@@ -749,6 +749,36 @@ what makes this a design boundary rather than a bug to patch: object memory
 needs the phase arena, scratch needs frames, and the two must be separable.
 That is the same boundary 8.3c's plan draws.
 
+The size distribution says it is a loop, not retention. Sampling every 8192nd
+allocation once the phase arena passes 200 MB:
+
+```
+122 samples of 16 bytes, 109 of 32 bytes, 19 larger (25 KB .. 105 KB)
+```
+
+231 of 250 samples are 16 or 32 bytes, at a running total of 3.09 GB - that is
+on the order of a hundred million tiny allocations during the type-check of a
+105 KB package. A package that size cannot legitimately need them, and nothing
+in the pass is called often enough to make them one-per-iteration (the const
+stripper runs once, the large raw codec writes total 7.9 MB). So something is
+looping.
+
+Two fixes were tried on the way and both are measured, not assumed:
+
+- **Interface fields decoded in place** (`codecDecodeInto` handling
+  `KindInterface` itself instead of allocating a 16-byte temporary per field):
+  plausible, since 16 bytes is exactly an interface, but it did NOT move the
+  wall (3.254 GB vs 3.253 GB). Reverted - an unverified change to the hottest
+  decode path is not worth landing.
+- **Registering interface pointees in the seen set on both sides** so cycles
+  that close through an interface edge are detectable: no effect. Reverted, for
+  the same reason plus the table-alignment risk.
+
+Next session should find the loop rather than treat the symptom: the sampled
+sizes are 16 and 32 bytes, which is a two-word and a four-word allocation, so
+instrument `alloc` to record the *calling* function (the emitter can pass a
+site id) or bisect by disabling one typecheck sub-pass at a time.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
