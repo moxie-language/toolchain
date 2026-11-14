@@ -946,6 +946,48 @@ regression in this session's sources, not a property of the design. The
 regression range is `6fa2e18a..HEAD` plus the working-tree `main.mx`, and the
 first suspect is whatever made a map reachable from a relocated value.
 
+### 8.3b10 The comparison that localises it: 147 MB against 880 MB
+
+The known-good `mxc-stage4` and a rebuilt compiler, same app, same `-a`, both
+building the same 17 packages one after another:
+
+| | after `array` (pkg 1) | root arena | after pkg 2 | peak |
+|---|---|---|---|---|
+| `mxc-stage4` (pre-session) | `ci-free array` rss=**147 MB** | **139 MB** | `ci-free internal/task` 150 MB | 327 MB |
+| rebuilt (this tree) | `ci-free array` rss=**880 MB** | **9 MB** | dies, 3.2 GB live | 4 GB |
+
+So the rebuilt compiler walks a graph 20x larger than the known-good one *from
+the first package*, and it is the **root arena** that differs: the known-good
+compiler holds 139 MB of materialised package graphs in the root, and the codec
+aliases a pointer into the root instead of walking it - `codecIsStableArenaAddr`
+returns true for `rootArenaAddr()` unconditionally, in every encode mode. The
+rebuilt compiler keeps 9 MB there, so those graphs live somewhere the codec
+treats as a dying frame and walks.
+
+That is the shape to chase, not the package contents: emptying
+`src/internal/task` entirely makes the SECOND package fail instead, and the
+failure follows the position, not the source. Two experiments are already
+recorded as dead ends so they need not be repeated:
+
+- `graphArenaFor` returning `RootArena()` unconditionally: no change, and
+  `root` still reported 9 MB - so `loadMxhInto` is not the path that
+  materialises these graphs (`mxhg=1` per package in both runs).
+- the pre-session `main.mx` (before the graph-arena work): SIGSEGV inside
+  `array`'s SSA build at 877 MB, earlier than the working-tree version, so the
+  working-tree `main.mx` is the best of the three and should be kept.
+
+Where the walk enters is `codecInManualArena` and `codecIsStableArenaAddr`:
+
+    codecInManualArena(p)   -> manualArena, ie. the arena ManualArenaEnter pushed
+    codecIsStableArenaAddr  -> root | stableArena, and NOT the top fn frame under
+                               codecRetTransient
+
+The rebuilt compiler's SSA nodes are allocated in `cctx.compileArena`, which IS
+the manual arena and IS the top of the fn stack. `codecInManualArena` therefore
+has to win the decision for them; the next measurement is to print the two
+predicates for the pointer being encoded at the first return in `array`'s SSA
+build and see which one says "transient".
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
