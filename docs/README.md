@@ -26,6 +26,7 @@ a rule.
 | 13 | [tutorial.md](tutorial.md) | a guided introduction with worked programs |
 | 14 | [decisions.md](decisions.md) | implemented vs proposed, known-red list, measurements of record |
 | 15 | [agent-skill.md](agent-skill.md) | the condensed rule sheet for an AI agent working in this tree |
+| 16 | [wasm-hub.md](wasm-hub.md) | the wasm domain hub protocol: three planes, id scheme, reaping |
 
 `claude.md` at the repository root is the same normative content as 1-6 in rule
 form, for an agent that must act without reading the set. Where it disagrees

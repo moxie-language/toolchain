@@ -3,6 +3,13 @@
 Status: **implemented**. A domain is a thread; `spawn` starts one; channels and
 `select` connect them. There is no scheduler, no goroutine and no lock.
 
+The lemmas this document applies: L1 (no preemption within a domain), L5 (no
+channel mobility - a peer is created by its parent), L6 (binary sessions), L8
+(the mailbox capacity is declared), L10-L14 (no shared address space, one writer
+and one reader per index, a channel is an entity), L21 (the index is the signal),
+L22 and L27 (death is reported, resilience is respawn and replay), and L31
+(randomness and time are inputs, which is why the timer is a worker).
+
 See [language.md](language.md) for the complete language reference.
 
 `spawn` is a language builtin (like `push`, `copy`). No import required. Registered in the type universe alongside other Moxie builtins.

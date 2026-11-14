@@ -181,8 +181,8 @@ Copy from here to section 7. Everything after is reference.
 >
 > The invariant to assert, in debug builds: **no object reachable from the
 > package's type graph has an owner other than this process's compile arena or
-> MAIN.** A violation is the bug reappearing, and it should trap with the owning
-> segment named.
+> the domain's root arena.** A violation is the bug reappearing, and it should
+> trap with the owning segment named.
 >
 > Exit criterion:
 >
@@ -210,8 +210,8 @@ Copy from here to section 7. Everything after is reference.
 > segments_live    <= 64
 > ```
 >
-> This is D13's `-no-main-arena` grown up: instead of a special mode that
-> allocates into MAIN and hopes, it is a measurement mode that catches a package
+> This is how `-no-main-arena` should grow up: instead of a flag that changes
+> package main's codegen and hopes, a measurement mode that catches a package
 > whose compile has begun to accumulate again.
 >
 > Exit criterion: the ceiling holds on the full closure, and a deliberately
@@ -347,9 +347,9 @@ rediscover them.
 - **No distributed or remote cache.** The address scheme is ready for it. The
   transport is not this task.
 - **No memory-model change.** Named twice because it is the temptation: a
-  bounded-memory compiler looks like a case for a store, and it is not. The bound
-  comes from the process boundary. If it ever comes from a store, D25 has been
-  violated somewhere.
+  bounded-memory compiler looks like a case for a persistent store, and it is
+  not. The bound comes from the process boundary; a store in its place would be
+  the accumulation returning under another name.
 
 ---
 

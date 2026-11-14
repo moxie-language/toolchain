@@ -5,8 +5,12 @@ compilers. The language reference is [language.md](language.md); the rules that
 are conventions rather than errors are in [style.md](style.md) and
 [memory.md](memory.md).
 
-The gate is A3: a feature exists only if it is declared and checkable. Removed
-constructs are *undefined*, not restricted - `int` is not a keyword with a
+The gate is A1: a property that governs execution must be declared and statically
+checkable, so anything whose behaviour would be discovered at run time is
+removed rather than policed. Removing `reflect` and the empty interface also
+removes the seam where that machinery would be needed (A2's single authority
+holds for a value whose type is known). Removed constructs are *undefined*, not
+restricted - `int` is not a keyword with a
 warning, it is a name that resolves to nothing, so a program may declare its own
 `int` type.
 
