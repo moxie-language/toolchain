@@ -1237,9 +1237,22 @@ refuses the reference, so the walk re-expands instead of closing. That is exactl
 the "a pointer to a SMALLER object at a registered address must stay a
 back-reference" rule working against a recursive graph.
 
-Next: instrument `codecSeenLookup` to count refusals (a hit on address with a
-too-small entry) versus misses during one package's emit. A high refusal count
-confirms it.
+That was measured and it is WRONG: a counter on the refusal branch of
+`codecSeenLookup` (address matches, registered size too small) never fires once
+in the whole app build. The seen set always honours the back-reference it finds,
+so the walk is visiting genuinely distinct objects - and there are 400k of them
+per package at ~6.5 KB each, which is where the bytes are.
+
+Which leaves the plain reading: the graph really is that large, because an
+`SSAValue` node reaches its block, its block reaches the function, the function
+reaches `Pkg` and `Prog`, and `Prog` reaches every package. Aliasing is supposed
+to cut that at the first pointer that lives in the phase arena, and 400k decodes
+say it does not. The next instrument is therefore not on the seen set but on the
+alias decision itself: count, per encode, how many `KindPointer` values take the
+`codecTagStable` path versus `codecTagPtr`, and print the ratio per package. If
+`codecTagPtr` dominates, the pointer being aliased is not the one that matters -
+the walk is entering through a struct or a slice header that carries no arena
+pointer at all.
 
 ### 8.3c What the codec cannot do, measured
 
