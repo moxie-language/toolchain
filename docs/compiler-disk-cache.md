@@ -1120,6 +1120,31 @@ are reached with a value whose address is on the stack or in a frame the phase
 does not own, and aliasing there leaves the caller reading a slot that is
 rewritten. The narrower set is the one to keep.
 
+### 8.3b12 Two counters that moved the wall out of the codec
+
+Two instruments settled the codec question and relocated the wall.
+
+**Encode entries per return.** A counter in `codecEncodeValue` plus one in
+`codecSetRetTransient` gives the ratio per package: `bytealg` 1.61M encodes over
+39,897 returns, `stringslite` 886k over 39,406, `math/bits` 2.48M over 87,783.
+So ~13-40 objects per return - the graph each return walks was never enormous -
+across **2.2 million return relocations** in one app build. At a fresh codec
+buffer per return that is ~1.5 KB of arena per return and 3.2 GB live, which is
+what `9fc0eb33` fixes: `codecBufScratch[:0]` is a COPY, so the "reusable" buffer
+had capacity 0 and allocated on every return. RSS after the fifth package
+673 MB -> 577 MB.
+
+**The wall is not the codec any more.** With that fixed the sixth package
+(`mxregexp`) still dies, but in **IR emit**, after `ci-tc` and `SSA build` - and a
+counter in `(*irEmitter).w` shows fewer than 200,000 calls for the WHOLE build,
+so the 2.6 GB it allocates is not IR text and not segment growth. `w()` is the
+only thing that accumulates text, and it barely runs, which leaves per-instruction
+work: `llvmType`/`typeDescName`/`reflective-type` strings recomputed for each
+instruction, a few KB each, over a package's instruction stream.
+
+That is the next measurement: count `llvmType` calls and total bytes of the
+strings it returns for one package, and cache it by `Type` instead of recomputing.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
