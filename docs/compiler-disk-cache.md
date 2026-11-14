@@ -1145,6 +1145,33 @@ instruction, a few KB each, over a package's instruction stream.
 That is the next measurement: count `llvmType` calls and total bytes of the
 strings it returns for one package, and cache it by `Type` instead of recomputing.
 
+### 8.3b13 The wall, located: two functions in the emitter
+
+A per-function line in the emitter's `emit()` loop (name, RSS, `len(e.segs)`)
+names it. Emitting `moxielang.dev/pkg/mxregexp`:
+
+| function | RSS when it starts |
+|---|---|
+| `(*parser).classFrag` | 680 MB |
+| `(*parser).emit` | 742 MB |
+| `(*parser).literal` | 800 MB |
+| `(*parser).parseAlt` | 840 MB |
+| `(*parser).parseAtom` | **1644 MB** |
+| `(*parser).parseClass` | **2785 MB** |
+
+`parseAtom` adds 804 MB and `parseClass` 1141 MB *inside one call each*, and
+`segs=0` at every start, so this is NOT the text being accumulated and not
+`w()` (which runs fewer than 200,000 times for the whole build). It is the
+per-function scratch: `emitFunction` rebuilds `valName`, `nameUsed`,
+`allocTypes`, `regTypes`, `blockExitLabel` and `typeCache` on entry and leaves
+every one of them in the phase arena, which reclaims only at package end. At a
+few hundred bytes per instruction that is tens of MB, not 800 - so one of those
+either has an entry per *type expansion* rather than per value, or something in
+the per-instruction path re-derives a type string whose size grows with the type.
+
+Next instrument: count the entries of those six maps and the bytes returned by
+`llvmType` per function, and run it on `parseAtom` alone.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
