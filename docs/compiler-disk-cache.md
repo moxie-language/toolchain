@@ -688,6 +688,33 @@ by the one control that matters: with `math` reached, `mxutil` and
 `internal/cpu` now complete (they never did before the phase fix), so the storm
 is the *next* defect, not a consequence of the one just fixed.
 
+Two candidate causes were then measured and BOTH are wrong, which is why this
+one is recorded as open rather than attributed:
+
+- **Not a huge source.** `stripUnusedConsts` was instrumented with `len(src)`:
+  math's concatenated source is 105,385 bytes, and every earlier package is
+  smaller. The coalescer is not over-allocating.
+- **Not a growing encode buffer.** Every `codecEncodeValue` prints its type
+  descriptor once `cb.pos > 1 MB`. Nothing printed before the ceiling killed the
+  run, so no single encode ever wrote a megabyte.
+
+What the post-mortem does say, from the core rather than from the stack print:
+
+```
+#8  main.moxielang.dev_pkg_mxutil.Ensure__byte
+#9  main[stripUnusedConsts]
+#10 main[typeCheckPkg]
+#11 main[TypeCheckOnly]
+```
+
+`stripUnusedConsts` presizes its output to `len(src)` and copies line by line,
+so a 105 KB input cannot make it allocate gigabytes - yet the allocation that
+dies is reached through it. That is where the next session starts: the frame
+above `Ensure[byte]` is unreliable because the binary carries no unwind info,
+so instrument `mxutil.Ensure`'s callers or the arena in question
+(`arenaOpenSegment` printing the arena, its `alloc` and `nregions`) rather than
+trusting the printed chain.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
