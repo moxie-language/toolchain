@@ -49,7 +49,32 @@ func (c *targetConfig) setTarget(os, arch string) {
 	c.arch = arch
 }
 
+// appendSeg copies the seg's spec strings into the receiver's own arena before
+// storing it.
+//
+// The seg list is read by buildImportSegScopes in a LATER phase than the one
+// that appended it, and with a warm cache the compile phase does not re-run the
+// concat - so the reader consumes what the typecheck phase wrote. The specs
+// handed in here are carved out of a source buffer that belongs to that phase's
+// arena, and a sovereign arena is compacted: the bytes move, and `target` is not
+// one of the moved arena's roots, so nothing rewrites the string headers. Measured
+// as a spec length of 1043149363 reaching ExtractQuoted, which only indexes
+// within len(s).
+//
+// The copy is made HERE, inside the method, because a method's allocations land
+// in the receiver's sovereign arena: the copy is then owned by the same arena as
+// the list that references it, moved with it, and rewritten with it.
 func (c *targetConfig) appendSeg(seg ImportSeg) {
+	if len(seg.Specs) > 0 {
+		specs := []string{:0:len(seg.Specs)}
+		for _, sp := range seg.Specs {
+			b := []byte{:len(sp)}
+			copy(b, sp)
+			specs = Ensure(specs, 1)
+			push(specs, string(b))
+		}
+		seg.Specs = specs
+	}
 	c.segs = Ensure(c.segs, 1)
 	push(c.segs, seg)
 }

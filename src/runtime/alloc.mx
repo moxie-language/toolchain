@@ -3681,14 +3681,26 @@ func sovUnqueueCompact(g *sovGroup) {
 // the rule, not a retention curve three thousand requests later.
 func arenaReleaseGroups(a *Arena) {
 	sovInvalidateArena(a)
+	// Counted BEFORE the list is cleared, which is the whole point: the old
+	// check read len(a.sovGroupList) after resize(...,0) and so could only ever
+	// see zero - it could not fail, which is why a lost group was silent. An
+	// entry whose ctxArena is another arena is legitimate (it was bequeathed by
+	// a relocation and its new arena will release it); one that still claims
+	// THIS arena after the sweep is a group that outlived its creator.
+	left := int32(0)
+	for _, g := range a.sovGroupList {
+		if g != nil && !g.released && g.ctxArena == a {
+			left++
+		}
+	}
 	a.sovGroupList = resize(a.sovGroupList, 0)
-	if a.sovGroups != 0 || len(a.sovGroupList) != 0 {
+	if a.sovGroups != 0 || left != 0 {
 		printstring("arena exit orphaned groups: arena=")
 		printuint64(uint64(uintptr(unsafe.Pointer(a))))
 		printstring(" groups=")
 		printuint64(uint64(uint32(a.sovGroups)))
-		printstring(" list=")
-		printuint64(uint64(uint32(len(a.sovGroupList))))
+		printstring(" left=")
+		printuint64(uint64(uint32(left)))
 		printstring("\n")
 		runtimePanic("arena: exit orphaned sovereign groups")
 	}
@@ -3699,7 +3711,14 @@ func arenaReleaseGroups(a *Arena) {
 // as its receiver's arena. Every exit reaches it through arenaReleaseGroups.
 // O(1) when no group is tracked in this arena.
 func sovInvalidateArena(a *Arena) {
-	if a == nil || domainRoot == nil || a.sovGroups <= 0 {
+	// The LIST decides whether there is work, not the counter. `a.sovGroups` is
+	// maintained at four separate sites (creation, rekey old side, rekey new
+	// side, release), and a group that reached the list could be skipped by a
+	// counter that had already reached zero - leaving it in the receiver map
+	// with a receiver in an arena that is about to be unmapped. That is the
+	// group a full sweep then faults on (sovWalkValue1 under sovMarkReceiverRoots),
+	// and it is why the unconditional compaction could not be used.
+	if a == nil || domainRoot == nil || (a.sovGroups <= 0 && len(a.sovGroupList) == 0) {
 		return
 	}
 	m := domainRoot.sovereignRoot
@@ -3723,6 +3742,76 @@ func sovInvalidateArena(a *Arena) {
 	if a.sovGroups != 0 {
 		a.sovGroups = 0
 	}
+}
+
+// SovCompactAll forces a FULL compaction pass: every live sovereign group is
+// queued and the queue is drained until nothing movable is left, ignoring the
+// pressure ratchet, the per-call budget and the back-off.
+//
+// It is UNSAFE and named for it. It walks the receiver map and then every
+// group's live records, so it costs O(all groups); and it is only correct at a
+// point where no frame of the groups it will move is live, because a live frame
+// is a root the mark pass cannot rewrite. A group whose arena is BORROWED is
+// still skipped - that is not policy, it is correctness.
+//
+// A program with an event loop gets a compaction at every select for free. A
+// program with no loop - a compiler, a batch transform - names its own safe
+// point and calls this there. The sovereign rule makes the arena boundary the
+// natural one: a type's lifecycle ends with the arena that created it, so once
+// that arena is gone nothing it created can still be borrowed.
+func SovCompactAll() (n int32) {
+	if domainRoot == nil || domainRoot.sovereignRoot == nil {
+		return 0
+	}
+	if RootMapRefuses() {
+		sovRefusals++
+		return 0
+	}
+	var it hashmapIterator
+	var k unsafe.Pointer
+	var v unsafe.Pointer
+	orphans := int32(0)
+	for hashmapNext(domainRoot.sovereignRoot, &it, unsafe.Pointer(&k), unsafe.Pointer(&v)) {
+		if v == nil {
+			continue
+		}
+		g := (*sovGroup)(v)
+		if g == nil || g.released {
+			continue
+		}
+		// A group with no ctxArena and not released has NO owner left to release
+		// it: its creating arena was torn down on a path that never reached
+		// arenaReleaseGroups. Walking its receiver roots is a read of memory that
+		// no longer exists, which is the fault this sweep hit
+		// (sovWalkValue1 <- sovMarkReceiverRoots <- sovFullMark). Counted, not
+		// silently skipped - the count is the size of the underlying defect.
+		if g.ctxArena == nil || g.data == nil {
+			orphans++
+			continue
+		}
+		sovQueueCompact(g)
+	}
+	if orphans > 0 {
+		printstring("SovCompactAll: orphaned groups (no ctxArena) = ")
+		printuint64(uint64(uint32(orphans)))
+		printstring("\n")
+	}
+	savedBackoff := sovBackoffUntil
+	sovBackoffUntil = 0
+	// Two idle rounds end it: the first says the queue is empty, the second is
+	// the one that would have found work a rotation freed up. A borrowed group is
+	// rotated, never dropped, so no pass starves it.
+	idle := int32(0)
+	for sovPendingHead != nil && idle < 2 {
+		if SovDrainCompactions(64) > 0 {
+			idle = 0
+		} else {
+			idle++
+		}
+		n++
+	}
+	sovBackoffUntil = savedBackoff
+	return n
 }
 
 // SovereignSetArena borrows the receiver's sovereign data arena as the
