@@ -110,70 +110,167 @@ func LTrimSpace(s []byte) (buf []byte) {
 	return s[start:stop]
 }
 
+// LIndexByteFrom returns the first index of c at or after `from`, or -1. The
+// caller otherwise has to sub-slice, and a sub-slice is a COPY in Moxie.
+func LIndexByteFrom(s []byte, from int32, c byte) (n int32) {
+	if from < 0 {
+		from = 0
+	}
+	for i := from; i < int32(len(s)); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// trimRange trims ASCII whitespace from src[from:to] and returns the bounds, so
+// trimming costs two indexes instead of a copied sub-slice.
+func trimRange(src []byte, from, to int32) (a, b int32) {
+	a = from
+	for a < to && (src[a] == ' ' || src[a] == '\t' || src[a] == '\n' || src[a] == '\r') {
+		a++
+	}
+	b = to
+	for b > a && (src[b-1] == ' ' || src[b-1] == '\t' || src[b-1] == '\n' || src[b-1] == '\r') {
+		b--
+	}
+	return a, b
+}
+
+// sliceLiteralScan resolves the `{:` at `start` to its match. ok is false when
+// the construct is not a slice literal, in which case the caller emits the two
+// bytes and continues.
+func sliceLiteralScan(src []byte, start int32) (lbrack, closeIdx, colonIdx int32, ok bool) {
+	lbrack = findSliceTypeStart(src, start)
+	if lbrack < 0 {
+		return -1, -1, -1, false
+	}
+	closeIdx = findMatchingBrace(src, start)
+	if closeIdx < 0 {
+		return -1, -1, -1, false
+	}
+	colonIdx = LIndexByteFrom(src, start+2, ':')
+	if colonIdx >= closeIdx {
+		colonIdx = -1
+	}
+	return lbrack, closeIdx, colonIdx, true
+}
+
+// putStr copies s into out at o and returns the next cursor position.
+func putStr(out []byte, o int32, s string) (n int32) {
+	for i := int32(0); i < int32(len(s)); i++ {
+		out[o] = s[i]
+		o++
+	}
+	return o
+}
+
+// putRange copies src[from:to] into out at o and returns the next cursor.
+func putRange(out []byte, o int32, src []byte, from, to int32) (n int32) {
+	for i := from; i < to; i++ {
+		out[o] = src[i]
+		o++
+	}
+	return o
+}
+
+// emitSliceLiteral writes one rewritten literal into out at o.
+func emitSliceLiteral(out []byte, o int32, src []byte, lbrack, start, closeIdx, colonIdx int32) (n int32) {
+	a, b := trimRange(src, start+2, closeIdx)
+	a2 := int32(0)
+	b2 := int32(0)
+	if colonIdx >= 0 {
+		a, b = trimRange(src, start+2, colonIdx)
+		a2, b2 = trimRange(src, colonIdx+1, closeIdx)
+	}
+	o = putStr(out, o, "__slicealloc(")
+	o = putRange(out, o, src, lbrack, start)
+	o = putStr(out, o, ", ")
+	o = putRange(out, o, src, a, b)
+	if colonIdx >= 0 {
+		o = putStr(out, o, ", ")
+		o = putRange(out, o, src, a2, b2)
+	}
+	return putStr(out, o, ")")
+}
+
+// trimmedLen is the length of src[from:to] with ASCII whitespace trimmed.
+func trimmedLen(src []byte, from, to int32) (n int32) {
+	a, b := trimRange(src, from, to)
+	return b - a
+}
+
+// sliceLiteralOutLen is the number of bytes emitSliceLiteral writes for the
+// same match, without writing them.
+func sliceLiteralOutLen(src []byte, lbrack, start, closeIdx, colonIdx int32) (n int32) {
+	n = (start - lbrack) + 16
+	if colonIdx < 0 {
+		return n + trimmedLen(src, start+2, closeIdx)
+	}
+	n += trimmedLen(src, start+2, colonIdx) + 2
+	return n + trimmedLen(src, colonIdx+1, closeIdx)
+}
+
+// RewriteSliceMakeLiterals lowers `[]T{:n}` and `[]T{:a:b}` to __slicealloc.
+//
+// It scans twice and writes once. The obvious shape - collect the segments in a
+// [][]byte and JoinChunks them - is quadratic here, and not because of the
+// scans: every `chunks = mxutil.Ensure(chunks, 1)` RETURNS a pointer-containing
+// slice across a function boundary, so the return protocol walks and copies
+// every segment accumulated so far, once per push. Measured on `runtime`
+// (519 KB of source): 32 MB -> 1.92 GB of arena inside this function, and
+// `io` (32 KB): 1.5 MB -> 35 MB.
+//
+// The output length is exactly computable from a scan that allocates nothing,
+// so pass one totals it, pass two writes through a cursor into one allocation.
 func RewriteSliceMakeLiterals(src []byte) (buf []byte) {
-	chunks := [][]byte{:0:len(src)/2 + 8}
-	i := 0
-	for i < len(src) {
-		start := LIndexFrom(src, i, []byte("{:"))
+	bc := []byte("{:")
+	n := int32(len(src))
+	outLen := n
+	matches := int32(0)
+	i := int32(0)
+	for i < n {
+		start := LIndexFrom(src, i, bc)
 		if start < 0 {
-			chunks = mxutil.Ensure(chunks, 1)
-			push(chunks, src[i:])
 			break
 		}
-		lbrack := findSliceTypeStart(src, start)
-		if lbrack < 0 {
-			chunks = mxutil.Ensure(chunks, 1)
-			push(chunks, src[i:start+2])
+		lbrack, closeIdx, colonIdx, ok := sliceLiteralScan(src, start)
+		if !ok {
 			i = start + 2
 			continue
 		}
-		closeIdx := findMatchingBrace(src, start)
-		if closeIdx < 0 {
-			chunks = mxutil.Ensure(chunks, 1)
-			push(chunks, src[i:start+2])
-			i = start + 2
-			continue
-		}
-		inner := src[start+2 : closeIdx]
-		colonIdx := LIndexByte(inner, ':')
-		typeText := src[lbrack:start]
-		chunks = mxutil.Ensure(chunks, 1)
-		push(chunks, src[i:lbrack])
-		if colonIdx < 0 {
-			chunks = mxutil.Ensure(chunks, 1)
-			push(chunks, []byte("__slicealloc("))
-			chunks = mxutil.Ensure(chunks, 1)
-			push(chunks, typeText)
-			chunks = mxutil.Ensure(chunks, 1)
-			push(chunks, []byte(", "))
-			chunks = mxutil.Ensure(chunks, 1)
-			push(chunks, LTrimSpace(inner))
-			chunks = mxutil.Ensure(chunks, 1)
-			push(chunks, []byte(")"))
-		} else {
-			lenExpr := LTrimSpace(inner[:colonIdx])
-			capExpr := LTrimSpace(inner[colonIdx+1:])
-			chunks = mxutil.Ensure(chunks, 1)
-			push(chunks, []byte("__slicealloc("))
-			chunks = mxutil.Ensure(chunks, 1)
-			push(chunks, typeText)
-			chunks = mxutil.Ensure(chunks, 1)
-			push(chunks, []byte(", "))
-			chunks = mxutil.Ensure(chunks, 1)
-			push(chunks, lenExpr)
-			chunks = mxutil.Ensure(chunks, 1)
-			push(chunks, []byte(", "))
-			chunks = mxutil.Ensure(chunks, 1)
-			push(chunks, capExpr)
-			chunks = mxutil.Ensure(chunks, 1)
-			push(chunks, []byte(")"))
-		}
+		outLen += sliceLiteralOutLen(src, lbrack, start, closeIdx, colonIdx) - (closeIdx + 1 - start)
+		matches++
 		i = closeIdx + 1
 	}
-	if len(chunks) == 0 {
+	if matches == 0 {
 		return src
 	}
-	return JoinChunks(chunks)
+	out := []byte{:outLen}
+	o := int32(0)
+	i = 0
+	for i < n {
+		start := LIndexFrom(src, i, bc)
+		if start < 0 {
+			o = putRange(out, o, src, i, n)
+			break
+		}
+		lbrack, closeIdx, colonIdx, ok := sliceLiteralScan(src, start)
+		if !ok {
+			o = putRange(out, o, src, i, start+2)
+			i = start + 2
+			continue
+		}
+		o = putRange(out, o, src, i, lbrack)
+		o = emitSliceLiteral(out, o, src, lbrack, start, closeIdx, colonIdx)
+		i = closeIdx + 1
+	}
+	// out[:o] rather than out: the estimate can only err LARGE (an underestimate
+	// faults at once in putRange), and an overestimate leaves unwritten NULs
+	// that the parser reports as "invalid NUL character" at end of file - a
+	// silent corruption that a miscount of __slicealloc( by one byte produced.
+	return out[:o]
 }
 
 func isIdentByteAt(src []byte, k int32) (r bool) {
