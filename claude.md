@@ -232,10 +232,24 @@ Choose by how the final size is known:
   not let a buffer enter the doubling regime in an arena that outlives the
   call - a sovereign arena keeps every abandoned backing until compaction
   reclaims it.
-- **Never hand-write the capacity guard.** `if len(x) >= cap(x) { x = GrowCap(x) }`
-  reserves ONE element and is a latent panic before a spread push, because
-  `push(x, src...)` needs `len(src)`. Use `mxutil.Ensure(x, len(src))` for a
-  spread, and `mxutil.Reserve(x, total)` when the total is known.
+- **Never hand-write the capacity guard, and never call a growth helper
+  either.** Slices grow; `push` is the growth. `runtime.slicePush` takes an
+  element COUNT, so `push(x, v)`, `push(x, a, b)` and `push(x, src...)` all grow
+  by themselves - a spread passes `len(src)` and the runtime makes room for it.
+  There is nothing to reserve, nothing to guard, and `mxutil.Ensure` /
+  `mxutil.Reserve` are legacy Go-era shims that are being deleted. Writing
+  `x = mxutil.Ensure(x, 1); push(x, v)` is not merely noise: **a function that
+  RETURNS a slice of pointer-bearing values is deep-copied by the return
+  protocol**, so every such call copies the whole list - every element, every
+  graph it reaches - and the copy is thrown away. That pattern cost 2 GB inside
+  one emitted function (`[]*SSAAlloc` in `math.Erfinv`) and 3.2 GB in
+  `markReturnEscapes`.
+- **A helper must not return a growable slice of pointer-bearing values.**
+  Either presize with `[]T{:n}` and write through a cursor (the fast shape when
+  the count is known), or write into the caller's map/struct through a pointer
+  and return a bool or a count. Returning `[]*Node` from anything called in a
+  loop is quadratic by construction, because the cost is in the RETURN, not in
+  the growth.
 
 One function, one arena, one buffer, one pass is the target shape: read the
 sources, write the output through a cursor. There is no concurrency, so a

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"moxielang.dev/pkg/mxutil"
 	"moxielang.dev/pkg/token"
 	. "moxielang.dev/pkg/types"
 )
@@ -110,7 +109,6 @@ type SSAValue interface {
 type SSAInstruction interface {
 	InstrPos() (n int32)
 	InstrString() (s string)
-	setBlock(*SSABasicBlock)
 }
 
 // SSA Member interface (package-level declaration).
@@ -270,7 +268,6 @@ func NewSSABasicBlock(parent *SSAFunction, comment string) (s *SSABasicBlock) {
 		Comment: comment,
 		parent:  parent,
 	}
-	parent.Blocks = mxutil.Ensure(parent.Blocks, 1)
 	push(parent.Blocks, b)
 	return b
 }
@@ -288,14 +285,29 @@ func (r *ssaRegister) SSAType() (t Type) { if r == nil { return nil } ; return r
 func (r *ssaRegister) SSAPos() (n int32) { return r.pos }
 func (r *ssaRegister) SSAParent() (s *SSAFunction) { if r.block != nil { return r.block.parent }; return nil }
 func (r *ssaRegister) String() (s string) { return r.name }
-func (r *ssaRegister) setBlock(b *SSABasicBlock)  { r.block = b }
 
 // ssaInstr - base for all instructions.
 type ssaInstr struct {
 	block *SSABasicBlock
 }
 
-func (a *ssaInstr) setBlock(b *SSABasicBlock)   { a.block = b }
+// node returns the embedded instruction header. It is a READ-ONLY method on
+// purpose: a method that STORES into its receiver makes the type self-mutating,
+// so every SSA node - one per instruction - would own a sovereign group with
+// its own data arena, allocation table and record table. `setBlock` was exactly
+// that method, it was called once per emitted instruction, and `math`'s SSA
+// graph alone then cost 715 MB where the known-good compiler compiles the whole
+// package in 327 MB.
+func (a *ssaInstr) node() (n *ssaInstr) { return a }
+
+// setInstrBlock records the block an instruction belongs to. A FREE function,
+// for the reason above: writing a field through a method is what creates a
+// sovereign group per node.
+func setInstrBlock(instr SSAInstruction, b *SSABasicBlock) {
+	if n, ok := instr.(interface{ node() *ssaInstr }); ok {
+		n.node().block = b
+	}
+}
 
 // Package-level global variable.
 type SSAGlobal struct {
@@ -992,12 +1004,10 @@ func ssaItoa(n int32) (s string) {
 	}
 	buf := []byte{:0:20}
 	for n > 0 {
-		buf = mxutil.Ensure(buf, 1)
 		push(buf, byte('0'+n%10))
 		n /= 10
 	}
 	if neg {
-		buf = mxutil.Ensure(buf, 1)
 		push(buf, '-')
 	}
 	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {

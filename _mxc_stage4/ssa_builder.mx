@@ -211,7 +211,6 @@ func (pb *ssaPkgBuilder) checkUnusedImports() {
 			if dotImportMentioned(body, im.target) {
 				continue
 			}
-			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 			push(cctx.compileErrors, prefix | "\"" | im.path | "\" imported and not used")
 			continue
 		}
@@ -232,7 +231,6 @@ func (pb *ssaPkgBuilder) checkUnusedImports() {
 		if im.local != "" && im.local != elem {
 			msg = "\"" | im.path | "\" imported as " | im.local | " and not used"
 		}
-		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 		push(cctx.compileErrors, prefix | msg)
 	}
 }
@@ -430,7 +428,6 @@ func (pb *ssaPkgBuilder) buildImportSegScopes() {
 				// rather than a name, so the check looks for the members. The
 				// target is still resolved, so an unresolved one is treated as
 				// used below rather than reported.
-				pb.segImports = mxutil.Ensure(pb.segImports, 1)
 				push(pb.segImports, segImport{seg: si, path: path, local: ".", dot: true, target: pb.resolveImportTarget(path)})
 				continue
 			}
@@ -457,10 +454,8 @@ func (pb *ssaPkgBuilder) buildImportSegScopes() {
 				}
 			}
 			sc.Insert(NewPkgName(nil, localName, target))
-			pb.segImports = mxutil.Ensure(pb.segImports, 1)
 			push(pb.segImports, segImport{seg: si, path: path, local: localName})
 		}
-		pb.segScopes = mxutil.Ensure(pb.segScopes, 1)
 		push(pb.segScopes, segScope{outStart: seg.OutStart, scope: sc})
 	}
 }
@@ -602,7 +597,6 @@ func (pb *ssaPkgBuilder) registerImport(d *syntax.ImportDecl) {
 		}
 	}
 	if !found {
-		tcp.Imports = mxutil.Ensure(tcp.Imports, 1)
 		push(tcp.Imports, target)
 	}
 	pn := NewPkgName(nil, localName, target)
@@ -706,7 +700,6 @@ func pkgResolveSigAST(pkg *SSAPackage, ft *syntax.FuncType) (s *Signature) {
 		if p.Name != nil {
 			pname = p.Name.Value
 		}
-		params = mxutil.Ensure(params, 1)
 		push(params, NewTCVar(nil, pname, typ))
 	}
 	var results []*TCVar
@@ -716,7 +709,6 @@ func pkgResolveSigAST(pkg *SSAPackage, ft *syntax.FuncType) (s *Signature) {
 		if r.Name != nil {
 			rname = r.Name.Value
 		}
-		results = mxutil.Ensure(results, 1)
 		push(results, NewTCVar(nil, rname, typ))
 	}
 	variadic := false
@@ -750,7 +742,6 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 				pb.declared = map[string]bool{}
 			}
 			if pb.declared[key] {
-				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 				push(cctx.compileErrors, key | " already declared")
 				return
 			}
@@ -775,12 +766,10 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 			prefix = "line:" | simpleItoa(line) | ": "
 		}
 		if pb.pkg.Pkg.Name == "main" && !testWrapsLibrary() {
-			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 			push(cctx.compileErrors, prefix | "init() is not allowed in main package: use main() for program entry")
 			return
 		}
 		if pb.initFn != nil {
-			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 			push(cctx.compileErrors, prefix | "at most one init() per package: merge this body into the package's init()")
 			return
 		}
@@ -795,7 +784,6 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 			pb.declared = map[string]bool{}
 		}
 		if pb.declared[d.Name.Value] {
-			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 			push(cctx.compileErrors, d.Name.Value | " redeclared in this block")
 			return
 		}
@@ -923,7 +911,6 @@ func (pb *ssaPkgBuilder) registerMethod(d *syntax.FuncDecl) {
 		// writes persist. A struct value receiver stays a copy and stays
 		// refused.
 		if !pb.recvValueAggregate(d.Recv) {
-			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 			push(cctx.compileErrors, "value receiver is not allowed: use pointer receiver (*" | ssaRecvTypeName(d.Recv) | ")")
 			return
 		}
@@ -1082,7 +1069,6 @@ func (pb *ssaPkgBuilder) registerVar(d *syntax.VarDecl) {
 		pb.pkg.SetMember(name.Value, newSSAGlobal(pb.pkg, name.Value, obj, varDeclType(pb.pkg, d, obj)))
 	}
 	if d.Values != nil {
-		pb.varInits = mxutil.Ensure(pb.varInits, 1)
 		push(pb.varInits, d)
 		pb.varInitScopes[d] = pb.curFileScope
 	}
@@ -1495,21 +1481,18 @@ func (fb *ssaFuncBuilder) emit(instr SSAInstruction) {
 	if fb.currentBlock == nil {
 		return
 	}
-	instr.setBlock(fb.currentBlock)
-	fb.currentBlock.Instrs = mxutil.Ensure(fb.currentBlock.Instrs, 1)
+	setInstrBlock(instr, fb.currentBlock)
 	push(fb.currentBlock.Instrs, instr)
 }
 
 // pushSucc records an edge b -> succ with explicit capacity growth
 // (push never reallocates).
 func (fb *ssaFuncBuilder) pushSucc(b, succ *SSABasicBlock) {
-	b.Succs = mxutil.Ensure(b.Succs, 1)
 	push(b.Succs, succ)
 }
 
 // pushPred records an edge pred -> b with explicit capacity growth.
 func (fb *ssaFuncBuilder) pushPred(b, pred *SSABasicBlock) {
-	b.Preds = mxutil.Ensure(b.Preds, 1)
 	push(b.Preds, pred)
 }
 
@@ -1553,7 +1536,6 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 				pos:    0,
 				parent: fb.fn,
 			}
-			fb.fn.Params = mxutil.Ensure(fb.fn.Params, 1)
 			push(fb.fn.Params, p)
 			if recvName != "" && recvName != "_" {
 				recvObj := NewTCVar(fb.fn.Pkg.Pkg, recvName, recv.Typ)
@@ -1569,7 +1551,6 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 				} else {
 					alloc := fb.emitAlloc(recv.Typ, 0)
 					fb.vars[recvObj] = alloc
-					fb.paramAllocas = mxutil.Ensure(fb.paramAllocas, 1)
 					push(fb.paramAllocas, alloc)
 					if isValRecv {
 						// p is *T; load the value T from the pointer, then store.
@@ -1590,14 +1571,12 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 		for i := 0; i < params.Len(); i++ {
 			pvar := params.At(i)
 			p := newSSAParameter(pvar.Name, pvar.Typ, fb.fn.pos, fb.fn)
-			fb.fn.Params = mxutil.Ensure(fb.fn.Params, 1)
 			push(fb.fn.Params, p)
 			if pvar.Name != "" && pvar.Name != "_" {
 				obj := NewTCVar(fb.fn.Pkg.Pkg, pvar.Name, pvar.Typ)
 				alloc := fb.emitAlloc(pvar.Typ, p.pos)
 				fb.vars[obj] = alloc
 				fb.varScope[obj] = fb.scopeID
-				fb.paramAllocas = mxutil.Ensure(fb.paramAllocas, 1)
 				push(fb.paramAllocas, alloc)
 				fb.emitStore(alloc, p)
 			}
@@ -1609,9 +1588,7 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 			r := sig.Results.At(i)
 			if r.Name != "" && r.Name != "_" {
 				alloc := fb.emitAlloc(r.Typ, fb.fn.pos)
-				fb.namedResults = mxutil.Ensure(fb.namedResults, 1)
 				push(fb.namedResults, alloc)
-				fb.fn.Locals = mxutil.Ensure(fb.fn.Locals, 1)
 				push(fb.fn.Locals, alloc)
 				fb.vars[r] = alloc
 				fb.varScope[r] = fb.scopeID
@@ -1662,7 +1639,6 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 						continue
 					}
 					if res.Name == "" || res.Name == "_" {
-						vals = mxutil.Ensure(vals, 1)
 						push(vals, &SSAConst{typ: res.Typ, val: nil})
 						continue
 					}
@@ -1675,7 +1651,6 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 					if p, ok := elemType.(*Pointer); ok {
 						elemType = p.Base
 					}
-					vals = mxutil.Ensure(vals, 1)
 					push(vals, fb.emitLoad(nr, elemType))
 				}
 			} else {
@@ -1684,7 +1659,6 @@ func (fb *ssaFuncBuilder) buildBody(d *syntax.FuncDecl) {
 					if p, ok := elemType.(*Pointer); ok {
 						elemType = p.Base
 					}
-					vals = mxutil.Ensure(vals, 1)
 					push(vals, fb.emitLoad(nr, elemType))
 				}
 			}
@@ -1714,7 +1688,6 @@ func (fb *ssaFuncBuilder) emitAlloc(typ Type, pos int32) (s *SSAAlloc) {
 	a.pos = pos
 	a.name = fb.nextName()
 	fb.emit(a)
-	fb.fn.Locals = mxutil.Ensure(fb.fn.Locals, 1)
 	push(fb.fn.Locals, a)
 	return a
 }
@@ -1968,7 +1941,6 @@ func (fb *ssaFuncBuilder) buildAssign(s *syntax.AssignStmt) {
 		// silently concatenated, so `s += b` on two []byte operands was a
 		// compilers-disagree bug (W29).
 		if s.Op == token.Add && fb.plusIsBanned() && TextType(lv.SSAType()) {
-			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 			push(cctx.compileErrors, "'+=' is not allowed for text concatenation, use |= operator")
 		}
 		op := compoundOp(s.Op)
@@ -2249,7 +2221,6 @@ func (fb *ssaFuncBuilder) errArgs(msg string) {
 	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
 		return
 	}
-	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 	push(cctx.compileErrors, fb.errPos() | msg)
 }
 
@@ -2383,7 +2354,6 @@ func checkIfaceAssignments() {
 		if missing == "" {
 			continue
 		}
-		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 		push(cctx.compileErrors, pa.pos | "cannot use value of type " | pa.V.String() | " (" | "(name=" | pa.vname | ")" | ") as " | pa.T.String() | " in " | pa.what | " (does not implement " | pa.T.String() | " (missing method " | missing | "))")
 	}
 	cstate.pendingIface = nil
@@ -2404,7 +2374,6 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 	// considered: an untyped int is Assignable to int8, but 1000 is not.
 	if cv, explicitNeg := constValueOf(val); cv != nil {
 		if msg := constReprError(cv, T); msg != "" && !constReprSkipUnsigned(T, cv, explicitNeg) {
-			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 			push(cctx.compileErrors, fb.errPos() | "cannot use " | cv.String() | " as " | T.String() | " in " | what | " (" | msg | ")")
 			return
 		}
@@ -2427,7 +2396,6 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 				// types.Object that way), so only a type from a third package -
 				// or one with no package at all, like a slice - is impossible.
 				if u := ifaceUnexportedMethod(tIface); u != "" && typeDeclPkg(V) != declPkg {
-					cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 					push(cctx.compileErrors, fb.errPos() | "cannot use value of type " | V.String() | " as " | T.String() | " in " | what | " (does not implement " | T.String() | " (unexported method " | u | "))")
 					return
 				}
@@ -2500,7 +2468,6 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 		if _, vIface := SafeUnderlying(V).(*TCInterface); vIface {
 			if _, vTP := V.(*TypeParam); !vTP {
 				if _, tIface := SafeUnderlying(T).(*TCInterface); !tIface {
-					cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 					push(cctx.compileErrors, fb.errPos() | "cannot use value of type " | V.String() | " as " | T.String() | " in " | what | " (an interface value needs a type assertion)")
 					return
 				}
@@ -2517,7 +2484,6 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 				if _, vTP := V.(*TypeParam); !vTP {
 					if IfaceCheckConclusive(V, tIface) {
 						if IfaceMethodSetLocal(V, fb.fn.Pkg.Pkg) {
-							cstate.pendingIface = mxutil.Ensure(cstate.pendingIface, 1)
 							push(cstate.pendingIface, ifaceAssign{V: V, T: T, localPkg: fb.fn.Pkg.Pkg, what: what, pos: fb.errPos(), vname: val.SSAName()})
 						}
 					}
@@ -2526,7 +2492,6 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 		}
 		return
 	}
-	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 	push(cctx.compileErrors, fb.errPos() | "cannot use value of type " | V.String() | " as " | T.String() | " in " | what)
 }
 
@@ -2543,7 +2508,6 @@ func (fb *ssaFuncBuilder) checkConstConvert(val SSAValue, T Type) {
 		return
 	}
 	if msg := constReprError(cv, T); msg != "" && !constReprSkipUnsigned(T, cv, explicitNeg) {
-		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 		push(cctx.compileErrors, fb.errPos() | "cannot convert " | cv.String() | " to " | T.String() | " (" | msg | ")")
 	}
 }
@@ -2811,7 +2775,6 @@ func (fb *ssaFuncBuilder) checkDefaultRepr(val SSAValue, what string) {
 		return
 	}
 	if msg := constReprError(cv, dt); msg != "" && !constReprSkipUnsigned(dt, cv, explicitNeg) {
-		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 		push(cctx.compileErrors, fb.errPos() | "cannot use " | cv.String() | " as " | dt.String() | " value in " | what | " (" | msg | ")")
 	}
 }
@@ -3368,7 +3331,6 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 			alloc := fb.emitAlloc(ObjectType(obj), 0)
 			fb.vars[obj] = alloc
 			fb.varScope[obj] = fb.scopeID
-			fb.fn.Locals = mxutil.Ensure(fb.fn.Locals, 1)
 			push(fb.fn.Locals, alloc)
 			v := initVal
 			if multiVals != nil && ni < len(multiVals) {
@@ -3464,7 +3426,6 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 				badName := firstUnresolvedTypeName(dd.Type, ls)
 				if len(badName) > 0 {
 					bad = true
-					cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 					push(cctx.compileErrors, "undefined: " | badName)
 				}
 			}
@@ -3815,7 +3776,6 @@ func (fb *ssaFuncBuilder) buildFor(s *syntax.ForStmt) {
 	fb.pushSucc(fb.currentBlock, condBlock)
 	fb.pushPred(condBlock, fb.currentBlock)
 
-	fb.loops = mxutil.Ensure(fb.loops, 1)
 	push(fb.loops, ssaLoopState{label: fb.pendingLabel, body: bodyBlock, post: postBlock, done: doneBlock})
 	fb.pendingLabel = ""
 
@@ -3876,7 +3836,6 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *syntax.ForStmt, rc *syntax.RangeClau
 
 	condBlock := fb.newBlock("range.cond")
 
-	fb.loops = mxutil.Ensure(fb.loops, 1)
 	push(fb.loops, ssaLoopState{label: fb.pendingLabel, body: bodyBlock, post: condBlock, done: doneBlock})
 	fb.pendingLabel = ""
 	fb.emit(&SSAJump{Comment: "range.cond"})
@@ -4020,7 +3979,6 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 
 	doneBlock := fb.newBlock("switch.done")
 	savedLoops := fb.loops
-	fb.loops = mxutil.Ensure(fb.loops, 1)
 	push(fb.loops, ssaLoopState{label: fb.pendingLabel, done: doneBlock})
 	fb.pendingLabel = ""
 
@@ -4500,7 +4458,6 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 	}
 	for i, clause := range s.Body {
 		cb := fb.newBlock("select.case")
-		caseBlocks = mxutil.Ensure(caseBlocks, 1)
 		push(caseBlocks, cb)
 		// The node for this clause was created once, above; its per-clause
 		// fields are written once, here. Rebuilding it per iteration
@@ -4555,7 +4512,6 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 	for _, st := range states {
 		if st.Dir == SelectDirRecv && st.Chan != nil {
 			elemType := ssaChanElemType(st.Chan.SSAType())
-			tupleVars = mxutil.Ensure(tupleVars, 1)
 			push(tupleVars, NewTCVar(nil, "recv", elemType))
 		}
 	}
@@ -4583,7 +4539,6 @@ func (fb *ssaFuncBuilder) buildSelect(s *syntax.SelectStmt) {
 		if kind == 0 {
 			continue
 		}
-		roots = mxutil.Ensure(roots, 1)
 		push(roots, &SSARoot{Obj: obj, Val: v, Typ: pt.Base, Kind: kind, Words: words})
 	}
 	// Deterministic layout: map iteration is unordered and the compiler must
@@ -4787,14 +4742,12 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 			for i, el := range list.ElemList {
 				v := fb.buildExpr(el)
 				if v != nil {
-					vals = mxutil.Ensure(vals, 1)
 					push(vals, v)
 				} else {
 					var zeroType Type
 					if fb.fn.Signature != nil && fb.fn.Signature.Results != nil && int32(i) < int32(fb.fn.Signature.Results.Len()) {
 						zeroType = fb.fn.Signature.Results.At(int32(i)).Typ
 					}
-					vals = mxutil.Ensure(vals, 1)
 					push(vals, &SSAConst{typ: zeroType, val: nil})
 				}
 			}
@@ -4802,7 +4755,6 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 			v := fb.buildExpr(s.Results)
 			if v != nil {
 				if v.SSAType() == nil {
-					vals = mxutil.Ensure(vals, 1)
 					push(vals, v)
 				} else if tup, ok2 := v.SSAType().(*Tuple); ok2 && tup.Len() > 1 {
 					{
@@ -4812,12 +4764,10 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 						zzq26.typ = tup.At(i).Typ
 						zzq26.name = fb.nextName()
 						fb.emit(zzq26)
-						vals = mxutil.Ensure(vals, 1)
 						push(vals, zzq26)
 					}
 					}
 				} else {
-					vals = mxutil.Ensure(vals, 1)
 					push(vals, v)
 				}
 			}
@@ -4843,7 +4793,6 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 					continue
 				}
 				if res.Name == "" || res.Name == "_" {
-					vals = mxutil.Ensure(vals, 1)
 					push(vals, &SSAConst{typ: res.Typ, val: nil})
 					continue
 				}
@@ -4856,7 +4805,6 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 				if p, ok := elemType.(*Pointer); ok {
 					elemType = p.Base
 				}
-				vals = mxutil.Ensure(vals, 1)
 				push(vals, fb.emitLoad(nr, elemType))
 			}
 		} else {
@@ -4865,7 +4813,6 @@ func (fb *ssaFuncBuilder) buildReturn(s *syntax.ReturnStmt) {
 				if p, ok := elemType.(*Pointer); ok {
 					elemType = p.Base
 				}
-				vals = mxutil.Ensure(vals, 1)
 				push(vals, fb.emitLoad(nr, elemType))
 			}
 		}
@@ -5135,7 +5082,6 @@ func (fb *ssaFuncBuilder) buildDeferThunk(mfn *SSAFunction, iface *TCInterface, 
 		vars := []*TCVar{:0:len(argVals) + 1}
 		push(vars, recvVar)
 		for i := int32(0); i < int32(len(argVals)); i++ {
-			vars = mxutil.Ensure(vars, 1)
 			push(vars, &TCVar{Name: "a" | ssaItoa(i), Typ: argVals[i].SSAType()})
 		}
 		params = NewTuple(vars...)
@@ -5151,16 +5097,13 @@ func (fb *ssaFuncBuilder) buildDeferThunk(mfn *SSAFunction, iface *TCInterface, 
 		Prog:      fb.fn.Prog,
 		parent:    fb.fn,
 	}
-	fb.fn.AnonFuncs = mxutil.Ensure(fb.fn.AnonFuncs, 1)
 	push(fb.fn.AnonFuncs, thunk)
 	recvParam := &SSAParameter{name: "recv", typ: recvType, parent: thunk}
-	thunk.Params = mxutil.Ensure(thunk.Params, 1)
 	push(thunk.Params, recvParam)
 	{
 		var zzq28 *SSAParameter
 	for i := int32(0); i < int32(len(argVals)); i++ {
 		zzq28 = &SSAParameter{name: "a" | ssaItoa(i), typ: argVals[i].SSAType(), parent: thunk}
-		thunk.Params = mxutil.Ensure(thunk.Params, 1)
 		push(thunk.Params, zzq28)
 	}
 	}
@@ -5180,8 +5123,7 @@ func (fb *ssaFuncBuilder) buildDeferThunk(mfn *SSAFunction, iface *TCInterface, 
 		call := &SSACall{Call: SSACallCommon{Value: mfn, Args: callArgs}}
 		call.typ = retType
 		call.name = "t1"
-		call.setBlock(entry)
-		entry.Instrs = mxutil.Ensure(entry.Instrs, 1)
+		setInstrBlock(call, entry)
 		push(entry.Instrs, call)
 		body = call
 	} else {
@@ -5194,8 +5136,7 @@ func (fb *ssaFuncBuilder) buildDeferThunk(mfn *SSAFunction, iface *TCInterface, 
 		inv := &SSAInvoke{X: recvParam, MethodName: methodName, IfaceType: iface, Args: invArgs}
 		inv.typ = retType
 		inv.name = "t1"
-		inv.setBlock(entry)
-		entry.Instrs = mxutil.Ensure(entry.Instrs, 1)
+		setInstrBlock(inv, entry)
 		push(entry.Instrs, inv)
 		body = inv
 	}
@@ -5203,8 +5144,7 @@ func (fb *ssaFuncBuilder) buildDeferThunk(mfn *SSAFunction, iface *TCInterface, 
 	if retType != nil {
 		ret.Results = []SSAValue{body}
 	}
-	ret.setBlock(entry)
-	entry.Instrs = mxutil.Ensure(entry.Instrs, 1)
+	setInstrBlock(ret, entry)
 	push(entry.Instrs, ret)
 	return thunk
 }
@@ -5362,7 +5302,6 @@ func (fb *ssaFuncBuilder) buildIdent(e *syntax.Name) (s SSAValue) {
 		// No local, free var, package member, predeclared type, or builtin:
 		// the name does not exist. Fail loud - a dropped reference compiles
 		// the surrounding code to garbage far from the cause.
-		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 		push(cctx.compileErrors, "undefined: " | e.Value)
 		return nil
 	}
@@ -5721,7 +5660,6 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 	// message. The rule is a main-module rule in legacy, so a dependency
 	// package keeps '+' - see targetIsMainModule.
 	if e.Op == token.Add && fb.plusIsBanned() && (TextType(x.SSAType()) || TextType(y.SSAType())) {
-		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 		push(cctx.compileErrors, "'+' is not allowed for text concatenation, use | operator")
 	}
 	if (op == OpOr || op == OpAdd) && x.SSAType() != nil && y.SSAType() != nil {
@@ -5745,7 +5683,6 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 		if _, xTP := x.SSAType().(*TypeParam); !xTP {
 			if _, yTP := y.SSAType().(*TypeParam); !yTP {
 				if TextType(x.SSAType()) != TextType(y.SSAType()) {
-					cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 					push(cctx.compileErrors, fb.errPos() | "cannot concatenate value of type " | x.SSAType().String() | " with value of type " | y.SSAType().String() | " ('|' concatenates text; use .String() on the value)")
 				}
 			}
@@ -5936,7 +5873,6 @@ func (fb *ssaFuncBuilder) checkSliceToArrayConv(x SSAValue, dst Type) {
 	if _, isArr := p.Base.(*Array); !isArr {
 		return
 	}
-	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 	push(cctx.compileErrors, "slice-to-array-pointer conversion is not allowed: work in slices")
 }
 
@@ -5969,7 +5905,6 @@ func (fb *ssaFuncBuilder) checkTextArrayConv(x SSAValue, dst Type) {
 	if _, isArr := SafeUnderlying(other).(*Array); !isArr {
 		return
 	}
-	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 	push(cctx.compileErrors, fb.errPos() | "cannot convert " | src.String() | " to " | dst.String() | " (a fixed extent is not text: work in slices)")
 }
 
@@ -6058,7 +5993,6 @@ func (fb *ssaFuncBuilder) checkPtrToIntConv(x SSAValue, dst Type) {
 	if db.Info&IsInteger == 0 {
 		return
 	}
-	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 	push(cctx.compileErrors, fb.errPos() | "cannot convert " | src.String() | " to " | dst.String() | " directly: a pointer converts to an integer only through unsafe.Pointer")
 }
 
@@ -6082,7 +6016,6 @@ func (fb *ssaFuncBuilder) checkUnsafePtrConv(val SSAValue, T Type) {
 	if b, isB := SafeUnderlying(V).(*Basic); isB && b.Kind == UntypedNil {
 		return
 	}
-	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 	push(cctx.compileErrors, fb.errPos() | "cannot convert value of type " | V.String() | " to unsafe.Pointer (only a pointer, a uintptr or nil)")
 }
 
@@ -6484,7 +6417,6 @@ func (fb *ssaFuncBuilder) coerceSliceArgs(args []SSAValue, hasDots bool, slT, wh
 			spreadOK = true
 		}
 		if !spreadOK {
-			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 			push(cctx.compileErrors, fb.errPos() | "cannot use " | srcT.String() | " as " | wholeT.String() | " in push (spread element type mismatch)")
 		}
 	}
@@ -6624,7 +6556,6 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		// function carrying state died with SIGSEGV), and error values are what
 		// recoverable failure is for. Fail loud so a ported file cannot bring
 		// it back.
-		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 		push(cctx.compileErrors, "recover() is not available in Moxie: a panic is fatal")
 		return nil
 	case BuiltinSpawn:
@@ -6651,7 +6582,6 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		// runtime's, so every call names the same channel; the element is the
 		// empty struct because the close is the whole message.
 		if len(args) != 0 {
-			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 			push(cctx.compileErrors, fb.errPos() | "__shutdown takes no arguments")
 			return nil
 		}
@@ -6681,7 +6611,6 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		// names the fix.
 		if len(args) > 0 && args[0] != nil {
 			if _, isArr := SafeUnderlying(args[0].SSAType()).(*Array); isArr {
-				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 				push(cctx.compileErrors, fb.errPos() | "fixed-extent array: capacity cannot change; slice it with arr[:] to get a growable extent")
 				return nil
 			}
@@ -6701,7 +6630,6 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 				}
 			}
 			if untypedNil {
-				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 				push(cctx.compileErrors, "invalid push: argument must be a slice; have untyped nil")
 				return nil
 			}
@@ -6742,7 +6670,6 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		// emitter and fail in clang instead of here.
 		if len(args) > 0 && args[0] != nil {
 			if _, isArr := SafeUnderlying(args[0].SSAType()).(*Array); isArr {
-				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 				push(cctx.compileErrors, fb.errPos() | "fixed-extent array: capacity cannot change; slice it with arr[:] to get a growable extent")
 				return nil
 			}
@@ -6772,7 +6699,6 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		// "returns the value but does not shrink" was a footgun that meant two
 		// different things depending on whether the value was used.
 		if len(args) == 1 && !fb.pushStmt {
-			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 			push(cctx.compileErrors, fb.errPos() | "pop is a statement: it removes the last element; read it with s[len(s)-1]")
 			return nil
 		}
@@ -7042,7 +6968,6 @@ func (fb *ssaFuncBuilder) reportUndefinedField(sel *syntax.SelectorExpr, t Type)
 	}
 	if name == "int64" && sel.Sel.Value == "String" {
 	}
-	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 	push(cctx.compileErrors, fb.errPos() | sel.Sel.Value | " undefined (type " | name | " has no field or method " | sel.Sel.Value | ")")
 }
 
@@ -7082,7 +7007,6 @@ func (fb *ssaFuncBuilder) buildSelector(e *syntax.SelectorExpr) (s SSAValue) {
 						if mev != nil {
 							return mev
 						}
-						cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 						push(cctx.compileErrors, fb.errPos() | e.Sel.Value | " is not a method of (" | nm.Value | ")")
 						return nil
 					}
@@ -7132,11 +7056,9 @@ func (fb *ssaFuncBuilder) buildMethodValue(sel *syntax.SelectorExpr, recv SSAVal
 		Prog:      fb.fn.Prog,
 		parent:    fb.fn,
 	}
-	fb.fn.AnonFuncs = mxutil.Ensure(fb.fn.AnonFuncs, 1)
 	push(fb.fn.AnonFuncs, wrapper)
 	recvType := fixedRecv.SSAType()
 	fv := &SSAFreeVar{name: "recv", typ: recvType, parent: wrapper}
-	wrapper.FreeVars = mxutil.Ensure(wrapper.FreeVars, 1)
 	push(wrapper.FreeVars, fv)
 	if wrapperParams != nil {
 		{
@@ -7144,7 +7066,6 @@ func (fb *ssaFuncBuilder) buildMethodValue(sel *syntax.SelectorExpr, recv SSAVal
 		for i := 0; i < wrapperParams.Len(); i++ {
 			v := wrapperParams.At(i)
 			zzq32 = &SSAParameter{name: v.Name, typ: v.Typ, parent: wrapper}
-			wrapper.Params = mxutil.Ensure(wrapper.Params, 1)
 			push(wrapper.Params, zzq32)
 		}
 		}
@@ -7164,15 +7085,13 @@ func (fb *ssaFuncBuilder) buildMethodValue(sel *syntax.SelectorExpr, recv SSAVal
 	call := &SSACall{Call: SSACallCommon{Value: fn, Args: args}}
 	call.typ = retType
 	call.name = "t1"
-	call.setBlock(entry)
-	entry.Instrs = mxutil.Ensure(entry.Instrs, 1)
+	setInstrBlock(call, entry)
 	push(entry.Instrs, call)
 	ret := &SSAReturn{}
 	if retType != nil {
 		ret.Results = []SSAValue{call}
 	}
-	ret.setBlock(entry)
-	entry.Instrs = mxutil.Ensure(entry.Instrs, 1)
+	setInstrBlock(ret, entry)
 	push(entry.Instrs, ret)
 	mc := &SSAMakeClosure{Fn: wrapper, Bindings: []SSAValue{fixedRecv}}
 	mc.typ = wrapperSig
@@ -7209,14 +7128,12 @@ func (fb *ssaFuncBuilder) buildMethodExprValue(sel *syntax.SelectorExpr, recvTyp
 		Prog:      fb.fn.Prog,
 		parent:    fb.fn,
 	}
-	fb.fn.AnonFuncs = mxutil.Ensure(fb.fn.AnonFuncs, 1)
 	push(fb.fn.AnonFuncs, w)
 	params := []SSAValue{:len(vars)}
 	{
 		var zzq33 *SSAParameter
 	for i := 0; i < len(vars); i++ {
 		zzq33 = &SSAParameter{name: vars[i].Name, typ: vars[i].Typ, parent: w}
-		w.Params = mxutil.Ensure(w.Params, 1)
 		push(w.Params, zzq33)
 		params[i] = zzq33
 	}
@@ -7231,15 +7148,13 @@ func (fb *ssaFuncBuilder) buildMethodExprValue(sel *syntax.SelectorExpr, recvTyp
 	call := &SSACall{Call: SSACallCommon{Value: fn, Args: params}}
 	call.typ = retType
 	call.name = "t1"
-	call.setBlock(entry)
-	entry.Instrs = mxutil.Ensure(entry.Instrs, 1)
+	setInstrBlock(call, entry)
 	push(entry.Instrs, call)
 	ret := &SSAReturn{}
 	if retType != nil {
 		ret.Results = []SSAValue{call}
 	}
-	ret.setBlock(entry)
-	entry.Instrs = mxutil.Ensure(entry.Instrs, 1)
+	setInstrBlock(ret, entry)
 	push(entry.Instrs, ret)
 	mc := &SSAMakeClosure{Fn: w}
 	mc.typ = wrapperSig
@@ -7563,12 +7478,10 @@ func extractRecvTParamNames(t syntax.Expr) (names []string) {
 		if le, ok := tt.Index.(*syntax.ListExpr); ok {
 			for _, e := range le.ElemList {
 				if n, ok2 := e.(*syntax.Name); ok2 {
-					names = mxutil.Ensure(names, 1)
 					push(names, n.Value)
 				}
 			}
 		} else if n, ok2 := tt.Index.(*syntax.Name); ok2 {
-			names = mxutil.Ensure(names, 1)
 			push(names, n.Value)
 		}
 	}
@@ -8017,7 +7930,6 @@ func (fb *ssaFuncBuilder) reportNotIndexable(t Type) {
 	if t != nil {
 		name = t.String()
 	}
-	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 	push(cctx.compileErrors, "invalid operation: cannot index " | name)
 }
 
@@ -8164,7 +8076,6 @@ func (fb *ssaFuncBuilder) checkAssertOperand(x SSAValue) (ok bool) {
 	if _, isTP := xt.(*TypeParam); isTP {
 		return true
 	}
-	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 	push(cctx.compileErrors, "invalid type assertion: " | xt.String() | " is not an interface")
 	return false
 }
@@ -8663,7 +8574,6 @@ func (fb *ssaFuncBuilder) buildCompositeLitInto(dst SSAValue, e *syntax.Composit
 	if len(e.ElemList) == 0 {
 		return
 	}
-	cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 	push(cctx.compileErrors, fb.errPos() | "composite literal of non-aggregate type " | typ.String())
 }
 
@@ -8897,7 +8807,6 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *syntax.FuncLit) (s SSAValue) {
 		Prog:      fb.fn.Prog,
 		parent:    fb.fn,
 	}
-	fb.fn.AnonFuncs = mxutil.Ensure(fb.fn.AnonFuncs, 1)
 	push(fb.fn.AnonFuncs, anon)
 
 	ab := newSSAFuncBuilder(anon, fb.info)
@@ -8942,14 +8851,12 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *syntax.FuncLit) (s SSAValue) {
 				// value, and the program died at run time with "indirect call
 				// to null" in a frame unrelated to the capture (smesh's
 				// create-vault UI). Fail at compile time and name it.
-				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 				push(cctx.compileErrors, fb.fn.name | ": closure capture '" | fv.name | "' has no live slot")
 				push(bindings, &SSAConst{typ: NewPointer(fv.typ), val: nil})
 			}
 		} else if pfv, ok := fb.freeVarPtrs[fv.name]; ok {
 			push(bindings, pfv)
 		} else {
-			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 			push(cctx.compileErrors, fb.fn.name | ": closure capture '" | fv.name | "' has no live slot")
 			push(bindings, &SSAConst{typ: NewPointer(fv.typ), val: nil})
 		}
@@ -9009,7 +8916,6 @@ func (fb *ssaFuncBuilder) removeVar(name string) {
 	var matches []Object
 	for o := range fb.vars {
 		if ObjectName(o) == name {
-			matches = mxutil.Ensure(matches, 1)
 			push(matches, o)
 		}
 	}
@@ -9079,8 +8985,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		}
 		extract.typ = NewPointer(elemT)
 		extract.name = fb.nextName()
-		extract.setBlock(fb.currentBlock)
-		fb.currentBlock.Instrs = mxutil.Ensure(fb.currentBlock.Instrs, 1)
+		setInstrBlock(extract, fb.currentBlock)
 		push(fb.currentBlock.Instrs, extract)
 		return extract
 	}
@@ -9108,8 +9013,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		idx.typ = ptrType
 		idx.byteStep = true
 		idx.name = fb.nextName()
-		idx.setBlock(fb.currentBlock)
-		fb.currentBlock.Instrs = mxutil.Ensure(fb.currentBlock.Instrs, 1)
+		setInstrBlock(idx, fb.currentBlock)
 		push(fb.currentBlock.Instrs, idx)
 		return idx
 	}
@@ -9148,8 +9052,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		td := &SSATypeDesc{t: arg.SSAType()}
 		td.typ = Typ[UnsafePointer]
 		td.name = fb.nextName()
-		td.setBlock(fb.currentBlock)
-		fb.currentBlock.Instrs = mxutil.Ensure(fb.currentBlock.Instrs, 1)
+		setInstrBlock(td, fb.currentBlock)
 		push(fb.currentBlock.Instrs, td)
 		return td
 	}
@@ -9352,7 +9255,6 @@ func (fb *ssaFuncBuilder) getOrCreateFreeVar(name string, typ Type) (s SSAValue)
 		typ:    typ,
 		parent: fb.fn,
 	}
-	fb.fn.FreeVars = mxutil.Ensure(fb.fn.FreeVars, 1)
 	push(fb.fn.FreeVars, fv)
 	if fb.freeVarPtrs == nil {
 		fb.freeVarPtrs = map[string]*SSAFreeVar{}
@@ -9386,7 +9288,6 @@ func (fb *ssaFuncBuilder) getOrCreateFreeVar(name string, typ Type) (s SSAValue)
 			break
 		}
 		zzq40 = &SSAFreeVar{name: name, typ: typ, parent: p.fn}
-		p.fn.FreeVars = mxutil.Ensure(p.fn.FreeVars, 1)
 		push(p.fn.FreeVars, zzq40)
 		if p.freeVarPtrs == nil {
 			p.freeVarPtrs = map[string]*SSAFreeVar{}
@@ -10114,7 +10015,6 @@ func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *syntax.SelectorExpr, recv SS
 		// interface; another package cannot refer to it. Legacy reports
 		// "s.seal undefined (cannot refer to unexported method seal)".
 		if !isExportedName(sel.Sel.Value) && ifaceHasMethod(iface, sel.Sel.Value) {
-			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 			push(cctx.compileErrors, fb.errPos() | sel.Sel.Value | " undefined (cannot refer to unexported method " | sel.Sel.Value | ")")
 			return nil, true
 		}
@@ -10199,7 +10099,6 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
 			if !fb.quietTypeErr {
 				// Not a predeclared or user-defined name: int/uint/make/new/
 				// complex64 etc are undefined in Moxie, not restricted.
-				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 				push(cctx.compileErrors, "undefined: " | ev.Value)
 			}
 		}
@@ -10277,7 +10176,6 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
 			if !fb.quietTypeErr {
 				if imp := cctx.universe.LookupByName(x.Value); imp != nil && imp.Scope != nil {
 					if _, isTn := imp.Scope.Lookup(ev.Sel.Value).(*TypeName); isTn {
-						cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 						push(cctx.compileErrors, "undefined: " | x.Value)
 					}
 				}
@@ -10342,7 +10240,6 @@ func (fb *ssaFuncBuilder) resolveInterfaceTypeAST(e *syntax.InterfaceType) (t *T
 		}
 		sig := fb.resolveFuncTypeAST(ft)
 		if sig != nil {
-			methods = mxutil.Ensure(methods, 1)
 			push(methods, NewTCIfaceMethod(f.Name.Value, sig))
 		}
 	}
@@ -10368,13 +10265,11 @@ func (fb *ssaFuncBuilder) resolveStructTypeAST(e *syntax.StructType) (t *TCStruc
 				name = TypeBaseName(typ)
 			}
 		}
-		fields = mxutil.Ensure(fields, 1)
 		push(fields, NewTCField(fb.fn.Pkg.Pkg, name, typ, f.Name == nil))
 		tag := ""
 		if i < len(e.TagList) && e.TagList[i] != nil {
 			tag = TagText(e.TagList[i].Value)
 		}
-		tags = mxutil.Ensure(tags, 1)
 		push(tags, tag)
 	}
 	return NewTCStruct(fields, tags)
@@ -10391,7 +10286,6 @@ func (fb *ssaFuncBuilder) resolveFuncTypeAST(ft *syntax.FuncType) (s *Signature)
 		if p.Name != nil {
 			pname = p.Name.Value
 		}
-		params = mxutil.Ensure(params, 1)
 		push(params, NewTCVar(nil, pname, typ))
 	}
 	var results []*TCVar
@@ -10401,7 +10295,6 @@ func (fb *ssaFuncBuilder) resolveFuncTypeAST(ft *syntax.FuncType) (s *Signature)
 		if r.Name != nil {
 			rname = r.Name.Value
 		}
-		results = mxutil.Ensure(results, 1)
 		push(results, NewTCVar(nil, rname, typ))
 	}
 	var pTuple, rTuple *Tuple
@@ -10614,7 +10507,6 @@ func substTypeIn(t Type, sub map[string]Type) (tv Type) {
 			if nt != f.Typ {
 				changed = true
 			}
-			fields = mxutil.Ensure(fields, 1)
 			push(fields, NewTCField(f.Pkg, f.Name, nt, f.Anonymous))
 		}
 		if changed {
@@ -10683,10 +10575,8 @@ func substTypeIn(t Type, sub map[string]Type) (tv Type) {
 				nt := substTypeIn(p.Typ, sub)
 				if nt != p.Typ {
 					changed = true
-					params = mxutil.Ensure(params, 1)
 					push(params, NewTCVar(nil, p.Name, nt))
 				} else {
-					params = mxutil.Ensure(params, 1)
 					push(params, p)
 				}
 			}
@@ -10698,10 +10588,8 @@ func substTypeIn(t Type, sub map[string]Type) (tv Type) {
 				nt := substTypeIn(r.Typ, sub)
 				if nt != r.Typ {
 					changed = true
-					results = mxutil.Ensure(results, 1)
 					push(results, NewTCVar(nil, r.Name, nt))
 				} else {
-					results = mxutil.Ensure(results, 1)
 					push(results, r)
 				}
 			}
@@ -10986,11 +10874,9 @@ func resolveTypeArgsExpr(indexExpr syntax.Expr, typeSubst map[string]Type, pkgSc
 	}
 	if le, ok := indexExpr.(*syntax.ListExpr); ok {
 		for _, te := range le.ElemList {
-			ts = mxutil.Ensure(ts, 1)
 			push(ts, resolveTypeExprWithSubst(te, typeSubst, pkgScope))
 		}
 	} else {
-		ts = mxutil.Ensure(ts, 1)
 		push(ts, resolveTypeExprWithSubst(indexExpr, typeSubst, pkgScope))
 	}
 	return ts
@@ -11008,7 +10894,6 @@ func resolveSignatureWithSubst(ft *syntax.FuncType, typeSubst map[string]Type, p
 		if p.Name != nil {
 			name = p.Name.Value
 		}
-		params = mxutil.Ensure(params, 1)
 		push(params, NewTCVar(nil, name, typ))
 	}
 	if len(ft.ParamList) > 0 {
@@ -11028,7 +10913,6 @@ func resolveSignatureWithSubst(ft *syntax.FuncType, typeSubst map[string]Type, p
 			if _, ok := r.Type.(*syntax.Name); ok {
 			}
 		}
-		results = mxutil.Ensure(results, 1)
 		push(results, NewTCVar(nil, name, typ))
 	}
 	var paramTuple *Tuple
@@ -11468,7 +11352,6 @@ func (fb *ssaFuncBuilder) declPkgImports(srcPkgPath string) (out []*TCPackage) {
 	}
 	for _, p := range cctx.universe.DirectImportPaths(decl) {
 		if ip := cctx.universe.Registry[p]; ip != nil {
-			out = mxutil.Ensure(out, 1)
 			push(out, ip)
 		}
 	}
@@ -11603,7 +11486,6 @@ func (fb *ssaFuncBuilder) resolveExplicitTypeArgs(indexExpr syntax.Expr, fd *syn
 	var result []Type
 	for _, te := range typeExprs {
 		t := fb.resolveTypeAST(te)
-		result = mxutil.Ensure(result, 1)
 		push(result, t)
 	}
 	if len(result) < len(fd.TParamList) {
@@ -11631,7 +11513,6 @@ func resolveInterfaceFromAST(e *syntax.InterfaceType) (t *TCInterface) {
 		for _, f := range e.MethodList {
 			if f.Name != nil {
 				m := NewTCIfaceMethod(f.Name.Value, nil)
-				methods = mxutil.Ensure(methods, 1)
 				push(methods, m)
 			}
 		}
