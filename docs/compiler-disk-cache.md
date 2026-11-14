@@ -997,6 +997,44 @@ has to win the decision for them; the next measurement is to print the two
 predicates for the pointer being encoded at the first return in `array`'s SSA
 build and see which one says "transient".
 
+### 8.3b11 The divergence: manualArena != fnStack[fnTop]
+
+The measurement 8.3b10 asked for, and it answered outright. A trace of
+`codecEncodeValue`'s kind and arena decision, raised by the compiler around one
+package's SSA build and capped at 200 decisions per package, prints four states:
+`z` manual arena nil, `n` manual arena is not the top frame, `M` the pointer is
+in the manual arena, `F` in the top frame, `S` stable, `x` none of those.
+Outside the fix every one of the 137 decisions was `n`.
+
+So `manualArena` and `fnStack[fnTop]` had DIVERGED, and they cannot by
+construction - `ManualArenaEnter` sets both, `ManualArenaExit` pops both, and
+`FnArenaPush` returns `manualArena` without touching the stack while manual mode
+is on. The mechanism is still unlocated; the fix does not depend on it, because
+the slot is what matters: `ManualArenaEnter` now marks the fn-stack slot it
+pushes in a `DomainRoot.manualFrame` bitmask and `codecInManualFrame` tests a
+pointer against every marked slot.
+
+Two facts made that the right fix rather than a rescue:
+
+- only the `KindPointer` branch ever consulted the manual arena, so a STRUCT or
+  a SLICE living in the phase arena was walked no matter what;
+- the `KindSlice` short-cut is refused during a return when the elements hold
+  pointers, which is right for a dying frame and wrong for a phase frame. The
+  emitter's `[]string` segment list therefore walked in full on every `Ensure`
+  return - O(len) per push, quadratic - which is what killed the third package
+  inside `(*irEmitter).w`.
+
+Effect: 1 package emitted -> 5, RSS flat at ~667 MB instead of
+880 MB -> 2.6 GB -> OOM (`4938ec8a`).
+
+**A dead end worth recording.** Also replacing `codecInManualArena` with
+`codecInManualFrame` at the other three sites - the `KindPointer` alias decision,
+`codecRetStableInner`, and the byte/slice header test - HANGS the build: no
+package finished in 400 s, where the narrower change does five. Those three sites
+are reached with a value whose address is on the stack or in a frame the phase
+does not own, and aliasing there leaves the caller reading a slot that is
+rewritten. The narrower set is the one to keep.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
