@@ -34,13 +34,40 @@
 #   systemctl --user show mxbuild.scope -p MemoryCurrent,MemoryPeak
 # A transient scope keeps its name for a moment after it exits, so a new run
 # destroys the old unit first rather than failing to start.
+#
+# CPUs: the box is pinned to TWO hardware threads with a cpuset. That is the
+# resource boundary, and it is deliberately not a job-count knob - `-j`, the
+# worker pool and TasksMax all describe how the work is scheduled, and the whole
+# point of the box is that it must fit in what it is given. The scheduler is
+# then free to put those two threads wherever it likes on the two CPUs and
+# nothing else may use them.
+#
+# MXBOX_CPUS names the set (systemd cpuset syntax). Default 0-1.
+#
+# The pin is applied TWICE on purpose: AllowedCPUs on the scope sets the cgroup
+# cpuset, and `taskset -c` sets the affinity mask of the process systemd spawns,
+# which every descendant inherits. Measured: AllowedCPUs alone left
+# Cpus_allowed_list at 0-7 for the command running inside the scope, and
+# `taskset -c 0-1` inside it reports 0-1. Both are kept so the cgroup and the
+# process tree agree.
+#
+# This also sizes the compiler's pool without a flag: it asks nproc, and a
+# process pinned to two CPUs answers 2, so its heuristic (nproc-1) selects one
+# worker. The work fits what it is given - which is the point of the box.
+#
+# TasksMax is not set: at 2 even `sh -c 'echo $(ls /proc/self/task)'` fails with
+# "fork: Resource temporarily unavailable" because the limit counts every task,
+# and at 8 LLVM's linker dies with std::system_error. It is not the lever.
 set -u
 MEM=4G
 HIGH=3500M
+CPUS=${MXBOX_CPUS:-0-1}
 systemctl --user stop mxbuild.scope 2>/dev/null
 if [ $# -eq 0 ]; then
 	exec systemd-run --user --scope --quiet --collect --unit=mxbuild \
-		-p MemoryMax=$MEM -p MemoryHigh=$HIGH -p MemorySwapMax=0 --shell
+		-p MemoryMax=$MEM -p MemoryHigh=$HIGH -p MemorySwapMax=0 \
+		-p AllowedCPUs=$CPUS -- taskset -c $CPUS "${SHELL:-/bin/sh}"
 fi
 exec systemd-run --user --scope --quiet --collect --unit=mxbuild \
-	-p MemoryMax=$MEM -p MemoryHigh=$HIGH -p MemorySwapMax=0 -- "$@"
+	-p MemoryMax=$MEM -p MemoryHigh=$HIGH -p MemorySwapMax=0 \
+		-p AllowedCPUs=$CPUS -- taskset -c $CPUS "$@"

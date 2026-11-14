@@ -48,8 +48,22 @@ scripts/moxbox.sh ~/mxc-builds/storewrite /tmp/storewrite-db 5000
 scripts/moxbox.sh go build -o /tmp/mxc-legacy ./legacy
 ```
 
-- It is a transient systemd scope with `MemoryMax=4G`, `MemoryHigh=3500M` and
-  `MemorySwapMax=0`. Swap off is the load-bearing part: with swap the cgroup
+- It is a transient systemd scope with `MemoryMax=4G`, `MemoryHigh=3500M`,
+  `MemorySwapMax=0` and a cpuset of **two hardware threads**. The CPUs are the
+  resource boundary: `AllowedCPUs` sets the cgroup's cpuset and `taskset -c`
+  sets the affinity mask of the process systemd spawns, which every descendant
+  inherits. Both are applied because `AllowedCPUs` alone left
+  `Cpus_allowed_list` at `0-7` for the command inside the scope. The set is
+  `MXBOX_CPUS`, default `0-1`.
+- **The CPU count sizes the work; it is not a scheduler knob.** The compiler
+  asks `nproc` for its worker-pool default, and a process pinned to two CPUs
+  answers `2`, so its `nproc-1` heuristic selects one worker and the build
+  reports `objects: N files, 1 parallel`. That is the whole mechanism - `-j` and
+  `TasksMax` are the wrong levers and were measured as such: `TasksMax=2` makes
+  even `sh -c 'echo $(ls /proc/self/task)'` fail with "fork: Resource temporarily
+  unavailable", `TasksMax=8` kills LLVM's linker with `std::system_error`, and a
+  job flag only changes how the work is scheduled inside whatever is given.
+  Swap off is the load-bearing part: with swap the cgroup
   reclaims to stay under Max, so the run stays inside 4 GB by paging, the fan
   runs all day and nothing fails - the symptom bounded instead of the bug
   caught. With swap off the limit is an immediate OOM kill. High sits just
