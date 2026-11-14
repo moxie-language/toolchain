@@ -1057,6 +1057,24 @@ That is the signature of walking something that the registry accumulates, and it
 is why the sixth package is the one that dies: the walk is now over five
 packages' materialised graphs as well as its own.
 
+And the last population that could be named is ruled out too: instrumenting
+`loadMxhInto` shows all six loads taking the `perkey` path, with mxh blobs of
+308, 366, 444, 856, 916 and 1788 bytes. A per-key graph arena therefore holds a
+couple of kilobytes of materialised graph, which cannot be what a 3.2M-encode
+walk is traversing.
+
+So the volume is inside the package's OWN object graph, reached from the values
+the SSA builder and the emitter return. The one structure that grows while a
+package is being built - and is reachable from every SSA node - is
+`SSAPackage.Members` (via `SSABasicBlock.parent -> SSAFunction.Pkg`) and
+`SSAProgram.packages` (via `SSAFunction.Prog`). A walk that costs O(members) at
+every return is O(n^2) in the package, which is exactly the shape of the measured
+3k / 15k / 16k / 880k / 3.2M: the packages with more and larger functions cost
+disproportionately more. The slot fix aliases a pointer whose ADDRESS is in a
+manual frame; the question for the next pass is why the `Pkg`/`Prog` pointers
+read out of an SSA node are not being aliased by it - `M` fires on 41,919 of
+212,000 decisions during emit and `x` on 170,200, so most of them still are not.
+
 The sixth package therefore dies on a graph that is in neither the phase arena
 nor the root. The remaining candidate population is the mxh-materialised package
 graphs when `mxhPkgKey` returns "" and `loadMxhInto` takes the `loadMxhData`
