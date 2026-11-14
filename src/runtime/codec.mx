@@ -160,30 +160,46 @@ func codecIsStableAddr(p uintptr) (ok bool) {
 	return codecIsStableArenaAddr(p)
 }
 
-// codecInManualArena reports whether p lives in the manual phase arena.
-//
-// ManualArenaEnter pushes that arena onto the fn stack so FnArenaPush and
-// FnArenaPop become no-ops, but it is NOT a frame: it outlives every call made
-// inside the phase and is released only by ManualArenaExit, after the phase's
-// last user. Treating it as the dying top frame copied every object a helper
-// returned, and a copy is not the same object:
-//
-//   - the parser's `t := Unparen(x); if t != x` compared a copy against the
-//     original, so every composite literal of an unparenthesised type was
-//     rejected with "cannot parenthesize type in composite literal" - a
-//     rebuilt compiler could not parse `map[string]bool{}`;
-//   - the encode walked the package's whole type graph at every return that
-//     handed one node out (7.4M seen-set entries for mxregexp, and unbounded
-//     recursion when the graph was cyclic).
-//
-// Byte data is deliberately NOT covered: a returned string or slice whose
-// bytes live in the phase arena is still copied, because text carved out of a
-// source buffer is what escapes a phase into registry keys.
+// codecInManualArena reports whether p lives in the arena `manualArena` names.
 func codecInManualArena(p uintptr) (ok bool) {
 	if domainRoot == nil || manualArena == nil {
 		return false
 	}
 	return codecArenaContains(manualArena, p)
+}
+
+// codecInManualFrame reports whether p lives in any frame that ManualArenaEnter
+// pushed - a MANUAL PHASE arena, which outlives every return made inside the
+// phase because ManualArenaExit releases it and that is not a return. Such an
+// arena is never a dying frame, so a pointer into one must be aliased for every
+// value kind and in every encode mode.
+//
+// This is a property of the SLOT, not of the `manualArena` global. The two can
+// disagree: instrumenting the encode decisions during a package's SSA build
+// printed manualArena != fnStack[fnTop] on 137 of 137 encodes, so pointers into
+// the actual phase arena were classified as dying-frame data and deep-copied.
+// What got copied was the whole SSA program graph (SSABasicBlock.parent ->
+// SSAFunction.Pkg -> SSAPackage.Prog -> the Prog's package map), which is why
+// the first emitted package cost 880 MB where the known-good compiler spent
+// 147 MB, and the second exhausted 4 GB in codecEncodeValue/codecDecodeMapValue.
+//
+// Byte data is deliberately NOT covered by the alias: a returned string or slice
+// whose bytes live in the phase arena is still copied, because text carved out
+// of a source buffer is what escapes a phase into registry keys. Its BACKING
+// array is covered, because no return inside the phase can release an element.
+func codecInManualFrame(p uintptr) (ok bool) {
+	if domainRoot == nil || domainRoot.manualFrame == nil {
+		return false
+	}
+	for i := int32(0); i <= domainRoot.fnTop && i < fnStackMax; i++ {
+		if domainRoot.manualFrame[i>>6]&(1<<(i&63)) == 0 {
+			continue
+		}
+		if codecArenaContains(domainRoot.fnStack[i], p) {
+			return true
+		}
+	}
+	return false
 }
 
 // codecIsStableArenaAddr is the arena-only half of codecIsStableAddr.
@@ -209,6 +225,9 @@ func codecIsStableArenaAddr(p uintptr) (ok bool) {
 	// copy, and every registration shape (exact, subtree, method, host)
 	// answered pattern=[].
 	if codecArenaContainsAddr(rootArenaAddr(), p) {
+		return true
+	}
+	if codecInManualFrame(p) {
 		return true
 	}
 	if codecRetTransient {
@@ -866,6 +885,7 @@ type codecSeenSet struct {
 // stdlib package's type universe actually reaches.
 const codecSeenCap = 1 << 21
 
+
 // codecSeenTab is the reusable encode-side seen table (the same 256-entry
 // capacity the per-call table had; a larger graph still grows it). A seen set is live
 // only for the duration of one encode (or decode), so a fresh 256-pointer
@@ -1056,8 +1076,17 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 		// call's row (`d1 a1 a1`). The element walk is O(len) instead of O(1)
 		// for such slices, which is the trade-off already accepted for the
 		// sovereign store-back.
+		//
+		// A backing array inside a MANUAL PHASE frame is the exception: no
+		// return inside the phase releases it (ManualArenaExit does, and that is
+		// not a return), so its elements cannot die either and the walk has
+		// nothing to relocate. Without this the emitter's own `[]string` segment
+		// list was walked in full on every `Ensure` return - O(len) per push,
+		// quadratic - and the third package of an app build exhausted 3.2 GB
+		// writing IR text.
 		if sl.ptr != nil && codecIsStableAddr(uintptr(unsafe.Pointer(sl.ptr))) &&
-			!(sl.length > 0 && (codecTopOnlyTransient || codecRetTransient) && elemType != nil && sovTypeHasPtrs(elemType)) {
+			!(sl.length > 0 && !codecInManualFrame(uintptr(unsafe.Pointer(sl.ptr))) &&
+				(codecTopOnlyTransient || codecRetTransient) && elemType != nil && sovTypeHasPtrs(elemType)) {
 			codecNoteStable(uintptr(unsafe.Pointer(sl.ptr)))
 			codecWriteVarint(cb, codecTagStableSlice)
 			codecWriteRaw(cb, unsafe.Pointer(&sl), codecStrHdr())

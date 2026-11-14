@@ -50,6 +50,13 @@ type DomainRoot struct {
 	fnTop    int32
 	fnBorrow []uint64 // bit i set when fnStack[i] holds a sovereign borrow
 	sovScratch []uint64 // bit i set when fnStack[i] holds a sovereign scratch (transient)
+	// manualFrame has bit i set when fnStack[i] was pushed by ManualArenaEnter,
+	// so a phase arena is recognisable as a phase arena from the stack itself
+	// rather than through the single `manualArena` global. The two can disagree
+	// (measured: 137 of 137 encodes during a package's SSA build saw
+	// manualArena != fnStack[fnTop]), and when they do, every pointer into the
+	// phase arena was treated as a dying frame and deep-copied.
+	manualFrame []uint64
 	stableArena *Arena // receiver sovereign arena of the current method (if any)
 	stableStack  []*Arena // stack of previous stable arenas for nested sovereign methods
 	stableTop    int32
@@ -317,6 +324,8 @@ func initDomain(capacity uintptr) {
 	dr.fnBorrow = rawSliceU64(p, (fnStackMax+63)/64)
 	p += uintptr((fnStackMax+63)/64) * 8
 	dr.sovScratch = rawSliceU64(p, (fnStackMax+63)/64)
+	p += uintptr((fnStackMax+63)/64) * 8
+	dr.manualFrame = rawSliceU64(p, (fnStackMax+63)/64)
 	p += uintptr((fnStackMax+63)/64) * 8
 	dr.stableStack = rawSliceArena(p, fnStackMax)
 	p += uintptr(fnStackMax) * unsafe.Sizeof(&dr.root)
@@ -3736,6 +3745,7 @@ func SovereignSetArena(a *Arena) {
 	}
 	domainRoot.fnTop = i
 	domainRoot.fnStack[i] = a
+	domainRoot.manualFrame[i>>6] |= 1 << (i & 63)
 	domainRoot.fnBorrow[i>>6] |= 1 << (i & 63)
 }
 
@@ -3751,6 +3761,7 @@ func SovereignRestoreArena(a *Arena) {
 	}
 	domainRoot.fnBorrow[i>>6] &^= 1 << (i & 63)
 	domainRoot.fnStack[i] = nil
+	domainRoot.manualFrame[i>>6] &^= 1 << (i & 63)
 	domainRoot.fnTop = i - 1
 }
 
