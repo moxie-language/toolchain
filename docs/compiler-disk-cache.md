@@ -1288,6 +1288,44 @@ IR emit, and it is not text (fewer than 200k `w()` calls for the whole build,
 one `emitFunction`: RSS after the prologue, after every tenth block, after the
 epilogue, for `parseAtom` alone.
 
+### 8.3b17 The wall moved three times in one pass: 1 -> 8 packages, flat RSS
+
+Three changes, each measured, each moving the wall to the next package.
+
+**The emitter's sovereign arena had no safe point.** `irEmitter` is a
+self-mutating type, so every allocation it makes lands in its sovereign arena and
+only compaction reclaims it - and compaction is drained at a `select`, which a
+compiler never runs. So nothing the emitter allocated was ever reclaimed: RSS
+across the emit phase went 741 -> 1643 -> 2785 MB, ~1.6 MB retained per IR
+instruction, while the package's own maps stayed tiny (226 values, 168
+type-cache entries). Two changes (`ffc9a5ea`): `CompileToIR` drains between
+packages - the safe point `src/web/callback/dispatch.mx` uses on wasm - and
+`emit`/the per-function loop became FREE functions, because a group with a live
+frame is never compacted and, as a METHOD, `emit`'s own frame was live for the
+whole package. That is why the between-package drain alone made RSS flat ACROSS
+packages (347, 348, 353, 353, 356 MB) and still left each package growing within
+itself.
+
+**`pkgMembers()` returned an interface slice.** Every call relocated - and so
+deep-copied and walked - every member, and a member reaches its block, its
+function, and through that the whole package. It is called five times in the emit
+path. Measured as a 28-deep `codecEncodeValue` recursion under
+`mxutil.Ensure__main.SSAMember <- pkgMembers <- emitAllFunctions`. The list is
+built once by `emitIR` into `e.members` and read as a field (`358cfc72`).
+
+Effect: **1 emitted package -> 8** (`array`, `internal/task`, `internal/bytealg`,
+`internal/stringslite`, `math/bits`, `mxregexp`, `mxutil`, `internal/cpu`) with
+`tc-FAIL=0` and RSS **flat at ~357 MB** the whole way. The failure is no longer
+an OOM.
+
+**The wall now.** The ninth package, `math`, dies with a SIGSEGV in
+`mxutil.ExtractQuoted` under `(*ssaPkgBuilder).buildImportSegScopes` inside
+`CreatePackage` - a corrupt string reaching a function that only indexes within
+`len(s)`, so the length or the pointer is garbage. That is an import-segment
+state problem (`mxutil.ConcatImportSegs` / `ResetConcatImportSegs`), not memory
+pressure, and it is the first failure in this whole sequence that is not a
+growth curve.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
