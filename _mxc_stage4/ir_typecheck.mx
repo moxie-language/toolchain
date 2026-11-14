@@ -382,6 +382,7 @@ func compileErrorCount() (n int32) {
 // elimination - avoids parsing/type-checking thousands of unreferenced
 // constants (e.g., syscall error tables).
 func stripUnusedConsts(src []byte) (out []byte) {
+
 	// A const is referenced by any identifier that is not the name its own
 	// declaration introduces, anywhere in the source: a function body, a
 	// package-level var initializer, a type declaration. Scanning only function
@@ -436,7 +437,16 @@ func stripUnusedConsts(src []byte) (out []byte) {
 	// appear somewhere other than their own declaration. Scan for "const " or "const(" patterns.
 	// For simplicity, only strip individual const lines (not grouped).
 	// This handles the bulk of zerrors/zsysnum generated constants.
-	out = []byte{:0:len(src)}
+	// The output is at most len(src) bytes: every copied line is its own length
+	// and every stripped line becomes "//" plus a newline, which is shorter
+	// than any declaration it replaces. So presize to len(src) and write
+	// through a cursor. Building it with Ensure+push per byte allocated and
+	// abandoned a buffer on EVERY byte - measured at 336 MB, 352 MB and 766 MB
+	// of arena for sources of 13 KB, 13 KB and 105 KB, which is exactly the
+	// quadratic the buffer-growth rules warn about, and it is what took the
+	// typecheck of math past the 3 GB ceiling.
+	out = []byte{:len(src)}
+	o := int32(0)
 	i = 0
 	for i < len(src) {
 		// Look for "const " at line start (after optional whitespace/tab).
@@ -467,16 +477,16 @@ func stripUnusedConsts(src []byte) (out []byte) {
 					// and was really elsewhere). Exported consts are kept:
 					// importers may use them (sha256.BlockSize as an array
 					// length).
-					out = mxutil.Ensure(out, 1)
-					push(out, '/')
-					out = mxutil.Ensure(out, 1)
-					push(out, '/')
+					out[o] = '/'
+					o++
+					out[o] = '/'
+					o++
 					for i < len(src) && src[i] != '\n' {
 						i++
 					}
 					if i < len(src) {
-						out = mxutil.Ensure(out, 1)
-						push(out, '\n')
+						out[o] = '\n'
+						o++
 						i++
 					}
 					continue
@@ -485,17 +495,17 @@ func stripUnusedConsts(src []byte) (out []byte) {
 		}
 		// Copy line through.
 		for i < len(src) && src[i] != '\n' {
-			out = mxutil.Ensure(out, 1)
-			push(out, src[i])
+			out[o] = src[i]
+			o++
 			i++
 		}
 		if i < len(src) {
-			out = mxutil.Ensure(out, 1)
-			push(out, '\n')
+			out[o] = '\n'
+			o++
 			i++
 		}
 	}
-	return out
+	return out[:o]
 }
 
 // constLineIsComplete reports whether a single-line "const NAME = value"
@@ -1076,6 +1086,12 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 
 	// Publish the result where the caller reads it, in this frame, so the
 	// package graph never crosses a return.
+	if pkg == nil {
+		mxutil.WriteStr(2, "  tcp-nilpkg "|name|"\n")
+	}
+	if file == nil {
+		mxutil.WriteStr(2, "  tcp-nilfile "|name|"\n")
+	}
 	cctx.tcPkg = pkg
 	cctx.tcFile = file
 	if pkg != nil {
@@ -1485,9 +1501,21 @@ func TypeCheckOnly(src []byte, name string, mxhPath string, pkgDir string) {
 		if mxhPath != "" {
 			writeFile(mxhPath, []byte(mxhData), 0644)
 		}
-		loadMxhInto([]byte(mxhData))
+		// Step 3, under test: the parent does NOT materialise this package's
+		// graph. The text on disk is the whole result; a later package that
+		// needs these exports loads them from that file when it is dispatched.
+		// This is the boundary the walk in docs/compiler-disk-cache.md 8.3
+		// crosses, and nothing graph-shaped should cross it.
+		// loadMxhInto([]byte(mxhData))
 	} else {
 		runtime.ManualArenaExit(arena)
+		mxutil.WriteStr(2, "  tc-FAIL "|name|" perr="|simpleItoa(int32(len(cctx.parseErrors)))|" cerr="|simpleItoa(int32(len(cctx.compileErrors)))|"\n")
+		for i := int32(0); i < int32(len(cctx.parseErrors)) && i < 3; i++ {
+			mxutil.WriteStr(2, "    perr: "|cctx.parseErrors[i]|"\n")
+		}
+		for i := int32(0); i < int32(len(cctx.compileErrors)) && i < 3; i++ {
+			mxutil.WriteStr(2, "    cerr: "|cctx.compileErrors[i]|"\n")
+		}
 	}
 	ScanGenericDecls(src, name)
 	runtime.ArenaFree(arena)
