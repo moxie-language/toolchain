@@ -35,6 +35,41 @@ func LIndexByte(b []byte, c byte) (n int32) {
 	return -1
 }
 
+// LIndexFrom returns the first absolute index at or after `from` of sep in s,
+// or -1. A sub-slice is a COPY in Moxie, so the rewrite loops that called
+// `LIndex(src[i:], ...)` copied the whole remaining source on every iteration.
+// The scans themselves are linear, so this is an efficiency fix, not the pass's
+// quadratic term (measured: 1.847 GB -> 1.832 GB on the `runtime` package).
+func LIndexFrom(s []byte, from int32, sep []byte) (n int32) {
+	n = len(sep)
+	if n == 0 {
+		return from
+	}
+	if from < 0 {
+		from = 0
+	}
+	if from > int32(len(s)) || n > int32(len(s))-from {
+		return -1
+	}
+	c0 := sep[0]
+	for i := from; i <= int32(len(s))-n; i++ {
+		if s[i] != c0 {
+			continue
+		}
+		hit := true
+		for j := int32(1); j < n; j++ {
+			if s[i+j] != sep[j] {
+				hit = false
+				break
+			}
+		}
+		if hit {
+			return i
+		}
+	}
+	return -1
+}
+
 // LIndex returns the first index of sep in s, or -1.
 func LIndex(s, sep []byte) (n int32) {
 	n = len(sep)
@@ -79,13 +114,12 @@ func RewriteSliceMakeLiterals(src []byte) (buf []byte) {
 	chunks := [][]byte{:0:len(src)/2 + 8}
 	i := 0
 	for i < len(src) {
-		start := LIndex(src[i:], []byte("{:"))
+		start := LIndexFrom(src, i, []byte("{:"))
 		if start < 0 {
 			chunks = mxutil.Ensure(chunks, 1)
 			push(chunks, src[i:])
 			break
 		}
-		start = start + i
 		lbrack := findSliceTypeStart(src, start)
 		if lbrack < 0 {
 			chunks = mxutil.Ensure(chunks, 1)
@@ -326,7 +360,7 @@ func RewriteChanMakeLiterals(src []byte) (buf []byte) {
 	started := false
 	i := 0
 	for i < len(src) {
-		idx := LIndex(src[i:], chanKw)
+		idx := LIndexFrom(src, i, chanKw)
 		if idx < 0 {
 			if started {
 				chunks = mxutil.Ensure(chunks, 1)
@@ -334,7 +368,6 @@ func RewriteChanMakeLiterals(src []byte) (buf []byte) {
 			}
 			break
 		}
-		idx = idx + i
 		j := idx + 5
 		for j < len(src) && (src[j] == ' ' || src[j] == '\t') {
 			j++
@@ -509,11 +542,11 @@ func RewriteEdgeDecls(src []byte) (buf []byte) {
 	i := int32(0)
 	last := int32(0)
 	for i < len(src) {
-		k := LIndex(src[i:], []byte("edge["))
+		k := LIndexFrom(src, i, []byte("edge["))
 		if k < 0 {
 			break
 		}
-		e0 := i + k
+		e0 := k
 		// Identifier boundary: not part of a longer identifier.
 		if e0 > 0 && isIdentByteAt(src, e0-1) {
 			i = e0 + 5
