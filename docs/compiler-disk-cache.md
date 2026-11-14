@@ -640,6 +640,36 @@ belongs there: print the concrete `SSAType` at the boxing site that produces the
 interface stored into `TCVar.Typ` / `TypeName.Typ` and compare it with the
 object actually passed.
 
+### 8.3b5 The self-typed variable, fixed and verified
+
+`NewTCVar` was instrumented to compare the data word of its `Type` argument with
+the address of the TCVar it is about to return. It fired on exactly one caller,
+mxutil's `allocSites`: the Type handed in was already pointing at the address the
+new variable was about to occupy, so the variable was typed at itself and the
+codec read its `{Pkg, Name, Typ}` fields as a `Named`'s.
+
+The cause is lifetime, not arithmetic. `ScanGenericDecls` re-parses a generic
+package into `cctx.genericArena`, but it only held that arena as the manual
+phase for the parse; the type objects built immediately afterwards - one
+TCPackage, one object per declaration - were allocated in whatever frame was
+current, from Types the original function also produced. An address in that
+outer frame could be reused for a new object while the graph still named it.
+
+Holding the phase for the whole function fixes it. Verified:
+
+| | before | after |
+|---|---|---|
+| `SELF-TYP` reports in a full run | 1 (`allocSites`) | **0** |
+| `mxutil` type-check | SIGSEGV in the codec | **`tc-out` at rss=50 MB** |
+| next failure | - | `math`: 3.2 GB live at 54 MB resident |
+
+That last row is the next wall and it is the one `docs/compiler-disk-cache.md`
+8.3c calls the encode storm: `codecWriteRaw`/`codecWriteVarint` copying the type
+graph at returns until the arena ceiling stops it. It is a separate defect from
+the one fixed here, and the tree already carries its plan (do not let the graph
+cross a return; the published `tcPkg`/`tcFile` path plus Step 2's domain
+boundary).
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
