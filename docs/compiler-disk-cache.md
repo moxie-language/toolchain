@@ -844,6 +844,85 @@ sub-slice is a copy* or *because Ensure+push runs per element*. Two are fixed
 for `X[a:]` inside a loop body - or `Ensure` immediately before `push` in a
 per-byte loop - would find them all at once.
 
+### 8.3b8 The slice pass, and two dangling universes under it
+
+The 1.8 GB in `RewriteSliceMakeLiterals` was not a scan and not a sub-slice
+copy. It was the segment list: every `chunks = mxutil.Ensure(chunks, 1)` RETURNS
+a pointer-containing slice across a function boundary, so the return protocol
+walks and copies every segment accumulated so far - once per push. Quadratic by
+construction, and invisible in the source because the growth is in the return
+protocol rather than in the buffer. Measured on `runtime` (519 KB): 32 MB ->
+1.92 GB inside that one function; `io` (32 KB): 1.5 MB -> 35 MB.
+
+Rewritten as two passes and one buffer (`c319641c`): pass one totals the exact
+output length from a scan that allocates nothing, pass two writes through a
+cursor. `runtime` now costs 32.7 MB -> 35.3 MB, and every package's rewritten
+source has the same length as the old pass produced (`runtime`: 519626 bytes
+either way). All 34 packages of the tiny app now reach `tc-out` with 0 parse
+errors, where the run previously died inside `runtime`.
+
+The instrument that found it is worth repeating: a per-phase arena mark
+(`ArenaRootUsage()` plus `ArenaUsed(CurrentArena())`) around each rewrite, then
+per-match counters inside the pass. The clue that the segments were the term,
+not the scan, was that the byte count of the output was linear while the arena
+was not.
+
+**Two dangling references surfaced the moment typecheck stopped dying.** Both
+are the same mistake: a graph that outlives the package it was built for,
+allocated in an ordinary fn arena.
+
+- `SetUniverseGlobals` installs `Edge`/`Sender`/`Receiver` after `InitUniverse`
+  returns, and installed them in an fn arena. `installChannelOwnershipTypes` is
+  a free function with its own frame, so the graph died at the next return while
+  the universe scope kept pointing at it. `emit`'s universe walk then read
+  `Edge`'s `Obj` out of memory a cache-path string had since been written into -
+  the "lengths" it read back were the ASCII of `/cache/` and `mxc-` - and the
+  compiler segfaulted in `SafeUnderlying` on the first package to reach IR emit.
+- `cctx.scannedGeneric` records which packages have been scanned, so it outlives
+  every package, and it was created in `ScanGenericDecls`' own frame. The next
+  package's write ran `hashmapSet` against freed buckets.
+
+Both fixed with `ManualArenaEnter(RootArena())`, not `SetCurrentArena`:
+`FnArenaPush` ignores the current arena and pushes a fresh frame, so manual mode
+is the only mechanism that keeps an allocation in the root (`722960b6`).
+
+**How to recognise this class.** A pointer that outlives its frame reads back as
+text: the arena it came from was released and something else - usually a path, a
+source file or an error string - was written into the same pages. Print the
+lengths, not the strings: `len(x.Name)` is safe on a dangling header, `x.Name` in
+a concatenation allocates the garbage length and dies with "implausible size".
+
+### 8.3b9 The current wall: a 20-deep codec recursion on a recursive struct
+
+With the three above fixed, the tiny app's build type-checks all 34 packages,
+emits IR for `array`, and stops in `internal/task`, whose `Task` is
+self-referential (`Next *Task`):
+
+    func (t *Task) DataUint32() (r0 uint32) { return *(*uint32)(unsafe.Pointer(&t.Data)) }
+    func (t *Task) SetDataUint32(val uint32) { *(*uint32)(unsafe.Pointer(&t.Data)) = val }
+
+Those two are the whole cost: RSS goes 880 MB -> 2.6 GB building them and the
+next 64 MB arena segment fails to map. A core dump from the abort gives
+
+    sysMapDie <- arenaOpenSegment <- arenaBump <- alloc <- mxutil.Ensure__Pointer
+      <- codecEncodeValue x20 <- buildExpr <- buildArgs <- buildCall
+      <- buildExpr <- buildArgs <- buildCall <- buildExpr <- buildStore
+      <- buildAssign <- buildStmt <- buildBlock <- buildBody <- buildFunc
+
+so the SSA builder's conversion chain is finite and the explosion is the
+return-value relocation of the innermost value: `codecEncodeValue` recursing 20
+levels on a self-referential type. `SafeUnderlying`'s `Named` walk is also
+capped at 20, which is the number to look at first - the cycle is not being cut
+by the seen set, or the walk is creating a fresh `*Pointer`/`*Named` per level so
+no pointer can ever repeat.
+
+`tests/`-style reproducer, 20 lines and no dependency on `internal/task`:
+
+    type Task struct { Next *Task; Ptr unsafe.Pointer; Data uint64 }
+
+with the two conversion functions above. The known-good `mxc-stage4` compiles it;
+every rebuilt compiler dies on it. `~/task-probe/main.mx` is that reproducer.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
