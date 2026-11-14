@@ -1027,6 +1027,24 @@ Two facts made that the right fix rather than a rescue:
 Effect: 1 package emitted -> 5, RSS flat at ~667 MB instead of
 880 MB -> 2.6 GB -> OOM (`4938ec8a`).
 
+**Two more measured dead ends, both reverted.** `SovereignRegStable(arena)`
+around the SSA + emit phase in `CompileToIR` - the documented "a frame registers
+its arena as stable" mechanism, independent of the manual-arena bookkeeping - is
+exactly as good as the slot fix and no better: same five packages, same 669 MB.
+That is the useful negative result, because it says the slot fix already covers
+what the stable registration would cover, and the sixth package's cost is
+somewhere neither mechanism reaches. And exempting a phase frame from the
+`retPointeeDies` refusal in the `KindPointer` alias decision is also identical
+in reach and slower (2m36 against 2m for the same five packages).
+
+The sixth package therefore dies on a graph that is in neither the phase arena
+nor the root. The remaining candidate population is the mxh-materialised package
+graphs when `mxhPkgKey` returns "" and `loadMxhInto` takes the `loadMxhData`
+path instead of `loadMxhDataIn(data, graphArenaFor(key))` - a per-key arena is
+neither root nor a manual frame, so the codec walks it. `mxhg` in the mem line
+counts only a handful of loads, so this is cheap to check by instrumenting which
+of the two paths each load takes.
+
 **A dead end worth recording.** Also replacing `codecInManualArena` with
 `codecInManualFrame` at the other three sites - the `KindPointer` alias decision,
 `codecRetStableInner`, and the byte/slice header test - HANGS the build: no
