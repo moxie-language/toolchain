@@ -1205,6 +1205,42 @@ accessors should stop returning an interface that the return protocol relocates.
 A third option, narrower, is to not record codec-decode allocations in the rec
 table, which needs an argument about compaction safety.
 
+### 8.3b15 What the decode is copying, and the size-as-key trap
+
+A kind trace in `codecDecodeValue`, raised by the emitter for the package it is
+emitting, gives the population of one app build:
+
+| kind | decodes |
+|---|---|
+| interface | 413,863 |
+| pointer | 399,647 |
+| struct | 199,631 |
+| bytes | 143,978 |
+| slice | 115,382 |
+| map | 5,564 |
+
+and the shape inside a single package's emit is
+
+    llll...ipipipipbipipbbbbllll ipipipb llb ll ipipip b...
+
+which reads as a SLICE of INTERFACES each holding a POINTER, with byte strings
+underneath - `[]SSAInstruction` and `[]SSAValue`. So what is being copied at every
+crossing is the function body's instruction list, reached from an interface
+return, and every `p` in that trace is an allocation.
+
+The aliasing rule should cut this at the first phase-arena pointer and does not,
+and the size-as-key rule on the seen set is the prime suspect: a back-reference
+is honoured only when `entrySize >= pointeeSize`, so one address reached through
+two differently-typed pointers (an `SSAValue` interface seen as `*SSAOperation`,
+then as `*SSABasicBlock`) is registered once with the smaller size and then
+refuses the reference, so the walk re-expands instead of closing. That is exactly
+the "a pointer to a SMALLER object at a registered address must stay a
+back-reference" rule working against a recursive graph.
+
+Next: instrument `codecSeenLookup` to count refusals (a hit on address with a
+too-small entry) versus misses during one package's emit. A high refusal count
+confirms it.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
