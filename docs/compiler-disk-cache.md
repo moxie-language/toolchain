@@ -1326,6 +1326,47 @@ state problem (`mxutil.ConcatImportSegs` / `ResetConcatImportSegs`), not memory
 pressure, and it is the first failure in this whole sequence that is not a
 growth curve.
 
+### 8.3b18 The sovereign rule is in place; the drain point was the hole
+
+The lifecycle rule - a sovereign type ends with the arena that created it, and
+if it is returned it is bequeathed to the receiver's arena and relocated there -
+IS implemented: `arenaReleaseGroups` -> `sovInvalidateArena` releases every group
+whose `ctxArena` is the arena being freed (`codecSovereignFree`), the bequest is
+`sovRekeyRelocated`/`sovRebaseFrameRoots` on relocation, and the invariant is
+checked loudly on every exit path ("arena: exit orphaned sovereign groups").
+
+What was missing is not the lifecycle but a DRAIN POINT. Compaction is drained at
+a select, and a compiler never runs one, so the emitter's arena was never
+compacted - 8.3b17. That is now fixed at two safe points that follow the rule
+exactly: between packages, where the previous package's arena is gone and
+nothing it created can still be borrowed, and between functions, from a free
+function so no frame of the emitter is live. Effect: 1 -> 8 emitted packages at
+flat ~357 MB.
+
+**An explicit unconditional compaction was built and REVERTED, because it found a
+real bug.** `SovCompactAll()` queued every group in the receiver map and drained
+with no ratchet or budget. It faults immediately in
+
+    sovWalkValue1 <- sovMarkReceiverRoots <- sovFullMark <- SovDrainCompactions
+      <- SovCompactAll <- CompileToIR
+
+- i.e. it visits groups whose RECEIVER outlived the arena that created it. The
+pending-queue path never sees them because nothing queued them, and
+`sovInvalidateArena` refused to release them at arena free
+(`RecordSovReleaseRefused`, `arena_scope.mx:336`). So there are groups in the
+map whose creating arena was released without them, which is the rule broken -
+and an unconditional sweep is exactly the instrument that surfaces it.
+
+The lead is the accounting: `a.sovGroups` is maintained separately from
+`len(a.sovGroupList)` at `sovGroups++` (alloc.mx:1781), `--`/`++` on rekey
+(3108-3112), `--` on release (3617), and tested together with the list length at
+`arenaReleaseGroups`. A drift between the counter and the list is what makes
+`sovInvalidateArena` return early (`a.sovGroups <= 0`) with the list still
+populated, and the group then keeps a dead receiver.
+
+Until that is fixed, the explicit full compaction cannot be used: it segfaults.
+The budgeted drain remains the working mechanism.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
