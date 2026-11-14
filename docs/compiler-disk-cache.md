@@ -1367,6 +1367,41 @@ populated, and the group then keeps a dead receiver.
 Until that is fixed, the explicit full compaction cannot be used: it segfaults.
 The budgeted drain remains the working mechanism.
 
+### 8.3b19 The import-segment list is corrupt on the WRITE side
+
+The ninth package (`math`) dies with a SIGSEGV in `mxutil.ExtractQuoted`, a
+function that only indexes within `len(s)`. Two probes fixed the location.
+
+A dump of `target.segs` taken INSIDE mxutil - straight from the global, before
+any return relocates it - prints one char per spec, `.` for a plausible length
+and `X` for garbage. The FIRST package of the app already reports
+`D segs:XX|`. So the corruption is not the return protocol and not the reader: the
+concatenated-import list is stored corrupt, and `ExtractQuoted` then reads past
+the end of a string whose length word is garbage (`1043149363` in the panic
+dump).
+
+That list is filled by the source-concatenation step and consumed by
+`buildImportSegScopes` during `CreatePackage`, in a different phase - and with a
+warm cache the compile phase does not re-run the concat at all, so the reader
+consumes what the TYPECHECK phase wrote. Two candidate fixes were tried and both
+made the build fail EARLIER (ci-free 8 -> 0), so both are reverted:
+
+- copying the spec strings into the root arena at append time with
+  `rootCopyString`;
+- the same with `unsafe.String` over the root allocation, to rule out
+  `string(b)` re-allocating into the current arena.
+
+`rootCopyStr` is worth knowing about here: despite the name it allocates in the
+CURRENT arena (`b := []byte{:len(v)}; copy(b, v)`), so it cannot make anything
+survive the phase. `rootCopyString(a *Arena, s)` is the one that takes an arena.
+
+Since neither copy changed the `X`, the strings are already bad at append time,
+or the reader is looking at a list from a phase that no longer matches the
+package. The next probe is therefore at the SOURCE: print `.`/`X` per spec inside
+the concat loop, before the append, and again in `AppendConcatImportSeg` itself.
+That decides between "the parse handed over dead strings" and "the global's list
+is stale for this package".
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
