@@ -1534,6 +1534,17 @@ func TypeCheckOnly(src []byte, name string, mxhPath string, pkgDir string) {
 
 
 func CompileToIR(src []byte, name string, triple string, pkgDir string) (s string) {
+	// The emitter is a SELF-MUTATING type, so every allocation it makes lands in
+	// its sovereign arena, and only compaction reclaims it. Compaction is drained
+	// at a select, which a compiler never runs - so the previous package's emitter
+	// arena was never reclaimed at all and each package added its share on top.
+	// Measured: RSS across the emit phase climbed 741 -> 1643 -> 2785 MB with
+	// ~1.6 MB retained per IR instruction, and the sixth package exhausted 4 GB.
+	//
+	// This is the safe point, the same one the wasm callback entry uses: the
+	// previous package's emitter has no live frame here, so its group can be
+	// compacted. A small budget per package, so a compaction cannot stall a build.
+	runtime.SovDrainCompactions(8)
 	cctx.compileTargetTriple = triple
 	cctx.curPkgPath = name
 	for i := int32(0); i < cctx.constErrN; i++ {
@@ -1655,7 +1666,9 @@ func CompileToIR(src []byte, name string, triple string, pkgDir string) (s strin
 			mxutil.WriteStr(2, "IR FILE CREATE FAILED: " | ferr.Error() | "\n")
 		}
 	}
-	ir := emitter.emit()
+	ir := emitIR(emitter)
+	// This package's emitter frames are gone; reclaim what it left behind.
+	runtime.SovDrainCompactions(8)
 	if emitter.outFile != nil {
 		emitter.outFile.Close()
 		emitter.outFile = nil
