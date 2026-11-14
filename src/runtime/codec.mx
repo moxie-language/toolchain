@@ -787,10 +787,24 @@ func retKindHasPtrs(tp uintptr, depth int32) (ok bool) {
 // and decode pair, on every call that returns a pointer-containing value -
 // which for the compiler is every call, inside a per-frame arena that never
 // reclaims it. Growth past 256 bytes still allocates, as before.
-var codecBufScratch [256]byte
+// It is a SLICE that keeps its grown capacity, and it lives in the ROOT arena
+// so that capacity survives every phase.
+//
+// It used to be `var codecBufScratch [256]byte` reset with `codecBufScratch[:0]`,
+// and that is a COPY in Moxie: the header handed to the encode had capacity 0,
+// so the buffer allocated 256 bytes on entry and doubled from there, on EVERY
+// call that returns a pointer-containing value, in an arena that does not
+// reclaim until the package ends. Measured on an app build: 29.1M encode
+// entries across 2.2M return relocations, ~1.5 KB of arena each, 3.2 GB live.
+// The reuse this variable was documented to provide had never happened.
+var codecBufScratch []byte
 
 func codecBufInit(cb *CodecBuf) {
-	cb.data = codecBufScratch[:0]
+	if cap(codecBufScratch) < 1024 {
+		p := ArenaAlloc(RootArena(), 1024)
+		codecBufScratch = resize(unsafe.Slice((*byte)(p), 1024), 0)
+	}
+	cb.data = codecBufScratch
 	cb.pos = 0
 	codecEscapePtr = false
 }
@@ -805,11 +819,15 @@ func codecEnsure(data []byte, n int32) (r0 []byte) {
 		return data
 	}
 	need := (len(data) + n) * 2
-	if need < 256 {
-		need = 256
+	if need < 1024 {
+		need = 1024
 	}
-	nb := []byte{:need}
+	// Root-allocated and ADOPTED, so the doubling happens a handful of times
+	// over a build instead of once per return.
+	p := ArenaAlloc(RootArena(), uintptr(need))
+	nb := unsafe.Slice((*byte)(p), need)
 	copy(nb, data)
+	codecBufScratch = resize(nb, 0)
 	r0 = resize(nb, len(data))
 	return r0
 }
@@ -983,6 +1001,7 @@ func codecEncodeValue(cb *CodecBuf, ss *codecSeenSet, ptr unsafe.Pointer, typ *R
 	if typ == nil {
 		runtimePanic("codecEncodeValue nil typ")
 	}
+	codecEncodeCalls++
 	badPtr := ptr == nil || uintptr(ptr) < codecBadPtrFloor()
 	k := typ.Kind()
 	if badPtr && k != KindStruct {
@@ -2011,8 +2030,19 @@ func codecSetTopOnlyTransient(b bool) {
 }
 
 // codecSetRetTransient sets the return-value encode transient mode.
+// codecEncodeCalls and codecRetCount are the compiler's per-phase attribution
+// counters: how many encode entries, and over how many returns.
+var codecEncodeCalls int64
+var codecRetCount int64
+
+// CodecCounts reports encode entries and return relocations.
+func CodecCounts() (enc, ret int64) { return codecEncodeCalls, codecRetCount }
+
 func codecSetRetTransient(b bool) {
 	codecRetTransient = b
+	if b {
+		codecRetCount++
+	}
 }
 
 
