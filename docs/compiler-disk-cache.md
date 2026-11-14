@@ -1402,6 +1402,83 @@ the concat loop, before the append, and again in `AppendConcatImportSeg` itself.
 That decides between "the parse handed over dead strings" and "the global's list
 is stale for this package".
 
+### 8.3b20 `math` was the package graph being encoded on every accessor return
+
+The ninth package did not hang in the hashmap. Markers inside the member builder
+put the stall at `e.pkg.Members[k]` (272 keys; the range, the sort and lookups
+0..16 completed, the next never returned), and gdb on the core showed the
+process 40 frames deep in `codecSeenLookup <- codecEncodeValue`, not in
+`hashmapGet` at all: the map read was fine, the RETURN of the member builder was
+encoding every member's graph (member -> block -> function -> package -> the
+member map). Every wall after that was the same shape, and each was measured
+before it was changed.
+
+1. **The member slice never crosses a function boundary.** `buildMembers(e)` is
+   a FREE function (so its allocation lands in the compile arena the emitter
+   reads from - as a method it went to the sovereign arena and was dangling by
+   the time `emitAllFunctions` walked it, SIGSEGV in `main[emitAllFunctions]`)
+   and it fills `e.members` in sorted key order. `pkgMembers()` is gone and its
+   five call sites read the field. `sortedMemberKeys` is the only return left:
+   strings, a few bytes each, reaching nothing. `math` then built its 272
+   members instantly.
+2. **`instrOperands` returns nothing.** It returned `[]SSAValue`, so every
+   instruction with operands re-encoded the package: 3.2 GB live at
+   `sovAddRec <- alloc <- codecDecodeValue <- instrOperands <- emitFunction`.
+   It now leaves the operands in `e.operandBuf` (already the scratch field) and
+   the two callers iterate the field. The `*SSAPhi` case is copied in rather than
+   aliased, because the buffer is grown in place.
+3. **`InstrBlock()`/`InstrParent()` are deleted from `SSAInstruction`.** A
+   read-only accessor returning a graph node costs a whole-package encode per
+   call. The six call sites use `e.currentEmitBlock`, which `emitBlock` already
+   maintains - `emitJump`, `emitIf` and `emitPhi` were each asking for the block
+   they were being emitted from.
+4. **The runtime half was tried and is reverted.** `ManualArenaEnter` never
+   marked its fn-stack slot, so `codecInManualFrame` - the predicate that makes
+   the codec ALIAS a pointer into a manual phase arena instead of copying it -
+   answered false for every phase, and every return inside a phase deep-copied
+   what it touched (both the alloc.mx and the codec.mx comment already claimed
+   the slot was marked). Marking it made `math` complete and dropped the encode
+   count from 23M to 5.5M, and then the alias dangled: the next run died in
+   `errors` with `alloc: implausible size 1216690128 arena=140060234366976` from
+   `concatLineToFile <- remapOneLine <- remapErrorLines`, i.e. a source-line
+   string aliased out of a phase arena that had already been released - exactly
+   the failure 8.3c recorded for the same idea. The phase arena IS freed at
+   `ManualArenaExit`, so every value that crosses a phase boundary needs a copy;
+   the fix has to be at the STORE side (which globals keep phase data), not at
+   the codec's stability question. Both alloc.mx hunks are reverted.
+
+Result: `math` completes, and in the first run `errors` and `unicode/utf8`
+followed it and the build stopped in `strconv` at the compiler's own 3 GB
+ceiling - the three source fixes alone, with the runtime untouched. That result
+is NOT reproducible: a second run of the SAME binary stopped in `errors`
+instead, with a spurious SSA-build compile error whose remap then died at
+`alloc: implausible size 8317679511831650432` in
+`sliceConcat <- remapOneLine <- remapErrorLines`. So the next blocker is not a
+wall but a nondeterminism, and it lives where 8.3b19 left it: the multi-file
+concat / import-segment list. `errors` is the first package with three files
+(errors.mx, join.mx, wrap.mx); every package before it is single-file. The
+probe 8.3b19 asked for - `.`/`X` per spec inside the concat loop, before the
+append, and again in `AppendConcatImportSeg` - is the next step, and it should
+be taken on a package with more than one file. `SovDomainReport` (measured with the
+runtime hunk in place, so the shape is right and the absolute numbers are a
+floor) for `math`: net mapped 342 MB at ci-tc, 1.36 GB after 16 functions,
+glive 78 MB against gcap 373 MB, back to 191 MB at ci-free - the peak is inside
+one package and it is released at `ManualArenaExit`.
+
+Next wall, with numbers: the peak is per PACKAGE because a manual phase makes
+`FnArenaPush` return the phase arena, so nothing is recycled until the phase
+exits. `strconv` alone climbs past 3.8 GB RSS (memory.high 66,358 hits, wchan
+`__mem_cgroup_handle_over_high`) and dies at the compiler's own 3 GB ceiling.
+The step after this one is a per-function nested phase arena, with the retained
+stores audited first - `e.globalTypes`, `e.globalDeclTypes` and `e.extDecls`
+hold string headers built in the per-function arena, so freeing it without
+copying those would dangle.
+
+The cheap win after that: `codecRetStableInner`'s `KindSlice` branch answers
+"not stable" for any slice whose element type holds pointers, which forces the
+slow path (encode+decode of stable headers) even though the encoder's own slice
+shortcut would alias the same backing. Aligning the two is the next measurement.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.

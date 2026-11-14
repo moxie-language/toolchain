@@ -765,7 +765,7 @@ func (e *irEmitter) resolveAllNamedTypes() {
 // inside one package's emit.
 func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 	fnArena := runtime.ArenaNew(8 * 1024 * 1024)
-	for _, member := range e.pkgMembers() {
+	for _, member := range e.members {
 		if m, ok := member.(*SSAFunction); ok {
 			checkUseAfterFree(m)
 			checkParamMutation(m)
@@ -812,9 +812,8 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 // allocated was ever reclaimable - measured as ~1.6 MB retained per IR
 // instruction and 2.9 GB inside one package.
 func emitIR(e *irEmitter) (s string) {
-	// Built once, here, where its relocation costs one walk per package instead
-	// of one per call. Read afterwards as e.members.
-	e.members = buildPkgMembers(e)
+	// Built once, in place. Nothing returns the member slice: see buildMembers.
+	buildMembers(e)
 	dl := e.dataLayout()
 	if dl != "" {
 		e.w("target datalayout = \"")
@@ -828,7 +827,7 @@ func emitIR(e *irEmitter) (s string) {
 	e.resolveAllNamedTypes()
 
 	e.pendTypeDescs = map[string]Type{}
-	for _, m := range e.pkgMembers() {
+	for _, m := range e.members {
 		fn, ok := m.(*SSAFunction)
 		if ok && fn.Blocks != nil && fn.Signature != nil {
 			if fn.Signature.Results != nil {
@@ -906,8 +905,7 @@ func emitIR(e *irEmitter) (s string) {
 
 	e.globalTypes = map[string]string{}
 	e.globalDeclTypes = map[string]string{}
-	sortedM := e.pkgMembers()
-	for _, member := range sortedM {
+	for _, member := range e.members {
 		fn, ok := member.(*SSAFunction)
 		if !ok { continue }
 		for _, b := range fn.Blocks {
@@ -1053,7 +1051,7 @@ func emitIR(e *irEmitter) (s string) {
 	}
 
 	e.flush()
-	for _, member := range e.pkgMembers() {
+	for _, member := range e.members {
 		switch m := member.(type) {
 		case *SSAGlobal:
 			if m.name != "_" {
@@ -1066,7 +1064,7 @@ func emitIR(e *irEmitter) (s string) {
 	// Deep copy state lives in compileArena, survives per-function resets.
 	// Pre-collect symbols that will get `define` (functions with bodies).
 	// Done in compile arena so the slice survives fn arena resets.
-	for _, member := range e.pkgMembers() {
+	for _, member := range e.members {
 		if f, ok := member.(*SSAFunction); ok && f.Blocks != nil {
 			defSym := e.funcSymbol(f)
 			if len(defSym) > 0 && defSym[0] == '@' {
@@ -1336,37 +1334,63 @@ func (e *irEmitter) mergeAccumulators() {
 
 }
 
-// pkgMembers returns the package's members sorted by name. They are built ONCE
-// by emitIR into e.members and read from there: a `func() []SSAMember` returning
-// an interface slice relocates - and therefore deep-copies and walks - every
-// member at every call, and a member reaches its block, its function and through
-// that the whole package. Measured: the seventh package died in
-// mxutil.Ensure__main.SSAMember <- pkgMembers <- emitAllFunctions with a 28-deep
-// codecEncodeValue recursion.
-func (e *irEmitter) pkgMembers() (ss []SSAMember) {
-	return e.members
+// Members never cross a function boundary. `[]SSAMember` is a slice of
+// interfaces, so RETURNING it makes the return protocol codec-encode the value
+// graph - every member reaches its block, its instructions and its types, and
+// that is the whole package. Measured: a member accessor returning e.members
+// cost one full package encode per call, five calls per package, 28-deep
+// codecEncodeValue; and growing the slice through mxutil.Ensure paid the same
+// walk at every doubling. That walk is what stalled `math` (272 members) inside
+// the member builder: the emitter sat in codecSeenLookup <- codecEncodeValue
+// for minutes per call even though the map lookups themselves were instant.
+//
+// So the member slice lives in the receiver, is filled by a function that
+// returns nothing, and is read as a field. A field read copies a 16-byte
+// interface header and reaches nothing.
+//
+// It is a FREE function for the allocation's sake: a method of the emitter
+// borrows the sovereign arena, so the slice would be allocated there and was
+// dangling by the time emitAllFunctions walked it (SIGSEGV in
+// main[emitAllFunctions]). As a free function the allocation lands in the
+// compile arena it is called from, which is where every other emitter
+// accumulator written by emitIR lives.
+func buildMembers(e *irEmitter) {
+	e.members = nil
+	keys := sortedMemberKeys(e)
+	n := int32(0)
+	for _, k := range keys {
+		if e.pkg.Members[k] != nil {
+			n++
+		}
+	}
+	e.members = []SSAMember{:n}
+	j := int32(0)
+	for _, k := range keys {
+		m := e.pkg.Members[k]
+		if m != nil {
+			e.members[j] = m
+			j++
+		}
+	}
 }
 
-func buildPkgMembers(e *irEmitter) (ss []SSAMember) {
-	var keys []string
+// sortedMemberKeys returns the package's member names in lexicographic order so
+// emission does not depend on hash order. A free function, so the key list's
+// growth garbage dies with its frame; the []string return is deep-copied by the
+// return protocol, but a name is a few bytes and reaches nothing.
+func sortedMemberKeys(e *irEmitter) (keys []string) {
+	keys = []string{:int32(len(e.pkg.Members))}
+	n := int32(0)
 	for k := range e.pkg.Members {
-		keys = mxutil.Ensure(keys, 1)
-		push(keys, k)
+		keys[n] = k
+		n++
 	}
-	for i := 1; i < len(keys); i++ {
+	for i := int32(1); i < n; i++ {
 		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
 			keys[j], keys[j-1] = keys[j-1], keys[j]
 		}
 	}
-	var members []SSAMember
-	for _, k := range keys {
-		m := e.pkg.Members[k]
-		if m != nil {
-			members = mxutil.Ensure(members, 1)
-			push(members, m)
-		}
-	}
-	return members
+	return keys
 }
 
 func (e *irEmitter) emitGlobal(g *SSAGlobal) {
@@ -1835,8 +1859,8 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 	hoistAllocs := map[SSAValue]bool{}
 	for _, b := range f.Blocks {
 		for _, instr := range b.Instrs {
-			refs := e.instrOperands(instr)
-			for _, ref := range refs {
+			e.instrOperands(instr)
+			for _, ref := range e.operandBuf {
 				if ab, ok := e.allocBlock[ref]; ok && ab != 0 && ab != b.Index {
 					hoistAllocs[ref] = true
 				}
@@ -1871,8 +1895,8 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 	e.usedAs = map[string]bool{}
 	for _, b := range f.Blocks {
 		for _, instr := range b.Instrs {
-			refs := e.instrOperands(instr)
-			for _, ref := range refs {
+			e.instrOperands(instr)
+			for _, ref := range e.operandBuf {
 				if ref != nil {
 					e.usedAs[ref.SSAName()] = true
 				}
@@ -2459,7 +2483,7 @@ func (e *irEmitter) emitStore(s *SSAStore) {
 func (e *irEmitter) emitPhi(p *SSAPhi) {
 	reg := e.regName(p)
 	typ := e.llvmType(p.SSAType())
-	blk := p.InstrBlock()
+	blk := e.currentEmitBlock
 	if blk == nil {
 		return
 	}
@@ -2831,7 +2855,7 @@ func (e *irEmitter) emitReturn(r *SSAReturn) {
 }
 
 func (e *irEmitter) emitJump(j *SSAJump) {
-	blk := j.InstrBlock()
+	blk := e.currentEmitBlock
 	if blk == nil {
 		return
 	}
@@ -2844,7 +2868,7 @@ func (e *irEmitter) emitJump(j *SSAJump) {
 }
 
 func (e *irEmitter) emitIf(i *SSAIf) {
-	blk := i.InstrBlock()
+	blk := e.currentEmitBlock
 	if i.Cond == nil {
 		if len(blk.Succs) >= 2 {
 			e.w("  br label ")
@@ -4079,7 +4103,14 @@ func (e *irEmitter) constOperand(c *SSAConst) (s string) {
 	return "zeroinitializer"
 }
 
-func (e *irEmitter) instrOperands(instr SSAInstruction) (ss []SSAValue) {
+// instrOperands leaves the instruction's operands in e.operandBuf and returns
+// NOTHING. Returning the slice was a whole-package deep copy per instruction:
+// the elements are SSAValue interfaces, so the return protocol encoded every
+// operand's graph (block -> function -> package -> the member map) and decoded
+// a copy of it into the caller's arena. Measured: 3.2 GB live inside `math`'s
+// emit, all of it in codecDecodeValue <- instrOperands, with the allocations
+// recorded one by one in the emitter's sovereign arena (sovAddRec).
+func (e *irEmitter) instrOperands(instr SSAInstruction) {
 	// Reuse scratch slice to avoid per-instruction allocation.
 	e.operandBuf = resize(e.operandBuf, 0)
 	switch i := instr.(type) {
@@ -4112,7 +4143,13 @@ func (e *irEmitter) instrOperands(instr SSAInstruction) (ss []SSAValue) {
 		e.operandBuf = mxutil.Ensure(e.operandBuf, 1)
 		push(e.operandBuf, i.Tuple)
 	case *SSAPhi:
-		return i.Edges
+		// Copied into the scratch buffer rather than aliased: e.operandBuf is
+		// grown in place below, and handing it the phi's own backing would let
+		// the next push write through to the phi.
+		for _, ed := range i.Edges {
+			e.operandBuf = mxutil.Ensure(e.operandBuf, 1)
+			push(e.operandBuf, ed)
+		}
 	case *SSAReturn:
 		for _, r := range i.Results {
 			e.operandBuf = mxutil.Ensure(e.operandBuf, 1)
@@ -4160,7 +4197,5 @@ func (e *irEmitter) instrOperands(instr SSAInstruction) (ss []SSAValue) {
 		if i.Cap != nil { e.operandBuf = mxutil.Ensure(e.operandBuf, 1); push(e.operandBuf, i.Cap) }
 		if i.Data != nil { e.operandBuf = mxutil.Ensure(e.operandBuf, 1); push(e.operandBuf, i.Data) }
 	}
-	return e.operandBuf
-	return nil
 }
 
