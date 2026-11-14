@@ -715,6 +715,40 @@ so instrument `mxutil.Ensure`'s callers or the arena in question
 (`arenaOpenSegment` printing the arena, its `alloc` and `nregions`) rather than
 trusting the printed chain.
 
+### 8.3b6 The math runaway is manual-mode accumulation
+
+Segment instrumentation settled it. Every segment opener printed its arena,
+scope, sovereign/root flags and running total; ONE arena accounts for the whole
+3 GB:
+
+```
+SEG arena=0x...8cf9000 scope=0 sov=0 root=0 size=105392 nreg=44 alloc=2760999568 r0cap=5271552
+SEG arena=0x...8cf9000 ...        nreg=45 alloc=2828098016
+...                                nreg=49 alloc=3096314880
+```
+
+`r0cap = 5271552` is `len(math's source) * 50`, i.e. the per-package typecheck
+arena (`arenaSize := uintptr(len(src)) * 50` in `TypeCheckOnly`). It reached
+3.09 GB over 49 segments.
+
+And the allocation is not one big thing:
+
+- `stripUnusedConsts` is called **once** for math (instrumented: a single
+  `len=105385`), and its output is presized to the input.
+- Large raw codec writes are bounded: 20 writes above 40 KB in the whole run,
+  the largest 6,814,688 bytes (an `.mxh` read), summing to about 7.9 MB.
+
+So the 3 GB is tens of thousands of small allocations, each retained. The
+reason is the mode the typecheck runs in: `TypeCheckOnly` enters the arena with
+`ManualArenaEnter`, and in manual mode `FnArenaPush` returns the phase arena
+instead of pushing a frame, so **no scratch is reclaimed for the whole
+package**. Peak becomes the sum of every allocation the typecheck ever makes.
+The codec's return decoding must target that arena (it is where the AST and
+type objects live), so manual mode is load-bearing for correctness - which is
+what makes this a design boundary rather than a bug to patch: object memory
+needs the phase arena, scratch needs frames, and the two must be separable.
+That is the same boundary 8.3c's plan draws.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
