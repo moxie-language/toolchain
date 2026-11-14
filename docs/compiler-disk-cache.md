@@ -801,6 +801,49 @@ change to make before attempting the wall again. `returnAddress(1)` inside the
 allocator is NOT usable for this - it faults, because the allocator's frame does
 not match what the intrinsic expects; measured twice.
 
+### 8.3b7 The wall moves: math is fixed, the rewrite passes are not
+
+Per-phase arena marks (a `tcMark(tag, arena)` after each rewrite) turned the
+"somewhere in the typecheck" wall into a list, and the first entry was a real
+bug with a clean fix:
+
+| phase (105 KB package) | arena |
+|---|---|
+| `enter` | 0 MB |
+| after `stripUnusedConsts` | 336-801 MB |
+| after the five source rewrites | +3 MB |
+| after the parse | +4 MB |
+| after the eight declaration passes | +0 MB |
+
+So the const stripper was allocating hundreds of megabytes and the typecheck
+itself almost nothing. It built its output with `out = mxutil.Ensure(out, 1);
+push(out, c)` **per byte** while the buffer was already presized to `len(src)`;
+rewritten as a cursor write (`e73f3efe`) the typecheck passed `math` and `moxie`
+for the first time and stopped at `runtime`.
+
+The same instrument then pointed at `RewriteSliceMakeLiterals`: 31 MB -> 1829 MB
+for the `runtime` package's ~500 KB source. Inside that function:
+
+- `LIndex(src[i:], pattern)` copied the remaining source per iteration - fixed
+  with an offset scan (`bb479835`), worth only 15 MB, so it was not the term.
+- The interior of each literal was taken as a slice and trimmed by further
+  slices. Rewritten with index arithmetic: no change.
+- `findSliceTypeStart` scanning back to the file start and `findMatchingBrace`
+  forward to the block end, per match. Bounded to 8 KB: no change.
+- A reversed range (`src[i:lbrack]` where the bracket precedes `i`) suspected of
+  producing an enormous length: guarded, no change.
+
+All four are reverted except the offset scan, which is worth keeping on its own
+terms. The 1.8 GB is still inside that pass and the next step is a per-iteration
+arena delta inside it, not another guess.
+
+**The pattern behind all of this** is worth stating because it is the fastest way
+to find the rest: this tree has several loops that are quadratic *because a
+sub-slice is a copy* or *because Ensure+push runs per element*. Two are fixed
+(cursor write, offset scan), a third is measured but not yet located, and a grep
+for `X[a:]` inside a loop body - or `Ensure` immediately before `push` in a
+per-byte loop - would find them all at once.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
