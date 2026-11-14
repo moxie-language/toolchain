@@ -779,6 +779,19 @@ sizes are 16 and 32 bytes, which is a two-word and a four-word allocation, so
 instrument `alloc` to record the *calling* function (the emitter can pass a
 site id) or bisect by disabling one typecheck sub-pass at a time.
 
+Two more candidates are now closed by measurement, and both were worth the
+build:
+
+- **The parser is not looping.** `operand` was instrumented with a per-parse
+  call counter that reports at 100k, 1M and 4M: it never printed, so a 105 KB
+  source does not enter `operand` a hundred thousand times. The parser frames in
+  the stack sample are noise from an unwinder with no CFI.
+- **The seen-set re-growth is not the accumulator.** `codecSeenInit` reset the
+  table to the 256-entry static array every encode, so each encode re-grew it
+  from 256 entries to the graph's size and abandoned every growth buffer. A
+  process-wide backing for the table changed the total by 0.6% (3.258 GB vs
+  3.253 GB). Reverted - it is a real inefficiency, but not this one.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
