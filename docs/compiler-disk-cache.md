@@ -792,6 +792,15 @@ build:
   process-wide backing for the table changed the total by 0.6% (3.258 GB vs
   3.253 GB). Reverted - it is a real inefficiency, but not this one.
 
+The reliable next instrument is stated here so it is not re-invented:
+`runtime.alloc` takes `(size, layout, td)` and every emitter call site passes
+`ptr null` for `td`, so an allocation carries no identity at all. Giving the
+emitted calls a **site id** (an i32 literal, or the type descriptor the emitter
+already knows) makes the tiny allocations name themselves, and that is the
+change to make before attempting the wall again. `returnAddress(1)` inside the
+allocator is NOT usable for this - it faults, because the allocator's frame does
+not match what the intrinsic expects; measured twice.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
