@@ -1526,7 +1526,12 @@ at `line:80` of the concatenated source, deterministically. Its registry holds
 18 packages there (14 when `-a` was still skipping), so the fuller package set
 is what exposes it: a name resolves to a type the checker cannot see, and the
 interface in the message (`Error` AND `String`) is one no `errors` source
-declares.
+declares. The message comes from `checkIfaceAssignments`, which judges a
+RECORDED argument assignment whose `V` is the invalid type - so the verdict is
+inconclusive and must not produce a second error, and `missing method Error` on
+an invalid type is nonsense. It also reports `line:80` with no file, because
+`remapErrorLines` resolved the position to a source-map entry with an empty
+file name. Both are the next probe.
 
 ### 8.3c What the codec cannot do, measured
 
