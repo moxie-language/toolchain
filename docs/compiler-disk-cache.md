@@ -1254,6 +1254,40 @@ alias decision itself: count, per encode, how many `KindPointer` values take the
 the walk is entering through a struct or a slice header that carries no arena
 pointer at all.
 
+### 8.3b16 The seen tables were copies too, and the alias ratio settles it
+
+Two counters on the pointer alias decision in `codecEncodeValue` -
+`codecTagStable` (address preserved) versus `codecTagPtr` (pointee deep-copied) -
+give the ratio per package, and it is decisive:
+
+| package | aliased | copied |
+|---|---|---|
+| array | 9,990,711 | 4,412 |
+| internal/task | 9,994,379 | 5,109 |
+| internal/bytealg | 10,038,651 | 163,576 |
+| internal/stringslite | 10,062,990 | 250,697 |
+| math/bits | 10,271,749 | 505,089 |
+
+So aliasing WORKS - 10.2M aliased against 505k copied - and 10.2M is the number
+to look at instead. Every one of those is `codecSeenAdd` plus a table growth,
+and both seen tables were `[256]unsafe.Pointer` reset with `[:0]`: a COPY, so
+capacity 0 at every call and a fresh table grown from scratch, ten million times
+over, in an arena that reclaims only at package end. That is the same defect as
+the encode buffer in `9fc0eb33`, sitting in the two variables next to it, and it
+is why the comment claiming "the same 256-entry capacity" was false.
+
+Both tables are now slices that keep their grown capacity, adopted back by
+`codecSeenGrow`/`codecDecodeSeenGrow`, which allocate in the ROOT arena so the
+capacity survives every phase. RSS after the fifth emitted package:
+**577 MB -> 352 MB** (`22347b8b`). The wall is unmoved.
+
+What that leaves for the sixth package: it still adds ~2.9 GB during `mxregexp`'s
+IR emit, and it is not text (fewer than 200k `w()` calls for the whole build,
+`segs=0` at every function start) and not the per-function maps (226 values,
+168 type-cache entries for the expensive function). The next instrument is inside
+one `emitFunction`: RSS after the prologue, after every tenth block, after the
+epilogue, for `parseAtom` alone.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
