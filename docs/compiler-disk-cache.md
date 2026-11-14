@@ -670,6 +670,24 @@ the one fixed here, and the tree already carries its plan (do not let the graph
 cross a return; the published `tcPkg`/`tcFile` path plus Step 2's domain
 boundary).
 
+The wall is not a legitimate appetite. Raising the in-process ceiling from 3 GB
+to 3.4 GB moved the stop from `live 3252834304` to `live 3588509696` - it does
+not plateau at 3.2 GB, it keeps going, so `math` is in an unbounded allocation
+loop and the ceiling is only what stops it first. The stack is the same every
+time:
+
+```
+mxutil.Ensure[byte] <- alloc <- arenaBump <- arenaOpenSegment
+                    <- codecWriteRaw <- codecWriteVarint <- codecRetStableInner
+```
+
+That is the encode storm exactly as 8.3c describes it: a decode produces a copy,
+the copy has an address the encoder's seen set has never seen, so the next
+descent encodes the copy, and the walk grows instead of terminating. Confirmed
+by the one control that matters: with `math` reached, `mxutil` and
+`internal/cpu` now complete (they never did before the phase fix), so the storm
+is the *next* defect, not a consequence of the one just fixed.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
