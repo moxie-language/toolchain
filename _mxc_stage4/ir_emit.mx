@@ -14,6 +14,7 @@ type emitKV struct{ k, v string }
 type emitKVI struct{ k string; v int32 }
 
 type irEmitter struct {
+	members    []SSAMember // the package's members, built once by emitIR
 	segs       []string // accumulated segments; joined in flush()
 	buf        []byte   // assembled output (only during flush/return)
 	outFile    *os.File // streaming output; nil = accumulate in buf
@@ -811,6 +812,9 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 // allocated was ever reclaimable - measured as ~1.6 MB retained per IR
 // instruction and 2.9 GB inside one package.
 func emitIR(e *irEmitter) (s string) {
+	// Built once, here, where its relocation costs one walk per package instead
+	// of one per call. Read afterwards as e.members.
+	e.members = buildPkgMembers(e)
 	dl := e.dataLayout()
 	if dl != "" {
 		e.w("target datalayout = \"")
@@ -1332,7 +1336,18 @@ func (e *irEmitter) mergeAccumulators() {
 
 }
 
+// pkgMembers returns the package's members sorted by name. They are built ONCE
+// by emitIR into e.members and read from there: a `func() []SSAMember` returning
+// an interface slice relocates - and therefore deep-copies and walks - every
+// member at every call, and a member reaches its block, its function and through
+// that the whole package. Measured: the seventh package died in
+// mxutil.Ensure__main.SSAMember <- pkgMembers <- emitAllFunctions with a 28-deep
+// codecEncodeValue recursion.
 func (e *irEmitter) pkgMembers() (ss []SSAMember) {
+	return e.members
+}
+
+func buildPkgMembers(e *irEmitter) (ss []SSAMember) {
 	var keys []string
 	for k := range e.pkg.Members {
 		keys = mxutil.Ensure(keys, 1)
