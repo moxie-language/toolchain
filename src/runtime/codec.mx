@@ -904,17 +904,44 @@ type codecSeenSet struct {
 const codecSeenCap = 1 << 21
 
 
-// codecSeenTab is the reusable encode-side seen table (the same 256-entry
-// capacity the per-call table had; a larger graph still grows it). A seen set is live
-// only for the duration of one encode (or decode), so a fresh 256-pointer
-// table per call is pure waste - and it is 2 KiB the per-frame arena never
-// reclaims. The compiler runs the codec on every call that returns a pointer,
-// inside a per-package arena, so that waste was 3.8 GB of a ~5 GB peak.
-var codecSeenTab [256]unsafe.Pointer
+
+// codecSeenTab is the reusable encode-side seen table: a slice that KEEPS its
+// grown capacity, adopted back here by codecSeenGrow. A seen set is live only
+// for the duration of one encode (or decode), so a fresh table per call is pure
+// waste - and the compiler runs the codec on every call that returns a pointer
+// inside a per-package arena, so the waste was measured in gigabytes.
+//
+// It used to be `var codecSeenTab [256]unsafe.Pointer` reset with
+// `codecSeenTab[:0]`, and that is a COPY in Moxie: capacity 0 at every call, so
+// every encode grew a table from scratch. Measured on an app build: 10.2M
+// aliased pointers against 505k copied, i.e. ten million table growths. With the
+// table genuinely reused, RSS after the fifth emitted package fell from 577 MB
+// to 355 MB.
+var codecSeenTab []unsafe.Pointer
 
 func codecSeenInit(ss *codecSeenSet) {
-	ss.ptrs = codecSeenTab[:0]
+	ss.ptrs = resize(codecSeenTab, 0)
 	ss.count = 0
+}
+
+// codecSeenGrow returns cur with room for n more entries, doubling and ADOPTING
+// the new backing in the ROOT arena so the capacity survives every phase. The
+// adoption is what makes the table reusable at all: `codecSeenTab[:0]` is a COPY
+// in Moxie, so the "reusable 256-entry table" this code was documented to keep
+// had capacity 0 at every call and every encode grew one from scratch. Measured
+// on an app build with the buffer fix in place: 10.2M aliased pointers against
+// 505k copied, so the tables were being grown 10 million times over.
+func codecSeenGrow(cur []unsafe.Pointer, n int32) (r []unsafe.Pointer) {
+	need := (len(cur) + n) * 2
+	if need < 512 {
+		need = 512
+	}
+	p := ArenaAlloc(RootArena(), uintptr(need)*unsafe.Sizeof(unsafe.Pointer(nil)))
+	nb := unsafe.Slice((*unsafe.Pointer)(p), need)
+	copy(nb, cur)
+	codecSeenTab = resize(nb, 0)
+	r = resize(nb, len(cur))
+	return r
 }
 
 // Seen entries are (address, encoded object size) PAIRS stored back to back in
@@ -948,7 +975,9 @@ func codecSeenLookup(ss *codecSeenSet, p unsafe.Pointer, sz uintptr) int32 {
 
 func codecSeenAdd(ss *codecSeenSet, p unsafe.Pointer, sz uintptr) int32 {
 	if ss.count >= codecSeenCap { return -1 }
-	ss.ptrs = mxutil.Ensure(ss.ptrs, 2)
+	if len(ss.ptrs)+2 > cap(ss.ptrs) {
+		ss.ptrs = codecSeenGrow(ss.ptrs, 2)
+	}
 	ss.ptrs = push(ss.ptrs, p, unsafe.Pointer(sz))
 	n := ss.count
 	ss.count++
@@ -970,16 +999,32 @@ type codecDecodeSeen struct {
 }
 
 // codecDecodeSeenTab is the reusable decode-side seen table.
-var codecDecodeSeenTab [256]unsafe.Pointer
+var codecDecodeSeenTab []unsafe.Pointer
 
 func codecDecodeSeenInit(ds *codecDecodeSeen) {
-	ds.ptrs = codecDecodeSeenTab[:0]
+	ds.ptrs = resize(codecDecodeSeenTab, 0)
 	ds.count = 0
+}
+
+// codecDecodeSeenGrow is codecSeenGrow for the decode table, with its own pool.
+func codecDecodeSeenGrow(cur []unsafe.Pointer, n int32) (r []unsafe.Pointer) {
+	need := (len(cur) + n) * 2
+	if need < 512 {
+		need = 512
+	}
+	p := ArenaAlloc(RootArena(), uintptr(need)*unsafe.Sizeof(unsafe.Pointer(nil)))
+	nb := unsafe.Slice((*unsafe.Pointer)(p), need)
+	copy(nb, cur)
+	codecDecodeSeenTab = resize(nb, 0)
+	r = resize(nb, len(cur))
+	return r
 }
 
 func codecDecodeSeenAdd(ds *codecDecodeSeen, p unsafe.Pointer) int32 {
 	if ds.count >= codecSeenCap { return -1 }
-	ds.ptrs = mxutil.Ensure(ds.ptrs, 1)
+	if len(ds.ptrs)+1 > cap(ds.ptrs) {
+		ds.ptrs = codecDecodeSeenGrow(ds.ptrs, 1)
+	}
 	ds.ptrs = push(ds.ptrs, p)
 	n := ds.count
 	ds.count++
