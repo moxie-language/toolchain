@@ -1037,6 +1037,26 @@ somewhere neither mechanism reaches. And exempting a phase frame from the
 `retPointeeDies` refusal in the `KindPointer` alias decision is also identical
 in reach and slower (2m36 against 2m for the same five packages).
 
+**The measurement that names the shape.** Counting `codecEncodeValue` entries
+and printing the running total in every `mem` line gives the per-phase volume
+for the tiny app's build:
+
+| point | encode calls |
+|---|---|
+| before `ci-pre array` (the whole typecheck pre-pass) | **23,612,691** |
+| `ci-free array` / `ci-free internal/task` | 23,620,176 / 23,639,258 |
+| `ci-free internal/bytealg` | 23,680,993 |
+| `ci-free internal/stringslite` | 26,182,002 |
+| `ci-free math/bits` | 26,806,160 |
+| `ci-pre mxregexp` | 29,292,024 |
+
+The emit-phase cost per package is 3k, 15k, 16k, **880k**, **3.2M** - it grows
+superlinearly with the number of packages already loaded, not with the package
+being emitted (`math/bits` is 25 KB and costs 3.2M encodes; `array` costs 3k).
+That is the signature of walking something that the registry accumulates, and it
+is why the sixth package is the one that dies: the walk is now over five
+packages' materialised graphs as well as its own.
+
 The sixth package therefore dies on a graph that is in neither the phase arena
 nor the root. The remaining candidate population is the mxh-materialised package
 graphs when `mxhPkgKey` returns "" and `loadMxhInto` takes the `loadMxhData`
