@@ -137,7 +137,7 @@ You cannot tune what you have not measured, and you cannot measure what is not s
 
 ## 3. Intra-Domain Patterns
 
-Within a single domain there is one thread. Channels and `select` are the event dispatch system - an unbuffered send jumps execution directly to the waiting `select` case; a buffered send queues for the next iteration. This means intra-domain "actors" are really event handlers sharing one event loop, and the patterns below are about organizing that loop.
+Within a single domain there is one thread. Channels and `select` are the event dispatch system - a channel is a mailbox with the depth its declaration gives it, so a send to `chan T{}` (one slot) completes immediately and the second send parks until the receiver takes the first, while `chan T{:N}` queues N before the sender parks. There is no unbuffered channel: one thread could never rendezvous with itself. This means intra-domain "actors" are really event handlers sharing one event loop, and the patterns below are about organizing that loop.
 
 ### 3.1 The actor loop
 

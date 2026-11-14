@@ -27,7 +27,7 @@ whole-link typecheck: every package typed into the registry, conversion
     │
     ▼
 per-package compile (dependency order): typecheck/SSA, then IR emit
-    ├── function arenas, relocation, receiver store-back
+    ├── function arenas, codec return relocation, receiver store-back
     ├── channel/select lowering and frame budgets (cap tags)
     ├── interface dispatch arms (type-ID switch)
     └── restriction checking
@@ -95,13 +95,13 @@ through the domain breaker and the ring's liveness bits, not `waitpid`.
 
 - **Within a domain**: single-threaded, no races possible. No mutexes needed. Channels are the synchronization primitive.
 - **Between domains**: contractual isolation in one address space. No pointer is handed across; values are copied (or codec-relocated) through the shared rings, and a channel handle is the only shared capability (lemma L15).
-- **Allocation**: bump-pointer arena per domain. `alloc()` bumps within the current arena. No GC, no free lists, no individual free. See [ownership.md](ownership.md) for the ownership model and lemma L19 for why this is the only allocation model the axioms admit.
+- **Allocation**: bump-pointer arena per domain. `alloc()` bumps within the current arena. No GC, no free lists, no individual free. See [memory.md](memory.md) for the ownership model and lemma L19 for why this is the only allocation model the axioms admit.
 - **Per-function ownership**: the compiler emits FnArenaPush/Pop around each function. Return values are relocated into the caller's arena before the function's arena is released.
 - **Domain exit**: the domain's arenas are released when its thread ends; the process address space is not shared with another process to unmap.
 
 ## Compiler Type Database
 
-The compiler keeps a per-build type-resolution database (`docs/type-db.md`).
+The compiler keeps a per-build type-resolution database; it is described in the appendix of [compiler.md](compiler.md).
 Facts are keyed nominally (package + declaration name); the structural hash is
 a secondary index only. Six indexes answer the questions the build needs: type
 to methods (sorted), package to interface contributions, (package, name),

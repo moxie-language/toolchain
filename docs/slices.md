@@ -236,7 +236,7 @@ copies the whole unread remainder on every iteration. The cursor path is
 | `bufio` | `Reader`, `Writer`, `Scanner` | `Reader` is the front-consuming stream reader (`r`/`w` cursor, `fill`/compaction, `ReadSlice`/`ReadLine`/`ReadBytes` copy the segment); `Writer.Write`/`WriteString` now consume their input with an offset; `AvailableBuffer` is removed |
 | `slices` | `Equal`, `Compare`, `Index`, `Contains`, `Insert`, `Delete`, `Replace`, `Compact`, `Reverse`, `Clone`, `Grow`, `Clip`, `Concat`, `Repeat`, `Sort*`, `BinarySearch*`, `Min`/`Max` | the generic Go-shaped API, minus the iterator functions (disabled); `Insert`/`Delete`/`Replace`/`Concat` return new slices (copies); `Reverse`/`Compact` work in place through indexes |
 | `sort` | `Sort(Interface)`, `Search`, `Find`, `SearchInts`, `SearchFloat64s`, `SearchStrings`, `Reverse` | interface-based; closures do not capture, so comparators take their data through parameters or a sovereign receiver |
-| `mxutil` | `Ensure`, `Reserve`, `GrowCap`, `CopyFrom`, `CopyAt`, `CopyRange`, plus string helpers (`SplitLines`, `JoinStrings`, `TrimSpace`, ...) | the growth helpers that keep doubling garbage in a dying frame; `CopyRange` is the offset-aware copy the cursor idiom needs |
+| `mxutil` | `CopyFrom`, `CopyAt`, `CopyRange`, plus string helpers (`SplitLines`, `JoinStrings`, `TrimSpace`, `Ensure`/`Reserve` as legacy) | `CopyRange` is the offset-aware copy the cursor idiom needs. `Ensure`/`Reserve` are legacy Go-era shims being deleted: `push` grows by itself, and a helper that RETURNS a pointer-bearing slice is deep-copied by the return protocol on every call |
 | `encoding/binary` | `Read`, `Uvarint`, `UvarintFrom`, `Varint`, `PutUvarint`, ... | the `*From` variants are the cursor convention for parsers |
 | `strconv`, `fmt` | `AppendInt`/`AppendFloat`/`FormatInt`/`FormatFloat`, `fmt.Sprintf`/`Fprintf` | the `Append*` family writes into a caller slice; `fmt` uses `...Stringer` variadics, not slices of interfaces |
 | `encoding/*`, `crypto/*`, `hash/*`, `compress/*` | most codecs take `[]byte` and return `[]byte` or write into a caller slice | the copy model shows up as "caller provides the destination" APIs |
@@ -354,15 +354,20 @@ capability is already here.
   compaction drain and `idleTrimPages` (root arena, then active frame arena);
 - `src/bufio/bufio.mx`, `src/bytes/buffer.mx`, `src/bytes/reader.mx` — the
   three reader shapes, and the offset-consuming writer;
-- `src/mxutil/mxutil.mx` — `Ensure`/`Reserve`/`GrowCap`,
-  `CopyFrom`/`CopyAt`/`CopyRange`;
+- `src/mxutil/mxutil.mx` — `CopyFrom`/`CopyAt`/`CopyRange`, plus the legacy
+  `Ensure`/`Reserve` growth helpers that are being deleted;
 - `src/bytes/iter_wasm.mx`, `src/slices/iter_wasm.mx` — the disabled iterator
   layer and its reason.
 
-## 10. Planned: compaction of long-lived arenas (sovereign, main, spawn)
+## 10. Compaction of long-lived arenas (sovereign, main, spawn)
 
-Status: design, not implemented. The prerequisite - per-frame pointer maps - does
-not exist yet. This section is the specification to build against, and it
+Status: **partly implemented.** Sovereign compaction is live: `sovAddRec` records
+every allocation in a group's data arena with its type descriptor,
+`SovDrainCompactions` is called at safe points (per emitted function and per block
+in the compiler, and by `chanSelect`), and `SovCompactAll` exists as the
+unconditional sweep. What is still design is compaction of the **main** and
+**spawn** arenas, whose prerequisite - per-frame pointer maps - does not exist
+yet. This section is the specification to build against, and it
 separates the two areas the problem really has: **the data** (bytes in the
 arena) and **the metadata** (what is where, what is live, and who points at it).
 
@@ -640,9 +645,11 @@ ordering** - not where the bytes came from. Two rules follow:
    that invents its own test splits the count, and a count that splits is not a
    count.
 
-`mxutil.Ensure`, `Reserve` and `GrowCap` all call `Growable` and panic with
-"linkdata slice: cap is foreign (copy it first)". `push`/`pop`/`resize` check the
-raw word in the builtins for the same reason.
+`push`/`pop`/`resize` check the raw capacity word in the builtins and panic with
+"linkdata slice: cap is foreign (copy it first)". The legacy `mxutil.Ensure` and
+`Reserve` call `Growable` for the same reason, but they are not the growth path
+and are being removed: `push` grows, for any number of elements including a
+spread.
 
 ### The three gaps before systems work is real
 

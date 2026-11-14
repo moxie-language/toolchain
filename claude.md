@@ -190,7 +190,7 @@ property with an MMU and paid for it with PIDs, pdeathsig, waitpid, a reaper and
 a class of stray processes; the capability boundary is the contract that
 actually matters.
 
-per-function arena stack. compiler emits FnArenaPush() at function entry, relocates return values and receiver writes into caller's arena via three-pass mark-compact (RelocInit/RelocMark/RelocForward/RelocCompact/RelocFixupAll), then FnArenaPop + ArenaRelease at function exit. no escape analysis, no scope chains, no individual free. all reclamation is bulk: arena release per function return (pooled), munmap per domain exit. there is no free() builtin. DomainRoot holds fnStack[512]*Arena with fnTop index.
+per-function arena stack. compiler emits FnArenaPush() at function entry, encodes the return values and receiver store-backs in the callee frame with the codec, calls FnArenaPopFree, and decodes them into the caller's arena. no escape analysis, no scope chains, no individual free. all reclamation is bulk: arena release per function return (pooled), munmap per domain exit. there is no free() builtin. DomainRoot holds fnStack[512]*Arena with fnTop index. docs/memory.md is the record.
 
 No global heap allocator, no startup bump allocator, no growHeap. Every allocation goes through FnArenaPush or the root arena's ArenaAlloc. domainRoot MUST be initialized before any allocation - there is no fallback path. The root arena is mmap'd once in initDomain; further regions are added via ArenaAlloc when a region fills. NEVER use a "heap" or "startup allocator" that bypasses the arena system.
 
@@ -307,16 +307,17 @@ Consequences:
 - Function values still exist and can be passed/called, but a function value carries only its code pointer, never an environment.
 - `spawn` already refuses to transit closure captures; the same rule applies everywhere, not just across spawn boundaries.
 
-## Arena Relocation Rules (Stage4 correct, Legacy must match)
+## Return Relocation Rules (Stage4 correct, Legacy must match)
 
-- Every function that returns pointer-containing types gets FnArenaPush at entry and full three-pass relocation at exit.
-- Runtime and unsafe packages are exempt (they implement the arena system).
-- Mark pass: RelocInit then RelocMark for each reachable pointer root from return values.
-- Forward pass: FnArenaPop then RelocForward (reclaims fn arena position for next callee's push).
-- Compact+Fixup pass: RelocCompact then RelocFixupAll, then ArenaRelease.
+The live protocol is **encode in the callee, pop, decode in the caller**
+(`src/runtime/codec.mx`, `emitRetWithCodec` in `_mxc_stage4/ir_deepcopy.mx`).
+
+- Every function that returns pointer-containing types gets FnArenaPush at entry; at exit its named results and receiver store-backs are encoded, `FnArenaPopFree` releases the frame, and the caller decodes into its own arena with pointers rewritten.
+- `codecRetStable` is the fast path: a single result whose pointers are already stable is returned as-is. It handles pointer, bytes, slice, struct and interface results.
+- A pointer into a MANUAL PHASE arena is stable, because no return inside the phase releases it. It must still not be stored past `ManualArenaExit`.
+- The `Reloc*` functions in `src/runtime/relocate.mx` are **not emitted by either compiler** - `RelocInit` has no caller. They remain as a description of the ownership model, not as the protocol. A plan that says "preserve the three-pass mark/compact" is preserving something that is not running.
 - Hashmap operations respect m.owner arena (hashmap arena ownership fix ed83d882) - bucket data stays in the owner arena even after grow/overflow, so hashmap access is safe across arena boundaries.
-- Per-type fixup functions (linkonce_odr) handle struct field pointer relocation without generating fixup IR inline in every caller.
-- NO exceptions in the legacy compiler - it must generate LLVM IR functionally identical to what stage4 emits for the Reloc* lifecycle. Legacy must not use SetCurrentArena, ArenaFree, ArenaRestore, ArenaMark, arenaCopySliceIfLocal, or any other non-Reloc* mechanism.
+- NO exceptions in the legacy compiler - it must generate LLVM IR functionally identical to what stage4 emits for the return protocol. Legacy must not use SetCurrentArena, ArenaFree, ArenaRestore, ArenaMark, arenaCopySliceIfLocal, or any other non-codec mechanism.
 
 ## Reporting Completion
 
@@ -894,12 +895,14 @@ When evaluating code quality, ask: does adding this make the system more coheren
 
 ## Bootstrap Build Protocol
 
-The compiler's per-package process structure and its content-addressed disk
-cache are specified in `docs/compiler-disk-cache.md`; §23 of
-`docs/memory-model.md` (decisions D25-D28) is the design it implements. The
-1500-line trap list in the brief's §3 is the accumulated record of what has
-already been tried on the compiler's memory behaviour - read it before changing
-the codec, `alloc.mx` or the build pipeline.
+The compiler's per-package arena, its phases and its content-addressed disk cache
+are specified in `docs/compiler.md`, which is also the accumulated record of what
+has already been tried on the compiler's memory behaviour - read it before
+changing the codec, `alloc.mx` or the build pipeline. Build and bootstrap
+procedure is `docs/building.md`. The documentation set is `docs/README.md`, and
+`docs/decisions.md` says which designs are implemented, which are proposals, and
+which defects are open. Where this file and `docs/` disagree, `docs/` is the
+record and this file is the bug.
 
 Every step of the self-hosting bootstrap MUST use `moxie build -a` to force rebuild all packages from scratch. The `-a` flag clears the `.bc` build cache before compilation, preventing stale linker objects from a compiler built with a different runtime from being reused. This is critical because the runtime (`src/runtime/codec.mx`, `src/runtime/alloc.mx`, etc.) may change between bootstrap cycles, and cached `.bc` files from a previous compiler build are incompatible.
 
@@ -907,9 +910,14 @@ Bootstrap cycle:
   1. Build legacy Go compiler: `cd legacy && go build -o moxie .`
   2. Compile stage4 with legacy: `cd .. && MOXIEROOT=$PWD legacy/moxie build -a -o mxc-stage4 ./_mxc_stage4`
   3. Bake the runtime from source with the compiler just built: `MOXIEROOT=$PWD ./mxc-stage4 build-runtime`
-  4. Compile stage4 with the first bootstrap: `MOXIEROOT=$PWD ./mxc-stage4 build -a -o mxc-stage4-2 ./_mxc_stage4`
-  5. Compile stage4 with the second bootstrap: `MOXIEROOT=$PWD ./mxc-stage4-2 build -a -o mxc-stage4-3 ./_mxc_stage4`
+  4. Compile stage4 with the first bootstrap: `MOXIEROOT=$PWD ./mxc-stage4 build -a -no-main-arena -o mxc-stage4-2 ./_mxc_stage4`
+  5. Compile stage4 with the second bootstrap: `MOXIEROOT=$PWD ./mxc-stage4-2 build -a -no-main-arena -o mxc-stage4-3 ./_mxc_stage4`
   6. Verify a generation reproduces itself: `sha256sum mxc-stage4-2 mxc-stage4-3` (should match)
+
+`-no-main-arena` is REQUIRED when building the compiler itself: without it every
+self-mutating emitter method holds a sovereign arena that cannot be compacted
+while it runs, and a large package (`math`, `strconv`) exhausts the box. It
+changes code only for package `main`, and it is part of the cache key (`nm1|`).
 
 `sysroot/runtime_go.bc` is an INPUT to application links, not a build product:
 it is only read when the runtime is not itself in the build closure (i.e. for

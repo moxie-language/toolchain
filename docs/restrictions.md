@@ -1,137 +1,95 @@
-# Moxie Language Restrictions
+# Language restrictions
 
-See [REFERENCE.md](../REFERENCE.md) for the complete language reference.
+Status: **implemented and enforced**. Every rule here is a compile error in both
+compilers. The language reference is [language.md](language.md); the rules that
+are conventions rather than errors are in [style.md](style.md) and
+[memory.md](memory.md).
 
-## Active Restrictions (compile errors)
+The gate is A3: a feature exists only if it is declared and checkable. Removed
+constructs are *undefined*, not restricted - `int` is not a keyword with a
+warning, it is a name that resolves to nothing, so a program may declare its own
+`int` type.
 
-### Type Unification
+---
 
-| Go Type | Moxie Equivalent | Notes |
-|---------|-----------------|-------|
-| `string` | `string = []byte` | Same type. Identical 3-word layout, mutually assignable. `string` is preferred for readability. |
-| `int` | `int32` | 32-bit on all targets. `len()`/`cap()` return `int32`. |
-| `uint` | `uint32` | 32-bit on all targets. |
+## 1. Types
 
-`string` and `[]byte` are the same type in Moxie — same runtime representation, same operations, fully interchangeable. Use `string` in signatures and declarations for readability; use `[]byte` when the byte-level nature matters (e.g., binary protocols).
+| Go | Moxie | note |
+|---|---|---|
+| `string` | `string = []byte` | one type, one 3-word layout, mutable |
+| `[]byte` | same type | the spelling chosen by intent |
+| `int` | `int32` | `len()`/`cap()` return `int32` on every target |
+| `uint` | `uint32` | |
+| `complex64`, `complex128` | removed | |
+| `any`, `interface{}` | removed | an interface must name at least one method |
+| arrays `[N]T` | removed | use a slice; an array type is leftover Go slice-bypass |
+| `uintptr` | kept | the pointer-sized integer for `unsafe.Pointer` arithmetic |
 
-### Removed Builtins
+## 2. Removed builtins and statements
 
-| Builtin | Alternative |
-|---------|------------|
-| `append(s, v...)` | `push(s, v...)` - explicit allocation semantics, geometric growth on overflow |
-| `make(T, ...)` | Literal syntax: `[]T{:n}`, `chan T{}`, `map[K]V{}` |
-| `new(T)` | `&T{}` or `var x T; p := &x` |
-| `complex(r, i)` | Not supported. Use separate float fields. |
-| `real(z)` | Not supported. |
-| `imag(z)` | Not supported. |
+| removed | replacement |
+|---|---|
+| `append(s, v...)` | `push(s, v...)` |
+| `make(T, ...)` | literal syntax: `[]T{:n}`, `[]T{:n:c}`, `chan T{}`, `chan T{:N}`, `map[K]V{}` |
+| `new(T)` | `&T{}`, or `var x T; p := &x` |
+| `complex`, `real`, `imag` | not available |
+| `go f()` | a domain is a thread: `spawn` starts one, channels connect them |
+| `fallthrough` | comma-separated case expressions, or a shared function |
+| `recover` | not available - a panic is death and deferred calls do not run |
+| `s + t` on text | `s \| t` |
+| `import "strings"` | use `bytes` (string=[]byte) |
+| `import "reflect"` | removed with the empty interface |
+| `import "sync"` | removed; a domain is one thread |
 
-### Added Builtins (Moxie-specific)
+`push`, `pop` and `resize` are **statements**, not expressions. The read form is
+`s[len(s)-1]`; `x := pop(s)` does not parse.
 
-| Builtin | Signature | Semantics |
-|---------|-----------|-----------|
-| `push` | `push(s []T, v1, v2, ...T)` | Appends elements to slice. Panics if len+n > cap. Lazy-inits nil slices (cap 32 min). Store-back to `s` is implicit. |
-| `pop` | `pop(s []T) T` | Removes and returns last element. Panics if len == 0. Store-back implicit. |
-| `resize` | `resize(s []T, n int32)` | Sets len to n. Panics if n > cap or n < 0 (unsigned check). Store-back implicit. |
-| `spawn` | `spawn(fn, args...) chan struct{}` | Creates new domain. See spawn boundary rules. |
+## 3. Slices
 
-#### Why append was removed
+- `push(s, ...)` grows: lazy-init to `max(n,4)` on a nil slice, doubling past
+  capacity. It does not panic on overflow. There is no capacity guard to write
+  and no growth helper to call (`mxutil.Ensure`/`Reserve` are legacy and being
+  deleted).
+- Presize with `[]T{:n}` and write through a cursor when the size is known.
+- `s[a:b]` **copies**. There is no aliasing, so `copy(x[a:b], y)` and
+  `x[a:b][i] = v` are compile errors, and a callee that writes through a
+  subslice argument writes to a copy.
+- Slices with comparable elements compare with `==`/`!=`.
+- A `//:linkdata` slice has foreign capacity: push/pop/resize panic rather than
+  write past the external symbol.
 
-`append` conflates allocation and insertion into one call with unpredictable copy
-semantics. It sometimes returns the same backing array, sometimes a new one - the
-caller cannot know which without comparing pointers. Code that holds an alias into
-a slice prefix and then appends to the original may or may not corrupt the alias,
-depending on whether capacity was sufficient. This makes reasoning about ownership
-impossible in an arena system where dead backing arrays are never freed individually.
+## 4. Sparsity and closure
 
-`push` separates concerns: declare capacity explicitly with `[]T{:0:cap}`. Push
-into existing capacity or panic. No hidden reallocation, no silent copying. If
-you hit the cap, the allocation site is wrong - fix it there, not at the push.
+- No ambient clock, filesystem, network, environment, entropy and no global
+  registry: authority is a parameter (A3, L31-L39). `//:linkdata` and the hosted
+  runtime are the declared boundary.
+- Package-scoped variables are immutable outside `init()`.
+- A closure does not capture. A function value carries a code pointer and
+  nothing else, so a nested function must receive what it needs as parameters
+  or as a sovereign receiver.
 
-### Removed Types
+## 5. Channels and spawn
 
-| Type | Alternative |
-|------|------------|
-| `complex64` | Not supported. |
-| `complex128` | Not supported. |
+- `chan T{}` is **one slot**, not an unbuffered channel. There is no unbuffered
+  channel: one thread could never rendezvous with itself. `chan T{:0}` is a
+  compile error naming that reason.
+- `chan T{:N}` is N outstanding messages; `chan T{:N:bytes}` states the frame
+  budget, which overrides the `cap:"..."` walk.
+- A spawn target's single result must be named `closed` and be of type
+  `chan struct{}`. That name and type together are what make a function a
+  target.
+- Spawn arguments are **copied**, frozen at the call; channels are shared
+  handles. There is no move semantics.
+- The codec route is chosen from the element type: pointer-free elements travel
+  as their own bytes, a type with a custom codec uses it, anything else uses the
+  structural codec. A raw `int32` or `bool` element is legal - `moxie.Codec`
+  wrappers are a convenience, not a requirement (see
+  `src/net/http/chanpool.mx`, whose spawn targets take `chan int32`).
 
-### Removed Statements
+## 6. Exemptions
 
-| Statement | Alternative |
-|-----------|------------|
-| `go f()` | **Compile error.** There are no goroutines. Use channels + `select` for event dispatch, `spawn` for domain-level parallelism. |
-| `fallthrough` | Comma-separated case expressions, or call a shared function. |
-
-### Slice Concatenation (`|` operator)
-
-| Go | Moxie |
-|----|-------|
-| `a + b` (strings) | `a \| b` (pipe operator) |
-| `s += "suffix"` | `s \|= "suffix"` |
-| two slices concatenated | `a \| b` (always allocates fresh backing) |
-
-The `+` operator on text types is a compile error. Use `|` instead.
-
-The `|` operator works on **all matching slice types**, not just `[]byte`:
-
-```go
-a := []int32{1, 2}
-b := []int32{3, 4}
-c := a | b   // []int32{1, 2, 3, 4} — always a fresh allocation
-```
-
-For `[]byte`, the loader rewrites `|` to an internal concat call before type checking. For all other slice types, the type checker and compiler handle `|` natively.
-
-### Literal Syntax Extensions
-
-| Syntax | Equivalent | Notes |
-|--------|-----------|-------|
-| `[]T{:n}` | `make([]T, n)` | Slice with length `n` |
-| `[]T{:n:c}` | `make([]T, n, c)` | Slice with length `n`, capacity `c` |
-| `chan T{}` | `make(chan T)` | Unbuffered channel |
-| `chan T{n}` | `make(chan T, n)` | Buffered channel with capacity `n` |
-
-The leading `:` in slice literals distinguishes size allocation from composite literals. `make()` is a compile error in user code — use literal syntax only.
-
-### Spawn Boundary Restrictions
-
-All data arguments and channel element types must implement `moxie.Codec` (see `src/moxie/codec.go`). The `moxie` package provides built-in codec types: `Bool`, `Int8`, `Uint8`, `Int16`, `Uint16`, `Int32`, `Uint32`, `Int64`, `Uint64`, `Float32`, `Float64`, `Bytes`. Big-endian aliases: `BigInt16`, `BigUint16`, `BigInt32`, `BigUint32`, `BigInt64`, `BigUint64`, `BigFloat32`, `BigFloat64`.
-
-| Allowed | Treatment |
-|---------|-----------|
-| Types implementing `moxie.Codec` | Serialized via EncodeTo/DecodeFrom |
-| Channels | Shared channel handles; the element's codec encodes the frame |
-| Structs with Codec methods | User-defined serialization |
-
-| Rejected (compile error) | Reason |
-|--------------------------|--------|
-| Raw built-in types (`int32`, `bool`, etc.) | Use `moxie.Int32`, `moxie.Bool`, etc. |
-| `*T` (pointer) | Cannot share memory across processes |
-| `func(...)` | Cannot serialize code |
-| Any `interface` type (including `interface{}`) | No interface crosses the spawn boundary |
-
-Non-constant variables passed to `spawn` cannot be used after the call (move semantics).
-
-### Slice Equality (Extension)
-
-Moxie extends Go's comparison rules: any `[]T` where `T` is comparable supports `==` and `!=`. Slices can be used as map keys. Go restricts this to `string` only — Moxie treats all comparable-element slices uniformly.
-
-### Import Restrictions
-
-| Import | Error |
-|--------|-------|
-| `"strings"` | `use "bytes" instead of "strings" (string=[]byte)` |
-
-## Exemptions
-
-Permanently exempt from restrictions:
-
-| Package | Reason |
-|---------|--------|
-| `runtime/*` | Language primitives |
-| `internal/*` | Internal implementation |
-| `unsafe` | Language primitive |
-| `reflect` | Must handle all Go types |
-| `os/*` | File descriptors, syscall wrappers |
-| `syscall/*` | Syscall interfaces |
-
-All other packages (user code and converted stdlib) are subject to full restrictions.
+`runtime/*`, `internal/*` and `unsafe` are exempt from the restrictions above:
+they implement the primitives. Everything else, user code and converted stdlib
+alike, is subject to the full set. `reflect` is **not** an exemption - it is
+removed from the language; `src/internal/reflectlite` is internal runtime
+support, not a user-facing package.

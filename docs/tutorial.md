@@ -265,15 +265,19 @@ func main() {
 
 This is the heart of Moxie. There are no goroutines. All concurrency within a domain is expressed through channels and `select`.
 
-### Unbuffered Channels — Synchronous Dispatch
+### One-Slot Channels — Mailbox Dispatch
 
-An unbuffered channel send **transfers execution** to the waiting `select` case. Think of it as a function call via the channel:
+`chan T{}` is a **one-slot mailbox**, not a rendezvous: the first send completes
+immediately and the second parks until the receiver has taken the first. A domain
+has one thread, so an unbuffered channel could never complete a send at all -
+there is nothing else to receive while the sender waits. Declare `chan T{:N}` for
+N outstanding messages:
 
 ```moxie
 package main
 
 func main() {
-    tick := chan struct{}{}         // unbuffered dispatcher
+    tick := chan struct{}{}         // one-slot dispatcher
     done := chan struct{}{}
 
     // In a real program, these sends would come from
@@ -402,9 +406,12 @@ Within a single domain, I/O is sequential. For concurrent I/O handling, spawn ch
 
 ---
 
-## 11. Domains and Spawn — Process Isolation
+## 11. Domains and Spawn — Thread Isolation
 
-`spawn` creates a child domain: a separate OS process with its own heap and event loop. The parent and child communicate through IPC channels.
+`spawn` creates a child domain: a **thread in the same process** with its own arena
+stack, TLS and event loop. Domains share an address space but not access - there is
+no API that reaches another domain's memory - and the only handles between them are
+channels, whose payloads cross by value.
 
 ### Basic Spawn
 
@@ -437,11 +444,17 @@ func compute(id moxie.Int32, scale moxie.Float64) {
 }
 
 func main() {
-    spawn(compute, moxie.Int32(1), moxie.Float64(2.5))
-    spawn(compute, moxie.Int32(2), moxie.Float64(3.0))
-    // Both children run concurrently as separate processes
+    spawn(compute, int32(1), float64(2.5))
+    spawn(compute, int32(2), float64(3.0))
+    // Both children run as separate domains in this process
 }
 ```
+
+The examples below use the `moxie.Int32` / `moxie.Float64` wrappers. They are a
+convenience, not a requirement: the codec route is chosen from the element type,
+so a spawn argument or a channel element that holds no references - a raw
+`int32`, `bool`, `float64` - travels as its own bytes and needs no wrapper. Use a
+wrapper when you want a stable named wire type, or a custom `EncodeTo`/`DecodeFrom`.
 
 ### IPC Channels
 
@@ -530,8 +543,7 @@ Constants and channels are exempt.
 
 | Rejected | Reason |
 |----------|--------|
-| Raw `int32`, `bool`, etc. | Use `moxie.Int32`, `moxie.Bool`, etc. |
-| Pointers | Cannot share memory across processes. |
+| Pointers | A pointer into one domain's arena means nothing in the child. |
 | Functions | Cannot serialize code. |
 | Interfaces | Type erasure prevents serialization. |
 
@@ -698,14 +710,15 @@ The compiler automatically marks functions as `async` when they contain channel 
 | `complex64/128` | Separate float fields | Rarely needed. |
 | `uintptr` | Explicit pointers | Raw pointer arithmetic is `unsafe` only. |
 | `import "strings"` | `import "bytes"` | `string = []byte` makes `strings` redundant. |
-| `interface{}` at spawn | `moxie.Codec` types | Serialization requires concrete types. |
+| `interface{}` at spawn | a concrete type, or a custom codec | an interface element has no fixed frame budget |
 
 ---
 
 ## Next Steps
 
-- [REFERENCE.md](REFERENCE.md) — Complete language specification
-- [docs/spawn.md](docs/spawn.md) — Spawn quick reference
-- [docs/architecture.md](docs/architecture.md) — Compiler pipeline and runtime internals
-- [docs/porting.md](docs/porting.md) — Migrating existing code to Moxie
-- [example-claude.md](example-claude.md) — claude.md template for AI-assisted Moxie development
+- [language.md](language.md) — complete language reference
+- [concurrency.md](concurrency.md) — spawn, channels, select
+- [memory.md](memory.md) — arenas, ownership, the return protocol
+- [restrictions.md](restrictions.md) — every removed construct and its replacement
+- [patterns.md](patterns.md) — the shapes that follow from the axioms
+- [README.md](README.md) — the rest of the set

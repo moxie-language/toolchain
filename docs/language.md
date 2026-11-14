@@ -7,8 +7,8 @@ Programs compile to static native binaries or WebAssembly. Source files use the
 This document specifies the Moxie language. Familiarity with C-family syntax is
 assumed.
 
-For canonical formatting rules and the `moxiefmt` tool, see
-[format.md](format.md).
+For canonical formatting rules see
+[style.md](style.md).
 
 ---
 
@@ -1384,9 +1384,11 @@ element insertion - into one call with unpredictable behavior:
   never presized enters the growth regime; every abandoned backing stays live
   in the arena that allocated it until that arena is released. In a sovereign
   receiver's arena that is permanent. This is why the tree's growth happens
-  inside free functions (their frame arena dies at return) and why
-  `mxutil.Ensure`/`Reserve`/`GrowCap` exist: presize when the size is knowable,
-  and let the one place that must grow be a function whose garbage dies early.
+  inside free functions (their frame arena dies at return). There is no capacity
+  helper to call: `push` is the growth, for one element, for several, and for a
+  spread, because `runtime.slicePush` takes an element count. Presize with
+  `[]T{:n}` when the count is known, and let the one place that must grow be a
+  function whose garbage dies early.
 
 `pop` and `resize` complete the set: `pop` is the inverse of a single-element
 push, and `resize` gives direct control over length without touching capacity.
@@ -1394,7 +1396,8 @@ push, and `resize` gives direct control over length without touching capacity.
 ```moxie
 items := []int32{:0:100}      // explicit capacity
 push(items, 1, 2, 3)         // items is now [1, 2, 3], len=3, cap=100
-last := pop(items)            // last=3, items is now [1, 2], len=2
+last := items[len(items)-1]   // read before the pop: pop has no value form
+pop(items)                    // items is now [1, 2], len=2
 resize(items, 0)              // items is now [], len=0, cap still 100
 ```
 
@@ -1899,7 +1902,7 @@ and are mutually assignable. The spelling is a hint to the code generator only.
 | Domain memory | One address space, no addressable cross-domain state; channel rings are shared |
 | Slice equality | `==` for any comparable element type |
 | Slice literals | `[]T{:n}`, `[]T{:n:c}` |
-| Channel literals | `chan T{}` (one slot), `chan T{n}` (n outstanding messages) |
+| Channel literals | `chan T{}` (one slot), `chan T{:N}` (N outstanding messages), `chan T{:N:bytes}` (declared frame budget) |
 | Named slice/map types | Compile error |
 | Value receivers | Compile error; pointer receivers only |
 | Unnamed return values | Compile error; all returns must be named |

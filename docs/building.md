@@ -206,18 +206,27 @@ MOXIE=/path/to/moxie ./build.sh
 ### From Release Tarball
 
 ```sh
-curl -fsSL https://moxielang.dev-releases/raw/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/moxie-language/toolchain/dev/install.sh | bash
 ```
 
-The installer downloads the latest release, extracts to `/opt/moxie` (or `$MOXIE_INSTALL_DIR`),
-and rebuilds all cached packages with the new compiler version.
+The installer downloads the latest GitHub release asset
+(`moxie-<tag>-linux-<arch>.tar.gz`), extracts it under
+`$HOME/.local/share/moxie/versions/<tag>/` (or `$MOXIE_INSTALL_DIR`), and points
+`$HOME/.local/share/moxie/current` at it. The top-level `src`, `sysroot`,
+`llvm-glue`, `compiler` and `bin` names are symlinks into `current`, so the
+stdlib and the compiler that expects it are versioned together and old versions
+are kept. The binary is installed as `$HOME/.local/bin/moxie-<tag>` with a
+`moxie` symlink, and the package cache is rebuilt with the new compiler.
 
 Add to your shell profile:
 
 ```sh
-export PATH="/opt/moxie/bin:$PATH"
-export MOXIEROOT="/opt/moxie"
+export PATH="$HOME/.local/bin:$PATH"
+export MOXIEROOT="$HOME/.local/share/moxie"
 ```
+
+`MOXIEROOT` points at the install root, whose `src` symlink follows
+`current/src`; switching versions only repoints `current`.
 
 ### From Git
 
@@ -434,9 +443,11 @@ legacy/moxie build -a -o mxc-stage4 ./_mxc_stage4
 # bake the runtime with the compiler just built
 ./mxc-stage4 build-runtime
 
-# the bootstrap must reproduce itself
-./mxc-stage4   build -a -o mxc-stage4-2 ./_mxc_stage4
-./mxc-stage4-2 build -a -o mxc-stage4-3 ./_mxc_stage4
+# the compiler's own package main gets NO function arena and no return encode:
+# without this flag every self-mutating emitter method holds a sovereign arena
+# that cannot be compacted while it runs, and a large package exhausts the box.
+./mxc-stage4   build -a -no-main-arena -o mxc-stage4-2 ./_mxc_stage4
+./mxc-stage4-2 build -a -no-main-arena -o mxc-stage4-3 ./_mxc_stage4
 cmp mxc-stage4-2 mxc-stage4-3 && echo "fixpoint verified"
 ```
 

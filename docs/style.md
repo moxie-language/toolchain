@@ -1,7 +1,9 @@
 # Moxie Formatting and Style Specification
 
-This document specifies the canonical formatting for `.mx` source files. The
-`moxiefmt` tool enforces these rules mechanically.
+This document specifies the canonical formatting for `.mx` source files.
+Status: specification. There is no `moxiefmt` tool in the tree yet - these rules
+are applied by hand and checked in review, so treat this as the target shape
+rather than as a mechanical gate.
 
 ---
 
@@ -148,5 +150,5 @@ formatter only uses 80 as the single-line/multi-line decision boundary.
 
 The formatter automatically wraps return values in `()` with named parameters.
 Even a single return value is wrapped: `func f() (err error)` not
-`func f() error`. This is a language constraint that `moxiefmt` enforces
+`func f() error`. This is a language constraint the compiler enforces
 mechanically.
