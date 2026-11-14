@@ -135,7 +135,19 @@ func SetUniverseGlobals(u *UniverseState) {
 	// same one every later type-check sees. Idempotent: a second call finds the
 	// name already bound.
 	if u != nil && u.Scope != nil && u.Scope.Lookup("Edge") == nil && u.Uintptr != nil {
+		// ROOT-allocated, for the same reason the universe itself is: this runs
+		// in an ordinary fn arena, and installChannelOwnershipTypes is a free
+		// function with a frame of its own - so the Named/TypeName/struct graph
+		// it builds died at the next return while the universe scope went on
+		// pointing at it. Measured on the rebuilt compiler: emit's universe walk
+		// read `Edge`'s Obj out of memory a cache-path string had since been
+		// written into, and the compiler segfaulted in SafeUnderlying on the
+		// first package that reached IR emit. ManualArenaEnter is the mechanism,
+		// not SetCurrentArena: FnArenaPush ignores the current arena and pushes a
+		// fresh frame, so only manual mode keeps these allocations in the root.
+		runtime.ManualArenaEnter(runtime.RootArena())
 		installChannelOwnershipTypes(u.Scope, u.Uintptr.Typ)
+		runtime.ManualArenaExit(runtime.RootArena())
 	}
 }
 

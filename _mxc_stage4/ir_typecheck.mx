@@ -1130,7 +1130,16 @@ func fileHasGeneric(file *syntax.File) (ok bool) {
 
 func ScanGenericDecls(src []byte, name string) {
 	if cctx.scannedGeneric == nil {
+		// Root-allocated: this map records which packages have already been
+		// scanned, so it outlives every package. A literal created here lives in
+		// this function's own frame, and the next package's write then ran
+		// hashmapSet against freed buckets - measured as a SIGSEGV in
+		// hashmapSet on the first package compiled after that memory was reused.
+		// ManualArenaEnter, not SetCurrentArena: FnArenaPush ignores the current
+		// arena and pushes a fresh frame.
+		runtime.ManualArenaEnter(runtime.RootArena())
 		cctx.scannedGeneric = map[string]bool{}
+		runtime.ManualArenaExit(runtime.RootArena())
 	}
 	// A package is scanned in the whole-link pre-pass and again in the compile
 	// pass; the genericArena is never freed, so a second parse would retain a
