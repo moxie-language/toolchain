@@ -1057,6 +1057,35 @@ That is the signature of walking something that the registry accumulates, and it
 is why the sixth package is the one that dies: the walk is now over five
 packages' materialised graphs as well as its own.
 
+Corrected reading of that table, per package's own compile (ci-pre -> ci-free):
+`array` 7,485; `internal/task` 14,988; `internal/bytealg` 41,444;
+`internal/stringslite` 501,009; `math/bits` 624,158. Monotonic with the package's
+POSITION, not with its size - that is a cost proportional to the number of
+packages already loaded, i.e. quadratic in the build, and it is the same shape
+the whole session has been finding in buffers and segment lists. `mxregexp` then
+dies at three orders of magnitude below what the growth curve predicts for its
+position, so the wall is the accumulation, not the package.
+
+**Three aliasing levers were tried against that accumulation and all three are
+no-ops**, which is the important negative result:
+
+- `SovereignRegStable(packageArena)` around SSA + emit, plus making an explicit
+  stable registration outrank the `codecRetTransient` top-frame veto. The veto
+  does run first and does hide the registration, so this was a real ordering
+  defect - fixing it changes nothing measurable.
+- `graphArenaFor` returning the root arena, so every materialised mxh graph is in
+  the one arena the codec always aliases.
+- the `manualFrame` slot fix, the one that DID help (1 -> 5 packages), does not
+  stop the accumulation either; it only removes the per-return copy of the
+  program graph.
+
+So the transfer is not through pointer identity at all: aliasing every arena the
+walk can enter changes the cost by nothing, which means the volume is in VALUES
+being encoded - slices and structs re-encoded at every crossing - and not in
+graphs being re-walked. The next instrument should therefore measure per CALL:
+count entries per `codecEncodeValue` and report the calls that exceed a
+threshold, with the enclosing function name, instead of counting the phase.
+
 And the last population that could be named is ruled out too: instrumenting
 `loadMxhInto` shows all six loads taking the `perkey` path, with mxh blobs of
 308, 366, 444, 856, 916 and 1788 bytes. A per-key graph arena therefore holds a
