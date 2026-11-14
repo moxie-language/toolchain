@@ -26,11 +26,44 @@ func fastrand() uint32 {
 	return xorshift32State
 }
 
+// initRand seeds the runtime's fast generator DETERMINISTICALLY.
+//
+// It used to read hardwareRand(), which made two runs of the same binary
+// differ: every hashmap takes its seed from fastrand(), a map's bucket layout
+// follows the seed, and a single-threaded program that iterates a map therefore
+// performs its work in a different order on every run. Every uncertainty in
+// this tree's build has been downstream of that. Entropy is not ambient any
+// more: a program that needs it asks for it with SeedRandFromEntropy.
 func initRand() {
-	r, _ := hardwareRand()
-	xorshift64State = uint64(r | 1) // protect against 0
-	xorshift32State = uint32(xorshift64State)
+	seedRandWith(0x853c49e6748fea9b)
 	inf = float64frombits(0x7FF0000000000000)
+}
+
+// SeedRandFromEntropy re-seeds the fast generator from the kernel. Map seeds
+// and math/rand both draw from it, so this is the call that makes a program's
+// behaviour unpredictable - reproducibility gives it up deliberately.
+func SeedRandFromEntropy() {
+	r, ok := hardwareRand()
+	if !ok {
+		return
+	}
+	seedRandWith(uint64(r | 1))
+}
+
+// SetRandSeed seeds the fast generator with a value the caller chose.
+func SetRandSeed(n uint64) {
+	seedRandWith(n)
+}
+
+func seedRandWith(n uint64) {
+	if n == 0 {
+		n = 1 // xorshift cannot be seeded with zero
+	}
+	xorshift64State = n
+	xorshift32State = uint32(n)
+	if xorshift32State == 0 {
+		xorshift32State = 1
+	}
 }
 
 var xorshift32State uint32

@@ -1479,6 +1479,55 @@ The cheap win after that: `codecRetStableInner`'s `KindSlice` branch answers
 slow path (encode+decode of stable headers) even though the encoder's own slice
 shortcut would alias the same backing. Aligning the two is the next measurement.
 
+### 8.3b21 The nondeterminism was the map seed, and it wrote the cache filenames
+
+Two runs of one binary failed in two different places, which is incoherent in a
+single-threaded program: nothing runs concurrently, so some INPUT must differ
+between the runs. There were two, and both are now gone.
+
+**1. The ambient seed.** `initRand` seeded the runtime's xorshift from
+`hardwareRand()` (`getrandom`) at domain start, and every hashmap takes
+`seed: uintptr(fastrand())` at creation and re-seeds on grow. A map's bucket
+layout follows its seed, so a program that iterates a map works in a different
+order every run. Measured: before, one binary stopped either in `errors` with a
+spurious `invalid type` compile error or reached `strconv` and died at the
+3 GB ceiling; after `initRand` seeds a constant, two runs both pass `errors`
+and both stop in `strconv`. Entropy is explicit now - `SeedRandFromEntropy()`
+re-seeds from the kernel, `SetRandSeed(n)` from a number - and nothing is
+ambient. (Algorithm-only; emitted code is unchanged, and `math/rand` still
+exists, it just does not start itself from the kernel.)
+
+**2. The cache filenames were corrupt, which is how the seed leaked into the
+work.** Cache paths are `<cacheBase>/<safeName(pkg)>/<hash>_<version>.mxh`, and
+one generation directory held `pkg/array/118?007e.mxh`, `pkg/errors/ 7300054.mxh`
+and `pkg/errors/pK ` beside the real hash names - source fragments as filenames.
+`pkgExportHash` memoises its result in `bst.pkgExportKeyMemo`, a ROOT map, and
+`fnvHex` builds the 8-byte hex string in its own frame and returns
+`string(buf)`. The return protocol copies the bytes into pkgExportHash's frame,
+so what the memo holds is a header into a frame that then returns: the next
+reader builds a path out of whatever reused those bytes. `hashmapContentSet`
+already deep-copies a KEY for exactly this reason; the VALUE is a bare memcpy.
+That is why the corrupt names moved from run to run - the memo rots and what it
+rots into depends on allocation order. Fixed by keeping the hash in the root
+arena (`keepStr`, the helper `main.mx` already uses for `bst` fields), and the
+generation directory written afterwards has 17 files, every one
+`<8 hex>.(mxh|bc|bc.o|bc.o.stamp)`.
+
+**3. `-a` read the cache to decide what to rebuild.** `prepareDispatchIndex`
+skips a package whose mxh exists on disk, and `-a` only stops READING the
+object cache, so a leftover file decided whether this run typechecked a package:
+"rebuild all" did different work on the same tree depending on what ran before.
+With `-a` the prepass now typechecks and rewrites it regardless.
+
+Result: the build is reproducible and fails in one place. That place is the
+`errors` package, whose SSA build now reports
+`cannot use value of type invalid type as interface{Error() string; String() string} in argument to function`
+at `line:80` of the concatenated source, deterministically. Its registry holds
+18 packages there (14 when `-a` was still skipping), so the fuller package set
+is what exposes it: a name resolves to a type the checker cannot see, and the
+interface in the message (`Error` AND `String`) is one no `errors` source
+declares.
+
 ### 8.3c What the codec cannot do, measured
 
 Two codec-level answers were tried and both are now closed off with numbers.
