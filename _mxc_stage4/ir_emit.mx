@@ -764,14 +764,19 @@ func (e *irEmitter) resolveAllNamedTypes() {
 // this: ~1.6 MB retained per IR instruction, and `mxregexp` alone reached 2.9 GB
 // inside one package's emit.
 func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
+	mxutil.WriteStr(2, "    EAF0 enter n="|mxutil.SimpleItoa(int32(len(e.members)))|" rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
 	fnArena := runtime.ArenaNew(8 * 1024 * 1024)
+	mxutil.WriteStr(2, "    EAF0 arena ok\n")
+	nf := int32(0)
 	for _, member := range e.members {
 		if m, ok := member.(*SSAFunction); ok {
+			nf++
+			mxutil.WriteStr(2, "    EAF nf="|mxutil.SimpleItoa(nf)|" in rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB fn="|m.name|" blocks="|mxutil.SimpleItoa(int32(len(m.Blocks)))|"\n")
 			checkUseAfterFree(m)
 			checkParamMutation(m)
 			runtime.SetCurrentArena(fnArena)
-			e.emitFunction(m)
-			e.emitAnonFuncs(m)
+			emitFunctionOf(e, m)
+			emitAnonFuncsOf(e, m)
 			e.flush()
 			runtime.SetCurrentArena(compileArena)
 			e.mergeAccumulators()
@@ -814,6 +819,7 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 func emitIR(e *irEmitter) (s string) {
 	// Built once, in place. Nothing returns the member slice: see buildMembers.
 	buildMembers(e)
+	mxutil.WriteStr(2, "    EM1 members n="|mxutil.SimpleItoa(int32(len(e.members)))|"\n")
 	dl := e.dataLayout()
 	if dl != "" {
 		e.w("target datalayout = \"")
@@ -824,7 +830,9 @@ func emitIR(e *irEmitter) (s string) {
 	e.w(e.triple)
 	e.w("\"\n\n")
 
+	mxutil.WriteStr(2, "    EM2 triple\n")
 	e.resolveAllNamedTypes()
+	mxutil.WriteStr(2, "    EM3 named types\n")
 
 	e.pendTypeDescs = map[string]Type{}
 	for _, m := range e.members {
@@ -844,6 +852,7 @@ func emitIR(e *irEmitter) (s string) {
 			e.collectAllTypeDescs(g.typ, map[string]bool{})
 		}
 	}
+	mxutil.WriteStr(2, "    EM4 descs n="|mxutil.SimpleItoa(int32(len(e.pendTypeDescs)))|"\n")
 	// Also declare type descriptors for this package's own named types,
 	// since interface dispatch may reference them. Deterministic per
 	// package: parallel workers compile packages in arbitrary order with
@@ -905,6 +914,7 @@ func emitIR(e *irEmitter) (s string) {
 
 	e.globalTypes = map[string]string{}
 	e.globalDeclTypes = map[string]string{}
+	nscan := int32(0)
 	for _, member := range e.members {
 		fn, ok := member.(*SSAFunction)
 		if !ok { continue }
@@ -1048,9 +1058,21 @@ func emitIR(e *irEmitter) (s string) {
 				}
 			}
 		}
+		// Every e.*() call in the scans above borrows the emitter's sovereign
+		// arena and pops at its return, so between two functions the group has
+		// no live frame and what the scans abandoned is reclaimable. Without
+		// this the group is never drained here: the scans run over every
+		// instruction of every function, and `strconv` alone reached 3.3 GB.
+		runtime.SovDrainCompactions(8)
+		nscan++
+		if nscan&16 == 0 {
+			mxutil.WriteStr(2, "    SCAN nf="|mxutil.SimpleItoa(nscan)|" rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
+		}
 	}
 
+	mxutil.WriteStr(2, "    M1 scans done rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
 	e.flush()
+	mxutil.WriteStr(2, "    M2 flush done rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
 	for _, member := range e.members {
 		switch m := member.(type) {
 		case *SSAGlobal:
@@ -1060,6 +1082,7 @@ func emitIR(e *irEmitter) (s string) {
 		}
 	}
 	e.flush()
+	mxutil.WriteStr(2, "    M3 globals done rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
 	compileArena := runtime.CurrentArena()
 	// Deep copy state lives in compileArena, survives per-function resets.
 	// Pre-collect symbols that will get `define` (functions with bodies).
@@ -1074,7 +1097,9 @@ func emitIR(e *irEmitter) (s string) {
 			push(e.definedSyms, defSym)
 		}
 	}
+	mxutil.WriteStr(2, "    M4 syms done rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
 	emitAllFunctions(e, compileArena)
+	mxutil.WriteStr(2, "    M5 functions done rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
 	// Fresh segs for trailing declarations.
 	e.segs = []string{:0:256}
 	// Merge pending declares/globals.
@@ -1597,10 +1622,12 @@ func (e *irEmitter) isPkgFunc(f *SSAFunction) (ok bool) {
 	return false
 }
 
-func (e *irEmitter) emitAnonFuncs(f *SSAFunction) {
+// emitAnonFuncs is free for the same reason as emitFunctionOf: as a method its
+// borrow was live across every nested function's whole emit.
+func emitAnonFuncsOf(e *irEmitter, f *SSAFunction) {
 	for _, af := range f.AnonFuncs {
-		e.emitFunction(af)
-		e.emitAnonFuncs(af)
+		emitFunctionOf(e, af)
+		emitAnonFuncsOf(e, af)
 		af.Blocks = nil
 		af.Locals = nil
 		af.Params = nil
@@ -1695,7 +1722,14 @@ func fnCarriesBigAggregate(f *SSAFunction) (ok bool) {
 	return false
 }
 
-func (e *irEmitter) emitFunction(f *SSAFunction) {
+// emitFunctionOf is a FREE function on purpose, like emitIR and
+// emitAllFunctions. `emitFunction` was a method, so the emitter's sovereign
+// arena was borrowed for the WHOLE function and nothing allocated under that
+// borrow - including the decode copies of every string an accessor returns
+// (`x.SSAName()` on any SSAValue) - could be compacted until the function
+// ended. Measured on `strconv`: 4.5M sovAddRec records and a 219 MB record
+// table inside one function's emit, 1.2 GB -> 3.3 GB.
+func emitFunctionOf(e *irEmitter, f *SSAFunction) {
 	e.w("; [emit] " | f.name | "\n")
 	sym := e.funcSymbol(f)
 	if len(sym) > 5 && (mxutil.HasPrefix(sym, "@llvm.") || mxutil.HasPrefix(sym, "@\"llvm.")) {
@@ -1932,14 +1966,29 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 			}
 		}
 	}
-	var hoistList []*SSAAlloc
+	// Presized, then written through a cursor. Growing this with
+	// `hoistList = mxutil.Ensure(hoistList, 1); push(...)` was quadratic:
+	// Ensure RETURNS []*SSAAlloc, and a returned slice of pointers is deep-copied
+	// by the return protocol - every element reaches its block, its function and
+	// through that the package - so each push copied the whole list. Measured:
+	// `math.Erfinv`, 22 blocks, 2 GB inside one function's emit.
+	hoistN := int32(0)
+	for _, hb := range f.Blocks {
+		for _, hinstr := range hb.Instrs {
+			if a, ok := hinstr.(*SSAAlloc); ok && hoisted[a] {
+				hoistN++
+			}
+		}
+	}
+	hoistList := []*SSAAlloc{:hoistN}
+	hoistI := int32(0)
 	// Collect allocas deterministically: iterate blocks/instructions in order
 	// (both are slices). Using hoisted map only as a set membership check.
 	for _, hb := range f.Blocks {
 		for _, hinstr := range hb.Instrs {
 			if a, ok := hinstr.(*SSAAlloc); ok && hoisted[a] {
-				hoistList = mxutil.Ensure(hoistList, 1)
-				push(hoistList, a)
+				hoistList[hoistI] = a
+				hoistI++
 			}
 		}
 	}
@@ -1948,11 +1997,23 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 			hoistList[j], hoistList[j-1] = hoistList[j-1], hoistList[j]
 		}
 	}
+	// Same presize rule as hoistList: a returned []*SSADefer reaches the whole
+	// function graph.
+	deferN := int32(0)
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			if _, ok := instr.(*SSADefer); ok {
+				deferN++
+			}
+		}
+	}
+	e.deferList = []*SSADefer{:deferN}
+	deferI := int32(0)
 	for _, b := range f.Blocks {
 		for _, instr := range b.Instrs {
 			if d, ok := instr.(*SSADefer); ok {
-				e.deferList = mxutil.Ensure(e.deferList, 1)
-				push(e.deferList, d)
+				e.deferList[deferI] = d
+				deferI++
 			}
 		}
 	}
@@ -1973,14 +2034,24 @@ func (e *irEmitter) emitFunction(f *SSAFunction) {
 			}
 			e.emitArenaPrologue()
 			e.deferCheckpointOn = e.deferFrame != ""
+			nin := int32(0)
 			for _, instr := range b.Instrs {
+				nin++
+				if nin&31 == 0 {
+					runtime.SovDrainCompactions(8)
+				}
 				e.emitInstr(instr)
 			}
 			e.deferCheckpointOn = false
 			e.flushPhiTruncs()
 		} else {
-			e.emitBlock(b)
+			emitBlockOf(e, b)
 		}
+		// Between two blocks the emitter's group has no live frame (each e.*
+		// call borrows and pops), so what the block abandoned is reclaimable
+		// here. Without this the group is drained once per function, and a
+		// function is where `strconv` spent 3.3 GB.
+		runtime.SovDrainCompactions(8)
 	}
 	e.hoisted = nil
 	e.hoistAllocaText(fnBodyStart)
@@ -2177,7 +2248,11 @@ func (e *irEmitter) emitCoverHitLine(line int32) {
 	e.declareRuntime("runtime.coverHit", "void", "i32")
 }
 
-func (e *irEmitter) emitBlock(b *SSABasicBlock) {
+// emitBlockOf is free like emitFunctionOf: as a method its borrow was live for
+// the whole block, so nothing the block's instructions allocated could be
+// compacted until it returned - and one block of `math.Erfinv` is enough to
+// exhaust the box.
+func emitBlockOf(e *irEmitter, b *SSABasicBlock) {
 	// A dotted label cannot collide with a source identifier: LLVM gives
 	// blocks and values one namespace, so a parameter named `b1` used to
 	// clash with generated block `b1` and clang rejected the module
@@ -2198,8 +2273,13 @@ func (e *irEmitter) emitBlock(b *SSABasicBlock) {
 	e.blockDead = false
 	e.deferCheckpointOn = e.deferFrame != "" && (e.curFunc.Recover == nil || b != e.curFunc.Recover)
 	phiFlushed := false
+	ni := int32(0)
 	for _, instr := range b.Instrs {
 		if e.blockDead { break }
+		ni++
+		if ni&31 == 0 {
+			runtime.SovDrainCompactions(8)
+		}
 		if !phiFlushed {
 			if _, isPhi := instr.(*SSAPhi); !isPhi {
 				phiFlushed = true

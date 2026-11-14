@@ -1491,30 +1491,44 @@ func paramRootName(v SSAValue, holders map[SSAValue]bool, depth int32) (name str
 
 // markReturnEscapes promotes stack allocas to heap when their address can
 // reach a return value.
+// mergeAllocs adds to m[key] every alloc in srcs it does not already hold, and
+// reports whether anything was added.
+//
+// It writes the map instead of returning the slice. Returning it made the
+// RETURN PROTOCOL deep-copy a slice of graph nodes (`[]*SSAAlloc` reaches the
+// block, the function, the package) on every instruction examined, and the copy
+// was thrown away: measured as 3.2 GB inside `mxregexp`'s markReturnEscapes,
+// 200 frames deep in codecDecodeValue. Called through a closure, which Moxie
+// cannot capture, the same call also had to pass the map by pointer.
+func mergeAllocs[K comparable](m map[K][]*SSAAlloc, key K, srcs []*SSAAlloc) (changed bool) {
+	cur := m[key]
+	for _, s := range srcs {
+		if s == nil {
+			continue
+		}
+		found := false
+		for _, c := range cur {
+			if c == s {
+				found = true
+				break
+			}
+		}
+		if !found {
+			// push grows by itself. mxutil.Ensure here was not just redundant,
+			// it was quadratic: Ensure RETURNS the slice, and a returned
+			// []*SSAAlloc is deep-copied by the return protocol (block ->
+			// function -> package) on every element added.
+			push(cur, s)
+			changed = true
+		}
+	}
+	m[key] = cur
+	return changed
+}
+
 func markReturnEscapes(f *SSAFunction) {
 	derived := map[SSAValue][]*SSAAlloc{}
 	stored := map[*SSAAlloc][]*SSAAlloc{}
-	mergeInto := func(dst []*SSAAlloc, srcs []*SSAAlloc) ([]*SSAAlloc, bool) {
-		didMerge := false
-		for _, s := range srcs {
-			if s == nil {
-				continue
-			}
-			found := false
-			for _, c := range dst {
-				if c == s {
-					found = true
-					break
-				}
-			}
-			if !found {
-				dst = mxutil.Ensure(dst, 1)
-				push(dst, s)
-				didMerge = true
-			}
-		}
-		return dst, didMerge
-	}
 	for _, b := range f.Blocks {
 		for _, instr := range b.Instrs {
 			if a, ok := instr.(*SSAAlloc); ok {
@@ -1563,18 +1577,14 @@ func markReturnEscapes(f *SSAFunction) {
 				case *SSAStore:
 					if d := derived[i.Val]; len(d) > 0 {
 						for _, a := range derived[i.Addr] {
-							ns, ch := mergeInto(stored[a], d)
-							if ch {
-								stored[a] = ns
+							if mergeAllocs(stored, a, d) {
 								changed = true
 							}
 						}
 					}
 				}
 				if dst != nil && len(srcs) > 0 {
-					nd, ch := mergeInto(derived[dst], srcs)
-					if ch {
-						derived[dst] = nd
+					if mergeAllocs(derived, dst, srcs) {
 						changed = true
 					}
 				}
