@@ -1519,6 +1519,27 @@ object cache, so a leftover file decided whether this run typechecked a package:
 "rebuild all" did different work on the same tree depending on what ran before.
 With `-a` the prepass now typechecks and rewrites it regardless.
 
+**4. The residual randomization was a NAME lookup over a pointer-keyed map.**
+`lookupObject` returns the first `Object` in `fb.vars` whose Name matches, and
+`fb.vars` is `map[Object]SSAValue`, so "first" is map iteration order over
+addresses. `buildTypeSwitch` guaranteed two objects with one name: it created a
+fresh TCVar per clause while a use site could still reach either, and both its
+save and its remove searched by name and `break`ed. `switch x := err.(type)` in
+`errors.is` has `case interface{Unwrap() error}` and `case interface{Unwrap() []error}`,
+so on some runs clause two's `x` resolved to clause one's type:
+`x.Unwrap()` returned `error` where `[]error` was meant, the range over it had
+no element type, and the element was rejected as an interface argument
+(`invalid type (name=t36)`). Confirmed by instrumenting the range builder: it
+printed `iterT=interface{Error() string; String() string}` for a range that
+must see `[]error`.
+
+The guard is ONE object - go/types records the clause type on each USE - so the
+switch now binds that object with `setGuard`, keyed by `info.Defs[tsg.Lhs]`, and
+the name scans are gone. `removeVar` already documented this exact hazard and
+deletes every match; the read side had no equivalent. Verified: three
+consecutive builds of a small app that imports `errors` produce identical output
+with no invalid-type diagnostic, where before the failure appeared on most runs.
+
 Result: the build is reproducible and fails in one place. That place is the
 `errors` package, whose SSA build now reports
 `cannot use value of type invalid type as interface{Error() string; String() string} in argument to function`

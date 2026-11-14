@@ -2307,13 +2307,18 @@ func (fb *ssaFuncBuilder) checkRecvChan(v SSAValue) {
 // (the "prefix:number:" shape remapOneLine expects). Without it an assignability
 // error names no file, and the stdlib has many.
 func (fb *ssaFuncBuilder) errPos() (s string) {
-	if fb.curLine > 0 {
-		return "line:" | simpleItoa(fb.curLine) | ": "
-	}
+	// The function name is part of the position, not a fallback: the line is
+	// the CONCATENATED line and the file map can be empty (remapErrorLines then
+	// prints "line:80:" with no file at all), so a diagnostic that names only
+	// the line cannot be located in the source.
+	where := ""
 	if fb.fn != nil {
-		return fb.fn.name | ": "
+		where = fb.fn.name | ": "
 	}
-	return ""
+	if fb.curLine > 0 {
+		return "line:" | simpleItoa(fb.curLine) | " in " | where
+	}
+	return where
 }
 
 // instantiatedUnder returns a Named generic's body with its own instantiation
@@ -2360,6 +2365,7 @@ type ifaceAssign struct {
 	localPkg *TCPackage
 	what    string
 	pos     string
+	vname   string
 }
 
 
@@ -2378,7 +2384,7 @@ func checkIfaceAssignments() {
 			continue
 		}
 		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-		push(cctx.compileErrors, pa.pos | "cannot use value of type " | pa.V.String() | " as " | pa.T.String() | " in " | pa.what | " (does not implement " | pa.T.String() | " (missing method " | missing | "))")
+		push(cctx.compileErrors, pa.pos | "cannot use value of type " | pa.V.String() | " (" | "(name=" | pa.vname | ")" | ") as " | pa.T.String() | " in " | pa.what | " (does not implement " | pa.T.String() | " (missing method " | missing | "))")
 	}
 	cstate.pendingIface = nil
 }
@@ -2512,7 +2518,7 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 					if IfaceCheckConclusive(V, tIface) {
 						if IfaceMethodSetLocal(V, fb.fn.Pkg.Pkg) {
 							cstate.pendingIface = mxutil.Ensure(cstate.pendingIface, 1)
-							push(cstate.pendingIface, ifaceAssign{V: V, T: T, localPkg: fb.fn.Pkg.Pkg, what: what, pos: fb.errPos()})
+							push(cstate.pendingIface, ifaceAssign{V: V, T: T, localPkg: fb.fn.Pkg.Pkg, what: what, pos: fb.errPos(), vname: val.SSAName()})
 						}
 					}
 				}
@@ -3931,6 +3937,7 @@ func (fb *ssaFuncBuilder) buildRangeLoop(s *syntax.ForStmt, rc *syntax.RangeClau
 	if valTyp == asType(Typ[Invalid]) && ssaIsStringType(iterSSAType) {
 		valTyp = asType(Typ[Uint8])
 	}
+
 	nxt.typ = NewTuple(
 		NewTCVar(nil, "ok", Typ[Bool]),
 		NewTCVar(nil, "k", keyTyp),
@@ -4233,18 +4240,44 @@ func (fb *ssaFuncBuilder) buildSwitch(s *syntax.SwitchStmt) {
 	fb.exitBlock(switchScope)
 }
 
+// setGuard binds a type switch's guard variable for one clause. The object is
+// the switch's single guard object, so the binding is a store into the same
+// key and a type update on the object itself - buildIdent reads the load's type
+// from the object, and the alloc it loads from is the clause's.
+func (fb *ssaFuncBuilder) setGuard(obj Object, typ Type, val SSAValue) {
+	if tv, isVar := obj.(*TCVar); isVar {
+		tv.Typ = typ
+	}
+	alloc := fb.emitAlloc(typ, 0)
+	fb.vars[obj] = alloc
+	fb.emitStore(alloc, val)
+}
+
 func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.TypeSwitchGuard, doneBlock *SSABasicBlock) {
 	x := fb.buildExpr(tsg.X)
-	var savedObj Object
+	// The guard is ONE object for the whole switch: go/types records the
+	// clause type on each USE, not a new object per clause. This used to create
+	// a fresh TCVar per clause keyed by nothing stable, and both the lookup it
+	// replaced and the restore below searched fb.vars BY NAME and broke on the
+	// first match - so with two objects called `x` in one layer, which one a use
+	// saw depended on map iteration order over POINTER keys, i.e. on the
+	// addresses the run was given. `switch x := err.(type)` with
+	// `case interface{Unwrap() error}` and `case interface{Unwrap() []error}`
+	// then resolved the second clause's `x` to the first clause's type on some
+	// runs: `x.Unwrap()` returned `error` where `[]error` was meant, the range
+	// over it had no element type, and the element was rejected as an interface
+	// argument. Deterministic because the object comes from the syntax info.
+	var guardObj Object
 	var savedAlloc SSAValue
+	var hadSaved bool
 	if tsg.Lhs != nil {
-		for obj, alloc := range fb.vars {
-			if ObjectName(obj) == tsg.Lhs.Value {
-				savedObj = obj
-				savedAlloc = alloc
-				break
-			}
+		if fb.info != nil {
+			guardObj = fb.info.Defs[tsg.Lhs]
 		}
+		if guardObj == nil {
+			guardObj = NewTCVar(fb.fn.Pkg.Pkg, tsg.Lhs.Value, NewTCInterface(nil, nil))
+		}
+		savedAlloc, hadSaved = fb.vars[guardObj]
 	}
 	{
 		var zzq16 []syntax.Expr
@@ -4355,16 +4388,7 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.Type
 					}
 					guardVal = &SSAConst{typ: guardType, val: nil}
 				}
-				for old := range fb.vars {
-					if ObjectName(old) == tsg.Lhs.Value {
-						delete(fb.vars, old)
-						break
-					}
-				}
-				obj := NewTCVar(fb.fn.Pkg.Pkg, tsg.Lhs.Value, guardType)
-				alloc := fb.emitAlloc(guardType, 0)
-				fb.vars[obj] = alloc
-				fb.emitStore(alloc, guardVal)
+				fb.setGuard(guardObj, guardType, guardVal)
 			}
 		} else {
 			fb.emit(&SSAJump{Comment: "typeswitch.case"})
@@ -4376,16 +4400,7 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.Type
 				if guardType == nil {
 					guardType = NewTCInterface(nil, nil)
 				}
-				for old := range fb.vars {
-					if ObjectName(old) == tsg.Lhs.Value {
-						delete(fb.vars, old)
-						break
-					}
-				}
-				obj := NewTCVar(fb.fn.Pkg.Pkg, tsg.Lhs.Value, guardType)
-				alloc := fb.emitAlloc(guardType, 0)
-				fb.vars[obj] = alloc
-				fb.emitStore(alloc, x)
+				fb.setGuard(guardObj, guardType, x)
 			}
 		}
 
@@ -4405,14 +4420,12 @@ func (fb *ssaFuncBuilder) buildTypeSwitch(s *syntax.SwitchStmt, tsg *syntax.Type
 		fb.currentBlock = nextBlock
 	}
 	}
-	if savedObj != nil && savedAlloc != nil {
-		for old := range fb.vars {
-			if ObjectName(old) == tsg.Lhs.Value {
-				delete(fb.vars, old)
-				break
-			}
+	if tsg.Lhs != nil {
+		if hadSaved {
+			fb.vars[guardObj] = savedAlloc
+		} else {
+			delete(fb.vars, guardObj)
 		}
-		fb.vars[savedObj] = savedAlloc
 	}
 	if fb.currentBlock != nil {
 		fb.emit(&SSAJump{Comment: "switch.done"})
