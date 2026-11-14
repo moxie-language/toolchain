@@ -975,6 +975,15 @@ recorded as dead ends so they need not be repeated:
 - the pre-session `main.mx` (before the graph-arena work): SIGSEGV inside
   `array`'s SSA build at 877 MB, earlier than the working-tree version, so the
   working-tree `main.mx` is the best of the three and should be kept.
+- clearing `cctx.scannedGeneric` at the top of `CompileToIR`, on the theory that
+  the compile phase was reusing a generic scan whose types belong to the freed
+  typecheck arena: identical 3.2 GB OOM, so the reused scan is not the term.
+- a 300000-step trace of `codecEncodeValue`'s kind and arena decision, gated on
+  `manualArena != nil`: the budget was consumed entirely by the typecheck
+  pre-pass before the first `compile`, so it produced no data about the SSA
+  build. **Gate the next attempt on the compile arena itself** (for example
+  `manualArena == cctx.compileArena`, or a flag the compiler sets around the SSA
+  build), not on manual mode being active.
 
 Where the walk enters is `codecInManualArena` and `codecIsStableArenaAddr`:
 
