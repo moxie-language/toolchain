@@ -892,36 +892,59 @@ source file or an error string - was written into the same pages. Print the
 lengths, not the strings: `len(x.Name)` is safe on a dangling header, `x.Name` in
 a concatenation allocates the garbage length and dies with "implausible size".
 
-### 8.3b9 The current wall: a 20-deep codec recursion on a recursive struct
+### 8.3b9 The current wall: the codec walking compiler state
 
 With the three above fixed, the tiny app's build type-checks all 34 packages,
-emits IR for `array`, and stops in `internal/task`, whose `Task` is
-self-referential (`Next *Task`):
+emits IR for the FIRST package of the emit phase (`array`, `ci-free array`
+prints), and dies in the SECOND (`internal/task`) at the 4 GB ceiling.
 
-    func (t *Task) DataUint32() (r0 uint32) { return *(*uint32)(unsafe.Pointer(&t.Data)) }
-    func (t *Task) SetDataUint32(val uint32) { *(*uint32)(unsafe.Pointer(&t.Data)) = val }
+The package's contents are irrelevant, which is the useful part: reducing
+`src/internal/task` to
 
-Those two are the whole cost: RSS goes 880 MB -> 2.6 GB building them and the
-next 64 MB arena segment fails to map. A core dump from the abort gives
+    package task
+    type Task struct { Data uint64 }
+
+still dies, and so does removing its `unsafe.Pointer` conversions. So the walk
+is not over the package being compiled - it is over compiler state that the
+codec reaches from something the return protocol is relocating.
+
+Two core dumps, two sides of the same walk:
 
     sysMapDie <- arenaOpenSegment <- arenaBump <- alloc <- mxutil.Ensure__Pointer
       <- codecEncodeValue x20 <- buildExpr <- buildArgs <- buildCall
-      <- buildExpr <- buildArgs <- buildCall <- buildExpr <- buildStore
-      <- buildAssign <- buildStmt <- buildBlock <- buildBody <- buildFunc
+      <- buildExpr <- buildArgs <- buildCall <- buildExpr <- buildStore ...
 
-so the SSA builder's conversion chain is finite and the explosion is the
-return-value relocation of the innermost value: `codecEncodeValue` recursing 20
-levels on a self-referential type. `SafeUnderlying`'s `Named` walk is also
-capped at 20, which is the number to look at first - the cycle is not being cut
-by the seen set, or the walk is creating a fresh `*Pointer`/`*Named` per level so
-no pointer can ever repeat.
+    sysMapDie <- arenaOpenSegment <- arenaBump[0m <- sovGrowRecs <- sovAddRec
+      <- alloc <- codecDecodeValue <- codecDecodeMapValue <- codecDecodeInto x...
 
-`tests/`-style reproducer, 20 lines and no dependency on `internal/task`:
+So one run exhausts the arena on the ENCODE side with a 20-deep
+`codecEncodeValue`, the other exhausts it on the DECODE side growing a SOVEREIGN
+arena's allocation record table (`sovAddRec` per allocation, `sovGrowRecs`
+doubling to 256 MB segments). Both are the same disease: a graph crossing the
+return boundary whose walk registers millions of pointers.
 
-    type Task struct { Next *Task; Ptr unsafe.Pointer; Data uint64 }
+Two things to look at first, in this order:
 
-with the two conversion functions above. The known-good `mxc-stage4` compiles it;
-every rebuilt compiler dies on it. `~/task-probe/main.mx` is that reproducer.
+1. **`codecDecodeMapValue` in the stack.** A MAP is reachable from the relocated
+   value. `*Scope`, `*SSAPackage.Members`, `SSAProgram.packages` and
+   `cctx.universe.Registry` are all maps. A returned `SSAValue` is an interface
+   whose node carries `Pkg *SSAPackage` and `Prog *SSAProgram`, so if the encode
+   follows those the walk is the whole program, and it grows by one package per
+   package compiled - which is exactly why the first package survives and the
+   second does not.
+2. **`codecSeenLookup` is a LINEAR SCAN** over every registered pointer, and
+   `codecSeenAdd` grows the table with `Ensure` per pair. So the seen set costs
+   O(N^2) time and O(N) arena per encode, and the tables of nested returns are
+   all live at once. It is not the cause, but it is the amplifier: 20 nested
+   levels each holding a table sized by the walk turns a big graph into 2.6 GB.
+
+`SafeUnderlying`'s `Named` walk is also capped at `depth < 20`, which matches the
+20 encode frames and may be the same number seen from the other end.
+
+The known-good `mxc-stage4` compiles the same app in 327 MB, so this is a
+regression in this session's sources, not a property of the design. The
+regression range is `6fa2e18a..HEAD` plus the working-tree `main.mx`, and the
+first suspect is whatever made a map reachable from a relocated value.
 
 ### 8.3c What the codec cannot do, measured
 
