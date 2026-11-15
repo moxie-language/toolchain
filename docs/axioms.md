@@ -1,6 +1,8 @@
 # Axioms of Moxie
 
-Three axioms generate everything in this language that a compiler can check. Everything else in it is a derivative, not a decision. Nothing in Moxie is a preference, a convention, or a matter of taste, and the reason there is nothing to argue about is that the axioms are strong enough and few enough that the design closes. The five structural laws of the pentalogue are the larger set the axioms project from; the law a type system cannot enforce is named there, and it is residue, not licence.
+Revision 2. The pentalogue is restated at the axiom scale: metal is explicit, wood is isolation, water is closure, fire is the code, earth is the spec. The first three are the axioms and the language enforces them; the last two are the programmer's and the client's, and no type system can. Isolation and bilateralism are one law, and sovereignty is arbitrary.
+
+Three axioms generate everything in this language that a compiler can check. Everything else in it is a derivative, not a decision. Nothing in Moxie is a preference, a convention, or a matter of taste, and the reason there is nothing to argue about is that the axioms are strong enough and few enough that the design closes. The five laws of the pentalogue are the larger set the axioms project from; the two a type system cannot enforce are named there, and they are residue, not licence.
 
 The operational test that keeps this checkable: a proposed feature must name the axiom that forces it. If no axiom forces it, it is an opinion, and it is deleted. A feature forced only by a pentalogue law that is not an axiom is doctrine, not language, and it belongs in the deployment rather than in the type system.
 
@@ -50,23 +52,57 @@ A3 is the authority requirement. It says what cannot be reached even though it i
 
 ## The pentalogue
 
-Three axioms are what a compiler can enforce. Five structural laws govern coherent systems, and the axioms are the static projection of them. The axioms are not a reduction of the pentalogue; they are its enforceable image. The gap between the two is the point of this section, because one of the five cannot be checked by a type system, and a design that pretends otherwise is coherent on paper and incoherent in use.
+Three axioms are what a compiler can enforce. Five laws govern coherent systems, and the axioms are their enforceable image. The line between the five is not structural versus behavioural, and it is not abstract versus concrete. It is this: **a law with a free parameter cannot be a type rule.**
 
-| law | element | requirement | projection |
-|---|---|---|---|
-| sovereignty | earth | what you control is yours; what crosses the border is hostile until proven otherwise | A2, A3 |
-| bilateralism | wood | no contract is signed by one hand; change both sides or change nothing | none |
-| precision | metal | give the stranger a key, not the house | A3 |
-| measurement | fire | weigh it, count it, time it; the crowd's opinion fits no scale | A1 |
-| resolution | water | what two claim to own, no man owns; the first to act on the lie destroys it for both | A2 |
+Three of the five have no free parameter. You must name the tier, you must declare the channel, the tier set is fixed. There is nothing to choose, so there is nothing to check but compliance, and compliance is a syntax pass.
 
-The sheng and ke relations are consistency conditions between the laws, not additional laws. Sheng is the productive direction, and it runs wood to fire to earth to metal to water and back: bilateral change fuels measurement, measurement establishes sovereignty, sovereignty refines into precise access, precise access resolves ownership, resolution enables new bilateral change. Ke is the destructive direction, and each edge names a way a coherent system dies: bilateral demands without boundaries disrupt sovereignty, territorial hoarding blocks resolution, ownership ambiguity obscures measurement, raw truth without restraint destroys refined interfaces, restricted access kills bilateral growth.
+Two of the five are nothing but free parameters: which algorithm, which encoding. The compiler cannot prefer one, because there is no fact of the matter, and a rule that cannot prefer cannot enforce. Those two are the programmer's, and they are the two that fail silently.
 
-The ke cycle is therefore the review checklist for everything the compiler cannot see. A design that hoards what it cannot hold, restricts access until nothing can pass, leaves ownership ambiguous, negotiates without standing, or exposes everything without granting anything has violated one of the five, and no static check will catch it, because none of those failures is a property of the code.
+| element | law | requirement | owner | failure |
+|---|---|---|---|---|
+| metal | explicit | every allocation names its tier; nothing that governs behaviour is inferred | A1 | a site with no declared tier |
+| wood | isolation | nothing crosses a boundary without a declared channel, and both sides declare it | A2 | a value crossing without a channel |
+| water | closure | the tier set is fixed and finite; nothing ambient is reachable | A3 | capacity exhausted, or a value outliving its tier |
+| fire | the code | the computation terminates and yields the same answer from the same input | programmer | divergence in time, or in value |
+| earth | the spec | one canonical form, stated once, used everywhere | client | two correct implementations disagree |
+
+**Isolation and bilateralism are one law.** A boundary that only one side respects is not a boundary, it is a suggestion. The channel is the contract: it is declared by both endpoints, it carries one message type, and neither side can reach past it. The tree supplies the two hands; the type system checks that both hands are on the same declaration. What it cannot check is good faith, and good faith is not a law, it is a virtue.
+
+**Sovereignty is arbitrary, and the spec is the client's.** This is the sharpest thing the pentalogue says about earth. The client states what they want; the canonical form has no correct answer: json, cbor, protobuf, or a double line break as a sentinel are all equally valid, and the choice is a matter of taste, history and convenience. What is not arbitrary is that there is exactly one, stated once, and that every implementation uses it. The content is free; the uniqueness is mandatory. That is precisely why no compiler can check it: a rule with a free parameter has no truth value to check against, only a consistency requirement, and consistency between two implementations is not a property of either one.
+
+**Fire is the code, and the code is the mechanism of precision.** The client says what they want; the programmer makes it exact. The computation must stop, and it must stop at the same place with the same value every time. Neither is decidable in general, which is why the language does not try. It does the only thing it can: it removes the ambient sources of nondeterminism, so that the common ways of failing fire are unavailable rather than merely discouraged. No ambient clock, no unseeded random, no float in the core, defined iteration order, no scheduler-dependent ordering. What remains is the programmer's algorithm, and the programmer's obligation to make it terminate.
+
+The sheng and ke relations are consistency conditions between the laws, not additional laws. Sheng is the productive direction, and it runs wood to fire to earth to metal to water and back: a boundary makes the code's behaviour well defined, running code reveals what the specification has to say, a canonical form is what makes a declaration possible, naming every site is what proves the set is closed, and a closed set is what makes a boundary meaningful.
+
+Ke is the destructive direction, and each edge names a way a coherent system dies: a boundary that cuts the specification in two leaves each side with its own canonical form; a specification that fixes the format so hard nothing can be added blocks closure; a capacity so tight the algorithm cannot run drowns the code; code that outruns its declarations melts the names that were supposed to cover it; and a declaration so precise it forbids the channel cuts the boundary it was meant to protect.
+
+The ke cycle is therefore the review checklist for everything the compiler cannot see. A design that splits its canonical form, freezes its format against growth, sets a capacity its algorithm cannot fit, lets behaviour escape its declarations, or names things so tightly that nothing can cross has violated one of the five, and no static check will catch it, because none of those failures is a property of the code.
 
 The repo's change discipline is the wood law applied to time: legacy first, stage4 second, because a change to one side alone is a contract signed by one hand.
 
-The enforceable claim is narrower than "three axioms generate everything": the axioms generate everything the compiler can check. Bilateralism is the law the language serves and cannot enforce, because it is a property of how peers behave across a boundary, not of the boundary's type. That is the pentalogue's residue, and it is listed with the others.
+The enforceable claim is narrower than "three axioms generate everything": the axioms generate everything the compiler can check. Fire and earth are the pentalogue's residue, and they are listed with the others. That is not a licence. A law that is residue is a duty on the programmer, and the duty is heavier than the enforced ones, because nothing will tell you when you have broken it.
+
+---
+
+## The enforced three and the residue two
+
+Three of the five are the machine's. Two are yours.
+
+| element | law | owner | failure | caught |
+|---|---|---|---|---|
+| metal | explicit | language | a site with no declared tier | compile |
+| wood | isolation | language | a value crossing without a channel | boundary |
+| water | closure | language | capacity exhausted, or a value outliving its tier | runtime |
+| fire | the code | programmer | divergence in time or value | never |
+| earth | the spec | client | two correct implementations disagree | never |
+
+The three the language owns are structural. They constrain the shape of the memory graph: explicit constrains the site, isolation constrains the edge, closure constrains the set. Site, edge and set is a complete description of a graph, which is why the three feel finished and why they are not. A graph description says nothing about what the graph does over time, and nothing about what it is supposed to mean.
+
+The two that are not the language's are the dynamics and the meaning. Fire is the programmer's: it bounds the time the graph runs and fixes the value it produces, and it is the mechanism by which an intention becomes precise. Earth is the client's: it fixes what the value is, so that two graphs produce the same one. Neither is a property of an allocation, so neither is a property a type system can see.
+
+So the division is not three enforced and two ignored. It is three enforced and two enabled: the language removes the ambient ways of failing them and provides the canonical form they need, and the specification states what was removed, what was provided, and what remains the programmer's.
+
+The failure modes are why the split matters. The three enforced failures are loud: a compile error, a type error, a panic naming the region. The two residue failures are silent. Fire fails as a fork. Earth fails as a disagreement between two correct implementations. Both look like a bug in the other node, and neither is catchable by any static check, which is why they belong in the specification rather than in the type system.
 
 ---
 
@@ -112,7 +148,7 @@ The cost is expressiveness. No ambient clock, no ambient I/O, no ambient identit
 
 - **Independent.** A1 does not imply A2: a fully declared shared-memory language is possible. A1 does not imply A3: a declared topology with an ambient clock is possible. A2 does not imply A1: an isolated system with runtime negotiation is possible. A2 does not imply A3: per-domain memory with a global file is possible. A3 does not imply A1: a closed capability set with undeclared topology is possible. A3 does not imply A2: a closed capability set over shared memory is possible.
 - **Auditable.** Three axioms still fit in a head, which means they can be checked for consistency and redundancy. Every other language also has an axiom set; it is unwritten, larger, partly contradictory, and owned by nobody. Anything unauditable survives by default as an opinion, because you cannot delete what has never been stated.
-- **Absorbing.** Three strong axioms with a triple intersection close the design. A1 closes inference, A2 closes sharing, A3 closes ambient authority. What looks like freedom in other languages is the gap an axiom failed to close. The residue is what physics and the wire format refuse to close. The pentalogue's wood law sits outside the intersection by construction, which is why it appears in the residue rather than in the lemmas.
+- **Absorbing.** Three strong axioms with a triple intersection close the design. A1 closes inference, A2 closes sharing, A3 closes ambient authority. What looks like freedom in other languages is the gap an axiom failed to close. The residue is what physics and the wire format refuse to close. The pentalogue's fire and earth laws sit outside the intersection by construction, which is why they appear in the residue rather than in the lemmas.
 
 ---
 
@@ -207,7 +243,7 @@ For a product, the owner is the lowest node that is within reach of, and outlive
 A2 forces per-component memory; A1 forces the release point to be structural. The intersection admits exactly one possibility: a per-function arena released at return, with relocation and pointer rewriting at the boundary. There is no startup bump allocator and no heap, because either would reintroduce a release point that structure does not determine.
 
 **L20. The topology declaration is the only global artifact, and it is a canon, not an authority.**
-A1 needs exactly one thing to check, and A2 guarantees nothing else is global. It therefore plays three roles at once: the intent record, the compiler input, and the review surface. It should diff as a shape rather than as control flow, because it is the only place a non-local bug can live. It is global because it is the measurement of the whole (fire), not because it holds power (earth). It grants nothing at runtime; the moment it becomes a runtime lookup it has become a service locator, which A3 forbids.
+A1 needs exactly one thing to check, and A2 guarantees nothing else is global. It therefore plays three roles at once: the intent record, the compiler input, and the review surface. It should diff as a shape rather than as control flow, because it is the only place a non-local bug can live. It is global because it is the specification of the whole (earth), not because it holds power. It grants nothing at runtime; the moment it becomes a runtime lookup it has become a service locator, which A3 forbids.
 
 **L21. Signal is the operation.**
 The index word is simultaneously the state and the notification. Advancing the write index is both the data-availability state and the wake for a parked reader; advancing the read index is both the space-availability state and the wake for a parked writer. There is no separate control message and no notification ordering question, because there is only one write. The parking primitive is a futex on that word, and the expected-value check in FUTEX_WAIT is what makes the check-then-sleep sequence atomic in the kernel.
@@ -268,7 +304,7 @@ The component that owns the OS interface is the one place where ambient authorit
 Fine-grained purity is given up (a leaf mutates its own arena) in exchange for a component whose observable behaviour is fully determined by its declared inputs. A2 supplies the private arena; A3 supplies the closure of the declared inputs; A1 supplies the static check. This is the purity that a type system can enforce at this granularity, and the only kind that makes replacement and cold restart sound.
 
 **L30. The axioms in silicon delete coherence and the memory model.**
-A hardware architecture that enforces A2 has no shared address space and therefore no coherence protocol, no directories, no invalidation traffic, and no memory consistency model. The interconnect becomes point-to-point channels with buffering, which removes snoop traffic and scales where a bus does not. Fault containment is by construction. Historical instances of this architecture class (the transputer, the Cell BE local stores) were simpler and more robust than their coherent contemporaries and lost commercially because no compiler made the topology a first-class reviewable artifact, not because of the silicon. The safety-critical domain, where certification demands provable isolation, independently converged on these axioms (ARINC 653 partitioned domains with no shared memory). A3 extends the same deletion to ambient authority: a component with no ambient input cannot be perturbed by a device it did not declare. What hardware cannot remove is the cost of the transfer itself, and the one place the axiom is violated by physics is DMA and MMIO, where the correct response is to minimise the shared window, which is what an IOMMU and SR-IOV already are. The shell is the software analogue of that window. The pentalogue states the same deletion socially: sovereignty is what remains when nothing is shared, and resolution is what remains when no fact has two owners.
+A hardware architecture that enforces A2 has no shared address space and therefore no coherence protocol, no directories, no invalidation traffic, and no memory consistency model. The interconnect becomes point-to-point channels with buffering, which removes snoop traffic and scales where a bus does not. Fault containment is by construction. Historical instances of this architecture class (the transputer, the Cell BE local stores) were simpler and more robust than their coherent contemporaries and lost commercially because no compiler made the topology a first-class reviewable artifact, not because of the silicon. The safety-critical domain, where certification demands provable isolation, independently converged on these axioms (ARINC 653 partitioned domains with no shared memory). A3 extends the same deletion to ambient authority: a component with no ambient input cannot be perturbed by a device it did not declare. What hardware cannot remove is the cost of the transfer itself, and the one place the axiom is violated by physics is DMA and MMIO, where the correct response is to minimise the shared window, which is what an IOMMU and SR-IOV already are. The shell is the software analogue of that window. The pentalogue states the same deletion: isolation is what remains when nothing is shared, and closure is what remains when nothing ambient is reachable.
 
 **L40. The capability graph is the topology.**
 A1 declares the topology; A3 declares the capabilities. The two graphs must coincide. A capability that crosses a boundary the topology does not declare is an undeclared edge; a declared edge with no capability is a dead channel. Corollary: capability placement is checkable by the same syntactic diff as topology placement, and the review surface is the pair of declarations.
@@ -312,7 +348,7 @@ Four things none of the axioms settles. They are acknowledged costs, not derived
 
 **The syscall boundary.** A3 closes the component, not the machine. The shell must call the OS, and the OS is ambient by physics. The correct response is to minimise the window and audit the list, the same way L30 treats DMA and MMIO. This is a residue, not a violation: the axiom applies to components, and the shell is the designated exception.
 
-**Bilateralism.** The language cannot enforce that both sides of a contract agree, only that both sides are declared. A peer can sign and then refuse, and the refusal is a declared message, not a type error. The pentalogue's wood law is therefore a residue: the tree supplies the two hands, but it cannot supply good faith. The repair is not a type; it is the operator's choice of peers, which is why the doctrine in the octalogue exists at all.
+**Good faith.** The language enforces that both sides of a contract are declared, and that neither can reach past the channel. It cannot enforce that both sides mean it. A peer can sign and then refuse, and the refusal is a declared message, not a type error. The wood law's boundary is enforced; the agreement across it is residue, because the tree supplies the two hands but cannot supply good faith. The repair is not a type; it is the operator's choice of peers, which is why the doctrine in the octalogue exists at all.
 
 Also acknowledged, from A2: the expressiveness that is given up. No in-place mutation of a shared structure, so no lock-free algorithms, no zero-copy shared buffers, no DMA-style sharing, and no cross-component in-place numerics. The single escape is at the physical edge, where the hardware itself shares memory. From A3: the ambient world is given up. No ambient clock, no ambient I/O, no ambient identity, no ambient randomness, no ambient configuration. The single escape is the shell, which owns the world and exposes it as declared capabilities.
 

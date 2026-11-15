@@ -148,7 +148,9 @@ The other adoption argument is the cost model. Moxie forces the programmer to re
 
 The parts of the doctrine that no type system enforces, listed so that the document does not overstate itself.
 
-Bilateralism. No contract is signed by one hand. This is a property of how peers behave across a boundary, not of the boundary's type, and it is the pentalogue's named residue. A component can honour its declared interface and still be a bad peer.
+Good faith. No contract is signed by one hand. The boundary is enforced: both endpoints declare the channel, and neither can reach past it. What is not enforceable is that both sides mean it. That is the pentalogue's named residue, and it is a property of how peers behave, not of the boundary's type. A component can honour its declared interface and still be a bad peer.
+
+Fire and earth. The code must terminate and yield the same answer from the same input, and the specification must state one canonical form. Neither is a property of the code, so neither is checkable. Fire is the programmer's and is the mechanism of precision; earth is the client's. They are the two laws the pentalogue hands back, and they are the two that fail silently.
 
 Integer overflow. Not checked. Arithmetic wraps.
 
