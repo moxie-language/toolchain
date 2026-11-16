@@ -194,6 +194,123 @@ type Arena struct {
 	// feed the per-scope report in arena_scope.mx.
 	scope int32
 	alloc uint64
+	// livePrev/liveNext/liveIn link every usable arena into liveArenaHead.
+	// They exist so a receiver can be attributed to the arena that owns it even
+	// when that arena is not a frame on the fn stack: a per-package graph arena
+	// and a channel pool's turn arena are current only while they are being
+	// written, so a sovereign group created for a receiver they hold has no
+	// other way to learn its own lifetime. Untracked, the group is never
+	// released, outlives its receiver's memory, and the next full mark walks
+	// recycled bytes - the fault in sovWalkValue1 under sovMarkReceiverRoots.
+	livePrev *Arena
+	liveNext *Arena
+	liveIn   int32
+	// liveGen is the walk generation that last visited this arena. A full walk
+	// marks each node once, so a corrupt link cannot make it count one arena
+	// thousands of times: it names the cycle instead (see liveWalkBegin).
+	liveGen uint32
+}
+
+// liveArenaHead is the most recently created live arena, and every arena that
+// can be written to is in this list until its teardown takes it out.
+//
+// The fn stack is not enough to answer "which arena owns this address": an
+// arena can be current without being a frame. Measured on the compiler's own
+// self-build, 40+ groups for types.Named receivers were created while the
+// receiver sat in a graph arena that the stack scan could not see, and every
+// one of them faulted later. ArenaNew adds, arenaReleaseGroups (the one
+// teardown all four exit paths share) removes, and the two pool hand-outs add
+// back what the teardown removed.
+var liveArenaHead *Arena
+
+// liveWalkGen rises once per full walk of the live list, and each arena records
+// the generation that visited it. A walk therefore counts a node once even if a
+// stale link puts it back in the chain, and a repeat is REPORTED instead of
+// silently inflating the total.
+//
+// This exists because the first honest ledger run (region.md A.3) reported
+// narena=4096 - the walk's bound - while /proc/self/maps held 163 mappings: some
+// death path leaves an arena linked, its address is reused by the next mmap, and
+// re-adding it closes a cycle. The repeat count is the size of that miss, and
+// printing it is how the missing arenaLiveDel gets named instead of guessed. The
+// durable fix is to find that path; the cycle is a fail-loud stop, not a repair.
+var liveWalkGen uint32
+var liveWalkRepeats uint32
+
+func liveWalkBegin() {
+	liveWalkGen++
+	if liveWalkGen == 0 {
+		a := liveArenaHead
+		for i := int32(0); a != nil && i < (1<<20); i++ {
+			a.liveGen = 0
+			a = a.liveNext
+		}
+		liveWalkGen = 1
+	}
+}
+
+// liveArenaLedger sums the capacity and count of every live arena, walking the
+// list once. Repeats are counted, not followed.
+func liveArenaLedger() (total uintptr, count int32) {
+	if domainRoot == nil {
+		return 0, 0
+	}
+	liveWalkBegin()
+	gen := liveWalkGen
+	a := liveArenaHead
+	for a != nil {
+		if a.liveGen == gen {
+			liveWalkRepeats++
+			break
+		}
+		a.liveGen = gen
+		count++
+		for j := int32(0); j < a.nregions; j++ {
+			total += a.regions[j].cap
+		}
+		a = a.liveNext
+	}
+	return total, count
+}
+
+// LiveWalkRepeats is how many times a live-list walk has had to stop at a node
+// it had already visited. Zero is the only healthy value.
+func LiveWalkRepeats() (n uint32) {
+	return liveWalkRepeats
+}
+
+// arenaLiveAdd registers a as writable. Idempotent: the pool and reset paths
+// call it on arenas that may already be listed.
+func arenaLiveAdd(a *Arena) {
+	if a == nil || a.liveIn != 0 {
+		return
+	}
+	a.livePrev = nil
+	a.liveNext = liveArenaHead
+	if liveArenaHead != nil {
+		liveArenaHead.livePrev = a
+	}
+	liveArenaHead = a
+	a.liveIn = 1
+}
+
+// arenaLiveDel unregisters a. Idempotent, because ArenaRelease frees an arena
+// that its own reset just re-registered.
+func arenaLiveDel(a *Arena) {
+	if a == nil || a.liveIn == 0 {
+		return
+	}
+	if a.livePrev != nil {
+		a.livePrev.liveNext = a.liveNext
+	} else if liveArenaHead == a {
+		liveArenaHead = a.liveNext
+	}
+	if a.liveNext != nil {
+		a.liveNext.livePrev = a.livePrev
+	}
+	a.livePrev = nil
+	a.liveNext = nil
+	a.liveIn = 0
 }
 
 // Arena pool: bounded freelist of reset arenas for reuse.
@@ -974,6 +1091,35 @@ func SovResetStable() {
 	domainRoot.stableArena = nil
 }
 
+// SovCheckpoint is the stop point for a program that has NO event loop: a
+// compiler, a batch transform, any CLI that runs one process and exits. It
+// answers the termination channel and reports 1 when the program should stop.
+//
+// It deliberately does NOT drain sovereign compaction, and the reason is a
+// precondition that does not hold yet. A drain is only correct when every live
+// reference to a compactable group is a root the walk rewrites: the receiver's
+// fields, the selecting frame's root map, and the fn/stable/manual arena slots.
+// None of those cover a POINTER IN A STACK SLOT or in the root arena, and a
+// compiler keeps exactly those: the type checker's locals name its own types,
+// `cctx` holds graphs, `mxutil.target` holds the import segments. Measured with
+// the drain enabled here: the encode of an import segment read a slice header at
+// 0x100000 (the bad-pointer floor), and the walk faulted inside
+// sovRebaseValue1 - memory that had moved under a frame the sweep could not see.
+//
+// So the stop point is installed now and the drain waits for the root set to
+// cover stack slots and root references (a conservative scan at the safe point,
+// which costs compaction - never correctness - when it is wrong). Until then a
+// caller that KNOWS its references are all rewritable can still call
+// SovDrainCompactions directly.
+func SovCheckpoint() (stop bool) {
+	// The channel has to exist before the flag can be answered: a program whose
+	// only select is the event loop never created it here, and shutdownPoll
+	// returns immediately when it is nil.
+	ShutdownChan()
+	shutdownPoll()
+	return shutdownFired || (shutdownChan != nil && shutdownChan.closed)
+}
+
 // SovDrainCompactions compacts up to budget queued groups and returns how many
 // it examined. Call it only at a safe point where no frame of the affected
 // receivers is live - the native event loop's yield, or the wasm host's
@@ -1498,14 +1644,18 @@ func SovReleaseDead(recv unsafe.Pointer) (freed uintptr) {
 	if sovArenaBorrowed(g.data) || sovBorrowedReceiverIn(g) {
 		return 0
 	}
+	// No deferred closure: a closure cannot capture in this language, and the
+	// compiler refuses one (SovReleaseDead: closure capture 'g' has no live
+	// slot). A panic is death and deferred calls do not run on the way out, so
+	// the only exit that matters is this one.
 	g.inRelease = 1
-	defer func() { g.inRelease = 0 }()
 	before := g.allocBytes
 	sovFullMark(g)
 	sovReleaseDeadGroup(g)
 	if before > g.allocBytes {
 		freed = before - g.allocBytes
 	}
+	g.inRelease = 0
 	return freed
 }
 
@@ -1653,6 +1803,7 @@ func sovNewArena(capacity uintptr) (a *Arena) {
 		a.sovGroups = 0
 		a.sovereign = 1
 		a.growDouble = 1
+		arenaLiveAdd(a)
 		return a
 	}
 	a = ArenaNew(capacity)
@@ -1753,6 +1904,28 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 	// so ctxArena stayed nil and sovInvalidateArena never released the group
 	// when the arena died.
 	home := sovFindContainingArena(uintptr(recv))
+	if home == nil {
+		// The receiver was allocated BY a mutating method of another sovereign
+		// type, so it is a record of that type's data arena rather than of any
+		// frame. Attributing it to that data arena is what makes the group
+		// reachable from the teardown that ends its receiver: compaction
+		// rekeys the group for every relocated record (sovRekeyRelocated), and
+		// release/reset runs sovInvalidateArena on the arena. Left
+		// unattributed, the group stays in the receiver map after its receiver
+		// is gone, and the next full mark walks a dead receiver - the fault in
+		// sovWalkValue1 under sovMarkReceiverRoots.
+		if owner := sovRangeOwner(uintptr(recv)); owner != nil {
+			// The arena that HOLDS the receiver, not merely "the owner's data
+			// arena": during a compaction cycle the owner has two, and a
+			// receiver allocated while the cycle runs lands in cycleData, which
+			// becomes g.data only when the cycle finishes. Attributing such a
+			// receiver to g.data made the group outlive it - g.data is freed at
+			// the finish, the receiver is not in it, and the teardown then had
+			// nothing to release. That orphan is what the mark walk later
+			// faulted on (R10).
+			home = sovArenaHolding(owner, uintptr(recv))
+		}
+	}
 	save := CurrentArena()
 	SetCurrentArena(trueRootArena())
 	g = sovGroupTake()
@@ -1784,6 +1957,12 @@ func codecSovereignArena(recv unsafe.Pointer, recvTypeDesc *RawType) (g *sovGrou
 	SetCurrentArena(save)
 	RecordSovMeta(unsafe.Sizeof(sovGroup{}))
 	if home == nil {
+		// No arena holds the receiver: a package global in the binary's data or
+		// TLS segment, which cannot move, so an immortal group is correct. The
+		// counter stays because it is the measurement that says whether this
+		// case is still only globals - it was 40+ per self-build before the
+		// live-arena list above, and every one of those was a receiver whose
+		// arena had been recycled.
 		RecordSovUntracked()
 	}
 	hashmapSet(m, unsafe.Pointer(&keyv), unsafe.Pointer(&av), h)
@@ -1810,6 +1989,26 @@ func sovFindContainingArena(addr uintptr) (a *Arena) {
 			return ca
 		}
 	}
+	// The stack is not the whole set of arenas a receiver can live in. A
+	// per-package graph arena and a channel pool's turn arena are current
+	// while they are written and are then parked, so a group created for a
+	// receiver they hold found no arena here, stayed untracked, and was never
+	// released. Walk the live list, most-recently-created first: that is the
+	// innermost nesting order, and the arena that dies first is the one whose
+	// lifetime the receiver shares. Bounded so a corrupted list cannot spin.
+	n := int32(0)
+	liveWalkBegin()
+	gen := liveWalkGen
+	for walk := liveArenaHead; walk != nil; walk = walk.liveNext {
+		if walk.liveGen == gen {
+			// Same stale link the ledger walk reports: stop rather than spin.
+			break
+		}
+		walk.liveGen = gen
+		if sovAddrInArena(walk, addr) {
+			return walk
+		}
+	}
 	return nil
 }
 
@@ -1825,6 +2024,24 @@ func sovAddrInArena(a *Arena, addr uintptr) (ok bool) {
 		}
 	}
 	return false
+}
+
+// sovArenaHolding returns the arena of owner that actually contains addr, or
+// nil. A group owns two during a compaction cycle: data (the arena being
+// emptied) and cycleData (the one being filled). A receiver allocated while the
+// cycle runs is in cycleData, and only a lookup that can name it gives the
+// group a lifetime that matches its receiver's.
+func sovArenaHolding(owner *sovGroup, addr uintptr) (a *Arena) {
+	if owner == nil {
+		return nil
+	}
+	if sovAddrInArena(owner.data, addr) {
+		return owner.data
+	}
+	if owner.cycleData != nil && sovAddrInArena(owner.cycleData, addr) {
+		return owner.cycleData
+	}
+	return nil
 }
 
 // sovDataArena returns the group's data arena (for stable registration).
@@ -2098,6 +2315,14 @@ func sovTypeHasPtrs(td *RawType) (ok bool) {
 
 func sovTypeHasPtrsAddr(tp uintptr, depth int32) (ok bool) {
 	if tp == 0 || depth > 32 {
+		return false
+	}
+	if tp&0b11 == 0 && tp < codecDataFloor() {
+		// Same test as the walk entry: a tagged pointer (low bits set) peels to
+		// a descriptor and is answered KindPointer above, but a bare small word
+		// is a length or an index that was read as a type. Answer "no pointers"
+		// so the caller leaves that field alone.
+		sovBadTypeWord++
 		return false
 	}
 	switch retKindOf(tp) {
@@ -2607,6 +2832,11 @@ func sovInReadableArena(p uintptr) (ok bool) {
 }
 
 // sovWalkValue marks every block reachable through the value at p.
+// sovBadTypeWord counts interface type words the walk and rebase passes
+// refused because they cannot be descriptors. Non-zero means a group outlived
+// the arena holding its receiver (R10 in docs/decisions.md).
+var sovBadTypeWord int32
+
 func sovWalkValue(g *sovGroup, p unsafe.Pointer, td *RawType) {
 	if td == nil || p == nil || sovWalkDepth >= sovMaxWalkDepth {
 		return
@@ -2650,6 +2880,16 @@ func sovReadable(p uintptr) (ok bool) {
 }
 
 func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
+	// The descriptor arrives either from the receiver's static type or from a
+	// record's `typeDesc`, and in the second case the record may itself be the
+	// stale half of a relocation. One test at the entry covers every caller:
+	// an address below the data floor cannot be a descriptor. Counted, not
+	// silent - the count is the measurement of how often the walk is handed
+	// dead metadata (R10 in docs/decisions.md).
+	if uintptr(unsafe.Pointer(td)) < codecDataFloor() {
+		sovBadTypeWord++
+		return
+	}
 	k := td.Kind()
 	switch k {
 	case KindPointer:
@@ -2711,13 +2951,39 @@ func sovWalkValue1(g *sovGroup, p unsafe.Pointer, td *RawType) {
 			}
 		}
 	case KindInterface:
-		iface := *(*_interface)(p)
-		if iface.typecode != nil {
-			ct := (*RawType)(iface.typecode)
+		// Read the type word and the payload word IN PLACE. A local copy of
+		// the interface is harmless until the payload word's address is taken,
+		// and an address-taken local is arena-allocated: every interface in a
+		// receiver graph therefore cost 16 bytes of whichever arena the walk
+		// was running in. During compaction that arena is the group's own data
+		// arena - the walk that decides what is live grew it. Measured on the
+		// compiler's `math` emit as 2.9 GB of 64 MB segments, none of them
+		// touched (RSS stayed under 600 MB while the mapped total hit the
+		// ceiling). The walk must not allocate, so it must not take the address
+		// of anything it reads.
+		tc := *(*unsafe.Pointer)(p)
+		if tc != nil {
+			// A type word read out of DATA can be anything: a receiver graph may
+			// name memory an arena has since released and a later mapping has
+			// recycled, and the word then holds a length, an index or a stale
+			// address. Dereferencing it is how the mark walk died with
+			// `RawType.Kind(t=0x4)`. The codec refuses the same word by the same
+			// test (codecDataFloor), so the walker uses it too: a value below the
+			// floor cannot be a descriptor, and the record is counted rather than
+			// walked. This is a fail-loud STOP, not the fix - the fix is that a
+			// group is released when the arena holding its receiver dies (R6/R10
+			// in docs/decisions.md), and the count below is how the remaining
+			// cases stay visible instead of silent.
+			if uintptr(tc) < codecDataFloor() {
+				sovBadTypeWord++
+				return
+			}
+			ct := (*RawType)(tc)
+			payload := unsafe.Add(p, unsafe.Sizeof(uintptr(0)))
 			if ct.Size() <= unsafe.Sizeof(uintptr(0)) {
-				sovWalkValue(g, unsafe.Pointer(&iface.value), ct)
+				sovWalkValue(g, payload, ct)
 			} else {
-				sovMarkBlock(g, iface.value)
+				sovMarkBlock(g, *(*unsafe.Pointer)(payload))
 			}
 		}
 	case KindMap:
@@ -2935,8 +3201,57 @@ func sovRebaseFrameRoots(g *sovGroup, nd *Arena) {
 }
 
 // sovMarkReceiverRoots marks everything reachable from one sovereign receiver.
+// sovOrphanWarned counts receivers the mark found in memory this domain no
+// longer owns, i.e. groups that outlived the arena holding their receiver.
+var sovOrphanWarned int32
+
+// sovArenaOnStack reports whether a is still one of the live frame arenas.
+func sovArenaOnStack(a *Arena) (ok bool) {
+	if a == nil || domainRoot == nil {
+		return false
+	}
+	for i := int32(0); i <= domainRoot.fnTop; i++ {
+		if domainRoot.fnStack[i] == a {
+			return true
+		}
+	}
+	return false
+}
+
 func sovMarkReceiverRoots(g *sovGroup, recv unsafe.Pointer, td *RawType) {
 	if td == nil || recv == nil {
+		return
+	}
+	if !sovReadable(uintptr(recv)) {
+		// The group is in the receiver map but the object it names is not in any
+		// live arena: the group outlived its receiver's arena, and every walk
+		// from here would read unmapped memory (`v := *(*unsafe.Pointer)(p)` is
+		// the fault this replaced). Name the state ONCE - the group, the arena it
+		// was attributed to, and whether that arena is still on the fn stack -
+		// then skip it. This is the measurement for R10 in docs/decisions.md,
+		// not a fix: the fix is the release path that misses this group.
+		if sovOrphanWarned == 0 {
+			printstring("moxie: sov orphan group: recv=")
+			printptr(uintptr(recv))
+			printstring(" group=")
+			printptr(uintptr(unsafe.Pointer(g)))
+			printstring(" ctx=")
+			printptr(uintptr(unsafe.Pointer(g.ctxArena)))
+			printstring(" ctxOnStack=")
+			if sovArenaOnStack(g.ctxArena) {
+				printstring("yes")
+			} else {
+				printstring("no")
+			}
+			printstring(" released=")
+			if g.released {
+				printstring("yes")
+			} else {
+				printstring("no")
+			}
+			printstring("\n")
+		}
+		sovOrphanWarned++
 		return
 	}
 	if td.Kind() != KindStruct {
@@ -3078,6 +3393,11 @@ func sovRebaseRoots(g *sovGroup, nd *Arena) {
 	}
 }
 
+// sovRekeyDropped counts groups dropped from the receiver map because a
+// compaction found another group already registered at the destination address
+// (R10 in docs/decisions.md).
+var sovRekeyDropped int32
+
 // sovRekeyRelocated moves the sovereign group keyed by a receiver address
 // that a compaction just relocated, so the object and the arena holding its
 // data stay associated. Called for every live block of the retiring arena:
@@ -3123,6 +3443,14 @@ func sovRekeyRelocated(g *sovGroup, oldData *Arena, oldAddr, newAddr uintptr, nd
 		// Something already registered at the destination, so this entry is
 		// the stale half of a pair. Leaving it unregistered is correct: the
 		// group's data arena is referenced only by the object we just moved.
+		// It is ALSO a number: two groups claiming one address means one of them
+		// now has a key that no longer names its receiver, which is how a mark
+		// ends up walking memory that belongs to something else (R10). Named
+		// once, counted always, so a build says whether this path is the one.
+		if sovRekeyDropped == 0 {
+			printstring("moxie: sov rekey dropped a group: two groups at one receiver address; the dropped group keeps its arena and loses its key\n")
+		}
+		sovRekeyDropped++
 		return
 	}
 	hashmapSet(m, unsafe.Pointer(&nv), unsafe.Pointer(&av), nh)
@@ -3241,6 +3569,38 @@ func sovCycleOrder(g *sovGroup) {
 // codecSovereignCompact starts a cycle when none is active, or continues one.
 func codecSovereignCompact(g *sovGroup, needed uintptr, marked bool) {
 	if g == nil || g.data == nil || g.escaped > 0 || g.compacting {
+		return
+	}
+	if !sovReadable(uintptr(g.recv)) {
+		// The receiver is in memory this domain no longer owns: the group
+		// outlived the arena that held it, so there is nothing left to
+		// compact - every field of that receiver is reclaimed memory. Reclaim
+		// the group instead (its data arena is garbage too), so the walk that
+		// would have faulted on it never runs again. Named once, then counted:
+		// this is the release a torn-down arena owed us, arriving late, and the
+		// count is how big the miss was.
+		if sovOrphanWarned == 0 {
+			printstring("moxie: sov orphan group reclaimed: recv=")
+			printptr(uintptr(g.recv))
+			printstring(" group=")
+			printptr(uintptr(unsafe.Pointer(g)))
+			printstring(" ctx=")
+			printptr(uintptr(unsafe.Pointer(g.ctxArena)))
+			printstring(" ctxOnStack=")
+			if sovArenaOnStack(g.ctxArena) {
+				printstring("yes")
+			} else {
+				printstring("no")
+			}
+			printstring("\n")
+		}
+		sovOrphanWarned++
+		key := g.recv
+		if m := domainRoot.sovereignRoot; m != nil {
+			h := m.keyHash(unsafe.Pointer(&key), 8, m.seed)
+			hashmapDelete(m, unsafe.Pointer(&key), h)
+		}
+		sovReleaseGroup(g)
 		return
 	}
 	if g.cycleActive {
@@ -3468,6 +3828,10 @@ func sovRebaseValue(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 	if td == nil || p == nil || sovWalkDepth >= sovMaxWalkDepth {
 		return
 	}
+	if uintptr(unsafe.Pointer(td)) < codecDataFloor() {
+		sovBadTypeWord++
+		return
+	}
 	sovWalkDepth++
 	sovRebaseValue1(g, p, td, nd)
 	sovWalkDepth--
@@ -3510,16 +3874,23 @@ func sovRebaseValue1(g *sovGroup, p unsafe.Pointer, td *RawType, nd *Arena) {
 			}
 		}
 	case KindInterface:
-		iface := *(*_interface)(p)
-		if iface.typecode != nil {
-			ct := (*RawType)(iface.typecode)
+		// Same reason as the mark walk: write the payload in place instead of
+		// in a local whose address is taken, so the rebase pass allocates
+		// nothing either.
+		tc := *(*unsafe.Pointer)(p)
+		if tc != nil {
+			if uintptr(tc) < codecDataFloor() {
+				sovBadTypeWord++
+				return
+			}
+			ct := (*RawType)(tc)
+			payload := unsafe.Add(p, unsafe.Sizeof(uintptr(0)))
 			if ct.Size() <= unsafe.Sizeof(uintptr(0)) {
-				sovRebaseValue(g, unsafe.Pointer(&iface.value), ct, nd)
-				*(*_interface)(p) = iface
+				sovRebaseValue(g, payload, ct, nd)
 			} else {
-				if iface.value != nil && !sovInArena(nd, uintptr(iface.value)) {
-					iface.value = unsafe.Pointer(sovRebasePtr(g, uintptr(iface.value), nd))
-					*(*_interface)(p) = iface
+				v := *(*unsafe.Pointer)(payload)
+				if v != nil && !sovInArena(nd, uintptr(v)) {
+					*(*unsafe.Pointer)(payload) = unsafe.Pointer(sovRebasePtr(g, uintptr(v), nd))
 				}
 			}
 		}
@@ -3599,18 +3970,46 @@ func codecSovereignFree(recv unsafe.Pointer) {
 	if recv == nil {
 		return
 	}
-	m := domainRoot.sovereignRoot
-	if m == nil {
-		return
-	}
-	keyv := recv
-	h := m.keyHash(unsafe.Pointer(&keyv), 8, m.seed)
-	var av unsafe.Pointer
-	if !hashmapGet(m, unsafe.Pointer(&keyv), unsafe.Pointer(&av), 8, h) || av == nil {
+	g, key, h := sovLookupReceiver(recv)
+	if g == nil {
 		RecordSovReleaseMiss()
 		return
 	}
-	g := (*sovGroup)(av)
+	hashmapDelete(domainRoot.sovereignRoot, unsafe.Pointer(&key), h)
+	sovReleaseGroup(g)
+}
+
+// sovLookupReceiver returns the group registered at recv, the key it was found
+// under and that key's hash.
+func sovLookupReceiver(recv unsafe.Pointer) (g *sovGroup, key unsafe.Pointer, h uint32) {
+	if recv == nil || domainRoot == nil {
+		return nil, nil, 0
+	}
+	m := domainRoot.sovereignRoot
+	if m == nil {
+		return nil, nil, 0
+	}
+	key = recv
+	h = m.keyHash(unsafe.Pointer(&key), 8, m.seed)
+	var av unsafe.Pointer
+	if !hashmapGet(m, unsafe.Pointer(&key), unsafe.Pointer(&av), 8, h) || av == nil {
+		return nil, key, h
+	}
+	return (*sovGroup)(av), key, h
+}
+
+// sovReleaseGroup is the ONE group teardown: unlink it from the queue and from
+// whatever arena claims it, drop any half-built compaction, release both of its
+// arenas and recycle the struct. The caller has already removed the group from
+// the receiver map, because a released group must not be findable by address.
+//
+// One body rather than two, for the same reason arenaReleaseGroups is one body:
+// a release path that remembers nine of ten steps leaves a group whose receiver
+// is gone still registered, and the next walk reads reclaimed memory.
+func sovReleaseGroup(g *sovGroup) {
+	if g == nil || g.released {
+		return
+	}
 	sovUnqueueCompact(g)
 	g.released = true
 	RecordSovRelease()
@@ -3631,7 +4030,6 @@ func codecSovereignFree(recv unsafe.Pointer) {
 		sovReleaseArena(g.allocTbl)
 		g.allocTbl = nil
 	}
-	hashmapDelete(m, unsafe.Pointer(&keyv), h)
 	sovRecycleGroup(g)
 }
 
@@ -3680,6 +4078,9 @@ func sovUnqueueCompact(g *sovGroup) {
 // check on every path: a group left behind is a crash at the boundary that broke
 // the rule, not a retention curve three thousand requests later.
 func arenaReleaseGroups(a *Arena) {
+	// No longer writable, so no receiver can be born in it: take it out of the
+	// attribution list before the groups are swept. Both halves are O(1).
+	arenaLiveDel(a)
 	sovInvalidateArena(a)
 	// Counted BEFORE the list is cleared, which is the whole point: the old
 	// check read len(a.sovGroupList) after resize(...,0) and so could only ever
@@ -4510,10 +4911,18 @@ func ArenaNew(capacity uintptr) (a *Arena) {
 	a.regions[0].off = dataOff
 	a.regions[0].cap = capacity
 	a.regions[0].kind = segKindFn
+	// The attribution tag belongs to EVERY arena, not only to one taken from the
+	// pool. ArenaAcquire set it and ArenaNew did not, so a directly created arena
+	// - a package graph, a phase scope, a sovereign data arena, the never-freed
+	// generic arena - came out of mmap with scope 0 and every per-scope report
+	// said "id=0: all of it". An attribution that cannot name the arena it is
+	// reporting is worse than none, because it reads like a finding.
+	a.scope = arenaScopeCurrent
 	a.regions[0].state = segLive
 	a.regions[0].owner = int32(domainID)
 	a.regions[0].gen = 0
 	RecordSegmentAdd(segKindFn, capacity)
+	arenaLiveAdd(a)
 	return a
 }
 
@@ -4697,6 +5106,33 @@ const maxSingleAlloc = uintptr(1) << 30
 // arenaBump is the one allocation core. arenaAllocRaw and ArenaAllocTD differ
 // only in whether a sovereign allocation-map entry is recorded, so the segment
 // logic exists exactly once.
+// --- allocation-volume stack probe ---
+//
+// A total tells you an arena grew; it cannot tell you who grew it. This arms a
+// STACK DUMP on allocation VOLUME: every `step` bytes handed out by any one
+// arena prints the current call stack. It costs one compare per allocation and
+// allocates nothing, so it cannot be the thing it is measuring, and it works
+// when the cost is thousands of small allocations rather than one big one -
+// which is the case that defeats a "report allocations over N bytes" probe.
+//
+// The printed words are return addresses in the program's own text, so a
+// non-PIE binary can be symbolized offline: addr2line -f -e <binary> <addr>.
+var allocStackArmed bool
+var allocStackStep uint64
+var allocStackNext uint64
+
+// ArmAllocStackProbe prints a stack each time an arena's cumulative allocation
+// crosses another `step` bytes. Zero disarms.
+func ArmAllocStackProbe(step uint64) {
+	if step == 0 {
+		allocStackArmed = false
+		return
+	}
+	allocStackStep = step
+	allocStackNext = step
+	allocStackArmed = true
+}
+
 func arenaBump(a *Arena, size uintptr) unsafe.Pointer {
 	if a == nil {
 		runtimePanic("ArenaAlloc: nil arena")
@@ -4720,6 +5156,20 @@ func arenaBump(a *Arena, size uintptr) unsafe.Pointer {
 	a.regions[idx].off += size
 	a.alloc += uint64(size)
 	arenaScopeAlloc(a.scope, size)
+	if allocStackArmed {
+		if a.alloc >= allocStackNext {
+			allocStackNext = a.alloc + allocStackStep
+			printstring("ALLOCSTACK scope=")
+			printuint64(uint64(uint32(a.scope)))
+			printstring(" alloc=")
+			printuint64(a.alloc)
+			printstring(" size=")
+			printuint64(uint64(size))
+			printstring("\n")
+			SovPrintStackWords(14)
+			printstring("\n")
+		}
+	}
 	// Direct allocations (hashmap buckets, codec buffers) reach this entry
 	// without passing through alloc(), so the site recorder cannot see them;
 	// the size is what identifies them.
@@ -4727,6 +5177,7 @@ func arenaBump(a *Arena, size uintptr) unsafe.Pointer {
 		RecordRootSize(size)
 	}
 	recordAllocSize(size)
+	RecordBigAlloc(size, a.scope)
 	memzero(ptr, size)
 	return ptr
 }
@@ -4852,6 +5303,10 @@ func ArenaReset(a *Arena) {
 	a.active = 0
 	a.regions[0].off = a.dataOff
 	a.regions[0].state = segLive
+	// The teardown above took it out of the attribution list; a reset arena is
+	// writable again, so it goes back in. ArenaRelease undoes this for the copy
+	// it parks in the pool.
+	arenaLiveAdd(a)
 }
 
 // ArenaAcquire returns a pooled arena with cap >= capacity, or
@@ -4870,6 +5325,7 @@ func ArenaAcquire(capacity uintptr) (a *Arena) {
 			arenaPool[i] = arenaPool[arenaPoolN]
 			arenaPool[arenaPoolN] = nil
 			a.scope = arenaScopeCurrent
+			arenaLiveAdd(a)
 			return a
 		}
 	}
@@ -4894,6 +5350,8 @@ func ArenaRelease(a *Arena) {
 		return
 	}
 	ArenaReset(a)
+	// Pooled, so nobody may write to it and no receiver can be born in it.
+	arenaLiveDel(a)
 	arenaPoolBytes += a.regions[0].cap
 	arenaPool[arenaPoolN] = a
 	arenaPoolN++
@@ -4954,6 +5412,48 @@ func ArenaUsed(a *Arena) (n uint64) {
 		n += uint64(a.regions[i].off)
 	}
 	return n
+}
+
+// ArenaCap is the mapped capacity of one arena: the segments it holds, whether
+// or not their bytes have been handed out. ArenaUsed against it is the test for
+// "this arena is big because it is doing work" versus "this arena reserved a
+// chain it does not fill" - a 64MB link region holding 3MB is a capacity
+// decision, not a live-data one.
+func ArenaCap(a *Arena) (n uint64) {
+	if a == nil {
+		return 0
+	}
+	for i := int32(0); i < a.nregions; i++ {
+		n += uint64(a.regions[i].cap)
+	}
+	return n
+}
+
+// SysMapNet is the runtime's own count of mapped-minus-unmapped bytes. The
+// memory ceiling fires on this number, so it has to agree with
+// /proc/self/maps; a build that aborts here while RSS is a third of it is
+// either a real mapping tower or a bookkeeping leak, and only printing both
+// tells which.
+func SysMapNet() (n uint64) {
+	if sysMapBytes > sysUnmapBytes {
+		return sysMapBytes - sysUnmapBytes
+	}
+	return 0
+}
+
+// LiveArenaCap is every byte of arena memory currently reserved (root, frame
+// arenas, phase arenas, sovereign data arenas, graph arenas). It is capacity,
+// not use: the gap between it and SysMapNet is the arena pool and the domain
+// segments.
+func LiveArenaCap() (n uint64) {
+	return uint64(liveArenaCapBytes())
+}
+
+// LiveArenaCount is how many arenas that total is spread over, so a budget line
+// reads "35 arenas 412MB" and a reader can tell a few large regions from many
+// small ones.
+func LiveArenaCount() (n int32) {
+	return ArenaLiveCount()
 }
 
 func ArenaRootUsage() (nregions int32, bytes uint64) {

@@ -67,6 +67,7 @@ type Config struct {
 	StandaloneRuntime  bool // keep symbols external for cross-module linking
 	NoMainArena        bool // -no-main-arena: package main gets no arena or return encode
 	NoSovNotes         bool // -no-sov-notes: no sovereign arena note for mutating methods
+	NoSov              bool // -no-sov: package main gets no sovereign arena (bootstrap only)
 }
 
 // compilerContext contains function-independent data that should still be
@@ -4407,7 +4408,7 @@ func (c *compilerContext) isSovereignNamedType(t types.Type) bool {
 		// other build - user programs and test binaries (which compile the
 		// package under test as "main") - owns its types like any other
 		// package.
-		if c.NoMainArena && p == "main" {
+		if (c.NoMainArena || c.NoSov) && p == "main" {
 			return false
 		}
 		if p == "moxielang.dev/pkg/syntax" || p == "syntax" {

@@ -40,6 +40,13 @@ func rootFlagMap(out *map[string]bool) {
 	runtime.SovereignRestoreArena(prev)
 }
 
+func rootArenaMap(out *map[string]*runtime.Arena) {
+	prev := runtime.CurrentArena()
+	runtime.SovereignSetArena(runtime.RootArena())
+	*out = map[string]*runtime.Arena{}
+	runtime.SovereignRestoreArena(prev)
+}
+
 func rootPkgMap(out *map[string]*pkgInfo) {
 	prev := runtime.CurrentArena()
 	runtime.SovereignSetArena(runtime.RootArena())
@@ -161,6 +168,13 @@ type buildState struct {
 	// bootstrap passes it; every other build includes main, test builds
 	// included.
 	noMainArena bool
+
+	// noSov is -no-sov: package main keeps its function arena (so a function's
+	// scratch dies at its return) but gets no sovereign arena (so a mutating
+	// method's allocations are not recorded). The two effects of
+	// -no-main-arena are separate problems: the sovereign record store and the
+	// compile arena absorbing scratch. Mirrors legacy NoSov.
+	noSov bool
 
 	// noSovNotes is -no-sov-notes: no sovereign arena note for each mutating
 	// method of a sovereign type in user code. Mirrors legacy Config.NoSovNotes.
@@ -635,9 +649,7 @@ func objFiles(clang, triple string, bcFiles []string) (objs []string) {
 		if objReusable(o, stamp) {
 			continue
 		}
-		todo = mxutil.Ensure(todo, 1)
 		push(todo, objCmd(clang, triple, src, objTmpPath(o)))
-		todoObj = mxutil.Ensure(todoObj, 1)
 		push(todoObj, o)
 	}
 	if len(todo) == 0 {
@@ -730,7 +742,6 @@ func registerScratch(dir string) {
 		mxutil.WriteStr(1, "WORK=" | dir | "\n")
 		return
 	}
-	bst.scratchDirs = mxutil.Ensure(bst.scratchDirs, 1)
 	push(bst.scratchDirs, dir)
 }
 
@@ -752,15 +763,15 @@ func exitNow(code int32) {
 	os.Exit(code)
 }
 
-// cInstallInterruptHandler asks the runtime to run moxieOnInterrupt when the
-// process is interrupted, then leave with the conventional 128+SIGINT status.
-//
-//export moxie_install_interrupt_handler
-func cInstallInterruptHandler()
-
-//export moxie_on_interrupt
-func moxieOnInterrupt() {
-	cleanupScratch()
+// interruptNow is the stop path: a checkpoint answered the termination channel,
+// so the build leaves through the ONE exit that releases the scratch directories
+// and the held repository locks. Returning from main instead would leave a
+// half-written .ll for clang to read (that produced "1 error generated" from a
+// file the build had already abandoned) and would report success for work that
+// was not done.
+func interruptNow() {
+	mxutil.WriteStr(2, "moxie: build interrupted\n")
+	exitNow(130)
 }
 
 // runPool runs cmds with at most jobs concurrent children. Returns false if
@@ -835,12 +846,10 @@ func splitSlash(s string) (ss []string) {
 	start := int32(0)
 	for i := int32(0); i < int32(len(s)); i++ {
 		if s[i] == '/' {
-			parts = mxutil.Ensure(parts, 1)
 			push(parts, s[start:i])
 			start = i + 1
 		}
 	}
-	parts = mxutil.Ensure(parts, 1)
 	push(parts, s[start:])
 	return parts
 }
@@ -855,7 +864,6 @@ func cleanPath(path string) (s string) {
 		if p == ".." && len(out) > 0 && out[len(out)-1] != ".." {
 			out = resize(out, len(out)-1)
 		} else {
-			out = mxutil.Ensure(out, 1)
 			push(out, p)
 		}
 	}
@@ -2493,7 +2501,6 @@ func appendUniq(ss []string, s string) (ss2 []string) {
 			return ss
 		}
 	}
-	ss = mxutil.Ensure(ss, 1)
 	push(ss, s)
 	return ss
 }
@@ -2564,7 +2571,6 @@ func buildScratchDir(base, tag string) (s string) {
 func pkgCacheKey(dir string, files []string) (s string) {
 	sorted := []string{:0:len(files)}
 	for _, f := range files {
-		sorted = mxutil.Ensure(sorted, 1)
 		push(sorted, f)
 	}
 	for i := int32(1); i < int32(len(sorted)); i++ {
@@ -2615,7 +2621,6 @@ func pkgHash(p *pkgInfo) (s string) {
 	}
 	sorted := []string{:0:len(p.imports)}
 	for _, imp := range p.imports {
-		sorted = mxutil.Ensure(sorted, 1)
 		push(sorted, imp)
 	}
 	for i := int32(1); i < int32(len(sorted)); i++ {
@@ -2634,6 +2639,12 @@ func pkgHash(p *pkgInfo) (s string) {
 	// object, and one of the two would link the other's arena decision.
 	if bst.noMainArena {
 		acc = acc | []byte("nm1|")
+	}
+	// -no-sov changes package main's code, so it belongs in the key for the
+	// same reason -no-main-arena does: otherwise a cached object built with one
+	// arena decision would be linked into a binary that made the other.
+	if bst.noSov {
+		acc = acc | []byte("ns1|")
 	}
 	acc = acc | []byte(pkgCacheKey(p.dir, p.files))
 	for _, imp := range sorted {
@@ -2723,7 +2734,6 @@ func pkgExportHash(p *pkgInfo) (s string) {
 	}
 	sorted := []string{:0:len(p.imports)}
 	for _, imp := range p.imports {
-		sorted = mxutil.Ensure(sorted, 1)
 		push(sorted, imp)
 	}
 	for i := int32(1); i < int32(len(sorted)); i++ {
@@ -2751,7 +2761,14 @@ func pkgExportHash(p *pkgInfo) (s string) {
 		}
 		acc = acc | []byte("|?") | []byte(imp)
 	}
-	hv := fnvHash(acc)
+	// keepStr, not the frame value: bst.pkgExportKeyMemo is a ROOT map, so a
+	// header stored from this frame points at memory that dies when it returns,
+	// and the next reader builds a cache path out of whatever reused those
+	// bytes. Measured: cache filenames like "pK " and "ic:int8\"" appeared
+	// beside the hash-named ones, and which package got a corrupt name changed
+	// from run to run. Returning the root copy also means the caller's
+	// cachedMxhPath is built from durable bytes.
+	hv := keepStr(fnvHash(acc))
 	bst.pkgExportKeyMemo[p.path] = hv
 	return hv
 }
@@ -2761,7 +2778,6 @@ func pkgExportHash(p *pkgInfo) (s string) {
 func linkSetHash(pkgs []*pkgInfo) (h string) {
 	names := []string{:0:len(pkgs)}
 	for _, p := range pkgs {
-		names = mxutil.Ensure(names, 1)
 		push(names, p.path | "@" | p.version)
 	}
 	for i := int32(1); i < int32(len(names)); i++ {
@@ -2862,7 +2878,6 @@ func splitBySpace(s string) (ss []string) {
 	for i := int32(0); i < int32(len(s)); i++ {
 		if s[i] == ' ' || s[i] == '\t' {
 			if inWord {
-				result = mxutil.Ensure(result, 1)
 				push(result, s[start:i])
 				inWord = false
 			}
@@ -2874,7 +2889,6 @@ func splitBySpace(s string) (ss []string) {
 		}
 	}
 	if inWord {
-		result = mxutil.Ensure(result, 1)
 		push(result, s[start:])
 	}
 	return result
@@ -3129,7 +3143,6 @@ func scanFileRegions(data []byte, imports map[string]bool) (bodyStart int32, bod
 				if len(bt) > 0 {
 					spec := string(bt)
 					imports[spec] = true
-					fimps = mxutil.Ensure(fimps, 1)
 					push(fimps, spec)
 				}
 			}
@@ -3139,7 +3152,6 @@ func scanFileRegions(data []byte, imports map[string]bool) (bodyStart int32, bod
 		if len(trimmed) >= 7 && string(trimmed[:7]) == "import " && (len(trimmed) < 8 || trimmed[7] != '(') {
 			spec := string(trimmed[7:])
 			imports[spec] = true
-			fimps = mxutil.Ensure(fimps, 1)
 			push(fimps, spec)
 			lineNum++
 			importsDone = true
@@ -3326,16 +3338,22 @@ func concatSources(dir string, files []string) (buf []byte) {
 	mxutil.ResetConcatImportSegs()
 	for i := range spans {
 		sp := spans[i]
-		cctx.concatSourceMap = mxutil.Ensure(cctx.concatSourceMap, 1)
 		push(cctx.concatSourceMap, srcSpan{
 			file:     sp.name,
 			outStart: outLine,
 			srcLine:  sp.bodyLine,
 		})
+		// The seg table is read in a later phase and reached through the return
+		// protocol, so its bytes must not live in anything compactable. Only the
+		// append runs with the root current: the source buffer this loop is
+		// building must keep dying with the caller's frame.
+		segArena := runtime.CurrentArena()
+		runtime.SetCurrentArena(runtime.RootArena())
 		mxutil.AppendConcatImportSeg(mxutil.ImportSeg{
 			OutStart: outLine,
 			Specs:    sp.fimps,
 		})
+		runtime.SetCurrentArena(segArena)
 		n := copyFileBody(out, w, sp.path, sp.size, sp.bodyStart)
 		out[w+n] = '\n'
 		for j := int32(0); j < n; j++ {
@@ -3443,7 +3461,6 @@ func collectAsmFiles(dir string) (ss []string) {
 					continue
 				}
 			}
-			ss = mxutil.Ensure(ss, 1)
 			push(ss, f)
 		}
 	}
@@ -3516,7 +3533,6 @@ func hasBuildConstraint(data []byte, forbidden []string) (ok bool) {
 			// Build lines are bounded by the 512-byte scan window.
 			buf := []byte{:0:64}
 			for j := i + skip; j < int32(len(data)) && data[j] != '\n'; j++ {
-				buf = mxutil.Ensure(buf, 1)
 				push(buf, data[j])
 			}
 			line := string(buf)
@@ -3666,7 +3682,6 @@ func appendBuildTags(v string) {
 				t = t[1 : len(t)-1]
 			}
 			if len(t) > 0 {
-				bst.extraTags = mxutil.Ensure(bst.extraTags, 1)
 				push(bst.extraTags, t)
 			}
 		}
@@ -3679,7 +3694,6 @@ func appendBuildTags(v string) {
 		}
 		t := v[start:j]
 		if len(t) > 0 {
-			bst.extraTags = mxutil.Ensure(bst.extraTags, 1)
 			push(bst.extraTags, t)
 		}
 		start = j + 1
@@ -3716,6 +3730,11 @@ func setPrintAllocs(pat string) {
 		return
 	}
 	bst.buildJobs = 1
+	// The alloc_trace tag selects the runtime's counter tables over the no-op
+	// twin. Nothing set it, so -print-allocs emitted logAlloc calls into a
+	// runtime whose logAlloc was empty: the site table was written and every
+	// counter stayed zero. The flag is the whole opt-in, as with -cover.
+	appendBuildTags("alloc_trace")
 }
 
 // enableCover arms -cover. The site table is reset, the cover build tag is set
@@ -4066,7 +4085,6 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		if cok && hasBuildConstraint(cdata, forbidden) {
 			continue
 		}
-		cFiles = mxutil.Ensure(cFiles, 1)
 		push(cFiles, cf)
 	}
 	files := []string{:0:len(allMx)}
@@ -4096,7 +4114,6 @@ func discoverPkg(pkgPath, root string) (p *pkgInfo) {
 		if !bst.quietDiscover {
 			mxutil.WriteStr(2, "    include: " | f | "\n")
 		}
-		files = mxutil.Ensure(files, 1)
 		push(files, f)
 	}
 	if len(files) == 0 {
@@ -4189,7 +4206,6 @@ func (r *resolver) walk(path, importer string) {
 	for _, imp := range pkg.imports {
 		r.walk(imp, path)
 	}
-	r.order = mxutil.Ensure(r.order, 1)
 	push(r.order, pkg)
 	if bst.pkgByPath == nil {
 		rootPkgMap(&bst.pkgByPath)
@@ -4272,7 +4288,6 @@ func remapErrorLines(msg string) (s string) {
 	lines := mxutil.SplitLines(msg)
 	var out []string
 	for _, line := range lines {
-		out = mxutil.Ensure(out, 1)
 		push(out, remapOneLine(line))
 	}
 	return joinStrings(out, "\n")
@@ -4394,7 +4409,6 @@ func (b *mxhBuf) w(s string) {
 
 func (b *mxhBuf) nl() {
 	if b.off >= len(b.data) {
-		b.data = mxutil.Ensure(b.data, 1)
 		push(b.data, '\n')
 		b.off++
 		return
@@ -4911,7 +4925,6 @@ func parseMxhTParams(raw string) (name string, tparams []*TypeParam) {
 	for _, p := range parts {
 		if len(p) > 1 && p[0] == '$' {
 			tpn := p[1:]
-			tparams = mxutil.Ensure(tparams, 1)
 			push(tparams, NewTypeParam(NewTypeName(nil, tpn, nil), nil))
 		}
 	}
@@ -4929,12 +4942,39 @@ func cacheWrite(path string, data []byte) {
 	os.Rename(tmp, path)
 }
 
+// mxhValid is the cache-hit test for an export file: it must EXIST and CARRY
+// CONTENT. FileExists alone is not a cache hit, it is a name - and a build
+// killed mid-write leaves a 0-byte file under a valid name, which then reports
+// as cached, loads nothing, and makes every name the package exports read
+// `undefined`. Measured: 51 of 187 mxh files in one cache directory were empty,
+// accumulated across every interrupted build. Writers use cacheWrite (tmp +
+// rename) so this cannot arise again; this test makes existing damage harmless.
+func mxhValid(path string) (ok bool) {
+	return mxutil.FileSize(path) > 0
+}
+
+// loadMxh reads a package's export text straight into the root arena and
+// materialises it there.
+//
+// It used to call mxutil.ReadFile, which allocates the whole file in its own
+// frame and returns it, so the return protocol copied every byte of it into
+// this caller's arena - and an .mxh for a large package is megabytes, read
+// several times a build. Reading into the arena the graph is about to be
+// materialised on removes the frame copy and the return copy both; what the
+// caller gets is a buffer it already owns.
 func loadMxh(path string) (ok bool) {
-	data, ok := mxutil.ReadFile(path)
-	if !ok {
+	sz := mxutil.FileSize(path)
+	if sz <= 0 {
 		return false
 	}
-	return loadMxhInto(data)
+	root := runtime.RootArena()
+	p := runtime.ArenaAlloc(root, uintptr(sz))
+	buf := unsafe.Slice((*byte)(p), sz)
+	n := mxutil.ReadFileInto(path, buf)
+	if n <= 0 {
+		return false
+	}
+	return loadMxhDataIn(resize(buf, n), root)
 }
 
 // mxh index-walking primitives. All return index pairs into the original
@@ -5025,7 +5065,6 @@ func mxhParseIfaceMethods(d string, start, end int32) (methods []*IfaceMethod) {
 			if eqIdx > seg {
 				mname := string(d[seg:eqIdx])
 				msig := parseSignatureDesc(string(d[eqIdx+1 : i]))
-				methods = mxutil.Ensure(methods, 1)
 				push(methods, NewTCIfaceMethod(mname, msig))
 			}
 			seg = i + 1
@@ -5100,7 +5139,7 @@ func loadMxhInto(data []byte) (ok bool) {
 	if key == "" {
 		return loadMxhData(data)
 	}
-	return loadMxhDataIn(data, graphArenaFor(key))
+	return loadMxhDataIn(data, graphArenaFor(key, int32(len(data))))
 }
 
 // mxhPkgKey returns the package path from an mxh text header ("package <path>
@@ -5131,21 +5170,46 @@ func mxhPkgKey(data []byte) (key string) {
 // graphArenaFor is the arena a package's materialised type graph lives in. It
 // is per package and released once the last package that can reference it has
 // been emitted; the root arena never holds an export graph.
-func graphArenaFor(key string) (a *runtime.Arena) {
+// graphArenaFor returns the arena a package's graph lives in. hint is the
+// package's mxh text length, used to size a new arena: the flat 4MB reservation
+// measured as 39 arenas holding 12MB of graph data - 156MB of capacity for the
+// actual working set, plus the mappings. A graph expands roughly 20x from its
+// text, so the arena is sized from the text with a floor and a ceiling; the
+// arena chains if the estimate is low, which is the same failure as before but
+// only for the package that was underestimated.
+func graphArenaFor(key string, hint int32) (a *runtime.Arena) {
 	if key == "" {
 		return runtime.RootArena()
 	}
 	if cctx.dispTier2Arena == nil {
-		cctx.dispTier2Arena = map[string]*runtime.Arena{}
+		// Root arena, written through the field: cctx is a package pointer, and
+		// neither a map literal nor a store through a pointer is relocated onto
+		// a durable arena (only method receivers are tracked for store-back).
+		// Built in a frame, this map's header died with it and every later
+		// lookup returned a garbage *Arena that ArenaAllocTD then indexed.
+		rootArenaMap(&cctx.dispTier2Arena)
 	}
 	a = cctx.dispTier2Arena[key]
 	if a == nil {
-		a = runtime.ArenaNew(4 * 1024 * 1024)
+		sz := uintptr(hint) * 24
+		if sz < 256*1024 {
+			sz = 256 * 1024
+		}
+		if sz > 4*1024*1024 {
+			sz = 4 * 1024 * 1024
+		}
+		// Scope 42 names a package graph arena in the attribution reports. The
+		// graph is product, but its capacity is a reservation decision, and the
+		// report is how a reservation and a live-data cost stop looking alike.
+		prevScope := runtime.SetArenaScope(42)
+		a = runtime.ArenaNew(sz)
+		runtime.SetArenaScope(prevScope)
 		save := runtime.CurrentArena()
 		if cctx.buildArena != nil {
 			runtime.SetCurrentArena(cctx.buildArena)
 		}
-		cctx.dispTier2Arena[key] = a
+		// The key is a package path carved out of the mxh bytes in this frame.
+		cctx.dispTier2Arena[keepStr(key)] = a
 		runtime.SetCurrentArena(save)
 	}
 	return a
@@ -5156,7 +5220,9 @@ func ensurePkgLoaded(key string, byPath map[string]*pkgInfo, cacheBase string) {
 	if key == "" || cctx.universe == nil || cctx.universe.Registry == nil {
 		return
 	}
-	if cctx.universe.Registry[key] != nil {
+	// Synthetic placeholders are not graphs: they must not stop the real export
+	// from being loaded. See the same test in loadMxhDataIn.
+	if existing := cctx.universe.Registry[key]; existing != nil && !existing.Synthetic {
 		return
 	}
 	pi := byPath[key]
@@ -5167,7 +5233,12 @@ func ensurePkgLoaded(key string, byPath map[string]*pkgInfo, cacheBase string) {
 	if !ok {
 		return
 	}
-	loadMxhDataIn(data, graphArenaFor(key))
+	if !loadMxhDataIn(data, graphArenaFor(key, int32(len(data)))) {
+		// A file that exists and still does not parse is corruption, not a
+		// cache miss: say which package and how big, because the alternative is
+		// a silent `undefined: <name>` three packages later.
+		mxutil.WriteStr(2, "  mxh-UNPARSEABLE " | key | " len=" | simpleItoa(int32(len(data))) | "\n")
+	}
 }
 
 // rootCopyStr copies v into the root arena, so a map key that came from a
@@ -5181,16 +5252,130 @@ func rootCopyStr(v string) (out string) {
 	return string(b)
 }
 
-// clearGraphCaches drops caches that hold pointers into package graphs. The
-// registry maps themselves are root-backed by construction: loadMxhDataIn
-// writes them with a root-copied key and a root current arena, so a graph arena
-// can be freed without touching them. ByName/DirectImports are plain caches of
-// graph pointers and are emptied before a free; every package rescans its own
-// generics before compiling.
-func clearGraphCaches() {
-	cctx.universe.ByName = map[string]*TCPackage{}
-	cctx.universe.DirectImports = map[string][]string{}
+// resetParseScope drops the parse scope, which points into whichever graph was
+// being read. The graph caches themselves are cleared PER PACKAGE by
+// retainGraphsOnly, not here: a wholesale clear also wipes the entries of the
+// packages that survive the release, and a retained package is never re-parsed,
+// so its entries never come back. That difference is what made `math` report
+// `undefined: bits`.
+func resetParseScope() {
 	cctx.parseTypePkgScope = nil
+}
+
+// retainGraphsOnly releases every materialised graph the package being
+// compiled does not need, so the registry's working set is exactly one
+// package's transitive import closure.
+//
+// The previous rule was last-use: keep a graph until the last package that
+// could name it has been emitted. In a single-binary build that is never, for
+// any graph - every package's last use is `main`, because main imports the
+// whole closure - so nothing was ever released and the pre-pass loaded all 45
+// graphs and held them: measured as retained=445MB at the type-check of
+// `moxie`, with `df` reporting acap=74MB, i.e. the ledger could not see it.
+//
+// Releasing outside the closure is safe by the store rule, not by a guess: a
+// package's graph only names types of packages it imports, and those are all
+// in its closure. A retained graph therefore cannot hold a pointer into a
+// released one, which is the dangling *Type that made this function's
+// predecessor unsafe when the rule was last-use. It costs a re-parse for a
+// package that a later package needs again - the mxh is on disk, and that is
+// what the registry is a cache of.
+// graphReloadable reports whether a released package's exports can be read back
+// from disk: the file must exist AND carry content. The length check is the
+// load-bearing half, because the build's `mxhOk` test is only FileExists - an
+// empty file passes it and loads nothing.
+func graphReloadable(key string) (ok bool) {
+	if cctx.graphReloadOK == nil {
+		cctx.graphReloadOK = map[string]bool{}
+	}
+	if v, seen := cctx.graphReloadOK[key]; seen {
+		return v
+	}
+	ok = false
+	if pi := cctx.pkgByPath[key]; pi != nil {
+		if data, read := mxutil.ReadFile(cachedMxhPath(cctx.graphCacheBase, pi)); read && len(data) > 0 {
+			ok = true
+		}
+	}
+	cctx.graphReloadOK[key] = ok
+	return ok
+}
+
+func retainGraphsOnly(needed []string) {
+	if cctx.dispTier2Arena == nil {
+		return
+	}
+	keep := map[string]bool{}
+	for _, k := range needed {
+		keep[k] = true
+	}
+	var done []string
+	kept := int32(0)
+	for k := range cctx.dispTier2Arena {
+		if keep[k] {
+			continue
+		}
+		if !graphReloadable(k) {
+			// A release is a cache eviction only if the entry can be read again.
+			// An absent or EMPTY mxh means this graph is the only copy of those
+			// exports, so it stays. Without this, a writer that produced an
+			// empty file turned a release into data loss: measured as
+			// `undefined: bits` with a 0-byte pkg/math_bits/*.mxh on disk.
+			kept++
+			continue
+		}
+		push(done, k)
+	}
+	if kept > 0 && getenv("MOXIE_GRAPH_LOG") != "" {
+		mxutil.WriteStr(2, "  keepgraph unreadable-mxh n=" | simpleItoa(kept) | "\n")
+	}
+	if len(done) > 0 {
+		// ByName is keyed by package NAME (pkg/types/tc_universe.mx:78), not by
+		// path, so a released graph cannot be removed from it by key: several
+		// paths can claim one name, and the entry holds a *TCPackage that lives
+		// in the arena being freed. A dangling TCPackage there has no Scope, so
+		// a qualifier resolved through it reports `undefined: <name>` - which is
+		// exactly the failure the compile-loop release produced, and it also
+		// faults when the arena is unmapped. Emptying the cache is safe because
+		// it is a cache of resolved lookups: the next lookup rebuilds it from
+		// the registry.
+		cctx.universe.ByName = map[string]*TCPackage{}
+	}
+	for _, k := range done {
+		copyGenericsToRoot(k)
+		delete(cctx.universe.Registry, k)
+		delete(cctx.mxhLoaded, k)
+		// Clear the caches for THIS package only. They used to be emptied
+		// wholesale before every release, because there was no way to know which
+		// package an entry belonged to while every graph could be dropped at any
+		// time - and a wholesale clear is not neutral: it also removes the
+		// entries of the packages that are RETAINED, whose graphs are not
+		// re-parsed and therefore never put them back. That is what made `math`
+		// report `undefined: bits` when this function ran in the compile loop:
+		// math/bits was retained, its graph still named its scope and imports,
+		// but every path-keyed cache that resolves a package qualifier had been
+		// emptied for it. Per-key clear is what makes the release safe to apply
+		// in a loop that keeps a working set.
+		delete(cctx.universe.DirectImports, k)
+		runtime.ArenaFree(cctx.dispTier2Arena[k])
+		delete(cctx.dispTier2Arena, k)
+		if getenv("MOXIE_GRAPH_LOG") != "" {
+			mxutil.WriteStr(2, "  dropgraph " | k | "\n")
+		}
+	}
+}
+
+// graphNeedsInit computes the per-package graph working set once, before the
+// first package is type-checked, and releases anything a previous phase
+// materialised. Needs are in dependency order, so loading them in that order
+// lets each mxh resolve its imports' names while it parses.
+func graphNeedsInit(pkgs []*pkgInfo) {
+	if cctx.pkgNeeds == nil {
+		computeGraphNeeds(pkgs)
+	}
+	mxutil.WriteStr(2, "  gni pkgs="|simpleItoa(int32(len(pkgs)))|" needs="|simpleItoa(int32(len(cctx.pkgNeeds)))|" bypath="|simpleItoa(int32(len(cctx.pkgByPath)))|" lastuse="|simpleItoa(int32(len(cctx.dispLastUse)))|" arenas="|simpleItoa(int32(len(cctx.dispTier2Arena)))|"\n")
+	retainGraphsOnly(nil)
+	resetParseScope()
 }
 
 func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
@@ -5226,17 +5411,28 @@ func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
 		return false
 	}
 	pkgPath := string(d[ws:we])
+	// Either marker saying "already materialised" is enough to skip the load,
+	// and both are checked because they are written at different times: the
+	// registry is the graph, the marker records that this pass saw it. Skipping
+	// matters - a second load allocates a second copy of the whole graph in the
+	// root arena, which is never released, and leaves two authorities for one
+	// package.
+	//
+	// A SYNTHETIC entry is not an authority: it is the placeholder startup
+	// installs for a package whose graph is pre-compiled (runtime, os, unsafe),
+	// carrying a handful of signatures so a program that never sees the real
+	// export still type-checks. Treating that placeholder as "already
+	// materialised" meant runtime's real mxh was never loaded - the loader
+	// returned TRUE, reporting success - and the registry kept nine names.
+	// Every package that called a runtime function outside those nine then got
+	// "undefined: runtime.X", which is how `time` failed on CurrentArena while
+	// the dumped export plainly contained it. Replace a placeholder; never
+	// replace a graph.
+	if existing := cctx.universe.Registry[pkgPath]; existing != nil && !existing.Synthetic {
+		return true
+	}
 	if cctx.mxhLoaded == nil {
 		cctx.mxhLoaded = map[string]bool{}
-	}
-	if cctx.mxhLoaded[pkgPath] {
-		// This package's graph is already in the registry from an earlier
-		// load in this process. Re-loading it would allocate a second copy of
-		// the whole graph in the root arena, which is never released: the
-		// serial path loads every package in the whole-link pre-pass and then
-		// loads each cached package again, which was ~400MB of duplicate graph
-		// on the relay build. One path, one graph.
-		return true
 	}
 	ns, ne := mxhNextWord(d, we, le)
 	if ns == ne {
@@ -5276,7 +5472,6 @@ func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
 	for scanPos < dlen {
 		ls2, le2, next2 := mxhNextLine(d, scanPos)
 		if mxhHasPrefix(d, ls2, le2, "import ") {
-			dimps = mxutil.Ensure(dimps, 1)
 			push(dimps, string(d[ls2+7:le2]))
 		}
 		scanPos = next2
@@ -5601,7 +5796,6 @@ func walkStdlibPkgs(srcDir, prefix string, out []string) (result []string) {
 	}
 	mxFiles := listFiles(srcDir, ".mx")
 	if len(mxFiles) > 0 && prefix != "" {
-		out = mxutil.Ensure(out, 1)
 		push(out, prefix)
 	}
 	for _, e := range entries {
@@ -5657,7 +5851,7 @@ func cmdCacheWarm() {
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
 		cachedMxh := cachedMxhPath(cacheBase, pkg)
 		bcOk := mxutil.FileExists(cached)
-		mxhOk := mxutil.FileExists(cachedMxh)
+		mxhOk := mxhValid(cachedMxh)
 		if bcOk && mxhOk {
 			skipped++
 			continue
@@ -6576,7 +6770,6 @@ func scanTestFuncs(data []byte) (ss []string) {
 		}
 		rest := line[paren:]
 		if mxutil.HasPrefix(rest, "(t *testing.T)") {
-			funcs = mxutil.Ensure(funcs, 1)
 			push(funcs, name)
 		}
 	}
@@ -6614,6 +6807,9 @@ func cmdTest(args []string) {
 			i += 2
 		} else if args[i] == "-no-main-arena" {
 			bst.noMainArena = true
+			i++
+		} else if args[i] == "-no-sov" {
+			bst.noSov = true
 			i++
 		} else if args[i] == "-no-sov-notes" {
 			bst.noSovNotes = true
@@ -6689,7 +6885,6 @@ func cmdTest(args []string) {
 		}
 		funcs := scanTestFuncs(data)
 		for _, fn := range funcs {
-			allTestFuncs = mxutil.Ensure(allTestFuncs, 1)
 			push(allTestFuncs, fn)
 		}
 	}
@@ -6728,10 +6923,8 @@ func cmdTest(args []string) {
 	}
 
 	for _, tf := range testFiles {
-		pkg.files = mxutil.Ensure(pkg.files, 1)
 		push(pkg.files, tf)
 	}
-	pkg.files = mxutil.Ensure(pkg.files, 1)
 	push(pkg.files, testMainFile)
 	// The package under test is linked as main. Record the path a normal build
 	// would compile it under before the name is overwritten, so the language
@@ -6746,7 +6939,6 @@ func cmdTest(args []string) {
 	pkg.name = "main"
 
 	if !hasImportStr(pkg.imports, "testing") {
-		pkg.imports = mxutil.Ensure(pkg.imports, 1)
 		push(pkg.imports, "testing")
 	}
 	// The test files' imports belong to the closure too. A dependency the
@@ -6763,7 +6955,6 @@ func cmdTest(args []string) {
 			if hasImportStr(pkg.imports, imp) {
 				continue
 			}
-			pkg.imports = mxutil.Ensure(pkg.imports, 1)
 			push(pkg.imports, imp)
 		}
 	}
@@ -6796,7 +6987,7 @@ func cmdTest(args []string) {
 			compilePath = "main"
 		}
 		cachedMxh := cachedMxhPath(cacheBase, dp)
-		if mxhOk := mxutil.FileExists(cachedMxh); mxhOk && !forceRebuild && dp != pkg {
+		if mxhOk := mxhValid(cachedMxh); mxhOk && !forceRebuild && dp != pkg {
 			loadMxh(cachedMxh)
 			src := concatSources(dp.dir, dp.files)
 			ScanGenericDecls(src, compilePath)
@@ -6849,23 +7040,20 @@ func cmdTest(args []string) {
 
 		if dp != pkg {
 			bcOk := mxutil.FileExists(cached)
-			mxhOk := mxutil.FileExists(cachedMxh)
+			mxhOk := mxhValid(cachedMxh)
 			if bcOk && mxhOk && !forceRebuild {
 				mxutil.WriteStr(2, "  cached " | dp.path | "\n")
 				loadMxh(cachedMxh)
-				allBcFiles = mxutil.Ensure(allBcFiles, 1)
 				push(allBcFiles, cached)
 				for _, cf := range dp.cfiles {
 					cPath := mxutil.JoinPath(dp.dir, cf)
 					cbcFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | "_" | cf | ".bc")
 					crc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
 					if crc == 0 {
-						allBcFiles = mxutil.Ensure(allBcFiles, 1)
 						push(allBcFiles, cbcFile)
 					}
 				}
 				for _, bf := range dp.bcfiles {
-					allBcFiles = mxutil.Ensure(allBcFiles, 1)
 					push(allBcFiles, mxutil.JoinPath(dp.dir, bf))
 				}
 				continue
@@ -6877,7 +7065,6 @@ func cmdTest(args []string) {
 				cdir := mxutil.JoinPath(cacheBase, safeName(dp.path))
 				mkdirAll(cdir, 0755)
 				TypeCheckOnly(csrc, compilePath, cachedMxh, dp.dir)
-				allBcFiles = mxutil.Ensure(allBcFiles, 1)
 				push(allBcFiles, cached)
 				continue
 			}
@@ -6925,7 +7112,6 @@ func cmdTest(args []string) {
 				cctx.lastMxhData = ""
 			}
 		}
-		allBcFiles = mxutil.Ensure(allBcFiles, 1)
 		push(allBcFiles, bcFile)
 		for _, cf := range dp.cfiles {
 			cPath := mxutil.JoinPath(dp.dir, cf)
@@ -6934,11 +7120,9 @@ func cmdTest(args []string) {
 			if drc != 0 {
 				fatal("clang failed for " | cf)
 			}
-			allBcFiles = mxutil.Ensure(allBcFiles, 1)
 			push(allBcFiles, cbcFile)
 		}
 		for _, bf := range dp.bcfiles {
-			allBcFiles = mxutil.Ensure(allBcFiles, 1)
 			push(allBcFiles, mxutil.JoinPath(dp.dir, bf))
 		}
 	}
@@ -6985,7 +7169,6 @@ func cmdTest(args []string) {
 			continue
 		}
 		initSym := irGlobalSymbol(compilePath, "main")
-		syms = mxutil.Ensure(syms, 1)
 		push(syms, initSym)
 	}
 	var prevSym string
@@ -7028,34 +7211,28 @@ func cmdTest(args []string) {
 	var objList []string
 	if !hasRuntimePkg {
 		runtimeGoBc := ensureRuntimeBake(sysroot, root)
-		objList = mxutil.Ensure(objList, 1)
 		push(objList, clangCompileToObj(clang, triple, runtimeGoBc))
 	}
 	if !hasRuntimePkg {
 		rtShims := mxutil.JoinPath(sysroot, "rt_shims.bc")
 		if _, rsk := mxutil.ReadFile(rtShims); rsk {
-			objList = mxutil.Ensure(objList, 1)
 			push(objList, clangCompileToObj(clang, triple,rtShims))
 		}
 	}
 	for _, o := range objFiles(clang, triple, allBcFiles) {
-		objList = mxutil.Ensure(objList, 1)
 		push(objList, o)
 	}
-	objList = mxutil.Ensure(objList, 1)
 	push(objList, clangCompileToObj(clang, triple,initAllBc))
 	objDir := mxutil.JoinPath(sysroot, "obj")
 	objEntries := listFiles(objDir, ".bc")
 	if objEntries != nil {
 		for _, e := range objEntries {
-			objList = mxutil.Ensure(objList, 1)
 			push(objList, clangCompileToObj(clang, triple,mxutil.JoinPath(objDir, e)))
 		}
 	}
 	oEntries := listFiles(objDir, ".o")
 	if oEntries != nil {
 		for _, e := range oEntries {
-			objList = mxutil.Ensure(objList, 1)
 			push(objList, mxutil.JoinPath(objDir, e))
 		}
 	}
@@ -7065,11 +7242,9 @@ func cmdTest(args []string) {
 	ldArgs := []string{linker, "--gc-sections", "-o", outpath,
 		mxutil.JoinPath(muslDir, "crt1.o")}
 	for _, o := range objList {
-		ldArgs = mxutil.Ensure(ldArgs, 1)
 		push(ldArgs, o)
 	}
 	for _, la := range []string{comprtLib, muslLib, "-z", "stack-size=67108864"} {
-		ldArgs = mxutil.Ensure(ldArgs, 1)
 		push(ldArgs, la)
 	}
 	rc = run(ldArgs)
@@ -7126,7 +7301,6 @@ func resolveTestDeps(testPkg *pkgInfo, root string) (ss []*pkgInfo) {
 	for _, imp := range testPkg.imports {
 		r.walk(imp, testPkg.path)
 	}
-	r.order = mxutil.Ensure(r.order, 1)
 	push(r.order, testPkg)
 	return r.order
 }
@@ -7166,7 +7340,6 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 		if f == testMainFile {
 			continue
 		}
-		allFiles = mxutil.Ensure(allFiles, 1)
 		push(allFiles, f)
 	}
 
@@ -7202,7 +7375,6 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 					}
 					if imp != "" {
 						imports[imp] = true
-						fimps = mxutil.Ensure(fimps, 1)
 						push(fimps, imp)
 					}
 				}
@@ -7211,7 +7383,6 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 			if mxutil.HasPrefix(line, "import ") && !mxutil.HasPrefix(line, "import (") {
 				imp := line[7:]
 				imports[imp] = true
-				fimps = mxutil.Ensure(fimps, 1)
 				push(fimps, imp)
 				i++
 				continue
@@ -7219,17 +7390,12 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 			if len(body) == 0 {
 				firstBodyLine = i + 1
 			}
-			body = mxutil.Ensure(body, 1)
 			push(body, lines[i])
 			i++
 		}
-		bodies = mxutil.Ensure(bodies, 1)
 		push(bodies, []byte(renamePkgMain(joinStrings(body, "\n"))))
-		bodyFiles = mxutil.Ensure(bodyFiles, 1)
 		push(bodyFiles, f)
-		bodyStartLines = mxutil.Ensure(bodyStartLines, 1)
 		push(bodyStartLines, firstBodyLine)
-		bodyImports = mxutil.Ensure(bodyImports, 1)
 		push(bodyImports, fimps)
 	}
 
@@ -7256,7 +7422,6 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 					}
 					if imp != "" {
 						imports[imp] = true
-						fimps = mxutil.Ensure(fimps, 1)
 						push(fimps, imp)
 					}
 				}
@@ -7265,7 +7430,6 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 			if mxutil.HasPrefix(line, "import ") && !mxutil.HasPrefix(line, "import (") {
 				imp := line[7:]
 				imports[imp] = true
-				fimps = mxutil.Ensure(fimps, 1)
 				push(fimps, imp)
 				i++
 				continue
@@ -7273,17 +7437,12 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 			if len(body) == 0 {
 				firstBodyLine = i + 1
 			}
-			body = mxutil.Ensure(body, 1)
 			push(body, lines[i])
 			i++
 		}
-		bodies = mxutil.Ensure(bodies, 1)
 		push(bodies, []byte(joinStrings(body, "\n")))
-		bodyFiles = mxutil.Ensure(bodyFiles, 1)
 		push(bodyFiles, "_testmain.mx")
-		bodyStartLines = mxutil.Ensure(bodyStartLines, 1)
 		push(bodyStartLines, firstBodyLine)
-		bodyImports = mxutil.Ensure(bodyImports, 1)
 		push(bodyImports, fimps)
 	}
 
@@ -7292,7 +7451,6 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 	if len(imports) > 0 {
 		impKeys := []string{:0:len(imports)}
 		for imp := range imports {
-			impKeys = mxutil.Ensure(impKeys, 1)
 			push(impKeys, imp)
 		}
 		for i := int32(1); i < int32(len(impKeys)); i++ {
@@ -7315,16 +7473,18 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 		}
 	}
 	for i, b := range bodies {
-		cctx.concatSourceMap = mxutil.Ensure(cctx.concatSourceMap, 1)
 		push(cctx.concatSourceMap, srcSpan{
 			file:     bodyFiles[i],
 			outStart: outLine,
 			srcLine:  bodyStartLines[i],
 		})
+		segArena := runtime.CurrentArena()
+		runtime.SetCurrentArena(runtime.RootArena())
 		mxutil.AppendConcatImportSeg(mxutil.ImportSeg{
 			OutStart: outLine,
 			Specs:    bodyImports[i],
 		})
+		runtime.SetCurrentArena(segArena)
 		for j := int32(0); j < int32(len(b)); j++ {
 			if b[j] == '\n' {
 				outLine++
@@ -7332,7 +7492,6 @@ func concatTestSources(dir string, files []string, testMainFile string) (buf []b
 		}
 		outLine++
 		out = out | b
-		out = mxutil.Ensure(out, 1)
 		push(out, '\n')
 		bodies[i] = nil
 	}
@@ -7389,7 +7548,8 @@ func prepareDispatchIndex(pkgs []*pkgInfo, cacheBase string, skip *pkgInfo) {
 	if cctx.mxhGenerics == nil {
 		cctx.mxhGenerics = map[string]map[string]bool{}
 	}
-	for _, pkg := range pkgs {
+	graphNeedsInit(pkgs)
+	for pi, pkg := range pkgs {
 		if pkg.baked || pkg == skip {
 			continue
 		}
@@ -7398,19 +7558,34 @@ func prepareDispatchIndex(pkgs []*pkgInfo, cacheBase string, skip *pkgInfo) {
 			compilePath = pkg.name
 		}
 		cachedMxh := cachedMxhPath(cacheBase, pkg)
-		if mxutil.FileExists(cachedMxh) {
-			// Load the cached mxh, do not merely skip it. Packages are in
-			// dependency order, and a later package whose mxh is missing is
-			// type-checked below. Skipping its cached imports left them out of
-			// the registry, so a type they declare (`*event.E` in a store
-			// method signature) resolved to nil, generateMxh wrote `__any` for
-			// it, and that poisoned mxh was registered. mxhLoaded then made the
-			// correct mxh from the compile pass a no-op, so every caller saw
-			// `{ i64, ptr }` where a pointer belonged and clang rejected the
-			// IR: `%t73 defined with type '{ i64, ptr }' but expected 'ptr'`.
-			loadMxh(cachedMxh)
+		// -a ignores the cache on READ, so an mxh left by an earlier run must
+		// not decide whether this run typechecks the package: the file exists
+		// or not depending on what ran before, which makes "rebuild all" do
+		// different work on the same tree. With -a the prepass typechecks it
+		// and rewrites the file.
+		if !bst.forceRebuild && mxutil.FileExists(cachedMxh) {
+			// Every package's mxh is on disk, so nothing here needs a graph:
+			// a later package whose mxh is missing loads this one from the
+			// file as part of its own closure, and the dispatch index below
+			// is built by reading the text. Loading it eagerly made the
+			// registry hold every package compiled so far, and a typecheck
+			// then paid for that universe on every pointer its return
+			// protocol walked.
 			continue
 		}
+		// The typecheck needs its import closure in the registry, in
+		// dependency order, so each mxh resolves its imports' names while it
+		// parses - and nothing beyond it. Everything outside this package's
+		// closure is released first, so the working set is the closure rather
+		// than the whole build.
+		needs := cctx.pkgNeeds[dispPkgKey(pkg)]
+		retainGraphsOnly(needs)
+		resetParseScope()
+		before := int32(len(cctx.universe.Registry))
+		for _, nk := range needs {
+			ensurePkgLoaded(nk, cctx.pkgByPath, cacheBase)
+		}
+		mxutil.WriteStr(2, "  pre "|pkg.path|" needs="|simpleItoa(int32(len(needs)))|" reg "|simpleItoa(before)|"->"|simpleItoa(int32(len(cctx.universe.Registry)))|"\n")
 		typeCheckPkgSource(cacheBase, pkg.dir, pkg.files, pkg.path, compilePath, cachedMxh)
 	}
 	cctx.dispIfaceMethods = map[string]bool{}
@@ -7745,7 +7920,6 @@ func scanSelectorCalls(src []byte) (methods []string) {
 			continue
 		}
 		seen[name] = true
-		methods = mxutil.Ensure(methods, 1)
 		push(methods, name)
 	}
 	for i := 1; i < int32(len(methods)); i++ {
@@ -7756,7 +7930,99 @@ func scanSelectorCalls(src []byte) (methods []string) {
 	return methods
 }
 
+// inMemoryBox reports whether this process is inside the mxbuild scope, the
+// 1 GB box every build and every run belongs in.
+//
+// This is a CHECK, not a convention. The rule "nothing runs outside the box"
+// was enforced by remembering to type `scripts/moxbox.sh`, and it held until
+// the first time a build was easier to run directly - which is how a compiler
+// that maps gigabytes got to run with the whole machine available and hide the
+// defect the cap exists to expose. The program now asks the kernel where it is
+// and refuses if the answer is "not in the box": no flag, no environment
+// variable, no exception. The one thing that runs outside it is the Go legacy
+// compiler, which is the bootstrap tool, not a Moxie program, and cannot check
+// its own cgroup without being rebuilt.
+func inMemoryBox() (ok bool) {
+	data, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		// Not Linux: there is no cgroup to be in, so there is nothing to
+		// refuse. A native target on another OS is out of scope for the box.
+		return true
+	}
+	want := []byte("mxbuild")
+	for i := int32(0); i+len(want) <= len(data); i++ {
+		hit := true
+		for j := int32(0); j < len(want); j++ {
+			if data[i+j] != want[j] {
+				hit = false
+				break
+			}
+		}
+		if hit {
+			return true
+		}
+	}
+	return false
+}
+
+// tracerAttached reports whether a debugger is tracing this process, read
+// from the TracerPid field of /proc/self/status.
+//
+// This is the one way past the box check, and it is narrow on purpose: a
+// traced process is a MEASUREMENT, not a build. The cap would kill the run at
+// exactly the moment the number is worth reading, so a gdb session has to run
+// without it - that is how the ceiling behind a 1 GB failure gets a value
+// instead of a guess. There is still no flag and no environment variable; you
+// cannot get here without attaching a tracer.
+func tracerAttached() (ok bool) {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return false
+	}
+	want := []byte("TracerPid:")
+	for i := int32(0); i+len(want) <= len(data); i++ {
+		hit := true
+		for j := int32(0); j < len(want); j++ {
+			if data[i+j] != want[j] {
+				hit = false
+				break
+			}
+		}
+		if !hit {
+			continue
+		}
+		k := i + len(want)
+		for k < len(data) && (data[k] == ' ' || data[k] == '\t') {
+			k++
+		}
+		return k < len(data) && data[k] >= '1' && data[k] <= '9'
+	}
+	return false
+}
+
 func main() {
+	// MOXIE_ALLOC_STACK=<MB> arms the allocation-volume stack probe: every that
+	// many megabytes handed out by any one arena prints the call stack that did
+	// it. Same shape as MOXIE_EMIT_USED - an environment-gated diagnostic, off
+	// by default, zero cost when off (one bool test per allocation).
+	if v := getenv("MOXIE_ALLOC_STACK"); v != "" {
+		mb := int64(0)
+		for vi := 0; vi < len(v); vi++ {
+			if v[vi] < '0' || v[vi] > '9' {
+				break
+			}
+			mb = mb*10 + int64(v[vi]-'0')
+		}
+		if mb > 0 {
+			runtime.ArmAllocStackProbe(uint64(mb) << 20)
+		}
+	}
+	if !inMemoryBox() && !tracerAttached() {
+		mxutil.WriteStr(2, "mxc: refusing to run outside the memory box\n"+
+			"  every build and every run belongs in scripts/moxbox.sh (1 GB, two CPUs);\n"+
+			"  this process is not in the mxbuild cgroup.\n")
+		os.Exit(2)
+	}
 	// Termination: the compiler is a batch program, so the entry checks the
 	// termination channel once and then runs to completion. A build in flight
 	// is stopped by the handler it installs below, which is its own cleanup
@@ -7766,6 +8032,12 @@ func main() {
 		return
 	default:
 	}
+	// A build that asks for more than this is a defect, and the cgroup's OOM
+	// kill would arrive as SIGKILL with no stack. A ceiling below the cgroup's
+	// turns it into a panic at the mapping that crossed it, with the request
+	// size and the callers. 3G against the 4G box leaves room for the LLVM
+	// tools the build spawns.
+	runtime.SysSetMemoryCeiling(3 << 30)
 	// Root arena is the domain root's arena, set up by the runtime.
 	// 2GB virtual - pages committed on touch by the MMU.
 	initCompilerState()
@@ -7788,7 +8060,11 @@ func main() {
 	// file behind after a successful build and the next build waited three
 	// minutes on a pid that was long gone.
 	defer releaseHeldRepoLocks()
-	cInstallInterruptHandler()
+	// The runtime's own handler stays installed: it raises a flag, and every
+	// checkpoint (and the select at the top of this function) answers it. The
+	// immediate handler this used to install called _exit from the signal
+	// context - which skipped the deferred cleanup in this function, gave the
+	// build no place to reclaim, and made ctrl-c a kill rather than a stop.
 	bst.buildJobs = adaptiveJobs()
 	if mxutil.TargetArch() == "wasm" {
 		// wasm32 has no fork, no threads and no worker fds, so the
@@ -7972,6 +8248,9 @@ func main() {
 		} else if args[i] == "-no-main-arena" {
 			bst.noMainArena = true
 			i++
+		} else if args[i] == "-no-sov" {
+			bst.noSov = true
+			i++
 		} else if args[i] == "-no-sov-notes" {
 			bst.noSovNotes = true
 			i++
@@ -8016,7 +8295,6 @@ func main() {
 			pkgPath = args[i]
 			i++
 		} else {
-			runArgs = mxutil.Ensure(runArgs, 1)
 			push(runArgs, args[i])
 			i++
 		}
@@ -8068,8 +8346,11 @@ func main() {
 		ensureModuleRoot(pkgPath)
 	}
 
+	memLine("  startup")
 	registerBuiltins()
+	memLine("  builtins")
 	pkgs := resolveAll(pkgPath, root)
+	memLine("  resolved")
 	bst.linkSetKey = linkSetHash(pkgs)
 	setLlSubDir(bst.linkSetKey)
 	// Record the target package's compiled path. The resolver's order does not
@@ -8094,7 +8375,6 @@ func main() {
 				continue
 			}
 			prev = p.path
-			deduped = mxutil.Ensure(deduped, 1)
 			push(deduped, p)
 		}
 		pkgs = deduped
@@ -8117,14 +8397,12 @@ func main() {
 			for _, p := range rtPkgs {
 				if !seen[p.path] {
 					seen[p.path] = true
-					merged = mxutil.Ensure(merged, 1)
 					push(merged, p)
 				}
 			}
 			for _, p := range pkgs {
 				if !seen[p.path] {
 					seen[p.path] = true
-					merged = mxutil.Ensure(merged, 1)
 					push(merged, p)
 				}
 			}
@@ -8169,11 +8447,9 @@ func main() {
 					mkdirAll(cdir, 0755)
 					TypeCheckOnly(src, compilePath, cachedMxh, p.dir)
 					p.baked = true
-					filtered = mxutil.Ensure(filtered, 1)
 					push(filtered, p)
 					continue
 				}
-				filtered = mxutil.Ensure(filtered, 1)
 				push(filtered, p)
 			}
 			pkgs = filtered
@@ -8306,7 +8582,6 @@ func main() {
 			aoFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | "_" | af | ".o")
 			arc := run([]string{clang, "--target=" | triple, "-c", aPath, "-o", aoFile})
 			if arc == 0 {
-				asmObjs = mxutil.Ensure(asmObjs, 1)
 				push(asmObjs, aoFile)
 			}
 		}
@@ -8356,7 +8631,6 @@ func main() {
 			continue
 		}
 		initSym := irGlobalSymbol(compilePath, "main")
-		syms = mxutil.Ensure(syms, 1)
 		push(syms, initSym)
 	}
 	var initCalls string
@@ -8403,7 +8677,6 @@ func main() {
 		memLine("  objs-pre")
 		wasmTriple := "wasm32-unknown-wasi"
 		objList := objFiles(clang, wasmTriple, allBcFiles)
-		objList = mxutil.Ensure(objList, 1)
 		push(objList, clangCompileToObj(clang, wasmTriple,initAllBc))
 		// Stubs for symbols not provided by stage4-compiled runtime.
 		//
@@ -8453,17 +8726,14 @@ func main() {
 			"  ret i32 %i\n" |
 			"}\n" |
 			"declare void @llvm.trap()\n"), 0644)
-		objList = mxutil.Ensure(objList, 1)
 		push(objList, clangCompileToObj(clang, wasmTriple,wasiStubs))
 		mxutil.WriteStr(2, "  link\n")
 		ldArgs := []string{"wasm-ld", "--export-dynamic", "--allow-undefined",
 			"--gc-sections", "-o", outpath}
 		for _, o := range objList {
-			ldArgs = mxutil.Ensure(ldArgs, 1)
 			push(ldArgs, o)
 		}
 		for _, la := range []string{"-z", "stack-size=67108864"} {
-			ldArgs = mxutil.Ensure(ldArgs, 1)
 			push(ldArgs, la)
 		}
 		rc = run(ldArgs)
@@ -8478,48 +8748,39 @@ func main() {
 		var objList []string
 		if !hasRuntimePkg {
 			runtimeGoBc := ensureRuntimeBake(sysroot, root)
-			objList = mxutil.Ensure(objList, 1)
 			push(objList, clangCompileToObj(clang, triple, runtimeGoBc))
 		}
 		rtShims := mxutil.JoinPath(sysroot, "rt_shims.bc")
 		if _, rsk := mxutil.ReadFile(rtShims); rsk {
-			objList = mxutil.Ensure(objList, 1)
 			push(objList, clangCompileToObj(clang, triple,rtShims))
 		}
 		for _, o := range objFiles(clang, triple, allBcFiles) {
-			objList = mxutil.Ensure(objList, 1)
 			push(objList, o)
 		}
-		objList = mxutil.Ensure(objList, 1)
 		push(objList, clangCompileToObj(clang, triple,initAllBc))
 		objDir := mxutil.JoinPath(sysroot, "obj")
 		objEntries := listFiles(objDir, ".bc")
 		if objEntries != nil {
 			for _, e := range objEntries {
-				objList = mxutil.Ensure(objList, 1)
 				push(objList, clangCompileToObj(clang, triple,mxutil.JoinPath(objDir, e)))
 			}
 		}
 		oEntries := listFiles(objDir, ".o")
 		if oEntries != nil {
 			for _, e := range oEntries {
-				objList = mxutil.Ensure(objList, 1)
 				push(objList, mxutil.JoinPath(objDir, e))
 			}
 		}
 		for _, ao := range asmObjs {
-			objList = mxutil.Ensure(objList, 1)
 			push(objList, ao)
 		}
 		mxutil.WriteStr(2, "  link\n")
 		ldArgs := []string{"ld.lld", "--gc-sections", "-o", outpath,
 			mxutil.JoinPath(muslDir, "crt1.o")}
 		for _, o := range objList {
-			ldArgs = mxutil.Ensure(ldArgs, 1)
 			push(ldArgs, o)
 		}
 		for _, la := range []string{comprtLib, muslLib, "-z", "stack-size=67108864"} {
-			ldArgs = mxutil.Ensure(ldArgs, 1)
 			push(ldArgs, la)
 		}
 		rc = run(ldArgs)
@@ -8533,11 +8794,24 @@ func main() {
 	if runAfter {
 		execArgs := []string{outpath}
 		for _, a := range runArgs {
-			execArgs = mxutil.Ensure(execArgs, 1)
 			push(execArgs, a)
 		}
 		exitNow(run(execArgs))
 	}
+}
+
+// rssPeak updates the process high-water mark and reports whether this call set
+// a new one. Called from the emit loop and the phase probes: the box acts on the
+// peak, so the build should say what the peak was and which function was being
+// emitted when it happened, instead of leaving that to a later gdb session.
+func rssPeak(what string) (isNew bool) {
+	r := rssKB()
+	if cctx == nil || r <= cctx.peakRSSKB {
+		return false
+	}
+	cctx.peakRSSKB = r
+	cctx.peakAt = what
+	return true
 }
 
 // rssKB reports this process's resident set size in kilobytes. Diagnostic only:
@@ -8565,6 +8839,12 @@ func rssKB() (kb int64) {
 // mapCensus counts this process's virtual memory areas and their total size.
 // A mapping count that grows per package with no live structure to match it is
 // an arena that was never unmapped; a flat count means the growth is live data.
+//
+// The size is end-start from the line's FIRST field ("start-end"). It used to
+// be read from the trailing hex digits of the line, which are the pathname or
+// the inode, so every mapping reported a handful of bytes and mapMB printed 0
+// for every build - the one number that would have named a leaked mapping was
+// always zero.
 func mapCensus() (lines int32, totalKB int64) {
 	data, merr := os.ReadFile("/proc/self/maps")
 	if merr != nil {
@@ -8572,28 +8852,31 @@ func mapCensus() (lines int32, totalKB int64) {
 	}
 	i := int32(0)
 	for i < len(data) {
-		nl := int32(0)
+		start := i
 		for i < len(data) && data[i] != '\n' {
 			i++
-			nl++
 		}
-		i++
+		nl := i - start
+		var a, b int64
+		j := start
+		for j < start+nl && isHexDigit(data[j]) {
+			a = a*16 + int64(hexVal(data[j]))
+			j++
+		}
+		if j < start+nl && data[j] == '-' {
+			j++
+			for j < start+nl && isHexDigit(data[j]) {
+				b = b*16 + int64(hexVal(data[j]))
+				j++
+			}
+		}
+		if b > a {
+			totalKB += (b - a) / 1024
+		}
 		lines++
-		// Each line ends with the mapping size in hex.
-		j := i - 1
-		if nl > 0 {
-			j = i - 2
+		if i < len(data) {
+			i++
 		}
-		hs := j
-		for hs > 0 && isHexDigit(data[hs]) {
-			hs--
-		}
-		hs++
-		var sz int64
-		for k := hs; k <= j; k++ {
-			sz = sz*16 + int64(hexVal(data[k]))
-		}
-		totalKB += sz / 1024
 	}
 	return lines, totalKB
 }
@@ -8634,8 +8917,31 @@ func memLine(tag string) {
 		iren = int32(len(cctx.irResults))
 	}
 	maps, mapKB := mapCensus()
+	if mxutil.HasPrefix(tag, "   ci-") {
+		runtime.SovDomainReport(tag)
+	}
 	rnreg, ralloc := runtime.ArenaRootUsage()
-	mxutil.WriteStr(2, "  mem "|tag|" rss="|simpleItoa(int32(rssKB()/1024))|"MB maps="|simpleItoa(maps)|" mapMB="|simpleItoa(int32(mapKB/1024))|" root="|simpleItoa(int32(rnreg))|"/"|simpleItoa(int32(ralloc/1048576))|"MB reg="|simpleItoa(reg)|" byname="|simpleItoa(byname)|" mxhg="|simpleItoa(mxhg)|" scang="|simpleItoa(scang)|" genS="|simpleItoa(genS)|" genF="|simpleItoa(genF)|" genM="|simpleItoa(genM)|" iren="|simpleItoa(iren)|"\n")
+	glive, _, gcap := runtime.SovGroupTotals()
+	net := runtime.SysMapNet()
+	acap := runtime.LiveArenaCap()
+	// dfgap is what the arena ledger cannot account for: the executable and its
+	// libraries, the domain stacks, the arena pool and TLS. It should be a
+	// near-constant, so a growing gap is either a non-arena mapping or a hole in
+	// the ledger - which is the number this line exists to expose (region.md A.3).
+	gap := uint64(0)
+	if net > acap {
+		gap = net - acap
+	}
+	// The package compile arena is the one arena whose size is a property of
+	// the package rather than of the build. Split out of `acap` it says whether
+	// a phase is expensive because of live data (used/cap close) or because it
+	// chained regions it does not fill (used << cap) - two different fixes.
+	cau, cac := int32(0), int32(0)
+	if cctx != nil && cctx.compileArena != nil {
+		cau = int32(runtime.ArenaUsed(cctx.compileArena) >> 20)
+		cac = int32(runtime.ArenaCap(cctx.compileArena) >> 20)
+	}
+	mxutil.WriteStr(2, "  mem "|tag|" rss="|simpleItoa(int32(rssKB()/1024))|"MB maps="|simpleItoa(maps)|" mapMB="|simpleItoa(int32(mapKB/1024))|" root="|simpleItoa(int32(rnreg))|"/"|simpleItoa(int32(ralloc/1048576))|"MB cau="|simpleItoa(cau)|"MB cac="|simpleItoa(cac)|"MB net="|simpleItoa(int32(net/1048576))|" acap="|simpleItoa(int32(acap/1048576))|" narena="|simpleItoa(runtime.LiveArenaCount())|" lrep="|simpleItoa(int32(runtime.LiveWalkRepeats()))|" dfgap="|simpleItoa(int32(gap/1048576))|" glive="|simpleItoa(int32(glive/1048576))|" gcap="|simpleItoa(int32(gcap/1048576))|" reg="|simpleItoa(reg)|" byname="|simpleItoa(byname)|" mxhg="|simpleItoa(mxhg)|" scang="|simpleItoa(scang)|" genS="|simpleItoa(genS)|" genF="|simpleItoa(genF)|" genM="|simpleItoa(genM)|" iren="|simpleItoa(iren)|"\n")
 }
 
 // buildPkgsSerial type-checks and compiles each package in dependency order
@@ -8646,25 +8952,20 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 	// Each package's graph lives in its own arena, loaded up front by the
 	// dispatch pre-pass and released when the last package that can reference
 	// it has been emitted. The whole-link graph is no longer root-lifetime.
-	if cctx.pkgNeeds == nil {
+	// The pre-pass runs first (and outside this function, so buildArena is
+	// still unset here) with the same per-package window; its leftovers are
+	// released now and the loop below loads exactly what each package
+	// type-checks against.
+	if cctx.buildArena == nil {
 		cctx.buildArena = runtime.CurrentArena()
 		cctx.graphCacheBase = cacheBase
-		computeGraphNeeds(pkgs)
+		if cctx.pkgNeeds == nil {
+			computeGraphNeeds(pkgs)
+		}
 		// Release every graph materialised by the pre-pass; the loop below
 		// loads exactly what each package typechecks against.
-		clearGraphCaches()
-		var dropKeys []string
-		for k := range cctx.dispTier2Arena {
-			dropKeys = mxutil.Ensure(dropKeys, 1)
-			dropKeys = push(dropKeys, k)
-		}
-		for _, k := range dropKeys {
-			copyGenericsToRoot(k)
-			delete(cctx.universe.Registry, k)
-			delete(cctx.mxhLoaded, k)
-			runtime.ArenaFree(cctx.dispTier2Arena[k])
-			delete(cctx.dispTier2Arena, k)
-		}
+		retainGraphsOnly(nil)
+		resetParseScope()
 		cctx.genericMethodInsts = nil
 		cctx.genericPkgScopes = nil
 		cctx.genericFuncDecls = nil
@@ -8685,6 +8986,15 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		byPathT2[dispPkgKey(tp)] = tp
 	}
 	for pi, pkg := range pkgs {
+		// One checkpoint per package: the stop point, and the place the
+		// previous package's emitter garbage is reclaimed (the emitter's
+		// frames are all gone here). This is the loop the compiler is
+		// supposed to BE - a program that runs one process and exits still
+		// has to come back to the select, or it can neither be interrupted
+		// nor compact.
+		if runtime.SovCheckpoint() {
+			interruptNow()
+		}
 		memLine(pkg.path)
 		// The build arena is build-lifetime, not per-package: a package that
 		// leaves its working set there turns the arena back into the tower the
@@ -8693,30 +9003,45 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			used := runtime.ArenaUsed(cctx.buildArena)
 			mxutil.WriteStr(2, "  arena pkg=" | pkg.path | " used=" | simpleItoa(int32(used/(1024*1024))) | "MB\n")
 		}
-		// Release every transient tier-2 graph whose last transitive user has
-		// already been emitted. Releasing here (rather than at the loop's many
-		// exit points) keeps every path covered.
-		clearGraphCaches()
-		var doneT2 []string
-		for k := range cctx.dispTier2Arena {
-			if l, ok := cctx.dispLastUse[k]; ok && l < pi {
-				doneT2 = mxutil.Ensure(doneT2, 1)
-				doneT2 = push(doneT2, k)
-			}
-		}
-		for _, k := range doneT2 {
-			copyGenericsToRoot(k)
-			delete(cctx.universe.Registry, k)
-			delete(cctx.mxhLoaded, k)
-			runtime.ArenaFree(cctx.dispTier2Arena[k])
-			delete(cctx.dispTier2Arena, k)
-		}
+		// The working set is exactly this package's import closure, and
+		// releasing outside it cannot dangle a type: see retainGraphsOnly.
 		pkgKey := dispPkgKey(pkg)
 		cctx.curPkgIdx = int32(pi)
-		if needs := cctx.pkgNeeds[pkgKey]; needs != nil {
+		needs := cctx.pkgNeeds[pkgKey]
+		resetParseScope()
+		// The release is NOT applied in this loop. It has now been measured to
+		// fail in two independent ways, and each is a distinct class:
+		//
+		//  1. DATA LOSS through the export cache. A package whose mxh was empty
+		//     could not be reloaded, so its names vanished (`undefined: bits`).
+		//     Fixed twice over: TypeCheckOnly no longer writes an empty export
+		//     file, and graphReloadable refuses to evict a graph whose mxh is
+		//     absent or empty. `keepgraph unreadable-mxh n=1` is that rule
+		//     firing (a synthetic package with no mxh on disk).
+		//  2. A DANGLING TYPE. With the release applied, a later package's
+		//     typecheck faults (SIGSEGV after tyP10, reg=17): a *Type from a
+		//     released graph is still reachable from a retained one. The closure
+		//     argument covers imports; it does not cover a type reached through
+		//     dispatch or embedded-method lookup, which is exactly the outlives
+		//     relation this plan exists to add (D6). So this is not a bug to
+		//     patch here - it is the plan's evidence that release without a
+		//     static outlives relation cannot be made safe by a heuristic.
+		//
+		// The pre-pass still releases (192 drops in one cold pre-pass), where the
+		// working set is rebuilt from scratch for each package.
+		if needs != nil {
 			for _, nk := range needs {
 				ensurePkgLoaded(nk, byPathT2, cacheBase)
 			}
+		}
+		if getenv("MOXIE_GRAPH_LOG") != "" {
+			miss := ""
+			for _, nk := range needs {
+				if cctx.universe.Registry[nk] == nil {
+					miss = miss | " " | nk
+				}
+			}
+			mxutil.WriteStr(2, "  ws " | pkg.path | " need=" | simpleItoa(int32(len(needs))) | " missing=" | miss | "\n")
 		}
 		isTier2 := !tier1(pkgKey, cctx.dispIfaceMethods, cctx.dispMethodsByPkg)
 		// Lazily materialise the tier-2 packages this one names, each in its own
@@ -8729,7 +9054,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 					continue
 				}
 				ik := dispPkgKey(ip)
-				if cctx.dispTier2Arena[ik] != nil || cctx.mxhLoaded[ik] {
+				if cctx.dispTier2Arena[ik] != nil || cctx.universe.Registry[ik] != nil {
 					continue
 				}
 				if tier1(ik, cctx.dispIfaceMethods, cctx.dispMethodsByPkg) {
@@ -8777,7 +9102,7 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		cachedMxh := cachedMxhPath(cacheBase, pkg)
 
 		bcOk := mxutil.FileExists(cached)
-		mxhOk := mxutil.FileExists(cachedMxh)
+		mxhOk := mxhValid(cachedMxh)
 
 		if bcOk && mxhOk && !forceRebuild {
 			mxutil.WriteStr(2, "  cached " | pkg.path)
@@ -8787,19 +9112,16 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			mxutil.WriteStr(2, "\n")
 			loadMxh(cachedMxh)
 			scanPkgGenerics(pkg.dir, pkg.files, compilePath)
-			bcs = mxutil.Ensure(bcs, 1)
 			push(bcs, cached)
 			for _, cf := range pkg.cfiles {
 				cPath := mxutil.JoinPath(pkg.dir, cf)
 				cbcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
 				crc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
 				if crc == 0 {
-					bcs = mxutil.Ensure(bcs, 1)
 					push(bcs, cbcFile)
 				}
 			}
 			for _, bf := range pkg.bcfiles {
-				bcs = mxutil.Ensure(bcs, 1)
 				push(bcs, mxutil.JoinPath(pkg.dir, bf))
 			}
 			continue
@@ -8814,7 +9136,6 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 				runtime.ArenaFree(cctx.compileArena)
 				cctx.compileArena = nil
 			}
-			bcs = mxutil.Ensure(bcs, 1)
 			push(bcs, cached)
 			continue
 		}
@@ -8837,7 +9158,6 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		}
 		bcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc")
 		// Defer clang call - collect for parallel execution after all IR emitted.
-		deferredClang = mxutil.Ensure(deferredClang, 1)
 		push(deferredClang, []string{clang, "--target=" | triple, "-emit-llvm", "-c", "-Wno-everything", "-Xclang", "-disable-O0-optnone", llFile, "-o", bcFile})
 		// mxh written inside CompileToIR's arena before it dies.
 		if len(cctx.lastMxhData) > 0 {
@@ -8846,22 +9166,18 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 			cacheWrite(cachedMxh, []byte(cctx.lastMxhData))
 			cctx.lastMxhData = ""
 		}
-		bcs = mxutil.Ensure(bcs, 1)
 		push(bcs, bcFile)
 		for _, cf := range pkg.cfiles {
 			cPath := mxutil.JoinPath(pkg.dir, cf)
 			cbcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
-			deferredClang = mxutil.Ensure(deferredClang, 1)
 			push(deferredClang, []string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
 			// rc = run(...)  -- deferred
 			if false {
 				fatal("clang failed for " | cf)
 			}
-			bcs = mxutil.Ensure(bcs, 1)
 			push(bcs, cbcFile)
 		}
 		for _, bf := range pkg.bcfiles {
-			bcs = mxutil.Ensure(bcs, 1)
 			push(bcs, mxutil.JoinPath(pkg.dir, bf))
 		}
 	}
@@ -9016,40 +9332,29 @@ func ringRecvInt32(ring unsafe.Pointer) (v int32, ok bool) {
 func serializePkgMeta(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase, root, modPrefix, modDir, rootModPrefix, targetPkgPath string) (data []byte) {
 	var b []byte
 	b = b | simpleItoa(len(pkgs))
-	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	b = b | triple
-	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	// The target rides along as its own fields. The triple cannot stand in for
 	// them: both wasm targets share "wasm32-unknown-wasi", so a worker that
 	// reconstructed js-vs-wasi from it hashed the same package under two keys.
 	b = b | mxutil.TargetOS()
-	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	b = b | mxutil.TargetArch()
-	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	b = b | clang
-	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	b = b | tmpdir
-	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	b = b | cacheBase
-	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	b = b | root
-	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	b = b | modPrefix
-	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	b = b | modDir
-	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	b = b | rootModPrefix
-	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	// The target's compiled path, because restrictions are gated on it: without
 	// it a worker's bst.targetPkgPath is "" and isTargetPkg falls through to the
@@ -9059,7 +9364,6 @@ func serializePkgMeta(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase, root, m
 	// reject_plus_text accepted a[]byte + b[]byte on the 8-core host and
 	// rejected it on a host whose TLS probe forced the serial path.
 	b = b | targetPkgPath
-	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	// -no-sov-notes, as the parent was given it: a worker emits the notes for
 	// the packages it compiles, so the flag has to reach it or the serial and
@@ -9069,51 +9373,38 @@ func serializePkgMeta(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase, root, m
 	} else {
 		b = b | "0"
 	}
-	b = mxutil.Ensure(b, 1)
 	push(b, '\n')
 	for _, p := range pkgs {
 		b = b | p.path
-		b = mxutil.Ensure(b, 1)
 		push(b, '\n')
 		b = b | p.name
-		b = mxutil.Ensure(b, 1)
 		push(b, '\n')
 		b = b | p.dir
-		b = mxutil.Ensure(b, 1)
 		push(b, '\n')
 		b = b | p.version
-		b = mxutil.Ensure(b, 1)
 		push(b, '\n')
 		b = b | simpleItoa(len(p.files))
-		b = mxutil.Ensure(b, 1)
 		push(b, '\n')
 		for _, f := range p.files {
 			b = b | f
-			b = mxutil.Ensure(b, 1)
 			push(b, '\n')
 		}
 		b = b | simpleItoa(len(p.cfiles))
-		b = mxutil.Ensure(b, 1)
 		push(b, '\n')
 		for _, f := range p.cfiles {
 			b = b | f
-			b = mxutil.Ensure(b, 1)
 			push(b, '\n')
 		}
 		b = b | simpleItoa(len(p.bcfiles))
-		b = mxutil.Ensure(b, 1)
 		push(b, '\n')
 		for _, f := range p.bcfiles {
 			b = b | f
-			b = mxutil.Ensure(b, 1)
 			push(b, '\n')
 		}
 		b = b | simpleItoa(len(p.imports))
-		b = mxutil.Ensure(b, 1)
 		push(b, '\n')
 		for _, im := range p.imports {
 			b = b | im
-			b = mxutil.Ensure(b, 1)
 			push(b, '\n')
 		}
 	}
@@ -9513,7 +9804,7 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 		cached := cachedBcPath(cacheBase, pkg.path, hash, pkg.version)
 		cachedMxh := cachedMxhPath(cacheBase, pkg)
 		bcOk := mxutil.FileExists(cached)
-		mxhOk := mxutil.FileExists(cachedMxh)
+		mxhOk := mxhValid(cachedMxh)
 		if bcOk && mxhOk && !forceRebuild {
 			done[i] = true
 			mxutil.WriteStr(2, "  cached " | pkg.path)
@@ -9534,7 +9825,6 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 		stack := []int32{:0:8}
 		for _, imp := range pkgs[i].imports {
 			if j, ok := idxByPath[imp]; ok {
-				stack = mxutil.Ensure(stack, 1)
 				push(stack, j)
 			}
 		}
@@ -9547,14 +9837,12 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 			visited[top] = true
 			for _, imp := range pkgs[top].imports {
 				if j, ok := idxByPath[imp]; ok && !visited[j] {
-					stack = mxutil.Ensure(stack, 1)
 					push(stack, j)
 				}
 			}
 		}
 		td := []int32{:0:len(visited)}
 		for j := range visited {
-			td = mxutil.Ensure(td, 1)
 			push(td, j)
 		}
 		transDeps[i] = td
@@ -9774,28 +10062,23 @@ func buildPkgsParallel(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string,
 			hasRT = true
 		}
 		if needBuild[i] {
-			bcs = mxutil.Ensure(bcs, 1)
 			push(bcs, mxutil.JoinPath(tmpdir, safeName(pkg.path) | ".bc"))
 			for _, cf := range pkg.cfiles {
-				bcs = mxutil.Ensure(bcs, 1)
 				push(bcs, mxutil.JoinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc"))
 			}
 		} else {
 			hash := pkgHash(pkg)
-			bcs = mxutil.Ensure(bcs, 1)
 			push(bcs, cachedBcPath(cacheBase, pkg.path, hash, pkg.version))
 			for _, cf := range pkg.cfiles {
 				cPath := mxutil.JoinPath(pkg.dir, cf)
 				cbcFile := mxutil.JoinPath(tmpdir, safeName(pkg.path) | "_" | cf | ".bc")
 				rc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
 				if rc == 0 {
-					bcs = mxutil.Ensure(bcs, 1)
 					push(bcs, cbcFile)
 				}
 			}
 		}
 		for _, bf := range pkg.bcfiles {
-			bcs = mxutil.Ensure(bcs, 1)
 			push(bcs, mxutil.JoinPath(pkg.dir, bf))
 		}
 	}
@@ -9839,7 +10122,6 @@ func cmdBuildRuntime() {
 					}
 				}
 				if !found {
-					all = mxutil.Ensure(all, 1)
 					push(all, dp)
 				}
 			}
@@ -9851,7 +10133,6 @@ func cmdBuildRuntime() {
 			}
 			src := concatSources(dp.dir, dp.files)
 			TypeCheckOnly(src, compilePath, "", dp.dir)
-			rtClosure = mxutil.Ensure(rtClosure, 1)
 			push(rtClosure, dp)
 		}
 	}
@@ -9872,19 +10153,16 @@ func cmdBuildRuntime() {
 			fatal("clang failed for " | dp.path)
 		}
 		optBc(bcFile)
-		bcFiles = mxutil.Ensure(bcFiles, 1)
 		push(bcFiles, bcFile)
 		for _, cf := range dp.cfiles {
 			cPath := mxutil.JoinPath(dp.dir, cf)
 			cbcFile := mxutil.JoinPath(tmpdir, safeName(dp.path) | "_" | cf | ".bc")
 			crc := run([]string{clang, "--target=" | triple, "-emit-llvm", "-c", cPath, "-o", cbcFile})
 			if crc == 0 {
-				bcFiles = mxutil.Ensure(bcFiles, 1)
 				push(bcFiles, cbcFile)
 			}
 		}
 		for _, bf := range dp.bcfiles {
-			bcFiles = mxutil.Ensure(bcFiles, 1)
 			push(bcFiles, mxutil.JoinPath(dp.dir, bf))
 		}
 	}
@@ -9908,7 +10186,6 @@ func cmdBuildRuntime() {
 		if rc != 0 {
 			fatal("clang failed for rt_stacksave")
 		}
-		bcFiles = mxutil.Ensure(bcFiles, 1)
 		push(bcFiles, ssBc)
 	}
 	outBc := runtimeBakePath(sysroot)
@@ -9921,7 +10198,6 @@ func cmdBuildRuntime() {
 	} else {
 		linkArgs := []string{"llvm-link", "-o", outBc}
 		for _, bf := range bcFiles {
-			linkArgs = mxutil.Ensure(linkArgs, 1)
 			push(linkArgs, bf)
 		}
 		rc := run(linkArgs)

@@ -101,6 +101,14 @@ func (s *Source) segmentCopy() (buf []byte) {
 	return c
 }
 
+// clamp bounds a decode window to the bytes DecodeRune and FullRune read.
+func clamp(n int32) (m int32) {
+	if n > utf8.UTFMax {
+		return utf8.UTFMax
+	}
+	return n
+}
+
 func (s *Source) rewind() {
 	if s.b < 0 {
 		panic("no active segment")
@@ -128,7 +136,13 @@ redo:
 		return
 	}
 
-	for s.e-s.r < utf8.UTFMax && !utf8.FullRune(s.buf[s.r:s.e]) && s.ioerr == nil {
+	// utf8.FullRune and utf8.DecodeRune read at most UTFMax bytes, and a
+	// subslice is a COPY: passing s.buf[s.r:s.e] copied the whole remaining file
+	// once per non-ASCII rune. Measured on the smesh app package: an `alloc` of
+	// 618506 bytes from the DecodeRune line, thousands of times, 3 GB of
+	// mappings in one pre-pass and an emit that never finished. Bound the window
+	// to what the decoders actually read.
+	for s.e-s.r < utf8.UTFMax && !utf8.FullRune(s.buf[s.r:s.r+clamp(s.e-s.r)]) && s.ioerr == nil {
 		s.fill()
 	}
 
@@ -143,7 +157,7 @@ redo:
 	}
 
 	var w int32
-	s.ch, w = utf8.DecodeRune(s.buf[s.r:s.e])
+	s.ch, w = utf8.DecodeRune(s.buf[s.r:s.r+clamp(s.e-s.r)])
 	s.chw = int32(w)
 	s.r += s.chw
 

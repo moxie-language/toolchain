@@ -211,6 +211,7 @@ func Build(
 		PanicStrategy:      config.PanicStrategy(),
 		StandaloneRuntime:  config.IsStandaloneRuntime(),
 		NoMainArena:        config.NoMainArena(),
+		NoSov:              config.NoSov(),
 		NoSovNotes:         config.NoSovNotes(),
 	}
 

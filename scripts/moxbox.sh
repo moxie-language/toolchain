@@ -1,12 +1,23 @@
 #!/bin/sh
-# moxbox - run a command inside the 4 GB memory box.
+# moxbox - run a command inside the 1 GB memory box.
 #
 # Every compiler build, every test, every soak, and every binary the compiler
 # produced runs through this. The box is a transient systemd scope with
-# MemoryMax=4G, MemoryHigh=3500M and MemorySwapMax=0.
+# MemoryMax=1G, MemoryHigh=900M and MemorySwapMax=0.
+#
+# 1 GB is the requirement, not a budget: the compiler and the programs it
+# builds must fit in a gigabyte, and a run that does not is a run with a defect
+# in it. The number moved down from 4 GB deliberately - at 4 GB the compiler
+# "worked" while mapping three gigabytes it never touched, so the cap stopped
+# being a diagnostic, and the defect it was hiding is still in the tree.
+#
+# There is deliberately NO environment override. The first version of this box
+# had MXBOX_MEM, meant for "a deliberate experiment", and within an hour it was
+# used twice to get a build past an OOM - which is the one thing the box exists
+# to refuse. A different limit is a change to this file, where it can be read.
 #
 # Swap is disabled on purpose. With swap the cgroup reclaims to stay under Max:
-# the run stays inside 4 GB by paging, the fan runs all day, and nothing fails.
+# the run stays inside the cap by paging, the fan runs all day, and nothing fails.
 # That bounds the symptom instead of catching the bug. With MemorySwapMax=0 the
 # limit is an immediate OOM kill - a fast, loud failure you can read.
 #
@@ -14,8 +25,8 @@
 # That window is where you attach gdb or read the arena accounting while the
 # process is still alive; Max is the backstop for when nobody is watching.
 #
-# 4G, not 6G: a 64-bit build that cannot fit in 32 bits of address space is
-# broken, and whatever pushed it past 4G is the defect to find.
+# A build that needs more than a gigabyte is spending it somewhere; find that
+# somewhere. The cap is the measurement.
 #
 #   scripts/moxbox.sh <command...>   run a command in the box
 #   scripts/moxbox.sh                interactive shell already inside the box
@@ -59,8 +70,8 @@
 # "fork: Resource temporarily unavailable" because the limit counts every task,
 # and at 8 LLVM's linker dies with std::system_error. It is not the lever.
 set -u
-MEM=4G
-HIGH=3500M
+MEM=1G
+HIGH=900M
 CPUS=${MXBOX_CPUS:-0-1}
 systemctl --user stop mxbuild.scope 2>/dev/null
 if [ $# -eq 0 ]; then

@@ -1,5 +1,10 @@
 package runtime
 
+import (
+	"unsafe"
+)
+
+
 // Per-arena scope attribution.
 //
 // The question this answers, concretely and without guessing: WHICH function's
@@ -426,6 +431,82 @@ func RecordRootSize(size uintptr) {
 	rootTraceBusy = false
 }
 
+// --- large-allocation census ---
+//
+// The scope rows say how much a phase allocated; the size histogram says which
+// size class it came from; this says which EXACT sizes it came from, with the
+// scope that asked. A compiler that allocates 188MB in one function while
+// emitting 7MB of text is not leaking a lifetime - it is asking for the same
+// large block over and over, and the count times the size is the bill. Only
+// allocations of 64KiB or more are recorded, so the hot path pays one compare
+// and the table stays small enough to read.
+const bigAllocMin = uintptr(1) << 16
+const bigAllocMax = int32(24)
+
+type bigAllocRec struct {
+	size  uintptr
+	scope int32
+	count uint64
+}
+
+var bigAllocs [bigAllocMax]bigAllocRec
+var bigAllocN int32
+var bigAllocOverflow uint64
+
+// RecordBigAlloc charges one allocation of size bytes to a scope. Linear scan of
+// at most 24 entries: this must not allocate, because it is called from the
+// allocation path.
+func RecordBigAlloc(size uintptr, scope int32) {
+	if size < bigAllocMin {
+		return
+	}
+	var i int32 = 0
+	for i = 0; i < bigAllocN; i++ {
+		if bigAllocs[i].size == size && bigAllocs[i].scope == scope {
+			bigAllocs[i].count++
+			return
+		}
+	}
+	if bigAllocN < bigAllocMax {
+		bigAllocs[bigAllocN].size = size
+		bigAllocs[bigAllocN].scope = scope
+		bigAllocs[bigAllocN].count = 1
+		bigAllocN++
+		return
+	}
+	bigAllocOverflow++
+}
+
+// ResetBigAllocs starts a fresh per-package census.
+func ResetBigAllocs() {
+	bigAllocN = 0
+	bigAllocOverflow = 0
+}
+
+// BigAllocReport renders the census in insertion order. Insertion order is the
+// order the sizes were first seen, so a package's first big allocation is the
+// first row; sorting would need storage this function must not take, and the
+// table is short enough to read as it stands.
+func BigAllocReport() (out []byte) {
+	for i := int32(0); i < bigAllocN; i++ {
+		out = appendScopeStr(out, "big size=")
+		out = appendScopeUint(out, uint64(bigAllocs[i].size))
+		out = appendScopeStr(out, " scope=")
+		out = appendScopeUint(out, uint64(uint32(bigAllocs[i].scope)))
+		out = appendScopeStr(out, " n=")
+		out = appendScopeUint(out, bigAllocs[i].count)
+		out = appendScopeStr(out, " mb=")
+		out = appendScopeUint(out, bigAllocs[i].count*uint64(bigAllocs[i].size)>>20)
+		out = appendScopeStr(out, "\n")
+	}
+	if bigAllocOverflow > 0 {
+		out = appendScopeStr(out, "big overflow=")
+		out = appendScopeUint(out, bigAllocOverflow)
+		out = appendScopeStr(out, "\n")
+	}
+	return out
+}
+
 // arenaTraceWanted reports whether site capture is on.
 func arenaTraceWanted() (on bool) {
 	return arenaTraceOn
@@ -602,6 +683,17 @@ func emitLiveArena(out []byte, a *Arena, tag []byte) (res []byte) {
 	res = appendScopeUint(res, uint64(uint32(a.scope)))
 	res = appendScopeStr(res, " sovereign=")
 	res = appendScopeUint(res, uint64(uint32(a.sovereign)))
+	// kind0/root/gdbl identify the arena without needing its address: a chained
+	// ordinary arena (kind segKindFn, 64MB links) and a doubling sovereign data
+	// arena are the two shapes that grow, and they grow for different reasons.
+	res = appendScopeStr(res, " kind0=")
+	res = appendScopeUint(res, uint64(uint32(a.regions[0].kind)))
+	res = appendScopeStr(res, " root=")
+	res = appendScopeUint(res, uint64(uint32(a.isRoot)))
+	res = appendScopeStr(res, " gdbl=")
+	res = appendScopeUint(res, uint64(uint32(a.growDouble)))
+	res = appendScopeStr(res, " tbl=")
+	res = appendScopeUint(res, uint64(uint32(len(a.regions))))
 	res = appendScopeStr(res, " n=")
 	res = appendScopeUint(res, uint64(uint32(a.nregions)))
 	res = appendScopeStr(res, " groups=")
@@ -618,34 +710,285 @@ func emitLiveArena(out []byte, a *Arena, tag []byte) (res []byte) {
 	return res
 }
 
-// liveArenaCapBytes is every byte of arena memory currently reserved: the root,
-// the function stack, and the pool. It is the number that must stay flat when a
-// scope boundary is doing its job - a scope that frees regions but leaves them
-// mapped shows nothing here, and neither does one that leaves a child group
-// alive.
+// liveArenaCapBytes is every byte of arena memory currently reserved, over
+// EVERY live arena: the root, the function stack, manual phase scopes,
+// owned/sovereign data arenas and package graph arenas.
+//
+// It used to walk fnStack and the pool only, on the theory that everything live
+// is on the stack. Parked arenas are not: a graph arena, a phase arena and a
+// sovereign group's data arena are all live with no stack slot, and on a cold
+// self-build the old rule reported 262MB while /proc/self/maps showed 2.8GB - so
+// the one number that could have named the growth was blind to it (region.md
+// D9). arenaLiveAdd/arenaLiveDel maintain the list at every creation and
+// release, so walking it is the arena system's mapping footprint, and the report
+// can be compared against the kernel instead of being trusted.
 func liveArenaCapBytes() (n uintptr) {
 	if domainRoot == nil {
 		return 0
 	}
-	for i := int32(0); i <= domainRoot.fnTop; i++ {
-		a := domainRoot.fnStack[i]
-		if a == nil {
-			continue
-		}
-		for j := int32(0); j < a.nregions; j++ {
-			n += a.regions[j].cap
-		}
-	}
+	n, _ = liveArenaLedger()
+	// A pooled arena is still mapped. It is bounded (arenaPoolN entries, one
+	// chain each) and counting it is what keeps this number equal to the
+	// kernel's rather than merely proportional to it.
 	for i := int32(0); i < arenaPoolN; i++ {
-		a := arenaPool[i]
-		if a == nil {
+		p := arenaPool[i]
+		if p == nil || p.liveIn != 0 {
 			continue
 		}
-		for j := int32(0); j < a.nregions; j++ {
-			n += a.regions[j].cap
+		for j := int32(0); j < p.nregions; j++ {
+			n += p.regions[j].cap
 		}
 	}
 	return n
+}
+
+// ArenaLiveCount reports how many arenas the ledger is accounting for, so a
+// report can say "35 arenas, 412MB" instead of a total nobody can check.
+func ArenaLiveCount() (n int32) {
+	_, n = liveArenaLedger()
+	return n
+}
+
+// LiveArenaTop writes the n largest live arenas by used bytes, then the totals
+// for the whole live set. LiveArenaCap says a build is holding 490MB; this says
+// WHICH arenas hold it, which is the difference between a number and a finding.
+// It runs at a phase boundary, never per allocation, so its own cost (one walk
+// of the live list per selection round) is irrelevant to what it measures.
+//
+// The walk carries its own generation mark, exactly like liveArenaLedger, so a
+// corrupt link costs one repeated node instead of a hang.
+func LiveArenaTop(n int32) (out []byte) {
+	if domainRoot == nil {
+		return out
+	}
+	liveWalkBegin()
+	gen := liveWalkGen
+	a := liveArenaHead
+	count := int32(0)
+	var totUse, totCap uint64
+	for a != nil {
+		if a.liveGen == gen {
+			break
+		}
+		a.liveGen = gen
+		count++
+		used, capb := arenaUseCap(a)
+		totUse += used
+		totCap += capb
+		a = a.liveNext
+	}
+	picked := []*Arena{:0:16}
+	for round := int32(0); round < n; round++ {
+		var best *Arena
+		var bestUsed uint64
+		liveWalkBegin()
+		gen = liveWalkGen
+		a = liveArenaHead
+		for a != nil {
+			if a.liveGen == gen {
+				break
+			}
+			a.liveGen = gen
+			u, _ := arenaUseCap(a)
+			seen := false
+			for _, p := range picked {
+				if p == a {
+					seen = true
+					break
+				}
+			}
+			if !seen && u > bestUsed {
+				best = a
+				bestUsed = u
+			}
+			a = a.liveNext
+		}
+		if best == nil || bestUsed == 0 {
+			break
+		}
+		push(picked, best)
+		out = emitLiveArena(out, best, "live")
+		// How much of what this arena has handed out is still ZERO? Every
+		// allocation is zeroed by arenaBump, so a byte that is zero at a phase
+		// boundary was either never written after allocation or was released.
+		// A high fraction says the memory bill is ALLOCATION VOLUME, not live
+		// data - which is a different defect from a leak, and a different fix.
+		used, _ := arenaUseCap(best)
+		z := arenaZeroBytes(best)
+		out = appendScopeStr(out, "livezero used=")
+		out = appendScopeUint(out, used)
+		out = appendScopeStr(out, " zero=")
+		out = appendScopeUint(out, z)
+		out = appendScopeStr(out, "\n")
+	}
+	out = appendScopeStr(out, "livetot n=")
+	out = appendScopeUint(out, uint64(uint32(count)))
+	out = appendScopeStr(out, " used=")
+	out = appendScopeUint(out, totUse)
+	out = appendScopeStr(out, " cap=")
+	out = appendScopeUint(out, totCap)
+	// The same question over the whole live set, skipping arenas below 1MiB:
+	// the scan is O(used) and the small ones cannot dominate a 490MB floor.
+	var zUse, zZero uint64
+	liveWalkBegin()
+	gen = liveWalkGen
+	a = liveArenaHead
+	for a != nil {
+		if a.liveGen == gen {
+			break
+		}
+		a.liveGen = gen
+		u, _ := arenaUseCap(a)
+		if u >= 1<<20 {
+			zUse += u
+			zZero += arenaZeroBytes(a)
+		}
+		a = a.liveNext
+	}
+	out = appendScopeStr(out, " scanned=")
+	out = appendScopeUint(out, zUse)
+	out = appendScopeStr(out, " zero=")
+	out = appendScopeUint(out, zZero)
+	out = appendScopeStr(out, " zeropermille=")
+	if zUse > 0 {
+		out = appendScopeUint(out, zZero*1000/zUse)
+	} else {
+		out = appendScopeUint(out, 0)
+	}
+	out = appendScopeStr(out, "\n")
+	return out
+}
+
+// arenaZeroBytes counts bytes of the arena's USED space that sit in 4KiB pages
+// whose every 8-byte word is zero. Whole pages, not bytes, because a page is the
+// unit the kernel compresses and the cgroup charges: a page with one live word
+// costs the same as a full one.
+func arenaZeroBytes(a *Arena) (zero uint64) {
+	if a == nil {
+		return 0
+	}
+	for j := int32(0); j < a.nregions; j++ {
+		base := a.regions[j].base
+		off := a.regions[j].off
+		p := uintptr(0)
+		for p+4096 <= off {
+			z := true
+			for w := uintptr(0); w < 4096; w += 8 {
+				if *(*uint64)(unsafe.Pointer(base + p + w)) != 0 {
+					z = false
+					break
+				}
+			}
+			if z {
+				zero += 4096
+			}
+			p += 4096
+		}
+	}
+	return zero
+}
+
+func arenaUseCap(a *Arena) (used, capb uint64) {
+	for j := int32(0); j < a.nregions; j++ {
+		used += uint64(a.regions[j].off)
+		capb += uint64(a.regions[j].cap)
+	}
+	return used, capb
+}
+
+// LiveArenaCensus answers the question the total cannot: how much of the
+// reserved bytes is FIXED COST rather than data. Every arena carries a header
+// and a region table, and its first region is never smaller than one page, so
+// an arena that holds a 40-byte object still costs its header plus a mapping.
+// A build with twenty thousand live arenas is therefore paying a tax that has
+// nothing to do with the data it is holding, and this line separates the two.
+//
+// tiny counts arenas reserving <= 64KiB and tinycap what they reserve in total:
+// when the count is large and tinycap is small, the arenas exist at a fixed cost
+// and no amount of data reduction will touch them.
+func LiveArenaCensus() (out []byte) {
+	if domainRoot == nil {
+		return out
+	}
+	hdr := align(unsafe.Sizeof(Arena{}))
+	liveWalkBegin()
+	gen := liveWalkGen
+	a := liveArenaHead
+	var n int32
+	var tinyN, tinyCap, hdrTotal, sovN, tabBig, capTotal uint64
+	for a != nil {
+		if a.liveGen == gen {
+			break
+		}
+		a.liveGen = gen
+		n++
+		_, c := arenaUseCap(a)
+		capTotal += c
+		if c <= 64*1024 {
+			tinyN++
+			tinyCap += c
+		}
+		hdrTotal += uint64(hdr) + uint64(len(a.regions))*uint64(unsafe.Sizeof(ArenaRegion{}))
+		if a.sovereign != 0 {
+			sovN++
+		}
+		if len(a.regions) > int32(arenaStdRegions) {
+			tabBig++
+		}
+		a = a.liveNext
+	}
+	out = appendScopeStr(out, "census n=")
+	out = appendScopeUint(out, uint64(uint32(n)))
+	out = appendScopeStr(out, " tiny=")
+	out = appendScopeUint(out, tinyN)
+	out = appendScopeStr(out, " tinycap=")
+	out = appendScopeUint(out, tinyCap)
+	out = appendScopeStr(out, " hdr=")
+	out = appendScopeUint(out, hdrTotal)
+	out = appendScopeStr(out, " sov=")
+	out = appendScopeUint(out, sovN)
+	out = appendScopeStr(out, " tab256=")
+	out = appendScopeUint(out, tabBig)
+	out = appendScopeStr(out, " cap=")
+	out = appendScopeUint(out, capTotal)
+	out = appendScopeStr(out, "\n")
+	// Per-scope totals: an arena with no name in a total is exactly how a
+	// permanent arena hides, so each scope's live arenas are summed by the tag
+	// the creating code set. A scope that only grows across packages is the
+	// finding; one that appears and vanishes is a phase doing its job.
+	for s := int32(0); s < arenaScopeMax; s++ {
+		var sn uint64
+		var suu, scc uint64
+		liveWalkBegin()
+		gen = liveWalkGen
+		a = liveArenaHead
+		for a != nil {
+			if a.liveGen == gen {
+				break
+			}
+			a.liveGen = gen
+			if a.scope == s {
+				sn++
+				u, c := arenaUseCap(a)
+				suu += u
+				scc += c
+			}
+			a = a.liveNext
+		}
+		if sn == 0 {
+			continue
+		}
+		out = appendScopeStr(out, "scopebytes id=")
+		out = appendScopeUint(out, uint64(uint32(s)))
+		out = appendScopeStr(out, " n=")
+		out = appendScopeUint(out, sn)
+		out = appendScopeStr(out, " used=")
+		out = appendScopeUint(out, suu)
+		out = appendScopeStr(out, " cap=")
+		out = appendScopeUint(out, scc)
+		out = appendScopeStr(out, "\n")
+	}
+	return out
 }
 
 func appendScopeStr(b []byte, s []byte) (out []byte) {

@@ -1,9 +1,24 @@
 #!/bin/bash
-set -e
+# Install a Moxie binary release.
+#
+# Layout (all versions retained):
+#   $INSTALL_ROOT/versions/<tag>/     bin, src, sysroot, llvm-glue, compiler
+#   $INSTALL_ROOT/current -> versions/<tag>
+#   $INSTALL_ROOT/{src,sysroot,llvm-glue,compiler,bin} -> current/<name>
+#   $BINDIR/moxie-<tag>               real binary
+#   $BINDIR/moxie -> moxie-<tag>
+#
+# MOXIEROOT=$INSTALL_ROOT therefore follows the current version, and the stdlib
+# is versioned with the compiler that expects it.
+#
+# Usage: install.sh [TAG]
+# Env: MOXIE_INSTALL_DIR, MOXIE_BINDIR, GH_REPO, GH_TOKEN
+set -euo pipefail
 
-BASE_URL="https://moxielang.dev-releases"
-INSTALL_DIR="${MOXIE_INSTALL_DIR:-$HOME/.local/share/moxie}"
+REPO="${GH_REPO:-moxie-language/toolchain}"
+INSTALL_ROOT="${MOXIE_INSTALL_DIR:-$HOME/.local/share/moxie}"
 BINDIR="${MOXIE_BINDIR:-$HOME/.local/bin}"
+VERSION="${1:-}"
 
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -11,77 +26,96 @@ case "$ARCH" in
     aarch64) ARCH=arm64 ;;
     *) echo "error: unsupported arch $ARCH" >&2; exit 1 ;;
 esac
-
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 if [ "$OS" != "linux" ]; then
     echo "error: only linux supported, got $OS" >&2
     exit 1
 fi
 
-PATTERN="moxie-v.*-${OS}-${ARCH}\\.tar\\.gz"
-
-echo "fetching release list ..." >&2
-PAGE=$(curl -sL "$BASE_URL")
-FILES=$(echo "$PAGE" | grep -oP '(?<=href="/moxie-releases/blob/)[^"]+\.tar\.gz' | grep -E "$PATTERN" || true)
-
-if [ -z "$FILES" ]; then
-    echo "error: no releases found for ${OS}/${ARCH}" >&2
+if [ -e "$INSTALL_ROOT/.git" ]; then
+    echo "error: $INSTALL_ROOT is a source checkout (it has .git)" >&2
+    echo "       set MOXIE_INSTALL_DIR to the directory this installer should own" >&2
     exit 1
 fi
 
-LATEST=$(echo "$FILES" | sed 's/moxie-v\([0-9]*\)\.\([0-9]*\)\.\([0-9]*\).*/\1 \2 \3 &/' | sort -k1,1n -k2,2n -k3,3n | tail -1 | awk '{print $4}')
+if [ -z "$VERSION" ]; then
+    if command -v gh >/dev/null 2>&1 && gh api user --jq .login >/dev/null 2>&1; then
+        VERSION=$(gh release list --repo "$REPO" --limit 100 --json tagName,isDraft \
+            --jq '.[] | select(.isDraft|not) | .tagName' | sort -V | tail -1)
+    else
+        VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=100" \
+            | grep -o '"tag_name": *"[^"]*"' | sed 's/.*"tag_name": *"//;s/"$//' | sort -V | tail -1)
+    fi
+fi
+if [ -z "$VERSION" ]; then
+    echo "error: no release found for $REPO" >&2
+    exit 1
+fi
 
-echo "latest: $LATEST" >&2
-echo "downloading ..." >&2
+ASSET="moxie-${VERSION}-${OS}-${ARCH}.tar.gz"
+echo "installing $VERSION ($ASSET) ..." >&2
 
 DL=$(mktemp -d)
-trap "rm -rf $DL" EXIT
+trap 'rm -rf "$DL"' EXIT
 
-curl -fsSL "${BASE_URL}/raw/${LATEST}" -o "${DL}/${LATEST}"
+if ! command -v gh >/dev/null 2>&1 || ! gh release download "$VERSION" --repo "$REPO" \
+        --pattern "$ASSET" --dir "$DL" >/dev/null 2>&1; then
+    echo "downloading asset via curl ..." >&2
+    curl -fsSL "https://github.com/$REPO/releases/download/$VERSION/$ASSET" -o "$DL/$ASSET"
+fi
+[ -f "$DL/$ASSET" ] || { echo "error: asset not downloaded: $ASSET" >&2; exit 1; }
 
-if [ -d "$INSTALL_DIR" ]; then
-    # MOXIE_INSTALL_DIR is allowed to name a source checkout, and the
-    # release tarball layout would replace it wholesale. Deleting a checkout
-    # destroys work that is not the installer's to remove, so refuse loudly
-    # and let the user pick a directory or move the checkout.
-    if [ -e "$INSTALL_DIR/.git" ]; then
-        echo "error: $INSTALL_DIR is a source checkout (it has .git)" >&2
-        echo "       refusing to delete it; set MOXIE_INSTALL_DIR to the directory" >&2
-        echo "       this installer should own (default: \$HOME/.local/share/moxie)" >&2
+VROOT="$INSTALL_ROOT/versions/$VERSION"
+mkdir -p "$INSTALL_ROOT/versions"
+rm -rf "$VROOT"
+mkdir -p "$VROOT"
+tar xzf "$DL/$ASSET" --strip-components=1 -C "$VROOT"
+
+for need in bin/moxie src sysroot; do
+    if [ ! -e "$VROOT/$need" ]; then
+        echo "error: release is missing $need" >&2
         exit 1
     fi
-    echo "removing old installation ..." >&2
-    rm -rf "$INSTALL_DIR"
+done
+
+# First versioned install over an old flat install: keep the old tree rather
+# than deleting it, then replace the top-level names with links.
+if [ -d "$INSTALL_ROOT/src" ] && [ ! -L "$INSTALL_ROOT/src" ]; then
+    BAK="$INSTALL_ROOT/../$(basename "$INSTALL_ROOT").pre-versioned.$(date +%s)"
+    echo "moving old flat install to $BAK ..." >&2
+    mv "$INSTALL_ROOT" "$BAK"
+    mkdir -p "$INSTALL_ROOT/versions"
 fi
 
-mkdir -p "$INSTALL_DIR"
-tar xzf "${DL}/${LATEST}" --strip-components=1 -C "$INSTALL_DIR"
+ln -sfn "versions/$VERSION" "$INSTALL_ROOT/current"
+for name in src sysroot llvm-glue compiler bin; do
+    rm -rf "$INSTALL_ROOT/$name"
+    if [ -e "$VROOT/$name" ]; then
+        ln -sfn "current/$name" "$INSTALL_ROOT/$name"
+    fi
+done
 
-if [ ! -x "$INSTALL_DIR/bin/moxie" ]; then
-    echo "error: install failed - moxie binary not found" >&2
-    exit 1
-fi
-
-# extract version from tarball name and install versioned binary
-VNUM=$(echo "$LATEST" | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+')
 mkdir -p "$BINDIR"
-cp "$INSTALL_DIR/bin/moxie" "$BINDIR/moxie-${VNUM}"
-ln -sf "moxie-${VNUM}" "$BINDIR/moxie"
+cp "$VROOT/bin/moxie" "$BINDIR/moxie-$VERSION"
+chmod +x "$BINDIR/moxie-$VERSION"
+ln -sfn "moxie-$VERSION" "$BINDIR/moxie"
 
-echo "installed to $INSTALL_DIR" >&2
-echo "binary: $BINDIR/moxie-${VNUM} (symlink: $BINDIR/moxie)" >&2
+echo "verifying ..." >&2
+MOXIEROOT="$INSTALL_ROOT" "$BINDIR/moxie" version
 
 echo "rebuilding package cache with new compiler ..." >&2
-MOXIEROOT="$INSTALL_DIR" LLVM_GLUE_PATH="$INSTALL_DIR/llvm-glue/libmoxie-llvm-glue.so" \
+MOXIEROOT="$INSTALL_ROOT" LLVM_GLUE_PATH="$INSTALL_ROOT/llvm-glue/libmoxie-llvm-glue.so" \
     "$BINDIR/moxie" update --all
 
 echo "warming stdlib cache ..." >&2
-MOXIEROOT="$INSTALL_DIR" LLVM_GLUE_PATH="$INSTALL_DIR/llvm-glue/libmoxie-llvm-glue.so" \
-    "$INSTALL_DIR/bin/moxie" cache warm
+MOXIEROOT="$INSTALL_ROOT" LLVM_GLUE_PATH="$INSTALL_ROOT/llvm-glue/libmoxie-llvm-glue.so" \
+    "$BINDIR/moxie" cache warm
 
 echo "" >&2
-echo "done." >&2
+echo "installed $VERSION:" >&2
+echo "  root:   $INSTALL_ROOT (current -> versions/$VERSION)" >&2
+echo "  binary: $BINDIR/moxie-$VERSION (symlink: moxie)" >&2
 echo "" >&2
 echo "add to your shell profile:" >&2
 echo "  export PATH=\"$BINDIR:\$PATH\"" >&2
-echo "  export MOXIEROOT=\"$INSTALL_DIR\"" >&2
+echo "  export MOXIEROOT=\"$INSTALL_ROOT\"" >&2

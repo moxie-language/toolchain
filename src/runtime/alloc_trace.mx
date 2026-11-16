@@ -78,6 +78,76 @@ func PrintAllocCounters() {
 	}
 }
 
+// PrintTopAllocSites writes the k sites with the largest byte totals, biggest
+// first: "alloctop <id> count=<n> bytes=<b>".
+//
+// A dump at exit answers "what did this run spend in total" but not "what is it
+// spending RIGHT NOW", and a transient - one function allocating and abandoning
+// 188MB - is gone by the time the program exits. Called from inside a loop, two
+// consecutive reports differ by exactly what the loop just spent, which is the
+// only way to pin a cost to the statement that paid it.
+//
+// Selection over at most maxAllocSites entries, k rounds, no allocation: this
+// runs inside the code it measures.
+func PrintTopAllocSites(k int32) {
+	// Marked entries are skipped and restored at the end, so the table is
+	// unchanged by a report: an instrument that perturbs its own measurement is
+	// worse than no instrument.
+	marked := []int32{:0:8}
+	saved := []uint64{:0:8}
+	for round := int32(0); round < k; round++ {
+		var best int32 = -1
+		var bestBytes uint64
+		for i := int32(0); i < numAllocSites; i++ {
+			if allocCounters[i] == 0 {
+				continue
+			}
+			skip := false
+			for _, m := range marked {
+				if m == i {
+					skip = true
+					break
+				}
+			}
+			if skip {
+				continue
+			}
+			if allocSizes[i] > bestBytes {
+				best = i
+				bestBytes = allocSizes[i]
+			}
+		}
+		if best < 0 {
+			break
+		}
+		tracePuts(2, "alloctop ")
+		traceU64(2, uint64(best))
+		tracePuts(2, " count=")
+		traceU64(2, allocCounters[best])
+		tracePuts(2, " bytes=")
+		traceU64(2, allocSizes[best])
+		tracePuts(2, "\n")
+		push(marked, best)
+		push(saved, allocCounters[best])
+	}
+	for i := int32(0); i < int32(len(marked)); i++ {
+		allocCounters[marked[i]] = saved[i]
+	}
+}
+
+//
+// Without it the counter tables were written by every instrumented build and
+// read by nobody: PrintAllocCounters had no caller anywhere in the tree, so
+// -print-allocs produced a site table on disk and a program that discarded the
+// numbers it had collected. An instrument whose report is unreachable is not an
+// instrument.
+func allocBeforeExit() {
+	if allocCounters == nil || numAllocSites == 0 {
+		return
+	}
+	PrintAllocCounters()
+}
+
 // --- exported readers, used by the wasm memory-profile host ---
 
 //export __moxie_alloc_counters_ptr

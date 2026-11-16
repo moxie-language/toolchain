@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+MOXIEROOT="$(pwd)"
+export MOXIEROOT
+export LLVM_GLUE_PATH="$MOXIEROOT/llvm-glue/libmoxie-llvm-glue.so"
+
 VERSION=$(git describe --tags --abbrev=0)
 if [ -z "$VERSION" ]; then
     echo "error: no git tag found" >&2
@@ -44,6 +48,14 @@ fi
 rm -f moxie-verify
 echo "fixpoint verified" >&2
 
+# Bake the runtime with the compiler just built, so the shipped sysroot matches
+# the compiler in the tarball instead of whatever bake happened to be in the
+# worktree. Skip with RELEASE_NO_BAKE=1.
+if [ "${RELEASE_NO_BAKE:-0}" != 1 ]; then
+    echo "baking runtime ..." >&2
+    ./moxie build-runtime
+fi
+
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin"
 mkdir -p "$STAGE/compiler"
@@ -74,6 +86,10 @@ cp _mxc_stage4/host.bc "$STAGE/compiler/"
 # build script
 cp build.sh "$STAGE/"
 
+# The tag this tarball was built from; mxcVersion reads it from beside the
+# binary so a versioned install reports its own tag.
+printf '%s\n' "$VERSION" > "$STAGE/VERSION"
+
 # SHA256 of the fixpoint binary for verification
 sha256sum moxie | cut -d' ' -f1 > "$STAGE/SHA256"
 
@@ -85,7 +101,12 @@ SHA=$(sha256sum "$TARBALL" | cut -d' ' -f1)
 echo "tarball: $TARBALL ($SIZE)" >&2
 echo "sha256:  $SHA" >&2
 
-# install versioned binary to ~/.local/bin
+# install versioned binary to ~/.local/bin (skip in disposable release worktrees)
+if [ "${RELEASE_NO_INSTALL:-0}" = 1 ]; then
+    rm -rf "$STAGE"
+    echo "release $VERSION ready at $TARBALL" >&2
+    exit 0
+fi
 BINDIR="$HOME/.local/bin"
 VNUM="${VERSION#v}"
 mkdir -p "$BINDIR"

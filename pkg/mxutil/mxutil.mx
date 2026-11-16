@@ -49,22 +49,44 @@ func (c *targetConfig) setTarget(os, arch string) {
 	c.arch = arch
 }
 
-// appendSeg copies the seg's spec strings into the receiver's own arena before
-// storing it.
+// appendSeg copies the seg's spec strings before storing them.
+//
+// The caller runs this with the ROOT arena current (see the compiler's concat
+// path): the list is read in a LATER phase than the one that appends to it, and
+// the reader reaches it through the return protocol, which encodes it. In the
+// receiver's sovereign arena that read raced compaction - an arena that moved
+// between two calls handed the encoder a header no arena owns (measured: a
+// []byte encode at 0x100000, the bad-pointer floor). Root data never moves, so
+// the read is stable and the codec's fast path returns the same addresses.
 //
 // The seg list is read by buildImportSegScopes in a LATER phase than the one
 // that appended it, and with a warm cache the compile phase does not re-run the
 // concat - so the reader consumes what the typecheck phase wrote. The specs
 // handed in here are carved out of a source buffer that belongs to that phase's
-// arena, and a sovereign arena is compacted: the bytes move, and `target` is not
-// one of the moved arena's roots, so nothing rewrites the string headers. Measured
-// as a spec length of 1043149363 reaching ExtractQuoted, which only indexes
-// within len(s).
+// arena, so they cannot be stored by reference: measured as a spec length of
+// 1043149363 reaching ExtractQuoted, which only indexes within len(s).
 //
-// The copy is made HERE, inside the method, because a method's allocations land
-// in the receiver's sovereign arena: the copy is then owned by the same arena as
-// the list that references it, moved with it, and rewritten with it.
+// The copy and the list both go to the root, not to the receiver's sovereign
+// arena. A sovereign arena is compacted, and the reader reaches the list through
+// the return protocol, which encodes it: an arena that moved between two calls
+// then hands the encoder a header no arena owns (measured: a []byte encode at
+// 0x100000, the bad-pointer floor). Root data is never moved, so the read is
+// stable and the codec's fast path returns the same addresses - this is
+// build-wide state that outlives the phase that wrote it.
 func (c *targetConfig) appendSeg(seg ImportSeg) {
+	// ROOT arena, not the receiver's sovereign arena.
+	//
+	// The list is read in a LATER phase than the one that appends to it, and a
+	// sovereign arena is compacted: its bytes move and only the group's own
+	// roots are rewritten. `target` is the group's receiver, so its fields ARE
+	// rewritten - but the reader gets here through the return protocol, which
+	// encodes the list, and an arena that moved between the two calls hands the
+	// encoder a header no arena owns (measured: a []byte encode at 0x100000).
+	//
+	// Root data is never moved, so every read is a stable read and the codec's
+	// fast path returns the same addresses instead of copying the whole list on
+	// every call. The list is build-wide state that outlives the phase that
+	// wrote it, which is the same reason cctx.constValMap lives in the root.
 	if len(seg.Specs) > 0 {
 		specs := []string{:0:len(seg.Specs)}
 		for _, sp := range seg.Specs {
@@ -259,7 +281,24 @@ func ReadFile(path string) (data []byte, ok bool) {
 	if n < 0 {
 		return nil, false
 	}
-	return buf[:n], true
+	if n == sz {
+		// Return the buffer ITSELF, not a reslice of it. `buf[:n]` materialises
+		// a copy through a reslice, and the returned slice's data pointer then
+		// reaches the return protocol as a bare pointer to a byte - which
+		// cannot be deep-copied, because a byte's declared size says nothing
+		// about the object behind it. The codec's answer is to leak the whole
+		// frame arena so the pointer stays valid, once per read: a build reads
+		// hundreds of files, and that is the leak that puts a large emit at the
+		// 4 GB cap. ReadFileInto is the caller-owned form and is preferred
+		// wherever the size is known; this keeps the convenience form from
+		// leaking on the common path.
+		return buf, true
+	}
+	exact := []byte{:n}
+	if n > 0 {
+		copy(exact, buf)
+	}
+	return exact, true
 }
 
 // FileSize reports a file's size in bytes, or -1. A scalar, so a caller can

@@ -44,6 +44,16 @@ func ssaConstEqual(a, b *SSAConst) (eq bool) {
 	return false
 }
 
+// chkLine reports the compile arena's used bytes after one check, so the suite's
+// 289MB is attributed per check instead of as a total. It allocates a few bytes
+// per call and prints one line.
+func chkLine(tag string) {
+	if cctx == nil || cctx.compileArena == nil {
+		return
+	}
+	mxutil.WriteStr(2, "  chk "|tag|" cau="|simpleItoa(int32(runtime.ArenaUsed(cctx.compileArena)>>20))|"MB\n")
+}
+
 // CreatePackage builds the SSA Package from type-checked syntax files.
 func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info *Info) (s *SSAPackage) {
 	p := &SSAPackage{
@@ -92,6 +102,23 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 	}
 	// Every body has been built by now, so the import marks are complete.
 	pb.checkUnusedImports()
+	// The body building ends here; everything after is the package-wide check
+	// suite. The ci-ssa line measures the two together, and the difference is
+	// large enough to decide which of them the 414MB belongs to.
+	memLine("   ssa-bodies "|pkg.Path)
+	// The check suite inspects the finished graph and reports into
+	// cctx.compileErrors. Measured on `runtime` (875 functions, 41537
+	// instructions) body building costs 124MB and these checks cost 289MB, so
+	// they are the larger half of the SSA-build peak.
+	//
+	// Scoping them in a scratch arena was tried and REVERTED: it did free the
+	// 289MB from the package arena (cau 521 -> 233MB), but it BROKE the build -
+	// `time` then reported "undefined: runtime.CurrentArena (called from
+	// AfterFunc)" four times, so something in this suite records state that the
+	// export pass reads. The check that does it is not identified yet, and a
+	// dangling export is not a trade worth making for a transient. The measured
+	// next step is to find the retention, then scope only the checks that do not
+	// record anything - the 289MB is the goal and this is the evidence for it.
 	// Restriction checks run before the compileErrors gate in ir_typecheck.
 	for _, member := range p.Members {
 		if f, ok := member.(*SSAFunction); ok {
@@ -100,14 +127,34 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 	}
 	checkSovereignLoopDecls(p, files)
 	checkIfaceAssignments()
+	// Scoping the AST-side checks in a scratch arena was implemented twice and
+	// REVERTED both times: with all eleven checks scoped, and again with only the
+	// seven AST ones scoped, the build then fails with four
+	// "undefined: runtime.CurrentArena" errors in `time`, and the transient peak
+	// does not move (871MB either way) because the checks still ALLOCATE their
+	// 289MB while they run - scoping only makes it reclaimable afterwards.
+	// The export of a package is captured before this point, so a check cannot be
+	// corrupting the mxh directly; something in the scoping affects later
+	// allocation placement and the retention is not yet identified. The measured
+	// next step is the suite's allocation VOLUME (~7KB per SSA instruction), not
+	// its lifetime.
+	chkLine("start")
 	checkSubsliceStores(files, pkg.Path)
+	chkLine("subsliceStores")
 	checkSubsliceCopyTargets(files, pkg.Path)
+	chkLine("subsliceCopyTargets")
 	checkShadowing(files)
+	chkLine("shadowing")
 	pb.checkImportConflicts(files)
+	chkLine("importConflicts")
 	checkPackageDecls(files, pkg.Path)
+	chkLine("packageDecls")
 	checkDuplicateCases(p, files)
+	chkLine("duplicateCases")
 	checkMissingReturn(files)
+	chkLine("missingReturn")
 	checkClosureCaptures(p)
+	chkLine("closureCaptures")
 	scanWasmSpawnTargets(p)
 	return p
 }
@@ -414,8 +461,13 @@ func importIdentByte(c byte) (ok bool) {
 func (pb *ssaPkgBuilder) buildImportSegScopes() {
 	pb.segScopes = nil
 	pb.segImports = nil
-	for si := 0; si < len(mxutil.ConcatImportSegs()); si++ {
-		seg := mxutil.ConcatImportSegs()[si]
+	// One call, one list: the accessor returns the sovereign `target`'s slice,
+	// so calling it once per iteration paid the return protocol twice per
+	// segment and, while the list was compactable, could hand the two calls
+	// different headers.
+	segs := mxutil.ConcatImportSegs()
+	for si := 0; si < len(segs); si++ {
+		seg := segs[si]
 		sc := NewScope(pb.pkg.Pkg.Scope)
 		for _, spec := range seg.Specs {
 			path := mxutil.ExtractQuoted(spec)
@@ -1315,7 +1367,22 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 	fb.emit(&SSAReturn{})
 }
 
+// ssaProbeTick prints a growth line only when the process has mapped another
+// 32MB, so the log names the function at which each step happened instead of
+// one line per function.
+func ssaProbeTick(name string) {
+	net := runtime.SysMapNet()
+	if net < cctx.ssaProbeNet+(32<<20) {
+		return
+	}
+	cctx.ssaProbeNet = net
+	mxutil.WriteStr(2, "    SSA mem fn="|name|" net="|simpleItoa(int32(net>>20))|"MB acap="|simpleItoa(int32(runtime.LiveArenaCap()>>20))|"MB rss="|simpleItoa(int32(rssKB()/1024))|"MB\n")
+}
+
 func (pb *ssaPkgBuilder) buildFunc(d *syntax.FuncDecl) {
+	if d.Name != nil {
+		ssaProbeTick(d.Name.Value)
+	}
 	if len(d.TParamList) > 0 {
 		return
 	}
@@ -1347,6 +1414,13 @@ func (pb *ssaPkgBuilder) buildFunc(d *syntax.FuncDecl) {
 	fb := newSSAFuncBuilder(fn, pb.info)
 	fb.fileScope = pb.curFileScope
 	fb.buildBody(d)
+	// No compaction is attempted here. A SovCompactGroup call was placed at this
+	// point and MEASURED as a no-op: 297 attempts, 297 refused, every one by
+	// sovExternalRef. A builder's product is reachable from `fn`, which lives in
+	// another arena, so every live record of the builder's group has an outside
+	// reference by construction and the group can never be compacted. The
+	// scratch this function leaves behind needs a region with a frame lifetime
+	// (region.md G.2), not a collector that is told to hurry.
 }
 
 // ssaFuncBuilder builds one SSAFunction body.
@@ -9079,6 +9153,32 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 	}
 	obj := imported.Scope.Lookup(funcName)
 	if obj == nil {
+		// MOXIE_UNDEF_DBG: say WHAT the scope looks like, because the exported
+		// text and the loaded scope are two different things and only one of
+		// them was ever measured.
+		if getenv("MOXIE_UNDEF_DBG") != "" {
+			hasShut := "n"
+			if imported.Scope.Lookup("ShutdownChan") != nil {
+				hasShut = "y"
+			}
+			hasRoot := "n"
+			if imported.Scope.Lookup("RootArena") != nil {
+				hasRoot = "y"
+			}
+			hasCur := "n"
+			if imported.Scope.Lookup("CurrentArena") != nil {
+				hasCur = "y"
+			}
+			regNames := int32(-1)
+			if rp := cctx.universe.Registry[imported.Path]; rp != nil && rp.Scope != nil {
+				regNames = int32(len(rp.Scope.Names()))
+			}
+			same := "n"
+			if rp := cctx.universe.Registry[imported.Path]; rp == imported {
+				same = "y"
+			}
+			mxutil.WriteStr(2, "  undefdbg pkg="|imported.Path|" want="|funcName|" names="|simpleItoa(int32(len(imported.Scope.Names())))|" regnames="|simpleItoa(regNames)|" same="|same|" shut="|hasShut|" root="|hasRoot|" cur="|hasCur|"\n")
+		}
 		// Fail loud: a dropped call compiles the caller to garbage
 		// (zeroinitializer returns) and crashes far from the cause.
 		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)

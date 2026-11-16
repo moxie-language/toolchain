@@ -33,12 +33,14 @@ The reason is not caution, it is measurement: a run under memory pressure is a
 run whose timing and peak RSS mean nothing, and this project's whole method is
 that a number you cannot trust is worse than no number.
 
-## Rule 2: Every Build and Every Run Is Boxed Into 4 GB
+## Rule 2: Every Build and Every Run Is Boxed Into 1 GB
 
 The compiler has blown the machine up more than once, and every time it was a
 program that asked for more memory than the work needed. A run that cannot fit
-in 4 GB is a run with a defect in it, and the defect is the thing to find - so
-the cap is not a budget, it is the diagnostic.
+in 1 GB is a run with a defect in it, and the defect is the thing to find - so
+the cap is not a budget, it is the diagnostic. The cap moved down from 4 GB
+because at 4 GB the compiler mapped three gigabytes it never touched and still
+"worked", which is exactly the condition the box exists to refuse.
 
 **Every command that builds or runs anything goes through `scripts/moxbox.sh`:**
 
@@ -48,7 +50,7 @@ scripts/moxbox.sh ~/mxc-builds/storewrite /tmp/storewrite-db 5000
 scripts/moxbox.sh go build -o /tmp/mxc-legacy ./legacy
 ```
 
-- It is a transient systemd scope with `MemoryMax=4G`, `MemoryHigh=3500M`,
+- It is a transient systemd scope with `MemoryMax=1G`, `MemoryHigh=900M` and **no environment override**: a different limit is an edit to `scripts/moxbox.sh`, where it is reviewable, not an env var, where it is a way past a failure,
   `MemorySwapMax=0` and a cpuset of **two hardware threads**. The CPUs are the
   resource boundary: `AllowedCPUs` sets the cgroup's cpuset and `taskset -c`
   sets the affinity mask of the process systemd spawns, which every descendant
@@ -83,10 +85,20 @@ scripts/moxbox.sh go build -o /tmp/mxc-legacy ./legacy
   journal, not the user one: `journalctl -k | grep -i oom` or `sudo dmesg | tail`.
 - `MemoryPeak` is the number that matters: 4.1 GB is a rounding error, 40 GB is
   a type graph reaching the whole program.
-- **Nothing runs outside it.** Not the compiler, not a binary the compiler
-  produced, not a test, not a soak, not `go build`, not a shell one-liner that
-  happens to allocate. If a step needs to run a program, it runs in the box.
-- **A 4 GB kill is a finding, not an inconvenience.** Record the command, the
+- **Nothing runs outside it, and the compiler enforces it.** Not the compiler,
+  not a binary the compiler produced, not a test, not a soak, not `go build`, not
+  a shell one-liner that happens to allocate. If a step needs to run a program,
+  it runs in the box.
+- **The compiler checks its own cgroup and refuses to run outside it** (`inMemoryBox`
+  in `_mxc_stage4/main.mx`: `/proc/self/cgroup` must name `mxbuild`, else
+  `mxc: refusing to run outside the memory box` and exit 2). The rule used to be
+  enforced by remembering to type `scripts/moxbox.sh`, and the first time a build
+  was easier to run directly it ran with the whole machine available and hid the
+  defect the cap exists to expose. There is no flag, environment variable or
+  exception. The ONE thing that runs unboxed is `legacy/moxie`, the Go bootstrap
+  compiler: it is the tool that builds the boxed compiler, it is not a Moxie
+  program, and it cannot check its own cgroup.
+- **A 1 GB kill is a finding, not an inconvenience.** Record the command, the
   input and the peak, then fix what grew. Do not raise the cap to get past it;
   the cap exists because raising it is what took the machine down.
 - `scripts/moxbox.sh` with no arguments is an interactive shell already inside

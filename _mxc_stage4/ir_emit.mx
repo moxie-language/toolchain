@@ -65,6 +65,17 @@ type irEmitter struct {
 	allocBlock      map[SSAValue]int32
 	storedTo        map[string]bool
 	usedAs          map[string]bool
+	// Per-function indexes for emitAlloc's field-layout inference.
+	// inferAllocTypeFromFieldAddrs used to scan every instruction of the
+	// function for every field address of every alloc it was asked about -
+	// O(instructions^3) - and each iteration called SSAName/llvmType, whose
+	// string results are copies. strconv.initPow10, one block with a table
+	// initialiser, turned that into 2 GB. Built once per function instead; the
+	// scan ORDER is unchanged, so the inference is identical.
+	faByBase   map[string][]*SSAFieldAddr
+	mulByBase  map[string][]string
+	devByAddr  map[string][]*SSAStore
+	ldByName   map[string][]*SSAUnOp
 	deferList  []*SSADefer
 	deferID    int32
 	deferFrame string    // deferFrame alloca reg for functions with defers
@@ -750,21 +761,101 @@ func (e *irEmitter) resolveAllNamedTypes() {
 // this: ~1.6 MB retained per IR instruction, and `mxregexp` alone reached 2.9 GB
 // inside one package's emit.
 func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
-	mxutil.WriteStr(2, "    EAF0 enter n="|mxutil.SimpleItoa(int32(len(e.members)))|" rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
+	// The floor this package's emit starts from, split into the terms that can
+	// be acted on separately: the retained package graphs, the root arena, and
+	// whatever is left in the arena ledger (the compile arena and the pool).
+	// Without the split, `acap` during emit is one number and the next fix is a
+	// guess - which is how "the emit wall" stayed unnamed for two rounds.
+	gcap := uint64(0)
+	gn := int32(0)
+	if cctx.dispTier2Arena != nil {
+		for _, ga := range cctx.dispTier2Arena {
+			if ga == nil {
+				continue
+			}
+			gn++
+			gcap += runtime.ArenaUsed(ga)
+		}
+	}
+	rnreg, rbytes := runtime.ArenaRootUsage()
+	cau, cac := uint64(0), uint64(0)
+	if cctx.compileArena != nil {
+		cau = runtime.ArenaUsed(cctx.compileArena)
+		cac = runtime.ArenaCap(cctx.compileArena)
+	}
+	mxutil.WriteStr(2, "    EAF0 enter n="|mxutil.SimpleItoa(int32(len(e.members)))|" rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB acap="|mxutil.SimpleItoa(int32(runtime.LiveArenaCap()>>20))|"MB cau="|mxutil.SimpleItoa(int32(cau>>20))|"MB cac="|mxutil.SimpleItoa(int32(cac>>20))|"MB graphs="|mxutil.SimpleItoa(gn)|"/"|mxutil.SimpleItoa(int32(gcap>>20))|"MB root="|mxutil.SimpleItoa(int32(rnreg))|"/"|mxutil.SimpleItoa(int32(rbytes>>20))|"MB\n")
+	// The floor's composition with names. `acap` is a total; this list says
+	// which arenas make it up, so "the emit floor is 490MB" becomes "the
+	// compile arena holds X of it" and the next fix has a target.
+	mxutil.WriteStr(2, "    EAF0top\n"|string(runtime.LiveArenaTop(12)))
+	mxutil.WriteStr(2, "    EAF0cen "|string(runtime.LiveArenaCensus()))
+	// The same floor, but by ALLOCATION SIZE: everything of 64KiB or more that
+	// typecheck + SSA asked for in this package, with its scope. A large `mb=`
+	// with a large `n=` is an allocation VOLUME defect; a single big `size=` is
+	// one buffer that could be presized. The two have different fixes.
+	mxutil.WriteStr(2, "    EAF0big\n"|string(runtime.BigAllocReport()))
+	// Which generic packages are being retained, and is their last use still
+	// ahead of this package? A retained graph whose last instantiation point has
+	// passed is 100MB of permanent arena held for nothing; one whose last use is
+	// ahead is the price of generics and no release can touch it at this point.
+	genN := int32(0)
+	for gn2, _ := range cctx.genericPkgScopes {
+		if genN >= 8 {
+			break
+		}
+		genN++
+		lu, ok := cctx.dispLastUse[gn2]
+		if !ok {
+			lu = -1
+		}
+		mxutil.WriteStr(2, "    EAF0gen pkg="|gn2|" lastuse="|mxutil.SimpleItoa(lu)|" cur="|mxutil.SimpleItoa(cctx.curPkgIdx)|"\n")
+	}
+	runtime.ResetBigAllocs()
+	prevFnScope := runtime.SetArenaScope(43)
 	fnArena := runtime.ArenaNew(8 * 1024 * 1024)
+	runtime.SetArenaScope(prevFnScope)
 	mxutil.WriteStr(2, "    EAF0 arena ok\n")
 	nf := int32(0)
 	for _, member := range e.members {
 		if m, ok := member.(*SSAFunction); ok {
 			nf++
-			mxutil.WriteStr(2, "    EAF nf="|mxutil.SimpleItoa(nf)|" in rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB fn="|m.name|" blocks="|mxutil.SimpleItoa(int32(len(m.Blocks)))|"\n")
+			cau2, cac2 := uint64(0), uint64(0)
+			if cctx.compileArena != nil {
+				cau2 = runtime.ArenaUsed(cctx.compileArena)
+				cac2 = runtime.ArenaCap(cctx.compileArena)
+			}
+			cnts, byts := runtime.AllocHistogram()
+			hist := ""
+			totAlloc := int32(0)
+			for bi := int32(0); bi < int32(len(byts)); bi++ {
+				totAlloc += int32(cnts[bi])
+				if bi >= 12 && bi < 21 {
+					hist = hist | " " | mxutil.SimpleItoa(bi) | ":" | mxutil.SimpleItoa(int32((byts[bi] >> 20)))
+				}
+			}
+			mxutil.WriteStr(2, "    EAF nf="|mxutil.SimpleItoa(nf)|" in rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB cau="|mxutil.SimpleItoa(int32(cau2>>20))|"MB cac="|mxutil.SimpleItoa(int32(cac2>>20))|"MB net="|mxutil.SimpleItoa(int32(runtime.SysMapNet()>>20))|"MB acap="|mxutil.SimpleItoa(int32(runtime.LiveArenaCap()>>20))|"MB na="|mxutil.SimpleItoa(int32(totAlloc/1000))|"k hist"|hist|" fn="|m.name|" blocks="|mxutil.SimpleItoa(int32(len(m.Blocks)))|"\n")
+			if rssPeak("emit " | m.name) {
+				mxutil.WriteStr(2, "    NEWPEAK rss=" | mxutil.SimpleItoa(int32(cctx.peakRSSKB/1024)) | "MB at emit " | m.name | " pool=" | mxutil.SimpleItoa(e.strPoolBytes()>>10) | "KB nstr=" | mxutil.SimpleItoa(int32(len(e.strConst)+len(e.pendStrConsts))) | "\n")
+			}
 			checkUseAfterFree(m)
 			checkParamMutation(m)
-			runtime.SetCurrentArena(fnArena)
+			// PUSH the per-function arena, do not just name it current.
+			// `alloc` hands out from domainRoot.fnStack[fnTop]; it never reads
+			// the SetCurrentArena override, so the old pair of SetCurrentArena
+			// calls here changed nothing and every emitter allocation went to
+			// whatever arena was pushed around the package - the compile arena,
+			// or a sovereign borrow. That is why `EAFU used=0MB` printed at the
+			// end of every function while the compile arena grew to 536MB on
+			// `runtime`: the per-function arena was never on the stack at all.
+			// ManualArenaEnter pushes, so this function's text and scratch land
+			// in fnArena and ArenaReset reclaims them at the next member, while
+			// mergeAccumulators below still lands in the compile arena because
+			// the push is popped first.
+			runtime.ManualArenaEnter(fnArena)
 			emitFunctionOf(e, m)
 			emitAnonFuncsOf(e, m)
 			e.flush()
-			runtime.SetCurrentArena(compileArena)
+			runtime.ManualArenaExit(fnArena)
 			e.mergeAccumulators()
 			e.segs = nil
 			e.buf = nil
@@ -781,6 +872,10 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 			e.allocBlock = nil
 			e.storedTo = nil
 			e.usedAs = nil
+			e.faByBase = nil
+			e.mulByBase = nil
+			e.devByAddr = nil
+			e.ldByName = nil
 			e.missingStores = nil
 			m.Blocks = nil
 			m.Locals = nil
@@ -788,10 +883,25 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 			m.FreeVars = nil
 			m.NamedResults = nil
 			m.vars = nil
+			// The scratch high-water mark for this function, read before the
+			// reset that reclaims it. This is the number that says whether the
+			// per-function cost is real or is a 64MB segment grabbed for a few
+			// megabytes: `acap` cannot tell those apart, `used` can.
+			mxutil.WriteStr(2, "    EAFU nf="|mxutil.SimpleItoa(nf)|" used="|mxutil.SimpleItoa(int32(runtime.ArenaUsed(fnArena)>>20))|"MB\n")
 			runtime.ArenaReset(fnArena)
-			runtime.SovDrainCompactions(4)
+			// The safe point between two function bodies: the select answers
+			// ctrl-c (a build that cannot be stopped is a build nobody can
+			// interrupt - it also cannot reclaim, because the drain only runs
+			// where no frame borrows the group) and the drain reclaims the
+			// scratch the function just abandoned. A deep call chain has no
+			// such boundary, which is why emit is a free function looping over
+			// members with a checkpoint per member.
+			if runtime.SovCheckpoint() {
+				interruptNow()
+			}
 		}
 	}
+	mxutil.WriteStr(2, "    EAF1big nf="|mxutil.SimpleItoa(nf)|"\n"|string(runtime.BigAllocReport()))
 	runtime.ArenaFree(fnArena)
 }
 
@@ -1278,6 +1388,21 @@ func copyStr(s string) (r string) {
 	return string(buf)
 }
 
+// strPoolBytes is the LIVE text of the string-constant pool: one string per
+// occurrence, because strings are mutable and two literals must not share
+// bytes. Printing it at each new RSS peak is what tests the claim that this
+// pool is the accumulator - if it stays small while RSS climbs, the growth is
+// somewhere else and the previous conclusion was wrong.
+func (e *irEmitter) strPoolBytes() (n int32) {
+	for _, s := range e.strConst {
+		n += len(s)
+	}
+	for _, s := range e.pendStrConsts {
+		n += len(s)
+	}
+	return n
+}
+
 // mergeAccumulators deep-copies per-function products into compile-arena maps.
 // Called on the compile arena after function emit + flush.
 // All accumulator string bytes are in the fn arena and must be copied.
@@ -1296,6 +1421,11 @@ func (e *irEmitter) mergeAccumulators() {
 		// len(strConst)+its position when the operand was emitted, so skipping a
 		// duplicate here would shift every later .str index onto the wrong bytes.
 		// strMap only records the FIRST index for a text, for addStringConst.
+		//
+		// Sharing the FIRST entry's bytes instead was measured and REJECTED:
+		// strings are MUTABLE in Moxie, so two table slots pointing at one text
+		// let a rewrite through either corrupt the other. The compiler caught it
+		// at link with "unknown special variable with appending linkage: @0".
 		if _, ok := e.strMap[cs]; !ok {
 			e.strMap[cs] = len(e.strConst)
 		}
@@ -1901,12 +2031,43 @@ func emitFunctionOf(e *irEmitter, f *SSAFunction) {
 		}
 	}
 	e.usedAs = map[string]bool{}
+	e.faByBase = map[string][]*SSAFieldAddr{}
+	e.mulByBase = map[string][]string{}
+	e.devByAddr = map[string][]*SSAStore{}
+	e.ldByName = map[string][]*SSAUnOp{}
 	for _, b := range f.Blocks {
 		for _, instr := range b.Instrs {
 			e.instrOperands(instr)
 			for _, ref := range e.operandBuf {
 				if ref != nil {
 					e.usedAs[ref.SSAName()] = true
+				}
+			}
+			switch i := instr.(type) {
+			case *SSAFieldAddr:
+				if i.X != nil {
+					k := i.X.SSAName()
+					sl := e.faByBase[k]
+					push(sl, i)
+					e.faByBase[k] = sl
+				}
+			case *SSAUnOp:
+				if i.Op == OpMul && i.X != nil {
+					k := i.X.SSAName()
+					sl := e.mulByBase[k]
+					push(sl, i.SSAName())
+					e.mulByBase[k] = sl
+				}
+				ln := i.SSAName()
+				ls := e.ldByName[ln]
+				push(ls, i)
+				e.ldByName[ln] = ls
+			case *SSAStore:
+				if i.Addr != nil {
+					k := i.Addr.SSAName()
+					sl := e.devByAddr[k]
+					push(sl, i)
+					e.devByAddr[k] = sl
 				}
 			}
 		}
@@ -2008,12 +2169,7 @@ func emitFunctionOf(e *irEmitter, f *SSAFunction) {
 			}
 			e.emitArenaPrologue()
 			e.deferCheckpointOn = e.deferFrame != ""
-			nin := int32(0)
 			for _, instr := range b.Instrs {
-				nin++
-				if nin&31 == 0 {
-					runtime.SovDrainCompactions(8)
-				}
 				e.emitInstr(instr)
 			}
 			e.deferCheckpointOn = false
@@ -2043,6 +2199,19 @@ func emitFunctionOf(e *irEmitter, f *SSAFunction) {
 	}
 
 	e.w("}\n")
+	// The per-function scratch high-water mark, read in the arena the emit loop
+	// made current for this function (fnArena). This is the number that says
+	// whether an 80MB capacity spike is data or a segment grabbed for a little:
+	// `acap` cannot tell those apart, `used` can.
+	if getenv("MOXIE_EMIT_USED") != "" {
+		nins := int32(0)
+		for _, b := range f.Blocks {
+			if b != nil {
+				nins += int32(len(b.Instrs))
+			}
+		}
+		mxutil.WriteStr(2, "    EMITUSED fn=" | f.name | " used=" | mxutil.SimpleItoa(int32(runtime.ArenaUsed(runtime.CurrentArena())>>10)) | "KB instrs=" | mxutil.SimpleItoa(nins) | "\n")
+	}
 }
 
 func (e *irEmitter) emitFuncDecl(f *SSAFunction) {
@@ -2239,12 +2408,23 @@ func emitBlockOf(e *irEmitter, b *SSABasicBlock) {
 	e.blockDead = false
 	e.deferCheckpointOn = e.deferFrame != "" && (e.curFunc.Recover == nil || b != e.curFunc.Recover)
 	phiFlushed := false
-	ni := int32(0)
+	// A block is where an emit cost hides: `strconv.initPow10` puts 7025
+	// instructions in ONE block, so a per-function report shows only the total
+	// and cannot say what the instructions spent it on. Every 1000 instructions
+	// the live scratch and the cumulative size histogram are printed, so two
+	// consecutive lines differ by exactly what those 1000 instructions
+	// allocated - and the bins name the shape of the allocation.
+	nInstr := int32(0)
 	for _, instr := range b.Instrs {
 		if e.blockDead { break }
-		ni++
-		if ni&31 == 0 {
-			runtime.SovDrainCompactions(8)
+		nInstr++
+		if len(b.Instrs) > 1500 && nInstr%1000 == 0 {
+			cnts, byts := runtime.AllocHistogram()
+			hs := ""
+			for bi := int32(12); bi < int32(21) && bi < int32(len(byts)); bi++ {
+				hs = hs | " " | mxutil.SimpleItoa(bi) | ":" | mxutil.SimpleItoa(int32(byts[bi] >> 20))
+			}
+			mxutil.WriteStr(2, "    BLOCKSTEP fn="|e.funcRelName()|" n="|mxutil.SimpleItoa(nInstr)|" scratch="|mxutil.SimpleItoa(int32(runtime.ArenaUsed(runtime.CurrentArena())>>20))|"MB hist"|hs|"\n")
 		}
 		if !phiFlushed {
 			if _, isPhi := instr.(*SSAPhi); !isPhi {

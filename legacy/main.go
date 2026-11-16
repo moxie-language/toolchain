@@ -571,7 +571,7 @@ func main() {
 	target := flag.String("target", "", "target specification")
 	buildMode := flag.String("buildmode", "", "build mode to use (default)")
 	printSize := flag.String("size", "", "print sizes (none, short, full)")
-	printAllocsString := flag.String("print-allocs", "", "regular expression of functions for which arena allocations should be printed (needs -tags alloc_trace for the runtime to count them)")
+	printAllocsString := flag.String("print-allocs", "", "regular expression of functions for which arena allocations should be printed (adds the alloc_trace runtime tag and dumps per-site bytes at exit)")
 	printCommands := flag.Bool("x", false, "Print commands")
 	flagJSON := flag.Bool("json", false, "print output in JSON format")
 	defaultParallelism := runtime.GOMAXPROCS(0)
@@ -595,6 +595,7 @@ func main() {
 	verifyIR := flag.Bool("internal-verifyir", false, "run extra verification steps on LLVM IR")
 	standaloneRuntime := flag.Bool("standalone-runtime", false, "keep runtime symbols external (for build-runtime)")
 	noMainArena := flag.Bool("no-main-arena", false, "package main gets no function arena or return encode (bootstrap only)")
+	noSov := flag.Bool("no-sov", false, "package main gets no sovereign arena but keeps its function arena (bootstrap only)")
 	noSovNotes := flag.Bool("no-sov-notes", false, "do not print the sovereign arena note for each mutating method in user code")
 	rebuildAll := flag.Bool("a", false, "rebuild all packages from scratch (ignore build cache; required for bootstrap)")
 
@@ -687,10 +688,19 @@ func main() {
 		StandaloneRuntime:  *standaloneRuntime,
 		RebuildAll:         *rebuildAll,
 		NoMainArena:        *noMainArena,
+		NoSov:              *noSov,
 		NoSovNotes:         *noSovNotes,
 	}
 	if *printCommands {
 		options.PrintCommands = printCommand
+	}
+	if printAllocs != nil {
+		// The flag is the whole opt-in, as with -cover: alloc_trace selects the
+		// runtime's counter tables over the no-op twin. Requiring the user to
+		// remember -tags as well meant the site table was written and every
+		// counter stayed zero, because the emitted logAlloc calls landed in a
+		// runtime whose logAlloc was empty.
+		options.Tags = append(options.Tags, "alloc_trace")
 	}
 
 	if extLDFlags != "" {

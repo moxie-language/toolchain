@@ -277,41 +277,38 @@ func (e *irEmitter) inferAllocTypeFromCallArgs(a *SSAAlloc) (s string) {
 
 func (e *irEmitter) inferAllocTypeFromFieldAddrs(a *SSAAlloc, baseType string) (s string) {
 	allocName := a.SSAName()
-	names := map[string]bool{allocName: true}
-	for _, b := range e.curFunc.Blocks {
-		for _, instr := range b.Instrs {
-			if uop, ok := instr.(*SSAUnOp); ok && uop.Op == OpMul && uop.X != nil && uop.X.SSAName() == allocName {
-				names[uop.SSAName()] = true
-			}
-		}
-	}
+	// The indexes are per function and built once, in emitFunctionOf. Walking
+	// every instruction here, once per alloc and again per field address, is
+	// O(instructions^3) per function and allocates a string header per step -
+	// strconv.initPow10 alone reached 2 GB in this loop.
 	maxField := -1
 	fieldTypes := map[int32]string{}
-	for _, b := range e.curFunc.Blocks {
-		for _, instr := range b.Instrs {
-			fa, ok := instr.(*SSAFieldAddr)
-			if !ok || fa.X == nil || !names[fa.X.SSAName()] {
-				continue
-			}
+	muls := e.mulByBase[allocName]
+	bases := []string{:1 + int32(len(muls))}
+	bases[0] = allocName
+	for i, mn := range muls {
+		bases[i+1] = mn
+	}
+	for _, base := range bases {
+		for _, fa := range e.faByBase[base] {
 			if fa.Field > maxField {
 				maxField = fa.Field
 			}
 			faName := fa.SSAName()
-			for _, b2 := range e.curFunc.Blocks {
-				for _, i2 := range b2.Instrs {
-					if sv, ok2 := i2.(*SSAStore); ok2 && sv.Addr != nil && sv.Addr.SSAName() == faName {
-						ft := e.llvmType(sv.Val.SSAType())
-						if ft != "void" && ft != "" {
-							fieldTypes[fa.Field] = ft
-						}
-					}
-					if ld, ok2 := i2.(*SSAUnOp); ok2 && ld.Op == OpMul && ld.X != nil && ld.X.SSAName() == faName {
-						ft := e.llvmType(ld.SSAType())
-						if ft != "void" && ft != "" && ft != "ptr" {
-							if _, exists := fieldTypes[fa.Field]; !exists {
-								fieldTypes[fa.Field] = ft
-							}
-						}
+			for _, sv := range e.devByAddr[faName] {
+				ft := e.llvmType(sv.Val.SSAType())
+				if ft != "void" && ft != "" {
+					fieldTypes[fa.Field] = ft
+				}
+			}
+			for _, ld := range e.ldByName[faName] {
+				if ld.Op != OpMul || ld.X == nil {
+					continue
+				}
+				ft := e.llvmType(ld.SSAType())
+				if ft != "void" && ft != "" && ft != "ptr" {
+					if _, exists := fieldTypes[fa.Field]; !exists {
+						fieldTypes[fa.Field] = ft
 					}
 				}
 			}

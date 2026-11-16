@@ -108,6 +108,12 @@ type compileCtx struct {
 	compileExportMap     map[string]string
 	compileArena         *runtime.Arena
 	parseArena           *runtime.Arena
+	// scanPhase distinguishes the whole-link typecheck pass (1) from the compile
+	// pass (2). It exists because generic-AST retention has to be decided
+	// differently in the two: during the typecheck pass a package's AST is
+	// parsed for the benefit of packages compiled LATER, so one that nothing
+	// later can instantiate from should not be retained at all.
+	scanPhase            int32
 	genericArena         *runtime.Arena
 	scannedGeneric       map[string]bool
 	// mxhLoaded records packages whose graph was already materialized from mxh
@@ -135,6 +141,20 @@ type compileCtx struct {
 	// pkgMentioned: the selector-method names each package's source calls.
 	// pkgNeeds: per package, the graphs that must be loaded for its typecheck
 	// and emission (transitive imports plus the providers of its methods).
+	// ssaProbeNet is the mapped-bytes value at the last SSA growth line. It
+	// lives here because everything in this struct is written through cctx, a
+	// package-level pointer, and a package global may not be mutated outside
+	// init().
+	ssaProbeNet          uint64
+	// graphReloadOK memoises whether a package's exports can be read back from
+	// disk, so a release never evicts the only copy of a graph.
+	graphReloadOK map[string]bool
+	// peakRSSKB / peakAt are the process high-water mark of resident memory and
+	// what was running when it was set. The box kills or throttles on the PEAK,
+	// not on the average, so the peak is the number a fix has to move - and a
+	// peak without a name is a number nobody can aim at.
+	peakRSSKB int64
+	peakAt    string
 	dispProviders        map[string][]string
 	pkgMentioned         map[string]map[string]bool
 	pkgNeeds             map[string][]string
@@ -654,6 +674,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 	// checker, the SSA builder and the interface dispatch all see a normal
 	// method. The same injection runs in legacy (wood law).
 	file = injectBuiltinString(file, pkg.Name, name, arena, pkgDir)
+	memLine("     tyP1")
 	for _, d := range file.DeclList {
 		switch dd := d.(type) {
 		case *syntax.ImportDecl:
@@ -712,6 +733,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 	// non-generic method. Declaration order must not decide whether a type
 	// keeps its parameters. The declaration's own body still resolves in the
 	// child scope built below; only the parameter objects move earlier.
+	memLine("     tyP2")
 	for _, d := range file.DeclList {
 		td, ok := d.(*syntax.TypeDecl)
 		if !ok || td.Name == nil || len(td.TParamList) == 0 {
@@ -747,6 +769,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 	boundAlias := map[string]bool{}
 	for pass := int32(0); pass < 8; pass++ {
 		progress := false
+		memLine("     tyP3")
 		for _, d := range file.DeclList {
 			td, ok := d.(*syntax.TypeDecl)
 			if !ok || td.Name == nil || !td.Alias || td.Type == nil || boundAlias[td.Name.Value] {
@@ -772,6 +795,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 			break
 		}
 	}
+	memLine("     tyP4")
 	for _, d := range file.DeclList {
 		if td, ok := d.(*syntax.TypeDecl); ok {
 			if td.Alias && boundAlias[td.Name.Value] {
@@ -800,6 +824,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 		prevConstValues = nil
 		prevConstType = nil
 		iotaVal = int64(-1)
+		memLine("     tyP5")
 		for _, d := range file.DeclList {
 			if cd, ok := d.(*syntax.ConstDecl); ok {
 				if cd.Group == nil || cd.Group != curConstGroup {
@@ -883,6 +908,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 			}
 		}
 	}
+	memLine("     tyP6")
 	for _, d := range file.DeclList {
 		if td, ok := d.(*syntax.TypeDecl); ok {
 			if td.Alias && boundAlias[td.Name.Value] {
@@ -929,6 +955,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 			}
 		}
 	}
+	memLine("     tyP7")
 	for _, d := range file.DeclList {
 		if td, ok := d.(*syntax.TypeDecl); ok {
 			if td.Alias && boundAlias[td.Name.Value] {
@@ -948,6 +975,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 			}
 		}
 	}
+	memLine("     tyP8")
 	for _, d := range file.DeclList {
 		switch dd := d.(type) {
 		case *syntax.VarDecl:
@@ -997,6 +1025,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 	// outlive the typecheck arena.
 	tcMethodSaved := runtime.CurrentArena()
 	runtime.SetCurrentArena(runtime.RootArena())
+	memLine("     tyP9")
 	for _, d := range file.DeclList {
 		if fd, ok := d.(*syntax.FuncDecl); ok && fd.Recv != nil {
 			if recvTypeHasIndex(fd.Recv.Type) {
@@ -1047,6 +1076,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 		}
 	}
 	runtime.SetCurrentArena(tcMethodSaved)
+	memLine("     tyP10")
 	for _, d := range file.DeclList {
 		if vd, ok := d.(*syntax.VarDecl); ok {
 			for _, n := range vd.NameList {
@@ -1099,6 +1129,7 @@ func scanParse(src []byte, name string, arena *runtime.Arena) (file *syntax.File
 }
 
 func fileHasGeneric(file *syntax.File) (ok bool) {
+	memLine("     tyP11")
 	for _, d := range file.DeclList {
 		fd, isFn := d.(*syntax.FuncDecl)
 		if !isFn {
@@ -1133,6 +1164,23 @@ func ScanGenericDecls(src []byte, name string) {
 	if cctx.scannedGeneric[name] {
 		return
 	}
+	// Retention is only worth its bytes if something LATER can instantiate from
+	// this package. `dispLastUse` is the last package index whose compile can
+	// reach it, so when that index is not past this package's own, the AST can
+	// wait for the package's own compile pass and be parsed there - where it is
+	// used immediately and the build's peak does not carry it.
+	//
+	// This is not a heuristic: it is the same outlives fact the graph retention
+	// already uses, applied to the AST. `main` is the case that matters - 1.4MB
+	// of source parses to 201MB of AST, nothing imports main, and it was being
+	// parsed at the first package and held until the last, for its own use.
+	if cctx.scanPhase == 1 {
+		own, okOwn := cctx.pkgOrder[name]
+		last, okLast := cctx.dispLastUse[name]
+		if okOwn && okLast && last <= own {
+			return
+		}
+	}
 	cctx.scannedGeneric[name] = true
 	// The mxh records whether a package declares generics. When it is loaded
 	// and says none, skip the probe parse entirely - most packages have no
@@ -1144,7 +1192,12 @@ func ScanGenericDecls(src []byte, name string) {
 		}
 	}
 	if cctx.genericArena == nil {
+		// Scope 45: this arena is never freed, so it is the one place in the
+		// compiler where allocation is permanent. Tagged because an unbounded
+		// permanent arena is indistinguishable from a leak in a total.
+		prevGeneric := runtime.SetArenaScope(45)
 		cctx.genericArena = runtime.ArenaNew(64 * 1024 * 1024)
+		runtime.SetArenaScope(prevGeneric)
 	}
 	// First pass in a scratch arena: detect whether the package declares any
 	// generics. Only generic packages' ASTs are retained (their FuncDecl nodes
@@ -1176,10 +1229,12 @@ func ScanGenericDecls(src []byte, name string) {
 	// does not fix this: FnArenaPush ignores it and pushes a fresh frame.
 	runtime.ManualArenaEnter(cctx.genericArena)
 	defer runtime.ManualArenaExit(cctx.genericArena)
+	u0 := runtime.ArenaUsed(cctx.genericArena)
 	file := scanParse(src, name, cctx.genericArena)
 	if file == nil {
 		return
 	}
+	u1 := runtime.ArenaUsed(cctx.genericArena)
 	shortName := name
 	for i := len(name) - 1; i >= 0; i-- {
 		if name[i] == '/' {
@@ -1189,6 +1244,7 @@ func ScanGenericDecls(src []byte, name string) {
 	}
 	thePkg := newTCPackageWithUniverse(name, shortName)
 	scope := thePkg.Scope
+	memLine("     tyP12")
 	for _, d := range file.DeclList {
 		if id, ok := d.(*syntax.ImportDecl); ok {
 			if id.Path == nil {
@@ -1234,6 +1290,7 @@ func ScanGenericDecls(src []byte, name string) {
 	var prevConstValues syntax.Expr
 	var prevConstType syntax.Expr
 	iotaVal := int64(-1)
+	memLine("     tyP13")
 	for _, d := range file.DeclList {
 		switch dd := d.(type) {
 		case *syntax.FuncDecl:
@@ -1387,6 +1444,8 @@ func ScanGenericDecls(src []byte, name string) {
 		cctx.genericPkgScopes = map[string]*Scope{}
 	}
 	cctx.genericPkgScopes[name] = scope
+	u2 := runtime.ArenaUsed(cctx.genericArena)
+	mxutil.WriteStr(2, "  genscan "|name|" src="|simpleItoa(int32(len(src)>>10))|"KB parse="|simpleItoa(int32((u1-u0)>>10))|"KB scope="|simpleItoa(int32((u2-u1)>>10))|"KB tot="|simpleItoa(int32(u2>>20))|"MB\n")
 }
 
 // recvTypeHasIndex reports whether a receiver type expression contains an
@@ -1466,7 +1525,15 @@ func regScopeLookup(regPkg *TCPackage, n string) (o Object) {
 // and populates the registry via loadMxh. The type graph never leaves the
 // typecheck arena - only the refined mxh text touches disk.
 func TypeCheckOnly(src []byte, name string, mxhPath string, pkgDir string) {
+	if runtime.SovCheckpoint() {
+		interruptNow()
+	}
 	memLine("   tc-in "|name)
+	// Scope 44 covers the whole export pass, for the same reason 41 covers the
+	// whole compile: what a phase allocates is the phase's, including the arenas
+	// it causes to be created.
+	runtime.SetArenaScope(44)
+	cctx.scanPhase = 1
 	// This pass has its own arena and frees it, so it must not leave compile
 	// errors behind: their bytes and the slice backing array live in that arena,
 	// and the next CompileToIR's gate used to read them from memory that was
@@ -1477,7 +1544,12 @@ func TypeCheckOnly(src []byte, name string, mxhPath string, pkgDir string) {
 	if arenaSize < 4*1024*1024 {
 		arenaSize = 4 * 1024 * 1024
 	}
+	// Scope 44 names the export-pass arena, which is a different lifetime from
+	// the compile arena: it dies at the end of this pass, so its bytes must not
+	// be mistaken for the package's retained type graph in an attribution line.
+	prevScope := runtime.SetArenaScope(44)
 	arena := runtime.ArenaNew(arenaSize)
+	runtime.SetArenaScope(prevScope)
 	// Borrow semantics: push a new frame, never overwrite the caller's
 	// slot. fnStack[0] stays the root arena, so sovGroup bookkeeping lands
 	// in root-lifetime memory. The typecheck arena's contents - and any
@@ -1493,8 +1565,26 @@ func TypeCheckOnly(src []byte, name string, mxhPath string, pkgDir string) {
 		runtime.ManualArenaExit(arena)
 		// mxh text must land in the caller's (persistent) arena so the
 		// registry survives ArenaFree.
-		if mxhPath != "" {
-			writeFile(mxhPath, []byte(mxhData), 0644)
+		// MOXIE_DUMP_MXH=<dir> writes every package's export text, so a missing
+		// symbol can be looked up in the export instead of inferred from a
+		// downstream "undefined". Diagnostic only, off by default.
+		if dumpDir := getenv("MOXIE_DUMP_MXH"); dumpDir != "" && len(mxhData) > 0 {
+			cacheWrite(mxutil.JoinPath(dumpDir, safeName(name)|".mxh"), []byte(mxhData))
+		}
+		if mxhPath != "" && len(mxhData) > 0 {
+			// cacheWrite, not writeFile: tmp + rename, so a build killed while
+			// writing leaves the previous file rather than a truncated one. An
+			// empty export file is indistinguishable from a valid one to a
+			// FileExists test, which is how 51 of 187 mxh files in one cache
+			// directory came to be 0 bytes and poisoned every later build.
+			cacheWrite(mxhPath, []byte(mxhData))
+		} else if mxhPath != "" {
+			// Writing an empty export file destroys a good cache entry: a later
+			// reader only tests that the file EXISTS, then loads nothing, so
+			// every name the package exports reads `undefined`. Named, not
+			// silent: measured as a 0-byte pkg/math_bits/*.mxh and
+			// `undefined: bits` once the graph working set began to be released.
+			mxutil.WriteStr(2, "  tc-EMPTY-MXH " | name | " not written\n")
 		}
 		// Step 3, under test: the parent does NOT materialise this package's
 		// graph. The text on disk is the whole result; a later package that
@@ -1534,9 +1624,19 @@ func CompileToIR(src []byte, name string, triple string, pkgDir string) (s strin
 	// here yet: enabling it SIGBUSes in the import-segment scan, which says the
 	// concatenated-import list's bytes belong to a compactable sovereign arena.
 	// Fix that ownership first, then this becomes SovCompactAll().
-	runtime.SovDrainCompactions(8)
+	if runtime.SovCheckpoint() {
+		interruptNow()
+	}
 	cctx.compileTargetTriple = triple
 	cctx.curPkgPath = name
+	// Scope 41 covers the WHOLE package compile, not just the creation of the
+	// compile arena. Every arena born inside - the sovereign data arena of an
+	// SSA object, a chain region, a graph materialised on demand - carries the
+	// tag of the phase that asked for it, which is the only way an attribution
+	// report can say "this package's compile is holding 344MB" instead of
+	// "id=0 is holding everything".
+	runtime.SetArenaScope(41)
+	cctx.scanPhase = 2
 	for i := int32(0); i < cctx.constErrN; i++ {
 		if cctx.constErrPkg[i] == name {
 			return ";" | "moxie: " | cctx.constErrMsg[i]
@@ -1548,21 +1648,23 @@ func CompileToIR(src []byte, name string, triple string, pkgDir string) (s strin
 	cctx.externGlobals = scanExternGlobals(src)
 	cctx.wasmImportMap = scanWasmImportMap(src, name)
 
-	// Arena sized from source. Virtual address space is free - pages commit
-	// on touch. 1000x covers generated-table-heavy packages like syscall and
-	// unicode; the arena appends 64MB chain regions if a package exceeds it,
-	// so the reservation is an optimisation and never a requirement - which
-	// is why it can be capped. The largest generated source in the tree asked
-	// for ~6.7GB of address space for a single package; that reservation (and
-	// its guard pages) costs address-space accounting and page-table work even
-	// where nothing is touched, so bound it and let the chain regions cover
-	// anything larger.
-	compileArenaSize := uintptr(len(src)) * 1000
-	if compileArenaSize < 64*1024*1024 {
-		compileArenaSize = 64 * 1024 * 1024
+	// Arena sized from source, but only as a STARTING POINT. The arena appends
+	// 64MB chain regions when a package outgrows it, so the initial size is an
+	// optimisation and never a requirement - and it was optimising the wrong
+	// thing. At 1000 bytes per source byte the `runtime` package reserved
+	// 512MB, and the SSA build of that package then chained ~30 more regions:
+	// a measured 3.2GB of live mapping for a build whose RSS was 717MB. That
+	// reserve is what tripped the compiler's own 3GB ceiling and aborted the
+	// self-build; the pages it names were never touched.
+	//
+	// 64 bytes per source byte with a 128MB cap keeps the reservation within a
+	// factor of two of real use, and growth is the mechanism for the rest.
+	compileArenaSize := uintptr(len(src)) * 64
+	if compileArenaSize < 16*1024*1024 {
+		compileArenaSize = 16 * 1024 * 1024
 	}
-	if compileArenaSize > 512*1024*1024 {
-		compileArenaSize = 512 * 1024 * 1024
+	if compileArenaSize > 128*1024*1024 {
+		compileArenaSize = 128 * 1024 * 1024
 	}
 	// Errors belong to the pass that records them. This pass frees its arena at
 	// the end, so it starts from an empty list and consumes its own entries at
@@ -1575,7 +1677,14 @@ func CompileToIR(src []byte, name string, triple string, pkgDir string) (s strin
 	ScanGenericDecls(src, name)
 
 	memLine("   ci-pre "|name)
+	// Scope 41 names the package compile arena in every attribution report:
+	// typecheck of this package, its SSA build and its emitter accumulators all
+	// land here. A fresh big-allocation census per package, so the report at the
+	// emit floor describes THIS package and not the build so far.
+	runtime.ResetBigAllocs()
+	prevScope := runtime.SetArenaScope(41)
 	arena := runtime.ArenaNew(compileArenaSize)
+	runtime.SetArenaScope(prevScope)
 	// The package arena apart from the arena STACK: anything that must survive
 	// the per-function fn arenas (descriptor state, the local-type registry)
 	// is allocated here and freed with the package.
@@ -1620,6 +1729,22 @@ func CompileToIR(src []byte, name string, triple string, pkgDir string) (s strin
 	mxutil.WriteStr(2, "    SSA build\n")
 	prog := NewSSAProgram()
 	ssaPkg := prog.CreatePackage(pkg, []*syntax.File{file}, nil)
+	// The SSA boundary. `ci-tc` has already parsed the AST and built the type
+	// graph, so ci-tc -> ci-ssa is what the SSA build itself costs and
+	// ci-ssa -> EAF0 is what the emitter's accumulators cost. Without this line
+	// the two are one number, and every "the emitter is heavy" conclusion was
+	// measuring both together.
+	nfn, nblk, nins := int32(0), int32(0), int32(0)
+	for _, mem := range ssaPkg.Members {
+		if fn, okf := mem.(*SSAFunction); okf {
+			nfn++
+			nblk += int32(len(fn.Blocks))
+			for _, bb := range fn.Blocks {
+				nins += int32(len(bb.Instrs))
+			}
+		}
+	}
+	memLine("   ci-ssa "|name|" members="|simpleItoa(int32(len(ssaPkg.Members)))|" fn="|simpleItoa(nfn)|" blk="|simpleItoa(nblk)|" ins="|simpleItoa(nins))
 	// The entry-point rules are checked on the built package, before the gate
 	// below: an error recorded after this point is never read.
 	checkTerminationSelects(ssaPkg)

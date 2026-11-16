@@ -41,6 +41,19 @@ func (c *Config) NoMainArena() bool {
 	return c.Options.NoMainArena
 }
 
+// NoSov reports -no-sov: package main gets no sovereign arena, but KEEPS its
+// function arena. The two halves of -no-main-arena are independent problems and
+// bundling them forced a choice between a sovereign record store that grows to
+// hundreds of megabytes and a compile arena that absorbs every function's
+// scratch: the first is the emitter's mutating methods recording millions of
+// allocations, the second is the same scratch becoming permanent for the
+// package. The compiler's emitter needs the fn arena (so scratch dies per
+// function) and does not need the sovereign arena (its accumulators are already
+// explicit in the compile arena).
+func (c *Config) NoSov() bool {
+	return c.Options.NoSov
+}
+
 // NoSovNotes reports -no-sov-notes: the note printed for every mutating method
 // of a sovereign type in user code is silenced. The note is a diagnostic, never
 // an error, and it changes no generated code, so it is not part of the package

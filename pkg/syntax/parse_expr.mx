@@ -1,7 +1,6 @@
 package syntax
 
 import (
-	"moxielang.dev/pkg/mxutil"
 	"unsafe"
 	"moxielang.dev/pkg/token"
 )
@@ -388,7 +387,12 @@ loop:
 			if !complit_ok {
 				break loop
 			}
-			if t != x {
+			// Unparen only changes x when x is a ParenExpr, so this asks the
+			// same question `t != x` does without comparing two interface
+			// values: Moxie's return protocol can hand back a copy of the
+			// pointee, and then the two words are not equal and every
+			// composite literal of an unparenthesised type was rejected.
+			if _, parenthesized := x.(*ParenExpr); parenthesized {
 				p.syntaxError("cannot parenthesize type in composite literal")
 				// already progressed, no need to advance
 			}
@@ -458,8 +462,7 @@ func (p *Parser) complitexpr() (c *CompositeLit) {
 			e = l
 			x.NKeys++
 		}
-		x.ElemList = mxutil.Ensure(x.ElemList, 1)
-		push(x.ElemList, e)
+		x.ElemList = push(x.ElemList, e)
 		more, ok := p.listSep("composite literal", token.Comma, token.Rbrace)
 		if !ok {
 			break
@@ -494,8 +497,7 @@ func (p *Parser) argList() (list []Expr, hasDots bool) {
 	// p.list's callback would have to read `list` and `hasDots` from this
 	// frame, and a Moxie closure captures nothing, so the loop is inlined.
 	for p.Tok != token.EOF && p.Tok != token.Rparen && !hasDots {
-		list = mxutil.Ensure(list, 1)
-		push(list, p.expr())
+		list = push(list, p.expr())
 		hasDots = p.got(token.DotDotDot)
 		more, ok := p.listSep("argument list", token.Comma, token.Rparen)
 		if !ok {
@@ -539,8 +541,7 @@ func (p *Parser) nameList(First *Name) (ns []*Name) {
 
 	l := []*Name{First}
 	for p.got(token.Comma) {
-		l = mxutil.Ensure(l, 1)
-		push(l, p.name())
+		l = push(l, p.name())
 	}
 
 	return l
@@ -590,8 +591,7 @@ func (p *Parser) exprList() (ex Expr) {
 	if p.got(token.Comma) {
 		list := []Expr{x, p.expr()}
 		for p.got(token.Comma) {
-			list = mxutil.Ensure(list, 1)
-			push(list, p.expr())
+			list = push(list, p.expr())
 		}
 		t := (*ListExpr)(p.nodeAlloc(unsafe.Sizeof(ListExpr{})))
 		t.pos = x.Pos()
@@ -628,8 +628,7 @@ func (p *Parser) typeList(strict bool) (x Expr, comma bool) {
 				if t = p.typeOrNil(); t == nil {
 					break
 				}
-				list = mxutil.Ensure(list, 1)
-				push(list, t)
+				list = push(list, t)
 			}
 			l := (*ListExpr)(p.nodeAlloc(unsafe.Sizeof(ListExpr{})))
 			l.pos = x.Pos() // == list[0].Pos()

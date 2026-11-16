@@ -1038,8 +1038,14 @@ func (e *irEmitter) emitSliceConcatN(reg string, sl *Slice, segs []SSAValue) {
 		e.w("  ") ; e.w(src) ; e.w(" = select i1 ") ; e.w(empty) ; e.w(", ptr ") ; e.w(buf) ; e.w(", ptr ") ; e.w(sp) ; e.w("\n")
 		e.w("  call void @runtime.memmove(ptr ") ; e.w(dst) ; e.w(", ptr ") ; e.w(src) ; e.w(", ") ; e.w(ipt) ; e.w(" ") ; e.w(nb) ; e.w(", ptr null)\n")
 		e.declareRuntime("runtime.memmove", "void", "ptr, ptr, " | ipt)
+		// The accumulated offset needs a NEW name each step: `%cc = add %cc, n`
+		// is a self-reference, and LLVM accepts that only for a phi. The bug
+		// surfaced as "invalid LLVM IR input: Only PHI nodes may reference
+		// their own value!" on the first package that concatenates three or
+		// more segments.
+		prevOff := off
 		off = e.nextReg2("cc")
-		e.w("  ") ; e.w(off) ; e.w(" = add ") ; e.w(ipt) ; e.w(" ") ; e.w(off) ; e.w(", ") ; e.w(nb) ; e.w("\n")
+		e.w("  ") ; e.w(off) ; e.w(" = add ") ; e.w(ipt) ; e.w(" ") ; e.w(prevOff) ; e.w(", ") ; e.w(nb) ; e.w("\n")
 	}
 	// An all-empty statement is the nil slice, not a one-byte allocation.
 	isZero := e.nextReg2("cc")
