@@ -156,6 +156,36 @@ type SSAPackage struct {
 	// package's: the per-package arena is bulk-freed after compilation.
 	wasmSpawnTargets []*wasmSpawnTarget
 	wasmSpawnIndex   map[string]int32
+	// Bodies are built one at a time. CreatePackage records the declarations
+	// and the member table; BuildBody fills exactly one member, inside that
+	// member's arena, and the emitter drops it after emitting. b is the
+	// registration state the later build needs.
+	b *ssaPkgBuilder
+}
+
+// HasBody reports whether member name gets a body in this package. It replaces
+// `fn.Blocks != nil` as the emitter's test for a `define`, because with
+// per-member building the test now runs BEFORE the body exists. A member whose
+// body was built already (a monomorphised clone created during another
+// member's build) counts too.
+func (p *SSAPackage) HasBody(name string) (ok bool) {
+	if f := p.Func(name); f != nil && f.Blocks != nil {
+		return true
+	}
+	if p.b == nil {
+		return false
+	}
+	if p.b.funcDecls[name] != nil {
+		return true
+	}
+	return p.b.hasBody[name]
+}
+
+// BuildBody builds exactly one member's body (see ssaPkgBuilder.buildBody).
+func (p *SSAPackage) BuildBody(name string) {
+	if p.b != nil {
+		p.b.buildBody(name)
+	}
 }
 
 func (p *SSAPackage) SetMember(name string, m SSAMember) {
@@ -175,6 +205,10 @@ func (p *SSAPackage) ExternalFunc(name string, sig *Signature) (s *SSAFunction) 
 	if existing := p.Func(name); existing != nil {
 		return existing
 	}
+	// A member entry is compile state: it is read by later bodies and by
+	// emission, so it is allocated in the package arena even when this is
+	// reached from inside a per-function build.
+	saveDurable := durableBegin()
 	fn := &SSAFunction{
 		name:      name,
 		Signature: sig,
@@ -182,6 +216,7 @@ func (p *SSAPackage) ExternalFunc(name string, sig *Signature) (s *SSAFunction) 
 		Prog:      p.Prog,
 	}
 	p.SetMember(name, fn)
+	durableEnd(saveDurable)
 	return fn
 }
 

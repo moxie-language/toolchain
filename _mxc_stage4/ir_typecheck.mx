@@ -361,7 +361,7 @@ func writeGenManifest() {
 // used as a value, and five other unsupported forms, stayed invisible.
 func reportCompileError(msg string) {
 	initCompileCtx()
-	push(cctx.compileErrors, msg)
+	addCompileError(msg)
 }
 
 // reportConstOverflow records an unsigned constant underflow found in the
@@ -636,7 +636,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 	// emitter still walks the rest of the function and the wasm channel path
 	// dereferences handles the aborted declaration never created.
 	if mxutil.TargetArch() == "wasm" && mxsrc.LIndex(src, []byte("__edgealloc(")) >= 0 {
-		push(cctx.compileErrors, "edge[In, Out]{depth} is not implemented on wasm yet: the pair needs the SAB channel transport")
+		addCompileError("edge[In, Out]{depth} is not implemented on wasm yet: the pair needs the SAB channel transport")
 	}
 	src = stripDuplicatePackageClauses2(src)
 
@@ -951,7 +951,7 @@ func typeCheckPkg(src []byte, name string, arena *runtime.Arena, pkgDir string) 
 			// tScope carries a generic declaration's type params, so `T` in
 			// `type S[T comparable] struct { v T }` resolves and is not reported.
 			if undef := firstUnresolvedTypeName(td.Type, tScope); undef != "" {
-				push(cctx.compileErrors, "undefined: " | undef)
+				addCompileError("undefined: " | undef)
 			}
 		}
 	}
@@ -1746,21 +1746,21 @@ func CompileToIR(src []byte, name string, triple string, pkgDir string) (s strin
 	prog := NewSSAProgram()
 	ssaPkg := prog.CreatePackage(pkg, []*syntax.File{file}, nil)
 	// The SSA boundary. `ci-tc` has already parsed the AST and built the type
-	// graph, so ci-tc -> ci-ssa is what the SSA build itself costs and
-	// ci-ssa -> EAF0 is what the emitter's accumulators cost. Without this line
-	// the two are one number, and every "the emitter is heavy" conclusion was
-	// measuring both together.
-	nfn, nblk, nins := int32(0), int32(0), int32(0)
+	// graph, so ci-tc -> ci-ssa is what declaring the package's members costs
+	// and ci-ssa -> EAF0 is what the emitter's accumulators cost. Bodies are no
+	// longer built here: they are built one at a time inside the emit loop (see
+	// emitAllFunctions), so `bodies` is the count that will be built, and the
+	// per-function blk/ins arrive in the EAF lines.
+	nfn, nbody := int32(0), int32(0)
 	for _, mem := range ssaPkg.Members {
 		if fn, okf := mem.(*SSAFunction); okf {
 			nfn++
-			nblk += int32(len(fn.Blocks))
-			for _, bb := range fn.Blocks {
-				nins += int32(len(bb.Instrs))
+			if ssaPkg.HasBody(fn.name) {
+				nbody++
 			}
 		}
 	}
-	memLine("   ci-ssa "|name|" members="|simpleItoa(int32(len(ssaPkg.Members)))|" fn="|simpleItoa(nfn)|" blk="|simpleItoa(nblk)|" ins="|simpleItoa(nins))
+	memLine("   ci-ssa "|name|" members="|simpleItoa(int32(len(ssaPkg.Members)))|" fn="|simpleItoa(nfn)|" bodies="|simpleItoa(nbody))
 	// The entry-point rules are checked on the built package, before the gate
 	// below: an error recorded after this point is never read.
 	checkTerminationSelects(ssaPkg)
@@ -2550,7 +2550,7 @@ func reportUndefinedFieldTypes(fields []*syntax.Field, scope *Scope) {
 			// an address whose arena was no longer mapped). Nothing here needs to
 			// read the list, so it does not. A qualified parameter can therefore
 			// carry the same message twice, once from tcResolveFuncInline.
-			push(cctx.compileErrors, "undefined: " | name)
+			addCompileError("undefined: " | name)
 		}
 	}
 }
@@ -2744,7 +2744,7 @@ func tcResolveNameInline(e syntax.Expr, scope *Scope) (t Type) {
 		// which clang rejects - or, when the scope happened to carry the
 		// binding, computed a garbage element size and panicked the compiler
 		// with "alloc: implausible size". Name the type instead.
-		push(cctx.compileErrors, "undefined: " | typeExprName(ex.Elem))
+		addCompileError("undefined: " | typeExprName(ex.Elem))
 		return nil
 	}
 	return nil
@@ -2847,7 +2847,7 @@ func tcResolveFuncInline(ft *syntax.FuncType, scope *Scope) (s *Signature) {
 			// same nil type and crashed at run time. Bare names are left alone -
 			// they are also how an unbound type parameter looks here.
 			if q := firstQualifiedTypeName(p.Type); q != "" {
-				push(cctx.compileErrors, "undefined: " | q)
+				addCompileError("undefined: " | q)
 			}
 		}
 		pname := ""

@@ -760,6 +760,79 @@ func (e *irEmitter) resolveAllNamedTypes() {
 // SovDrainCompactions can reclaim the per-instruction scratch. Measured before
 // this: ~1.6 MB retained per IR instruction, and `mxregexp` alone reached 2.9 GB
 // inside one package's emit.
+// emitNextMemberName returns the lexicographically smallest member of e that is
+// an SSA function and has not been emitted yet, or "" when none is left.
+//
+// A free function, for the same reason emitAllFunctions is: it runs between two
+// body builds, and a method frame would keep the emitter's sovereign group live
+// across the boundary where it is compacted.
+func emitNextMemberName(e *irEmitter, emitted map[string]bool) (name string) {
+	for k, m := range e.pkg.Members {
+		if emitted[k] {
+			continue
+		}
+		if _, ok := m.(*SSAFunction); !ok {
+			continue
+		}
+		if name == "" || k < name {
+			name = k
+		}
+	}
+	return name
+}
+
+// emitBuiltMember emits one member whose body already exists and lives in the
+// CURRENT arena, clearing the per-function scratch afterwards. Monomorphised
+// clones are built while another member is being built, so their bodies belong
+// to that member's arena and must be emitted before it is reset.
+func emitBuiltMember(e *irEmitter, fn *SSAFunction) {
+	emitFunctionOf(e, fn)
+	emitAnonFuncsOf(e, fn)
+	e.flush()
+	e.segs = nil
+	e.buf = nil
+	e.operandBuf = nil
+	e.valName = nil
+	e.nameUsed = map[string]bool{}
+	e.allocTypes = nil
+	e.regTypes = nil
+	e.blockExitLabel = nil
+	e.typeCache = nil
+	e.hoisted = nil
+	e.pendingPhiTruncs = nil
+	e.deferList = nil
+	e.allocBlock = nil
+	e.storedTo = nil
+	e.usedAs = nil
+	e.faByBase = nil
+	e.mulByBase = nil
+	e.devByAddr = nil
+	e.ldByName = nil
+	e.missingStores = nil
+	fn.Blocks = nil
+	fn.Locals = nil
+	fn.Params = nil
+	fn.FreeVars = nil
+	fn.NamedResults = nil
+	fn.vars = nil
+}
+
+// emitAllFunctions builds and flushes every function body into e.
+//
+// One member at a time: the body is built, the checks that read it run, it is
+// emitted, and it is dropped - all inside a per-function arena pushed before
+// the build. The next member starts from an empty arena. This is the unit Go
+// gets from its per-package process and its per-function work list; here the
+// arena is the unit, because there is no process per package.
+//
+// This is a FREE function on purpose. `emit` is a method of a self-mutating
+// type, so its own frame is live for the whole package and a group with a live
+// frame is never compacted - nothing the emitter allocates can be reclaimed
+// while `emit` runs. From here each `e.emitFunction(m)` borrows and pops at its
+// return, so between two functions the group has no live frame and
+// SovDrainCompactions can reclaim the per-instruction scratch. Measured before
+// this: ~1.6 MB retained per IR instruction, and `mxregexp` alone reached 2.9 GB
+// inside one package's emit.
 func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 	// The floor this package's emit starts from, split into the terms that can
 	// be acted on separately: the retained package graphs, the root arena, and
@@ -816,89 +889,120 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 	runtime.SetArenaScope(prevFnScope)
 	mxutil.WriteStr(2, "    EAF0 arena ok\n")
 	nf := int32(0)
-	for _, member := range e.members {
-		if m, ok := member.(*SSAFunction); ok {
-			nf++
-			cau2, cac2 := uint64(0), uint64(0)
-			if cctx.compileArena != nil {
-				cau2 = runtime.ArenaUsed(cctx.compileArena)
-				cac2 = runtime.ArenaCap(cctx.compileArena)
+	emitted := map[string]bool{}
+	// The loop covers every function member, not only the ones with a declared
+	// body: a bodyless member still needs its `declare`. A member whose body is
+	// planned is built here; one that arrived already built (a monomorphised
+	// clone) is emitted in the same arena that built it, below.
+	for {
+		name := emitNextMemberName(e, emitted)
+		if name == "" {
+			break
+		}
+		emitted[name] = true
+		fn := e.pkg.Func(name)
+		if fn == nil {
+			continue
+		}
+		nf++
+		// PUSH the per-function arena, do not just name it current.
+		// `alloc` hands out from domainRoot.fnStack[fnTop]; it never reads
+		// the SetCurrentArena override, so an earlier pair of SetCurrentArena
+		// calls here changed nothing and every emitter allocation went to
+		// whatever arena was pushed around the package - the compile arena,
+		// or a sovereign borrow. That is why `EAFU used=0MB` printed at the
+		// end of every function while the compile arena grew to 536MB on
+		// `runtime`: the per-function arena was never on the stack at all.
+		runtime.ManualArenaEnter(fnArena)
+		// The package arena is registered stable for the duration. The codec's
+		// return rule treats only the TOP manual arena as stable, so with the
+		// function arena current a type living in the package arena came back
+		// from every resolution deep-copied - and a `[]T` parameter and a `[]T`
+		// result of ONE signature then held two different Named objects.
+		// This is a statement of fact, not a guard: the package arena outlives
+		// the body, and saying so is what keeps the type graph one graph.
+		runtime.SovereignRegStable(compileArena)
+		// The BODY, its checks and its emitted text all live in fnArena now:
+		// step 2's unit of work and step 4's unit of reclamation are the same
+		// function, which is why they are one push.
+		e.pkg.BuildBody(name)
+		// The global-type scan is per body now: it refines the declared type of
+		// a package global from the stores and loads that reach it, and it used
+		// to be a whole-package loop that required every body to exist.
+		scanGlobalTypesOf(e, fn)
+		// Checks whose subject is this body. They used to run over the whole
+		// package after every body existed, which is why all bodies had to
+		// exist at once; the package-wide checks (the AST ones) stay in
+		// CreatePackage, at declaration granularity.
+		checkGlobalMutation(fn)
+		checkClosureCaptureOf(e.pkg, fn)
+		checkDuplicateCasesOf(e.pkg, fn)
+		if mxutil.TargetArch() == "wasm" {
+			scanWasmSpawnTarget(e.pkg, fn)
+		}
+		checkUseAfterFree(fn)
+		checkParamMutation(fn)
+		cau2, cac2 := uint64(0), uint64(0)
+		if cctx.compileArena != nil {
+			cau2 = runtime.ArenaUsed(cctx.compileArena)
+			cac2 = runtime.ArenaCap(cctx.compileArena)
+		}
+		cnts, byts := runtime.AllocHistogram()
+		hist := ""
+		totAlloc := int32(0)
+		for bi := int32(0); bi < int32(len(byts)); bi++ {
+			totAlloc += int32(cnts[bi])
+			if bi >= 12 && bi < 21 {
+				hist = hist | " " | mxutil.SimpleItoa(bi) | ":" | mxutil.SimpleItoa(int32((byts[bi] >> 20)))
 			}
-			cnts, byts := runtime.AllocHistogram()
-			hist := ""
-			totAlloc := int32(0)
-			for bi := int32(0); bi < int32(len(byts)); bi++ {
-				totAlloc += int32(cnts[bi])
-				if bi >= 12 && bi < 21 {
-					hist = hist | " " | mxutil.SimpleItoa(bi) | ":" | mxutil.SimpleItoa(int32((byts[bi] >> 20)))
+		}
+		mxutil.WriteStr(2, "    EAF nf="|mxutil.SimpleItoa(nf)|" in rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB cau="|mxutil.SimpleItoa(int32(cau2>>20))|"MB cac="|mxutil.SimpleItoa(int32(cac2>>20))|"MB net="|mxutil.SimpleItoa(int32(runtime.SysMapNet()>>20))|"MB acap="|mxutil.SimpleItoa(int32(runtime.LiveArenaCap()>>20))|"MB na="|mxutil.SimpleItoa(int32(totAlloc/1000))|"k hist"|hist|" fn="|fn.name|" blocks="|mxutil.SimpleItoa(int32(len(fn.Blocks)))|"\n")
+		if rssPeak("emit " | fn.name) {
+			mxutil.WriteStr(2, "    NEWPEAK rss=" | mxutil.SimpleItoa(int32(cctx.peakRSSKB/1024)) | "MB at emit " | fn.name | " pool=" | mxutil.SimpleItoa(e.strPoolBytes()>>10) | "KB nstr=" | mxutil.SimpleItoa(int32(len(e.strConst)+len(e.pendStrConsts))) | "\n")
+		}
+		emitBuiltMember(e, fn)
+		// Clones this build created have their bodies in THIS arena; emit them
+		// before the reset, or the reset frees a body that was never written.
+		for {
+			built := ""
+			for k, m := range e.pkg.Members {
+				if emitted[k] {
+					continue
+				}
+				f, okf := m.(*SSAFunction)
+				if !okf || f.Blocks == nil {
+					continue
+				}
+				if built == "" || k < built {
+					built = k
 				}
 			}
-			mxutil.WriteStr(2, "    EAF nf="|mxutil.SimpleItoa(nf)|" in rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB cau="|mxutil.SimpleItoa(int32(cau2>>20))|"MB cac="|mxutil.SimpleItoa(int32(cac2>>20))|"MB net="|mxutil.SimpleItoa(int32(runtime.SysMapNet()>>20))|"MB acap="|mxutil.SimpleItoa(int32(runtime.LiveArenaCap()>>20))|"MB na="|mxutil.SimpleItoa(int32(totAlloc/1000))|"k hist"|hist|" fn="|m.name|" blocks="|mxutil.SimpleItoa(int32(len(m.Blocks)))|"\n")
-			if rssPeak("emit " | m.name) {
-				mxutil.WriteStr(2, "    NEWPEAK rss=" | mxutil.SimpleItoa(int32(cctx.peakRSSKB/1024)) | "MB at emit " | m.name | " pool=" | mxutil.SimpleItoa(e.strPoolBytes()>>10) | "KB nstr=" | mxutil.SimpleItoa(int32(len(e.strConst)+len(e.pendStrConsts))) | "\n")
+			if built == "" {
+				break
 			}
-			checkUseAfterFree(m)
-			checkParamMutation(m)
-			// PUSH the per-function arena, do not just name it current.
-			// `alloc` hands out from domainRoot.fnStack[fnTop]; it never reads
-			// the SetCurrentArena override, so the old pair of SetCurrentArena
-			// calls here changed nothing and every emitter allocation went to
-			// whatever arena was pushed around the package - the compile arena,
-			// or a sovereign borrow. That is why `EAFU used=0MB` printed at the
-			// end of every function while the compile arena grew to 536MB on
-			// `runtime`: the per-function arena was never on the stack at all.
-			// ManualArenaEnter pushes, so this function's text and scratch land
-			// in fnArena and ArenaReset reclaims them at the next member, while
-			// mergeAccumulators below still lands in the compile arena because
-			// the push is popped first.
-			runtime.ManualArenaEnter(fnArena)
-			emitFunctionOf(e, m)
-			emitAnonFuncsOf(e, m)
-			e.flush()
-			runtime.ManualArenaExit(fnArena)
-			e.mergeAccumulators()
-			e.segs = nil
-			e.buf = nil
-			e.operandBuf = nil
-			e.valName = nil
-			e.nameUsed = map[string]bool{}
-			e.allocTypes = nil
-			e.regTypes = nil
-			e.blockExitLabel = nil
-			e.typeCache = nil
-			e.hoisted = nil
-			e.pendingPhiTruncs = nil
-			e.deferList = nil
-			e.allocBlock = nil
-			e.storedTo = nil
-			e.usedAs = nil
-			e.faByBase = nil
-			e.mulByBase = nil
-			e.devByAddr = nil
-			e.ldByName = nil
-			e.missingStores = nil
-			m.Blocks = nil
-			m.Locals = nil
-			m.Params = nil
-			m.FreeVars = nil
-			m.NamedResults = nil
-			m.vars = nil
-			// The scratch high-water mark for this function, read before the
-			// reset that reclaims it. This is the number that says whether the
-			// per-function cost is real or is a 64MB segment grabbed for a few
-			// megabytes: `acap` cannot tell those apart, `used` can.
-			mxutil.WriteStr(2, "    EAFU nf="|mxutil.SimpleItoa(nf)|" used="|mxutil.SimpleItoa(int32(runtime.ArenaUsed(fnArena)>>20))|"MB\n")
-			runtime.ArenaReset(fnArena)
-			// The safe point between two function bodies: the select answers
-			// ctrl-c (a build that cannot be stopped is a build nobody can
-			// interrupt - it also cannot reclaim, because the drain only runs
-			// where no frame borrows the group) and the drain reclaims the
-			// scratch the function just abandoned. A deep call chain has no
-			// such boundary, which is why emit is a free function looping over
-			// members with a checkpoint per member.
-			if runtime.SovCheckpoint() {
-				interruptNow()
-			}
+			emitted[built] = true
+			bf := e.pkg.Func(built)
+			nf++
+			emitBuiltMember(e, bf)
+		}
+		runtime.SovereignRegRestore()
+		runtime.ManualArenaExit(fnArena)
+		e.mergeAccumulators()
+		// The scratch high-water mark for this function, read before the
+		// reset that reclaims it. This is the number that says whether the
+		// per-function cost is real or is a 64MB segment grabbed for a few
+		// megabytes: `acap` cannot tell those apart, `used` can.
+		mxutil.WriteStr(2, "    EAFU nf="|mxutil.SimpleItoa(nf)|" used="|mxutil.SimpleItoa(int32(runtime.ArenaUsed(fnArena)>>20))|"MB\n")
+		runtime.ArenaReset(fnArena)
+		// The safe point between two function bodies: the select answers
+		// ctrl-c (a build that cannot be stopped is a build nobody can
+		// interrupt - it also cannot reclaim, because the drain only runs
+		// where no frame borrows the group) and the drain reclaims the
+		// scratch the function just abandoned. A deep call chain has no
+		// such boundary, which is why emit is a free function looping over
+		// members with a checkpoint per member.
+		if runtime.SovCheckpoint() {
+			interruptNow()
 		}
 	}
 	mxutil.WriteStr(2, "    EAF1big nf="|mxutil.SimpleItoa(nf)|"\n"|string(runtime.BigAllocReport()))
@@ -912,108 +1016,16 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 // emit's own frame was live for the entire package, so nothing the emitter
 // allocated was ever reclaimable - measured as ~1.6 MB retained per IR
 // instruction and 2.9 GB inside one package.
-func emitIR(e *irEmitter) (s string) {
-	// Built once, in place. Nothing returns the member slice: see buildMembers.
-	buildMembers(e)
-	mxutil.WriteStr(2, "    EM1 members n="|mxutil.SimpleItoa(int32(len(e.members)))|" rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
-	dl := e.dataLayout()
-	if dl != "" {
-		e.w("target datalayout = \"")
-		e.w(dl)
-		e.w("\"\n")
+// scanGlobalTypesOf records, for one function body, the declared LLVM type of
+// every package global the body stores to or loads from, and the load-to-global
+// map those decisions are matched through. It used to be one loop over every
+// member of the package before the first emit; with per-member building it runs
+// on the body that was just built, in that body's arena, so its scratch dies
+// with the body instead of accumulating for the whole package.
+func scanGlobalTypesOf(e *irEmitter, fn *SSAFunction) {
+	if fn == nil || fn.Blocks == nil {
+		return
 	}
-	e.w("target triple = \"")
-	e.w(e.triple)
-	e.w("\"\n\n")
-
-	mxutil.WriteStr(2, "    EM2 triple rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
-	e.resolveAllNamedTypes()
-	mxutil.WriteStr(2, "    EM3 named types rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
-
-	e.pendTypeDescs = map[string]Type{}
-	for _, m := range e.members {
-		fn, ok := m.(*SSAFunction)
-		if ok && fn.Blocks != nil && fn.Signature != nil {
-			if fn.Signature.Results != nil {
-				for i := int32(0); i < int32(fn.Signature.Results.Len()); i++ {
-					e.collectAllTypeDescs(fn.Signature.Results.At(i).Typ, map[string]bool{})
-				}
-			}
-			if fn.Signature.Recv != nil {
-				e.collectAllTypeDescs(fn.Signature.Recv.Typ, map[string]bool{})
-			}
-		}
-		g, ok2 := m.(*SSAGlobal)
-		if ok2 && g.typ != nil {
-			e.collectAllTypeDescs(g.typ, map[string]bool{})
-		}
-	}
-	mxutil.WriteStr(2, "    EM4 descs n="|mxutil.SimpleItoa(int32(len(e.pendTypeDescs)))|" rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
-	// Also declare type descriptors for this package's own named types,
-	// since interface dispatch may reference them. Deterministic per
-	// package: parallel workers compile packages in arbitrary order with
-	// per-thread registries, so the descriptor set must not depend on
-	// which packages happen to be loaded. Every package emits its own
-	// types; linkonce_odr dedups at link time.
-	if e.pkg != nil && e.pkg.Pkg != nil && e.pkg.Pkg.Scope != nil {
-		scope := e.pkg.Pkg.Scope
-		names := scope.Names()
-		for _, name := range names {
-			obj := scope.Lookup(name)
-			if obj == nil {
-				continue
-			}
-			tn, ok := obj.(*TypeName)
-			if !ok || tn.Typ == nil {
-				continue
-			}
-			path := normalizePkgPath(e.pkg.Pkg.Path)
-			tail := "named:" | path | "." | name
-			if _, exists := e.pendTypeDescs[tail]; !exists {
-				e.pendTypeDescs[tail] = Typ[Invalid]
-			}
-			tailPtr := "pointer:" | tail
-			if _, exists := e.pendTypeDescs[tailPtr]; !exists {
-				e.pendTypeDescs[tailPtr] = Typ[Invalid]
-			}
-		}
-	}
-	// Also declare basic type descriptors from the universe scope. The
-	// canonical descriptor spelling comes from the kind (uint8, int32,
-	// bytes), not from the universe name: `byte`, `rune` and `string` are
-	// named types, so poking `basic:byte` here only created a descriptor
-	// that no reference could match.
-	if cctx.universe != nil && cctx.universe.Scope != nil {
-		for _, name := range cctx.universe.Scope.Names() {
-			tn, isTN := cctx.universe.Scope.Lookup(name).(*TypeName)
-			if !isTN || tn.Typ == nil {
-				continue
-			}
-			b, isBasic := SafeUnderlying(tn.Typ).(*Basic)
-			if !isBasic || b == nil {
-				continue
-			}
-			tail := "basic:" | basicTypeDescName(b.Kind)
-			if _, exists := e.pendTypeDescs[tail]; !exists {
-				e.pendTypeDescs[tail] = Typ[Invalid]
-			}
-			ptail := "pointer:" | tail
-			if _, exists := e.pendTypeDescs[ptail]; !exists {
-				e.pendTypeDescs[ptail] = Typ[Invalid]
-			}
-		}
-	}
-
-	if !buildTagTrue("moxie.stringer") {
-		e.emitBasicIdentities()
-	}
-
-	e.globalTypes = map[string]string{}
-	e.globalDeclTypes = map[string]string{}
-	nscan := int32(0)
-	for _, member := range e.members {
-		fn, ok := member.(*SSAFunction)
-		if !ok { continue }
 		for _, b := range fn.Blocks {
 			for _, instr := range b.Instrs {
 				if st, okSt := instr.(*SSAStore); okSt && st.Addr != nil && st.Val != nil {
@@ -1154,37 +1166,126 @@ func emitIR(e *irEmitter) (s string) {
 				}
 			}
 		}
-		// Every e.*() call in the scans above borrows the emitter's sovereign
-		// arena and pops at its return, so between two functions the group has
-		// no live frame and what the scans abandoned is reclaimable. Without
-		// this the group is never drained here: the scans run over every
-		// instruction of every function, and `strconv` alone reached 3.3 GB.
-		runtime.SovDrainCompactions(8)
-		nscan++
-		if nscan&16 == 0 {
-			mxutil.WriteStr(2, "    SCAN nf="|mxutil.SimpleItoa(nscan)|" rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
+	// Every e.*() call in the scans above borrows the emitter's sovereign
+	// arena and pops at its return, so between two functions the group has
+	// no live frame and what the scan abandoned is reclaimable. The scan runs
+	// over every instruction of the function, and `strconv` alone reached
+	// 3.3 GB before this drain existed.
+	runtime.SovDrainCompactions(8)
+}
+
+func emitIR(e *irEmitter) (s string) {
+	// Built once, in place. Nothing returns the member slice: see buildMembers.
+	buildMembers(e)
+	mxutil.WriteStr(2, "    EM1 members n="|mxutil.SimpleItoa(int32(len(e.members)))|" rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
+	dl := e.dataLayout()
+	if dl != "" {
+		e.w("target datalayout = \"")
+		e.w(dl)
+		e.w("\"\n")
+	}
+	e.w("target triple = \"")
+	e.w(e.triple)
+	e.w("\"\n\n")
+
+	mxutil.WriteStr(2, "    EM2 triple rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
+	e.resolveAllNamedTypes()
+	mxutil.WriteStr(2, "    EM3 named types rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
+
+	e.pendTypeDescs = map[string]Type{}
+	for _, m := range e.members {
+		fn, ok := m.(*SSAFunction)
+		if ok && e.pkg.HasBody(fn.name) && fn.Signature != nil {
+			if fn.Signature.Results != nil {
+				for i := int32(0); i < int32(fn.Signature.Results.Len()); i++ {
+					e.collectAllTypeDescs(fn.Signature.Results.At(i).Typ, map[string]bool{})
+				}
+			}
+			if fn.Signature.Recv != nil {
+				e.collectAllTypeDescs(fn.Signature.Recv.Typ, map[string]bool{})
+			}
+		}
+		g, ok2 := m.(*SSAGlobal)
+		if ok2 && g.typ != nil {
+			e.collectAllTypeDescs(g.typ, map[string]bool{})
 		}
 	}
-
-	mxutil.WriteStr(2, "    M1 scans done rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
-	e.flush()
-	mxutil.WriteStr(2, "    M2 flush done rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
-	for _, member := range e.members {
-		switch m := member.(type) {
-		case *SSAGlobal:
-			if m.name != "_" {
-				e.emitGlobal(m)
+	mxutil.WriteStr(2, "    EM4 descs n="|mxutil.SimpleItoa(int32(len(e.pendTypeDescs)))|" rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
+	// Also declare type descriptors for this package's own named types,
+	// since interface dispatch may reference them. Deterministic per
+	// package: parallel workers compile packages in arbitrary order with
+	// per-thread registries, so the descriptor set must not depend on
+	// which packages happen to be loaded. Every package emits its own
+	// types; linkonce_odr dedups at link time.
+	if e.pkg != nil && e.pkg.Pkg != nil && e.pkg.Pkg.Scope != nil {
+		scope := e.pkg.Pkg.Scope
+		names := scope.Names()
+		for _, name := range names {
+			obj := scope.Lookup(name)
+			if obj == nil {
+				continue
+			}
+			tn, ok := obj.(*TypeName)
+			if !ok || tn.Typ == nil {
+				continue
+			}
+			path := normalizePkgPath(e.pkg.Pkg.Path)
+			tail := "named:" | path | "." | name
+			if _, exists := e.pendTypeDescs[tail]; !exists {
+				e.pendTypeDescs[tail] = Typ[Invalid]
+			}
+			tailPtr := "pointer:" | tail
+			if _, exists := e.pendTypeDescs[tailPtr]; !exists {
+				e.pendTypeDescs[tailPtr] = Typ[Invalid]
 			}
 		}
 	}
+	// Also declare basic type descriptors from the universe scope. The
+	// canonical descriptor spelling comes from the kind (uint8, int32,
+	// bytes), not from the universe name: `byte`, `rune` and `string` are
+	// named types, so poking `basic:byte` here only created a descriptor
+	// that no reference could match.
+	if cctx.universe != nil && cctx.universe.Scope != nil {
+		for _, name := range cctx.universe.Scope.Names() {
+			tn, isTN := cctx.universe.Scope.Lookup(name).(*TypeName)
+			if !isTN || tn.Typ == nil {
+				continue
+			}
+			b, isBasic := SafeUnderlying(tn.Typ).(*Basic)
+			if !isBasic || b == nil {
+				continue
+			}
+			tail := "basic:" | basicTypeDescName(b.Kind)
+			if _, exists := e.pendTypeDescs[tail]; !exists {
+				e.pendTypeDescs[tail] = Typ[Invalid]
+			}
+			ptail := "pointer:" | tail
+			if _, exists := e.pendTypeDescs[ptail]; !exists {
+				e.pendTypeDescs[ptail] = Typ[Invalid]
+			}
+		}
+	}
+
+	if !buildTagTrue("moxie.stringer") {
+		e.emitBasicIdentities()
+	}
+
+	e.globalTypes = map[string]string{}
+	e.globalDeclTypes = map[string]string{}
+
+	mxutil.WriteStr(2, "    M1 header done rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
 	e.flush()
-	mxutil.WriteStr(2, "    M3 globals done rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
+	mxutil.WriteStr(2, "    M2 flush done rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
 	compileArena := runtime.CurrentArena()
 	// Deep copy state lives in compileArena, survives per-function resets.
-	// Pre-collect symbols that will get `define` (functions with bodies).
+	// Pre-collect symbols that will get `define`. `HasBody` replaces
+	// `Blocks != nil`: with per-member building no body exists yet, and the
+	// list decides `declare` vs `define` for every call in the package. A
+	// monomorphised clone created later still emits its own `define`, and a
+	// forward `declare` of it is legal IR.
 	// Done in compile arena so the slice survives fn arena resets.
 	for _, member := range e.members {
-		if f, ok := member.(*SSAFunction); ok && f.Blocks != nil {
+		if f, ok := member.(*SSAFunction); ok && e.pkg.HasBody(f.name) {
 			defSym := e.funcSymbol(f)
 			if len(defSym) > 0 && defSym[0] == '@' {
 				defSym = defSym[1:]
@@ -1195,6 +1296,23 @@ func emitIR(e *irEmitter) (s string) {
 	mxutil.WriteStr(2, "    M4 syms done rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
 	emitAllFunctions(e, compileArena)
 	mxutil.WriteStr(2, "    M5 functions done rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
+	// Globals are emitted AFTER the functions, not before them. Their declared
+	// type is refined by scanGlobalTypesOf from how each body stores to or
+	// loads from them, and that knowledge now arrives one body at a time. The
+	// text order changed; the IR does not: llvm-as accepts a global that a
+	// function names before its definition, and the cached object for a
+	// package is produced from this same text every time.
+	e.segs = []string{:0:256}
+	for _, member := range e.members {
+		switch m := member.(type) {
+		case *SSAGlobal:
+			if m.name != "_" {
+				e.emitGlobal(m)
+			}
+		}
+	}
+	e.flush()
+	mxutil.WriteStr(2, "    M3 globals done rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
 	// Fresh segs for trailing declarations.
 	e.segs = []string{:0:256}
 	// Merge pending declares/globals.
@@ -1570,7 +1688,7 @@ func (e *irEmitter) emitLinkDataGlobal(g *SSAGlobal, name string, ld *linkDataIn
 		elemSize = typeDescSize(sl.Elem)
 	}
 	if elemSize != 1 || ld.length <= 0 {
-		push(cctx.compileErrors, "linkdata: " | g.name | " must be a slice of one-byte elements with a positive length")
+		addCompileError("linkdata: " | g.name | " must be a slice of one-byte elements with a positive length")
 		e.w(name | " = hidden " | e.tlsPrefix() | e.sliceType() | " zeroinitializer\n")
 		return
 	}
@@ -1590,13 +1708,13 @@ func (e *irEmitter) emitEmbedGlobal(g *SSAGlobal, name string, ei *embedInfo) {
 	if !ok {
 		// Fail loud: a zeroinitializer embed global is a nil slice at runtime
 		// and SIGSEGVs far from the cause.
-		push(cctx.compileErrors, "embed: file not found: "|ei.path)
+		addCompileError("embed: file not found: "|ei.path)
 		e.w(name | " = hidden " | e.tlsPrefix() | e.sliceType() | " zeroinitializer\n")
 		return
 	}
 	elemSize := e.embedElemSize(ei.elemType)
 	if elemSize <= 0 {
-		push(cctx.compileErrors, "embed: unknown element type: "|ei.elemType|" for "|ei.path)
+		addCompileError("embed: unknown element type: "|ei.elemType|" for "|ei.path)
 		e.w(name | " = hidden " | e.tlsPrefix() | e.sliceType() | " zeroinitializer\n")
 		return
 	}

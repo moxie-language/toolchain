@@ -129,7 +129,7 @@ func checkNamedReturns(d *syntax.FuncDecl, pkgPath string) {
 	}
 	for _, r := range d.Type.ResultList {
 		if r.Name == nil {
-			push(cctx.compileErrors, d.Name.Value | ": unnamed return values are not allowed: name all return values")
+			addCompileError(d.Name.Value | ": unnamed return values are not allowed: name all return values")
 			return
 		}
 	}
@@ -150,7 +150,7 @@ func checkParenCallTarget(e *syntax.CallExpr, pkgPath string) {
 	if !isUserPackagePath(restrictPath(pkgPath)) {
 		return
 	}
-	push(cctx.compileErrors, "parenthesized call target is not allowed: write f(x), not (f)(x)")
+	addCompileError("parenthesized call target is not allowed: write f(x), not (f)(x)")
 }
 
 // checkPackageDecls mirrors the declaration rule of legacy restrict.go
@@ -213,7 +213,7 @@ func varDeclNames(t *syntax.VarDecl) (s string) {
 }
 
 func declErr(msg string) {
-	push(cctx.compileErrors, msg)
+	addCompileError(msg)
 }
 
 // demotedStringConst reports whether every value of a var declaration is a
@@ -424,11 +424,11 @@ func checkGlobalStores(f *SSAFunction, depth int32) {
 			switch i := instr.(type) {
 			case *SSAStore:
 				if ssaGlobalRoot(i.Addr, 0) != "" {
-					push(cctx.compileErrors, f.name | ": package globals are immutable outside init: mutate through the methods of a sovereign self-mutating type")
+					addCompileError(f.name | ": package globals are immutable outside init: mutate through the methods of a sovereign self-mutating type")
 				}
 			case *SSAMapUpdate:
 				if ssaGlobalRoot(i.Map, 0) != "" {
-					push(cctx.compileErrors, f.name | ": package globals are immutable outside init: mutate through the methods of a sovereign self-mutating type")
+					addCompileError(f.name | ": package globals are immutable outside init: mutate through the methods of a sovereign self-mutating type")
 				}
 			case *SSAMakeClosure:
 				if cf, ok := i.Fn.(*SSAFunction); ok {
@@ -446,25 +446,18 @@ func checkGlobalStores(f *SSAFunction, depth int32) {
 // __spawn_entry switches on it, so the numbering must be stable across the two
 // sides and reproducible between builds: Members is a map, so the walk is
 // ordered by name rather than by map iteration.
-func scanWasmSpawnTargets(p *SSAPackage) {
-	if mxutil.TargetArch() != "wasm" || p == nil {
+// scanWasmSpawnTarget records the spawn targets named in one function body. The
+// caller walks members in name order, so the numbering is the same as the old
+// whole-package scan's: the parent passes the index to bridge.spawn_domain and
+// the child's __spawn_entry switches on it.
+func scanWasmSpawnTarget(p *SSAPackage, f *SSAFunction) {
+	if mxutil.TargetArch() != "wasm" || p == nil || f == nil || f.Blocks == nil {
 		return
 	}
-	p.wasmSpawnIndex = map[string]int32{}
-	names := []string{:0:len(p.Members)}
-	for name := range p.Members {
-		push(names, name)
+	if p.wasmSpawnIndex == nil {
+		p.wasmSpawnIndex = map[string]int32{}
 	}
-	for i := int32(1); i < int32(len(names)); i++ {
-		for j := i; j > 0 && names[j] < names[j-1]; j-- {
-			names[j], names[j-1] = names[j-1], names[j]
-		}
-	}
-	for _, name := range names {
-		f, ok := p.Members[name].(*SSAFunction)
-		if !ok || f.Blocks == nil {
-			continue
-		}
+	{
 		for _, b := range f.Blocks {
 			for _, instr := range b.Instrs {
 				c, ok2 := instr.(*SSACall)
@@ -559,7 +552,7 @@ func checkSovereignLoopDecls(p *SSAPackage, files []*syntax.File) {
 }
 
 func sovLoopErr(name, msg string) {
-	push(cctx.compileErrors, name | ": " | msg)
+	addCompileError(name | ": " | msg)
 }
 
 // shadowErr reports a local declaration that reuses a name already visible from
@@ -570,7 +563,7 @@ func sovLoopErr(name, msg string) {
 // then resolved the name to the wrong object, which surfaced much later as
 // "cannot resolve type of short var".
 func shadowErr(fnName, ident string) {
-	push(cctx.compileErrors, fnName | ": '" | ident | "' shadows declaration in enclosing scope")
+	addCompileError(fnName | ": '" | ident | "' shadows declaration in enclosing scope")
 }
 
 func scanSovLoopDecls(p *SSAPackage, name string, f *syntax.File, stmts []syntax.Stmt, inLoop bool) {
@@ -1083,14 +1076,14 @@ func (pb *ssaPkgBuilder) checkImportConflicts(files []*syntax.File) {
 			for _, a := range pb.importedNamesOf(imp) {
 				for _, b := range pb.importedNamesOf(other) {
 					if a == b {
-						push(cctx.compileErrors, "'" | a | "' is imported twice in one file: alias one of the imports")
+						addCompileError("'" | a | "' is imported twice in one file: alias one of the imports")
 					}
 				}
 			}
 		}
 		for _, n := range pb.importedNamesOf(imp) {
 			if inNameList(pkgNames, n) {
-				push(cctx.compileErrors, "'" | n | "' collides with an imported package name: alias the import or rename the declaration")
+				addCompileError("'" | n | "' collides with an imported package name: alias the import or rename the declaration")
 			}
 		}
 	}
@@ -1234,7 +1227,7 @@ func subsliceCopyExpr(e syntax.Expr) {
 				break
 			}
 			if _, isSlice := dst.(*syntax.SliceExpr); isSlice {
-				push(cctx.compileErrors, "a subslice is a copy, so copying into it is not allowed: write the elements or resize the slice")
+				addCompileError("a subslice is a copy, so copying into it is not allowed: write the elements or resize the slice")
 			}
 		}
 		for _, a := range t.ArgList {
@@ -1317,7 +1310,7 @@ func subsliceTargets(e syntax.Expr) {
 		return
 	}
 	if subsliceTarget(e) {
-		push(cctx.compileErrors, "a subslice is a copy, so a write through it is not allowed: resize the slice and push the value")
+		addCompileError("a subslice is a copy, so a write through it is not allowed: resize the slice and push the value")
 	}
 }
 
@@ -1404,7 +1397,7 @@ func checkParamMutation(f *SSAFunction) {
 			}
 			if isParamDerivedEx(s.Addr, paramHolders, 0) {
 				name := paramRootName(s.Addr, paramHolders, 0)
-				push(cctx.compileErrors, f.name | ": store through borrowed parameter '" | name | "'")
+				addCompileError(f.name | ": store through borrowed parameter '" | name | "'")
 			}
 		}
 	}
@@ -1605,22 +1598,18 @@ func markReturnEscapes(f *SSAFunction) {
 // constant value. go/types rejects that on the legacy side; stage4 compiled the
 // second clause, which can never run. Applies to every package, like
 // checkShadowing, because legacy type-checks the stdlib too.
-func checkDuplicateCases(p *SSAPackage, files []*syntax.File) {
-	if p == nil || p.Pkg == nil || p.Pkg.Scope == nil {
+// checkDuplicateCasesOf runs the duplicate-case scan for one member's
+// declaration. The scan reads syntax only; it runs with the member's body so a
+// body's checks live in the body's arena like every other per-member check.
+func checkDuplicateCasesOf(p *SSAPackage, f *SSAFunction) {
+	if p == nil || p.Pkg == nil || p.Pkg.Scope == nil || f == nil || p.b == nil {
 		return
 	}
-	for _, f := range files {
-		if f == nil {
-			continue
-		}
-		for _, d := range f.DeclList {
-			fd, ok := d.(*syntax.FuncDecl)
-			if !ok || fd.Body == nil {
-				continue
-			}
-			dupCaseStmts(fd.Body.List, p.Pkg.Scope)
-		}
+	d := p.b.funcDecls[f.name]
+	if d == nil || d.Body == nil {
+		return
 	}
+	dupCaseStmts(d.Body.List, p.Pkg.Scope)
 }
 
 func dupCaseStmts(list []syntax.Stmt, scope *Scope) {
@@ -1678,7 +1667,7 @@ func dupCaseClauses(clauses []*syntax.CaseClause, scope *Scope) {
 				continue
 			}
 			if seen[key] {
-				push(cctx.compileErrors, "duplicate case in switch")
+				addCompileError("duplicate case in switch")
 			}
 			seen[key] = true
 		}
@@ -1730,7 +1719,7 @@ func checkMissingReturn(files []*syntax.File) {
 			if fd.Recv != nil {
 				where = where | " (method)"
 			}
-			push(cctx.compileErrors, where | ": missing return")
+			addCompileError(where | ": missing return")
 		}
 	}
 }
@@ -1903,8 +1892,8 @@ func hasBreakIn(s syntax.Stmt, label string, implicit bool) (ok bool) {
 // internally (os.ReadFile's method values bind recv, os.Symlink closes over
 // its arguments) and legacy exempts those packages, so flagging them would
 // reject every program that imports os.
-func checkClosureCaptures(p *SSAPackage) {
-	if p == nil || p.Pkg == nil {
+func checkClosureCaptureOf(p *SSAPackage, f *SSAFunction) {
+	if p == nil || p.Pkg == nil || f == nil {
 		return
 	}
 	if bst != nil && bst.allowCaptures {
@@ -1915,43 +1904,11 @@ func checkClosureCaptures(p *SSAPackage) {
 		// captures asks for them anyway: the report is what turned "the stdlib
 		// has 13 files with capturing closures" from a claim into a list.
 		if bst != nil && bst.reportCaptures {
-			reportCapturePackage(p)
+			reportCaptureFunc(f, 0)
 		}
 		return
 	}
-	names := []string{:0:len(p.Members)}
-	for n := range p.Members {
-		push(names, n)
-	}
-	for i := int32(1); i < int32(len(names)); i++ {
-		for j := i; j > 0 && names[j] < names[j-1]; j-- {
-			names[j], names[j-1] = names[j-1], names[j]
-		}
-	}
-	for _, n := range names {
-		if f, ok := p.Members[n].(*SSAFunction); ok {
-			checkCaptureFunc(f, 0)
-		}
-	}
-}
-
-// reportCapturePackage prints every capturing function in a package to stderr.
-// Reporting only: nothing here can fail a build.
-func reportCapturePackage(p *SSAPackage) {
-	names := []string{:0:len(p.Members)}
-	for n := range p.Members {
-		push(names, n)
-	}
-	for i := int32(1); i < int32(len(names)); i++ {
-		for j := i; j > 0 && names[j] < names[j-1]; j-- {
-			names[j], names[j-1] = names[j-1], names[j]
-		}
-	}
-	for _, n := range names {
-		if f, ok := p.Members[n].(*SSAFunction); ok {
-			reportCaptureFunc(f, 0)
-		}
-	}
+	checkCaptureFunc(f, 0)
 }
 
 func reportCaptureFunc(f *SSAFunction, depth int32) {
@@ -1985,7 +1942,7 @@ func checkCaptureFunc(f *SSAFunction, depth int32) {
 		captured = captured | f.FreeVars[i].name
 	}
 	if captured != "" {
-		push(cctx.compileErrors, f.name | ": closure captures outer variable(s) [" | captured | "]; pass as explicit parameter(s)")
+		addCompileError(f.name | ": closure captures outer variable(s) [" | captured | "]; pass as explicit parameter(s)")
 	}
 	for _, af := range f.AnonFuncs {
 		checkCaptureFunc(af, depth+1)

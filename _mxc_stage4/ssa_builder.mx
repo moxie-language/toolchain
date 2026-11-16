@@ -44,6 +44,56 @@ func ssaConstEqual(a, b *SSAConst) (eq bool) {
 	return false
 }
 
+// addCompileError records a diagnostic in the PACKAGE arena.
+//
+// A member's body is built in the per-function arena, whose contents are
+// released when that member is done, but diagnostics are read after emission
+// (CompileToIR's gate). Both the message and any growth of the slice therefore
+// belong to the package, not to the function that noticed the problem.
+func addCompileError(msg string) {
+	if msg == "" {
+		return
+	}
+	if cctx == nil || cctx.compileArena == nil {
+		push(cctx.compileErrors, msg)
+		return
+	}
+	save := runtime.CurrentArena()
+	runtime.SetCurrentArena(cctx.compileArena)
+	push(cctx.compileErrors, copyStr(msg))
+	runtime.SetCurrentArena(save)
+}
+
+// durableBegin points allocation at the package arena and returns the arena to
+// restore. Compile-lifetime state created while a member's body is being built
+// (a new member, its signature, a type it instantiates) has to outlive the
+// function arena, and this is the one place that decides so: the rule is
+// "package state is allocated in the package arena", not a heuristic about
+// which pointer escapes.
+func durableBegin() (save *runtime.Arena) {
+	save = runtime.CurrentArena()
+	if cctx != nil && cctx.compileArena != nil {
+		// A MANUAL frame, not SetCurrentArena. The codec's return rule asks
+		// whether a pointer is in the TOP manual arena, so resolving a
+		// signature with the package arena merely "current" let it deep-copy
+		// every type it returned - and the parameter and result of one
+		// signature came back holding different Named objects, which is
+		// "cannot use []mxutil.ImportSeg as []mxutil.ImportSeg". Entering the
+		// package arena makes the graph the frame the codec sees.
+		runtime.ManualArenaEnter(cctx.compileArena)
+	}
+	return save
+}
+
+func durableEnd(save *runtime.Arena) {
+	if save != nil {
+		if cctx != nil && cctx.compileArena != nil {
+			runtime.ManualArenaExit(cctx.compileArena)
+		}
+		runtime.SetCurrentArena(save)
+	}
+}
+
 // chkLine reports the compile arena's used bytes after one check, so the suite's
 // 289MB is attributed per check instead of as a total. It allocates a few bytes
 // per call and prints one line.
@@ -65,7 +115,9 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 	prog.packages[pkg] = p
 	prog.imported[pkg.Path] = p
 
-	pb := &ssaPkgBuilder{pkg: p, info: info, prog: prog}
+	pb := &ssaPkgBuilder{pkg: p, info: info, prog: prog,
+		funcDecls: map[string]*syntax.FuncDecl{}, hasBody: map[string]bool{}}
+	p.b = pb
 
 	// Imports are file-scoped: each file gets a scope (parent = pkg scope)
 	// holding its own PkgName bindings, so two files can bind the same
@@ -92,70 +144,43 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 		pb.curFileScope = pb.fileScopes[f]
 		pb.registerFile(f)
 	}
-	for _, f := range files {
-		pb.curFileScope = pb.fileScopes[f]
-		pb.buildFile(f)
-	}
-	pb.curFileScope = nil
-	if len(pb.varInits) > 0 || pb.initFn != nil {
-		pb.buildVarInits()
-	}
-	// Every body has been built by now, so the import marks are complete.
+	// No body is built here. CreatePackage records which members will get one
+	// and leaves the build to BuildBody, so a body, its checks and its emitted
+	// text live in one arena and die together instead of every body of the
+	// package existing at once (the 414MB that made the peak package-shaped).
+	pb.prepareBodies(files)
+	// The import marks are complete at declaration granularity: every reference
+	// a body can make is already in the file's syntax.
 	pb.checkUnusedImports()
-	// The body building ends here; everything after is the package-wide check
-	// suite. The ci-ssa line measures the two together, and the difference is
-	// large enough to decide which of them the 414MB belongs to.
-	memLine("   ssa-bodies "|pkg.Path)
-	// The check suite inspects the finished graph and reports into
-	// cctx.compileErrors. Measured on `runtime` (875 functions, 41537
-	// instructions) body building costs 124MB and these checks cost 289MB, so
-	// they are the larger half of the SSA-build peak.
+	// Declaration-level checks only. Everything that reads a finished body has
+	// moved to the per-member pipeline (emitAllFunctions: build -> checks ->
+	// emit -> drop), where the body's own arena reclaims what the check
+	// allocates. Measured on `runtime`: building all bodies cost 124MB and the
+	// whole-package check suite 289MB, the larger half of the SSA peak, because
+	// every check allocated per node into the package arena and outlived the
+	// graph it inspected.
 	//
-	// Scoping them in a scratch arena was tried and REVERTED: it did free the
-	// 289MB from the package arena (cau 521 -> 233MB), but it BROKE the build -
-	// `time` then reported "undefined: runtime.CurrentArena (called from
-	// AfterFunc)" four times, so something in this suite records state that the
-	// export pass reads. The check that does it is not identified yet, and a
-	// dangling export is not a trade worth making for a transient. The measured
-	// next step is to find the retention, then scope only the checks that do not
-	// record anything - the 289MB is the goal and this is the evidence for it.
-	// Restriction checks run before the compileErrors gate in ir_typecheck.
-	for _, member := range p.Members {
-		if f, ok := member.(*SSAFunction); ok {
-			checkGlobalMutation(f)
-		}
-	}
+	// The AST-side checks stay here but run PER FILE: they read syntax only,
+	// the package pass owns it, and one file's walk no longer has to coexist
+	// with the other files' scratch.
 	checkSovereignLoopDecls(p, files)
 	checkIfaceAssignments()
-	// Scoping the AST-side checks in a scratch arena was implemented twice and
-	// REVERTED both times: with all eleven checks scoped, and again with only the
-	// seven AST ones scoped, the build then fails with four
-	// "undefined: runtime.CurrentArena" errors in `time`, and the transient peak
-	// does not move (871MB either way) because the checks still ALLOCATE their
-	// 289MB while they run - scoping only makes it reclaimable afterwards.
-	// The export of a package is captured before this point, so a check cannot be
-	// corrupting the mxh directly; something in the scoping affects later
-	// allocation placement and the retention is not yet identified. The measured
-	// next step is the suite's allocation VOLUME (~7KB per SSA instruction), not
-	// its lifetime.
-	chkLine("start")
-	checkSubsliceStores(files, pkg.Path)
-	chkLine("subsliceStores")
-	checkSubsliceCopyTargets(files, pkg.Path)
-	chkLine("subsliceCopyTargets")
-	checkShadowing(files)
-	chkLine("shadowing")
+	chkLine("decls")
+	for _, f := range files {
+		one := []*syntax.File{f}
+		checkSubsliceStores(one, pkg.Path)
+		checkSubsliceCopyTargets(one, pkg.Path)
+		checkShadowing(one)
+		checkPackageDecls(one, pkg.Path)
+		checkMissingReturn(one)
+	}
+	chkLine("astfile")
 	pb.checkImportConflicts(files)
 	chkLine("importConflicts")
-	checkPackageDecls(files, pkg.Path)
-	chkLine("packageDecls")
-	checkDuplicateCases(p, files)
-	chkLine("duplicateCases")
-	checkMissingReturn(files)
-	chkLine("missingReturn")
-	checkClosureCaptures(p)
-	chkLine("closureCaptures")
-	scanWasmSpawnTargets(p)
+	if mxutil.TargetArch() == "wasm" {
+		p.wasmSpawnIndex = map[string]int32{}
+		p.wasmSpawnTargets = nil
+	}
 	return p
 }
 
@@ -184,7 +209,15 @@ type ssaPkgBuilder struct {
 	fileScopes    map[*syntax.File]*Scope
 	curFileScope  *Scope
 	varInitScopes map[*syntax.VarDecl]*Scope
-	segScopes     []segScope
+	// funcDecls maps a member name to the declaration whose body builds it.
+	// A name in neither this map nor hasBody has no body to build: an extern,
+	// a generic base, or a declaration without a body.
+	funcDecls map[string]*syntax.FuncDecl
+	// hasBody marks the synthesised members - __varinit and the synthetic main
+	// a library gets for its package-var initialisers - which have a body but
+	// no declaration.
+	hasBody   map[string]bool
+	segScopes []segScope
 }
 
 // segScope is one source file's import scope in the concatenated package
@@ -258,7 +291,7 @@ func (pb *ssaPkgBuilder) checkUnusedImports() {
 			if dotImportMentioned(body, im.target) {
 				continue
 			}
-			push(cctx.compileErrors, prefix | "\"" | im.path | "\" imported and not used")
+			addCompileError(prefix | "\"" | im.path | "\" imported and not used")
 			continue
 		}
 		if identAppearsOutsideImports(body, im.local) {
@@ -278,7 +311,7 @@ func (pb *ssaPkgBuilder) checkUnusedImports() {
 		if im.local != "" && im.local != elem {
 			msg = "\"" | im.path | "\" imported as " | im.local | " and not used"
 		}
-		push(cctx.compileErrors, prefix | msg)
+		addCompileError(prefix | msg)
 	}
 }
 
@@ -735,7 +768,7 @@ func pkgResolveTypeAST(pkg *SSAPackage, e syntax.Expr) (t Type) {
 		// See tcResolveNameInline's DotsType: a nil element type here leaves the
 		// parameter `void` while the variadic flag stays true, so callers build a
 		// slice for a void parameter. Name the type rather than emit that.
-		push(cctx.compileErrors, "undefined: " | typeExprName(ev.Elem))
+		addCompileError("undefined: " | typeExprName(ev.Elem))
 		return nil
 	}
 	return nil
@@ -794,7 +827,7 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 				pb.declared = map[string]bool{}
 			}
 			if pb.declared[key] {
-				push(cctx.compileErrors, key | " already declared")
+				addCompileError(key | " already declared")
 				return
 			}
 			pb.declared[key] = true
@@ -818,11 +851,11 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 			prefix = "line:" | simpleItoa(line) | ": "
 		}
 		if pb.pkg.Pkg.Name == "main" && !testWrapsLibrary() {
-			push(cctx.compileErrors, prefix | "init() is not allowed in main package: use main() for program entry")
+			addCompileError(prefix | "init() is not allowed in main package: use main() for program entry")
 			return
 		}
 		if pb.initFn != nil {
-			push(cctx.compileErrors, prefix | "at most one init() per package: merge this body into the package's init()")
+			addCompileError(prefix | "at most one init() per package: merge this body into the package's init()")
 			return
 		}
 	}
@@ -836,7 +869,7 @@ func (pb *ssaPkgBuilder) registerFunc(d *syntax.FuncDecl) {
 			pb.declared = map[string]bool{}
 		}
 		if pb.declared[d.Name.Value] {
-			push(cctx.compileErrors, d.Name.Value | " redeclared in this block")
+			addCompileError(d.Name.Value | " redeclared in this block")
 			return
 		}
 		pb.declared[d.Name.Value] = true
@@ -963,7 +996,7 @@ func (pb *ssaPkgBuilder) registerMethod(d *syntax.FuncDecl) {
 		// writes persist. A struct value receiver stays a copy and stays
 		// refused.
 		if !pb.recvValueAggregate(d.Recv) {
-			push(cctx.compileErrors, "value receiver is not allowed: use pointer receiver (*" | ssaRecvTypeName(d.Recv) | ")")
+			addCompileError("value receiver is not allowed: use pointer receiver (*" | ssaRecvTypeName(d.Recv) | ")")
 			return
 		}
 	}
@@ -1199,34 +1232,63 @@ func (pb *ssaPkgBuilder) registerConst(d *syntax.ConstDecl) {
 	}
 }
 
-func (pb *ssaPkgBuilder) buildFile(f *syntax.File) {
-	for _, d := range f.DeclList {
-		if fd, ok := d.(*syntax.FuncDecl); ok {
-			pb.curFileScope = pb.declScope(d)
-			if fd.Recv != nil {
-				ssaRecvTypeName(fd.Recv)
+// prepareBodies records which members have a body and which declaration builds
+// each one, and creates the package-entry members. It builds nothing: a body is
+// built by BuildBody, one member at a time.
+func (pb *ssaPkgBuilder) prepareBodies(files []*syntax.File) {
+	for _, f := range files {
+		if f == nil {
+			continue
+		}
+		for _, d := range f.DeclList {
+			fd, ok := d.(*syntax.FuncDecl)
+			if !ok {
+				continue
 			}
-			pb.buildFunc(fd)
+			name := bodyMemberName(fd)
+			if name == "" || pb.pkg.Members[name] == nil {
+				continue
+			}
+			pb.funcDecls[name] = fd
 		}
 	}
+	pb.curFileScope = nil
+	pb.prepareVarInits()
 }
 
-func (pb *ssaPkgBuilder) buildVarInits() {
-	sig := &Signature{
-		Params:  NewTuple(),
-		Results: NewTuple(),
+// bodyMemberName is the member a FuncDecl's body belongs to, or "" when there
+// is no body to build: a generic function or a method on a generic receiver
+// (both are instantiated per concrete type on demand) or a declaration without
+// a body.
+func bodyMemberName(d *syntax.FuncDecl) (name string) {
+	if d == nil || d.Name == nil || d.Body == nil {
+		return ""
 	}
-	fn, _ := pb.pkg.Members["main"].(*SSAFunction)
-	if fn == nil {
-		fn = &SSAFunction{
-			name:      "main",
-			Signature: sig,
-			Pkg:       pb.pkg,
-			Prog:      pb.prog,
+	if len(d.TParamList) > 0 {
+		return ""
+	}
+	if d.Recv != nil && ssaRecvIsGeneric(d.Recv) {
+		return ""
+	}
+	name = d.Name.Value
+	if d.Recv != nil {
+		rtn := ssaRecvTypeName(d.Recv)
+		if rtn != "" {
+			name = "(*" | rtn | ")." | d.Name.Value
 		}
-		pb.pkg.SetMember("main", fn)
 	}
-	if len(fn.Blocks) > 0 {
+	return name
+}
+
+// prepareVarInits creates the members that carry package-level initialisers. A
+// package with a real main gets a __varinit member (its stores run there and
+// main calls it); a library gets a synthetic main that holds the stores, which
+// is the entry runtime.initAll invokes.
+func (pb *ssaPkgBuilder) prepareVarInits() {
+	if len(pb.varInits) == 0 && pb.initFn == nil {
+		return
+	}
+	if pb.funcDecls["main"] != nil {
 		initSig := &Signature{Params: NewTuple(), Results: NewTuple()}
 		initFn := &SSAFunction{
 			name:      "__varinit",
@@ -1235,87 +1297,50 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 			Prog:      pb.prog,
 		}
 		pb.pkg.SetMember("__varinit", initFn)
-		fb2 := newSSAFuncBuilder(initFn, pb.info)
-		entry2 := fb2.newBlock("entry")
-		fb2.currentBlock = entry2
-		for _, d := range pb.varInits {
-			if d.Values == nil {
-				continue
-			}
-			fb2.fileScope = pb.varInitScopes[d]
-			var rhs SSAValue
-			rhsBuilt := false
-			// `var a, b T = x, y` gives each name its own value (see the
-			// function-scope form in buildLocalDecl): building the list once
-			// handed the last value to every name, so `var g1, g2 int32 = 3, 4`
-			// printed 4 4.
-			var multiVals2 []SSAValue
-			if vl, isList := d.Values.(*syntax.ListExpr); isList && len(d.NameList) > 1 && len(vl.ElemList) == len(d.NameList) {
-				multiVals2 = []SSAValue{:len(vl.ElemList)}
-				for mi := int32(0); mi < len(vl.ElemList); mi++ {
-					multiVals2[mi] = fb2.buildExpr(vl.ElemList[mi])
-				}
-			}
-			for ni, name := range d.NameList {
-				if name.Value == "_" {
-					continue
-				}
-				if fb2.tryConstArrayMemcpy(name, d.Values) {
-					continue
-				}
-				if multiVals2 != nil && ni < len(multiVals2) {
-					if multiVals2[ni] == nil {
-						break
-					}
-					fb2.buildStore(name, multiVals2[ni])
-					continue
-				}
-				if !rhsBuilt {
-					rhs = fb2.buildExpr(d.Values)
-					rhsBuilt = true
-				}
-				if rhs == nil {
-					break
-				}
-				fb2.buildStore(name, rhs)
-			}
-		}
-		fb2.emit(&SSAReturn{})
-		// Inject __varinit and, when the package has one, init() at the start
-		// of main, in that order. The synthesised-main branch below already
-		// does both; this branch is the target package, whose main already has
-		// a body. A program's main package cannot declare init(), so a normal
-		// build never needed the second call - but the synthetic main that
-		// `moxie test` builds around a library can, and it was skipped: a
-		// library's init() never ran in its own test (scalar global = 0,
-		// want 42).
-		pre := []SSAInstruction{}
-		callInstr := &SSACall{Call: SSACallCommon{Value: initFn}}
-		callInstr.name = "vinit"
-		pre = mxutil.Ensure(pre, 1)
-		pre = push(pre, callInstr)
-		if pb.initFn != nil {
-			callInit := &SSACall{Call: SSACallCommon{Value: pb.initFn}}
-			callInit.name = "pinit"
-			pre = mxutil.Ensure(pre, 1)
-			pre = push(pre, callInit)
-		}
-		oldEntry := fn.Blocks[0]
-		n := int32(len(oldEntry.Instrs))
-		pn := int32(len(pre))
-		combined := []SSAInstruction{:n + pn}
-		for i := int32(0); i < pn; i++ {
-			combined[i] = pre[i]
-		}
-		for i := int32(0); i < n; i++ {
-			combined[i+pn] = oldEntry.Instrs[i]
-		}
-		oldEntry.Instrs = combined
+		pb.hasBody["__varinit"] = true
 		return
 	}
-	fb := newSSAFuncBuilder(fn, pb.info)
-	entry := fb.newBlock("entry")
-	fb.currentBlock = entry
+	if pb.pkg.Members["main"] == nil {
+		sig := &Signature{Params: NewTuple(), Results: NewTuple()}
+		pb.pkg.SetMember("main", &SSAFunction{
+			name:      "main",
+			Signature: sig,
+			Pkg:       pb.pkg,
+			Prog:      pb.prog,
+		})
+	}
+	pb.hasBody["main"] = true
+}
+
+// buildBody builds exactly one member body. Every allocation lands in whatever
+// arena the caller made current, which is what lets the emitter build, check,
+// emit and drop one function at a time.
+func (pb *ssaPkgBuilder) buildBody(name string) {
+	if f := pb.pkg.Func(name); f != nil && f.Blocks != nil {
+		// Already built: a monomorphised clone created while another member
+		// was being built.
+		return
+	}
+	if name == "__varinit" {
+		pb.buildVarInitBody()
+		return
+	}
+	if d := pb.funcDecls[name]; d != nil {
+		pb.curFileScope = pb.declScope(d)
+		pb.buildFunc(d)
+		pb.curFileScope = nil
+		if name == "main" && pb.hasBody["__varinit"] {
+			pb.injectVarInitCalls()
+		}
+		return
+	}
+	if name == "main" && pb.hasBody["main"] {
+		pb.buildSyntheticMain()
+	}
+}
+
+// buildVarInitStores emits the package-level variable initialisers into fb.
+func (pb *ssaPkgBuilder) buildVarInitStores(fb *ssaFuncBuilder) {
 	for _, d := range pb.varInits {
 		if d.Values == nil {
 			continue
@@ -1323,10 +1348,10 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 		fb.fileScope = pb.varInitScopes[d]
 		var rhs SSAValue
 		rhsBuilt := false
-		// `var a, b T = x, y` gives each name its own value, the same way
-		// buildLocalDecl does for the function-scope form. Building the list
-		// once and storing the result to every name gave both names the last
-		// value (`var g1, g2 int32 = 3, 4` printed 4 4).
+		// `var a, b T = x, y` gives each name its own value (see the
+		// function-scope form in buildLocalDecl): building the list once
+		// handed the last value to every name, so `var g1, g2 int32 = 3, 4`
+		// printed 4 4.
 		var multiVals []SSAValue
 		if vl, isList := d.Values.(*syntax.ListExpr); isList && len(d.NameList) > 1 && len(vl.ElemList) == len(d.NameList) {
 			multiVals = []SSAValue{:len(vl.ElemList)}
@@ -1358,6 +1383,32 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 			fb.buildStore(name, rhs)
 		}
 	}
+}
+
+// buildVarInitBody builds __varinit, the member that runs a package's
+// variable initialisers when the package has a real main to call it.
+func (pb *ssaPkgBuilder) buildVarInitBody() {
+	fn := pb.pkg.Func("__varinit")
+	if fn == nil {
+		return
+	}
+	fb := newSSAFuncBuilder(fn, pb.info)
+	fb.currentBlock = fb.newBlock("entry")
+	pb.buildVarInitStores(fb)
+	fb.emit(&SSAReturn{})
+}
+
+// buildSyntheticMain builds the main a library gets: it holds the package's
+// variable initialisers itself, because there is no declared main to call a
+// __varinit. runtime.initAll calls this entry.
+func (pb *ssaPkgBuilder) buildSyntheticMain() {
+	fn := pb.pkg.Func("main")
+	if fn == nil {
+		return
+	}
+	fb := newSSAFuncBuilder(fn, pb.info)
+	fb.currentBlock = fb.newBlock("entry")
+	pb.buildVarInitStores(fb)
 	// Package-level variable initializers run first, then init(), as in Go.
 	if pb.initFn != nil {
 		callInit := &SSACall{Call: SSACallCommon{Value: pb.initFn}}
@@ -1365,6 +1416,44 @@ func (pb *ssaPkgBuilder) buildVarInits() {
 		fb.emit(callInit)
 	}
 	fb.emit(&SSAReturn{})
+}
+
+// injectVarInitCalls puts the __varinit and, when the package has one, init()
+// at the start of main, in that order. The synthetic-main case does both
+// itself; this is the target package, whose main already has a body. A
+// program's main package cannot declare init(), so a normal build never needed
+// the second call - but the synthetic main that `moxie test` builds around a
+// library can, and it was skipped: a library's init() never ran in its own test
+// (scalar global = 0, want 42).
+func (pb *ssaPkgBuilder) injectVarInitCalls() {
+	fn := pb.pkg.Func("main")
+	if fn == nil || len(fn.Blocks) == 0 {
+		return
+	}
+	initFn := pb.pkg.Func("__varinit")
+	if initFn == nil {
+		return
+	}
+	pre := []SSAInstruction{}
+	callInstr := &SSACall{Call: SSACallCommon{Value: initFn}}
+	callInstr.name = "vinit"
+	pre = push(pre, callInstr)
+	if pb.initFn != nil {
+		callInit := &SSACall{Call: SSACallCommon{Value: pb.initFn}}
+		callInit.name = "pinit"
+		pre = push(pre, callInit)
+	}
+	oldEntry := fn.Blocks[0]
+	n := int32(len(oldEntry.Instrs))
+	pn := int32(len(pre))
+	combined := []SSAInstruction{:n + pn}
+	for i := int32(0); i < pn; i++ {
+		combined[i] = pre[i]
+	}
+	for i := int32(0); i < n; i++ {
+		combined[i+pn] = oldEntry.Instrs[i]
+	}
+	oldEntry.Instrs = combined
 }
 
 // ssaProbeTick prints a growth line only when the process has mapped another
@@ -1883,11 +1972,10 @@ func (fb *ssaFuncBuilder) buildStmt(s syntax.Stmt) {
 		// nothing
 	case *syntax.ExprStmt:
 		if name, ok := ss.X.(*syntax.Name); ok && name.Value != "_" {
-			cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
 			if fb.nameResolves(name) {
-				push(cctx.compileErrors, "evaluated but not used: " | name.Value)
+				addCompileError("evaluated but not used: " | name.Value)
 			} else {
-				push(cctx.compileErrors, "undefined: " | name.Value)
+				addCompileError("undefined: " | name.Value)
 			}
 			break
 		}
@@ -2015,7 +2103,7 @@ func (fb *ssaFuncBuilder) buildAssign(s *syntax.AssignStmt) {
 		// silently concatenated, so `s += b` on two []byte operands was a
 		// compilers-disagree bug (W29).
 		if s.Op == token.Add && fb.plusIsBanned() && TextType(lv.SSAType()) {
-			push(cctx.compileErrors, "'+=' is not allowed for text concatenation, use |= operator")
+			addCompileError("'+=' is not allowed for text concatenation, use |= operator")
 		}
 		op := compoundOp(s.Op)
 		bin := &SSABinOp{Op: op, X: lv, Y: rv}
@@ -2295,7 +2383,7 @@ func (fb *ssaFuncBuilder) errArgs(msg string) {
 	if fb.fn == nil || fb.fn.Pkg == nil || fb.fn.Pkg.Pkg == nil {
 		return
 	}
-	push(cctx.compileErrors, fb.errPos() | msg)
+	addCompileError(fb.errPos() | msg)
 }
 
 // requireBool rejects a non-boolean if/for condition.
@@ -2428,7 +2516,7 @@ func checkIfaceAssignments() {
 		if missing == "" {
 			continue
 		}
-		push(cctx.compileErrors, pa.pos | "cannot use value of type " | pa.V.String() | " (" | "(name=" | pa.vname | ")" | ") as " | pa.T.String() | " in " | pa.what | " (does not implement " | pa.T.String() | " (missing method " | missing | "))")
+		addCompileError(pa.pos | "cannot use value of type " | pa.V.String() | " (" | "(name=" | pa.vname | ")" | ") as " | pa.T.String() | " in " | pa.what | " (does not implement " | pa.T.String() | " (missing method " | missing | "))")
 	}
 	cstate.pendingIface = nil
 }
@@ -2448,7 +2536,7 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 	// considered: an untyped int is Assignable to int8, but 1000 is not.
 	if cv, explicitNeg := constValueOf(val); cv != nil {
 		if msg := constReprError(cv, T); msg != "" && !constReprSkipUnsigned(T, cv, explicitNeg) {
-			push(cctx.compileErrors, fb.errPos() | "cannot use " | cv.String() | " as " | T.String() | " in " | what | " (" | msg | ")")
+			addCompileError(fb.errPos() | "cannot use " | cv.String() | " as " | T.String() | " in " | what | " (" | msg | ")")
 			return
 		}
 	}
@@ -2470,7 +2558,7 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 				// types.Object that way), so only a type from a third package -
 				// or one with no package at all, like a slice - is impossible.
 				if u := ifaceUnexportedMethod(tIface); u != "" && typeDeclPkg(V) != declPkg {
-					push(cctx.compileErrors, fb.errPos() | "cannot use value of type " | V.String() | " as " | T.String() | " in " | what | " (does not implement " | T.String() | " (unexported method " | u | "))")
+					addCompileError(fb.errPos() | "cannot use value of type " | V.String() | " as " | T.String() | " in " | what | " (does not implement " | T.String() | " (unexported method " | u | "))")
 					return
 				}
 			}
@@ -2542,7 +2630,7 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 		if _, vIface := SafeUnderlying(V).(*TCInterface); vIface {
 			if _, vTP := V.(*TypeParam); !vTP {
 				if _, tIface := SafeUnderlying(T).(*TCInterface); !tIface {
-					push(cctx.compileErrors, fb.errPos() | "cannot use value of type " | V.String() | " as " | T.String() | " in " | what | " (an interface value needs a type assertion)")
+					addCompileError(fb.errPos() | "cannot use value of type " | V.String() | " as " | T.String() | " in " | what | " (an interface value needs a type assertion)")
 					return
 				}
 			}
@@ -2566,7 +2654,7 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 		}
 		return
 	}
-	push(cctx.compileErrors, fb.errPos() | "cannot use value of type " | V.String() | " as " | T.String() | " in " | what)
+	addCompileError(fb.errPos() | "cannot use value of type " | V.String() | " as " | T.String() | " in " | what)
 }
 
 // checkConstConvert reports a constant conversion whose value cannot be
@@ -2582,7 +2670,7 @@ func (fb *ssaFuncBuilder) checkConstConvert(val SSAValue, T Type) {
 		return
 	}
 	if msg := constReprError(cv, T); msg != "" && !constReprSkipUnsigned(T, cv, explicitNeg) {
-		push(cctx.compileErrors, fb.errPos() | "cannot convert " | cv.String() | " to " | T.String() | " (" | msg | ")")
+		addCompileError(fb.errPos() | "cannot convert " | cv.String() | " to " | T.String() | " (" | msg | ")")
 	}
 }
 
@@ -2849,7 +2937,7 @@ func (fb *ssaFuncBuilder) checkDefaultRepr(val SSAValue, what string) {
 		return
 	}
 	if msg := constReprError(cv, dt); msg != "" && !constReprSkipUnsigned(dt, cv, explicitNeg) {
-		push(cctx.compileErrors, fb.errPos() | "cannot use " | cv.String() | " as " | dt.String() | " value in " | what | " (" | msg | ")")
+		addCompileError(fb.errPos() | "cannot use " | cv.String() | " as " | dt.String() | " value in " | what | " (" | msg | ")")
 	}
 }
 
@@ -2955,12 +3043,15 @@ func (fb *ssaFuncBuilder) buildStore(lhs syntax.Expr, val SSAValue) {
 			impPkg := fb.ensureImportedSSAPackage(v.Pkg)
 			g3, ok7 := impPkg.Members[lv.Value].(*SSAGlobal)
 			if !ok7 {
+				// A package member outlives this member's arena: allocate it in the package arena.
+				saveDurable := durableBegin()
 				g3 = &SSAGlobal{
 					name: lv.Value,
 					typ:  NewPointer(v.Typ),
 					pkg:  impPkg,
 				}
 				impPkg.SetMember(lv.Value, g3)
+				durableEnd(saveDurable)
 			}
 			if p, ok8 := g3.SSAType().(*Pointer); ok8 && p.Base != nil {
 				val = fb.coerceToInterface(val, p.Base)
@@ -3500,7 +3591,7 @@ func (fb *ssaFuncBuilder) buildLocalDecl(d syntax.Decl) {
 				badName := firstUnresolvedTypeName(dd.Type, ls)
 				if len(badName) > 0 {
 					bad = true
-					push(cctx.compileErrors, "undefined: " | badName)
+					addCompileError("undefined: " | badName)
 				}
 			}
 			// Refuse the type when a field did not resolve: the error is
@@ -5021,7 +5112,7 @@ func (fb *ssaFuncBuilder) buildBranch(s *syntax.BranchStmt) {
 // receiver, the way legacy lowers it: the receiver travels as an argument on
 // the defer record, so `defer f.Close()` stays legal while `x := f.Close` is a
 // capture and is rejected. Building a bound method value here instead (a) made
-// a legal defer look like a capture to checkClosureCaptures and (b) could not
+// a legal defer look like a capture to checkClosureCaptureOf and (b) could not
 // serve an interface receiver at all, because that call is an invoke, which is
 // an instruction rather than a value - `defer i.M()` was dropped in silence.
 func (fb *ssaFuncBuilder) buildDeferStmt(call *syntax.CallExpr) {
@@ -5376,7 +5467,7 @@ func (fb *ssaFuncBuilder) buildIdent(e *syntax.Name) (s SSAValue) {
 		// No local, free var, package member, predeclared type, or builtin:
 		// the name does not exist. Fail loud - a dropped reference compiles
 		// the surrounding code to garbage far from the cause.
-		push(cctx.compileErrors, "undefined: " | e.Value)
+		addCompileError("undefined: " | e.Value)
 		return nil
 	}
 	switch ob := obj.(type) {
@@ -5418,12 +5509,15 @@ func (fb *ssaFuncBuilder) buildIdent(e *syntax.Name) (s SSAValue) {
 			impPkg := fb.ensureImportedSSAPackage(ob.Pkg)
 			g, ok := impPkg.Members[e.Value].(*SSAGlobal)
 			if !ok {
+				// A package member outlives this member's arena: allocate it in the package arena.
+				saveDurable := durableBegin()
 				g = &SSAGlobal{
 					name: e.Value,
 					typ:  NewPointer(ob.Typ),
 					pkg:  impPkg,
 				}
 				impPkg.SetMember(e.Value, g)
+				durableEnd(saveDurable)
 			}
 			return fb.emitLoad(g, ob.Typ)
 		}
@@ -5441,6 +5535,8 @@ func (fb *ssaFuncBuilder) buildIdent(e *syntax.Name) (s SSAValue) {
 			fn = impPkg.Func(e.Value)
 			if fn == nil {
 				sig, _ := ob.Typ.(*Signature)
+				// A package member outlives this member's arena: allocate it in the package arena.
+				saveDurable := durableBegin()
 				fn = &SSAFunction{
 					name:      e.Value,
 					object:    ob,
@@ -5449,6 +5545,7 @@ func (fb *ssaFuncBuilder) buildIdent(e *syntax.Name) (s SSAValue) {
 					Prog:      fb.fn.Prog,
 				}
 				impPkg.SetMember(e.Value, fn)
+				durableEnd(saveDurable)
 			}
 			return fn
 		}
@@ -5734,7 +5831,7 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 	// message. The rule is a main-module rule in legacy, so a dependency
 	// package keeps '+' - see targetIsMainModule.
 	if e.Op == token.Add && fb.plusIsBanned() && (TextType(x.SSAType()) || TextType(y.SSAType())) {
-		push(cctx.compileErrors, "'+' is not allowed for text concatenation, use | operator")
+		addCompileError("'+' is not allowed for text concatenation, use | operator")
 	}
 	if (op == OpOr || op == OpAdd) && x.SSAType() != nil && y.SSAType() != nil {
 		if IsRuneKind(x.SSAType()) && IsStringKind(y.SSAType()) || IsStringKind(x.SSAType()) && IsRuneKind(y.SSAType()) {
@@ -5757,7 +5854,7 @@ func (fb *ssaFuncBuilder) buildOperation(e *syntax.Operation) (s SSAValue) {
 		if _, xTP := x.SSAType().(*TypeParam); !xTP {
 			if _, yTP := y.SSAType().(*TypeParam); !yTP {
 				if TextType(x.SSAType()) != TextType(y.SSAType()) {
-					push(cctx.compileErrors, fb.errPos() | "cannot concatenate value of type " | x.SSAType().String() | " with value of type " | y.SSAType().String() | " ('|' concatenates text; use .String() on the value)")
+					addCompileError(fb.errPos() | "cannot concatenate value of type " | x.SSAType().String() | " with value of type " | y.SSAType().String() | " ('|' concatenates text; use .String() on the value)")
 				}
 			}
 		}
@@ -5947,7 +6044,7 @@ func (fb *ssaFuncBuilder) checkSliceToArrayConv(x SSAValue, dst Type) {
 	if _, isArr := p.Base.(*Array); !isArr {
 		return
 	}
-	push(cctx.compileErrors, "slice-to-array-pointer conversion is not allowed: work in slices")
+	addCompileError("slice-to-array-pointer conversion is not allowed: work in slices")
 }
 
 // checkTextArrayConv rejects a text conversion whose other side is a fixed
@@ -5979,7 +6076,7 @@ func (fb *ssaFuncBuilder) checkTextArrayConv(x SSAValue, dst Type) {
 	if _, isArr := SafeUnderlying(other).(*Array); !isArr {
 		return
 	}
-	push(cctx.compileErrors, fb.errPos() | "cannot convert " | src.String() | " to " | dst.String() | " (a fixed extent is not text: work in slices)")
+	addCompileError(fb.errPos() | "cannot convert " | src.String() | " to " | dst.String() | " (a fixed extent is not text: work in slices)")
 }
 
 // isUnsafePtrType reports whether t is the unsafe.Pointer type. Compared by
@@ -6067,7 +6164,7 @@ func (fb *ssaFuncBuilder) checkPtrToIntConv(x SSAValue, dst Type) {
 	if db.Info&IsInteger == 0 {
 		return
 	}
-	push(cctx.compileErrors, fb.errPos() | "cannot convert " | src.String() | " to " | dst.String() | " directly: a pointer converts to an integer only through unsafe.Pointer")
+	addCompileError(fb.errPos() | "cannot convert " | src.String() | " to " | dst.String() | " directly: a pointer converts to an integer only through unsafe.Pointer")
 }
 
 func (fb *ssaFuncBuilder) checkUnsafePtrConv(val SSAValue, T Type) {
@@ -6090,7 +6187,7 @@ func (fb *ssaFuncBuilder) checkUnsafePtrConv(val SSAValue, T Type) {
 	if b, isB := SafeUnderlying(V).(*Basic); isB && b.Kind == UntypedNil {
 		return
 	}
-	push(cctx.compileErrors, fb.errPos() | "cannot convert value of type " | V.String() | " to unsafe.Pointer (only a pointer, a uintptr or nil)")
+	addCompileError(fb.errPos() | "cannot convert value of type " | V.String() | " to unsafe.Pointer (only a pointer, a uintptr or nil)")
 }
 
 func (fb *ssaFuncBuilder) buildCall(e *syntax.CallExpr) (s SSAValue) {
@@ -6491,7 +6588,7 @@ func (fb *ssaFuncBuilder) coerceSliceArgs(args []SSAValue, hasDots bool, slT, wh
 			spreadOK = true
 		}
 		if !spreadOK {
-			push(cctx.compileErrors, fb.errPos() | "cannot use " | srcT.String() | " as " | wholeT.String() | " in push (spread element type mismatch)")
+			addCompileError(fb.errPos() | "cannot use " | srcT.String() | " as " | wholeT.String() | " in push (spread element type mismatch)")
 		}
 	}
 	for i := 1; i < len(args); i++ {
@@ -6630,7 +6727,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		// function carrying state died with SIGSEGV), and error values are what
 		// recoverable failure is for. Fail loud so a ported file cannot bring
 		// it back.
-		push(cctx.compileErrors, "recover() is not available in Moxie: a panic is fatal")
+		addCompileError("recover() is not available in Moxie: a panic is fatal")
 		return nil
 	case BuiltinSpawn:
 		fb.checkSpawnSignature(args)
@@ -6656,7 +6753,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		// runtime's, so every call names the same channel; the element is the
 		// empty struct because the close is the whole message.
 		if len(args) != 0 {
-			push(cctx.compileErrors, fb.errPos() | "__shutdown takes no arguments")
+			addCompileError(fb.errPos() | "__shutdown takes no arguments")
 			return nil
 		}
 		callS := &SSACall{Call: SSACallCommon{Value: b}}
@@ -6685,7 +6782,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		// names the fix.
 		if len(args) > 0 && args[0] != nil {
 			if _, isArr := SafeUnderlying(args[0].SSAType()).(*Array); isArr {
-				push(cctx.compileErrors, fb.errPos() | "fixed-extent array: capacity cannot change; slice it with arr[:] to get a growable extent")
+				addCompileError(fb.errPos() | "fixed-extent array: capacity cannot change; slice it with arr[:] to get a growable extent")
 				return nil
 			}
 		}
@@ -6704,7 +6801,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 				}
 			}
 			if untypedNil {
-				push(cctx.compileErrors, "invalid push: argument must be a slice; have untyped nil")
+				addCompileError("invalid push: argument must be a slice; have untyped nil")
 				return nil
 			}
 		}
@@ -6744,7 +6841,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		// emitter and fail in clang instead of here.
 		if len(args) > 0 && args[0] != nil {
 			if _, isArr := SafeUnderlying(args[0].SSAType()).(*Array); isArr {
-				push(cctx.compileErrors, fb.errPos() | "fixed-extent array: capacity cannot change; slice it with arr[:] to get a growable extent")
+				addCompileError(fb.errPos() | "fixed-extent array: capacity cannot change; slice it with arr[:] to get a growable extent")
 				return nil
 			}
 		}
@@ -6754,13 +6851,11 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 			// exists so a buffer can be rewound by as many elements as another
 			// slice holds without spelling out the length arithmetic.
 			if !e.HasDots {
-				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-				push(cctx.compileErrors, fb.errPos() | "pop of several elements takes a spread argument: pop(s, xs...)")
+				addCompileError(fb.errPos() | "pop of several elements takes a spread argument: pop(s, xs...)")
 				return nil
 			}
 			if !fb.pushStmt {
-				cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-				push(cctx.compileErrors, fb.errPos() | "pop(s, xs...) is a statement: it removes len(xs) elements; use pop(s) for the last element")
+				addCompileError(fb.errPos() | "pop(s, xs...) is a statement: it removes len(xs) elements; use pop(s) for the last element")
 				return nil
 			}
 			if args[0] == nil || args[0].SSAType() == nil {
@@ -6773,7 +6868,7 @@ func (fb *ssaFuncBuilder) buildBuiltinCall(e *syntax.CallExpr, b *SSABuiltin, ar
 		// "returns the value but does not shrink" was a footgun that meant two
 		// different things depending on whether the value was used.
 		if len(args) == 1 && !fb.pushStmt {
-			push(cctx.compileErrors, fb.errPos() | "pop is a statement: it removes the last element; read it with s[len(s)-1]")
+			addCompileError(fb.errPos() | "pop is a statement: it removes the last element; read it with s[len(s)-1]")
 			return nil
 		}
 		callPop := &SSACall{Call: SSACallCommon{Value: b, Args: args}}
@@ -7042,7 +7137,7 @@ func (fb *ssaFuncBuilder) reportUndefinedField(sel *syntax.SelectorExpr, t Type)
 	}
 	if name == "int64" && sel.Sel.Value == "String" {
 	}
-	push(cctx.compileErrors, fb.errPos() | sel.Sel.Value | " undefined (type " | name | " has no field or method " | sel.Sel.Value | ")")
+	addCompileError(fb.errPos() | sel.Sel.Value | " undefined (type " | name | " has no field or method " | sel.Sel.Value | ")")
 }
 
 func (fb *ssaFuncBuilder) buildSelector(e *syntax.SelectorExpr) (s SSAValue) {
@@ -7081,7 +7176,7 @@ func (fb *ssaFuncBuilder) buildSelector(e *syntax.SelectorExpr) (s SSAValue) {
 						if mev != nil {
 							return mev
 						}
-						push(cctx.compileErrors, fb.errPos() | e.Sel.Value | " is not a method of (" | nm.Value | ")")
+						addCompileError(fb.errPos() | e.Sel.Value | " is not a method of (" | nm.Value | ")")
 						return nil
 					}
 				}
@@ -7445,9 +7540,15 @@ func (fb *ssaFuncBuilder) genericMethodInstance(named *Named, methodName string)
 	if fb.fn != nil && fb.fn.Pkg != nil && fb.fn.Pkg.Pkg != nil && fb.fn.Pkg.Pkg.Path == pkgPath {
 		cctx.sigDeclPkgImports = fb.fn.Pkg.Pkg.Imports
 	}
+	// The instantiated method is PACKAGE state (its member entry and the
+	// receiver type recorded below are read by later bodies and by emission),
+	// so the resolution and everything it creates are allocated in the package
+	// arena, not in the per-function arena the build is running in.
+	saveDurable := durableBegin()
 	sig = resolveMethodSigWithSubst(fd, typeSubst, srcScope)
 	cctx.sigDeclPkgImports = savedImports
 	if sig == nil || sig.Recv == nil {
+		durableEnd(saveDurable)
 		return nil, nil, false
 	}
 	mangledName := mangleGenericName("(*"|named.Obj.Name|")."|methodName, named.TArgs)
@@ -7466,8 +7567,11 @@ func (fb *ssaFuncBuilder) genericMethodInstance(named *Named, methodName string)
 		mangledName = pfx | "." | mangledName
 	}
 	if fn5, ok5 := fb.fn.Pkg.Members[mangledName].(*SSAFunction); ok5 {
+		durableEnd(saveDurable)
 		return fn5, sig, true
 	}
+	// A package member outlives this member's arena: allocate it in the package arena.
+	saveDurable := durableBegin()
 	fn = &SSAFunction{
 		name:      mangledName,
 		Signature: sig,
@@ -7475,6 +7579,7 @@ func (fb *ssaFuncBuilder) genericMethodInstance(named *Named, methodName string)
 		Prog:      fb.fn.Prog,
 	}
 	fb.fn.Pkg.SetMember(mangledName, fn)
+	durableEnd(saveDurable)
 	// Record the instantiated receiver for interface dispatch: the arm scan
 	// enumerates type DECLARATIONS, and a generic declaration is skipped because
 	// its methods are never emitted standalone. Without this a value boxed as
@@ -7497,6 +7602,7 @@ func (fb *ssaFuncBuilder) genericMethodInstance(named *Named, methodName string)
 		}
 		cctx.genericMethodInsts[ownerPath | "|" | mangledName] = sig.Recv.Typ
 	}
+	durableEnd(saveDurable)
 	subFb := newSSAFuncBuilder(fn, fb.info)
 	subFb.typeSubst = typeSubst
 	subFb.srcScope = srcScope
@@ -7586,6 +7692,9 @@ func resolveMethodSigWithSubst(fd *syntax.FuncDecl, typeSubst map[string]Type, p
 func (fb *ssaFuncBuilder) ensureImportedSSAPackage(imported *TCPackage) (s *SSAPackage) {
 	impPkg := fb.fn.Prog.ImportedPackage(imported.Path)
 	if impPkg == nil {
+		// The registry entry outlives every function arena: this is compile
+		// state, so it is allocated in the package arena.
+		saveDurable := durableBegin()
 		impPkg = &SSAPackage{
 			Prog:    fb.fn.Prog,
 			Pkg:     imported,
@@ -7593,6 +7702,7 @@ func (fb *ssaFuncBuilder) ensureImportedSSAPackage(imported *TCPackage) (s *SSAP
 		}
 		fb.fn.Prog.imported[imported.Path] = impPkg
 		fb.fn.Prog.packages[imported] = impPkg
+		durableEnd(saveDurable)
 	}
 	return impPkg
 }
@@ -7623,12 +7733,15 @@ func (fb *ssaFuncBuilder) buildPkgMember(pn *PkgName, memberName string) (s SSAV
 		impPkg := fb.ensureImportedSSAPackage(imported)
 		g, ok := impPkg.Members[memberName].(*SSAGlobal)
 		if !ok {
+			// A package member outlives this member's arena: allocate it in the package arena.
+			saveDurable := durableBegin()
 			g = &SSAGlobal{
 				name: memberName,
 				typ:  NewPointer(ob.Typ),
 				pkg:  impPkg,
 			}
 			impPkg.SetMember(memberName, g)
+			durableEnd(saveDurable)
 		}
 		return fb.emitLoad(g, ob.Typ)
 	case *TCFunc:
@@ -7639,6 +7752,8 @@ func (fb *ssaFuncBuilder) buildPkgMember(pn *PkgName, memberName string) (s SSAV
 			// direct-call path does the same lazily, but a func referenced
 			// as an argument never goes through it.
 			sig, _ := ob.Typ.(*Signature)
+			// A package member outlives this member's arena: allocate it in the package arena.
+			saveDurable := durableBegin()
 			fn = &SSAFunction{
 				name:      memberName,
 				object:    ob,
@@ -7650,6 +7765,7 @@ func (fb *ssaFuncBuilder) buildPkgMember(pn *PkgName, memberName string) (s SSAV
 				fn.isExternC = true
 			}
 			impPkg.SetMember(memberName, fn)
+			durableEnd(saveDurable)
 		}
 		return fn
 	}
@@ -8004,7 +8120,7 @@ func (fb *ssaFuncBuilder) reportNotIndexable(t Type) {
 	if t != nil {
 		name = t.String()
 	}
-	push(cctx.compileErrors, "invalid operation: cannot index " | name)
+	addCompileError("invalid operation: cannot index " | name)
 }
 
 func (fb *ssaFuncBuilder) buildSlice(e *syntax.SliceExpr) (s SSAValue) {
@@ -8150,7 +8266,7 @@ func (fb *ssaFuncBuilder) checkAssertOperand(x SSAValue) (ok bool) {
 	if _, isTP := xt.(*TypeParam); isTP {
 		return true
 	}
-	push(cctx.compileErrors, "invalid type assertion: " | xt.String() | " is not an interface")
+	addCompileError("invalid type assertion: " | xt.String() | " is not an interface")
 	return false
 }
 
@@ -8648,7 +8764,7 @@ func (fb *ssaFuncBuilder) buildCompositeLitInto(dst SSAValue, e *syntax.Composit
 	if len(e.ElemList) == 0 {
 		return
 	}
-	push(cctx.compileErrors, fb.errPos() | "composite literal of non-aggregate type " | typ.String())
+	addCompileError(fb.errPos() | "composite literal of non-aggregate type " | typ.String())
 }
 
 // storeLitElem stores one composite-literal element at dst. An untyped nested
@@ -8925,13 +9041,13 @@ func (fb *ssaFuncBuilder) buildFuncLit(e *syntax.FuncLit) (s SSAValue) {
 				// value, and the program died at run time with "indirect call
 				// to null" in a frame unrelated to the capture (smesh's
 				// create-vault UI). Fail at compile time and name it.
-				push(cctx.compileErrors, fb.fn.name | ": closure capture '" | fv.name | "' has no live slot")
+				addCompileError(fb.fn.name | ": closure capture '" | fv.name | "' has no live slot")
 				push(bindings, &SSAConst{typ: NewPointer(fv.typ), val: nil})
 			}
 		} else if pfv, ok := fb.freeVarPtrs[fv.name]; ok {
 			push(bindings, pfv)
 		} else {
-			push(cctx.compileErrors, fb.fn.name | ": closure capture '" | fv.name | "' has no live slot")
+			addCompileError(fb.fn.name | ": closure capture '" | fv.name | "' has no live slot")
 			push(bindings, &SSAConst{typ: NewPointer(fv.typ), val: nil})
 		}
 	}
@@ -9015,12 +9131,15 @@ func (fb *ssaFuncBuilder) buildPkgMemberAddr(pn *PkgName, memberName string) (s 
 		impPkg := fb.ensureImportedSSAPackage(imported)
 		g, ok := impPkg.Members[memberName].(*SSAGlobal)
 		if !ok {
+			// A package member outlives this member's arena: allocate it in the package arena.
+			saveDurable := durableBegin()
 			g = &SSAGlobal{
 				name: memberName,
 				typ:  NewPointer(ob.Typ),
 				pkg:  impPkg,
 			}
 			impPkg.SetMember(memberName, g)
+			durableEnd(saveDurable)
 		}
 		return g
 	}
@@ -9181,9 +9300,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 		}
 		// Fail loud: a dropped call compiles the caller to garbage
 		// (zeroinitializer returns) and crashes far from the cause.
-		cctx.compileErrors = mxutil.Ensure(cctx.compileErrors, 1)
-		push(cctx.compileErrors,
-			"undefined: "|imported.Path|"."|funcName|" (called from "|fb.fn.name|")")
+		addCompileError("undefined: "|imported.Path|"."|funcName|" (called from "|fb.fn.name|")")
 		return nil
 	}
 	fn, ok := obj.(*TCFunc)
@@ -9193,6 +9310,8 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 	impPkg := fb.ensureImportedSSAPackage(imported)
 	ssaFn := impPkg.Func(funcName)
 	if ssaFn == nil {
+		// A package member outlives this member's arena: allocate it in the package arena.
+		saveDurable := durableBegin()
 		ssaFn = &SSAFunction{
 			name:      funcName,
 			object:    fn,
@@ -9204,6 +9323,7 @@ func (fb *ssaFuncBuilder) buildPkgCall(pn *PkgName, funcName string, argList []s
 			ssaFn.isExternC = true
 		}
 		impPkg.SetMember(funcName, ssaFn)
+		durableEnd(saveDurable)
 	}
 	args := fb.buildArgs(argList)
 	var retType Type
@@ -10115,7 +10235,7 @@ func (fb *ssaFuncBuilder) buildIfaceMethodCall(sel *syntax.SelectorExpr, recv SS
 		// interface; another package cannot refer to it. Legacy reports
 		// "s.seal undefined (cannot refer to unexported method seal)".
 		if !isExportedName(sel.Sel.Value) && ifaceHasMethod(iface, sel.Sel.Value) {
-			push(cctx.compileErrors, fb.errPos() | sel.Sel.Value | " undefined (cannot refer to unexported method " | sel.Sel.Value | ")")
+			addCompileError(fb.errPos() | sel.Sel.Value | " undefined (cannot refer to unexported method " | sel.Sel.Value | ")")
 			return nil, true
 		}
 	}
@@ -10199,7 +10319,7 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
 			if !fb.quietTypeErr {
 				// Not a predeclared or user-defined name: int/uint/make/new/
 				// complex64 etc are undefined in Moxie, not restricted.
-				push(cctx.compileErrors, "undefined: " | ev.Value)
+				addCompileError("undefined: " | ev.Value)
 			}
 		}
 		return nil
@@ -10276,7 +10396,7 @@ func (fb *ssaFuncBuilder) resolveTypeAST(e syntax.Expr) (t Type) {
 			if !fb.quietTypeErr {
 				if imp := cctx.universe.LookupByName(x.Value); imp != nil && imp.Scope != nil {
 					if _, isTn := imp.Scope.Lookup(ev.Sel.Value).(*TypeName); isTn {
-						push(cctx.compileErrors, "undefined: " | x.Value)
+						addCompileError("undefined: " | x.Value)
 					}
 				}
 			}
@@ -10852,7 +10972,7 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope
 		}
 		// See tcResolveNameInline's DotsType: a nil element type leaves the
 		// parameter `void` while the variadic flag stays true.
-		push(cctx.compileErrors, "undefined: " | typeExprName(ev.Elem))
+		addCompileError("undefined: " | typeExprName(ev.Elem))
 		return nil
 	case *syntax.SliceType:
 		elem := resolveTypeExprWithSubst(ev.Elem, typeSubst, pkgScope)
@@ -10958,7 +11078,7 @@ func resolveTypeExprWithSubst(e syntax.Expr, typeSubst map[string]Type, pkgScope
 			// tcResolveFuncInline, which reports an unresolved parameter type.
 			if imp := cctx.universe.LookupByName(pkgName.Value); imp != nil && imp.Scope != nil {
 				if tn, ok6 := imp.Scope.Lookup(ev.Sel.Value).(*TypeName); ok6 && tn != nil {
-					push(cctx.compileErrors, "undefined: " | pkgName.Value)
+					addCompileError("undefined: " | pkgName.Value)
 				}
 			}
 		}
@@ -11408,8 +11528,14 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, plainName str
 	if declImports := fb.declPkgImports(srcPkgPath); declImports != nil {
 		cctx.sigDeclPkgImports = declImports
 	}
+	// The clone is PACKAGE state: its member entry is read by later bodies and
+	// by emission, so the signature (and every type it instantiates), the
+	// function and the member entry are allocated in the package arena even
+	// though this runs inside another member's per-function arena.
+	saveDurable := durableBegin()
 	sig := resolveSignatureWithSubst(fd.Type, typeSubst, srcScope)
 	if sig == nil {
+		durableEnd(saveDurable)
 		cctx.sigDeclPkgImports = savedImports2
 		return nil, false
 	}
@@ -11420,6 +11546,7 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, plainName str
 		Prog:      fb.fn.Prog,
 	}
 	targetPkg.SetMember(mangledName, fn)
+	durableEnd(saveDurable)
 	subFb := newSSAFuncBuilder(fn, fb.info)
 	subFb.typeSubst = typeSubst
 	subFb.srcScope = srcScope
