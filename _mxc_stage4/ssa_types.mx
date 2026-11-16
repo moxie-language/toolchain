@@ -1,6 +1,7 @@
 package main
 
 import (
+	"moxielang.dev/pkg/mxutil"
 	"moxielang.dev/pkg/token"
 	. "moxielang.dev/pkg/types"
 )
@@ -188,8 +189,50 @@ func (p *SSAPackage) BuildBody(name string) {
 	}
 }
 
+// badMemberName reports whether a member name holds a byte that cannot appear in
+// one: a name is a view of AST text or a string the compiler built, and a
+// control byte means the bytes came from memory that no longer holds the name.
+func badMemberName(name string) (bad bool) {
+	for i := int32(0); i < int32(len(name)); i++ {
+		if name[i] < 0x20 || name[i] == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// durableMemberNames selects the durable copy of a member's name. It is a knob
+// because the copy is what makes a name built in a per-function arena survive to
+// emission, and it also changes the cost of registration, so the two effects are
+// measured apart.
+const durableMemberNames = true
+
 func (p *SSAPackage) SetMember(name string, m SSAMember) {
-	p.Members[name] = m
+	if badMemberName(name) {
+		mxutil.WriteStr(2, "BADNAME pkg=" | p.Pkg.Path | " len=" | mxutil.SimpleItoa(int32(len(name))) | " v=" | name | "\n")
+	}
+	// A member's NAME outlives the body that spelled it: the emitter reads it
+	// long after the per-function arena that built it was reset, and a name
+	// built there reached funcSymbol as dead bytes - `call void
+	// @"internal/task.0<binary>"` in the emitted IR, which clang rejects as a
+	// NUL in a symbol. The member entry is package state, so its name is too:
+	// copy it into the package arena and make it the function's own name.
+	if !durableMemberNames || cctx == nil || cctx.compileArena == nil {
+		p.Members[name] = m
+		return
+	}
+	saveNm := durableBegin()
+	dn := copyStr(name)
+	p.Members[dn] = m
+	// Compare by IDENTITY, not by content: a copy is equal by content, so a
+	// content test would leave the struct pointing at the dead bytes.
+	switch mf := m.(type) {
+	case *SSAFunction:
+		mf.name = dn
+	case *SSAGlobal:
+		mf.name = dn
+	}
+	durableEnd(saveNm)
 }
 
 func (p *SSAPackage) Func(name string) (s *SSAFunction) {

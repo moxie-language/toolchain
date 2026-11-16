@@ -2,6 +2,7 @@ package main
 
 import (
 	"runtime"
+	"unsafe"
 	"moxielang.dev/pkg/mxutil"
 	"moxielang.dev/pkg/syntax"
 	"moxielang.dev/pkg/token"
@@ -88,6 +89,25 @@ func durableBegin() (save *runtime.Arena) {
 func durableEnd(save *runtime.Arena) {
 	if save != nil {
 		if cctx != nil && cctx.compileArena != nil {
+			// The scope was entered on the package arena, so its exit must find
+			// the package arena in the slot it is about to pop. A borrow that
+			// switched the slot during the scope (SovereignSetArena uses the
+			// same slot, it does not push a frame) makes this false, and then
+			// the SetCurrentArena below installs `save` over a slot another
+			// frame believes it owns - the fn stack keeps its depth while the
+			// arena in it is wrong, and every later allocation in the enclosing
+			// phase lands in a foreign arena.
+			if cur := runtime.CurrentArena(); cur != cctx.compileArena {
+				dcur := int64(0)
+				if cur != nil {
+					dcur = int64(uintptr(unsafe.Pointer(cur))-uintptr(unsafe.Pointer(cctx.compileArena))) >> 20
+				}
+				dsave := int64(0)
+				if save != nil {
+					dsave = int64(uintptr(unsafe.Pointer(save))-uintptr(unsafe.Pointer(cctx.compileArena))) >> 20
+				}
+				mxutil.WriteStr(2, "  DSYNC scope closes on the wrong arena: slot=" | mxutil.SimpleItoa64(dcur) | "MB save=" | mxutil.SimpleItoa64(dsave) | "MB depth=" | mxutil.SimpleItoa(runtime.FnStackDepth()) | "\n")
+			}
 			runtime.ManualArenaExit(cctx.compileArena)
 		}
 		runtime.SetCurrentArena(save)
@@ -2646,6 +2666,14 @@ func (fb *ssaFuncBuilder) checkAssignable(val SSAValue, T Type, what string) {
 				if _, vTP := V.(*TypeParam); !vTP {
 					if IfaceCheckConclusive(V, tIface) {
 						if IfaceMethodSetLocal(V, fb.fn.Pkg.Pkg) {
+							// Judged at the end of THIS member (see emitAllFunctions):
+							// the deferral exists only because a type's method set
+							// must be complete, and CreatePackage records every
+							// declaration before any body is built, so a whole-member
+							// window is enough. A package-wide post-pass made the
+							// recorded V/T outlive the arena they were built in -
+							// SIGSEGV in checkIfaceAssignments reading a type from the
+							// previous package's freed arena.
 							push(cstate.pendingIface, ifaceAssign{V: V, T: T, localPkg: fb.fn.Pkg.Pkg, what: what, pos: fb.errPos(), vname: val.SSAName()})
 						}
 					}
@@ -7570,8 +7598,9 @@ func (fb *ssaFuncBuilder) genericMethodInstance(named *Named, methodName string)
 		durableEnd(saveDurable)
 		return fn5, sig, true
 	}
-	// A package member outlives this member's arena: allocate it in the package arena.
-	saveDurable := durableBegin()
+	// A package member outlives this member's arena: allocate it in the package
+	// arena. The scope opened above already covers this, including the mangled
+	// name - a second durableBegin here shadowed the first and leaked its frame.
 	fn = &SSAFunction{
 		name:      mangledName,
 		Signature: sig,
@@ -7579,7 +7608,6 @@ func (fb *ssaFuncBuilder) genericMethodInstance(named *Named, methodName string)
 		Prog:      fb.fn.Prog,
 	}
 	fb.fn.Pkg.SetMember(mangledName, fn)
-	durableEnd(saveDurable)
 	// Record the instantiated receiver for interface dispatch: the arm scan
 	// enumerates type DECLARATIONS, and a generic declaration is skipped because
 	// its methods are never emitted standalone. Without this a value boxed as
@@ -11476,6 +11504,16 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, plainName str
 		callerPkg = fb.fn.Pkg.Pkg.Path
 	}
 	recordGen("F", srcPkgPath, plainName, "", callerPkg, typeArgs, site)
+	// The clone is PACKAGE state: its member entry is read by later bodies and
+	// by emission, so the mangled NAME, the signature (and every type it
+	// instantiates), the function and the member entry are allocated in the
+	// package arena even though this runs inside another member's per-function
+	// arena. The name has to be inside this scope: it becomes a key of
+	// targetPkg.Members and the clone's SSAName, and a name allocated outside
+	// it is a dead string for the next body - measured as a SIGSEGV in
+	// hashmapContentSet -> hash32 while emitting the member after
+	// strconv.initPow10, hashing a 32-byte key out of the arena just reset.
+	saveDurable := durableBegin()
 	mangledName := mangleGenericName(plainName, typeArgs)
 	if srcPkgPath != "" {
 		// Two generic funcs with the same name from different packages can
@@ -11495,6 +11533,7 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, plainName str
 		mangledName = pfx | "." | mangledName
 	}
 	if fn5, ok54 := targetPkg.Members[mangledName].(*SSAFunction); ok54 {
+		durableEnd(saveDurable)
 		return fb.emitCallToSSAFunc(fn5, args, hasDots), true
 	}
 	typeSubst := map[string]Type{}
@@ -11532,7 +11571,6 @@ func (fb *ssaFuncBuilder) monomorphizeAndCall(fd *syntax.FuncDecl, plainName str
 	// by emission, so the signature (and every type it instantiates), the
 	// function and the member entry are allocated in the package arena even
 	// though this runs inside another member's per-function arena.
-	saveDurable := durableBegin()
 	sig := resolveSignatureWithSubst(fd.Type, typeSubst, srcScope)
 	if sig == nil {
 		durableEnd(saveDurable)

@@ -513,6 +513,7 @@ func FnArenaPush(capacity uintptr) (a *Arena) {
 	a = ArenaAcquire(capacity)
 	a.alloc = 0
 	arenaScopeArena(a.scope)
+	curEvNote(evPush, nil, a)
 	domainRoot.fnStack[domainRoot.fnTop] = a
 	return a
 }
@@ -523,7 +524,17 @@ func FnArenaPop() (a *Arena) {
 	if manualArena != nil {
 		return nil
 	}
+	// A manual frame is not a function frame: its owner pops it with
+	// ManualArenaExit or SovereignRestoreArena. Popping one here means the
+	// manual stack and the fn stack have drifted apart, and the next push then
+	// installs a fresh frame arena in the slot a phase arena owns - the phase
+	// keeps its depth while its arena is gone, and every later allocation in it
+	// lands in a pooled frame that the phase will never free.
+	if domainRoot.manualFrame[domainRoot.fnTop>>6]&(1<<(domainRoot.fnTop&63)) != 0 {
+		runtimePanic("fn arena pop on a manual frame slot")
+	}
 	a = domainRoot.fnStack[domainRoot.fnTop]
+	curEvNote(evPop, a, nil)
 	domainRoot.fnStack[domainRoot.fnTop] = nil
 	domainRoot.sovScratch[domainRoot.fnTop>>6] &^= 1 << (domainRoot.fnTop & 63)
 	domainRoot.fnTop--
@@ -583,6 +594,33 @@ func rootArenaAddr() (u uintptr) {
 	return uintptr(unsafe.Pointer(&domainRoot.root))
 }
 
+// FnStackDepth reports the function arena stack's depth, and ManualFrameDepth
+// the number of live manual frames. They exist so an invariant check outside the
+// runtime can say whether a suspicious arena state came from a pushed frame or a
+// popped manual phase, without reaching into domainRoot.
+func FnStackDepth() (n int32) {
+	if domainRoot == nil {
+		return 0
+	}
+	return domainRoot.fnTop
+}
+
+// ArenaScopeOf names the arena's scope tag (SetArenaScope id), so a diagnostic
+// can say what class of arena a slot ended up holding.
+func ArenaScopeOf(a *Arena) (n int32) {
+	if a == nil {
+		return 0
+	}
+	return a.scope
+}
+
+func ManualFrameDepth() (n int32) {
+	if domainRoot == nil {
+		return 0
+	}
+	return domainRoot.manualTop
+}
+
 // CurrentArena returns the active arena (top of function stack).
 func CurrentArena() (a *Arena) {
 	if domainRoot == nil {
@@ -591,13 +629,116 @@ func CurrentArena() (a *Arena) {
 	return domainRoot.fnStack[domainRoot.fnTop]
 }
 
+// curSwOld/New/Dep record the last current-arena switches. A switch that is not
+// restored leaves the slot naming another arena with the DEPTH unchanged, and
+// everything after it allocates into the wrong one; this ring makes that visible
+// at the check that first notices it. Debug instrumentation, compiled in and
+// known-cheap (three stores per switch).
+var curSwOld [65536]uintptr
+var curSwNew [65536]uintptr
+var curSwDep [65536]int32
+var curSwKnd [65536]uint8
+var curSwN int32
+
+// arena stack events, for the debug ring: who changed the shape of the fn stack
+const (
+	evSet   = 0 // SetCurrentArena: slot replaced, depth unchanged
+	evEnter = 1 // ManualArenaEnter: manual frame pushed
+	evExit  = 2 // ManualArenaExit: manual frame popped
+	evBorrow = 3 // SovereignSetArena: borrow frame pushed
+	evRestore = 4 // SovereignRestoreArena: borrow frame popped
+	evPush  = 5 // FnArenaPush: function frame pushed
+	evPop   = 6 // FnArenaPop: function frame popped
+)
+
+// slotWatch arms a check for the ONE event that must never happen: a frame
+// arena (the watched arena's scope) installed in the watched slot, or the
+// watched slot popped by a frame pop. The first such event is recorded by
+// index so the caller can dump the event ring around it.
+var slotWatchArena uintptr
+var slotWatchDepth int32
+var slotWatchArmed bool
+var slotWatchIdx int32 = -1
+var slotWatchKind int32 = -1
+
+// arenaScopeOfWatched returns the watched arena's scope tag, read through the
+// same pointer the watch holds.
+func arenaScopeOfWatched() (n int32) {
+	if slotWatchArena == 0 {
+		return 0
+	}
+	return (*Arena)(unsafe.Pointer(slotWatchArena)).scope
+}
+
+func SetSlotWatch(a *Arena, depth int32) {
+	if a == nil {
+		slotWatchArmed = false
+		return
+	}
+	slotWatchArena = uintptr(unsafe.Pointer(a))
+	slotWatchDepth = depth
+	slotWatchArmed = true
+	slotWatchIdx = -1
+	slotWatchKind = -1
+}
+
+func SlotWatchIdx() (n int32, kind int32) {
+	return slotWatchIdx, slotWatchKind
+}
+
+func curEvNote(kind uint8, old, new *Arena) {
+	if domainRoot == nil {
+		return
+	}
+	if slotWatchArmed && slotWatchIdx < 0 && domainRoot.fnTop == slotWatchDepth {
+		bad := false
+		if kind == evSet && new != nil && uintptr(unsafe.Pointer(new)) != slotWatchArena && new.scope == arenaScopeOfWatched() {
+			bad = true
+		}
+		if kind == evPush && new != nil && uintptr(unsafe.Pointer(new)) != slotWatchArena && new.scope == arenaScopeOfWatched() {
+			bad = true
+		}
+		if kind == evPop && old != nil && uintptr(unsafe.Pointer(old)) == slotWatchArena {
+			bad = true
+		}
+		if kind == evExit && old != nil && uintptr(unsafe.Pointer(old)) == slotWatchArena {
+			bad = true
+		}
+		if kind == evRestore && old != nil && uintptr(unsafe.Pointer(old)) == slotWatchArena {
+			bad = true
+		}
+		if bad {
+			slotWatchIdx = curSwN
+			slotWatchKind = int32(kind)
+		}
+	}
+	i := curSwN & 65535
+	curSwKnd[i] = kind
+	curSwOld[i] = uintptr(unsafe.Pointer(old))
+	curSwNew[i] = uintptr(unsafe.Pointer(new))
+	curSwDep[i] = domainRoot.fnTop
+	curSwN++
+}
+
 // SetCurrentArena overwrites the top of the function arena stack.
 // Used by hashmap owner-arena switching. Caller must save/restore.
 func SetCurrentArena(a *Arena) {
 	if domainRoot == nil {
 		return
 	}
+	curEvNote(evSet, domainRoot.fnStack[domainRoot.fnTop], a)
 	domainRoot.fnStack[domainRoot.fnTop] = a
+}
+
+// CurSwitchCount and CurSwitchAt expose the switch ring to a debug check that
+// formats it with the compiler's own number formatting.
+func CurSwitchCount() (n int32) {
+	return curSwN
+}
+
+func CurSwitchAt(k int32) (old, cur uintptr, depth int32, kind uint8) {
+	i := k & 65535
+	return curSwOld[i], curSwNew[i], curSwDep[i], curSwKnd[i]
 }
 
 // InitArenaRestore hands the caller's arena back after an initialiser that runs
@@ -4234,6 +4375,7 @@ func SovereignSetArena(a *Arena) {
 		runtimePanic("sovereign: borrow stack overflow")
 	}
 	domainRoot.fnTop = i
+	curEvNote(evBorrow, nil, a)
 	domainRoot.fnStack[i] = a
 	domainRoot.manualFrame[i>>6] |= 1 << (i & 63)
 	domainRoot.fnBorrow[i>>6] |= 1 << (i & 63)
@@ -4249,7 +4391,14 @@ func SovereignRestoreArena(a *Arena) {
 	if i == 0 {
 		runtimePanic("sovereign: restore underflow")
 	}
+	// Only a borrow frame is popped here; a plain frame or a manual phase on
+	// top means the borrow that this epilogue closes was already consumed (or
+	// never pushed), and popping it would steal another frame's slot.
+	if domainRoot.fnBorrow[i>>6]&(1<<(i&63)) == 0 {
+		runtimePanic("sovereign: restore on a slot that is not a borrow")
+	}
 	domainRoot.fnBorrow[i>>6] &^= 1 << (i & 63)
+	curEvNote(evRestore, domainRoot.fnStack[i], nil)
 	domainRoot.fnStack[i] = nil
 	domainRoot.manualFrame[i>>6] &^= 1 << (i & 63)
 	domainRoot.fnTop = i - 1
@@ -4827,7 +4976,16 @@ func ManualArenaEnter(a *Arena) {
 		runtimePanic("manual arena stack overflow")
 	}
 	domainRoot.fnTop = i
+	curEvNote(evEnter, nil, a)
 	domainRoot.fnStack[i] = a
+	// Mark the slot: manualFrame is "this slot was pushed by ManualArenaEnter",
+	// and codecInManualFrame answers stability from it. Without the bit a phase
+	// arena was only stable while it happened to be the TOP manual arena - so a
+	// durable scope or a borrow on top of it made every pointer into the phase
+	// look like dying-frame data, and the return protocol deep-copied whole SSA
+	// graphs (measured: 382MB inside one strconv function, and a codec tag
+	// desync when the copy's seen-set drifted from the decoder's).
+	domainRoot.manualFrame[i>>6] |= 1 << (i & 63)
 	if domainRoot.manualTop < int32(len(domainRoot.manualStack)) {
 		domainRoot.manualStack[domainRoot.manualTop] = manualArena
 		domainRoot.manualTop++
@@ -4844,7 +5002,17 @@ func ManualArenaExit(a *Arena) {
 	if i == 0 {
 		runtimePanic("manual arena underflow")
 	}
+	// The slot must be a manual frame: leaving one that is not means an
+	// enter/exit pair is unbalanced, and the pop hands the slot to whichever
+	// arena happens to be installed above. The ARGUMENT is not the test - a
+	// caller may pass the arena it intends to restore into (the root-map
+	// helpers do), because the pop itself is what restores.
+	if domainRoot.manualFrame[i>>6]&(1<<(i&63)) == 0 || domainRoot.fnBorrow[i>>6]&(1<<(i&63)) != 0 {
+		runtimePanic("manual arena exit on a slot that is not a manual frame")
+	}
+	curEvNote(evExit, domainRoot.fnStack[i], nil)
 	domainRoot.fnStack[i] = nil
+	domainRoot.manualFrame[i>>6] &^= 1 << (i & 63)
 	domainRoot.fnTop = i - 1
 	if domainRoot.manualTop > 0 {
 		domainRoot.manualTop--

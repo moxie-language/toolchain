@@ -4,6 +4,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"unsafe"
 	"moxielang.dev/pkg/mxutil"
 	. "moxielang.dev/pkg/types"
 )
@@ -781,6 +782,27 @@ func emitNextMemberName(e *irEmitter, emitted map[string]bool) (name string) {
 	return name
 }
 
+// ssaValTag names the concrete kind of an SSA value for MX_EMIT_TRACE.
+func ssaValTag(v SSAValue) (s string) {
+	switch v.(type) {
+	case *SSAConst:
+		return "const"
+	case *SSAGlobal:
+		return "global"
+	case *SSAFunction:
+		return "func"
+	case *ssaRegister:
+		return "reg"
+	case *SSAParameter:
+		return "param"
+	case *SSAFreeVar:
+		return "free"
+	case *SSABuiltin:
+		return "builtin"
+	}
+	return "other"
+}
+
 // emitBuiltMember emits one member whose body already exists and lives in the
 // CURRENT arena, clearing the per-function scratch afterwards. Monomorphised
 // clones are built while another member is being built, so their bodies belong
@@ -905,6 +927,7 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 			continue
 		}
 		nf++
+		tM0 := runtime.NowNano()
 		// PUSH the per-function arena, do not just name it current.
 		// `alloc` hands out from domainRoot.fnStack[fnTop]; it never reads
 		// the SetCurrentArena override, so an earlier pair of SetCurrentArena
@@ -925,7 +948,70 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 		// The BODY, its checks and its emitted text all live in fnArena now:
 		// step 2's unit of work and step 4's unit of reclamation are the same
 		// function, which is why they are one push.
+		d0 := runtime.FnStackDepth()
+		m0 := runtime.ManualFrameDepth()
+		runtime.SetSlotWatch(fnArena, d0)
 		e.pkg.BuildBody(name)
+		// A build opens and closes its own durable scopes; an unbalanced one
+		// leaves a package-arena frame on the fn stack, and then the codec sees
+		// the wrong phase arena for the rest of the package and deep-copies the
+		// body graph (silently: the first symptom is a codec tag desync in an
+		// unrelated function). Name it here instead.
+		if cur := runtime.CurrentArena(); cur != fnArena {
+			d1 := runtime.FnStackDepth()
+			m1 := runtime.ManualFrameDepth()
+			which := "unknown"
+			if cur == nil {
+				which = "nil"
+			}
+			if cctx.compileArena != nil && cur == cctx.compileArena {
+				which = "compileArena"
+			}
+			if cur == runtime.RootArena() {
+				which = "rootArena"
+			}
+			mxutil.WriteStr(2, "  LEAK build left a frame open for " | name | " current=" | which | " used=" | mxutil.SimpleItoa(int32(runtime.ArenaUsed(cur)>>20)) | "MB cap=" | mxutil.SimpleItoa(int32(runtime.ArenaCap(cur)>>20)) | "MB d=" | mxutil.SimpleItoa64(int64(uintptr(unsafe.Pointer(cur))-uintptr(unsafe.Pointer(fnArena)))>>20) | "MB scope=" | mxutil.SimpleItoa(runtime.ArenaScopeOf(cur)) | " depth " | mxutil.SimpleItoa(d0) | "->" | mxutil.SimpleItoa(d1) | " manual " | mxutil.SimpleItoa(m0) | "->" | mxutil.SimpleItoa(m1) | "\n")
+
+			base := uintptr(unsafe.Pointer(fnArena))
+			wi, wk := runtime.SlotWatchIdx()
+			mxutil.WriteStr(2, "    watch idx=" | mxutil.SimpleItoa(wi) | " kind=" | mxutil.SimpleItoa(wk) | "\n")
+			swN := runtime.CurSwitchCount()
+			swK := swN - 24
+			if wi >= 0 {
+				swK = wi - 6
+				// Walk back to the last event that put OUR arena back in OUR
+				// slot, so the dump shows the whole run that ends with the slot
+				// naming a frame arena.
+				for k := wi - 1; k >= 0 && k > wi-65536; k-- {
+					_, sn0, sd0, _ := runtime.CurSwitchAt(k)
+					if sd0 == d0 && sn0 == base {
+						swK = k
+						break
+					}
+				}
+				if wi-swK > 60 {
+					swK = wi - 60
+				}
+				swN = wi + 7
+				if swK < 0 {
+					swK = 0
+				}
+				if swN > runtime.CurSwitchCount() {
+					swN = runtime.CurSwitchCount()
+				}
+			}
+			if swK < 0 {
+				swK = 0
+			}
+			for k := swK; k < swN; k++ {
+				so, sn, sd, sk := runtime.CurSwitchAt(k)
+				sc := int32(0)
+				if sn != 0 {
+					sc = runtime.ArenaScopeOf((*runtime.Arena)(unsafe.Pointer(sn)))
+				}
+				mxutil.WriteStr(2, "    ev#" | mxutil.SimpleItoa(k) | " k=" | mxutil.SimpleItoa(int32(sk)) | " d=" | mxutil.SimpleItoa(sd) | " old=" | mxutil.SimpleItoa64(int64(so-base)>>20) | "MB new=" | mxutil.SimpleItoa64(int64(sn-base)>>20) | "MB s=" | mxutil.SimpleItoa(sc) | "\n")
+			}
+		}
 		// The global-type scan is per body now: it refines the declared type of
 		// a package global from the stores and loads that reach it, and it used
 		// to be a whole-package loop that required every body to exist.
@@ -942,6 +1028,11 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 		}
 		checkUseAfterFree(fn)
 		checkParamMutation(fn)
+		// The deferred interface-assignment verdict belongs to this body: its
+		// recorded values and types were built in this member's arena and do not
+		// outlive it. The method sets it needs are complete because
+		// CreatePackage recorded every declaration before the first body.
+		checkIfaceAssignments()
 		cau2, cac2 := uint64(0), uint64(0)
 		if cctx.compileArena != nil {
 			cau2 = runtime.ArenaUsed(cctx.compileArena)
@@ -960,7 +1051,12 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 		if rssPeak("emit " | fn.name) {
 			mxutil.WriteStr(2, "    NEWPEAK rss=" | mxutil.SimpleItoa(int32(cctx.peakRSSKB/1024)) | "MB at emit " | fn.name | " pool=" | mxutil.SimpleItoa(e.strPoolBytes()>>10) | "KB nstr=" | mxutil.SimpleItoa(int32(len(e.strConst)+len(e.pendStrConsts))) | "\n")
 		}
+		tM1 := runtime.NowNano()
 		emitBuiltMember(e, fn)
+		tM2 := runtime.NowNano()
+		if nf <= 24 || nf%64 == 0 {
+			mxutil.WriteStr(2, "    TIME nf=" | mxutil.SimpleItoa(nf) | " build=" | mxutil.SimpleItoa(int32((tM1-tM0)/1000000)) | "ms emit=" | mxutil.SimpleItoa(int32((tM2-tM1)/1000000)) | "ms\n")
+		}
 		// Clones this build created have their bodies in THIS arena; emit them
 		// before the reset, or the reset frees a body that was never written.
 		for {
@@ -993,11 +1089,14 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 		// per-function cost is real or is a 64MB segment grabbed for a few
 		// megabytes: `acap` cannot tell those apart, `used` can.
 		mxutil.WriteStr(2, "    EAFU nf="|mxutil.SimpleItoa(nf)|" used="|mxutil.SimpleItoa(int32(runtime.ArenaUsed(fnArena)>>20))|"MB\n")
-		// EXPERIMENT A: no reset. If the crash survives this, the defect is not
-		// the reset freeing a still-referenced object.
-		if runtime.ArenaUsed(fnArena) > (1<<30) {
-			runtime.ArenaReset(fnArena)
-		}
+		// Experiment A (skip the reset) ran here and answered its question:
+		// with the reset skipped, the build no longer crashes at strconv but
+		// hangs at the same boundary one member later (math, after ilogb,
+		// 10+ minutes at 99% CPU with no output). A hang and a crash at the
+		// same boundary are one defect, so the reset is not what is broken:
+		// something allocated in this arena is still referenced afterwards.
+		// The reset stays.
+		runtime.ArenaReset(fnArena)
 		// The safe point between two function bodies: the select answers
 		// ctrl-c (a build that cannot be stopped is a build nobody can
 		// interrupt - it also cannot reclaim, because the drain only runs
@@ -2144,15 +2243,39 @@ func emitFunctionOf(e *irEmitter, f *SSAFunction) {
 	}
 	e.hoisted = hoisted
 	e.missingStores = nil
+	// MX_EMIT_TRACE=<member>: name every operand of one body as it is visited,
+	// before it is hashed. A dangling SSA name crashes the hash below, and the
+	// last line printed is the operand that carried it.
+	traceFn := getenv("MX_EMIT_TRACE")
+	tr := traceFn != "" && traceFn == f.name
+	if tr {
+		n := int32(0)
+		for _, tb := range f.Blocks {
+			for _, ti := range tb.Instrs {
+				e.instrOperands(ti)
+				for j, to := range e.operandBuf {
+					if to == nil {
+						continue
+					}
+					mxutil.WriteStr(2, "TRO i=" | mxutil.SimpleItoa(n) | " op=" | mxutil.SimpleItoa(j) | " k=" | ssaValTag(to) | "\n")
+				}
+				n++
+			}
+		}
+	}
 	e.storedTo = map[string]bool{}
 	for _, b := range f.Blocks {
 		for _, instr := range b.Instrs {
 			if s, ok := instr.(*SSAStore); ok && s.Addr != nil {
+				if tr {
+					mxutil.WriteStr(2, "TRS " | s.Addr.SSAName() | "\n")
+				}
 				e.storedTo[s.Addr.SSAName()] = true
 			}
 		}
 	}
 	e.usedAs = map[string]bool{}
+	instrNo := int32(0)
 	e.faByBase = map[string][]*SSAFieldAddr{}
 	e.mulByBase = map[string][]string{}
 	e.devByAddr = map[string][]*SSAStore{}
@@ -2160,11 +2283,15 @@ func emitFunctionOf(e *irEmitter, f *SSAFunction) {
 	for _, b := range f.Blocks {
 		for _, instr := range b.Instrs {
 			e.instrOperands(instr)
-			for _, ref := range e.operandBuf {
+			for j, ref := range e.operandBuf {
 				if ref != nil {
+					if tr {
+						mxutil.WriteStr(2, "TRU i=" | mxutil.SimpleItoa(instrNo) | " op=" | mxutil.SimpleItoa(j) | " k=" | ssaValTag(ref) | " n=" | ref.SSAName() | "\n")
+					}
 					e.usedAs[ref.SSAName()] = true
 				}
 			}
+			instrNo++
 			switch i := instr.(type) {
 			case *SSAFieldAddr:
 				if i.X != nil {
