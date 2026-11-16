@@ -8475,71 +8475,15 @@ func main() {
 	prepareDispatchIndex(pkgs, cacheBase, nil)
 	memLine("  dispindex")
 
-	// Whole-link registry pre-pass: interface dispatch emits a typeID switch
-	// over impls found in cctx.universe.Registry, which is populated in
-	// dependency order. A type defined in a downstream package (main) passed
-	// into an upstream package's interface param was invisible to the
-	// upstream dispatch, which silently called a wrong impl (or hit "no
-	// impl"). Typecheck every package in the closure into the registry and
-	// write every mxh to the cache before the first emission, so dispatch
-	// enumerates the whole link set: serial emission reads the accumulated
-	// registry directly, workers load every mxh at startup.
-	byPathAll := map[string]*pkgInfo{}
-	for _, p := range pkgs {
-		byPathAll[p.path] = p
-		byPathAll[dispPkgKey(p)] = p
-	}
-	importsLoaded := map[string]bool{}
-	for _, pkg := range pkgs {
-		if pkg.baked {
-			continue
-		}
-		compilePath := pkg.path
-		if compilePath == "." || compilePath == ".." || mxutil.HasPrefix(compilePath, "/") || mxutil.HasPrefix(compilePath, "./") || mxutil.HasPrefix(compilePath, "../") {
-			compilePath = pkg.name
-		}
-		cachedMxh := cachedMxhPath(cacheBase, pkg)
-		if mxutil.FileExists(cachedMxh) && !forceRebuild {
-			if !tier1(dispPkgKey(pkg), cctx.dispIfaceMethods, cctx.dispMethodsByPkg) {
-				// Tier 2 AND already cached: no dispatch can reach it, its mxh
-				// is on disk, and the compile loop materialises it lazily into a
-				// relessable arena. A package that must be COMPILED still runs
-				// TypeCheckOnly below, because a later compile can need its
-				// declarations through a path that is not a direct import -
-				// mangleGenericName is that path, and skipping it broke the
-				// self-host twice.
-				continue
-			}
-			// Record the package's declared methods while its mxh is being
-			// read anyway: this is the index findIfaceImpls consults to skip
-			// packages that cannot implement the method being dispatched.
-			if data, dok := mxutil.ReadFile(cachedMxh); dok {
-				// Load this package's direct imports first. A descriptor names
-				// types from their packages, and an unresolved qualifier
-				// degrades to int32: crypto's `method Hash New ->hash.Hash`
-				// became crypto.Hash (int32) because hash was skipped here as
-				// tier 2, and every importer then declared an i32 return
-				// (LLVM: extractvalue {i64, ptr} on i32).
-				for _, imp := range pkg.imports {
-					ip := byPathAll[imp]
-					if ip == nil || ip.baked || importsLoaded[imp] {
-						continue
-					}
-					importsLoaded[imp] = true
-					if idata, iok := mxutil.ReadFile(cachedMxhPath(cacheBase, ip)); iok {
-						loadMxhData(idata)
-					}
-				}
-				if cctx.dispMethodsByPkg == nil {
-					cctx.dispMethodsByPkg = map[string]map[string]bool{}
-				}
-				cctx.dispMethodsByPkg[dispPkgKey(pkg)] = dispParseMethods(string(data))
-				loadMxhData(data)
-			}
-			continue
-		}
-		typeCheckPkgSource(cacheBase, pkg.dir, pkg.files, pkg.path, compilePath, cachedMxh)
-	}
+	// There is exactly one export pass, and prepareDispatchIndex above IS it:
+	// it typechecks every package whose mxh is missing, writes the mxh, and
+	// builds the dispatch index from the text. It used to be followed by a
+	// second "whole-link registry pre-pass" that typechecked the same packages
+	// again (every package, under -a) and loaded their graphs into the
+	// registry - work that was then thrown away, because buildPkgsSerial
+	// starts with retainGraphsOnly(nil) and reloads exactly what each package
+	// needs. That was the second `tc-out` in every cold-build log and the
+	// third parse of every package.
 	if getenv("MOXIE_TYPEDB_STATS") != "" && cctx.typeDB != nil {
 		mxutil.WriteStr(2, "typedb: facts=" | simpleItoa(typeDBFactCount(cctx.typeDB)) |
 			" methods=" | simpleItoa(typeDBMethodCount(cctx.typeDB)) |

@@ -1696,13 +1696,26 @@ func CompileToIR(src []byte, name string, triple string, pkgDir string) (s strin
 	file := cctx.tcFile
 	memLine("   ci-tc "|name)
 
-	// Generate mxh inside compile arena - type graph is alive.
-	// Serialize exports before any arena switch. Then load the
-	// serialized text on the root arena. No cross-arena graph copy.
+	// The LIVE graph is registered as this package's export for the duration
+	// of its own compile. It is not loaded from the mxh: the pass has the
+	// graph, and materialising the text next to it would give every type a
+	// second Named identity - a second authority for one package (A2), and
+	// `[]T` in one place would not be `[]T` in another. The entry is removed
+	// again before this arena is freed, so a later package loads the export
+	// from disk at use like any other.
+	regLive := false
+	if pkg != nil && cctx.universe != nil && cctx.universe.Registry != nil {
+		saveReg := runtime.CurrentArena()
+		runtime.SetCurrentArena(runtime.RootArena())
+		cctx.universe.Registry[rootCopyStr(name)] = pkg
+		runtime.SetCurrentArena(saveReg)
+		regLive = true
+	}
+	// Generate mxh inside compile arena - type graph is alive. The text is
+	// copied out so it survives ArenaFree.
 	if pkg != nil && file != nil {
 		mxhData := cctx.tcMxh
 		runtime.ManualArenaExit(arena)
-		loadMxhInto([]byte(mxhData))
 		// Copy mxh text to root arena so it survives ArenaFree.
 		mxhCopy := []byte{:len(mxhData)}
 		copy(mxhCopy, mxhData)
@@ -1716,6 +1729,9 @@ func CompileToIR(src []byte, name string, triple string, pkgDir string) (s strin
 		res := parseErrorReport()
 		resCopy := []byte{:len(res)}
 		copy(resCopy, res)
+		if regLive {
+			delete(cctx.universe.Registry, name)
+		}
 		runtime.ArenaFree(arena)
 		cctx.compileArena = nil
 		cctx.localTypeReg = nil
@@ -1761,6 +1777,9 @@ func CompileToIR(src []byte, name string, triple string, pkgDir string) (s strin
 		runtime.ManualArenaExit(arena)
 		resCopy := []byte{:len(res)}
 		copy(resCopy, res)
+		if regLive {
+			delete(cctx.universe.Registry, name)
+		}
 		runtime.ArenaFree(arena)
 		cctx.compileArena = nil
 		cctx.localTypeReg = nil
@@ -1802,6 +1821,9 @@ func CompileToIR(src []byte, name string, triple string, pkgDir string) (s strin
 		runtime.ManualArenaExit(arena)
 		resCopy := []byte{:len(res)}
 		copy(resCopy, res)
+		if regLive {
+			delete(cctx.universe.Registry, name)
+		}
 		runtime.ArenaFree(arena)
 		cctx.compileArena = nil
 		cctx.localTypeReg = nil
@@ -1820,6 +1842,9 @@ func CompileToIR(src []byte, name string, triple string, pkgDir string) (s strin
 	}
 
 	// Bulk reclaim: reset arena for next compilation.
+	if regLive {
+		delete(cctx.universe.Registry, name)
+	}
 	runtime.ArenaFree(arena)
 	cctx.compileArena = nil
 	cctx.localTypeReg = nil
