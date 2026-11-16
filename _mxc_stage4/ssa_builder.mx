@@ -85,17 +85,26 @@ func durableBegin() (save *runtime.Arena) {
 		mxutil.WriteStr(2, "  DBEGIN odd save=" | mxutil.SimpleItoa64(d) | "MB depth=" | mxutil.SimpleItoa(runtime.FnStackDepth()) | " scope=" | mxutil.SimpleItoa(runtime.ArenaScopeOf(save)) | "\n")
 		base := uintptr(unsafe.Pointer(cctx.compileArena))
 		swN := runtime.CurSwitchCount()
-		swK := swN - 8
-		if swK < 0 {
-			swK = 0
-		}
-		for k := swK; k < swN; k++ {
+		depth := runtime.FnStackDepth()
+		// Every event recorded AT THIS DEPTH, newest first: the slot can only be
+		// changed by an event at its own depth, and the borrow traffic above it
+		// drowns the ring.
+		shown := int32(0)
+		for k := swN - 1; k >= 0 && k > swN-65536 && shown < 12; k-- {
 			so, sn, sd, sk := runtime.CurSwitchAt(k)
+			if sd != depth {
+				continue
+			}
+			shown++
 			sc := int32(0)
 			if sn != 0 {
 				sc = runtime.ArenaScopeOf((*runtime.Arena)(unsafe.Pointer(sn)))
 			}
-			mxutil.WriteStr(2, "    pre#" | mxutil.SimpleItoa(k) | " k=" | mxutil.SimpleItoa(int32(sk)) | " d=" | mxutil.SimpleItoa(sd) | " old=" | mxutil.SimpleItoa64(int64(so-base)>>20) | "MB new=" | mxutil.SimpleItoa64(int64(sn-base)>>20) | "MB s=" | mxutil.SimpleItoa(sc) | "\n")
+			oc := int32(0)
+			if so != 0 {
+				oc = runtime.ArenaScopeOf((*runtime.Arena)(unsafe.Pointer(so)))
+			}
+			mxutil.WriteStr(2, "    at#" | mxutil.SimpleItoa(k) | " k=" | mxutil.SimpleItoa(int32(sk)) | " old=" | mxutil.SimpleItoa64(int64(so-base)>>20) | "MB/" | mxutil.SimpleItoa(oc) | " new=" | mxutil.SimpleItoa64(int64(sn-base)>>20) | "MB/" | mxutil.SimpleItoa(sc) | "\n")
 		}
 	}
 	if cctx != nil && cctx.compileArena != nil {
