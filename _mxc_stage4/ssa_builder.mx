@@ -298,21 +298,21 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 	// a body can make is already in the file's syntax.
 	pb.checkUnusedImports()
 	memLine("     cp-checks "|pkg.Path)
-	// Declaration-level checks only. Everything that reads a finished body has
-	// moved to the per-member pipeline (emitAllFunctions: build -> checks ->
-	// emit -> drop), where the body's own arena reclaims what the check
-	// allocates. Measured on `runtime`: building all bodies cost 124MB and the
-	// whole-package check suite 289MB, the larger half of the SSA peak, because
-	// every check allocated per node into the package arena and outlived the
-	// graph it inspected.
+	// Declaration-level checks only, and all of them per FILE. Everything that
+	// reads a finished body lives in the per-member pipeline
+	// (emitAllFunctions: build -> checks -> emit -> drop), where the body's own
+	// arena reclaims what the check allocates. Measured on `runtime`: building
+	// all bodies cost 124MB and the whole-package check suite 289MB, the larger
+	// half of the SSA peak, because every check allocated per node into the
+	// package arena and outlived the graph it inspected.
 	//
-	// The AST-side checks stay here but run PER FILE: they read syntax only,
-	// the package pass owns it, and one file's walk no longer has to coexist
-	// with the other files' scratch.
-	checkSovereignLoopDecls(p, files)
-	memLine("     cp-sovereign "|pkg.Path)
-	checkIfaceAssignments()
-	memLine("     cp-ifaceassign "|pkg.Path)
+	// The two calls that used to stand here judged NOTHING once Step 2 stopped
+	// building bodies in CreatePackage: checkSovereignLoopDecls asked
+	// ssaFuncHasReceiverWrite, which walks fn.Blocks, and checkIfaceAssignments
+	// drained cstate.pendingIface, which checkAssignable fills while a body is
+	// built. Both are per member now (emitAllFunctions), where their subject
+	// exists. A check that runs before its subject is a check that is not
+	// running.
 	chkLine("decls")
 	// A file's checks walk that file's syntax and keep every walker, scope and
 	// diagnostic scratch in whatever arena is current - the PACKAGE arena -

@@ -494,7 +494,7 @@ func scanWasmSpawnTarget(p *SSAPackage, f *SSAFunction) {
 	}
 }
 
-// checkSovereignLoopDecls rejects declarations that ALLOCATE, per iteration,
+// checkSovereignLoopDeclOf rejects declarations that ALLOCATE, per iteration,
 // inside a loop body of a self-mutating (sovereign) method. Such a declaration
 // lands in the receiver's sovereign arena and persists until the method
 // returns. Move the loop scratch into a helper function so it runs in a
@@ -508,48 +508,40 @@ func scanWasmSpawnTarget(p *SSAPackage, f *SSAFunction) {
 // slice, map or array literal, with or without &) and a value of a
 // pointer-bearing type - see sovLoopDeclAllocates. This is the mirror of
 // legacy/compiler/restrict.go checkSovereignLoopDecls.
-func checkSovereignLoopDecls(p *SSAPackage, files []*syntax.File) {
-	if p == nil {
+//
+// ONE MEMBER, not one package. The predicate is the sovereign prologue's
+// (ssaFuncHasReceiverWrite walks the built body), so a whole-package walk from
+// CreatePackage - where Step 2 builds no body at all - found no function with a
+// receiver write and judged nothing: the check was silently dead from the day
+// the body build moved into the per-member pipeline. It belongs where the body
+// is, and the declaration is recovered from the member name the way
+// checkDuplicateCasesOf does it.
+func checkSovereignLoopDeclOf(p *SSAPackage, fn *SSAFunction) {
+	if p == nil || p.b == nil || fn == nil || fn.Signature == nil || fn.Signature.Recv == nil {
 		return
 	}
-	for _, f := range files {
-		if f == nil {
-			continue
-		}
-		for _, d := range f.DeclList {
-			fd, ok := d.(*syntax.FuncDecl)
-			if !ok || fd.Recv == nil || fd.Body == nil || fd.Name == nil {
-				continue
-			}
-			recvName := ssaRecvTypeName(fd.Recv)
-			if recvName == "" {
-				continue
-			}
-			member, ok2 := p.Members["(*" | recvName | ")." | fd.Name.Value]
-			if !ok2 {
-				member, ok2 = p.Members[recvName | "." | fd.Name.Value]
-			}
-			fn, ok3 := member.(*SSAFunction)
-			// The predicate is the one the sovereign prologue uses, not the
-			// direct scan: a method whose only mutation is a call on the
-			// receiver (g.advance(...)) still runs with the receiver's arena
-			// borrowed, so its loop scratch lands in the sovereign arena and
-			// persists just the same.
-			if !ok3 || fn.Signature == nil || fn.Signature.Recv == nil || !ssaFuncHasReceiverWrite(fn) {
-				continue
-			}
-			var named *Named
-			if ptr, okp := SafeUnderlying(fn.Signature.Recv.Typ).(*Pointer); okp {
-				if n, okn := ptr.Base.(*Named); okn {
-					named = n
-				}
-			}
-			if named == nil || !ssaIsSovereignNamedType(p, named) {
-				continue
-			}
-			scanSovLoopDecls(p, fn.name, f, fd.Body.List, false)
+	fd := p.b.funcDecls[fn.name]
+	if fd == nil || fd.Body == nil {
+		return
+	}
+	// The predicate is the one the sovereign prologue uses, not the direct
+	// scan: a method whose only mutation is a call on the receiver
+	// (g.advance(...)) still runs with the receiver's arena borrowed, so its
+	// loop scratch lands in the sovereign arena and persists just the same.
+	if !ssaFuncHasReceiverWrite(fn) {
+		return
+	}
+	var named *Named
+	if ptr, okp := SafeUnderlying(fn.Signature.Recv.Typ).(*Pointer); okp {
+		if n, okn := ptr.Base.(*Named); okn {
+			named = n
 		}
 	}
+	if named == nil || !ssaIsSovereignNamedType(p, named) {
+		return
+	}
+	// The scan reads syntax only; the file argument is unused by every callee.
+	scanSovLoopDecls(p, fn.name, nil, fd.Body.List, false)
 }
 
 func sovLoopErr(name, msg string) {
