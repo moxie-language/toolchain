@@ -1,6 +1,7 @@
 package main
 
 import (
+	"runtime"
 	"moxielang.dev/pkg/mxutil"
 	"moxielang.dev/pkg/syntax"
 	"moxielang.dev/pkg/token"
@@ -1115,19 +1116,45 @@ func (pb *ssaPkgBuilder) importedNamesOf(imp segImport) (names []string) {
 // checkShadowing enforces the naming rule over every function body in the
 // package, in one pass, so that a binding is visible to the whole block it sits
 // in regardless of where in that block it is written.
+// shMark/shMarkReport name the FUNCTION whose shadowing walk allocated more
+// than a threshold, so a per-file number is attributed to a declaration without
+// a build per candidate. Diagnostic; removed before merge.
+func shMark() {
+	if cctx == nil || cctx.shArenaRef == nil {
+		return
+	}
+	cctx.shArenaPrev = runtime.ArenaUsed(cctx.shArenaRef)
+}
+
+func shMarkReport(name string) {
+	if cctx == nil || cctx.shArenaRef == nil {
+		return
+	}
+	cur := runtime.ArenaUsed(cctx.shArenaRef)
+	if cur >= cctx.shArenaPrev+(2<<20) {
+		mxutil.WriteStr(2, "  shbig fn=" | name | " d=" | simpleItoa(int32((cur-cctx.shArenaPrev)>>20)) | "MB total=" | simpleItoa(int32(cur>>20)) | "MB\n")
+	}
+	cctx.shArenaPrev = cur
+}
+
 func checkShadowing(files []*syntax.File) {
 	pkgNames := packageDeclNames(files)
 	imports := packageImportNames(files)
+	// The enclosing name set is read by every function's walk while each
+	// function's OWN scratch is reclaimed at the end of that walk, so the set
+	// lives in the package arena and the per-function scratch does not.
+	checkOuterNames(&cctx.shOuter, pkgNames, imports)
+	outer := cctx.shOuter
 	for _, f := range files {
 		if f == nil {
 			continue
 		}
-		outer := concatNames(pkgNames, imports)
 		for _, d := range f.DeclList {
 			fd, ok := d.(*syntax.FuncDecl)
 			if !ok || fd.Body == nil || fd.Name == nil {
 				continue
 			}
+			shMark()
 			// A function body's top-level bindings share the parameter scope:
 			// `r, n := f()` redeclares a named result (or a parameter) rather
 			// than shadowing it, which is what the legacy compiler's go/types
@@ -1136,6 +1163,8 @@ func checkShadowing(files []*syntax.File) {
 			shDeclField(w, fd.Recv)
 			shDeclSig(w, fd.Type)
 			shStmts(w, fd.Body.List)
+			shMarkReport(fd.Name.Value)
+			checkPointReset()
 		}
 	}
 }

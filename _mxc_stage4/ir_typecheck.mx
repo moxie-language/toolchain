@@ -181,6 +181,13 @@ type compileCtx struct {
 	irOutputFile         string
 	curPkgPath           string
 	lastMxhData          string
+	// shadowing attribution (diagnostic; removed before merge)
+	shArenaRef  *runtime.Arena
+	shArenaPrev uint64
+	// checkArena is the arena the per-file checks run in, and shOuter is the
+	// package-scoped enclosing name set they read (diagnostic + step 3).
+	checkArena *runtime.Arena
+	shOuter    []string
 	// localTypeReg maps the descriptor tail a FUNCTION-LOCAL named type
 	// produces ("pkg.Name", the string typeDescName builds) to the type
 	// itself. Descriptors are emitted from the tail text at module tail, long
@@ -1149,6 +1156,35 @@ func fileHasGeneric(file *syntax.File) (ok bool) {
 	return false
 }
 
+// rootFuncDeclMap / rootScopeMap build a package scan's durable maps in the ROOT
+// arena and store them through out.
+//
+// They are written through a POINTER rather than returned: a map is neither a
+// pointer nor a slice, so the return protocol cannot alias it - it encodes and
+// decodes, i.e. deep-copies, and the copy lands in the caller's arena. Writing
+// the field directly is the only way to leave the map where it was built.
+//
+// Why the root and not the current arena: these record what a package declared
+// and are read by every LATER package's scan (and by memLine at each phase
+// boundary), while the arena current at the first package's scan is that
+// package's own typecheck arena - released after its emit. The map header then
+// points into a freed mapping and the next `len()` or insert faults. Measured
+// as a SIGSEGV in runtime.hashmapLen from memLine's `len(cctx.genericFuncDecls)`.
+// scannedGeneric and genericMethodInsts already did this; these four did not.
+func rootFuncDeclMap(out *map[string]*syntax.FuncDecl) {
+	prev := runtime.CurrentArena()
+	runtime.SovereignSetArena(runtime.RootArena())
+	*out = map[string]*syntax.FuncDecl{}
+	runtime.SovereignRestoreArena(prev)
+}
+
+func rootScopeMap(out *map[string]*Scope) {
+	prev := runtime.CurrentArena()
+	runtime.SovereignSetArena(runtime.RootArena())
+	*out = map[string]*Scope{}
+	runtime.SovereignRestoreArena(prev)
+}
+
 func ScanGenericDecls(src []byte, name string) {
 	if cctx.scannedGeneric == nil {
 		// Root-allocated: this map records which packages have already been
@@ -1301,12 +1337,12 @@ func ScanGenericDecls(src []byte, name string) {
 			if dd.Recv == nil && dd.Name != nil && dd.Name.Value != "init" {
 				if len(dd.TParamList) > 0 {
 					if cctx.genericFuncDecls == nil {
-						cctx.genericFuncDecls = map[string]*syntax.FuncDecl{}
+						rootFuncDeclMap(&cctx.genericFuncDecls)
 					}
 					cctx.genericFuncDecls[name+"."+dd.Name.Value] = dd
 				} else {
 					if cctx.genericPkgLocalDecls == nil {
-						cctx.genericPkgLocalDecls = map[string]*syntax.FuncDecl{}
+						rootFuncDeclMap(&cctx.genericPkgLocalDecls)
 					}
 					cctx.genericPkgLocalDecls[name+"."+dd.Name.Value] = dd
 				}
@@ -1315,7 +1351,7 @@ func ScanGenericDecls(src []byte, name string) {
 				rn := genericRecvTypeName(dd.Recv.Type)
 				if rn != "" {
 					if cctx.genericMethodDecls == nil {
-						cctx.genericMethodDecls = map[string]*syntax.FuncDecl{}
+						rootFuncDeclMap(&cctx.genericMethodDecls)
 					}
 					cctx.genericMethodDecls[name+"."+rn+"."+dd.Name.Value] = dd
 				}
@@ -1445,7 +1481,7 @@ func ScanGenericDecls(src []byte, name string) {
 		}
 	}
 	if cctx.genericPkgScopes == nil {
-		cctx.genericPkgScopes = map[string]*Scope{}
+		rootScopeMap(&cctx.genericPkgScopes)
 	}
 	cctx.genericPkgScopes[name] = scope
 	u2 := runtime.ArenaUsed(cctx.genericArena)

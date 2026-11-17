@@ -165,10 +165,65 @@ func durableEnd(save uintptr) {
 // chkLine reports the compile arena's used bytes after one check, so the suite's
 // 289MB is attributed per check instead of as a total. It allocates a few bytes
 // per call and prints one line.
-// chkALine reports a scratch arena's used bytes after one check, so the check
-// that asks for the most is named instead of inferred from an OOM.
-func chkALine(tag string, a *runtime.Arena) {
-	mxutil.WriteStr(2, "  chkA "|tag|" used="|simpleItoa(int32(runtime.ArenaUsed(a)>>20))|"MB\n")
+// checkOuterNames builds the set of names that enclose every function body - the
+// package's own declarations plus its imports - in the PACKAGE arena, and hands
+// it back through dst. Every function's shadow walk reads it, while each
+// function's own scratch is reclaimed the moment its walk returns, so the set
+// has to outlive the check arena. Written through a pointer because a returned
+// []string is deep-copied by the return protocol, and that copy would land in
+// the very arena the next reset reclaims.
+func checkOuterNames(dst *[]string, pkgNames, imports []string) {
+	if cctx == nil || cctx.compileArena == nil {
+		*dst = concatNames(pkgNames, imports)
+		return
+	}
+	n := int32(len(pkgNames) + len(imports))
+	if n == 0 {
+		*dst = nil
+		return
+	}
+	p := runtime.ArenaAlloc(cctx.compileArena, uintptr(n)*unsafe.Sizeof(""))
+	out := unsafe.Slice((*string)(p), n)
+	k := int32(0)
+	for i := int32(0); i < int32(len(pkgNames)); i++ {
+		out[k] = rootCopyString(cctx.compileArena, pkgNames[i])
+		k++
+	}
+	for i := int32(0); i < int32(len(imports)); i++ {
+		out[k] = rootCopyString(cctx.compileArena, imports[i])
+		k++
+	}
+	*dst = out
+}
+
+// checkPointReset reclaims the scratch of ONE declaration's check without
+// leaving the check's manual frame: the walker keeps nothing across a
+// declaration, and the enclosing name set it reads lives in the package arena.
+// Without this the per-file total is the sum over the file's functions -
+// measured on the compiler's own `main.mx` as 643MB of one file's shadowing
+// scratch, which is what pushed the boxed self-build over the cgroup limit.
+func checkPointReset() {
+	a := cctx.checkArena
+	if a == nil {
+		return
+	}
+	runtime.ManualArenaExit(a)
+	runtime.ArenaReset(a)
+	runtime.ManualArenaEnter(a)
+}
+
+// checkLeave closes the manual frame one check ran in, reclaims its scratch, and
+// names the size when it is large enough to be worth reporting. It pairs with
+// the ManualArenaEnter immediately before each check: one frame per check, so
+// the peak is the largest single check instead of the sum of all five. The
+// arena's own exit invariant is what refuses an unbalanced pair.
+func checkLeave(a *runtime.Arena, tag string) {
+	used := runtime.ArenaUsed(a)
+	runtime.ManualArenaExit(a)
+	if used >= 8<<20 {
+		mxutil.WriteStr(2, "  chkA "|tag|" used="|simpleItoa(int32(used>>20))|"MB\n")
+	}
+	runtime.ArenaReset(a)
 }
 
 func chkLine(tag string) {
@@ -249,23 +304,36 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 	// The diagnostics themselves are durable: addCompileError copies the
 	// message into the package arena.
 	checkArena := runtime.ArenaNew(4 * 1024 * 1024)
+	// Each check is independent and reads only syntax, so its scratch dies the
+	// moment it returns: one frame per check, reset before the next. Resetting
+	// only once per FILE was not enough - the compiler's own `main.mx` measured
+	// checkShadowing 113MB and checkMissingReturn a further 118MB in the SAME
+	// file's arena, i.e. 231MB of live scratch at the point the build also
+	// holds its emit accumulators, and the box then throttled the build into a
+	// stall at 926MB (MemoryHigh=900M, swap off). Per check the peak is the
+	// largest single check instead of their sum.
+	cctx.shArenaRef = checkArena
+	cctx.checkArena = checkArena
 	for _, f := range files {
-		runtime.ManualArenaEnter(checkArena)
 		one := []*syntax.File{f}
-		chkALine("ss", checkArena)
+		runtime.ManualArenaEnter(checkArena)
 		checkSubsliceStores(one, pkg.Path)
-		chkALine("ss2", checkArena)
+		checkLeave(checkArena, "ss")
+		runtime.ManualArenaEnter(checkArena)
 		checkSubsliceCopyTargets(one, pkg.Path)
-		chkALine("sc", checkArena)
+		checkLeave(checkArena, "ss2")
+		runtime.ManualArenaEnter(checkArena)
 		checkShadowing(one)
-		chkALine("sh", checkArena)
+		checkLeave(checkArena, "sh")
+		runtime.ManualArenaEnter(checkArena)
 		checkPackageDecls(one, pkg.Path)
-		chkALine("pd", checkArena)
+		checkLeave(checkArena, "pd")
+		runtime.ManualArenaEnter(checkArena)
 		checkMissingReturn(one)
-		chkALine("mr", checkArena)
-		runtime.ManualArenaExit(checkArena)
-		runtime.ArenaReset(checkArena)
+		checkLeave(checkArena, "mr")
 	}
+	cctx.shArenaRef = nil
+	cctx.checkArena = nil
 	runtime.ArenaFree(checkArena)
 	chkLine("astfile")
 	pb.checkImportConflicts(files)

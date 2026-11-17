@@ -47,6 +47,20 @@ func rootArenaMap(out *map[string]*runtime.Arena) {
 	runtime.SovereignRestoreArena(prev)
 }
 
+// rootNestedFlagMap roots a map whose values are maps. The outer map must be
+// created in the root arena for the same reason the inner ones are: the first
+// package whose mxh is loaded creates it, and that package's graph arena is
+// RELEASED when its last reader is done - so the map header and its buckets then
+// belong to a freed mapping and the next `len()` faults. Measured: the self-build
+// reached the bitcode stage and then crashed in runtime.hashmapLen, called from
+// memLine's `len(cctx.mxhGenerics)`.
+func rootNestedFlagMap(out *map[string]map[string]bool) {
+	prev := runtime.CurrentArena()
+	runtime.SovereignSetArena(runtime.RootArena())
+	*out = map[string]map[string]bool{}
+	runtime.SovereignRestoreArena(prev)
+}
+
 func rootPkgMap(out *map[string]*pkgInfo) {
 	prev := runtime.CurrentArena()
 	runtime.SovereignSetArena(runtime.RootArena())
@@ -1752,7 +1766,7 @@ func loadManifest(root string) {
 			bst.manifestDir = root
 			rootStrMap(&bst.manifestPins)
 			for _, e := range parseManifestText(string(data)) {
-				bst.manifestPins[e.repo] = e.ref
+				bst.manifestPins[keepStr(e.repo)] = keepStr(e.ref)
 			}
 			return
 		}
@@ -1763,7 +1777,7 @@ func loadManifest(root string) {
 				bst.manifestDir = root
 				rootStrMap(&bst.manifestPins)
 				for _, e := range parseManifestText(string(data)) {
-					bst.manifestPins[e.repo] = e.ref
+					bst.manifestPins[keepStr(e.repo)] = keepStr(e.ref)
 				}
 				return
 			}
@@ -1778,7 +1792,7 @@ func loadManifest(root string) {
 		if ok {
 			bst.manifestDir = rt
 			for _, e := range parseManifestText(string(data)) {
-				bst.manifestPins[e.repo] = e.ref
+				bst.manifestPins[keepStr(e.repo)] = keepStr(e.ref)
 			}
 		}
 	}
@@ -1818,7 +1832,12 @@ func resolvePinnedRepo(pkgPath, repo, ref string) (dir string) {
 	if bst.manifestCommits == nil {
 		rootStrMap(&bst.manifestCommits)
 	}
-	bst.manifestCommits[repo] = gitCapture([]string{"-C", wt, "rev-parse", "HEAD"}, mxutil.JoinPath(mpath, "cache/pin"))
+	// keepStr the commit: the map is root-lifetime and its VALUES are stored as
+	// a raw string header (hashmapSet memcpys the value; only the KEY's bytes are
+	// copied by hashmapContentSet), so a value built in this frame leaves the map
+	// pointing at memory that dies when the frame returns. Same rule as
+	// pkgExportKeyMemo's key in this file.
+	bst.manifestCommits[keepStr(repo)] = keepStr(gitCapture([]string{"-C", wt, "rev-parse", "HEAD"}, mxutil.JoinPath(mpath, "cache/pin")))
 	if len(pkgPath) <= len(repo) {
 		return wt
 	}
@@ -2703,8 +2722,14 @@ func pkgHash(p *pkgInfo) (s string) {
 		caps = "1"
 	}
 	acc = acc | []byte("|C") | []byte(caps)
-	hv := fnvHash(acc)
-	bst.pkgKeyMemo[p.path] = hv
+	// keepStr, like pkgExportKeyMemo's key in this file: bst.* maps are
+	// root-lifetime and hashmapSet stores a string VALUE as a raw header, so a
+	// value built in this frame leaves the map pointing at its dead bytes. The
+	// symptom is a cache path built from garbage - measured as a .bc file named
+	// `3191000-.bc` and as `llc: ... /pkg/<name>/: Is a directory` when the
+	// freed bytes read back as the empty string.
+	hv := keepStr(fnvHash(acc))
+	bst.pkgKeyMemo[keepStr(p.path)] = hv
 	return hv
 }
 
@@ -5139,7 +5164,7 @@ func loadMxhInto(data []byte) (ok bool) {
 	if key == "" {
 		return loadMxhData(data)
 	}
-	return loadMxhDataIn(data, graphArenaFor(key, int32(len(data))))
+	return loadMxhDataIn(data, (*runtime.Arena)(unsafe.Pointer(graphArenaFor(key, int32(len(data))))))
 }
 
 // mxhPkgKey returns the package path from an mxh text header ("package <path>
@@ -5177,9 +5202,19 @@ func mxhPkgKey(data []byte) (key string) {
 // text, so the arena is sized from the text with a floor and a ceiling; the
 // arena chains if the estimate is low, which is the same failure as before but
 // only for the package that was underestimated.
-func graphArenaFor(key string, hint int32) (a *runtime.Arena) {
+// The result is a uintptr, NOT *runtime.Arena. An arena is an identity, and a
+// pointer to one must not cross a return: the return protocol classifies the
+// pointee, and Arena is a POINTER-BEARING graph (sovGroupList []*sovGroup ->
+// sovGroup.ctxArena/data *Arena -> back), so "does the pointee die" walked the
+// whole sovereign relationship and faulted on a data arena that had been
+// released - measured on the compiler's own self-build as a SIGSEGV in
+// retPointeeDies 320 frames deep, reached from this function's return, with the
+// package key `moxielang.dev/pkg/types` in the caller. An address has no
+// protocol and cannot be relocated, which is what a handle needs. Same rule as
+// durableBegin's save in ssa_builder.mx.
+func graphArenaFor(key string, hint int32) (a uintptr) {
 	if key == "" {
-		return runtime.RootArena()
+		return uintptr(unsafe.Pointer(runtime.RootArena()))
 	}
 	if cctx.dispTier2Arena == nil {
 		// Root arena, written through the field: cctx is a package pointer, and
@@ -5189,8 +5224,8 @@ func graphArenaFor(key string, hint int32) (a *runtime.Arena) {
 		// lookup returned a garbage *Arena that ArenaAllocTD then indexed.
 		rootArenaMap(&cctx.dispTier2Arena)
 	}
-	a = cctx.dispTier2Arena[key]
-	if a == nil {
+	av := cctx.dispTier2Arena[key]
+	if av == nil {
 		sz := uintptr(hint) * 24
 		if sz < 256*1024 {
 			sz = 256 * 1024
@@ -5202,17 +5237,17 @@ func graphArenaFor(key string, hint int32) (a *runtime.Arena) {
 		// graph is product, but its capacity is a reservation decision, and the
 		// report is how a reservation and a live-data cost stop looking alike.
 		prevScope := runtime.SetArenaScope(42)
-		a = runtime.ArenaNew(sz)
+		av = runtime.ArenaNew(sz)
 		runtime.SetArenaScope(prevScope)
 		save := runtime.CurrentArena()
 		if cctx.buildArena != nil {
 			runtime.SetCurrentArena(cctx.buildArena)
 		}
 		// The key is a package path carved out of the mxh bytes in this frame.
-		cctx.dispTier2Arena[keepStr(key)] = a
+		cctx.dispTier2Arena[keepStr(key)] = av
 		runtime.SetCurrentArena(save)
 	}
-	return a
+	return uintptr(unsafe.Pointer(av))
 }
 
 // ensurePkgLoaded materialises one package graph if it is not in the registry.
@@ -5233,7 +5268,7 @@ func ensurePkgLoaded(key string, byPath map[string]*pkgInfo, cacheBase string) {
 	if !ok {
 		return
 	}
-	if !loadMxhDataIn(data, graphArenaFor(key, int32(len(data)))) {
+	if !loadMxhDataIn(data, (*runtime.Arena)(unsafe.Pointer(graphArenaFor(key, int32(len(data)))))) {
 		// A file that exists and still does not parse is corruption, not a
 		// cache miss: say which package and how big, because the alternative is
 		// a silent `undefined: <name>` three packages later.
@@ -5446,7 +5481,7 @@ func loadMxhDataIn(data []byte, arena *runtime.Arena) (ok bool) {
 	// mxh is loaded (possibly empty), so ScanGenericDecls can skip parsing
 	// packages the mxh says have no generics.
 	if cctx.mxhGenerics == nil {
-		cctx.mxhGenerics = map[string]map[string]bool{}
+		rootNestedFlagMap(&cctx.mxhGenerics)
 	}
 	if cctx.mxhGenerics[pkgPath] == nil {
 		saveArena3 := runtime.CurrentArena()
@@ -7012,7 +7047,7 @@ func cmdTest(args []string) {
 		if data, tok := mxutil.ReadFile(testMxh); tok {
 			d := string(data)
 			if cctx.dispMethodsByPkg == nil {
-				cctx.dispMethodsByPkg = map[string]map[string]bool{}
+				rootNestedFlagMap(&cctx.dispMethodsByPkg)
 			}
 			cctx.dispMethodsByPkg[dispPkgKey(pkg)] = dispParseMethods(d)
 			dispParseIfaceMethods(d, cctx.dispIfaceMethods)
@@ -7546,7 +7581,7 @@ func prepareDispatchIndex(pkgs []*pkgInfo, cacheBase string, skip *pkgInfo) {
 		cctx.mxhLoaded = map[string]bool{}
 	}
 	if cctx.mxhGenerics == nil {
-		cctx.mxhGenerics = map[string]map[string]bool{}
+		rootNestedFlagMap(&cctx.mxhGenerics)
 	}
 	graphNeedsInit(pkgs)
 	for pi, pkg := range pkgs {
@@ -7590,7 +7625,7 @@ func prepareDispatchIndex(pkgs []*pkgInfo, cacheBase string, skip *pkgInfo) {
 	}
 	cctx.dispIfaceMethods = map[string]bool{}
 	if cctx.dispMethodsByPkg == nil {
-		cctx.dispMethodsByPkg = map[string]map[string]bool{}
+		rootNestedFlagMap(&cctx.dispMethodsByPkg)
 	}
 	if cctx.typeDB == nil {
 		cctx.typeDB = typeDBNew()
@@ -7809,7 +7844,7 @@ func measureDispFingerprint(dp *pkgInfo) {
 		}
 		fp = string(fb)
 	}
-	bst.pkgDispFingerprint[dp.path] = fp
+	bst.pkgDispFingerprint[keepStr(dp.path)] = keepStr(fp)
 	runtime.ArenaFree(mArena)
 }
 
@@ -8919,7 +8954,11 @@ func buildPkgsSerial(pkgs []*pkgInfo, triple, clang, tmpdir, cacheBase string, f
 		cctx.sigDeclPkgImports = nil
 	}
 	if cctx.dispTier2Arena == nil {
-		cctx.dispTier2Arena = map[string]*runtime.Arena{}
+		// Root arena, like graphArenaFor's own creation. This site used to
+		// build the map in whatever arena was current, which is this function's
+		// frame: the header and every bucket then died when it returned, and a
+		// later lookup read them as a garbage *Arena.
+		rootArenaMap(&cctx.dispTier2Arena)
 	}
 	// The base is after the one-time build maps (needs, last-use, path index);
 	// only per-package growth from here is a leak.
@@ -9181,7 +9220,12 @@ func cacheCompiledBc(cacheBase, tmpdir, pkgPath, hash, version string) {
 		if bst.bcTwin == nil {
 			rootStrMap(&bst.bcTwin)
 		}
-		bst.bcTwin[bcFile] = cp
+		// keepStr the path: the map is root-lifetime and hashmapSet stores a
+		// string VALUE as a raw header, so the bytes must be root-arena bytes.
+		// Measured: FileExists(twin) in objFiles memcpy'd 111 bytes from a
+		// released frame arena and the self-build died inside musl memcpy after
+		// `compile objects`.
+		bst.bcTwin[keepStr(bcFile)] = keepStr(cp)
 	}
 }
 
