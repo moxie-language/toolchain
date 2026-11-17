@@ -1720,10 +1720,15 @@ func CompileToIR(src []byte, name string, triple string, pkgDir string) (s strin
 	if pkg != nil && file != nil {
 		mxhData := cctx.tcMxh
 		runtime.ManualArenaExit(arena)
-		// Copy mxh text to root arena so it survives ArenaFree.
-		mxhCopy := []byte{:len(mxhData)}
-		copy(mxhCopy, mxhData)
-		cctx.lastMxhData = string(mxhCopy)
+		// ROOT arena, not this function's frame. `lastMxhData` is read by the
+		// build loop AFTER this call returns, so a copy made in the current
+		// arena is released with the frame: the loop then wrote a non-empty
+		// length through a dead pointer, mxc_writefile created the file and
+		// broke on EFAULT, and the 0-byte export OVERWROTE the correct text the
+		// dependency pre-pass had written for the same package. Measured:
+		// `pkg/unicode/*.mxh` 0 bytes, `undefined: unicode.Tables` in every
+		// importer, on dev as well as on this branch. keepStr is the root copy.
+		cctx.lastMxhData = keepStr(mxhData)
 		runtime.ManualArenaEnter(arena)
 	}
 
