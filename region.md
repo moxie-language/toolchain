@@ -2338,3 +2338,34 @@ the copy the argument was relocated into. (2) The same with `-no-main-arena`
 DIVERGENCE from legacy's classification, not (in these two shapes) a
 demonstrated dangling read: the stored value is owned by the callee's arena, not
 by the misclassified caller's. Fixtures: tests/tmp/sovdangle/main.mx.
+
+## 0.3v — the classification fix lands; the second generation is still broken
+
+`recvWritesReceiver` (ir_deepcopy.mx) makes the receiver-write answer exact and
+order-independent: it builds the receiver type's declared methods into a
+per-package classification arena (`cctx.recvClassArena`, scope 46, freed by
+`recvClassReset` at the end of the package's emit), classifies the whole method
+set in one pass while every body is alive, and caches the per-member answers.
+The prologue's two decisions and the loop-scratch rule all ask it, so they
+cannot disagree. A body built for classification is marked provisional
+(`cctx.recvClassProvisional`) so `emitAllFunctions`' clone loop does not emit it
+without its checks. Verified with the reference implementation as oracle, all
+three order variants of one fixture: `legacy/moxie` says both methods are
+mutating and rejects the loop declaration; stage4 now says the same and rejects
+it too (before: only the direct writer was mutating, and the program compiled).
+
+It does NOT fix the second generation. `mxc-r112` (legacy-built) -> self-build
+`mxc-r112-2` completes; `mxc-r112-2` then FAILS on the tiny litprobe with
+`extractvalue {i64, ptr} null, 0` (emitBinOp's nil-X recovery path, ir_binop.mx
+144-188) and, in a second run of the same binary on the same input, panics in
+`emitFieldAddr` with "no impl for SSAType (64 impls, none matches)" while
+emitting `(*TCInterface).String`. Same class as 0.3u, different member: the
+builder produces an SSA node with a NIL operand, and the emitter's recovery path
+turns that into invalid IR instead of failing loudly. The rank of suspects is
+unchanged (0.3t), and the emitter's silent recovery is the first thing to make
+loud: a nil operand is a builder defect, and `emitBinOp`/`emitIf` currently
+invent an operand for it.
+
+Consequence for Step 7: the fixpoint gate cannot pass, so `release.sh` refuses
+to build a release unless `RELEASE_SKIP_FIXPOINT=1` is set - the interim-rc
+escape hatch, which prints the reason (this entry) and ships generation 1.
