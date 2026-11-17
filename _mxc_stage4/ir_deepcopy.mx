@@ -1,6 +1,7 @@
 package main
 
 import (
+	"runtime"
 	"moxielang.dev/pkg/mxutil"
 	. "moxielang.dev/pkg/types"
 )
@@ -132,6 +133,204 @@ func (e *irEmitter) isSovereignNamedType(named *Named) (ok bool) {
 	return ssaIsSovereignNamedType(e.pkg, named)
 }
 
+// recvClassArena holds, for the life of ONE package's emit, the bodies of the
+// methods belonging to a type whose receiver-write answer is being asked for.
+//
+// The query walks CALLEE bodies (ssaFuncHasReceiverWriteSeen), so in a
+// one-body-at-a-time pipeline a callee's body is either not built yet or already
+// cleared by its own emit, and every transitive receiver write was invisible.
+// Measured on one fixture: legacy - which has every body when it decides - calls
+// a method that mutates only by calling a mutating method on the receiver
+// MUTATING, while stage4 called it read-only. That is not a cosmetic
+// difference: read-only selects the other arena policy (a per-call frame
+// instead of borrowing the receiver's arena) and makes the loop-scratch rule
+// accept a program legacy rejects. Building the type's methods once into an
+// arena that outlives the member makes the answer exact and independent of the
+// order the members happen to be emitted in.
+// The state lives on cctx: a package global may not be assigned outside
+// init(), and a mutation through a pointer global is the sanctioned route.
+//
+// recvClassReset frees the classification arena and forgets its answers. It runs
+// at the end of every package's emit: the bodies it holds belong to that
+// package's members.
+func recvClassReset() {
+	if cctx == nil {
+		return
+	}
+	if cctx.recvClassArena != nil {
+		runtime.ArenaFree(cctx.recvClassArena)
+		cctx.recvClassArena = nil
+	}
+	cctx.recvClassCache = nil
+	cctx.recvClassBusy = false
+	cctx.recvClassProvisional = nil
+}
+
+// recvMethodName reports whether mname names a method of the type called tname,
+// including an instantiation of it (`(*Bag[int32]).add`).
+func recvMethodName(mname, tname string) (ok bool) {
+	pfx := "(*" | tname | ")"
+	if !mxutil.HasPrefix(mname, pfx) {
+		return false
+	}
+	rest := mname[len(pfx):]
+	if len(rest) == 0 {
+		return false
+	}
+	return rest[0] == '.' || rest[0] == '['
+}
+
+// recvNamedOf returns the named type a method's receiver names, or nil.
+func recvNamedOf(fn *SSAFunction) (named *Named) {
+	if fn == nil || fn.Signature == nil || fn.Signature.Recv == nil {
+		return nil
+	}
+	if ptr, okp := SafeUnderlying(fn.Signature.Recv.Typ).(*Pointer); okp {
+		if n, okn := ptr.Base.(*Named); okn {
+			return n
+		}
+	}
+	return nil
+}
+
+// markRecvProvisional records a member whose live body was built for the
+// receiver-write classification rather than by the emit loop. The set is
+// package state (the clone loop reads it while emitting a LATER member), so it
+// is created in the package arena.
+func markRecvProvisional(mname string) {
+	if cctx == nil {
+		return
+	}
+	if cctx.recvClassProvisional == nil {
+		saveD := durableBegin()
+		cctx.recvClassProvisional = map[string]bool{}
+		durableEnd(saveD)
+	}
+	cctx.recvClassProvisional[mname] = true
+}
+
+// recvProvisional reports whether a member's live body was built by the
+// classification rather than by the emit loop.
+func recvProvisional(mname string) (ok bool) {
+	if cctx == nil || cctx.recvClassProvisional == nil {
+		return false
+	}
+	return cctx.recvClassProvisional[mname]
+}
+
+// ensureRecvBodies builds every method of named that has a declared body and no
+// live one, into the classification arena.
+func ensureRecvBodies(p *SSAPackage, named *Named) {
+	if p == nil || p.b == nil || named == nil || named.Obj == nil || cctx == nil || cctx.recvClassBusy {
+		return
+	}
+	if named.Obj.Pkg != nil && p.Pkg != nil && named.Obj.Pkg.Path != p.Pkg.Path {
+		// Another package's type: its own emit owns those bodies.
+		return
+	}
+	if cctx.recvClassArena == nil {
+		// The Arena struct itself must outlive the member: this runs with the
+		// per-member arena current, and that arena is reset at the member's end.
+		saveD := durableBegin()
+		prev := runtime.SetArenaScope(46)
+		cctx.recvClassArena = runtime.ArenaNew(4 * 1024 * 1024)
+		runtime.SetArenaScope(prev)
+		durableEnd(saveD)
+	}
+	// Collect the names first: a build can add members (a monomorphised clone),
+	// and a range must not see the map change under it.
+	names := []string{}
+	for mname, member := range p.Members {
+		if !recvMethodName(mname, named.Obj.Name) {
+			continue
+		}
+		fn, okf := member.(*SSAFunction)
+		if !okf || fn.Blocks != nil {
+			continue
+		}
+		if !p.HasBody(mname) {
+			continue
+		}
+		push(names, mname)
+	}
+	if len(names) == 0 {
+		return
+	}
+	cctx.recvClassBusy = true
+	for _, mname := range names {
+		runtime.ManualArenaEnter(cctx.recvClassArena)
+		// The emit loop registers the package arena stable around a build; a
+		// build outside that registration makes the codec's return rule judge a
+		// type in the package arena as dying at return and deep-copy it, which
+		// splits type identity - the same defect region.md 0.2w records.
+		runtime.SovereignRegStable(cctx.compileArena)
+		p.BuildBody(mname)
+		runtime.SovereignRegRestore()
+		runtime.ManualArenaExit(cctx.recvClassArena)
+		// A body built here must not be mistaken for a monomorphised clone by
+		// emitAllFunctions' clone loop, which emits anything with a live body
+		// that has not been emitted yet - and does so WITHOUT the per-member
+		// checks, so the loop-scratch rule would never see the member and the
+		// member would be emitted out of the arena the emit loop expects.
+		// Mark it provisional: the clone loop skips it, the loop below reaches
+		// it by name at its own turn, finds the live body, runs its checks and
+		// emits it like any other member.
+		markRecvProvisional(mname)
+	}
+	cctx.recvClassBusy = false
+}
+
+// recvWritesReceiver answers "does this method mutate its receiver, directly or
+// through a method it calls on the receiver", with the receiver type's bodies
+// alive, and remembers the answer for the whole type in one pass.
+//
+// Both emit-time decisions (borrow the receiver's arena; register it stable
+// instead) and the loop-scratch check ask THIS, at the same moment for the same
+// member, so they cannot disagree.
+func recvWritesReceiver(p *SSAPackage, fn *SSAFunction) (ok bool) {
+	if fn == nil || fn.Signature == nil || fn.Signature.Recv == nil || cctx == nil {
+		return false
+	}
+	// A nil map is not readable here (hashmapGet on it faults), so the cache is
+	// created before the first lookup - and in the PACKAGE arena, because this
+	// runs with the per-member arena current and a map created there is freed by
+	// the member's own reset while the next member is still reading it.
+	if cctx.recvClassCache == nil {
+		saveD := durableBegin()
+		cctx.recvClassCache = map[string]bool{}
+		durableEnd(saveD)
+	}
+	if v, hit := cctx.recvClassCache[fn.name]; hit {
+		return v
+	}
+	named := recvNamedOf(fn)
+	if named == nil {
+		return false
+	}
+	ensureRecvBodies(p, named)
+	// Classify the WHOLE method set of the type now, while every body is alive:
+	// a later ask happens after its own member's emit cleared that body, and
+	// rebuilding it per ask would accumulate copies in the arena.
+	for mname, member := range p.Members {
+		if !recvMethodName(mname, named.Obj.Name) {
+			continue
+		}
+		mfn, okf := member.(*SSAFunction)
+		if !okf || len(mfn.Blocks) == 0 {
+			continue
+		}
+		if _, hit := cctx.recvClassCache[mname]; hit {
+			continue
+		}
+		cctx.recvClassCache[mname] = ssaFuncHasReceiverWrite(mfn)
+	}
+	if v, hit := cctx.recvClassCache[fn.name]; hit {
+		return v
+	}
+	// No live body to judge (a bodyless member, or a type from another package).
+	return false
+}
+
 // ssaIsSovereignNamedType reports whether named is a self-mutating (sovereign)
 // type: a named type that needs a codec and has at least one method that
 // writes the receiver. The language has no named slice or map types
@@ -164,6 +363,11 @@ func ssaIsSovereignNamedType(p *SSAPackage, named *Named) (ok bool) {
 	if !typeNeedsCodec(named) {
 		return false
 	}
+	// The scan below skips a method whose body is not live, so the type's
+	// methods have to be alive before it runs - otherwise a type whose ONLY
+	// mutating method is transitive looks read-only and the whole sovereign
+	// machinery is skipped for it.
+	ensureRecvBodies(p, named)
 	mangledPrefix := "(*" | named.Obj.Name | ")."
 	for mname, member := range p.Members {
 		if !mxutil.HasPrefix(mname, mangledPrefix) {
@@ -184,16 +388,18 @@ func ssaFuncHasReceiverWrite(fn *SSAFunction) (ok bool) {
 	return ssaFuncHasReceiverWriteSeen(fn, map[*SSAFunction]bool{}, 0)
 }
 
-// ssaFuncHasReceiverWriteDirectly is the direct-only query. The loop-scratch
-// restriction still asks THIS question, not the transitive one the prologue
-// asks: seeing delegation would put every method that mutates by calling
-// g.advance(...) under the restriction, and each one then needs its loop
-// scratch moved into a helper. That port is a pass of its own - the sites found
-// so far are bufio's collectFragments, cryptobyte's readBase128Int, dnsmessage's
-// four All* readers, net.Buffers, x509's AppendCertsFromPEM, tls's
-// writeRecordLocked and loadSession, filter.F.Marshal and store/sorted's
-// File.Get/GetPrefix/Last/lowerBound - and it continues from there.
-// Mirrors legacy ssaFuncWritesReceiverDirectly.
+// ssaFuncHasReceiverWriteDirectly is the direct-only query, the mirror of
+// legacy's ssaFuncWritesReceiverDirectly. It is NOT what the loop-scratch rule
+// asks: that rule asks recvWritesReceiver, the same transitive question the
+// sovereign prologue asks, because a method that mutates only through a callee
+// DOES run with the receiver's arena borrowed and its loop scratch DOES persist
+// there. (An earlier comment here claimed the restriction asked the direct
+// question and pointed at the delegation port as future work; the code asked
+// the transitive one, and the port is still the list of sites whose loop
+// scratch has to move into a helper: bufio's collectFragments, cryptobyte's
+// readBase128Int, dnsmessage's four All* readers, net.Buffers, x509's
+// AppendCertsFromPEM, tls's writeRecordLocked and loadSession, filter.F.Marshal
+// and store/sorted's File.Get/GetPrefix/Last/lowerBound - and it continues.)
 func ssaFuncHasReceiverWriteDirectly(fn *SSAFunction) (ok bool) {
 	return ssaFuncHasDirectReceiverWrite(fn)
 }
@@ -473,7 +679,7 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 	// methods get a regular per-function arena so their scratch is cleared at
 	// return.
 	if e.curFunc.Signature != nil && e.curFunc.Signature.Recv != nil && len(e.curFunc.Params) > 0 &&
-		ssaFuncHasReceiverWrite(e.curFunc) {
+		recvWritesReceiver(e.pkg, e.curFunc) {
 		named := e.recvNamedType()
 		if named != nil {
 			if e.isSovereignNamedType(named) {
@@ -533,7 +739,7 @@ func (e *irEmitter) emitArenaPrologue() (ok bool) {
 		// Read-only method of a sovereign type: register the receiver's arena
 		// as stable so returned views into receiver data stay views, while the
 		// method's own scratch lives in this fn arena and is freed at return.
-		if named := e.recvNamedType(); named != nil && e.isSovereignNamedType(named) && !ssaFuncHasReceiverWrite(e.curFunc) {
+		if named := e.recvNamedType(); named != nil && e.isSovereignNamedType(named) && !recvWritesReceiver(e.pkg, e.curFunc) {
 			recvName := e.operand(e.curFunc.Params[0])
 			e.w("  call void @runtime.codecRegStable(ptr ") ; e.w(recvName) ; e.w(", ptr null)\n")
 			e.declareRuntime("runtime.codecRegStable", "void", "ptr")
