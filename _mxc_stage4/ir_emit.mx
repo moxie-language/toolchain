@@ -951,7 +951,6 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 		d0 := runtime.FnStackDepth()
 		m0 := runtime.ManualFrameDepth()
 		cctx.memberArena = fnArena
-		runtime.SetSlotWatch(fnArena, d0)
 		e.pkg.BuildBody(name)
 		// A build opens and closes its own durable scopes; an unbalanced one
 		// leaves a package-arena frame on the fn stack, and then the codec sees
@@ -974,33 +973,20 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 			mxutil.WriteStr(2, "  LEAK build left a frame open for " | name | " current=" | which | " used=" | mxutil.SimpleItoa(int32(runtime.ArenaUsed(cur)>>20)) | "MB cap=" | mxutil.SimpleItoa(int32(runtime.ArenaCap(cur)>>20)) | "MB d=" | mxutil.SimpleItoa64(int64(uintptr(unsafe.Pointer(cur))-uintptr(unsafe.Pointer(fnArena)))>>20) | "MB scope=" | mxutil.SimpleItoa(runtime.ArenaScopeOf(cur)) | " depth " | mxutil.SimpleItoa(d0) | "->" | mxutil.SimpleItoa(d1) | " manual " | mxutil.SimpleItoa(m0) | "->" | mxutil.SimpleItoa(m1) | "\n")
 
 			base := uintptr(unsafe.Pointer(fnArena))
-			wi, wk := runtime.SlotWatchIdx()
-			mxutil.WriteStr(2, "    watch idx=" | mxutil.SimpleItoa(wi) | " kind=" | mxutil.SimpleItoa(wk) | "\n")
+			// Which arena is in the slot, named by identity: the scope tag
+			// alone cannot tell one 8MB frame arena from another, and the
+			// question is whether the slot holds the package arena or a frame.
+			if cctx.compileArena != nil {
+				b := int64(base)
+				ca := (int64(uintptr(unsafe.Pointer(cctx.compileArena))) - b) >> 20
+				ea := (int64(uintptr(unsafe.Pointer(e.compileArena))) - b) >> 20
+				cu := (int64(uintptr(unsafe.Pointer(cur))) - b) >> 20
+				d5 := (int64(runtime.SovereignSlotArena(d0-1)) - b) >> 20
+				d6 := (int64(runtime.SovereignSlotArena(d0)) - b) >> 20
+				mxutil.WriteStr(2, "    ids cctxCA=" | mxutil.SimpleItoa64(ca) | "MB/" | mxutil.SimpleItoa(runtime.ArenaScopeOf(cctx.compileArena)) | " eCA=" | mxutil.SimpleItoa64(ea) | "MB/" | mxutil.SimpleItoa(runtime.ArenaScopeOf(e.compileArena)) | " cur=" | mxutil.SimpleItoa64(cu) | "MB/" | mxutil.SimpleItoa(runtime.ArenaScopeOf(cur)) | " d5=" | mxutil.SimpleItoa64(d5) | "MB d6=" | mxutil.SimpleItoa64(d6) | "MB\n")
+			}
 			swN := runtime.CurSwitchCount()
 			swK := swN - 24
-			if wi >= 0 {
-				swK = wi - 6
-				// Walk back to the last event that put OUR arena back in OUR
-				// slot, so the dump shows the whole run that ends with the slot
-				// naming a frame arena.
-				for k := wi - 1; k >= 0 && k > wi-65536; k-- {
-					_, sn0, sd0, _ := runtime.CurSwitchAt(k)
-					if sd0 == d0 && sn0 == base {
-						swK = k
-						break
-					}
-				}
-				if wi-swK > 60 {
-					swK = wi - 60
-				}
-				swN = wi + 7
-				if swK < 0 {
-					swK = 0
-				}
-				if swN > runtime.CurSwitchCount() {
-					swN = runtime.CurSwitchCount()
-				}
-			}
 			if swK < 0 {
 				swK = 0
 			}

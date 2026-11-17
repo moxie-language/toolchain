@@ -365,10 +365,12 @@ func hashmapSet(m *hashmap, key unsafe.Pointer, value unsafe.Pointer, hash uint3
 // value into the bucket, and returns a pointer to this bucket.
 func hashmapInsertIntoNewBucket(m *hashmap, key, value unsafe.Pointer, tophash uint8) *hashmapBucket {
 	bucketBufSize := hashmapBucketSize(m)
-	saved := CurrentArena()
-	SetCurrentArena(hashmapOwner(m))
-	bucketBuf := alloc(bucketBufSize, nil, nil)
-	SetCurrentArena(saved)
+	// Allocate FROM the owner arena instead of making it current. The old
+	// save/SetCurrentArena/restore pair reached into domainRoot.fnStack and
+	// replaced whatever slot was on top - including a phase or per-function
+	// manual frame - so one allocation could leave a foreign arena in a slot
+	// another frame owned. The allocation was the whole purpose of the switch.
+	bucketBuf := ArenaAlloc(hashmapOwner(m), bucketBufSize)
 	bucket := (*hashmapBucket)(bucketBuf)
 
 	// Insert into the first slot, which is empty as it has just been allocated.
@@ -389,14 +391,13 @@ func hashmapGrow(m *hashmap) {
 	oldBits := m.bucketBits
 	bucketSize := hashmapBucketSize(m)
 
-	// Allocate new buckets in the map's owning arena.
-	saved := CurrentArena()
-	SetCurrentArena(hashmapOwner(m))
-
+	// Allocate new buckets in the map's owning arena, without making it
+	// current: the switch replaced the fn-stack top slot, which is not this
+	// function's to overwrite while a phase or member frame is installed there.
 	m.bucketBits = oldBits + 1
 	m.count = 0
 	m.seed = uintptr(fastrand())
-	m.buckets = alloc(bucketSize*(uintptr(1)<<m.bucketBits), nil, nil)
+	m.buckets = ArenaAlloc(hashmapOwner(m), bucketSize*(uintptr(1)<<m.bucketBits))
 
 	// Re-insert all entries from old buckets into the new array.
 	numOldBuckets := uintptr(1) << oldBits
@@ -414,8 +415,6 @@ func hashmapGrow(m *hashmap) {
 			bucket = bucket.next
 		}
 	}
-
-	SetCurrentArena(saved)
 }
 
 // hashmapDestroy, hashmapFreeBuckets, hashmapDeepFree removed:
@@ -708,11 +707,8 @@ func hashmapContentSet(m *hashmap, key string, value unsafe.Pointer) {
 	var st _string
 	_s := (*_string)(unsafe.Pointer(&key))
 	if _s.length > 0 {
-		saved := CurrentArena()
-		SetCurrentArena(hashmapOwner(m))
-		kb := alloc(uintptr(_s.length), nil, nil)
+		kb := ArenaAlloc(hashmapOwner(m), uintptr(_s.length))
 		memcpy(kb, unsafe.Pointer(_s.ptr), uintptr(_s.length))
-		SetCurrentArena(saved)
 		st.ptr = (*uint8)(kb)
 		st.length = _s.length
 	}

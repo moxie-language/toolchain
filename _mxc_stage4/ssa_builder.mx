@@ -71,19 +71,38 @@ func addCompileError(msg string) {
 // function arena, and this is the one place that decides so: the rule is
 // "package state is allocated in the package arena", not a heuristic about
 // which pointer escapes.
-func durableBegin() (save *runtime.Arena) {
-	save = runtime.CurrentArena()
+//
+// The returned handle is a uintptr, NOT *runtime.Arena. An arena is an identity,
+// and a pointer to one crosses a function return through the codec's return
+// protocol, which classifies the pointee by where it lives. By the time this
+// function returns it has already entered the package arena, so the member's
+// arena is no longer the top frame; the protocol then decided the pointee dies
+// and decoded a COPY of the Arena struct into the package arena - same regions,
+// same scope field, different address. durableEnd restored that copy into the
+// member's slot, the member's own ManualArenaExit found a different arena there,
+// and the build died with "manual arena exit on a different arena than the slot
+// holds" on the first generic member of the third package. An address has no
+// protocol and cannot be relocated, which is what a handle needs.
+func durableBegin() (save uintptr) {
+	save = uintptr(unsafe.Pointer(runtime.CurrentArena()))
+	mem := uintptr(0)
+	ca := uintptr(0)
+	if cctx != nil {
+		mem = uintptr(unsafe.Pointer(cctx.memberArena))
+		ca = uintptr(unsafe.Pointer(cctx.compileArena))
+	}
 	// A durable scope must begin on the member's own arena (or on the package
 	// arena it is about to enter); any other value means the fn-stack slot was
 	// already wrong when the scope opened, and the scope then restores that wrong
 	// value at its close.
-	if cctx != nil && cctx.memberArena != nil && save != cctx.memberArena && save != cctx.compileArena {
+	if cctx != nil && mem != 0 && save != mem && save != ca {
+		sv := (*runtime.Arena)(unsafe.Pointer(save))
 		d := int64(0)
-		if save != nil {
-			d = int64(uintptr(unsafe.Pointer(save))-uintptr(unsafe.Pointer(cctx.compileArena))) >> 20
+		if save != 0 {
+			d = int64(save-ca) >> 20
 		}
-		mxutil.WriteStr(2, "  DBEGIN odd save=" | mxutil.SimpleItoa64(d) | "MB depth=" | mxutil.SimpleItoa(runtime.FnStackDepth()) | " scope=" | mxutil.SimpleItoa(runtime.ArenaScopeOf(save)) | "\n")
-		base := uintptr(unsafe.Pointer(cctx.compileArena))
+		mxutil.WriteStr(2, "  DBEGIN odd save=" | mxutil.SimpleItoa64(d) | "MB depth=" | mxutil.SimpleItoa(runtime.FnStackDepth()) | " scope=" | mxutil.SimpleItoa(runtime.ArenaScopeOf(sv)) | " rbase=" | mxutil.SimpleItoa64(int64(runtime.ArenaRegionBase(sv))) | " self=" | mxutil.SimpleItoa64(int64(save)-int64(runtime.ArenaRegionBase(sv))) | "\n")
+		base := ca
 		swN := runtime.CurSwitchCount()
 		depth := runtime.FnStackDepth()
 		// Every event recorded AT THIS DEPTH, newest first: the slot can only be
@@ -120,8 +139,8 @@ func durableBegin() (save *runtime.Arena) {
 	return save
 }
 
-func durableEnd(save *runtime.Arena) {
-	if save != nil {
+func durableEnd(save uintptr) {
+	if save != 0 {
 		if cctx != nil && cctx.compileArena != nil {
 			// The scope was entered on the package arena, so its exit must find
 			// the package arena in the slot it is about to pop. A borrow that
@@ -132,19 +151,14 @@ func durableEnd(save *runtime.Arena) {
 			// arena in it is wrong, and every later allocation in the enclosing
 			// phase lands in a foreign arena.
 			if cur := runtime.CurrentArena(); cur != cctx.compileArena {
-				dcur := int64(0)
-				if cur != nil {
-					dcur = int64(uintptr(unsafe.Pointer(cur))-uintptr(unsafe.Pointer(cctx.compileArena))) >> 20
-				}
-				dsave := int64(0)
-				if save != nil {
-					dsave = int64(uintptr(unsafe.Pointer(save))-uintptr(unsafe.Pointer(cctx.compileArena))) >> 20
-				}
+				ca := uintptr(unsafe.Pointer(cctx.compileArena))
+				dcur := int64(uintptr(unsafe.Pointer(cur))-ca) >> 20
+				dsave := int64(save-ca) >> 20
 				mxutil.WriteStr(2, "  DSYNC scope closes on the wrong arena: slot=" | mxutil.SimpleItoa64(dcur) | "MB save=" | mxutil.SimpleItoa64(dsave) | "MB depth=" | mxutil.SimpleItoa(runtime.FnStackDepth()) | "\n")
 			}
 			runtime.ManualArenaExit(cctx.compileArena)
 		}
-		runtime.SetCurrentArena(save)
+		runtime.SetCurrentArena((*runtime.Arena)(unsafe.Pointer(save)))
 	}
 }
 

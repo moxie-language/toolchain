@@ -614,6 +614,17 @@ func ArenaScopeOf(a *Arena) (n int32) {
 	return a.scope
 }
 
+// ArenaRegionBase names the mapping an arena's first region sits in. Two Arena
+// structs with the same region base are not the same arena - one of them is a
+// copy that the return protocol made of the other, and a copy is not an owner:
+// the slot it is restored into then names memory that was never pushed.
+func ArenaRegionBase(a *Arena) (b uintptr) {
+	if a == nil {
+		return 0
+	}
+	return a.regions[0].base
+}
+
 func ManualFrameDepth() (n int32) {
 	if domainRoot == nil {
 		return 0
@@ -651,66 +662,9 @@ const (
 	evPop   = 6 // FnArenaPop: function frame popped
 )
 
-// slotWatch arms a check for the ONE event that must never happen: a frame
-// arena (the watched arena's scope) installed in the watched slot, or the
-// watched slot popped by a frame pop. The first such event is recorded by
-// index so the caller can dump the event ring around it.
-var slotWatchArena uintptr
-var slotWatchDepth int32
-var slotWatchArmed bool
-var slotWatchIdx int32 = -1
-var slotWatchKind int32 = -1
-
-// arenaScopeOfWatched returns the watched arena's scope tag, read through the
-// same pointer the watch holds.
-func arenaScopeOfWatched() (n int32) {
-	if slotWatchArena == 0 {
-		return 0
-	}
-	return (*Arena)(unsafe.Pointer(slotWatchArena)).scope
-}
-
-func SetSlotWatch(a *Arena, depth int32) {
-	if a == nil {
-		slotWatchArmed = false
-		return
-	}
-	slotWatchArena = uintptr(unsafe.Pointer(a))
-	slotWatchDepth = depth
-	slotWatchArmed = true
-	slotWatchIdx = -1
-	slotWatchKind = -1
-}
-
-func SlotWatchIdx() (n int32, kind int32) {
-	return slotWatchIdx, slotWatchKind
-}
-
 func curEvNote(kind uint8, old, new *Arena) {
 	if domainRoot == nil {
 		return
-	}
-	if slotWatchArmed && slotWatchIdx < 0 && domainRoot.fnTop == slotWatchDepth {
-		bad := false
-		if kind == evSet && new != nil && uintptr(unsafe.Pointer(new)) != slotWatchArena && new.scope == arenaScopeOfWatched() {
-			bad = true
-		}
-		if kind == evPush && new != nil && uintptr(unsafe.Pointer(new)) != slotWatchArena && new.scope == arenaScopeOfWatched() {
-			bad = true
-		}
-		if kind == evPop && old != nil && uintptr(unsafe.Pointer(old)) == slotWatchArena {
-			bad = true
-		}
-		if kind == evExit && old != nil && uintptr(unsafe.Pointer(old)) == slotWatchArena {
-			bad = true
-		}
-		if kind == evRestore && old != nil && uintptr(unsafe.Pointer(old)) == slotWatchArena {
-			bad = true
-		}
-		if bad {
-			slotWatchIdx = curSwN
-			slotWatchKind = int32(kind)
-		}
 	}
 	i := curSwN & 65535
 	curSwKnd[i] = kind
@@ -726,7 +680,8 @@ func SetCurrentArena(a *Arena) {
 	if domainRoot == nil {
 		return
 	}
-	curEvNote(evSet, domainRoot.fnStack[domainRoot.fnTop], a)
+	prev := domainRoot.fnStack[domainRoot.fnTop]
+	curEvNote(evSet, prev, a)
 	domainRoot.fnStack[domainRoot.fnTop] = a
 }
 
