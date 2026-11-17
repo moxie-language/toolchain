@@ -960,19 +960,44 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 	mxutil.WriteStr(2, "    EAF0 arena ok\n")
 	nf := int32(0)
 	emitted := map[string]bool{}
+	uP3Prev := uint64(0)
 	// The loop covers every function member, not only the ones with a declared
 	// body: a bodyless member still needs its `declare`. A member whose body is
 	// planned is built here; one that arrived already built (a monomorphised
 	// clone) is emitted in the same arena that built it, below.
 	for {
+		// The selection ranges the member map, and a range over a map calls
+		// hashmapNext, whose first call allocates a sorted buffer of every key
+		// (keySize*n). Run it INSIDE the member arena so that buffer dies with
+		// the member: outside it the current arena is the package arena, where
+		// the buffer is retained for the life of the package. Measured on
+		// `runtime` (866 members): 156MB retained, which is the whole of Step
+		// 2's unmet cau clause - the emit floor is 40MB and the EAF lines showed
+		// it climbing to 155MB, none of it from the member's own build, checks
+		// or emit.
+		runtime.ManualArenaEnter(fnArena)
 		name := emitNextMemberName(e, emitted)
+		runtime.ManualArenaExit(fnArena)
+		uI := uint64(0)
+		if cctx.compileArena != nil {
+			uI = runtime.ArenaUsed(cctx.compileArena)
+		}
 		if name == "" {
 			break
 		}
 		emitted[name] = true
+		uJ := uint64(0)
+		if cctx.compileArena != nil {
+			uJ = runtime.ArenaUsed(cctx.compileArena)
+		}
 		fn := e.pkg.Func(name)
 		if fn == nil {
 			continue
+		}
+		// Fork C: split the loop-back from the previous member's tail print.
+		uH := uint64(0)
+		if cctx.compileArena != nil {
+			uH = runtime.ArenaUsed(cctx.compileArena)
 		}
 		nf++
 		tM0 := runtime.NowNano()
@@ -999,6 +1024,13 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 		d0 := runtime.FnStackDepth()
 		m0 := runtime.ManualFrameDepth()
 		cctx.memberArena = fnArena
+		// Fork C: the compile arena's fill before this member, so the EAFU line
+		// can split the per-member growth into build+checks and emit+merge.
+		uA := uint64(0)
+		if cctx.compileArena != nil {
+			uA = runtime.ArenaUsed(cctx.compileArena)
+		}
+		mxutil.WriteStr(2, "    PH4 nf="|mxutil.SimpleItoa(nf)|" sel="|mxutil.SimpleItoa64((int64(uI)-int64(uP3Prev))>>10)|"KB mark="|mxutil.SimpleItoa64((int64(uJ)-int64(uI))>>10)|"KB fsel="|mxutil.SimpleItoa64((int64(uH)-int64(uJ))>>10)|"KB enter="|mxutil.SimpleItoa64((int64(uA)-int64(uH))>>10)|"KB\n")
 		e.pkg.BuildBody(name)
 		// A build opens and closes its own durable scopes; an unbalanced one
 		// leaves a package-arena frame on the fn stack, and then the codec sees
@@ -1082,7 +1114,12 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 				hist = hist | " " | mxutil.SimpleItoa(bi) | ":" | mxutil.SimpleItoa(int32((byts[bi] >> 20)))
 			}
 		}
-		mxutil.WriteStr(2, "    EAF nf="|mxutil.SimpleItoa(nf)|" in rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB cau="|mxutil.SimpleItoa(int32(cau2>>20))|"MB cac="|mxutil.SimpleItoa(int32(cac2>>20))|"MB net="|mxutil.SimpleItoa(int32(runtime.SysMapNet()>>20))|"MB acap="|mxutil.SimpleItoa(int32(runtime.LiveArenaCap()>>20))|"MB na="|mxutil.SimpleItoa(int32(totAlloc/1000))|"k hist"|hist|" fn="|fn.name|" blocks="|mxutil.SimpleItoa(int32(len(fn.Blocks)))|"\n")
+		mxutil.WriteStr(2, "    EAF nf="|mxutil.SimpleItoa(nf)|" in rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB cau="|mxutil.SimpleItoa(int32(cau2>>20))|"MB cac="|mxutil.SimpleItoa(int32(cac2>>20))|"MB net="|mxutil.SimpleItoa(int32(runtime.SysMapNet()>>20))|"MB acap="|mxutil.SimpleItoa(int32(runtime.LiveArenaCap()>>20))|"MB na="|mxutil.SimpleItoa(int32(totAlloc/1000))|"k hist"|hist|" durN="|mxutil.SimpleItoa(cctx.durScopes)|" dur="|mxutil.SimpleItoa(int32(cctx.durBytes>>20))|"MB ptd="|mxutil.SimpleItoa(int32(len(e.pendTypeDescs)))|" dsym="|mxutil.SimpleItoa(int32(len(e.definedSyms)))|" arr="|mxutil.SimpleItoa(int32(len(e.arrConsts)))|" kif="|mxutil.SimpleItoa(int32(len(e.keepIfaceTypes)))|" smap="|mxutil.SimpleItoa(int32(len(e.strMap)))|" edecl="|mxutil.SimpleItoa(int32(len(e.extDecls)))|" eglob="|mxutil.SimpleItoa(int32(len(e.extGlobals)))|" tid="|mxutil.SimpleItoa(int32(len(e.typeIDs)))|" fn="|fn.name|" blocks="|mxutil.SimpleItoa(int32(len(fn.Blocks)))|"\n")
+		// Fork C: the durable counters cover the member that was just built plus
+		// whatever the previous member's emit opened; printed here and zeroed so
+		// the next line reports its own member instead of a running total.
+		cctx.durScopes = 0
+		cctx.durBytes = 0
 		if rssPeak("emit " | fn.name) {
 			mxutil.WriteStr(2, "    NEWPEAK rss=" | mxutil.SimpleItoa(int32(cctx.peakRSSKB/1024)) | "MB at emit " | fn.name | " pool=" | mxutil.SimpleItoa(e.strPoolBytes()>>10) | "KB nstr=" | mxutil.SimpleItoa(int32(len(e.strConst)+len(e.pendStrConsts))) | "\n")
 		}
@@ -1119,11 +1156,19 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 		runtime.SovereignRegRestore()
 		runtime.ManualArenaExit(fnArena)
 		e.mergeAccumulators()
+		uE := uint64(0)
+		if cctx.compileArena != nil {
+			uE = runtime.ArenaUsed(cctx.compileArena)
+		}
 		// The scratch high-water mark for this function, read before the
 		// reset that reclaims it. This is the number that says whether the
 		// per-function cost is real or is a 64MB segment grabbed for a few
 		// megabytes: `acap` cannot tell those apart, `used` can.
-		mxutil.WriteStr(2, "    EAFU nf="|mxutil.SimpleItoa(nf)|" used="|mxutil.SimpleItoa(int32(runtime.ArenaUsed(fnArena)>>20))|"MB\n")
+		mxutil.WriteStr(2, "    EAFU nf="|mxutil.SimpleItoa(nf)|" used="|mxutil.SimpleItoa(int32(runtime.ArenaUsed(fnArena)>>20))|"MB pre="|mxutil.SimpleItoa64(int64(uA)>>10)|"KB bc="|mxutil.SimpleItoa64((int64(cau2)-int64(uA))>>10)|"KB em="|mxutil.SimpleItoa64((int64(uE)-int64(cau2))>>10)|"KB\n")
+		uP2 := uint64(0)
+		if cctx.compileArena != nil {
+			uP2 = runtime.ArenaUsed(cctx.compileArena)
+		}
 		// Experiment A (skip the reset) ran here and answered its question:
 		// with the reset skipped, the build no longer crashes at strconv but
 		// hangs at the same boundary one member later (math, after ilogb,
@@ -1132,6 +1177,12 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 		// something allocated in this arena is still referenced afterwards.
 		// The reset stays.
 		runtime.ArenaReset(fnArena)
+		// Fork C: split the loop tail's compile-arena growth (measured as a
+		// constant ~138KB per member) between the reset and the checkpoint.
+		uF := uint64(0)
+		if cctx.compileArena != nil {
+			uF = runtime.ArenaUsed(cctx.compileArena)
+		}
 		// The safe point between two function bodies: the select answers
 		// ctrl-c (a build that cannot be stopped is a build nobody can
 		// interrupt - it also cannot reclaim, because the drain only runs
@@ -1142,6 +1193,16 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 		if runtime.SovCheckpoint() {
 			interruptNow()
 		}
+		uG := uint64(0)
+		if cctx.compileArena != nil {
+			uG = runtime.ArenaUsed(cctx.compileArena)
+		}
+		uP3 := uint64(0)
+		if cctx.compileArena != nil {
+			uP3 = runtime.ArenaUsed(cctx.compileArena)
+		}
+		uP3Prev = uP3
+		mxutil.WriteStr(2, "    PH2 nf="|mxutil.SimpleItoa(nf)|" eafu="|mxutil.SimpleItoa64((int64(uP2)-int64(uE))>>10)|"KB reset="|mxutil.SimpleItoa64((int64(uF)-int64(uP2))>>10)|"KB chk="|mxutil.SimpleItoa64((int64(uG)-int64(uF))>>10)|"KB ph2="|mxutil.SimpleItoa64((int64(uP3)-int64(uG))>>10)|"KB\n")
 	}
 	mxutil.WriteStr(2, "    EAF1big nf="|mxutil.SimpleItoa(nf)|"\n"|string(runtime.BigAllocReport()))
 	runtime.ArenaFree(fnArena)
