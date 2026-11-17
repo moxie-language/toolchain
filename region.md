@@ -2326,3 +2326,15 @@ adds **0MB** to the package arena for `runtime` (it was +239MB before the
 per-check arena, +7MB at the last stop). The three named negative fixtures pass
 on `mxc-r103`: `reject_duplicate_case`, `reject_missing_return`,
 `reject_shadow_type_switch`.
+
+**Follow-up probes on the classification (same entry).** Two shapes were built
+and run with `mxc-r103` to see whether the misclassification is merely a policy
+difference or produces a dangling read. (1) `fill` builds a `[]string` locally
+and hands it to a directly-mutating `put` that stores it in the receiver; after
+`fill` returns, `main` overwrites frame memory with a 4000-element slice and
+then reads `b.items` - it still prints `hello`, because the callee's arena owns
+the copy the argument was relocated into. (2) The same with `-no-main-arena`
+(no sovereign arena at all): also `hello`. So the misclassification is a
+DIVERGENCE from legacy's classification, not (in these two shapes) a
+demonstrated dangling read: the stored value is owned by the callee's arena, not
+by the misclassified caller's. Fixtures: tests/tmp/sovdangle/main.mx.
