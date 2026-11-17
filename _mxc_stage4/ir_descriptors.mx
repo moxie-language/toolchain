@@ -560,15 +560,23 @@ func (e *irEmitter) collectTypeDesc(t Type) {
 	if t == nil || e.fingerprintOnly {
 		return
 	}
+	// Dedupe against a TRANSIENT tail and copy into the package arena only on
+	// a miss. Copying before the lookup allocated one package-arena string per
+	// descriptor reference in every member - measured as +118MB of cau across
+	// `runtime`'s 883 members (271MB at the emit floor, 389MB at the last
+	// member), which is the whole of this step's cau growth. The key that is
+	// stored still has to be durable: the tail is a view into the caller's fn
+	// arena and the map is read at module tail.
+	tail := e.typeDescName(t)
+	if _, ok := e.pendTypeDescs[tail]; ok {
+		return
+	}
 	saved := runtime.CurrentArena()
 	runtime.SetCurrentArena(e.compileArena)
 	if e.pendTypeDescs == nil {
 		e.pendTypeDescs = map[string]Type{}
 	}
-	tail := e.arenaString(e.typeDescName(t))
-	if _, ok := e.pendTypeDescs[tail]; !ok {
-		e.pendTypeDescs[tail] = t
-	}
+	e.pendTypeDescs[e.arenaString(tail)] = t
 	runtime.SetCurrentArena(saved)
 }
 
@@ -587,15 +595,18 @@ func registerLocalType(named *Named) {
 	if named == nil || named.Obj == nil || named.Obj.Pkg == nil {
 		return
 	}
+	// Same rule as collectTypeDesc: look up with the transient key, copy only
+	// when the registry does not already hold it.
+	key := normalizePkgPath(named.Obj.Pkg.Path) | "." | named.Obj.Name | localTypeTagOf(named.Obj)
+	if _, ok := cctx.localTypeReg[key]; ok {
+		return
+	}
 	saved := runtime.CurrentArena()
 	runtime.SetCurrentArena(cctx.compileArena)
 	if cctx.localTypeReg == nil {
 		cctx.localTypeReg = map[string]Type{}
 	}
-	key := compileArenaString(normalizePkgPath(named.Obj.Pkg.Path) | "." | named.Obj.Name | localTypeTagOf(named.Obj))
-	if _, ok := cctx.localTypeReg[key]; !ok {
-		cctx.localTypeReg[key] = named
-	}
+	cctx.localTypeReg[compileArenaString(key)] = named
 	runtime.SetCurrentArena(saved)
 }
 
