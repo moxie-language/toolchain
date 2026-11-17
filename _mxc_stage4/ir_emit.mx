@@ -45,6 +45,8 @@ type irEmitter struct {
 	// `b := []byte("abc")` changed a `c := []byte("abc")` elsewhere in the
 	// program. Legacy's createConst cache uses the same key.
 	strLitIndex map[*SSAConst]int32
+	strPushCount  int32 // diagnostic: distinct constants pushed into .str
+	strStaleCount int32 // diagnostic: memo hits naming another constant's text
 	arrConsts    []string // constant array global bodies (compile arena)
 	pendArrConsts []string // fn-arena pending, merged by mergeAccumulators
 	curFunc    *SSAFunction
@@ -713,6 +715,18 @@ func (e *irEmitter) stringConstOperand(c *SSAConst, s string) (txt string) {
 		idx = int32(len(e.strConst) + len(e.pendStrConsts))
 		push(e.pendStrConsts, s)
 		e.strLitIndex[c] = idx
+		e.strPushCount++
+		if e.strPushCount%20000 == 0 {
+			mxutil.WriteStr(2, "  STRPUSH n=" | mxutil.SimpleItoa(e.strPushCount) | " pend=" | mxutil.SimpleItoa(int32(len(e.pendStrConsts))) | " strconst=" | mxutil.SimpleItoa(int32(len(e.strConst))) | "\n")
+		}
+	} else if have, ok2 := e.strConstTextAt(idx); ok2 && have != s {
+		// A memo hit whose index no longer names this constant's own text is
+		// the stale-key defect: the SSAConst pointer was reused after the arena
+		// that held the first one was reset.
+		e.strStaleCount++
+		if e.strStaleCount < 8 || e.strStaleCount%4096 == 0 {
+			mxutil.WriteStr(2, "  STRSTALE n=" | mxutil.SimpleItoa(e.strStaleCount) | " idx=" | irItoa(idx) | " want=[" | s | "] have=[" | have | "]\n")
+		}
 	}
 	ipt := e.intptrType()
 	slen := irItoa64(int64(len(s)))
@@ -721,6 +735,23 @@ func (e *irEmitter) stringConstOperand(c *SSAConst, s string) (txt string) {
 
 func (e *irEmitter) strConstGlobal(idx int32) (s string) {
 	return "@.str." | irItoa(idx)
+}
+
+// strConstTextAt reads back the text a .str index names right now: below
+// len(strConst) it is a merged entry, above it a pending one. Used only by the
+// stale-key diagnostic in stringConstOperand.
+func (e *irEmitter) strConstTextAt(idx int32) (s string, ok bool) {
+	if idx < 0 {
+		return s, false
+	}
+	if idx < int32(len(e.strConst)) {
+		return e.strConst[idx], true
+	}
+	j := idx - int32(len(e.strConst))
+	if j < int32(len(e.pendStrConsts)) {
+		return e.pendStrConsts[j], true
+	}
+	return s, false
 }
 
 func (e *irEmitter) resolveAllNamedTypes() {
@@ -808,6 +839,23 @@ func ssaValTag(v SSAValue) (s string) {
 // clones are built while another member is being built, so their bodies belong
 // to that member's arena and must be emitted before it is reset.
 func emitBuiltMember(e *irEmitter, fn *SSAFunction) {
+	// strLitIndex is keyed by the SSA constant, and it belongs with the
+	// accumulators cleared at the end of this function for exactly their
+	// reason: the body, and so the SSAConst objects it is built from, live in
+	// the per-function arena the caller resets after this returns. Keeping one
+	// map across members made a later member's constant - allocated at a freed
+	// body's address - hit the dead pointer's entry, so the operand took the
+	// right length from its own constant and a foreign address from the stale
+	// index: `cmd == "build"` compiled to a five-byte compare against an
+	// unrelated IR-template literal, and the stage4-built compiler did not
+	// recognise its own argv.
+	//
+	// It is made fresh HERE rather than with the resets at the end because the
+	// map must belong to the arena of the member that uses it: one created at
+	// the end of the previous member is freed by that member's ArenaReset
+	// before this member's first constant looks it up (measured: SIGSEGV in
+	// (*parser).parseAtom's emit).
+	e.strLitIndex = map[*SSAConst]int32{}
 	emitFunctionOf(e, fn)
 	emitAnonFuncsOf(e, fn)
 	e.flush()
@@ -1385,7 +1433,7 @@ func emitIR(e *irEmitter) (s string) {
 	}
 	mxutil.WriteStr(2, "    M4 syms done rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
 	emitAllFunctions(e, compileArena)
-	mxutil.WriteStr(2, "    M5 functions done rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB\n")
+	mxutil.WriteStr(2, "    M5 functions done rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB strpush="|mxutil.SimpleItoa(e.strPushCount)|" strstale="|mxutil.SimpleItoa(e.strStaleCount)|" strconst="|mxutil.SimpleItoa(int32(len(e.strConst)+len(e.pendStrConsts)))|"\n")
 	// Globals are emitted AFTER the functions, not before them. Their declared
 	// type is refined by scanGlobalTypesOf from how each body stores to or
 	// loads from them, and that knowledge now arrives one body at a time. The
