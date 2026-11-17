@@ -234,14 +234,27 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 	checkSovereignLoopDecls(p, files)
 	checkIfaceAssignments()
 	chkLine("decls")
+	// A file's checks walk that file's syntax and keep every walker, scope and
+	// diagnostic scratch in whatever arena is current - the PACKAGE arena -
+	// where nothing ever reclaims it: measured +231MB for `runtime`, cau 32MB
+	// going into `chk astfile` and 263MB coming out, which is 64% of that
+	// package's 360MB total and the whole of its emit floor. A file's walk
+	// cannot outlive the file, so it gets an arena that is reset for each one.
+	// The diagnostics themselves are durable: addCompileError copies the
+	// message into the package arena.
+	checkArena := runtime.ArenaNew(4 * 1024 * 1024)
 	for _, f := range files {
+		runtime.ManualArenaEnter(checkArena)
 		one := []*syntax.File{f}
 		checkSubsliceStores(one, pkg.Path)
 		checkSubsliceCopyTargets(one, pkg.Path)
 		checkShadowing(one)
 		checkPackageDecls(one, pkg.Path)
 		checkMissingReturn(one)
+		runtime.ManualArenaExit(checkArena)
+		runtime.ArenaReset(checkArena)
 	}
+	runtime.ArenaFree(checkArena)
 	chkLine("astfile")
 	pb.checkImportConflicts(files)
 	chkLine("importConflicts")
