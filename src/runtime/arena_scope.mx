@@ -92,6 +92,7 @@ func recordAllocSize(size uintptr) {
 	if len(allocHistCount) == 0 {
 		return
 	}
+	recordFineAlloc(size)
 	b := sizeBin(size)
 	if b >= allocHistBins {
 		b = allocHistBins - 1
@@ -104,6 +105,26 @@ func recordAllocSize(size uintptr) {
 // bytes). It is the measurement D8 and D9 are decided from.
 func AllocHistogram() (counts []uint64, bytes []uint64) {
 	return allocHistCount, allocHistBytes
+}
+
+// fineAllocCount counts allocations by EXACT size 1..192. The floor(log2) bins
+// cannot separate 32 from 63, and a compiler-emit probe found the entire
+// per-fragment cost (region.md 0.3j) inside one such bin, so the exact size is
+// what identifies the site.
+var fineAllocCount [193]uint32
+
+func recordFineAlloc(size uintptr) {
+	if size >= 1 && size <= 192 {
+		fineAllocCount[size]++
+	}
+}
+
+// FineAllocAt reports how many allocations of exactly size n have happened.
+func FineAllocAt(n int32) (c uint32) {
+	if n < 1 || n > 192 {
+		return 0
+	}
+	return fineAllocCount[n]
 }
 
 // SegmentStats is the per-kind ledger: live segments, bytes reserved and

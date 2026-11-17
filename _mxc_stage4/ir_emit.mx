@@ -191,7 +191,32 @@ func (e *irEmitter) w(s string) {
 	// and the stalled run never reaches its EAFU line, so this profile is the
 	// only way to see which of the emitter's accumulators holds those 288MB.
 	if len(e.segs)%8192 == 0 {
-		mxutil.WriteStr(2, "    W segs="|mxutil.SimpleItoa(int32(len(e.segs)))|" text="|mxutil.SimpleItoa(e.segBytes>>10)|"KB farena="|mxutil.SimpleItoa(int32(runtime.ArenaUsed(runtime.CurrentArena())>>20))|"MB vn="|mxutil.SimpleItoa(int32(len(e.valName)))|" rt="|mxutil.SimpleItoa(int32(len(e.regTypes)))|" at="|mxutil.SimpleItoa(int32(len(e.allocTypes)))|" tc="|mxutil.SimpleItoa(int32(len(e.typeCache)))|" st="|mxutil.SimpleItoa(int32(len(e.storedTo)))|" ua="|mxutil.SimpleItoa(int32(len(e.usedAs)))|" ln="|mxutil.SimpleItoa(int32(len(e.ldByName)))|" dv="|mxutil.SimpleItoa(int32(len(e.devByAddr)))|" fb="|mxutil.SimpleItoa(int32(len(e.faByBase)))|" ho="|mxutil.SimpleItoa(int32(len(e.hoisted)))|" hb="|mxutil.SimpleItoa(int32(len(e.blockExitLabel)))|"\n")
+		cnts, _ := runtime.AllocHistogram()
+		hc := ""
+		for bi := int32(5); bi <= 12; bi++ {
+			hc = hc | " " | mxutil.SimpleItoa(bi) | ":" | mxutil.SimpleItoa(int32(cnts[bi]))
+		}
+		// The three most frequent EXACT allocation sizes so far, which is what
+		// identifies the ~1KB-per-fragment scratch inside one coarse bin.
+		lim := uint32(0xffffff)
+		top := ""
+		for rank := int32(0); rank < 3; rank++ {
+			bs := int32(0)
+			bc := uint32(0)
+			for n := int32(1); n <= 192; n++ {
+				c := runtime.FineAllocAt(n)
+				if c <= lim && c > bc {
+					bc = c
+					bs = n
+				}
+			}
+			if bc == 0 {
+				break
+			}
+			top = top | " " | mxutil.SimpleItoa(bs) | ":" | mxutil.SimpleItoa(int32(bc))
+			lim = bc - 1
+		}
+		mxutil.WriteStr(2, "    W segs="|mxutil.SimpleItoa(int32(len(e.segs)))|" text="|mxutil.SimpleItoa(e.segBytes>>10)|"KB farena="|mxutil.SimpleItoa(int32(runtime.ArenaUsed(runtime.CurrentArena())>>20))|"MB vn="|mxutil.SimpleItoa(int32(len(e.valName)))|" rt="|mxutil.SimpleItoa(int32(len(e.regTypes)))|" at="|mxutil.SimpleItoa(int32(len(e.allocTypes)))|" tc="|mxutil.SimpleItoa(int32(len(e.typeCache)))|" st="|mxutil.SimpleItoa(int32(len(e.storedTo)))|" ua="|mxutil.SimpleItoa(int32(len(e.usedAs)))|" ln="|mxutil.SimpleItoa(int32(len(e.ldByName)))|" dv="|mxutil.SimpleItoa(int32(len(e.devByAddr)))|" fb="|mxutil.SimpleItoa(int32(len(e.faByBase)))|" ho="|mxutil.SimpleItoa(int32(len(e.hoisted)))|" hb="|mxutil.SimpleItoa(int32(len(e.blockExitLabel)))|" cnt"|hc|" top"|top|"\n")
 	}
 }
 
