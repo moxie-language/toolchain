@@ -17,6 +17,7 @@ type emitKVI struct{ k string; v int32 }
 type irEmitter struct {
 	members    []SSAMember // the package's members, built once by emitIR
 	segs       []string // accumulated segments; joined in flush()
+	segBytes   int32    // diagnostic: total text bytes pushed into segs
 	buf        []byte   // assembled output (only during flush/return)
 	outFile    *os.File // streaming output; nil = accumulate in buf
 	operandBuf []SSAValue // scratch buffer for instrOperands
@@ -184,6 +185,14 @@ func (e *irEmitter) w(s string) {
 		e.emitCallCheckpoint()
 	}
 	push(e.segs, s)
+	e.segBytes += int32(len(s))
+	// Fork C: the emit's own growth inside one member. `(*irEmitter).emitBinOp`
+	// leaves the body build at 17MB and reaches 305MB by the end of its emit,
+	// and the stalled run never reaches its EAFU line, so this profile is the
+	// only way to see which of the emitter's accumulators holds those 288MB.
+	if len(e.segs)%8192 == 0 {
+		mxutil.WriteStr(2, "    W segs="|mxutil.SimpleItoa(int32(len(e.segs)))|" text="|mxutil.SimpleItoa(e.segBytes>>10)|"KB farena="|mxutil.SimpleItoa(int32(runtime.ArenaUsed(runtime.CurrentArena())>>20))|"MB vn="|mxutil.SimpleItoa(int32(len(e.valName)))|" rt="|mxutil.SimpleItoa(int32(len(e.regTypes)))|" at="|mxutil.SimpleItoa(int32(len(e.allocTypes)))|" tc="|mxutil.SimpleItoa(int32(len(e.typeCache)))|" st="|mxutil.SimpleItoa(int32(len(e.storedTo)))|" ua="|mxutil.SimpleItoa(int32(len(e.usedAs)))|" ln="|mxutil.SimpleItoa(int32(len(e.ldByName)))|" dv="|mxutil.SimpleItoa(int32(len(e.devByAddr)))|" fb="|mxutil.SimpleItoa(int32(len(e.faByBase)))|" ho="|mxutil.SimpleItoa(int32(len(e.hoisted)))|" hb="|mxutil.SimpleItoa(int32(len(e.blockExitLabel)))|"\n")
+	}
 }
 
 // appendEmitKV grows the pending-extern-decl accumulator explicitly
@@ -860,6 +869,7 @@ func emitBuiltMember(e *irEmitter, fn *SSAFunction) {
 	emitAnonFuncsOf(e, fn)
 	e.flush()
 	e.segs = nil
+	e.segBytes = 0
 	e.buf = nil
 	e.operandBuf = nil
 	e.valName = nil
@@ -1082,6 +1092,13 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 		// The global-type scan is per body now: it refines the declared type of
 		// a package global from the stores and loads that reach it, and it used
 		// to be a whole-package loop that required every body to exist.
+		// Fork C: the member arena after the BODY is built, before its checks
+		// and its emit. This is the number that says whether a big member's
+		// 305MB is the body graph (Step 4/5) or the emitter's scratch.
+		fB := uint64(0)
+		if fnArena != nil {
+			fB = runtime.ArenaUsed(fnArena)
+		}
 		scanGlobalTypesOf(e, fn)
 		// Checks whose subject is this body. They used to run over the whole
 		// package after every body existed, which is why all bodies had to
@@ -1114,7 +1131,7 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 				hist = hist | " " | mxutil.SimpleItoa(bi) | ":" | mxutil.SimpleItoa(int32((byts[bi] >> 20)))
 			}
 		}
-		mxutil.WriteStr(2, "    EAF nf="|mxutil.SimpleItoa(nf)|" in rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB cau="|mxutil.SimpleItoa(int32(cau2>>20))|"MB cac="|mxutil.SimpleItoa(int32(cac2>>20))|"MB net="|mxutil.SimpleItoa(int32(runtime.SysMapNet()>>20))|"MB acap="|mxutil.SimpleItoa(int32(runtime.LiveArenaCap()>>20))|"MB na="|mxutil.SimpleItoa(int32(totAlloc/1000))|"k hist"|hist|" durN="|mxutil.SimpleItoa(cctx.durScopes)|" dur="|mxutil.SimpleItoa(int32(cctx.durBytes>>20))|"MB ptd="|mxutil.SimpleItoa(int32(len(e.pendTypeDescs)))|" dsym="|mxutil.SimpleItoa(int32(len(e.definedSyms)))|" arr="|mxutil.SimpleItoa(int32(len(e.arrConsts)))|" kif="|mxutil.SimpleItoa(int32(len(e.keepIfaceTypes)))|" smap="|mxutil.SimpleItoa(int32(len(e.strMap)))|" edecl="|mxutil.SimpleItoa(int32(len(e.extDecls)))|" eglob="|mxutil.SimpleItoa(int32(len(e.extGlobals)))|" tid="|mxutil.SimpleItoa(int32(len(e.typeIDs)))|" fn="|fn.name|" blocks="|mxutil.SimpleItoa(int32(len(fn.Blocks)))|"\n")
+		mxutil.WriteStr(2, "    EAF nf="|mxutil.SimpleItoa(nf)|" in rss="|mxutil.SimpleItoa(int32(rssKB()/1024))|"MB cau="|mxutil.SimpleItoa(int32(cau2>>20))|"MB cac="|mxutil.SimpleItoa(int32(cac2>>20))|"MB net="|mxutil.SimpleItoa(int32(runtime.SysMapNet()>>20))|"MB acap="|mxutil.SimpleItoa(int32(runtime.LiveArenaCap()>>20))|"MB na="|mxutil.SimpleItoa(int32(totAlloc/1000))|"k hist"|hist|" durN="|mxutil.SimpleItoa(cctx.durScopes)|" dur="|mxutil.SimpleItoa(int32(cctx.durBytes>>20))|"MB ptd="|mxutil.SimpleItoa(int32(len(e.pendTypeDescs)))|" dsym="|mxutil.SimpleItoa(int32(len(e.definedSyms)))|" arr="|mxutil.SimpleItoa(int32(len(e.arrConsts)))|" kif="|mxutil.SimpleItoa(int32(len(e.keepIfaceTypes)))|" smap="|mxutil.SimpleItoa(int32(len(e.strMap)))|" edecl="|mxutil.SimpleItoa(int32(len(e.extDecls)))|" eglob="|mxutil.SimpleItoa(int32(len(e.extGlobals)))|" tid="|mxutil.SimpleItoa(int32(len(e.typeIDs)))|" fb="|mxutil.SimpleItoa(int32(fB>>20))|"MB fn="|fn.name|" blocks="|mxutil.SimpleItoa(int32(len(fn.Blocks)))|"\n")
 		// Fork C: the durable counters cover the member that was just built plus
 		// whatever the previous member's emit opened; printed here and zeroed so
 		// the next line reports its own member instead of a running total.
@@ -1153,6 +1170,11 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 			nf++
 			emitBuiltMember(e, bf)
 		}
+		// Fork C: the member arena after the emit, before the reset.
+		fE := uint64(0)
+		if fnArena != nil {
+			fE = runtime.ArenaUsed(fnArena)
+		}
 		runtime.SovereignRegRestore()
 		runtime.ManualArenaExit(fnArena)
 		e.mergeAccumulators()
@@ -1164,7 +1186,7 @@ func emitAllFunctions(e *irEmitter, compileArena *runtime.Arena) {
 		// reset that reclaims it. This is the number that says whether the
 		// per-function cost is real or is a 64MB segment grabbed for a few
 		// megabytes: `acap` cannot tell those apart, `used` can.
-		mxutil.WriteStr(2, "    EAFU nf="|mxutil.SimpleItoa(nf)|" used="|mxutil.SimpleItoa(int32(runtime.ArenaUsed(fnArena)>>20))|"MB pre="|mxutil.SimpleItoa64(int64(uA)>>10)|"KB bc="|mxutil.SimpleItoa64((int64(cau2)-int64(uA))>>10)|"KB em="|mxutil.SimpleItoa64((int64(uE)-int64(cau2))>>10)|"KB\n")
+		mxutil.WriteStr(2, "    EAFU nf="|mxutil.SimpleItoa(nf)|" used="|mxutil.SimpleItoa(int32(runtime.ArenaUsed(fnArena)>>20))|"MB pre="|mxutil.SimpleItoa64(int64(uA)>>10)|"KB bc="|mxutil.SimpleItoa64((int64(cau2)-int64(uA))>>10)|"KB em="|mxutil.SimpleItoa64((int64(uE)-int64(cau2))>>10)|"KB fe="|mxutil.SimpleItoa(int32(fE>>20))|"MB\n")
 		uP2 := uint64(0)
 		if cctx.compileArena != nil {
 			uP2 = runtime.ArenaUsed(cctx.compileArena)
