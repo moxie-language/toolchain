@@ -282,18 +282,22 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 		pb.curFileScope = pb.fileScopes[f]
 		pb.registerImportsAndTypes(f)
 	}
+	memLine("     cp-imports "|pkg.Path)
 	for _, f := range files {
 		pb.curFileScope = pb.fileScopes[f]
 		pb.registerFile(f)
 	}
+	memLine("     cp-files "|pkg.Path)
 	// No body is built here. CreatePackage records which members will get one
 	// and leaves the build to BuildBody, so a body, its checks and its emitted
 	// text live in one arena and die together instead of every body of the
 	// package existing at once (the 414MB that made the peak package-shaped).
 	pb.prepareBodies(files)
+	memLine("     cp-bodies "|pkg.Path)
 	// The import marks are complete at declaration granularity: every reference
 	// a body can make is already in the file's syntax.
 	pb.checkUnusedImports()
+	memLine("     cp-checks "|pkg.Path)
 	// Declaration-level checks only. Everything that reads a finished body has
 	// moved to the per-member pipeline (emitAllFunctions: build -> checks ->
 	// emit -> drop), where the body's own arena reclaims what the check
@@ -306,7 +310,9 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 	// the package pass owns it, and one file's walk no longer has to coexist
 	// with the other files' scratch.
 	checkSovereignLoopDecls(p, files)
+	memLine("     cp-sovereign "|pkg.Path)
 	checkIfaceAssignments()
+	memLine("     cp-ifaceassign "|pkg.Path)
 	chkLine("decls")
 	// A file's checks walk that file's syntax and keep every walker, scope and
 	// diagnostic scratch in whatever arena is current - the PACKAGE arena -
@@ -345,11 +351,22 @@ func (prog *SSAProgram) CreatePackage(pkg *TCPackage, files []*syntax.File, info
 		checkMissingReturn(one)
 		checkLeave(checkArena, "mr")
 	}
+	// checkImportConflicts builds an imported-name list per import SPEC, and a
+	// dot import's list is every exported name of the imported package: the
+	// compiler's own main package measured +194MB of it retained in the package
+	// arena, 46% of that package's 423MB emit floor and the difference between
+	// the boxed self-build finishing and throttling at 954MB against
+	// MemoryHigh=900M (region.md 0.3l). Its durable output is addCompileError,
+	// which copies into cctx.compileArena through an explicit arena switch, so
+	// its scratch belongs in the same per-check arena as the checks above.
+	runtime.ManualArenaEnter(checkArena)
+	pb.checkImportConflicts(files)
+	checkLeave(checkArena, "ic")
 	cctx.shArenaRef = nil
 	cctx.checkArena = nil
 	runtime.ArenaFree(checkArena)
+	memLine("     cp-impconf "|pkg.Path)
 	chkLine("astfile")
-	pb.checkImportConflicts(files)
 	chkLine("importConflicts")
 	if mxutil.TargetArch() == "wasm" {
 		p.wasmSpawnIndex = map[string]int32{}

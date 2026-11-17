@@ -1067,6 +1067,19 @@ func isExportedName(n string) (ok bool) {
 // is one original file.
 func (pb *ssaPkgBuilder) checkImportConflicts(files []*syntax.File) {
 	pkgNames := packageDeclNames(files)
+	// One name list per import, computed ONCE. importedNamesOf allocates a
+	// slice on every call, and for a dot import it walks every exported name of
+	// the imported package and pushes each - calling it inside the pairwise
+	// loop made this check quadratic in ALLOCATIONS as well as in comparisons.
+	// Measured on the compiler's own main package: +194MB in the package arena,
+	// 46% of that package's 423MB emit floor and the difference between the
+	// boxed self-build finishing and throttling at 954MB against
+	// MemoryHigh=900M (region.md 0.3l). The lists are read-only here, so
+	// hoisting them does not change which errors are reported or their order.
+	names := [][]string{:len(pb.segImports)}
+	for si := 0; si < len(pb.segImports); si++ {
+		names[si] = pb.importedNamesOf(pb.segImports[si])
+	}
 	for si := 0; si < len(pb.segImports); si++ {
 		imp := pb.segImports[si]
 		for sj := si + 1; sj < len(pb.segImports); sj++ {
@@ -1074,15 +1087,15 @@ func (pb *ssaPkgBuilder) checkImportConflicts(files []*syntax.File) {
 			if other.seg != imp.seg || other.path == imp.path {
 				continue
 			}
-			for _, a := range pb.importedNamesOf(imp) {
-				for _, b := range pb.importedNamesOf(other) {
+			for _, a := range names[si] {
+				for _, b := range names[sj] {
 					if a == b {
 						addCompileError("'" | a | "' is imported twice in one file: alias one of the imports")
 					}
 				}
 			}
 		}
-		for _, n := range pb.importedNamesOf(imp) {
+		for _, n := range names[si] {
 			if inNameList(pkgNames, n) {
 				addCompileError("'" | n | "' collides with an imported package name: alias the import or rename the declaration")
 			}
