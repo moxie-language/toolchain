@@ -136,10 +136,23 @@ func durableBegin() (save uintptr) {
 		// package arena makes the graph the frame the codec sees.
 		runtime.ManualArenaEnter(cctx.compileArena)
 	}
+	if cctx != nil {
+		// Fork C: count the scope and remember the package arena's fill so
+		// durableEnd can charge the bytes this scope retains to durable state.
+		cctx.durScopes++
+		if cctx.compileArena != nil {
+			cctx.durBegUsed = runtime.ArenaUsed(cctx.compileArena)
+		}
+	}
 	return save
 }
 
 func durableEnd(save uintptr) {
+	if cctx != nil && cctx.compileArena != nil {
+		if u := runtime.ArenaUsed(cctx.compileArena); u > cctx.durBegUsed {
+			cctx.durBytes += u - cctx.durBegUsed
+		}
+	}
 	if save != 0 {
 		if cctx != nil && cctx.compileArena != nil {
 			// The scope was entered on the package arena, so its exit must find
